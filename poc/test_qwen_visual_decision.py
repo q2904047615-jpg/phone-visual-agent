@@ -1,19 +1,27 @@
 from __future__ import annotations
 
+import copy
 import json
 import unittest
 from pathlib import Path
 
 from PIL import Image
 
-from qwen_visual_decision import QwenVisualDecisionObserver
+from generic_scene_observer import _local_frame_fingerprint
+from generic_step_planner import GenericStepPlanningError
+from qwen_visual_decision import (
+    QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
+    QwenTaskContext,
+    QwenVisualDecisionObserver,
+    TrustedObservation,
+)
+from ui_scene import UIElement, UIScene
 from vision_agent import VisionAgentError
 
 
 ROOT = Path(__file__).resolve().parent
-EXISTING_SCREENSHOT = (
-    ROOT / "evals" / "vision_replay" / "images" / "douyin_digit_local_input_com.jpg"
-)
+ASSET_ROOT = ROOT / "evals" / "qwen_visual_decision" / "images"
+REPLAY_ROOT = ROOT / "evals" / "vision_replay" / "images"
 
 
 class FakeProvider:
@@ -27,21 +35,9 @@ class FakeProvider:
     def status(self) -> dict:
         return {"configured": True, "model": "fake-qwen"}
 
-    def _chat(
-        self,
-        messages: list[dict],
-        max_tokens: int,
-        *,
-        timeout: float | None = None,
-        max_attempts: int | None = None,
-    ) -> str:
+    def _chat(self, messages, max_tokens, **kwargs) -> str:
         self.calls += 1
         self.messages = messages
-        self.options = {
-            "max_tokens": max_tokens,
-            "timeout": timeout,
-            "max_attempts": max_attempts,
-        }
         return json.dumps(self.payload, ensure_ascii=False)
 
 
@@ -50,244 +46,777 @@ class SequenceProvider(FakeProvider):
         super().__init__({})
         self.payloads = list(payloads)
 
-    def _chat(
-        self,
-        messages: list[dict],
-        max_tokens: int,
-        *,
-        timeout: float | None = None,
-        max_attempts: int | None = None,
-    ) -> str:
+    def _chat(self, messages, max_tokens, **kwargs) -> str:
         self.calls += 1
         self.messages = messages
-        self.options = {
-            "max_tokens": max_tokens,
-            "timeout": timeout,
-            "max_attempts": max_attempts,
-        }
+        if not self.payloads:
+            raise AssertionError("模型被调用超过一次初始请求和一次修复重试")
         return json.dumps(self.payloads.pop(0), ensure_ascii=False)
 
 
-def action_payload() -> dict:
-    return {
-        "protocol_version": "2026-08-11-qwen-visual-decision-v1",
-        "device_id": "offline_device_01",
-        "page_state": {
-            "foreground_app_id": "douyin",
-            "screen_id": "comment_editor",
-            "summary": "评论输入框显示.com，符号键盘已展开",
-            "elements": [
-                {
-                    "element_id": "e_send",
-                    "role": "button",
-                    "meaning": "send_comment",
-                    "label": "发送",
-                    "bounds": [780, 438, 925, 515],
-                    "confidence": 0.96,
-                    "states": {"goal_relevant": True, "enabled": True},
-                    "evidence": ["发送"],
-                }
-            ],
-            "overlays": ["comment_editor"],
-            "stable": True,
-            "confidence": 0.94,
-            "fingerprint": "model-fingerprint-is-ignored",
-        },
-        "status": "action",
-        "next_action": {
-            "kind": "tap_semantic",
-            "element_id": "e_send",
-            "target": "send_comment",
-            "role": "button",
-            "label": "发送",
-            "states": {"enabled": True},
-        },
-        "target_region": {
-            "kind": "element",
-            "element_id": "e_send",
-            "bounds": [780, 438, 925, 515],
-            "description": "右侧红色发送按钮",
-        },
-        "expected_result": {"scene_changed": True, "screen_id": "video"},
-        "confidence": 0.93,
-        "reason": "发送按钮清晰且唯一。",
-        "completion_evidence": [],
-    }
+def load_sequence(name: str) -> list[Image.Image]:
+    paths = sorted((ASSET_ROOT / name).glob("frame_*.jpg"))
+    if len(paths) != 4:
+        raise AssertionError(f"真实四帧测试序列缺失：{name}")
+    frames: list[Image.Image] = []
+    for path in paths:
+        with Image.open(path) as image:
+            frames.append(image.convert("RGB"))
+    return frames
 
 
-def existing_screenshot_frames() -> list[Image.Image]:
-    with Image.open(EXISTING_SCREENSHOT) as image:
+def load_replay_image(name: str) -> Image.Image:
+    with Image.open(REPLAY_ROOT / name) as image:
+        return image.convert("RGB")
+
+
+def repeated_frames(path: Path) -> list[Image.Image]:
+    with Image.open(path) as image:
         frame = image.convert("RGB")
     return [frame.copy() for _ in range(4)]
 
 
+def launcher_elements() -> tuple[UIElement, ...]:
+    return (
+        UIElement(
+            element_id="settings_icon",
+            role="icon",
+            meaning="open_settings",
+            label="设置",
+            bounds=(0.68, 0.20, 0.86, 0.35),
+            confidence=0.96,
+            states={"goal_relevant": True},
+            evidence=("设置",),
+        ),
+        UIElement(
+            element_id="unlabelled_camera_icon",
+            role="icon",
+            meaning="open_camera",
+            label="",
+            bounds=(0.69, 0.82, 0.88, 0.95),
+            confidence=0.92,
+            states={"goal_relevant": False},
+            evidence=("相机图形",),
+        ),
+    )
+
+
+def overlay_elements() -> tuple[UIElement, ...]:
+    return (
+        UIElement(
+            element_id="input_value",
+            role="input",
+            meaning="current_text_input",
+            label=".com",
+            bounds=(0.05, 0.62, 0.78, 0.72),
+            confidence=0.94,
+            states={"focused": True},
+            evidence=(".com",),
+        ),
+        UIElement(
+            element_id="unlabelled_close_icon",
+            role="icon",
+            meaning="close_top_overlay",
+            label="",
+            bounds=(0.90, 0.08, 0.98, 0.14),
+            confidence=0.91,
+            states={"overlay_control": True},
+            evidence=("关闭图形",),
+        ),
+        UIElement(
+            element_id="text_submit_button",
+            role="button",
+            meaning="submit_current_content",
+            label="发布",
+            bounds=(0.81, 0.62, 0.97, 0.72),
+            confidence=0.96,
+            states={"enabled": True},
+            evidence=("发布",),
+        ),
+    )
+
+
+def settings_list_elements() -> tuple[UIElement, ...]:
+    return (
+        UIElement(
+            element_id="visible_settings_list",
+            role="container",
+            meaning="scrollable_settings_list",
+            label="",
+            bounds=(0.08, 0.22, 0.92, 0.92),
+            confidence=0.95,
+            states={"scrollable": True},
+            evidence=("多个纵向列表项",),
+        ),
+        UIElement(
+            element_id="visible_text_item",
+            role="list_item",
+            meaning="open_device_information",
+            label="我的设备",
+            bounds=(0.16, 0.45, 0.88, 0.56),
+            confidence=0.96,
+            states={},
+            evidence=("我的设备",),
+        ),
+    )
+
+
+def scene_for(
+    frames: list[Image.Image],
+    *,
+    elements: tuple[UIElement, ...] | None = None,
+    screen_id: str = "launcher_home",
+    app_id: str = "launcher",
+    summary: str = "桌面应用网格清晰可见",
+    overlays: tuple[str, ...] = (),
+) -> UIScene:
+    sharpness = []
+    from observation_images import measure_frame_sharpness
+
+    for frame in frames:
+        sharpness.append(measure_frame_sharpness(frame))
+    selected = max(range(len(frames)), key=sharpness.__getitem__)
+    return UIScene(
+        app_id=app_id,
+        screen_id=screen_id,
+        summary=summary,
+        elements=elements if elements is not None else launcher_elements(),
+        overlays=overlays,
+        stable=True,
+        confidence=0.95,
+        fingerprint=_local_frame_fingerprint(frames[selected]),
+    )
+
+
+def trusted_observation(
+    frames: list[Image.Image],
+    *,
+    elements: tuple[UIElement, ...] | None = None,
+    scene: UIScene | None = None,
+    observation_id: str = "obs_0123456789abcdef0123456789abcdef",
+) -> TrustedObservation:
+    return TrustedObservation.from_scene(
+        frames=frames,
+        device_id="offline_phone_01",
+        scene=scene or scene_for(frames, elements=elements),
+        observation_id=observation_id,
+    )
+
+
+def task_context(
+    *,
+    task_id: str = "task_offline_01",
+    revision: int = 3,
+    external: bool = False,
+    confirmed: bool = False,
+) -> dict:
+    risk_ids = ["risk_send"] if external else []
+    impact = "external_state" if external else "navigation_only"
+    return {
+        "protocol_version": "2026-08-11-deepseek-task-graph-v2",
+        "task_id": task_id,
+        "device_id": "offline_phone_01",
+        "revision": revision,
+        "task_status": "awaiting_confirmation" if external else "running",
+        "goal": {
+            "objective": "打开当前目标页面" if not external else "提交当前内容",
+            "target_apps": [{"app_id": "generic", "app_name": "目标应用"}],
+            "entities": {},
+        },
+        "global_constraints": ["每轮只允许一个动作", "看不清时停止"],
+        "goal_completion_conditions": [
+            {
+                "condition_id": "visible_result",
+                "description": "目标结果清晰可见",
+                "evidence_required": ["当前画面证据"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ],
+        "current_subgoal": {
+            "subgoal_id": "current_target",
+            "objective": "打开设置" if not external else "提交当前内容",
+            "status": "active",
+            "depends_on": [],
+            "constraints": ["只使用当前画面中的可信控件"],
+            "completion_conditions": ["目标页面可见"],
+            "completion_evidence": [],
+            "risk_action_ids": risk_ids,
+            "external_impact": impact,
+        },
+        "current_external_impact": impact,
+        "risk_actions": (
+            [
+                {
+                    "risk_id": "risk_send",
+                    "description": "提交将改变外部状态",
+                    "external_effect": "内容会被提交",
+                    "risk_type": "data_mutation",
+                    "risk_level": "high",
+                    "subgoal_ids": ["current_target"],
+                    "confirmation_required": True,
+                }
+            ]
+            if external
+            else []
+        ),
+        "confirmation_gate": {
+            "required": external,
+            "state": "confirmed" if confirmed else "awaiting_confirmation" if external else "not_required",
+            "risk_ids": risk_ids,
+            "external_state_action_allowed": bool(external and confirmed),
+        },
+    }
+
+
+def action_payload(
+    context: dict,
+    observation: TrustedObservation,
+    *,
+    element_id: str = "settings_icon",
+) -> dict:
+    element = observation.get_candidate(element_id)
+    return {
+        "protocol_version": QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
+        "task_id": context["task_id"],
+        "device_id": context["device_id"],
+        "revision": context["revision"],
+        "observation_id": observation.observation_id,
+        "fingerprint": observation.fingerprint,
+        "page_state": {
+            "foreground_app_id": observation.scene.foreground_app_id,
+            "screen_id": observation.scene.screen_id,
+            "summary": observation.scene.summary,
+            "overlays": list(observation.scene.overlays),
+        },
+        "status": "action",
+        "next_action": {
+            "kind": "tap_semantic",
+            "element_id": element.element_id,
+            "target": element.meaning,
+            "role": element.role,
+            "label": element.label,
+            "states": dict(element.states),
+        },
+        "target_region": {
+            "kind": "element",
+            "element_id": element.element_id,
+            "bounds": [round(item * 1000) for item in element.bounds],
+            "description": element.label or element.meaning,
+        },
+        "expected_result": {"scene_changed": True},
+        "confidence": 0.92,
+        "reason": "可信候选唯一且清晰。",
+        "completion_evidence_element_ids": [],
+    }
+
+
+def blocked_payload(context: dict, observation: TrustedObservation) -> dict:
+    value = action_payload(context, observation)
+    value.update(
+        {
+            "status": "blocked",
+            "next_action": None,
+            "target_region": None,
+            "expected_result": {},
+            "confidence": 0.4,
+            "reason": "没有可靠且唯一的可信候选。",
+        }
+    )
+    return value
+
+
 class QwenVisualDecisionTests(unittest.TestCase):
-    def test_existing_screenshot_produces_one_bound_action(self) -> None:
-        provider = FakeProvider(action_payload())
+    def setUp(self) -> None:
+        self.frames = load_sequence("launcher_stable")
+        self.context = task_context()
+        self.observation = trusted_observation(self.frames)
+
+    def decide(self, provider, *, context=None, frames=None, observation=None):
         observer = QwenVisualDecisionObserver(provider)
         decision = observer.decide(
-            frames=existing_screenshot_frames(),
-            device_id="offline_device_01",
-            current_subgoal={
-                "objective": "评论输入框内容确认后，点击唯一发送按钮",
-            },
-            constraints=["只提出一个动作"],
+            frames=frames or self.frames,
+            task_context=context or self.context,
+            trusted_observation=observation or self.observation,
         )
+        return observer, decision
 
-        self.assertEqual(provider.calls, 1)
-        self.assertEqual(decision.proposal.action.action, "tap_semantic")
-        self.assertEqual(decision.target_region.element_id, "e_send")
+    def test_real_stable_sequence_uses_four_distinct_frames(self) -> None:
+        fingerprints = {hash(frame.tobytes()) for frame in self.frames}
+        self.assertEqual(len(fingerprints), 4)
+        self.assertTrue(self.observation.local_stability.stable)
+        self.assertEqual(self.observation.local_stability.frame_count, 4)
+        self.assertEqual(self.observation.scene.fingerprint, self.observation.fingerprint)
+
+    def test_offline_manifest_uses_full_context_and_multiple_page_types(self) -> None:
+        manifest = json.loads(
+            (ROOT / "evals" / "qwen_visual_decision" / "cases.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        page_types = {str(case["page_type"]) for case in manifest["cases"]}
+        self.assertGreaterEqual(len(page_types), 3)
+        first_frames = manifest["cases"][0]["frames"]
+        self.assertEqual(len(first_frames), 4)
+        self.assertEqual(len(set(first_frames)), 4)
+        for case in manifest["cases"]:
+            parsed = QwenTaskContext.from_dict(case["task_context"])
+            self.assertEqual(parsed.device_id, "offline_phone_01")
+            for field in (
+                "protocol_version",
+                "task_id",
+                "device_id",
+                "revision",
+                "current_subgoal",
+                "global_constraints",
+                "current_external_impact",
+                "risk_actions",
+                "confirmation_gate",
+            ):
+                self.assertIn(field, case["task_context"])
+
+    def test_action_binds_to_preexisting_trusted_candidate(self) -> None:
+        provider = FakeProvider(action_payload(self.context, self.observation))
+        _observer, decision = self.decide(provider)
+        self.assertEqual(decision.proposal.action.params["element_id"], "settings_icon")
         self.assertEqual(
             decision.target_region.bounds,
-            decision.page_state.get_element("e_send").bounds,
+            self.observation.get_candidate("settings_icon").bounds,
         )
-        self.assertEqual(decision.expected_result["screen_id"], "video")
-        self.assertAlmostEqual(decision.confidence, 0.93)
-        self.assertTrue(
-            provider.messages[0]["content"][1]["image_url"]["url"].startswith(
-                "data:image/jpeg;base64,"
-            )
-        )
-        self.assertFalse(observer.status()["hardware_actions_enabled"])
+        self.assertIs(decision.trusted_observation, self.observation)
+        self.assertNotIn("elements", decision.page_state.to_dict())
 
-    def test_region_not_bound_to_element_is_rejected(self) -> None:
-        payload = action_payload()
-        payload["target_region"]["bounds"] = [790, 450, 900, 500]
-        with self.assertRaisesRegex(VisionAgentError, "复用当前页面元素 bounds"):
-            QwenVisualDecisionObserver(FakeProvider(payload)).decide(
-                frames=existing_screenshot_frames(),
-                device_id="offline_device_01",
-                current_subgoal={"objective": "点击发送"},
-                constraints=[],
-            )
-
-    def test_action_below_confidence_threshold_must_block(self) -> None:
-        payload = action_payload()
-        payload["confidence"] = 0.60
-        with self.assertRaisesRegex(VisionAgentError, "必须返回 blocked"):
-            QwenVisualDecisionObserver(FakeProvider(payload)).decide(
-                frames=existing_screenshot_frames(),
-                device_id="offline_device_01",
-                current_subgoal={"objective": "点击发送"},
-                constraints=[],
-            )
-
-    def test_action_must_copy_visible_element_fields(self) -> None:
-        payload = action_payload()
-        payload["next_action"]["label"] = "近似发送"
-        with self.assertRaisesRegex(VisionAgentError, "逐字复制目标元素 label"):
-            QwenVisualDecisionObserver(FakeProvider(payload)).decide(
-                frames=existing_screenshot_frames(),
-                device_id="offline_device_01",
-                current_subgoal={"objective": "点击发送"},
-                constraints=[],
-            )
-
-    def test_output_device_id_must_match_input(self) -> None:
-        payload = action_payload()
-        payload["device_id"] = "other_device"
-        with self.assertRaisesRegex(VisionAgentError, "device_id不匹配"):
-            QwenVisualDecisionObserver(FakeProvider(payload)).decide(
-                frames=existing_screenshot_frames(),
-                device_id="offline_device_01",
-                current_subgoal={"objective": "点击发送"},
-                constraints=[],
-            )
-
-    def test_blocked_response_discards_malformed_non_action_elements(self) -> None:
-        payload = action_payload()
-        payload.update(
+    def test_forged_mars_element_and_self_authored_page_state_are_rejected(self) -> None:
+        forged = action_payload(self.context, self.observation)
+        forged["page_state"]["elements"] = [
             {
-                "status": "blocked",
-                "next_action": None,
-                "target_region": None,
-                "expected_result": {},
-                "confidence": 0.4,
-                "reason": "没有逐字匹配的可见候选词。",
-            }
-        )
-        payload["page_state"]["elements"] = [
-            {
-                "element_id": "candidate",
-                "role": "candidate_text",
-                "meaning": "candidate",
-                "label": "近似词",
-                "bounds": [100, 100, 300, 160],
-                "confidence": 0.9,
-                "states": ["visible"],
-                "evidence": ["近似词"],
+                "element_id": "mars_entry",
+                "role": "button",
+                "meaning": "open_mars",
+                "label": "火星入口",
+                "bounds": [100, 100, 300, 200],
+                "confidence": 0.99,
             }
         ]
-        decision = QwenVisualDecisionObserver(FakeProvider(payload)).decide(
-            frames=existing_screenshot_frames(),
-            device_id="offline_device_01",
-            current_subgoal={"objective": "选择逐字相同的目标词"},
-            constraints=["禁止近似替代"],
+        forged["next_action"].update(
+            {
+                "element_id": "mars_entry",
+                "target": "open_mars",
+                "role": "button",
+                "label": "火星入口",
+            }
         )
+        forged["target_region"].update(
+            {"element_id": "mars_entry", "bounds": [100, 100, 300, 200]}
+        )
+        provider = SequenceProvider([forged, forged])
+        observer = QwenVisualDecisionObserver(provider)
+        decision = observer.decide(
+            frames=self.frames,
+            task_context=self.context,
+            trusted_observation=self.observation,
+        )
+        self.assertEqual(provider.calls, 2)
         self.assertEqual(decision.proposal.status, "blocked")
-        self.assertEqual(decision.page_state.elements, ())
+        self.assertIn("禁止携带候选元素", decision.reason)
+        self.assertTrue(observer.last_diagnostics["first_output_rejected"])
+        self.assertFalse(
+            observer.last_diagnostics["candidate_action_from_first_output"]
+        )
+        self.assertTrue(observer.last_diagnostics["retry_failure_blocked"])
+        self.assertEqual(observer.status()["final_blocked_rate"], 1.0)
 
-    def test_finished_requires_visible_evidence_and_no_action(self) -> None:
-        payload = action_payload()
+    def test_forged_element_id_without_page_elements_is_rejected(self) -> None:
+        forged = action_payload(self.context, self.observation)
+        forged["next_action"]["element_id"] = "mars_entry"
+        forged["target_region"]["element_id"] = "mars_entry"
+        provider = SequenceProvider([forged, forged])
+        _observer, decision = self.decide(provider)
+        self.assertEqual(decision.proposal.status, "blocked")
+        self.assertIn("不存在元素", decision.reason)
+
+    def test_output_task_revision_and_fingerprint_must_match(self) -> None:
+        for field, replacement in (
+            ("task_id", "task_old"),
+            ("revision", 2),
+            ("fingerprint", "old_fingerprint"),
+            ("observation_id", "obs_ffffffffffffffffffffffffffffffff"),
+        ):
+            with self.subTest(field=field):
+                bad = action_payload(self.context, self.observation)
+                bad[field] = replacement
+                provider = SequenceProvider([bad, bad])
+                _observer, decision = self.decide(provider)
+                self.assertEqual(decision.proposal.status, "blocked")
+                self.assertIn("不匹配或已过期", decision.reason)
+
+    def test_old_decision_rejected_after_task_revision_changes(self) -> None:
+        _observer, decision = self.decide(
+            FakeProvider(action_payload(self.context, self.observation))
+        )
+        newer = task_context(revision=4)
+        with self.assertRaisesRegex(GenericStepPlanningError, "已过期或不匹配"):
+            decision.validate_fresh(QwenTaskContext.from_dict(newer), self.observation)
+
+    def test_old_decision_rejected_after_fingerprint_changes(self) -> None:
+        _observer, decision = self.decide(
+            FakeProvider(action_payload(self.context, self.observation))
+        )
+        new_frames = load_sequence("launcher_changed")
+        new_observation = trusted_observation(
+            new_frames,
+            observation_id="obs_fedcba9876543210fedcba9876543210",
+        )
+        with self.assertRaisesRegex(GenericStepPlanningError, "已过期或不匹配"):
+            decision.validate_fresh(self.context, new_observation)
+
+    def test_confirmation_gate_blocks_before_qwen_call(self) -> None:
+        context = task_context(external=True, confirmed=False)
+        provider = FakeProvider(action_payload(task_context(), self.observation))
+        observer, decision = self.decide(provider, context=context)
+        self.assertEqual(provider.calls, 0)
+        self.assertEqual(decision.proposal.status, "blocked")
+        self.assertIn("确认门未满足", decision.reason)
+        self.assertEqual(
+            observer.last_diagnostics["local_safety_block"], "confirmation_gate"
+        )
+        self.assertEqual(observer.status()["final_blocked_rate"], 1.0)
+
+    def test_missing_or_ambiguous_exact_text_blocks_before_qwen(self) -> None:
+        missing_context = task_context(task_id="task_exact_missing", revision=12)
+        missing_context["goal"]["entities"] = {"expected_text": "火星入口"}
+        missing_provider = FakeProvider(action_payload(self.context, self.observation))
+        missing_observer, missing_decision = self.decide(
+            missing_provider,
+            context=missing_context,
+        )
+        self.assertEqual(missing_provider.calls, 0)
+        self.assertEqual(missing_decision.proposal.status, "blocked")
+        self.assertEqual(
+            missing_observer.last_diagnostics["local_safety_block"],
+            "exact_text_missing",
+        )
+
+        duplicate_elements = (
+            UIElement(
+                element_id="duplicate_1",
+                role="button",
+                meaning="confirm_first",
+                label="确定",
+                bounds=(0.1, 0.2, 0.3, 0.3),
+                confidence=0.95,
+            ),
+            UIElement(
+                element_id="duplicate_2",
+                role="button",
+                meaning="confirm_second",
+                label="确定",
+                bounds=(0.6, 0.2, 0.8, 0.3),
+                confidence=0.95,
+            ),
+        )
+        duplicate_observation = trusted_observation(
+            self.frames,
+            elements=duplicate_elements,
+            observation_id="obs_33333333333333333333333333333333",
+        )
+        ambiguous_context = task_context(task_id="task_exact_ambiguous", revision=13)
+        ambiguous_context["goal"]["entities"] = {"exact_text": "确定"}
+        ambiguous_provider = FakeProvider(
+            action_payload(
+                ambiguous_context,
+                duplicate_observation,
+                element_id="duplicate_1",
+            )
+        )
+        observer = QwenVisualDecisionObserver(ambiguous_provider)
+        decision = observer.decide(
+            frames=self.frames,
+            task_context=ambiguous_context,
+            trusted_observation=duplicate_observation,
+        )
+        self.assertEqual(ambiguous_provider.calls, 0)
+        self.assertEqual(decision.proposal.status, "blocked")
+        self.assertEqual(
+            observer.last_diagnostics["local_safety_block"],
+            "exact_text_ambiguous",
+        )
+
+    def test_action_cannot_ignore_unique_exact_text_candidate(self) -> None:
+        context = task_context(task_id="task_exact_select", revision=14)
+        context["goal"]["entities"] = {"target_text": "设置"}
+        wrong = action_payload(
+            context,
+            self.observation,
+            element_id="unlabelled_camera_icon",
+        )
+        provider = SequenceProvider([wrong, wrong])
+        _observer, decision = self.decide(provider, context=context)
+        self.assertEqual(decision.proposal.status, "blocked")
+        self.assertIn("逐字一致唯一候选", decision.reason)
+
+    def test_confirmed_external_context_can_propose_one_bound_action(self) -> None:
+        context = task_context(external=True, confirmed=True)
+        response = action_payload(context, self.observation)
+        provider = FakeProvider(response)
+        _observer, decision = self.decide(provider, context=context)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(decision.proposal.status, "action")
+
+    def test_multiple_actions_field_is_rejected(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad["actions"] = [bad["next_action"], bad["next_action"]]
+        provider = SequenceProvider([bad, bad])
+        _observer, decision = self.decide(provider)
+        self.assertEqual(decision.proposal.status, "blocked")
+        self.assertIn("协议外字段：actions", decision.reason)
+
+    def test_modified_candidate_bounds_are_rejected(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad["target_region"]["bounds"] = [690, 210, 850, 340]
+        provider = SequenceProvider([bad, bad])
+        _observer, decision = self.decide(provider)
+        self.assertEqual(decision.proposal.status, "blocked")
+        self.assertIn("原始 bounds", decision.reason)
+
+    def test_invalid_first_output_gets_exactly_one_retry(self) -> None:
+        invalid = action_payload(self.context, self.observation)
+        invalid["target_region"]["bounds"] = [1, 1, 10, 10]
+        valid = action_payload(self.context, self.observation)
+        provider = SequenceProvider([invalid, valid])
+        observer, decision = self.decide(provider)
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(decision.proposal.status, "action")
+        self.assertTrue(observer.last_diagnostics["protocol_retry_used"])
+        self.assertFalse(
+            observer.last_diagnostics["candidate_action_from_first_output"]
+        )
+        status = observer.status()
+        self.assertEqual(status["first_pass_rate"], 0.0)
+        self.assertEqual(status["repair_retry_rate"], 1.0)
+
+    def test_unstable_real_page_sequence_does_not_call_qwen(self) -> None:
+        overlay = load_replay_image("douyin_digit_local_input_com.jpg")
+        moving = [self.frames[0], overlay, self.frames[1], overlay.copy()]
+        provider = FakeProvider(action_payload(self.context, self.observation))
+        observer = QwenVisualDecisionObserver(provider)
+        with self.assertRaisesRegex(VisionAgentError, "不稳定"):
+            observer.decide(
+                frames=moving,
+                task_context=self.context,
+                trusted_observation=self.observation,
+            )
+        self.assertEqual(provider.calls, 0)
+
+    def test_motion_blur_cannot_establish_trusted_observation(self) -> None:
+        blurred = load_replay_image("motion_blur_after_pinyin.jpg")
+        with self.assertRaisesRegex(VisionAgentError, "仍然模糊"):
+            TrustedObservation.from_scene(
+                frames=[blurred.copy() for _ in range(4)],
+                device_id="offline_phone_01",
+                scene=scene_for([blurred.copy() for _ in range(4)]),
+            )
+
+    def test_scene_fingerprint_must_come_from_current_frames(self) -> None:
+        scene = scene_for(self.frames)
+        stale = UIScene(
+            app_id=scene.app_id,
+            screen_id=scene.screen_id,
+            summary=scene.summary,
+            elements=scene.elements,
+            stable=True,
+            confidence=scene.confidence,
+            fingerprint="stale_fingerprint",
+        )
+        with self.assertRaisesRegex(VisionAgentError, "fingerprint"):
+            TrustedObservation.from_scene(
+                frames=self.frames,
+                device_id="offline_phone_01",
+                scene=stale,
+            )
+
+    def test_finished_uses_only_trusted_evidence_ids(self) -> None:
+        payload = action_payload(self.context, self.observation)
         payload.update(
             {
                 "status": "finished",
                 "next_action": None,
                 "target_region": None,
                 "expected_result": {},
-                "completion_evidence": ["输入框清晰显示.com"],
-                "reason": "当前画面已满足子目标。",
+                "confidence": 0.94,
+                "completion_evidence_element_ids": ["settings_icon"],
             }
         )
-        decision = QwenVisualDecisionObserver(FakeProvider(payload)).decide(
-            frames=existing_screenshot_frames(),
-            device_id="offline_device_01",
-            current_subgoal={"objective": "确认输入框准确显示.com"},
-            constraints=["不要发送"],
-        )
+        _observer, decision = self.decide(FakeProvider(payload))
         self.assertEqual(decision.proposal.status, "finished")
-        self.assertIsNone(decision.proposal.action)
         self.assertEqual(
             decision.proposal.completion_evidence,
-            ("输入框清晰显示.com",),
+            ("settings_icon:设置",),
         )
 
-    def test_one_protocol_retry_repairs_finished_target_region(self) -> None:
-        invalid = action_payload()
-        invalid.update(
+    def test_finished_with_forged_evidence_id_is_rejected(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad.update(
             {
                 "status": "finished",
                 "next_action": None,
-                "completion_evidence": ["输入框显示.com"],
+                "target_region": None,
+                "expected_result": {},
+                "completion_evidence_element_ids": ["mars_entry"],
             }
         )
-        repaired = dict(invalid)
-        repaired["target_region"] = None
-        repaired["expected_result"] = {}
-        provider = SequenceProvider([invalid, repaired])
-        observer = QwenVisualDecisionObserver(provider)
-        decision = observer.decide(
-            frames=existing_screenshot_frames(),
-            device_id="offline_device_01",
-            current_subgoal={"objective": "确认输入框显示.com"},
-            constraints=["不要发送"],
-        )
-        self.assertEqual(decision.proposal.status, "finished")
-        self.assertEqual(provider.calls, 2)
-        self.assertTrue(observer.last_diagnostics["protocol_retry_used"])
+        provider = SequenceProvider([bad, bad])
+        _observer, decision = self.decide(provider)
+        self.assertEqual(decision.proposal.status, "blocked")
+        self.assertIn("不存在元素", decision.reason)
 
-    def test_unstable_frames_stop_before_qwen_call(self) -> None:
-        provider = FakeProvider(action_payload())
-        frames = existing_screenshot_frames()
-        frames[-1] = Image.new("RGB", frames[-1].size, "white")
-        with self.assertRaisesRegex(VisionAgentError, "稳定性检查未通过"):
-            QwenVisualDecisionObserver(provider).decide(
-                frames=frames,
-                device_id="offline_device_01",
-                current_subgoal={"objective": "点击发送"},
-                constraints=[],
-            )
-        self.assertEqual(provider.calls, 0)
+    def test_unlabelled_icon_can_only_be_selected_by_existing_id(self) -> None:
+        payload = action_payload(
+            self.context,
+            self.observation,
+            element_id="unlabelled_camera_icon",
+        )
+        _observer, decision = self.decide(FakeProvider(payload))
+        self.assertEqual(
+            decision.proposal.action.params["element_id"],
+            "unlabelled_camera_icon",
+        )
+        self.assertEqual(decision.proposal.action.params.get("label", ""), "")
+
+    def test_redacted_list_page_supports_only_one_screen_swipe(self) -> None:
+        frames = repeated_frames(ASSET_ROOT / "settings_list_redacted.png")
+        scene = scene_for(
+            frames,
+            elements=settings_list_elements(),
+            app_id="system_surface",
+            screen_id="scrollable_list",
+            summary="脱敏后的纵向列表清晰可见",
+        )
+        observation = trusted_observation(
+            frames,
+            scene=scene,
+            observation_id="obs_11111111111111111111111111111111",
+        )
+        context = task_context(task_id="task_scroll_list", revision=8)
+        payload = action_payload(context, observation, element_id="visible_text_item")
+        payload.update(
+            {
+                "next_action": {"kind": "swipe", "direction": "up"},
+                "target_region": {
+                    "kind": "screen",
+                    "element_id": None,
+                    "bounds": [0, 0, 1000, 1000],
+                    "description": "当前可滚动列表整屏区域",
+                },
+                "expected_result": {"list_content_changed": True},
+            }
+        )
+        observer = QwenVisualDecisionObserver(FakeProvider(payload))
+        decision = observer.decide(
+            frames=frames,
+            task_context=context,
+            trusted_observation=observation,
+        )
+        self.assertEqual(decision.proposal.action.action, "swipe")
+        self.assertEqual(decision.proposal.action.params["direction"], "up")
+
+    def test_overlay_page_covers_close_input_text_button_and_finished(self) -> None:
+        frames = repeated_frames(REPLAY_ROOT / "douyin_digit_local_input_com.jpg")
+        scene = scene_for(
+            frames,
+            elements=overlay_elements(),
+            app_id="media_surface",
+            screen_id="input_overlay",
+            summary="输入弹层、输入框和文字提交按钮清晰可见",
+            overlays=("input_overlay",),
+        )
+        observation = trusted_observation(
+            frames,
+            scene=scene,
+            observation_id="obs_22222222222222222222222222222222",
+        )
+
+        close_context = task_context(task_id="task_close_overlay", revision=9)
+        close_payload = action_payload(
+            close_context,
+            observation,
+            element_id="unlabelled_close_icon",
+        )
+        close_payload["next_action"]["kind"] = "dismiss_overlay"
+        close_observer = QwenVisualDecisionObserver(FakeProvider(close_payload))
+        close_decision = close_observer.decide(
+            frames=frames,
+            task_context=close_context,
+            trusted_observation=observation,
+        )
+        self.assertEqual(close_decision.proposal.action.action, "dismiss_overlay")
+
+        submit_context = task_context(
+            task_id="task_submit_text_button",
+            revision=10,
+            external=True,
+            confirmed=True,
+        )
+        submit_payload = action_payload(
+            submit_context,
+            observation,
+            element_id="text_submit_button",
+        )
+        submit_observer = QwenVisualDecisionObserver(FakeProvider(submit_payload))
+        submit_decision = submit_observer.decide(
+            frames=frames,
+            task_context=submit_context,
+            trusted_observation=observation,
+        )
+        self.assertEqual(
+            submit_decision.proposal.action.params["label"],
+            "发布",
+        )
+
+        finished_context = task_context(task_id="task_input_finished", revision=11)
+        finished_context["goal"]["entities"] = {"expected_text": ".com"}
+        finished_payload = action_payload(
+            finished_context,
+            observation,
+            element_id="input_value",
+        )
+        finished_payload.update(
+            {
+                "status": "finished",
+                "next_action": None,
+                "target_region": None,
+                "expected_result": {},
+                "completion_evidence_element_ids": ["input_value"],
+            }
+        )
+        finished_observer = QwenVisualDecisionObserver(FakeProvider(finished_payload))
+        finished_decision = finished_observer.decide(
+            frames=frames,
+            task_context=finished_context,
+            trusted_observation=observation,
+        )
+        self.assertEqual(finished_decision.proposal.status, "finished")
+        self.assertEqual(
+            finished_decision.proposal.completion_evidence,
+            ("input_value:.com",),
+        )
+
+    def test_full_deepseek_context_is_preserved_in_prompt(self) -> None:
+        provider = FakeProvider(blocked_payload(self.context, self.observation))
+        self.decide(provider)
+        prompt = provider.messages[0]["content"][0]["text"]
+        for field in (
+            "protocol_version",
+            "task_id",
+            "device_id",
+            "revision",
+            "current_subgoal",
+            "global_constraints",
+            "current_external_impact",
+            "risk_actions",
+            "confirmation_gate",
+        ):
+            self.assertIn(field, prompt)
 
 
 if __name__ == "__main__":

@@ -660,7 +660,7 @@ class GenericSupervisedStepRequest(BaseModel):
 
 class GenericSupervisedAutoRequest(BaseModel):
     confirmed: bool = False
-    max_physical_actions: int = Field(default=4, ge=1, le=8)
+    max_physical_actions: int = Field(default=1, ge=1, le=1)
 
 
 def build_generic_plan_preview(

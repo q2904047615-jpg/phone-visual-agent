@@ -1,3 +1,6 @@
+const Protocol = window.UniversalAgentProtocol;
+if (!Protocol) throw new Error("通用 Agent 前端协议适配层未加载。");
+
 const state = {
   token: "",
   mock: false,
@@ -11,12 +14,13 @@ const state = {
   stopRequested: false,
 };
 
-const terminalStatuses = new Set(["succeeded", "blocked", "failed", "cancelled"]);
-
 const statusNames = {
+  idle: "等待目标",
   awaiting_confirmation: "等待确认",
   paused_after_action: "已完成一步",
+  running: "执行中",
   succeeded: "目标完成",
+  completed: "目标完成",
   blocked: "已阻止",
   failed: "失败",
   cancelled: "已停止",
@@ -39,17 +43,13 @@ const semanticActionNames = {
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
-  if (options.method && options.method !== "GET") {
-    headers["X-Control-Token"] = state.token;
-  }
+  if (options.method && options.method !== "GET") headers["X-Control-Token"] = state.token;
   if (options.body) headers["Content-Type"] = "application/json";
   const response = await fetch(path, { ...options, headers });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const detail = data.detail;
-    const message = typeof detail === "string"
-      ? detail
-      : (detail?.error || JSON.stringify(detail || {}));
+    const message = typeof detail === "string" ? detail : (detail?.error || JSON.stringify(detail || {}));
     throw new Error(message || `请求失败（${response.status}）`);
   }
   return data;
@@ -77,6 +77,17 @@ function setDot(selector, stateName) {
   if (element) element.className = `dot ${stateName}`;
 }
 
+function sessionView() {
+  if (!state.supervisedSession) return null;
+  return Protocol.adaptSession(state.supervisedSession, {
+    fallbackDeviceId: state.sessionDeviceId || state.deviceId,
+  });
+}
+
+function lockedSessionDeviceId() {
+  return state.sessionDeviceId || sessionView()?.deviceId || state.deviceId;
+}
+
 function observerStatus() {
   return state.device.execution_architecture?.universal_agent?.observer || {};
 }
@@ -90,37 +101,9 @@ function currentVisionStageLabel() {
   return "等待任务";
 }
 
-function currentProposal() {
-  return state.supervisedSession?.proposal || null;
-}
-
-function taskGraphNodes(session = state.supervisedSession) {
-  const graph = session?.task_graph || session?.goal?.task_graph || {};
-  const nodes = Array.isArray(graph) ? graph : graph.nodes;
-  return Array.isArray(nodes) ? nodes : [];
-}
-
-function currentSubgoal(session = state.supervisedSession) {
-  const value = session?.current_subgoal || currentProposal()?.current_subgoal;
-  if (typeof value === "string") return value;
-  if (value && typeof value === "object") {
-    return value.label || value.objective || value.title || "当前动态子目标";
-  }
-  return session?.goal?.objective || "当前动态子目标";
-}
-
-function currentAction() {
-  return state.supervisedSession?.visual_action || currentProposal()?.action || null;
-}
-
 function actionLabel(action) {
-  if (!action) return "等待重新观察";
-  return semanticActionNames[action.action] || action.action || "未知动作";
-}
-
-function actionTarget(action) {
-  const params = action?.params || {};
-  return params.label || params.target || params.element_id || params.direction || "当前语义目标";
+  if (!action?.actionType) return "等待重新观察";
+  return semanticActionNames[action.actionType] || action.actionType;
 }
 
 function confidenceLabel(value) {
@@ -128,31 +111,38 @@ function confidenceLabel(value) {
   return Number.isFinite(number) ? `${Math.round(number * 100)}%` : "—";
 }
 
+function planState(subgoal, view) {
+  if (subgoal.id === view.currentSubgoal.id) return "current";
+  if (["done", "completed", "succeeded"].includes(subgoal.status)) return "done";
+  if (["failed", "blocked", "cancelled"].includes(subgoal.status)) return "blocked";
+  return "waiting";
+}
+
 function renderStatus() {
   const device = state.device || {};
-  const session = state.supervisedSession;
+  const view = sessionView();
   setDot("#controllerDot", device.controller_online ? (device.busy ? "warn" : "online") : "offline");
   setDot("#cameraDot", device.camera_online ? "online" : "offline");
-  setDot("#agentDot", state.busy ? "warn" : (session && !terminalStatuses.has(session.status) ? "online" : "neutral"));
+  setDot("#agentDot", state.busy ? "warn" : (view && !view.isTerminal ? "online" : "neutral"));
   document.querySelector("#controllerText").textContent = device.controller_online
     ? (device.busy ? "当前动作执行中" : "在线且空闲")
     : "离线";
   document.querySelector("#cameraText").textContent = device.camera_online ? "实时画面可用" : "画面不可用";
   document.querySelector("#agentTextStatus").textContent = state.paused
     ? "人工暂停"
-    : (state.busy ? currentVisionStageLabel() : (session ? (statusNames[session.status] || session.status) : "等待目标"));
-  document.querySelector("#safetyText").textContent = currentActionHasAccountEffect()
+    : (state.busy ? currentVisionStageLabel() : (view ? (statusNames[view.status] || view.status) : "等待目标"));
+  document.querySelector("#safetyText").textContent = view?.risk.accountEffectPossible
     ? "外部状态动作待确认"
     : "一次一动作";
-  setDot("#safetyDot", currentActionHasAccountEffect() ? "warn" : "online");
+  setDot("#safetyDot", view?.risk.accountEffectPossible ? "warn" : "online");
 }
 
 function renderGoalAndPlan() {
-  const session = state.supervisedSession;
+  const view = sessionView();
   const goalElement = document.querySelector("#goalSummary");
   const planElement = document.querySelector("#planList");
   const badge = document.querySelector("#planBadge");
-  if (!session) {
+  if (!view) {
     goalElement.className = "goal-summary empty-state";
     goalElement.textContent = "输入目标后，这里会展示目标、约束和可验证的完成条件。";
     planElement.innerHTML = "";
@@ -161,71 +151,33 @@ function renderGoalAndPlan() {
     return;
   }
 
-  const goal = session.goal || {};
-  const constraints = Array.isArray(goal.constraints) ? goal.constraints : [];
-  const criteria = Object.entries(goal.success_criteria || {});
   goalElement.className = "goal-summary";
   goalElement.innerHTML = `
     <div class="goal-title-row">
-      <div><span>目标</span><strong>${escapeHtml(goal.objective || "未命名目标")}</strong></div>
-      <code>${escapeHtml(state.sessionDeviceId || state.deviceId)}</code>
+      <div><span>目标 · ${escapeHtml(view.taskId || "待分配任务 ID")}</span><strong>${escapeHtml(view.objective)}</strong></div>
+      <code>${escapeHtml(view.deviceId || lockedSessionDeviceId())}</code>
     </div>
     <div class="goal-chips">
-      ${goal.app_name ? `<span>App · ${escapeHtml(goal.app_name)}</span>` : ""}
-      ${constraints.map(item => `<span>限制 · ${escapeHtml(item)}</span>`).join("")}
-      ${criteria.map(([key, value]) => `<span>完成 · ${escapeHtml(key)}：${escapeHtml(formatValue(value))}</span>`).join("")}
+      ${view.appName ? `<span>目标应用 · ${escapeHtml(view.appName)}</span>` : ""}
+      ${view.constraints.map(item => `<span>限制 · ${escapeHtml(item)}</span>`).join("")}
+      ${view.completionConditions.map(item => `<span>完成 · ${escapeHtml(item)}</span>`).join("")}
     </div>`;
 
-  const history = Array.isArray(session.history) ? session.history : [];
-  const graphNodes = taskGraphNodes(session);
-  if (graphNodes.length) {
-    planElement.innerHTML = graphNodes.map((node, index) => {
-      const rawStatus = String(node.status || "pending").toLowerCase();
-      const stateName = ["done", "completed", "succeeded"].includes(rawStatus)
-        ? "done"
-        : (["current", "running", "active"].includes(rawStatus) ? "current" : (["failed", "blocked", "cancelled"].includes(rawStatus) ? "blocked" : "waiting"));
-      return planStepHtml({
-        number: node.index ?? node.step_number ?? index + 1,
-        label: node.label || node.objective || node.title || `动态节点 ${index + 1}`,
-        detail: node.reason || node.checkpoint || node.success_criteria || "等待当前画面更新",
-        stateName,
-      });
-    }).join("");
-    badge.className = `pill ${session.status === "succeeded" ? "success" : (terminalStatuses.has(session.status) ? "danger" : "active")}`;
-    badge.textContent = statusNames[session.status] || session.status;
-    return;
-  }
-  const completed = history.map(item => planStepHtml({
-    number: item.step_number,
-    label: actionLabel(item.proposal?.action),
-    detail: item.completion_evidence?.join("；") || "动作后已重新观察",
-    stateName: "done",
+  const steps = view.subgoals.map(item => planStepHtml({
+    number: item.index,
+    label: item.label,
+    detail: item.reason,
+    stateName: planState(item, view),
   })).join("");
-  const proposal = currentProposal();
-  const current = proposal && !terminalStatuses.has(session.status)
-    ? planStepHtml({
-        number: session.step_number,
-        label: actionLabel(proposal.action),
-        detail: proposal.reason || "依据当前画面动态生成",
-        stateName: session.status === "awaiting_confirmation" ? "current" : "waiting",
-      })
-    : "";
-  const result = terminalStatuses.has(session.status)
-    ? planStepHtml({
-        number: history.length + 1,
-        label: statusNames[session.status] || session.status,
-        detail: proposal?.reason || session.failed_reason || "会话已结束",
-        stateName: session.status === "succeeded" ? "done" : "blocked",
-      })
-    : planStepHtml({
-        number: "…",
-        label: "后续步骤等待新画面",
-        detail: "不会预先写死；当前动作验证后再动态生成",
-        stateName: "waiting",
-      });
-  planElement.innerHTML = completed + current + result;
-  badge.className = `pill ${session.status === "succeeded" ? "success" : (terminalStatuses.has(session.status) ? "danger" : "active")}`;
-  badge.textContent = statusNames[session.status] || session.status;
+  const dynamicTail = view.isTerminal ? "" : planStepHtml({
+    number: "…",
+    label: "后续步骤等待新画面",
+    detail: "每个动作重新观察后，DeepSeek 可更新剩余任务图",
+    stateName: "waiting",
+  });
+  planElement.innerHTML = steps + dynamicTail;
+  badge.className = `pill ${view.status === "succeeded" || view.status === "completed" ? "success" : (view.isTerminal ? "danger" : "active")}`;
+  badge.textContent = statusNames[view.status] || view.status;
 }
 
 function planStepHtml({ number, label, detail, stateName }) {
@@ -236,44 +188,34 @@ function planStepHtml({ number, label, detail, stateName }) {
   </div>`;
 }
 
-function formatValue(value) {
-  if (Array.isArray(value)) return value.map(formatValue).join("、");
-  if (value && typeof value === "object") return Object.entries(value).map(([key, item]) => `${key}=${formatValue(item)}`).join("；");
-  return String(value ?? "—");
-}
-
 function renderTrace() {
-  const session = state.supervisedSession;
+  const view = sessionView();
   const trace = document.querySelector("#traceList");
   const count = document.querySelector("#traceCount");
-  const history = Array.isArray(session?.history) ? session.history : [];
-  count.textContent = `${history.length} 条`;
-  if (!session) {
+  count.textContent = `${view?.history.length || 0} 条`;
+  if (!view) {
     trace.className = "trace-list empty-state";
     trace.textContent = "还没有执行记录。每次观察、确认、动作和验证都会显示在这里。";
     return;
   }
-  const rows = history.slice().reverse().map(item => {
-    const action = item.proposal?.action;
-    const physicalActions = Number(item.execution?.physical_actions || 0);
-    return `<article class="trace-item">
+  const rows = view.history.slice().reverse().map(item => `
+    <article class="trace-item">
       <div class="trace-marker"></div>
       <div>
-        <div class="trace-title"><strong>步骤 ${escapeHtml(item.step_number)} · ${escapeHtml(actionLabel(action))}</strong><time>${physicalActions} 个物理动作</time></div>
-        <p>${escapeHtml(item.proposal?.reason || "已执行并重新观察")}</p>
-        <small>目标：${escapeHtml(actionTarget(action))} · 验证：${escapeHtml(item.completion_evidence?.join("；") || "已保存动作后画面")}</small>
+        <div class="trace-title"><strong>步骤 ${escapeHtml(item.stepNumber)} · ${escapeHtml(actionLabel(item.action))}</strong><time>${item.physicalActions} 个物理动作</time></div>
+        <p>${escapeHtml(item.reason)}</p>
+        <small>目标：${escapeHtml(item.action.semanticTarget)} · 验证：${escapeHtml(item.completionEvidence.join("；") || "已保存动作后画面")}</small>
       </div>
-    </article>`;
-  }).join("");
+    </article>`).join("");
   trace.className = "trace-list";
   trace.innerHTML = rows || `<article class="trace-item observation-only"><div class="trace-marker"></div><div><div class="trace-title"><strong>目标已理解，初始画面已观察</strong><time>0 个物理动作</time></div><p>正在等待当前一步确认。</p></div></article>`;
 }
 
 function renderScene() {
-  const scene = state.supervisedSession?.scene || null;
+  const view = sessionView();
   const overlay = document.querySelector("#previewOverlay");
   const meta = document.querySelector("#sceneMeta");
-  if (!scene) {
+  if (!view) {
     overlay.textContent = state.busy ? currentVisionStageLabel() : "等待观察";
     overlay.classList.toggle("show", state.busy);
     meta.innerHTML = `<span><b>页面</b><em>尚未识别</em></span><span><b>稳定性</b><em>—</em></span><span><b>置信度</b><em>—</em></span>`;
@@ -282,19 +224,18 @@ function renderScene() {
   overlay.textContent = state.busy ? currentVisionStageLabel() : "";
   overlay.classList.toggle("show", state.busy);
   meta.innerHTML = `
-    <span><b>页面</b><em>${escapeHtml(scene.summary || scene.screen_id || "unknown")}</em></span>
-    <span><b>稳定性</b><em>${scene.stable ? "稳定" : "不稳定"}</em></span>
-    <span><b>置信度</b><em>${escapeHtml(confidenceLabel(scene.confidence))}</em></span>`;
+    <span><b>页面</b><em>${escapeHtml(view.scene.summary)}</em></span>
+    <span><b>稳定性</b><em>${view.scene.stable ? "稳定" : "不稳定"}</em></span>
+    <span><b>置信度</b><em>${escapeHtml(confidenceLabel(view.scene.confidence))}</em></span>`;
 }
 
 function renderAction() {
-  const session = state.supervisedSession;
+  const view = sessionView();
   const content = document.querySelector("#actionContent");
   const controls = document.querySelector("#actionControls");
   const badge = document.querySelector("#sessionBadge");
-  const pauseNotice = document.querySelector("#pauseNotice");
-  pauseNotice.hidden = !state.paused;
-  if (!session) {
+  document.querySelector("#pauseNotice").hidden = !state.paused;
+  if (!view) {
     content.className = "empty-state";
     content.textContent = "Agent 将结合目标和当前画面，只提出一个下一动作。";
     controls.innerHTML = "";
@@ -303,28 +244,31 @@ function renderAction() {
     return;
   }
 
-  const proposal = currentProposal();
-  const action = currentAction();
-  const terminal = terminalStatuses.has(session.status);
-  const accountEffect = currentActionHasAccountEffect();
+  const action = view.visualAction;
+  const risk = view.risk.accountEffectPossible;
   content.className = "action-content";
-  content.innerHTML = terminal
-    ? `<h3>${escapeHtml(statusNames[session.status] || session.status)}</h3><p>${escapeHtml(proposal?.reason || session.failed_reason || "会话已经结束。")}</p>`
-    : (session.status === "paused_after_action"
-      ? `<h3>上一步已完成并重新观察</h3><p>继续后会根据新画面生成下一步，不会沿用失效计划。</p>`
-      : `<div class="next-action-title"><span>${escapeHtml(actionLabel(action))}</span>${accountEffect ? '<b class="risk-tag">外部状态风险</b>' : '<b class="safe-tag">受限单步</b>'}</div>
-         <h3>${escapeHtml(currentSubgoal(session))}</h3>
-         <div class="action-target">本步动作 · ${escapeHtml(actionTarget(action))}</div>
-         <p>${escapeHtml(proposal?.reason || "依据当前画面动态生成")}</p>
-         <small>确认仅授权当前一步；动作完成后必须重新观察。</small>`);
+  content.innerHTML = view.isTerminal
+    ? `<h3>${escapeHtml(statusNames[view.status] || view.status)}</h3><p>${escapeHtml(action.reason || view.failedReason || "会话已经结束。")}</p>`
+    : (view.status === "paused_after_action"
+      ? `<h3>上一步已完成并重新观察</h3><p>网页将依据新画面决定是否发起下一次单动作请求。</p>`
+      : `<div class="next-action-title"><span>${escapeHtml(actionLabel(action))}</span>${risk ? '<b class="risk-tag">外部状态风险</b>' : '<b class="safe-tag">受限单步</b>'}</div>
+         <h3>${escapeHtml(view.currentSubgoal.label)}</h3>
+         <div class="action-target">语义目标 · ${escapeHtml(action.semanticTarget)}</div>
+         <div class="action-facts">
+           <span><b>目标区域</b>${escapeHtml(Protocol.displayValue(action.targetRegion))}</span>
+           <span><b>预期变化</b>${escapeHtml(action.expectedChange)}</span>
+           <span><b>动作置信度</b>${escapeHtml(confidenceLabel(action.confidence))}</span>
+         </div>
+         <p>${escapeHtml(action.reason)}</p>
+         <small>确认只授权当前一步；动作完成并重新观察后才会决定下一步。</small>`);
 
   const disabled = state.busy || state.paused ? "disabled" : "";
-  if (terminal) {
+  if (view.isTerminal) {
     controls.innerHTML = "";
-  } else if (session.status === "awaiting_confirmation") {
+  } else if (view.status === "awaiting_confirmation") {
     controls.innerHTML = `
-      <button id="reviewAction" class="${accountEffect ? "risk-button" : "primary-button"}" ${disabled}>${accountEffect ? "查看风险并确认" : "确认当前一步"}</button>
-      ${!accountEffect ? `<button id="autoSupervisedAgent" class="secondary-button" ${disabled}>自动推进安全步骤</button>` : ""}
+      <button id="reviewAction" class="${risk ? "risk-button" : "primary-button"}" ${disabled}>${risk ? "查看风险并确认" : "确认当前一步"}</button>
+      ${!risk ? `<button id="autoSupervisedAgent" class="secondary-button" ${disabled}>自动推进安全步骤</button>` : ""}
       <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
   } else {
     controls.innerHTML = `
@@ -332,13 +276,9 @@ function renderAction() {
       <button id="autoSupervisedAgent" class="secondary-button" ${disabled}>自动推进安全步骤</button>
       <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
   }
-  badge.className = `pill ${accountEffect ? "risk" : (terminal ? (session.status === "succeeded" ? "success" : "danger") : "active")}`;
-  badge.textContent = accountEffect ? "等待风险确认" : (statusNames[session.status] || session.status);
+  badge.className = `pill ${risk ? "risk" : (view.isTerminal ? (view.status === "succeeded" || view.status === "completed" ? "success" : "danger") : "active")}`;
+  badge.textContent = risk ? "等待风险确认" : (statusNames[view.status] || view.status);
   bindActionEvents();
-}
-
-function currentActionHasAccountEffect() {
-  return !!state.supervisedSession?.current_action?.account_effect_possible;
 }
 
 function bindActionEvents() {
@@ -349,9 +289,10 @@ function bindActionEvents() {
 }
 
 function render() {
+  const view = sessionView();
   const deviceSelect = document.querySelector("#deviceId");
   deviceSelect.value = state.deviceId;
-  deviceSelect.disabled = !!state.supervisedSession && !terminalStatuses.has(state.supervisedSession.status);
+  deviceSelect.disabled = !!view && !view.isTerminal;
   document.querySelector("#startSupervisedAgent").disabled = state.busy || state.paused;
   document.querySelector("#agentText").disabled = state.busy;
   document.querySelector("#pauseButton").textContent = state.paused ? "▶ 继续推进" : "Ⅱ 暂停推进";
@@ -399,18 +340,17 @@ async function withVisionProgress(initialLabel, operation) {
 }
 
 async function startSupervisedAgent() {
-  const input = document.querySelector("#agentText");
-  const text = input.value.trim();
+  const text = document.querySelector("#agentText").value.trim();
+  const current = sessionView();
   if (!text) return toast("请先输入希望手机完成的目标。", true);
-  if (state.supervisedSession && !terminalStatuses.has(state.supervisedSession.status)) {
-    return toast("已有进行中的会话，请继续或停止后再创建新目标。", true);
-  }
+  if (current && !current.isTerminal) return toast("已有进行中的会话，请继续或停止后再创建新目标。", true);
   state.sessionDeviceId = state.deviceId;
   try {
+    const payload = Protocol.buildRequestPayload(state.sessionDeviceId, { text });
     const response = await withVisionProgress("理解目标并观察当前画面", () =>
       api("/api/agent/generic-supervised/start", {
         method: "POST",
-        body: JSON.stringify({ text, device_id: state.deviceId }),
+        body: JSON.stringify(payload),
       })
     );
     state.supervisedSession = response.session;
@@ -423,35 +363,34 @@ async function startSupervisedAgent() {
 }
 
 function openRiskDialog() {
-  const session = state.supervisedSession;
-  const proposal = currentProposal();
-  const action = currentAction();
-  if (!session || !action || state.paused || state.busy) return;
-  const accountEffect = currentActionHasAccountEffect();
-  document.querySelector("#riskTitle").textContent = accountEffect ? "确认外部状态动作" : "确认当前单步动作";
+  const view = sessionView();
+  if (!view || !view.visualAction.actionType || state.paused || state.busy) return;
+  const risk = view.risk.accountEffectPossible;
+  document.querySelector("#riskTitle").textContent = risk ? "确认外部状态动作" : "确认当前单步动作";
   const level = document.querySelector("#riskLevel");
-  level.className = `risk-level ${accountEffect ? "high" : "guarded"}`;
-  level.textContent = accountEffect ? "高关注 · 可能改变账号或对外产生影响" : "受控动作 · 仅授权当前一步";
-  document.querySelector("#riskGoal").textContent = session.goal?.objective || "—";
-  document.querySelector("#riskAction").textContent = `${actionLabel(action)} · ${actionTarget(action)}`;
-  document.querySelector("#riskReason").textContent = proposal?.reason || "—";
-  document.querySelector("#riskExpected").textContent = action.params?.expected_result || "动作后重新观察，并根据可见变化判断是否成功";
-  document.querySelector("#riskDevice").textContent = state.sessionDeviceId || state.deviceId;
-  document.querySelector("#riskWarning").textContent = accountEffect
-    ? "此动作可能发送消息、关注、点赞、评论或改变账号状态。确认只授权当前一个动作，后续风险动作仍需再次确认。"
+  level.className = `risk-level ${risk ? "high" : "guarded"}`;
+  level.textContent = risk ? "高关注 · 可能改变账号或对外产生影响" : "受控动作 · 仅授权当前一步";
+  document.querySelector("#riskGoal").textContent = view.objective;
+  document.querySelector("#riskAction").textContent = `${actionLabel(view.visualAction)} · ${view.visualAction.semanticTarget}`;
+  document.querySelector("#riskReason").textContent = view.visualAction.reason;
+  document.querySelector("#riskExpected").textContent = view.visualAction.expectedChange;
+  document.querySelector("#riskDevice").textContent = lockedSessionDeviceId();
+  document.querySelector("#riskWarning").textContent = risk
+    ? "此动作可能改变对外内容、账号关系或账号状态。确认只授权当前一个动作，后续风险动作仍需逐步重新确认。"
     : "确认只授权当前一个动作。执行后系统必须重新观察，不会自动沿用旧画面继续点击。";
-  document.querySelector("#confirmRiskAction").className = accountEffect ? "danger-confirm" : "primary-button";
+  document.querySelector("#confirmRiskAction").className = risk ? "danger-confirm" : "primary-button";
   document.querySelector("#riskDialog").showModal();
 }
 
 async function advanceSupervisedAgent() {
-  const session = state.supervisedSession;
-  if (!session || state.paused || state.busy) return;
+  const view = sessionView();
+  if (!view || state.paused || state.busy) return;
   try {
+    const payload = Protocol.buildRequestPayload(lockedSessionDeviceId(), { confirmed: true });
     const response = await withVisionProgress("执行当前一步并重新观察", () =>
-      api(`/api/agent/generic-supervised/${session.session_id}/confirm`, {
+      api(`/api/agent/generic-supervised/${view.sessionId}/confirm`, {
         method: "POST",
-        body: JSON.stringify({ confirmed: true, device_id: state.deviceId }),
+        body: JSON.stringify(payload),
       })
     );
     state.supervisedSession = response.session;
@@ -464,13 +403,14 @@ async function advanceSupervisedAgent() {
 }
 
 async function nextSupervisedAgent() {
-  const session = state.supervisedSession;
-  if (!session || state.paused || state.busy) return;
+  const view = sessionView();
+  if (!view || state.paused || state.busy) return;
   try {
+    const payload = Protocol.buildRequestPayload(lockedSessionDeviceId());
     const response = await withVisionProgress("重新观察并动态规划下一步", () =>
-      api(`/api/agent/generic-supervised/${session.session_id}/next`, {
+      api(`/api/agent/generic-supervised/${view.sessionId}/next`, {
         method: "POST",
-        body: JSON.stringify({ device_id: state.deviceId }),
+        body: JSON.stringify(payload),
       })
     );
     state.supervisedSession = response.session;
@@ -482,31 +422,48 @@ async function nextSupervisedAgent() {
 }
 
 async function autoSupervisedAgent() {
-  const session = state.supervisedSession;
-  if (!session || state.paused || state.busy || currentActionHasAccountEffect()) return;
+  const initial = sessionView();
+  if (!Protocol.shouldAutoAdvance({ session: initial, paused: state.paused, busy: state.busy })) return;
   try {
-    const response = await withVisionProgress("逐步观察并推进低风险动作", () =>
-      api(`/api/agent/generic-supervised/${session.session_id}/auto`, {
-        method: "POST",
-        body: JSON.stringify({ confirmed: true, max_physical_actions: 4, device_id: state.deviceId }),
-      })
-    );
-    state.supervisedSession = response.session;
-    await finalizeStopIfRequested();
-    if (state.supervisedSession.auto_pause_reason) toast(state.supervisedSession.auto_pause_reason);
-    render();
+    const outcome = await Protocol.runAutoAdvanceLoop({
+      maxRequests: 8,
+      getContext: () => ({
+        session: sessionView(),
+        sessionDeviceId: lockedSessionDeviceId(),
+        paused: state.paused || state.stopRequested,
+        busy: false,
+      }),
+      sendOne: payload => {
+        const view = sessionView();
+        return withVisionProgress("执行一个安全动作并重新观察", () =>
+          api(`/api/agent/generic-supervised/${view.sessionId}/auto`, {
+            method: "POST",
+            body: JSON.stringify(payload),
+          })
+        );
+      },
+      applyResponse: async response => {
+        state.supervisedSession = response.session;
+        await finalizeStopIfRequested();
+        render();
+      },
+    });
+    const view = sessionView();
+    if (view?.autoPauseReason) toast(view.autoPauseReason);
+    else if (outcome.limitReached) toast("网页已达到本轮逐次请求上限，请核对画面后再继续。");
   } catch (error) {
     toast(error.message, true);
   }
 }
 
 async function cancelSupervisedAgent({ quiet = false } = {}) {
-  const session = state.supervisedSession;
-  if (!session || terminalStatuses.has(session.status)) return;
+  const view = sessionView();
+  if (!view || view.isTerminal) return;
   try {
-    const response = await api(`/api/agent/generic-supervised/${session.session_id}/cancel`, {
+    const payload = Protocol.buildRequestPayload(lockedSessionDeviceId());
+    const response = await api(`/api/agent/generic-supervised/${view.sessionId}/cancel`, {
       method: "POST",
-      body: JSON.stringify({ device_id: state.deviceId }),
+      body: JSON.stringify(payload),
     });
     state.supervisedSession = response.session;
     state.stopRequested = false;
@@ -526,7 +483,7 @@ async function finalizeStopIfRequested() {
 function togglePause() {
   state.paused = !state.paused;
   toast(state.paused
-    ? "已暂停推进。正在进行的最小动作完成后会停住。"
+    ? "已暂停推进。当前请求结束后，网页不会发起下一次请求。"
     : "已恢复，可由你确认后继续生成或执行下一步。");
   render();
 }
@@ -537,10 +494,8 @@ async function stopTasks() {
   state.stopRequested = true;
   render();
   try {
-    const result = await api("/api/stop", {
-      method: "POST",
-      body: JSON.stringify({ device_id: state.deviceId }),
-    });
+    const payload = Protocol.buildRequestPayload(lockedSessionDeviceId());
+    const result = await api("/api/stop", { method: "POST", body: JSON.stringify(payload) });
     if (!requestWasRunning) await finalizeStopIfRequested();
     toast(result.note || "停止请求已发送。");
     await refreshDevice();
@@ -556,7 +511,8 @@ async function restoreActiveSession() {
   try {
     const response = await api(`/api/agent/generic-supervised/${active.session_id}`);
     state.supervisedSession = response.session;
-    state.sessionDeviceId = state.deviceId;
+    const restored = Protocol.adaptSession(response.session, { fallbackDeviceId: state.deviceId });
+    state.sessionDeviceId = restored.deviceId || state.deviceId;
   } catch (_error) {
     state.supervisedSession = null;
   }

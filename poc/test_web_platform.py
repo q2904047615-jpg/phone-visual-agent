@@ -3753,9 +3753,11 @@ class ApiEndToEndTests(unittest.TestCase):
     def test_home_uses_generic_supervised_single_step_endpoints(self) -> None:
         home = self.client.get("/")
         script = self.client.get("/assets/app.js")
+        protocol_adapter = self.client.get("/assets/protocol_adapter.js")
         styles = self.client.get("/assets/styles.css")
         self.assertEqual(home.status_code, 200)
         self.assertEqual(script.status_code, 200)
+        self.assertEqual(protocol_adapter.status_code, 200)
         self.assertEqual(styles.status_code, 200)
         self.assertIn("你希望手机完成什么", home.text)
         self.assertIn("动态计划", home.text)
@@ -3767,18 +3769,23 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertIn('id="deviceId"', home.text)
         self.assertNotIn("微信工作流", home.text)
         self.assertNotIn("抖音工作流", home.text)
+        self.assertIn('/assets/protocol_adapter.js', home.text)
         self.assertIn("/api/agent/generic-supervised/start", script.text)
-        self.assertIn("/api/agent/generic-supervised/${session.session_id}/auto", script.text)
+        self.assertIn("/api/agent/generic-supervised/${view.sessionId}/auto", script.text)
         self.assertIn("nextSupervisedAgent", script.text)
-        self.assertIn("device_id: state.deviceId", script.text)
-        self.assertIn("session?.task_graph", script.text)
-        self.assertIn("session?.current_subgoal", script.text)
-        self.assertIn("state.supervisedSession?.visual_action", script.text)
-        self.assertIn("currentActionHasAccountEffect", script.text)
         self.assertIn("togglePause", script.text)
         self.assertNotIn('api("/api/agent/supervised/start"', script.text)
         self.assertNotIn("wechatView", script.text)
         self.assertNotIn("douyinView", script.text)
+
+    def test_generic_supervised_auto_request_allows_exactly_one_physical_action(self) -> None:
+        request = web_app.GenericSupervisedAutoRequest(confirmed=True)
+        self.assertEqual(request.max_physical_actions, 1)
+        with self.assertRaises(ValueError):
+            web_app.GenericSupervisedAutoRequest(
+                confirmed=True,
+                max_physical_actions=2,
+            )
 
     def test_plan_preview_compiles_without_creating_or_running_task(self) -> None:
         before = len(web_app.runtime.store.list(100))

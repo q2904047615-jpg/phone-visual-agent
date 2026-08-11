@@ -311,6 +311,9 @@ h3 { margin-bottom: 0; }
 .safe-tag { color: var(--accent); background: rgba(126, 230, 196, .08); }
 .action-content h3 { margin-bottom: 7px; font-size: 14px; }
 .action-target { width: max-content; max-width: 100%; margin-bottom: 7px; padding: 4px 7px; overflow: hidden; border-radius: 7px; color: #a9b9e2; background: rgba(125, 165, 255, .07); text-overflow: ellipsis; white-space: nowrap; font-size: 8px; }
+.action-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-bottom: 8px; }
+.action-facts span { min-width: 0; padding: 7px 8px; border-radius: 8px; color: #d4dcf0; background: rgba(255, 255, 255, .025); font-size: 8px; line-height: 1.45; overflow-wrap: anywhere; }
+.action-facts b { display: block; margin-bottom: 2px; color: var(--muted); font-size: 7px; }
 .action-content p { margin-bottom: 8px; color: #aeb8d1; font-size: 10px; line-height: 1.65; }
 .action-content small { color: var(--muted); font-size: 8px; }
 .action-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 11px; }

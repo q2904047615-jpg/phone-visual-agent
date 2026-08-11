@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" width="1000" height="620">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#2563eb"/>
+    </marker>
+  </defs>
+  <rect width="1000" height="620" fill="#f4f7fb"/>
+  <rect x="35" y="28" width="930" height="560" rx="22" fill="#ffffff" stroke="#dbe3ee" stroke-width="2"/>
+  <text x="70" y="82" font-family="Microsoft YaHei, sans-serif" font-size="32" font-weight="700" fill="#1e293b">电机座 + 电机安装方向（俯视）</text>
+  <text x="70" y="116" font-family="Microsoft YaHei, sans-serif" font-size="18" fill="#64748b">方向确认前先不要拧紧；示意图不按实际比例。</text>
+
+  <rect x="300" y="175" width="570" height="260" rx="8" fill="none" stroke="#8a98a8" stroke-width="28"/>
+  <text x="585" y="300" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="26" fill="#334155">2020 铝型材外框</text>
+  <text x="585" y="337" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="18" fill="#64748b">手机以后平放在框下方</text>
+
+  <path d="M305 200 L360 200 L360 280 L305 280 Z" fill="#f59e0b" stroke="#92400e" stroke-width="4"/>
+  <ellipse cx="320" cy="220" rx="9" ry="17" fill="#fff" stroke="#92400e" stroke-width="3"/>
+  <ellipse cx="320" cy="261" rx="9" ry="17" fill="#fff" stroke="#92400e" stroke-width="3"/>
+  <text x="378" y="244" font-family="Microsoft YaHei, sans-serif" font-size="21" fill="#92400e">B 面贴铝型材内侧</text>
+  <text x="82" y="346" font-family="Microsoft YaHei, sans-serif" font-size="20" fill="#92400e">两个椭圆长孔</text>
+  <line x1="235" y1="328" x2="312" y2="270" stroke="#92400e" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="82" y="192" width="172" height="118" rx="14" fill="#475569" stroke="#0f172a" stroke-width="4"/>
+  <circle cx="168" cy="251" r="35" fill="#64748b" stroke="#cbd5e1" stroke-width="4"/>
+  <text x="168" y="165" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="21" font-weight="700" fill="#334155">NEMA17 电机在框外</text>
+
+  <line x1="254" y1="251" x2="430" y2="251" stroke="#2563eb" stroke-width="11"/>
+  <line x1="430" y1="251" x2="665" y2="251" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow)"/>
+  <text x="530" y="220" font-family="Microsoft YaHei, sans-serif" font-size="21" fill="#2563eb">电机轴 / 皮带方向</text>
+  <text x="530" y="194" font-family="Microsoft YaHei, sans-serif" font-size="18" fill="#2563eb">沿外框长边指向另一端</text>
+
+  <line x1="300" y1="488" x2="870" y2="488" stroke="#2563eb" stroke-width="4" marker-end="url(#arrow)"/>
+  <text x="585" y="525" text-anchor="middle" font-family="Microsoft YaHei, sans-serif" font-size="22" fill="#2563eb">Y 方向（外框长边方向）</text>
+
+  <rect x="70" y="548" width="860" height="2" fill="#e2e8f0"/>
+  <text x="70" y="578" font-family="Microsoft YaHei, sans-serif" font-size="17" fill="#475569">下一步：用 M5×6 无头紧定螺丝试穿椭圆长孔，只看能否顺畅穿过，不要拧。</text>
+</svg>

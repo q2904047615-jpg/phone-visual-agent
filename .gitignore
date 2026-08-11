@@ -1,0 +1,52 @@
+# Local agent and tool state
+.agents/
+.superpowers/
+.git.invalid-empty-backup-*/
+.tmp_order_analysis/
+.tmp_orders_analysis/
+tmp/
+tools/
+
+# Python environments and caches
+**/__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+poc/.venv/
+.venv/
+venv/
+
+# Runtime output and user/device data
+poc/output/
+poc/data/
+poc/evals/vision_replay/cache/
+poc/evals/vision_replay/history/
+poc/evals/vision_replay/results/
+*.db
+*.sqlite
+*.sqlite3
+*.jsonl
+
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.key
+*secret*
+*credential*
+
+# Large or unrelated local artifacts
+录屏复核副本.mp4
+taobao_search_debug.png
+taobao_search_probe.py
+
+# Operating system and editor files
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/

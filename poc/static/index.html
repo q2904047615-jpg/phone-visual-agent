@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>机械臂控制台</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="#/">
+        <span class="brand-mark">R</span>
+        <span><strong>Robot Desk</strong><small>本机机械臂控制台</small></span>
+      </a>
+      <nav>
+        <a data-route="home" href="#/"><span>⌂</span>总览</a>
+        <a data-route="wechat" href="#/apps/wechat"><span>微</span>微信</a>
+        <a data-route="douyin" href="#/apps/douyin"><span>抖</span>抖音</a>
+        <a data-route="tasks" href="#/tasks"><span>✓</span>任务记录</a>
+        <a data-route="settings" href="#/settings"><span>⚙</span>设置</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div id="modeBadge" class="mode-badge">正在连接</div>
+        <small>仅监听 127.0.0.1</small>
+      </div>
+    </aside>
+
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">LOCAL AUTOMATION</p>
+          <h1 id="pageTitle">机械臂总览</h1>
+        </div>
+        <button id="stopButton" class="stop-button">■ 停止任务</button>
+      </header>
+
+      <section id="statusStrip" class="status-strip">
+        <div><span id="controllerDot" class="dot"></span><b>控制端</b><em id="controllerText">检测中</em></div>
+        <div><span id="cameraDot" class="dot"></span><b>摄像头</b><em id="cameraText">检测中</em></div>
+        <div><span id="queueDot" class="dot"></span><b>执行队列</b><em id="queueText">读取中</em></div>
+      </section>
+
+      <div id="toast" class="toast" role="status"></div>
+      <div id="view"></div>
+    </main>
+  </div>
+
+  <dialog id="confirmDialog">
+    <form method="dialog">
+      <p class="eyebrow">ACTION CONFIRMATION</p>
+      <h2>确认执行机械臂任务？</h2>
+      <p id="confirmSummary" class="confirm-summary"></p>
+      <div class="warning-box">
+        这会操作真实手机并可能改变 App 内数据。请确认手机画面、账号及目标页面均正确。
+      </div>
+      <div class="dialog-actions">
+        <button value="cancel" class="secondary-button">返回检查</button>
+        <button id="confirmExecute" value="default" class="primary-button">确认并执行</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>

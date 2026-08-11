@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>机械臂九点落笔校准</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #020407; color: #dff; font-family: sans-serif; touch-action: none; }
+    #pad { position: fixed; inset: 8vh 6vw 6vh; border: 3px solid #00e5ff; border-radius: 18px; background: #020407; }
+    #target { position: absolute; width: 34px; height: 34px; margin: -17px; border: 6px solid #ff00e6; border-radius: 50%; box-shadow: 0 0 14px #ff00e6; }
+    #target::before, #target::after { content: ''; position: absolute; background: #ff00e6; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+    #target::before { width: 48px; height: 3px; }
+    #target::after { width: 3px; height: 48px; }
+    #touch { display: none; position: fixed; width: 24px; height: 24px; margin: -12px; border: 4px solid #ffe600; border-radius: 50%; pointer-events: none; }
+    #status { position: fixed; top: 1.3vh; left: 0; right: 0; text-align: center; font-size: 18px; font-weight: 700; }
+    #detail { position: fixed; bottom: 0.8vh; left: 0; right: 0; text-align: center; font-size: 13px; color: #8ff; }
+  </style>
+</head>
+<body>
+  <div id="status">九点落笔校准 · 第 <span id="index">1</span>/9 点 · 请勿手动触摸</div>
+  <div id="pad"><div id="target"></div></div>
+  <div id="touch"></div>
+  <div id="detail">等待机械臂落笔</div>
+  <script>
+    const positions = [[.15,.15],[.50,.15],[.85,.15],[.15,.50],[.50,.50],[.85,.50],[.15,.85],[.50,.85],[.85,.85]];
+    let sequence = 0;
+    let sessionId = null;
+    let locked = false;
+    const pad = document.querySelector('#pad');
+    const target = document.querySelector('#target');
+    const touch = document.querySelector('#touch');
+    const index = document.querySelector('#index');
+    const detail = document.querySelector('#detail');
+
+    function placeTarget() {
+      const [u, v] = positions[Math.min(sequence, positions.length - 1)];
+      target.style.left = `${u * 100}%`;
+      target.style.top = `${v * 100}%`;
+      index.textContent = String(Math.min(sequence + 1, 9));
+      locked = sequence >= positions.length;
+      if (locked) {
+        target.style.display = 'none';
+        document.querySelector('#status').textContent = '九点采集完成 · 等待电脑验证';
+      }
+    }
+
+    async function record(event) {
+      event.preventDefault();
+      if (locked) return;
+      locked = true;
+      const point = event.touches ? event.touches[0] : event;
+      const rect = pad.getBoundingClientRect();
+      const [u, v] = positions[sequence];
+      touch.style.display = 'block';
+      touch.style.left = `${point.clientX}px`;
+      touch.style.top = `${point.clientY}px`;
+      const payload = {
+        sequence,
+        target_x: rect.left + u * rect.width,
+        target_y: rect.top + v * rect.height,
+        actual_x: point.clientX,
+        actual_y: point.clientY,
+        viewport_width: window.innerWidth,
+        viewport_height: window.innerHeight
+      };
+      try {
+        const response = await fetch('/api/sample', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        detail.textContent = `第 ${sequence + 1} 点已记录：(${Math.round(point.clientX)}, ${Math.round(point.clientY)})`;
+        sequence += 1;
+        setTimeout(() => { touch.style.display = 'none'; locked = false; placeTarget(); }, 650);
+      } catch (error) {
+        detail.textContent = `记录失败：${error.message}`;
+        locked = false;
+      }
+    }
+
+    async function syncFromServer() {
+      try {
+        const response = await fetch('/api/samples', {cache:'no-store'});
+        if (!response.ok) return;
+        const state = await response.json();
+        if (sessionId !== state.session_id || sequence !== state.samples.length) {
+          sessionId = state.session_id;
+          sequence = Math.min(state.samples.length, positions.length);
+          touch.style.display = 'none';
+          locked = false;
+          placeTarget();
+          detail.textContent = sequence ? `已同步 ${sequence} 个触点` : '等待机械臂落笔';
+        }
+      } catch (_error) {
+        // Keep the visible target; the next successful poll will resync.
+      }
+    }
+
+    pad.addEventListener('pointerdown', record, {passive:false});
+    syncFromServer();
+    setInterval(syncFromServer, 700);
+  </script>
+</body>
+</html>

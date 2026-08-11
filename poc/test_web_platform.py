@@ -3779,7 +3779,8 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertNotIn("douyinView", script.text)
 
     def test_generic_supervised_auto_request_allows_exactly_one_physical_action(self) -> None:
-        request = web_app.GenericSupervisedAutoRequest(confirmed=True)
+        request = web_app.GenericSupervisedAutoRequest()
+        self.assertFalse(request.confirmed)
         self.assertEqual(request.max_physical_actions, 1)
         with self.assertRaises(ValueError):
             web_app.GenericSupervisedAutoRequest(

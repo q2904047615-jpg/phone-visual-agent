@@ -1,0 +1,93 @@
+{
+  "source": {
+    "branch": "agent/qwen-next-action",
+    "commit": "1d892ad01834b32160c9a59105ceb0713d830828",
+    "serializer": "QwenVisualDecision.to_dict()"
+  },
+  "decision": {
+    "protocol_version": "2026-08-11-qwen-visual-decision-v2",
+    "task_id": "task-map-001",
+    "device_id": "phone-01",
+    "revision": 1,
+    "observation_id": "obs_0123456789abcdef0123456789abcdef",
+    "fingerprint": "51277d0d9e6f986b00dc",
+    "page_state": {
+      "foreground_app_id": "launcher",
+      "screen_id": "launcher_home",
+      "summary": "桌面应用网格清晰可见",
+      "overlays": []
+    },
+    "trusted_observation": {
+      "observation_id": "obs_0123456789abcdef0123456789abcdef",
+      "device_id": "phone-01",
+      "fingerprint": "51277d0d9e6f986b00dc",
+      "scene": {
+        "protocol_version": "2026-08-10-ui-scene-v2",
+        "foreground_app_id": "launcher",
+        "app_id": "launcher",
+        "screen_id": "launcher_home",
+        "summary": "桌面应用网格清晰可见",
+        "elements": [
+          {
+            "element_id": "settings_icon",
+            "role": "icon",
+            "meaning": "open_settings",
+            "bounds": [0.68, 0.2, 0.86, 0.35],
+            "confidence": 0.96,
+            "label": "设置",
+            "states": { "goal_relevant": true },
+            "evidence": ["设置"]
+          },
+          {
+            "element_id": "unlabelled_camera_icon",
+            "role": "icon",
+            "meaning": "open_camera",
+            "bounds": [0.69, 0.82, 0.88, 0.95],
+            "confidence": 0.92,
+            "label": "",
+            "states": { "goal_relevant": false },
+            "evidence": ["相机图形"]
+          }
+        ],
+        "overlays": [],
+        "stable": true,
+        "confidence": 0.95,
+        "fingerprint": "51277d0d9e6f986b00dc"
+      },
+      "local_stability": {
+        "stable": true,
+        "mean_delta": 0.155,
+        "max_delta": 0.164,
+        "frame_count": 4,
+        "threshold": 38.0,
+        "reason": "外圈静态UI多帧一致"
+      },
+      "selected_frame_index": 0,
+      "frame_sharpness_scores": [9.405, 9.395, 9.396, 9.393]
+    },
+    "status": "action",
+    "next_action": {
+      "node_id": "qwen_visual_revision_1",
+      "action": "tap_semantic",
+      "params": {
+        "role": "icon",
+        "element_id": "settings_icon",
+        "target": "open_settings",
+        "label": "设置",
+        "states": { "goal_relevant": true },
+        "expected_effect": { "scene_changed": true }
+      }
+    },
+    "target_region": {
+      "kind": "element",
+      "element_id": "settings_icon",
+      "bounds": [0.68, 0.2, 0.86, 0.35],
+      "description": "设置"
+    },
+    "expected_result": { "scene_changed": true },
+    "confidence": 0.92,
+    "reason": "可信候选唯一且清晰。",
+    "completion_evidence_element_ids": [],
+    "completion_evidence": []
+  }
+}

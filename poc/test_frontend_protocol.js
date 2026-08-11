@@ -2,144 +2,218 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const Protocol = require("./static/protocol_adapter.js");
+const deepSeekFixture = require("./frontend_contract_fixtures/deepseek_task_graph_v2.json");
+const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v2.json");
 
-function deepSeekSession(overrides = {}) {
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function externalSession({ includeDecision = false } = {}) {
   return {
-    session_id: "session-contract-01",
-    goal: { objective: "完成一个未预设的通用手机目标" },
-    task_graph: {
-      task_id: "task-deepseek-01",
-      device_id: "device-session-01",
-      status: "awaiting_confirmation",
-      constraints: ["不得越过用户确认", "每次只执行一个物理动作"],
-      completion_conditions: {
-        visible_state: "结果标记可见",
-        evidence: ["保存动作后画面"],
-      },
-      current_subgoal: "sg-2",
-      subgoals: [
-        {
-          subgoal_id: "sg-1",
-          objective: "观察并理解当前页面",
-          status: "completed",
-          completion_conditions: ["页面状态已识别"],
-        },
-        {
-          subgoal_id: "sg-2",
-          objective: "操作唯一匹配的语义目标",
-          status: "current",
-          reason: "当前画面中只有一个候选目标",
-        },
-        {
-          subgoal_id: "sg-3",
-          objective: "重新观察并验证变化",
-          status: "pending",
-        },
-      ],
-    },
-    current_action: {
-      action_type: "tap_semantic",
-      semantic_target: "唯一的确认控件",
-      target_region: { x_min: 0.61, y_min: 0.72, x_max: 0.88, y_max: 0.82 },
-      expected_change: "页面出现可验证的结果标记",
-      confidence: 0.93,
-      reason: "文字、位置和当前子目标一致",
-      account_effect_possible: false,
-      physical_action_possible: true,
-    },
-    scene: {
-      screen_id: "generic-screen",
-      summary: "通用页面与一个确认控件",
-      stable: true,
-      confidence: 0.96,
-    },
+    session_id: "session-cross-contract",
+    task_graph: clone(deepSeekFixture.to_qwen_context),
+    ...(includeDecision ? { qwen_decision: clone(qwenFixture.decision) } : {}),
     history: [],
-    ...overrides,
   };
 }
 
-test("DeepSeek task_graph.subgoals and root fields become the preferred plan view", () => {
-  const session = deepSeekSession({
-    // Deliberately conflicting legacy fields prove that the new task graph wins.
-    status: "failed",
-    device_id: "legacy-device",
-    task_id: "legacy-task",
-  });
-  const view = Protocol.adaptSession(session, { fallbackDeviceId: "fallback-device" });
+function safeActionSession() {
+  const graph = clone(deepSeekFixture.task_graph);
+  graph.status = "running";
+  graph.current_subgoal = clone(graph.subgoals[0]);
+  graph.current_subgoal.status = "active";
+  graph.subgoals[0].status = "active";
+  graph.subgoals[1].status = "pending";
+  graph.active_subgoal_id = "locate_target";
+  return {
+    session_id: "session-safe-action",
+    task_graph: graph,
+    qwen_decision: clone(qwenFixture.decision),
+    history: [],
+  };
+}
 
-  assert.equal(view.protocol, "deepseek-task-graph");
-  assert.equal(view.taskId, "task-deepseek-01");
-  assert.equal(view.deviceId, "device-session-01");
-  assert.equal(view.status, "awaiting_confirmation");
-  assert.deepEqual(view.constraints, ["不得越过用户确认", "每次只执行一个物理动作"]);
-  assert.deepEqual(view.completionConditions, [
-    "visible_state：结果标记可见",
-    "evidence：保存动作后画面",
-  ]);
-  assert.deepEqual(view.subgoals.map(item => item.id), ["sg-1", "sg-2", "sg-3"]);
-  assert.equal(view.currentSubgoal.id, "sg-2");
-  assert.equal(view.currentSubgoal.label, "操作唯一匹配的语义目标");
-});
-
-test("Qwen generic visual action fields remain intact for rendering", () => {
-  const view = Protocol.adaptSession(deepSeekSession());
-
-  assert.equal(view.visualAction.actionType, "tap_semantic");
-  assert.equal(view.visualAction.semanticTarget, "唯一的确认控件");
-  assert.deepEqual(view.visualAction.targetRegion, {
-    x_min: 0.61,
-    y_min: 0.72,
-    x_max: 0.88,
-    y_max: 0.82,
-  });
-  assert.equal(view.visualAction.expectedChange, "页面出现可验证的结果标记");
-  assert.equal(view.visualAction.confidence, 0.93);
-  assert.equal(view.visualAction.reason, "文字、位置和当前子目标一致");
-});
-
-test("legacy nodes and proposal.action remain an explicit fallback", () => {
+test("real DeepSeek to_dict snapshot exposes every v2 task graph field", () => {
   const view = Protocol.adaptSession({
-    session_id: "legacy-session",
-    status: "awaiting_confirmation",
-    task_graph: {
-      nodes: [{ id: "legacy-node", label: "兼容旧节点", status: "current" }],
-    },
-    proposal: {
-      current_subgoal: "legacy-node",
-      action: {
-        action: "swipe",
-        params: { direction: "up", target: "当前内容区域", expected_result: "显示下一段内容" },
-      },
-      confidence: 0.81,
-      reason: "旧接口回退",
-    },
-  }, { fallbackDeviceId: "legacy-device" });
-
-  assert.equal(view.protocol, "legacy-task-graph");
-  assert.equal(view.currentSubgoal.id, "legacy-node");
-  assert.equal(view.visualAction.actionType, "swipe");
-  assert.equal(view.visualAction.semanticTarget, "当前内容区域");
-  assert.equal(view.visualAction.expectedChange, "显示下一段内容");
-  assert.equal(view.deviceId, "legacy-device");
-});
-
-test("every browser-driven auto request is limited to one physical action", () => {
-  assert.deepEqual(Protocol.buildAutoRequestPayload("device-session-01"), {
-    confirmed: true,
-    max_physical_actions: 1,
-    device_id: "device-session-01",
+    session_id: "session-deepseek-full",
+    task_graph: clone(deepSeekFixture.task_graph),
+    goal: { objective: "错误的旧目标" },
   });
+
+  assert.equal(view.protocol, "deepseek-task-graph-v2");
+  assert.equal(view.protocolVersion, "2026-08-11-deepseek-task-graph-v2");
+  assert.equal(view.taskId, "task-map-001");
+  assert.equal(view.deviceId, "phone-01");
+  assert.equal(view.revision, 1);
+  assert.equal(view.status, "awaiting_confirmation");
+  assert.equal(view.objective, "在地图应用中找到图书馆并保存地点");
+  assert.notEqual(view.objective, "未命名目标");
+  assert.deepEqual(view.targetApps.map(item => [item.id, item.name]), [["maps", "地图"]]);
+  assert.deepEqual(view.constraints, ["不要发起导航"]);
+  assert.match(view.completionConditions[0], /目标地点已保存/);
+  assert.deepEqual(view.subgoals.map(item => item.id), ["locate_target", "save_target"]);
+  assert.equal(view.currentSubgoal.id, "save_target");
+  assert.equal(view.currentSubgoal.externalImpact, "external_state");
+  assert.deepEqual(view.risk.actions.map(item => item.id), ["save_place"]);
+  assert.equal(view.risk.confirmationGate.required, true);
+  assert.equal(view.risk.confirmationGate.state, "awaiting_confirmation");
+  assert.deepEqual(view.risk.confirmationGate.riskIds, ["save_place"]);
 });
 
-test("pause after a response prevents the browser from issuing another request", async () => {
+test("real DeepSeek to_qwen_context snapshot keeps its exact field names", () => {
+  const view = Protocol.adaptSession(externalSession());
+
+  assert.equal(view.protocolVersion, "2026-08-11-deepseek-task-graph-v2");
+  assert.equal(view.status, "awaiting_confirmation");
+  assert.equal(view.objective, "在地图应用中找到图书馆并保存地点");
+  assert.deepEqual(view.constraints, ["不要发起导航"]);
+  assert.match(view.completionConditions[0], /目标地点已保存/);
+  assert.equal(view.currentSubgoal.id, "save_target");
+  assert.equal(view.subgoals.length, 1);
+  assert.equal(view.risk.currentExternalImpact, "external_state");
+  assert.equal(view.risk.requiresConfirmation, true);
+  assert.equal(view.risk.blocksAutomatic, true);
+});
+
+test("real Qwen decision.to_dict snapshot exposes the complete unique next action", () => {
+  const view = Protocol.adaptSession(safeActionSession());
+  const action = view.visualAction;
+
+  assert.equal(action.protocol, "qwen-visual-decision-v2");
+  assert.equal(action.protocolVersion, "2026-08-11-qwen-visual-decision-v2");
+  assert.equal(action.status, "action");
+  assert.equal(action.actionType, "tap_semantic");
+  assert.equal(action.semanticTarget, "设置");
+  assert.equal(action.elementId, "settings_icon");
+  assert.deepEqual(action.targetRegion, {
+    kind: "element",
+    element_id: "settings_icon",
+    bounds: [0.68, 0.2, 0.86, 0.35],
+    description: "设置",
+  });
+  assert.deepEqual(action.expectedChange, { scene_changed: true });
+  assert.equal(action.confidence, 0.92);
+  assert.equal(action.reason, "可信候选唯一且清晰。");
+  assert.equal(action.taskId, "task-map-001");
+  assert.equal(action.revision, 1);
+  assert.equal(action.observationId, "obs_0123456789abcdef0123456789abcdef");
+  assert.equal(action.fingerprint, "51277d0d9e6f986b00dc");
+  assert.equal(action.identityMatchesTask, true);
+  assert.equal(action.isExecutable, true);
+});
+
+test("Qwen v2 blocked and finished decisions never become executable actions", () => {
+  for (const status of ["blocked", "finished"]) {
+    const session = safeActionSession();
+    session.qwen_decision.status = status;
+    session.qwen_decision.next_action = null;
+    session.qwen_decision.target_region = null;
+    session.qwen_decision.expected_result = {};
+    session.qwen_decision.reason = status === "blocked"
+      ? "没有可靠且唯一的可信候选。"
+      : "当前可见证据已满足目标。";
+    const view = Protocol.adaptSession(session);
+    assert.equal(view.visualAction.status, status);
+    assert.equal(view.visualAction.actionType, "");
+    assert.equal(view.visualAction.isExecutable, false);
+    assert.equal(view.visualAction.physicalActionPossible, false);
+    assert.equal(Protocol.shouldAutoAdvance({ session: view, paused: false, busy: false }), false);
+  }
+});
+
+test("external-state context without a Qwen action can never auto-confirm", () => {
+  const view = Protocol.adaptSession(externalSession());
+  assert.equal(view.visualAction.actionType, "");
+  assert.equal(view.status, "awaiting_confirmation");
+  assert.equal(Protocol.shouldAutoAdvance({ session: view, paused: false, busy: false }), false);
+});
+
+test("each confirmation and impact signal independently closes automatic advance", () => {
+  const mutations = [
+    view => { view.risk.requiresConfirmation = true; },
+    view => { view.status = "awaiting_confirmation"; },
+    view => { view.risk.hasCurrentRisk = true; },
+    view => { view.risk.currentExternalImpact = "external_state"; },
+    view => { view.risk.currentExternalImpact = "unknown"; },
+  ];
+  for (const mutate of mutations) {
+    const view = Protocol.adaptSession(safeActionSession());
+    view.risk.blocksAutomatic = false;
+    mutate(view);
+    assert.equal(
+      Protocol.shouldAutoAdvance({ session: view, paused: false, busy: false }),
+      false,
+    );
+  }
+});
+
+test("automatic requests omit confirmed and remain limited to one physical action", () => {
+  const payload = Protocol.buildAutoRequestPayload("phone-01");
+  assert.deepEqual(payload, {
+    max_physical_actions: 1,
+    device_id: "phone-01",
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(payload, "confirmed"), false);
+});
+
+test("an explicit confirmation grant is scoped and can be consumed only once", () => {
+  const view = Protocol.adaptSession(externalSession());
+  const grant = Protocol.createConfirmationGrant(view, "phone-01");
+  const payload = Protocol.consumeConfirmationGrant(grant, view, "phone-01");
+
+  assert.deepEqual(payload, {
+    confirmed: true,
+    confirmation: {
+      session_id: "session-cross-contract",
+      task_id: "task-map-001",
+      device_id: "phone-01",
+      revision: 1,
+      subgoal_id: "save_target",
+      risk_ids: ["save_place"],
+    },
+    device_id: "phone-01",
+  });
+  assert.throws(
+    () => Protocol.consumeConfirmationGrant(grant, view, "phone-01"),
+    /已使用或不存在/,
+  );
+});
+
+test("confirmation scope cannot cross revision, risk, subgoal, task, or device", () => {
+  const original = Protocol.adaptSession(externalSession());
+  const mutations = [
+    session => { session.task_graph.revision = 2; },
+    session => { session.task_graph.confirmation_gate.risk_ids = ["different_risk"]; },
+    session => { session.task_graph.current_subgoal.subgoal_id = "different_subgoal"; },
+    session => { session.task_graph.task_id = "different-task"; },
+  ];
+
+  for (const mutate of mutations) {
+    const grant = Protocol.createConfirmationGrant(original, "phone-01");
+    const changedRaw = externalSession();
+    mutate(changedRaw);
+    const changed = Protocol.adaptSession(changedRaw);
+    assert.throws(
+      () => Protocol.consumeConfirmationGrant(grant, changed, "phone-01"),
+      /已经变化/,
+    );
+  }
+
+  const deviceGrant = Protocol.createConfirmationGrant(original, "phone-01");
+  assert.throws(
+    () => Protocol.consumeConfirmationGrant(deviceGrant, original, "phone-02"),
+    /已经变化/,
+  );
+});
+
+test("pause after one safe response prevents the next request and keeps the locked device", async () => {
   let paused = false;
-  let selectedDeviceId = "device-session-01";
-  const lockedSessionDeviceId = selectedDeviceId;
-  let session = Protocol.adaptSession(deepSeekSession());
+  let session = Protocol.adaptSession(safeActionSession());
+  const lockedSessionDeviceId = "phone-01";
+  const laterSelectedDeviceId = "phone-02";
   const requests = [];
 
-  // The dropdown changes after session creation, but requests retain the lock.
-  selectedDeviceId = "device-selected-later";
   const outcome = await Protocol.runAutoAdvanceLoop({
     getContext: () => ({
       session,
@@ -149,7 +223,7 @@ test("pause after a response prevents the browser from issuing another request",
     }),
     sendOne: async payload => {
       requests.push(payload);
-      return deepSeekSession();
+      return safeActionSession();
     },
     applyResponse: async response => {
       session = Protocol.adaptSession(response);
@@ -159,30 +233,25 @@ test("pause after a response prevents the browser from issuing another request",
 
   assert.equal(outcome.requests, 1);
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].max_physical_actions, 1);
-  assert.equal(requests[0].device_id, "device-session-01");
-  assert.notEqual(requests[0].device_id, selectedDeviceId);
+  assert.deepEqual(requests[0], {
+    max_physical_actions: 1,
+    device_id: lockedSessionDeviceId,
+  });
+  assert.notEqual(requests[0].device_id, laterSelectedDeviceId);
 });
 
-test("risk on the current step prevents automatic advancement", async () => {
-  const risky = deepSeekSession();
-  risky.current_action.account_effect_possible = true;
-  const requests = [];
-
-  const outcome = await Protocol.runAutoAdvanceLoop({
-    getContext: () => ({
-      session: Protocol.adaptSession(risky),
-      sessionDeviceId: "device-session-01",
-      paused: false,
-      busy: false,
-    }),
-    sendOne: async payload => {
-      requests.push(payload);
-      return risky;
-    },
-    applyResponse: async () => {},
-  });
-
-  assert.equal(outcome.requests, 0);
-  assert.deepEqual(requests, []);
+test("new Qwen v2 fields win over conflicting legacy fallback data", () => {
+  const session = safeActionSession();
+  session.current_action = {
+    action_type: "swipe",
+    semantic_target: "错误旧目标",
+    physical_action_possible: false,
+  };
+  session.proposal = {
+    action: { action: "back", params: { target: "错误旧动作" } },
+  };
+  const view = Protocol.adaptSession(session);
+  assert.equal(view.visualAction.protocol, "qwen-visual-decision-v2");
+  assert.equal(view.visualAction.actionType, "tap_semantic");
+  assert.equal(view.visualAction.elementId, "settings_icon");
 });

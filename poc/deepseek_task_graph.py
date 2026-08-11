@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from generic_intent import GenericIntentError, _parse_json_object
 
 
-DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-11-deepseek-task-graph-v1"
+DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-11-deepseek-task-graph-v2"
 GRAPH_STATUSES = frozenset(
     {"ready", "running", "awaiting_confirmation", "completed", "blocked"}
 )
@@ -17,6 +17,21 @@ SUBGOAL_STATUSES = frozenset(
     {"pending", "active", "completed", "blocked", "skipped"}
 )
 RISK_LEVELS = frozenset({"low", "medium", "high", "critical"})
+SUBGOAL_EXTERNAL_IMPACTS = frozenset(
+    {"read_only", "navigation_only", "external_state", "unknown"}
+)
+RISK_TYPES = frozenset(
+    {
+        "message_or_communication",
+        "content_publication",
+        "account_relationship_change",
+        "data_mutation",
+        "data_deletion",
+        "transaction_or_payment",
+        "account_or_permission_change",
+        "unknown_external_effect",
+    }
+)
 REPLAN_TRIGGERS = frozenset(
     {
         "observation_changed",
@@ -30,6 +45,33 @@ REPLAN_TRIGGERS = frozenset(
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+LOW_LEVEL_INSTRUCTION_PATTERN = re.compile(
+    r"(?:"
+    r"点击|轻触|点按|滑动|上划|下划|左划|右划|长按|拖动|"
+    r"输入(?:文字|文本|内容|字符)?|按下[^，。；;]{0,12}键|按键|返回键|"
+    r"裸坐标|坐标|系统命令|shell|powershell|cmd\.exe|adb|main\.exe|"
+    r"\(\s*\d{1,4}\s*[,，]\s*\d{1,4}\s*\)|\bx\s*[:=]\s*\d+|"
+    r"\b(?:tap|click|swipe|long[ _-]?press|drag|type[ _-]?text|input[ _-]?text|"
+    r"coordinate|keycode|press[ _-]?key|system[ _-]?command)\b"
+    r")",
+    re.IGNORECASE,
+)
+EXTERNAL_STATE_CHANGE_PATTERN = re.compile(
+    r"(?:"
+    r"发送|发布|点赞|"
+    r"(?<!已)关注(?:该|这个|目标|账号|用户|作者)|进入已关注|"
+    r"(?<!已)收藏(?:该|这个|目标|地点|内容|记录|项目)|进入已收藏|"
+    r"(?<!已)(?:执行|进行|完成)?保存(?:到|该|这个|目标|地点|内容|记录|文件)|进入已保存|"
+    r"发表评论|发布评论|进行评论|添加评论|"
+    r"删除|移除|购买|下单|付款|支付|"
+    r"转账|授权|授予|修改|创建|新增|上传|分享|加入|退出(?:账号|群|组织)?|"
+    r"订阅|举报|预约|提交|注册|登录|登出|"
+    r"\b(?:send|publish|post|comment|like|follow|favorite|save|delete|remove|"
+    r"purchase|pay|transfer|grant|modify|create|upload|share|join|leave|"
+    r"subscribe|report|book|submit|register|login|logout)\b"
+    r")",
+    re.IGNORECASE,
+)
 
 
 class JsonTaskGraphProvider(Protocol):
@@ -61,6 +103,7 @@ class GraphGoal:
 
     def validate(self) -> None:
         _require_text(self.objective, "goal.objective")
+        _reject_low_level_instruction(self.objective, "goal.objective")
         app_ids: set[str] = set()
         for app in self.target_apps:
             app.validate()
@@ -81,7 +124,13 @@ class CompletionCondition:
     def validate(self) -> None:
         _validate_id(self.condition_id, "完成条件 ID")
         _require_text(self.description, "completion_conditions.description")
+        _reject_low_level_instruction(
+            self.description,
+            "completion_conditions.description",
+        )
         _validate_text_list(self.evidence_required, "evidence_required", required=True)
+        for item in self.evidence_required:
+            _reject_low_level_instruction(item, "completion_conditions.evidence_required")
         _validate_text_list(self.evidence, "evidence", required=False)
         if self.satisfied and not self.evidence:
             raise TaskGraphError(f"已满足的完成条件缺少可见证据：{self.condition_id}")
@@ -94,6 +143,7 @@ class RiskAction:
     risk_id: str
     description: str
     external_effect: str
+    risk_type: str
     risk_level: str
     subgoal_ids: tuple[str, ...]
     confirmation_required: bool = True
@@ -102,6 +152,13 @@ class RiskAction:
         _validate_id(self.risk_id, "风险 ID")
         _require_text(self.description, "risk_actions.description")
         _require_text(self.external_effect, "risk_actions.external_effect")
+        _reject_low_level_instruction(self.description, "risk_actions.description")
+        _reject_low_level_instruction(
+            self.external_effect,
+            "risk_actions.external_effect",
+        )
+        if self.risk_type not in RISK_TYPES:
+            raise TaskGraphError(f"通用风险类型无效：{self.risk_type}")
         if self.risk_level not in RISK_LEVELS:
             raise TaskGraphError(f"风险等级无效：{self.risk_level}")
         if self.confirmation_required is not True:
@@ -119,6 +176,7 @@ class Subgoal:
     completion_conditions: tuple[str, ...]
     completion_evidence: tuple[str, ...]
     risk_action_ids: tuple[str, ...]
+    external_impact: str
 
     def validate(self) -> None:
         _validate_id(self.subgoal_id, "子目标 ID")
@@ -127,11 +185,20 @@ class Subgoal:
             raise TaskGraphError(f"子目标状态无效：{self.status}")
         _validate_id_list(self.depends_on, "subgoals.depends_on", required=False)
         _validate_text_list(self.constraints, "subgoals.constraints", required=False)
+        for item in self.constraints:
+            _reject_low_level_instruction(
+                item,
+                "subgoals.constraints",
+                allow_negated=True,
+            )
         _validate_text_list(
             self.completion_conditions,
             "subgoals.completion_conditions",
             required=True,
         )
+        _reject_low_level_instruction(self.objective, "subgoals.objective")
+        for item in self.completion_conditions:
+            _reject_low_level_instruction(item, "subgoals.completion_conditions")
         _validate_text_list(
             self.completion_evidence,
             "subgoals.completion_evidence",
@@ -142,6 +209,32 @@ class Subgoal:
             "subgoals.risk_action_ids",
             required=False,
         )
+        if self.external_impact not in SUBGOAL_EXTERNAL_IMPACTS:
+            raise TaskGraphError(
+                f"子目标外部影响分类无效：{self.external_impact}"
+            )
+        describes_external_change = _describes_external_state_change(
+            self.objective,
+            *self.completion_conditions,
+        )
+        if describes_external_change and self.external_impact in {
+            "read_only",
+            "navigation_only",
+        }:
+            raise TaskGraphError(
+                f"子目标包含外部状态变化但未声明：{self.subgoal_id}"
+            )
+        if self.external_impact in {"external_state", "unknown"} and not self.risk_action_ids:
+            raise TaskGraphError(
+                f"外部状态或未知影响子目标必须关联风险并失败关闭：{self.subgoal_id}"
+            )
+        if self.risk_action_ids and self.external_impact not in {
+            "external_state",
+            "unknown",
+        }:
+            raise TaskGraphError(
+                f"关联风险的子目标影响分类必须为 external_state 或 unknown：{self.subgoal_id}"
+            )
         if self.status == "completed" and not self.completion_evidence:
             raise TaskGraphError(f"已完成子目标缺少可见证据：{self.subgoal_id}")
         if self.status != "completed" and self.completion_evidence:
@@ -233,11 +326,15 @@ class DynamicTaskGraph:
         if self.status != "blocked" and not self.goal.target_apps:
             raise TaskGraphError("可推进的任务图至少需要一个目标 App。")
         _validate_text_list(self.constraints, "constraints", required=False)
+        for item in self.constraints:
+            _reject_low_level_instruction(item, "constraints", allow_negated=True)
         _validate_text_list(
             self.clarification_questions,
             "clarification_questions",
             required=False,
         )
+        for item in self.clarification_questions:
+            _reject_low_level_instruction(item, "clarification_questions")
 
         conditions = _unique_by_id(
             self.completion_conditions,
@@ -252,7 +349,6 @@ class DynamicTaskGraph:
         risks = _unique_by_id(self.risk_actions, lambda item: item.risk_id, "风险")
         for risk in risks.values():
             risk.validate()
-
         subgoals = _unique_by_id(self.subgoals, lambda item: item.subgoal_id, "子目标")
         for subgoal in subgoals.values():
             subgoal.validate()
@@ -282,6 +378,12 @@ class DynamicTaskGraph:
                     raise TaskGraphError(
                         f"风险与子目标引用不对称：{risk.risk_id} / {subgoal_id}"
                     )
+        if (
+            self.status != "blocked"
+            and _describes_external_state_change(self.goal.objective)
+            and not risks
+        ):
+            raise TaskGraphError("外部状态目标必须声明风险动作并等待确认。")
         _reject_dependency_cycles(subgoals)
 
         active = [item.subgoal_id for item in self.subgoals if item.status == "active"]
@@ -300,6 +402,18 @@ class DynamicTaskGraph:
                 )
             if self.status == "awaiting_confirmation" and not active_node.risk_action_ids:
                 raise TaskGraphError("等待确认状态必须关联当前子目标的风险动作。")
+            if (
+                active_node.external_impact in {"external_state", "unknown"}
+                and self.status != "awaiting_confirmation"
+            ):
+                raise TaskGraphError(
+                    "外部状态或未知影响子目标成为 current_subgoal 时必须等待用户确认。"
+                )
+            if (
+                self.status == "awaiting_confirmation"
+                and active_node.external_impact not in {"external_state", "unknown"}
+            ):
+                raise TaskGraphError("等待确认状态只能用于外部状态或未知影响子目标。")
         elif active or self.active_subgoal_id is not None:
             raise TaskGraphError("完成或阻塞任务图不能保留活动子目标。")
 
@@ -372,12 +486,32 @@ class DynamicTaskGraph:
             return None
         return next(item for item in self.subgoals if item.subgoal_id == self.active_subgoal_id)
 
-    def to_qwen_context(self) -> dict[str, Any]:
+    def to_qwen_context(
+        self,
+        *,
+        confirmed_risk_ids: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
         """Expose only the current high-level target and safety context to Qwen."""
 
         value = self.to_dict()
         current = value["current_subgoal"]
         current_risk_ids = set(current["risk_action_ids"] if current else [])
+        confirmed = set(confirmed_risk_ids)
+        unknown_confirmations = confirmed - current_risk_ids
+        if unknown_confirmations:
+            raise TaskGraphError(
+                "确认记录不属于 current_subgoal："
+                + ", ".join(sorted(unknown_confirmations))
+            )
+        confirmation_required = bool(
+            current
+            and current["external_impact"] in {"external_state", "unknown"}
+        )
+        confirmation_granted = bool(
+            confirmation_required
+            and current_risk_ids
+            and current_risk_ids.issubset(confirmed)
+        )
         return {
             "protocol_version": self.protocol_version,
             "task_id": self.task_id,
@@ -388,11 +522,26 @@ class DynamicTaskGraph:
             "global_constraints": value["constraints"],
             "goal_completion_conditions": value["completion_conditions"],
             "current_subgoal": current,
+            "current_external_impact": (
+                current["external_impact"] if current else None
+            ),
             "risk_actions": [
                 item
                 for item in value["risk_actions"]
                 if item["risk_id"] in current_risk_ids
             ],
+            "confirmation_gate": {
+                "required": confirmation_required,
+                "state": (
+                    "confirmed"
+                    if confirmation_granted
+                    else "awaiting_confirmation"
+                    if confirmation_required
+                    else "not_required"
+                ),
+                "risk_ids": sorted(current_risk_ids),
+                "external_state_action_allowed": confirmation_granted,
+            },
         }
 
 
@@ -452,7 +601,11 @@ class DeepSeekTaskGraphPlanner:
             task_id=graph.task_id,
             device_id=graph.device_id,
             revision=graph.revision + 1,
+            validate=False,
         )
+        _validate_external_impact_revision(graph, candidate)
+        _validate_preserved_risk_ids(graph, candidate)
+        candidate.validate()
         _validate_revision(graph, candidate, observation)
         previous_ids = {item.subgoal_id for item in graph.subgoals}
         completed_ids = tuple(
@@ -492,6 +645,7 @@ class DeepSeekTaskGraphPlanner:
         task_id: str,
         device_id: str,
         revision: int,
+        validate: bool = True,
     ) -> DynamicTaskGraph:
         raw = self.provider.chat_json(
             [{"role": "user", "content": prompt}],
@@ -508,7 +662,8 @@ class DeepSeekTaskGraphPlanner:
             device_id=device_id,
             revision=revision,
         )
-        graph.validate()
+        if validate:
+            graph.validate()
         return graph
 
     def _require_provider(self) -> None:
@@ -530,8 +685,10 @@ def _initial_prompt(raw_goal: str) -> str:
 2. 子目标描述“应达到什么状态”，不能描述具体按钮、坐标或动作序列。
 3. 只能有一个 active 子目标；其依赖必须已经 completed（初始图通常无依赖）。
 4. 初始规划没有画面证据，所有完成条件 satisfied=false，任何子目标都不能 completed。
-5. 会改变账号、数据、交易、发布、发送或其他外部状态的事项列入 risk_actions，
-   confirmation_required 必须为 true，并与相关子目标双向关联。
+5. 每个子目标必须用 external_impact 标为 read_only、navigation_only、external_state 或 unknown。
+   会改变账号、数据、交易、发布、发送或其他外部状态的事项必须标为 external_state 并列入
+   risk_actions；无法确定影响时标为 unknown。两者都必须关联风险，confirmation_required=true；
+   如果成为 active，status 必须为 awaiting_confirmation。
 6. 信息不足时 status=blocked、active_subgoal_id=null，并填写 clarification_questions。
 7. 只返回 JSON 对象，不要 Markdown。
 """
@@ -565,7 +722,8 @@ def _replan_prompt(
 4. 新宣称 completed/satisfied 时，evidence 必须逐字复制 visible_evidence 中的证据；
    历史完成节点继续保留自己的历史证据。
 5. 既有 risk_actions 必须保留，不能降低风险等级或取消 confirmation_required。
-6. 每轮只选择一个 active 高层子目标；不要在任务图里提出下一视觉动作。
+6. external_state 和 unknown 子目标都必须关联风险；成为 active 时必须返回
+   awaiting_confirmation。每轮只选择一个 active 高层子目标；不要提出下一视觉动作。
 7. 只返回 JSON 对象，不要 Markdown，也不要返回 task_id、device_id、revision、协议版本、
    current_subgoal 或历史记录；这些字段由本地协议层生成。
 """
@@ -592,6 +750,7 @@ def _schema_prompt() -> str:
     "risk_id":"小写稳定ID",
     "description":"可能改变外部状态的事项",
     "external_effect":"对账号、数据、交易或他人的影响",
+    "risk_type":"message_or_communication|content_publication|account_relationship_change|data_mutation|data_deletion|transaction_or_payment|account_or_permission_change|unknown_external_effect",
     "risk_level":"low|medium|high|critical",
     "subgoal_ids":["关联子目标ID"],
     "confirmation_required":true
@@ -604,7 +763,8 @@ def _schema_prompt() -> str:
     "constraints":["本子目标约束"],
     "completion_conditions":["本子目标完成条件"],
     "completion_evidence":[],
-    "risk_action_ids":["关联风险ID"]
+    "risk_action_ids":["关联风险ID"],
+    "external_impact":"read_only|navigation_only|external_state|unknown"
   }],
   "active_subgoal_id":"活动子目标ID或null",
   "clarification_questions":["阻塞时需要用户补充的信息"]
@@ -708,6 +868,7 @@ def _risk_from_payload(value: Any) -> RiskAction:
             "risk_id",
             "description",
             "external_effect",
+            "risk_type",
             "risk_level",
             "subgoal_ids",
             "confirmation_required",
@@ -720,6 +881,7 @@ def _risk_from_payload(value: Any) -> RiskAction:
         external_effect=_require_text(
             item.get("external_effect"), "risk_actions.external_effect"
         ),
+        risk_type=str(item.get("risk_type") or "").strip().lower(),
         risk_level=str(item.get("risk_level") or "").strip().lower(),
         subgoal_ids=_id_tuple(item.get("subgoal_ids"), "risk_actions.subgoal_ids"),
         confirmation_required=item.get("confirmation_required") is True,
@@ -739,6 +901,7 @@ def _subgoal_from_payload(value: Any) -> Subgoal:
             "completion_conditions",
             "completion_evidence",
             "risk_action_ids",
+            "external_impact",
         },
         "subgoals[]",
     )
@@ -757,6 +920,7 @@ def _subgoal_from_payload(value: Any) -> Subgoal:
         risk_action_ids=_id_tuple(
             item.get("risk_action_ids"), "subgoals.risk_action_ids"
         ),
+        external_impact=str(item.get("external_impact") or "").strip().lower(),
     )
 
 
@@ -805,6 +969,7 @@ def _validate_revision(
         if (
             new.description != old.description
             or new.external_effect != old.external_effect
+            or new.risk_type != old.risk_type
             or risk_order[new.risk_level] < risk_order[old.risk_level]
             or new.confirmation_required is not True
             or not set(old.subgoal_ids).issubset(new.subgoal_ids)
@@ -832,6 +997,7 @@ def _validate_revision(
             or new.constraints != old.constraints
             or new.completion_conditions != old.completion_conditions
             or new.risk_action_ids != old.risk_action_ids
+            or new.external_impact != old.external_impact
             or not set(old.completion_evidence).issubset(new.completion_evidence)
         ):
             raise TaskGraphError(f"重规划不能复活或改写已完成子目标：{subgoal_id}")
@@ -842,6 +1008,42 @@ def _validate_revision(
         )
         if newly_completed and not set(new.completion_evidence).issubset(evidence):
             raise TaskGraphError(f"子目标使用了当前观察之外的完成证据：{subgoal_id}")
+
+
+def _validate_external_impact_revision(
+    previous: DynamicTaskGraph,
+    candidate: DynamicTaskGraph,
+) -> None:
+    old_subgoals = {item.subgoal_id: item for item in previous.subgoals}
+    new_subgoals = {item.subgoal_id: item for item in candidate.subgoals}
+    for subgoal_id, old in old_subgoals.items():
+        new = new_subgoals.get(subgoal_id)
+        if new is None:
+            continue
+        if old.external_impact == "external_state" and new.external_impact != "external_state":
+            raise TaskGraphError(
+                f"重规划不能降低既有 external_state 影响分类：{subgoal_id}"
+            )
+        if old.external_impact == "unknown" and new.external_impact in {
+            "read_only",
+            "navigation_only",
+        }:
+            raise TaskGraphError(
+                f"重规划不能未经证据把 unknown 降级为安全分类：{subgoal_id}"
+            )
+
+
+def _validate_preserved_risk_ids(
+    previous: DynamicTaskGraph,
+    candidate: DynamicTaskGraph,
+) -> None:
+    previous_ids = {item.risk_id for item in previous.risk_actions}
+    candidate_ids = {item.risk_id for item in candidate.risk_actions}
+    missing = previous_ids - candidate_ids
+    if missing:
+        raise TaskGraphError(
+            "重规划不能删除既有风险：" + ", ".join(sorted(missing))
+        )
 
 
 def _reject_dependency_cycles(subgoals: dict[str, Subgoal]) -> None:
@@ -948,6 +1150,26 @@ def _validate_device_id(device_id: str) -> None:
 def _validate_task_id(task_id: str) -> None:
     if not TASK_ID_PATTERN.fullmatch(str(task_id or "")):
         raise TaskGraphError(f"task_id 无效：{task_id!r}")
+
+
+def _reject_low_level_instruction(
+    value: str,
+    path: str,
+    *,
+    allow_negated: bool = False,
+) -> None:
+    for match in LOW_LEVEL_INSTRUCTION_PATTERN.finditer(value):
+        prefix = value[max(0, match.start() - 8) : match.start()].lower()
+        if allow_negated and any(
+            prefix.endswith(marker)
+            for marker in ("不要", "不得", "禁止", "不能", "避免", "do not", "never")
+        ):
+            continue
+        raise TaskGraphError(f"DeepSeek 高层任务图包含低层动作表达：{path}")
+
+
+def _describes_external_state_change(*values: str) -> bool:
+    return any(EXTERNAL_STATE_CHANGE_PATTERN.search(value) for value in values)
 
 
 def _reject_control_fields(value: Any, path: str) -> None:

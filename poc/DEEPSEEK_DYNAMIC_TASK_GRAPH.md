@@ -1,6 +1,6 @@
 # DeepSeek 通用动态任务图 v1
 
-协议版本：`2026-08-11-deepseek-task-graph-v1`
+协议版本：`2026-08-11-deepseek-task-graph-v2`
 
 ## 职责
 
@@ -20,6 +20,8 @@
 
 `DynamicTaskGraph.to_qwen_context()` 生成只读上下文，明确包含 `task_id`、`device_id`、最终目标、全局约束、全局完成条件和唯一的 `current_subgoal`。其中风险列表只保留与当前子目标关联的风险。Qwen据此结合真实画面提出一个下一视觉动作，但不能修改任务图，也不能直接执行设备动作。
 
+上下文同时包含 `current_external_impact` 和 `confirmation_gate`。`external_state` 或 `unknown` 子目标成为 `current_subgoal` 时，任务图只能处于 `awaiting_confirmation`，默认门禁为 `required=true`、`external_state_action_allowed=false`。任务图之外的可信本地控制器在收到用户明确确认后，可把对应风险 ID 作为 `confirmed_risk_ids` 传入 `to_qwen_context()`；只有当前子目标的全部风险均在确认集合中，门禁才返回 `state=confirmed` 和允许值。DeepSeek 的模型响应没有这个字段，不能自行放行。
+
 ## 重规划不变量
 
 DeepSeek 每轮返回完整的新图快照，本地校验器再决定是否接受。校验器强制保证：
@@ -32,6 +34,13 @@ DeepSeek 每轮返回完整的新图快照，本地校验器再决定是否接�
 6. 依赖必须存在且不能形成环，活动子目标的依赖必须全部完成；
 7. 可推进状态必须且只能有一个活动子目标；
 8. 低层动作、裸坐标、系统命令和 `main.exe` 控制字段不能进入任务图。
+
+## 两项强制校验
+
+1. **DeepSeek 不输出低层动作**：除了拒绝 `action`、`steps`、坐标和命令字段，还会检查目标、子目标、完成条件及风险描述中的点击、滑动、长按、拖动、输入等指令性表达。命中后整张模型任务图作废，不能降级执行。
+2. **外部状态动作必须确认**：每个子目标必须显式给出 `external_impact`，值只能是 `read_only`、`navigation_only`、`external_state` 或 `unknown`。持久化、发送、发布、账号、交易或数据变化必须标为 `external_state`；不能确定时标为 `unknown`。后两类必须双向关联 `risk_actions`，风险的 `confirmation_required` 必须为 `true`；成为当前子目标时任务状态只能是 `awaiting_confirmation`。
+
+风险的 `risk_type` 只能使用跨 App 通用语义：消息或通信、内容发布、账号关系变化、数据修改、数据删除、交易或支付、账号或权限变化、未知外部影响。它不描述任何 App 页面路径或业务步骤。
 
 ## 与后续模块的接口
 

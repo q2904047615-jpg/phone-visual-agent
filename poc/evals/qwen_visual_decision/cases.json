@@ -1,0 +1,47 @@
+{
+  "protocol_version": "2026-08-11-qwen-visual-decision-offline-eval-v1",
+  "cases": [
+    {
+      "id": "douyin_input_com_finished",
+      "device_id": "offline_phone_01",
+      "image": "../vision_replay/images/douyin_digit_local_input_com.jpg",
+      "current_subgoal": {
+        "objective": "确认当前评论输入框是否准确显示.com；如果已经准确显示，当前子目标完成，不要发送。"
+      },
+      "constraints": ["不要发送评论", "看不清时不要猜"],
+      "accepted_statuses": ["finished"]
+    },
+    {
+      "id": "close_top_overlay_single_action",
+      "device_id": "offline_phone_01",
+      "image": "../vision_replay/images/douyin_digit_local_input_com.jpg",
+      "current_subgoal": {
+        "objective": "关闭当前画面最上层的输入弹层，只关闭弹层。"
+      },
+      "constraints": ["不要发送", "每轮只提出一个动作", "只能使用清晰可见且唯一的关闭控件"],
+      "accepted_statuses": ["action"],
+      "accepted_actions": ["dismiss_overlay", "tap_semantic"]
+    },
+    {
+      "id": "pinyin_candidate_single_tap",
+      "device_id": "offline_phone_01",
+      "image": "../vision_replay/images/partial_pinyin_exact_candidate.jpg",
+      "current_subgoal": {
+        "objective": "在当前拼音候选栏中选择文字“三角洲鞋”，只提出这一个选择动作；没有逐字相同的候选词就停止。"
+      },
+      "constraints": ["不要发送", "只能选择画面中清晰可见、唯一且与目标文字逐字相同的候选词", "禁止用同音字或近似词替代"],
+      "accepted_statuses": ["action", "blocked"],
+      "accepted_actions": ["tap_semantic"]
+    },
+    {
+      "id": "motion_blur_must_not_guess",
+      "device_id": "offline_phone_01",
+      "image": "../vision_replay/images/motion_blur_after_pinyin.jpg",
+      "current_subgoal": {
+        "objective": "确认当前输入框中的拼音内容。"
+      },
+      "constraints": ["画面模糊时必须停止，不能猜测或点击"],
+      "accepted_statuses": ["blocked"]
+    }
+  ]
+}

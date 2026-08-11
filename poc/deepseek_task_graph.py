@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from generic_intent import GenericIntentError, _parse_json_object
 
 
-DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-11-deepseek-task-graph-v2"
+DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-11-deepseek-task-graph-v3"
 GRAPH_STATUSES = frozenset(
     {"ready", "running", "awaiting_confirmation", "completed", "blocked"}
 )
@@ -25,6 +25,8 @@ RISK_TYPES = frozenset(
         "message_or_communication",
         "content_publication",
         "account_relationship_change",
+        "membership_change",
+        "permission_role_change",
         "data_mutation",
         "data_deletion",
         "transaction_or_payment",
@@ -70,6 +72,86 @@ EXTERNAL_STATE_CHANGE_PATTERN = re.compile(
     r"purchase|pay|transfer|grant|modify|create|upload|share|join|leave|"
     r"subscribe|report|book|submit|register|login|logout)\b"
     r")",
+    re.IGNORECASE,
+)
+COMMUNICATION_EFFECT_PATTERN = re.compile(
+    r"(?:"
+    r"(?:发送|发给|发(?:一条)?|回复|询问|通知|联系|沟通).{0,12}"
+    r"(?:消息|私信|留言|需求|用户|联系人|对方)|"
+    r"(?:给|向).{0,12}(?:留言|发送|发私信|发消息)|"
+    r"(?:私信|留言).{0,8}(?:询问|回复|通知)|"
+    r"\b(?:send|reply|message|notify|contact)\b.{0,24}"
+    r"\b(?:message|user|contact|recipient)\b"
+    r")",
+    re.IGNORECASE,
+)
+ACCOUNT_RELATIONSHIP_EFFECT_PATTERN = re.compile(
+    r"(?:"
+    r"(?:加|添加|列为|成为|删除|移除|解除).{0,8}(?:好友|联系人)|"
+    r"(?<!已)(?:取消|解除)?关注(?:该|这个|目标|用户|账号|作者|对方)|"
+    r"(?:拉黑|屏蔽).{0,8}(?:用户|账号|联系人|对方)|"
+    r"\b(?:add|remove|block|unblock|follow|unfollow)\b.{0,20}"
+    r"\b(?:friend|contact|user|account)\b"
+    r")",
+    re.IGNORECASE,
+)
+MEMBERSHIP_EFFECT_PATTERN = re.compile(
+    r"(?:"
+    r"(?:拉|邀请|添加|加入|移入|移出|踢出|删除|移除|创建|建立|建|修改)"
+    r".{0,12}(?:群|群组|成员|团队|组织)|"
+    r"(?:群|群组|团队|组织).{0,8}(?:加人|添加成员|移除成员|修改成员)|"
+    r"\b(?:invite|add|remove|join|leave|create|modify)\b.{0,20}"
+    r"\b(?:group|member|team|organization)\b"
+    r")",
+    re.IGNORECASE,
+)
+PERMISSION_ROLE_EFFECT_PATTERN = re.compile(
+    r"(?:"
+    r"(?:设为|设置为|任命|授予|撤销|修改|提升|降为).{0,12}"
+    r"(?:管理员|权限|角色|所有者|版主)|"
+    r"\b(?:assign|grant|revoke|promote|demote|change)\b.{0,20}"
+    r"\b(?:admin|administrator|permission|role|owner|moderator)\b"
+    r")",
+    re.IGNORECASE,
+)
+CONTENT_PUBLICATION_EFFECT_PATTERN = re.compile(
+    r"(?:发布|发表评论|发布评论|上传内容|分享内容|公开内容|"
+    r"\b(?:publish|post|comment|upload|share)\b.{0,16}"
+    r"\b(?:content|post|comment|media)\b)",
+    re.IGNORECASE,
+)
+DATA_DELETION_EFFECT_PATTERN = re.compile(
+    r"(?:(?:删除|清除|移除).{0,10}(?:数据|文件|记录|内容|项目|照片|文档)|"
+    r"\b(?:delete|erase|remove)\b.{0,16}\b(?:data|file|record|content|item)\b)",
+    re.IGNORECASE,
+)
+DATA_MUTATION_EFFECT_PATTERN = re.compile(
+    r"(?:(?:保存|创建|新增|修改|编辑|提交|上传).{0,10}"
+    r"(?:数据|文件|记录|内容|项目|地点|文档|表单)|进入已保存|"
+    r"\b(?:save|create|modify|edit|submit|upload)\b.{0,16}"
+    r"\b(?:data|file|record|content|item|form)\b)",
+    re.IGNORECASE,
+)
+TRANSACTION_EFFECT_PATTERN = re.compile(
+    r"(?:购买|下单|付款|支付|转账|退款|充值|提现|"
+    r"\b(?:purchase|order|pay|transfer|refund|deposit|withdraw)\b)",
+    re.IGNORECASE,
+)
+ACCOUNT_PERMISSION_EFFECT_PATTERN = re.compile(
+    r"(?:授权|授予权限|撤销权限|注册|登录|登出|修改账号|修改账户|"
+    r"\b(?:authorize|grant permission|revoke permission|register|login|logout)\b)",
+    re.IGNORECASE,
+)
+READ_ONLY_PROOF_PATTERN = re.compile(
+    r"(?:查看|观察|读取|检查|核对|浏览|搜索|查找|识别|判断|确认是否|"
+    r"(?:页面|列表|详情|信息|状态).{0,8}(?:可见|显示)|"
+    r"\b(?:view|observe|read|inspect|check|browse|search|find|verify)\b)",
+    re.IGNORECASE,
+)
+NAVIGATION_PROOF_PATTERN = re.compile(
+    r"(?:打开|进入|前往|切换到|返回到|导航到|"
+    r"(?:页面|界面|列表|详情).{0,8}(?:可见|显示)|"
+    r"\b(?:open|navigate|go to|switch to|return to)\b)",
     re.IGNORECASE,
 )
 
@@ -213,16 +295,31 @@ class Subgoal:
             raise TaskGraphError(
                 f"子目标外部影响分类无效：{self.external_impact}"
             )
-        describes_external_change = _describes_external_state_change(
+        inferred_risk_types = _infer_external_risk_types(
             self.objective,
+            *self.constraints,
             *self.completion_conditions,
         )
-        if describes_external_change and self.external_impact in {
+        if inferred_risk_types and self.external_impact in {
             "read_only",
             "navigation_only",
         }:
             raise TaskGraphError(
                 f"子目标包含外部状态变化但未声明：{self.subgoal_id}"
+            )
+        if self.external_impact == "read_only" and not _proves_read_only(
+            self.objective,
+            *self.completion_conditions,
+        ):
+            raise TaskGraphError(
+                f"子目标无法证明是纯观察，必须标为 unknown：{self.subgoal_id}"
+            )
+        if self.external_impact == "navigation_only" and not _proves_navigation(
+            self.objective,
+            *self.completion_conditions,
+        ):
+            raise TaskGraphError(
+                f"子目标无法证明是纯导航，必须标为 unknown：{self.subgoal_id}"
             )
         if self.external_impact in {"external_state", "unknown"} and not self.risk_action_ids:
             raise TaskGraphError(
@@ -378,6 +475,21 @@ class DynamicTaskGraph:
                     raise TaskGraphError(
                         f"风险与子目标引用不对称：{risk.risk_id} / {subgoal_id}"
                     )
+        for subgoal in subgoals.values():
+            inferred_types = _infer_external_risk_types(
+                subgoal.objective,
+                *subgoal.constraints,
+                *subgoal.completion_conditions,
+            )
+            linked_types = {
+                risks[risk_id].risk_type for risk_id in subgoal.risk_action_ids
+            }
+            missing_types = inferred_types - linked_types
+            if missing_types:
+                raise TaskGraphError(
+                    f"子目标 {subgoal.subgoal_id} 缺少匹配的通用风险类型："
+                    + ", ".join(sorted(missing_types))
+                )
         if (
             self.status != "blocked"
             and _describes_external_state_change(self.goal.objective)
@@ -490,6 +602,8 @@ class DynamicTaskGraph:
         self,
         *,
         confirmed_risk_ids: tuple[str, ...] = (),
+        confirmed_subgoal_id: str | None = None,
+        confirmed_revision: int | None = None,
     ) -> dict[str, Any]:
         """Expose only the current high-level target and safety context to Qwen."""
 
@@ -497,6 +611,14 @@ class DynamicTaskGraph:
         current = value["current_subgoal"]
         current_risk_ids = set(current["risk_action_ids"] if current else [])
         confirmed = set(confirmed_risk_ids)
+        if confirmed and confirmed_subgoal_id != self.active_subgoal_id:
+            raise TaskGraphError("确认记录不属于 current_subgoal，禁止跨子目标复用。")
+        if confirmed and confirmed_revision != self.revision:
+            raise TaskGraphError("确认记录 revision 不匹配，禁止跨 revision 复用。")
+        if not confirmed and (
+            confirmed_subgoal_id is not None or confirmed_revision is not None
+        ):
+            raise TaskGraphError("确认作用域不能脱离 confirmed_risk_ids 单独提供。")
         unknown_confirmations = confirmed - current_risk_ids
         if unknown_confirmations:
             raise TaskGraphError(
@@ -540,6 +662,12 @@ class DynamicTaskGraph:
                     else "not_required"
                 ),
                 "risk_ids": sorted(current_risk_ids),
+                "scope": {
+                    "task_id": self.task_id,
+                    "device_id": self.device_id,
+                    "revision": self.revision,
+                    "subgoal_id": self.active_subgoal_id,
+                },
                 "external_state_action_allowed": confirmation_granted,
             },
         }
@@ -689,8 +817,12 @@ def _initial_prompt(raw_goal: str) -> str:
    会改变账号、数据、交易、发布、发送或其他外部状态的事项必须标为 external_state 并列入
    risk_actions；无法确定影响时标为 unknown。两者都必须关联风险，confirmation_required=true；
    如果成为 active，status 必须为 awaiting_confirmation。
-6. 信息不足时 status=blocked、active_subgoal_id=null，并填写 clarification_questions。
-7. 只返回 JSON 对象，不要 Markdown。
+6. read_only 只能描述查看、读取、检查等纯观察结果；navigation_only 只能描述打开或进入页面等
+   导航结果。不能证明属于这两类时必须标为 unknown，不能为了免确认而猜成安全类别。
+7. 风险类型只用通信、内容发布、账号关系、成员关系、权限角色、数据修改/删除、交易支付、
+   账号权限或未知外部影响等跨 App 语义，不得描述 App 页面路径。
+8. 信息不足时 status=blocked、active_subgoal_id=null，并填写 clarification_questions。
+9. 只返回 JSON 对象，不要 Markdown。
 """
 
 
@@ -724,7 +856,9 @@ def _replan_prompt(
 5. 既有 risk_actions 必须保留，不能降低风险等级或取消 confirmation_required。
 6. external_state 和 unknown 子目标都必须关联风险；成为 active 时必须返回
    awaiting_confirmation。每轮只选择一个 active 高层子目标；不要提出下一视觉动作。
-7. 只返回 JSON 对象，不要 Markdown，也不要返回 task_id、device_id、revision、协议版本、
+7. 既有 external_state 不能降级，unknown 没有新的可靠证据时不能改成 read_only 或
+   navigation_only；read_only/navigation_only 必须分别有纯观察或纯导航依据。
+8. 只返回 JSON 对象，不要 Markdown，也不要返回 task_id、device_id、revision、协议版本、
    current_subgoal 或历史记录；这些字段由本地协议层生成。
 """
 
@@ -750,7 +884,7 @@ def _schema_prompt() -> str:
     "risk_id":"小写稳定ID",
     "description":"可能改变外部状态的事项",
     "external_effect":"对账号、数据、交易或他人的影响",
-    "risk_type":"message_or_communication|content_publication|account_relationship_change|data_mutation|data_deletion|transaction_or_payment|account_or_permission_change|unknown_external_effect",
+    "risk_type":"message_or_communication|content_publication|account_relationship_change|membership_change|permission_role_change|data_mutation|data_deletion|transaction_or_payment|account_or_permission_change|unknown_external_effect",
     "risk_level":"low|medium|high|critical",
     "subgoal_ids":["关联子目标ID"],
     "confirmation_required":true
@@ -1037,13 +1171,19 @@ def _validate_preserved_risk_ids(
     previous: DynamicTaskGraph,
     candidate: DynamicTaskGraph,
 ) -> None:
-    previous_ids = {item.risk_id for item in previous.risk_actions}
-    candidate_ids = {item.risk_id for item in candidate.risk_actions}
-    missing = previous_ids - candidate_ids
+    previous_risks = {item.risk_id: item for item in previous.risk_actions}
+    candidate_risks = {item.risk_id: item for item in candidate.risk_actions}
+    missing = set(previous_risks) - set(candidate_risks)
     if missing:
         raise TaskGraphError(
             "重规划不能删除既有风险：" + ", ".join(sorted(missing))
         )
+    for risk_id, previous_risk in previous_risks.items():
+        candidate_risk = candidate_risks[risk_id]
+        if candidate_risk.risk_type != previous_risk.risk_type:
+            raise TaskGraphError(f"重规划不能改换既有风险类别：{risk_id}")
+        if candidate_risk.confirmation_required is not True:
+            raise TaskGraphError(f"重规划不能取消既有风险确认：{risk_id}")
 
 
 def _reject_dependency_cycles(subgoals: dict[str, Subgoal]) -> None:
@@ -1169,7 +1309,39 @@ def _reject_low_level_instruction(
 
 
 def _describes_external_state_change(*values: str) -> bool:
-    return any(EXTERNAL_STATE_CHANGE_PATTERN.search(value) for value in values)
+    return bool(_infer_external_risk_types(*values))
+
+
+def _infer_external_risk_types(*values: str) -> frozenset[str]:
+    text = " ".join(values)
+    inferred: set[str] = set()
+    patterns = {
+        "message_or_communication": COMMUNICATION_EFFECT_PATTERN,
+        "account_relationship_change": ACCOUNT_RELATIONSHIP_EFFECT_PATTERN,
+        "membership_change": MEMBERSHIP_EFFECT_PATTERN,
+        "permission_role_change": PERMISSION_ROLE_EFFECT_PATTERN,
+        "content_publication": CONTENT_PUBLICATION_EFFECT_PATTERN,
+        "data_deletion": DATA_DELETION_EFFECT_PATTERN,
+        "data_mutation": DATA_MUTATION_EFFECT_PATTERN,
+        "transaction_or_payment": TRANSACTION_EFFECT_PATTERN,
+        "account_or_permission_change": ACCOUNT_PERMISSION_EFFECT_PATTERN,
+    }
+    for risk_type, pattern in patterns.items():
+        if pattern.search(text):
+            inferred.add(risk_type)
+    if EXTERNAL_STATE_CHANGE_PATTERN.search(text) and not inferred:
+        inferred.add("unknown_external_effect")
+    return frozenset(inferred)
+
+
+def _proves_read_only(*values: str) -> bool:
+    text = " ".join(values)
+    return bool(READ_ONLY_PROOF_PATTERN.search(text))
+
+
+def _proves_navigation(*values: str) -> bool:
+    text = " ".join(values)
+    return bool(NAVIGATION_PROOF_PATTERN.search(text))
 
 
 def _reject_control_fields(value: Any, path: str) -> None:

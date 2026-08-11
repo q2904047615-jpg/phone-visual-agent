@@ -88,6 +88,47 @@ def observation():
     )
 
 
+def single_subgoal_payload(objective, *, external_impact):
+    payload = base_payload()
+    payload["goal"]["objective"] = objective
+    payload["completion_conditions"] = [
+        {
+            "condition_id": "result_visible",
+            "description": "目标结果可见",
+            "evidence_required": ["页面显示目标结果"],
+            "satisfied": False,
+            "evidence": [],
+        }
+    ]
+    payload["risk_actions"] = []
+    payload["subgoals"] = [
+        {
+            "subgoal_id": "target_state",
+            "objective": objective,
+            "status": "active",
+            "depends_on": [],
+            "constraints": [],
+            "completion_conditions": ["目标结果可见"],
+            "completion_evidence": [],
+            "risk_action_ids": [],
+            "external_impact": external_impact,
+        }
+    ]
+    payload["active_subgoal_id"] = "target_state"
+    payload["status"] = "ready"
+    return payload
+
+
+def active_external_payload():
+    payload = base_payload()
+    payload["status"] = "awaiting_confirmation"
+    payload["subgoals"][0]["status"] = "skipped"
+    payload["subgoals"][1]["status"] = "active"
+    payload["subgoals"][1]["depends_on"] = []
+    payload["active_subgoal_id"] = "save_target"
+    return payload
+
+
 class DeepSeekTaskGraphTests(unittest.TestCase):
     def test_builds_generic_graph_with_device_isolation(self):
         provider = FakeProvider(base_payload())
@@ -282,6 +323,15 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskGraphError, "必须等待用户确认"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan("目标", device_id="phone-1")
 
+    def test_deepseek_cannot_generate_confirmation_results(self):
+        payload = base_payload()
+        payload["confirmed_risk_ids"] = ["save_place"]
+        with self.assertRaisesRegex(TaskGraphError, "协议外字段"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                "目标",
+                device_id="phone-1",
+            )
+
     def test_risk_type_must_use_cross_app_vocabulary(self):
         payload = base_payload()
         payload["risk_actions"][0]["risk_type"] = "custom_page_flow"
@@ -313,6 +363,77 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 "目标",
+                device_id="phone-1",
+            )
+
+    def test_relationship_communication_membership_and_role_effects_fail_closed(self):
+        dangerous_goals = (
+            "加好友",
+            "拉他进群",
+            "发私信询问需求",
+            "邀请用户入群",
+            "取消关注该用户",
+            "给对方留言",
+            "建群或修改群成员",
+            "把用户设为管理员",
+        )
+        for objective in dangerous_goals:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="read_only",
+                )
+                with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                        objective,
+                        device_id="phone-1",
+                    )
+
+    def test_synonymous_external_effects_cannot_bypass_classification(self):
+        synonymous_goals = (
+            "添加联系人",
+            "把对方列为好友",
+            "请该用户加入团队",
+            "撤销管理员权限",
+            "给联系人发消息",
+            "将成员移出团队",
+        )
+        for objective in synonymous_goals:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="read_only",
+                )
+                with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                        objective,
+                        device_id="phone-1",
+                    )
+
+    def test_declared_risk_type_must_match_inferred_external_effect(self):
+        payload = single_subgoal_payload(
+            "向联系人发送消息",
+            external_impact="external_state",
+        )
+        payload["risk_actions"] = [copy.deepcopy(base_payload()["risk_actions"][0])]
+        payload["risk_actions"][0]["subgoal_ids"] = ["target_state"]
+        payload["subgoals"][0]["risk_action_ids"] = ["save_place"]
+        payload["status"] = "awaiting_confirmation"
+        with self.assertRaisesRegex(TaskGraphError, "缺少匹配的通用风险类型"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                "向联系人发送消息",
+                device_id="phone-1",
+            )
+
+    def test_external_effect_hidden_in_constraints_cannot_bypass_classification(self):
+        payload = single_subgoal_payload(
+            "处理联系人请求",
+            external_impact="read_only",
+        )
+        payload["subgoals"][0]["constraints"] = ["完成前给联系人发消息"]
+        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                "处理联系人请求",
                 device_id="phone-1",
             )
 
@@ -388,6 +509,46 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual(graph.subgoals[0].external_impact, "navigation_only")
         self.assertEqual(graph.subgoals[1].external_impact, "read_only")
 
+    def test_read_only_relationship_inspection_goals_are_allowed(self):
+        safe_goals = (
+            "查看好友列表",
+            "查看群成员",
+            "检查是否已关注",
+        )
+        for objective in safe_goals:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="read_only",
+                )
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    objective,
+                    device_id="phone-1",
+                )
+                self.assertEqual(graph.active_subgoal().external_impact, "read_only")
+
+    def test_contact_page_navigation_is_allowed(self):
+        payload = single_subgoal_payload(
+            "打开联系人页面",
+            external_impact="navigation_only",
+        )
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "打开联系人页面",
+            device_id="phone-1",
+        )
+        self.assertEqual(graph.active_subgoal().external_impact, "navigation_only")
+
+    def test_unproven_safe_classification_must_be_unknown(self):
+        payload = single_subgoal_payload(
+            "处理当前对象",
+            external_impact="read_only",
+        )
+        with self.assertRaisesRegex(TaskGraphError, "无法证明是纯观察"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                "处理当前对象",
+                device_id="phone-1",
+            )
+
     def test_qwen_context_closes_gate_for_external_state_subgoal(self):
         payload = base_payload()
         payload["status"] = "awaiting_confirmation"
@@ -410,7 +571,9 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertFalse(gate["external_state_action_allowed"])
 
         confirmed_gate = graph.to_qwen_context(
-            confirmed_risk_ids=("save_place",)
+            confirmed_risk_ids=("save_place",),
+            confirmed_subgoal_id="save_target",
+            confirmed_revision=graph.revision,
         )["confirmation_gate"]
         self.assertEqual(confirmed_gate["state"], "confirmed")
         self.assertTrue(confirmed_gate["external_state_action_allowed"])
@@ -421,7 +584,43 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             device_id="phone-1",
         )
         with self.assertRaisesRegex(TaskGraphError, "不属于 current_subgoal"):
-            graph.to_qwen_context(confirmed_risk_ids=("save_place",))
+            graph.to_qwen_context(
+                confirmed_risk_ids=("save_place",),
+                confirmed_subgoal_id="locate_target",
+                confirmed_revision=graph.revision,
+            )
+
+    def test_confirmation_cannot_cross_subgoal(self):
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(active_external_payload())).plan(
+            "目标",
+            device_id="phone-1",
+        )
+        with self.assertRaisesRegex(TaskGraphError, "跨子目标复用"):
+            graph.to_qwen_context(
+                confirmed_risk_ids=("save_place",),
+                confirmed_subgoal_id="locate_target",
+                confirmed_revision=graph.revision,
+            )
+
+    def test_confirmation_cannot_cross_revision(self):
+        payload = active_external_payload()
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "目标",
+            device_id="phone-1",
+            task_id="task-confirmation-scope",
+        )
+        revised = DeepSeekTaskGraphPlanner(FakeProvider(copy.deepcopy(payload))).replan(
+            graph,
+            observation(),
+            trigger="observation_changed",
+            reason="场景发生变化",
+        )
+        with self.assertRaisesRegex(TaskGraphError, "跨 revision 复用"):
+            revised.to_qwen_context(
+                confirmed_risk_ids=("save_place",),
+                confirmed_subgoal_id="save_target",
+                confirmed_revision=graph.revision,
+            )
 
     def test_rejects_dependency_cycle(self):
         payload = base_payload()
@@ -548,6 +747,22 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 observation(),
                 trigger="observation_changed",
                 reason="模型删除了风险",
+            )
+
+    def test_replan_cannot_change_existing_risk_type(self):
+        initial = base_payload()
+        revised = copy.deepcopy(initial)
+        revised["risk_actions"][0]["risk_type"] = "data_deletion"
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            "目标",
+            device_id="phone-1",
+        )
+        with self.assertRaisesRegex(TaskGraphError, "不能改换既有风险类别"):
+            DeepSeekTaskGraphPlanner(FakeProvider(revised)).replan(
+                graph,
+                observation(),
+                trigger="risk_detected",
+                reason="模型改换了风险类别",
             )
 
     def test_replan_cannot_downgrade_external_state_to_read_only(self):

@@ -1,5 +1,5 @@
 {
-  "protocol_version": "2026-08-11-qwen-visual-decision-offline-eval-v2",
+  "protocol_version": "2026-08-11-qwen-visual-decision-offline-eval-v3",
   "cases": [
     {
       "id": "launcher_text_icon_single_action",
@@ -79,7 +79,7 @@
         "device_id": "offline_phone_01",
         "revision": 4,
         "task_status": "running",
-        "goal": {"objective": "确认输入框是否准确显示.com", "target_apps": [], "entities": {"expected_text": ".com"}},
+        "goal": {"objective": "确认输入框是否准确显示.com", "target_apps": [], "entities": {"expected_text": ".com", "expected_role": "input"}},
         "global_constraints": ["不要发送", "文字必须逐字一致"],
         "goal_completion_conditions": [{"condition_id": "exact_text_visible", "description": "输入框清晰显示.com", "evidence_required": ["当前画面文字"], "satisfied": false, "evidence": []}],
         "current_subgoal": {"subgoal_id": "verify_input_text", "objective": "确认当前输入框是否准确显示.com；若已显示则完成", "status": "active", "depends_on": [], "constraints": ["不要发送"], "completion_conditions": ["输入框逐字显示.com"], "completion_evidence": [], "risk_action_ids": [], "external_impact": "read_only"},
@@ -87,7 +87,7 @@
         "risk_actions": [],
         "confirmation_gate": {"required": false, "state": "not_required", "risk_ids": [], "external_state_action_allowed": false}
       },
-      "accepted_statuses": ["finished", "blocked"]
+      "accepted_statuses": ["finished"]
     },
     {
       "id": "text_submit_without_confirmation_blocked",

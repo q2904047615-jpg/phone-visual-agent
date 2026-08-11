@@ -15,7 +15,7 @@ from qwen_visual_decision import (
     QwenVisualDecisionObserver,
     TrustedObservation,
 )
-from ui_scene import UIElement, UIScene
+from ui_scene import UIElement, UIScene, UISceneError
 from vision_agent import VisionAgentError
 
 
@@ -42,7 +42,7 @@ class FakeProvider:
 
 
 class SequenceProvider(FakeProvider):
-    def __init__(self, payloads: list[dict]) -> None:
+    def __init__(self, payloads: list[dict | BaseException]) -> None:
         super().__init__({})
         self.payloads = list(payloads)
 
@@ -51,7 +51,10 @@ class SequenceProvider(FakeProvider):
         self.messages = messages
         if not self.payloads:
             raise AssertionError("模型被调用超过一次初始请求和一次修复重试")
-        return json.dumps(self.payloads.pop(0), ensure_ascii=False)
+        value = self.payloads.pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return json.dumps(value, ensure_ascii=False)
 
 
 def load_sequence(name: str) -> list[Image.Image]:
@@ -386,6 +389,42 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIs(decision.trusted_observation, self.observation)
         self.assertNotIn("elements", decision.page_state.to_dict())
 
+    def test_prompt_uses_documented_thousand_scale_without_mutating_candidate(self) -> None:
+        original_bounds = self.observation.get_candidate("settings_icon").bounds
+        prompt = self.observation.prompt_dict()
+        candidate = next(
+            item for item in prompt["candidates"] if item["element_id"] == "settings_icon"
+        )
+        self.assertEqual(prompt["candidate_bounds_scale"], 1000)
+        self.assertEqual(candidate["bounds"], [680, 200, 860, 350])
+        self.assertEqual(
+            self.observation.get_candidate("settings_icon").bounds,
+            original_bounds,
+        )
+
+    def test_observation_context_is_small_but_decision_context_remains_complete(self) -> None:
+        parsed = QwenTaskContext.from_dict(self.context)
+        observation_context = parsed.to_observation_context()
+        self.assertEqual(observation_context["device_id"], self.context["device_id"])
+        self.assertEqual(
+            observation_context["objective"],
+            self.context["current_subgoal"]["objective"],
+        )
+        self.assertIn("constraints", observation_context)
+        self.assertNotIn("task_id", observation_context)
+        for field in (
+            "protocol_version",
+            "task_id",
+            "device_id",
+            "revision",
+            "current_subgoal",
+            "global_constraints",
+            "current_external_impact",
+            "risk_actions",
+            "confirmation_gate",
+        ):
+            self.assertIn(field, parsed.to_dict())
+
     def test_forged_mars_element_and_self_authored_page_state_are_rejected(self) -> None:
         forged = action_payload(self.context, self.observation)
         forged["page_state"]["elements"] = [
@@ -542,6 +581,155 @@ class QwenVisualDecisionTests(unittest.TestCase):
             "exact_text_ambiguous",
         )
 
+    def test_read_only_exact_text_uses_structured_role_for_completion(self) -> None:
+        elements = (
+            UIElement(
+                element_id="input_value",
+                role="input",
+                meaning="current_text_input",
+                label=".com",
+                bounds=(0.05, 0.55, 0.75, 0.65),
+                confidence=0.96,
+                evidence=(".com",),
+            ),
+            UIElement(
+                element_id="candidate_value",
+                role="keyboard_key",
+                meaning="candidate_shortcut",
+                label=".com",
+                bounds=(0.10, 0.70, 0.28, 0.77),
+                confidence=0.93,
+                evidence=(".com",),
+            ),
+            UIElement(
+                element_id="preview_text",
+                role="text",
+                meaning="input_preview",
+                label=".com",
+                bounds=(0.35, 0.70, 0.53, 0.77),
+                confidence=0.91,
+                evidence=(".com",),
+            ),
+        )
+        scene = scene_for(
+            self.frames,
+            elements=elements,
+            app_id="generic_surface",
+            screen_id="text_entry",
+            summary="输入框与输入辅助区域清晰可见",
+        )
+        observation = trusted_observation(
+            self.frames,
+            scene=scene,
+            observation_id="obs_44444444444444444444444444444444",
+        )
+        context = task_context(task_id="task_verify_input", revision=15)
+        context["current_external_impact"] = "read_only"
+        context["current_subgoal"]["external_impact"] = "read_only"
+        context["goal"]["entities"] = {
+            "expected_text": ".com",
+            "expected_role": "input",
+        }
+        payload = action_payload(context, observation, element_id="input_value")
+        payload.update(
+            {
+                "status": "finished",
+                "next_action": None,
+                "target_region": None,
+                "expected_result": {},
+                "completion_evidence_element_ids": ["input_value"],
+            }
+        )
+        observer = QwenVisualDecisionObserver(FakeProvider(payload))
+        decision = observer.decide(
+            frames=self.frames,
+            task_context=context,
+            trusted_observation=observation,
+        )
+        self.assertEqual(decision.proposal.status, "finished")
+        self.assertEqual(decision.proposal.completion_evidence, ("input_value:.com",))
+
+    def test_same_visual_object_duplicates_collapse_without_changing_bounds(self) -> None:
+        elements = (
+            UIElement(
+                element_id="confirm_text",
+                role="text",
+                meaning="confirm_current_dialog",
+                label="确定",
+                bounds=(0.40, 0.60, 0.60, 0.68),
+                confidence=0.92,
+                evidence=("确定",),
+            ),
+            UIElement(
+                element_id="confirm_button",
+                role="button",
+                meaning="confirm_current_dialog",
+                label="确定",
+                bounds=(0.38, 0.58, 0.62, 0.70),
+                confidence=0.95,
+                evidence=("确定",),
+            ),
+        )
+        original_scene = scene_for(self.frames, elements=elements)
+        observation = trusted_observation(
+            self.frames,
+            scene=original_scene,
+            observation_id="obs_55555555555555555555555555555555",
+        )
+        self.assertEqual([item.element_id for item in observation.scene.elements], ["confirm_button"])
+        self.assertEqual(dict(observation.candidate_aliases)["confirm_text"], "confirm_button")
+        self.assertEqual(
+            observation.get_candidate("confirm_button").bounds,
+            elements[1].bounds,
+        )
+        with self.assertRaisesRegex(UISceneError, "不存在元素"):
+            observation.get_candidate("confirm_text")
+        context = task_context(task_id="task_confirm_unique", revision=16)
+        context["goal"]["entities"] = {
+            "expected_text": "确定",
+            "expected_role": "button",
+        }
+        payload = action_payload(context, observation, element_id="confirm_button")
+        observer = QwenVisualDecisionObserver(FakeProvider(payload))
+        decision = observer.decide(
+            frames=self.frames,
+            task_context=context,
+            trusted_observation=observation,
+        )
+        self.assertEqual(decision.proposal.status, "action")
+
+    def test_overlapping_semantic_conflict_is_recorded_not_silently_merged(self) -> None:
+        elements = (
+            UIElement(
+                element_id="left_action",
+                role="button",
+                meaning="accept_change",
+                label="接受",
+                bounds=(0.35, 0.50, 0.65, 0.62),
+                confidence=0.94,
+            ),
+            UIElement(
+                element_id="right_action",
+                role="button",
+                meaning="reject_change",
+                label="拒绝",
+                bounds=(0.36, 0.51, 0.66, 0.63),
+                confidence=0.94,
+            ),
+        )
+        observation = trusted_observation(
+            self.frames,
+            scene=scene_for(self.frames, elements=elements),
+            observation_id="obs_66666666666666666666666666666666",
+        )
+        self.assertEqual(len(observation.scene.elements), 2)
+        self.assertTrue(
+            any(
+                item["kind"] == "overlapping_semantic_conflict"
+                for item in observation.candidate_conflicts
+            )
+        )
+
     def test_action_cannot_ignore_unique_exact_text_candidate(self) -> None:
         context = task_context(task_id="task_exact_select", revision=14)
         context["goal"]["entities"] = {"target_text": "设置"}
@@ -562,6 +750,37 @@ class QwenVisualDecisionTests(unittest.TestCase):
         _observer, decision = self.decide(provider, context=context)
         self.assertEqual(provider.calls, 1)
         self.assertEqual(decision.proposal.status, "action")
+
+    def test_decision_service_disconnect_returns_blocked_with_diagnostics(self) -> None:
+        provider = SequenceProvider(
+            [VisionAgentError("千问视觉连接连续1次中断：Server disconnected")]
+        )
+        observer, decision = self.decide(provider)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(decision.proposal.status, "blocked")
+        self.assertEqual(observer.last_diagnostics["error_type"], "service_disconnect")
+        self.assertEqual(observer.last_diagnostics["model_calls"], 1)
+        self.assertEqual(
+            len(observer.last_diagnostics["model_call_elapsed_seconds"]),
+            1,
+        )
+        self.assertIn("未形成候选动作", observer.last_diagnostics["safe_stop_reason"])
+
+    def test_disconnect_during_format_retry_discards_first_output(self) -> None:
+        invalid = action_payload(self.context, self.observation)
+        invalid["target_region"]["bounds"] = [1, 1, 10, 10]
+        provider = SequenceProvider(
+            [
+                invalid,
+                VisionAgentError("千问视觉连接连续1次中断：Server disconnected"),
+            ]
+        )
+        observer, decision = self.decide(provider)
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(decision.proposal.status, "blocked")
+        self.assertTrue(observer.last_diagnostics["first_output_rejected"])
+        self.assertFalse(observer.last_diagnostics["candidate_action_from_first_output"])
+        self.assertEqual(observer.last_diagnostics["error_type"], "service_disconnect")
 
     def test_multiple_actions_field_is_rejected(self) -> None:
         bad = action_payload(self.context, self.observation)
@@ -804,7 +1023,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
     def test_full_deepseek_context_is_preserved_in_prompt(self) -> None:
         provider = FakeProvider(blocked_payload(self.context, self.observation))
         self.decide(provider)
-        prompt = provider.messages[0]["content"][0]["text"]
+        prompt = provider.messages[-1]["content"][0]["text"]
         for field in (
             "protocol_version",
             "task_id",

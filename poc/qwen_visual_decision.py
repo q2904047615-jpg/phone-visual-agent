@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +22,7 @@ from observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
 )
+from qwen_runtime_errors import classify_qwen_error, failure_diagnostics
 from semantic_executor import SemanticAction
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 from universal_action_controller import UniversalActionController, UniversalActionError
@@ -51,6 +53,23 @@ ALLOWED_EXTERNAL_IMPACTS = {
     "navigation_only",
     "external_state",
     "unknown",
+}
+ACTIONABLE_EXACT_TEXT_ROLES = frozenset(
+    {"button", "icon", "input", "tab", "toggle", "list_item", "keyboard_key"}
+)
+ROLE_PRIORITY = {
+    "input": 100,
+    "button": 95,
+    "icon": 90,
+    "keyboard_key": 85,
+    "list_item": 80,
+    "tab": 75,
+    "toggle": 75,
+    "dialog": 60,
+    "text": 40,
+    "image": 35,
+    "container": 10,
+    "unknown": 0,
 }
 
 
@@ -229,6 +248,17 @@ class QwenTaskContext:
         return bool(self.confirmation_gate["external_state_action_allowed"])
 
     @property
+    def pre_observation_block_reason(self) -> str | None:
+        """Return the local gate that must run before either Qwen call."""
+
+        if (
+            self.current_external_impact in {"external_state", "unknown"}
+            and not self.external_action_allowed
+        ):
+            return "风险确认门未满足，本轮禁止调用观察或决策模型。"
+        return None
+
+    @property
     def exact_text_requirements(self) -> tuple[str, ...]:
         """Structured exact-text requirements supplied by the task graph.
 
@@ -254,6 +284,53 @@ class QwenTaskContext:
                     values.append(text)
         return tuple(values)
 
+    @property
+    def exact_text_target_roles(self) -> tuple[str, ...]:
+        entities = self.goal.get("entities") or {}
+        values: list[str] = []
+        for key in ("expected_role", "target_role", "exact_text_role"):
+            raw = entities.get(key)
+            parts = raw if isinstance(raw, (list, tuple)) else [raw]
+            for part in parts:
+                if part is None:
+                    continue
+                role = str(part).strip().lower()
+                if role not in {
+                    "button",
+                    "icon",
+                    "input",
+                    "text",
+                    "tab",
+                    "toggle",
+                    "image",
+                    "list_item",
+                    "dialog",
+                    "keyboard_key",
+                    "container",
+                    "unknown",
+                }:
+                    raise VisionAgentError(f"goal.entities.{key} 角色无效：{role}")
+                if role not in values:
+                    values.append(role)
+        return tuple(values)
+
+    @property
+    def exact_text_target_meanings(self) -> tuple[str, ...]:
+        entities = self.goal.get("entities") or {}
+        values: list[str] = []
+        for key in ("expected_meaning", "target_meaning", "exact_text_meaning"):
+            raw = entities.get(key)
+            parts = raw if isinstance(raw, (list, tuple)) else [raw]
+            for part in parts:
+                if part is None:
+                    continue
+                meaning = str(part).strip().casefold()
+                if not meaning:
+                    raise VisionAgentError(f"goal.entities.{key} 格式无效。")
+                if meaning not in values:
+                    values.append(meaning)
+        return tuple(values)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "protocol_version": self.protocol_version,
@@ -272,6 +349,32 @@ class QwenTaskContext:
             "confirmation_gate": dict(self.confirmation_gate),
         }
 
+    def to_observation_context(self) -> dict[str, Any]:
+        """Small read-only goal context for candidate discovery.
+
+        The decision selector still receives ``to_dict()`` in full. This view
+        removes task-graph bookkeeping that the observation model cannot use,
+        reducing malformed or truncated scene JSON without hiding the active
+        objective, entities, constraints, completion conditions, or device.
+        """
+
+        return {
+            "device_id": self.device_id,
+            "objective": str(self.current_subgoal.get("objective") or ""),
+            "entities": dict(self.goal.get("entities") or {}),
+            "constraints": [
+                *self.global_constraints,
+                *_text_tuple(
+                    self.current_subgoal.get("constraints") or [],
+                    "current_subgoal.constraints",
+                ),
+            ],
+            "completion_conditions": list(
+                self.current_subgoal.get("completion_conditions") or []
+            ),
+            "external_impact": self.current_external_impact,
+        }
+
 
 @dataclass(frozen=True)
 class TrustedObservation:
@@ -282,6 +385,8 @@ class TrustedObservation:
     local_stability: LocalFrameStability
     selected_frame_index: int
     frame_sharpness_scores: tuple[float, ...]
+    candidate_aliases: tuple[tuple[str, str], ...] = ()
+    candidate_conflicts: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_scene(
@@ -325,14 +430,17 @@ class TrustedObservation:
         resolved_id = observation_id or f"obs_{uuid.uuid4().hex}"
         if not OBSERVATION_ID_PATTERN.fullmatch(resolved_id):
             raise VisionAgentError(f"observation_id 格式无效：{resolved_id!r}")
+        canonical_scene, aliases, conflicts = _canonicalize_trusted_scene(scene)
         result = cls(
             observation_id=resolved_id,
             device_id=str(device_id).strip(),
             fingerprint=fingerprint,
-            scene=scene,
+            scene=canonical_scene,
             local_stability=stability,
             selected_frame_index=selected,
             frame_sharpness_scores=sharpness,
+            candidate_aliases=aliases,
+            candidate_conflicts=conflicts,
         )
         result.validate_against_frames(frames)
         return result
@@ -367,6 +475,11 @@ class TrustedObservation:
         return self.scene.get_element(element_id)
 
     def prompt_dict(self) -> dict[str, Any]:
+        candidates: list[dict[str, Any]] = []
+        for item in self.scene.elements:
+            value = item.to_dict()
+            value["bounds"] = [round(part * 1000) for part in item.bounds]
+            candidates.append(value)
         return {
             "observation_id": self.observation_id,
             "device_id": self.device_id,
@@ -376,7 +489,10 @@ class TrustedObservation:
             "summary": self.scene.summary,
             "overlays": list(self.scene.overlays),
             "scene_confidence": float(self.scene.confidence),
-            "candidates": [item.to_dict() for item in self.scene.elements],
+            "candidate_bounds_scale": 1000,
+            "candidates": candidates,
+            "candidate_aliases": dict(self.candidate_aliases),
+            "candidate_conflicts": [dict(item) for item in self.candidate_conflicts],
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -390,6 +506,8 @@ class TrustedObservation:
             "frame_sharpness_scores": [
                 round(value, 3) for value in self.frame_sharpness_scores
             ],
+            "candidate_aliases": dict(self.candidate_aliases),
+            "candidate_conflicts": [dict(item) for item in self.candidate_conflicts],
         }
 
 
@@ -698,8 +816,10 @@ class QwenVisualDecisionObserver:
         trusted_observation: TrustedObservation,
         decision_number: int = 1,
     ) -> QwenVisualDecision:
+        started = time.perf_counter()
         self.last_raw_response = ""
         self.last_diagnostics = {}
+        model_call_elapsed_seconds: list[float] = []
         context = (
             task_context
             if isinstance(task_context, QwenTaskContext)
@@ -722,9 +842,27 @@ class QwenVisualDecisionObserver:
             "protocol_retry_used": False,
             "first_output_rejected": False,
             "candidate_action_from_first_output": False,
+            "first_pass_success": False,
+            "repair_retry_success": False,
             "hardware_actions_enabled": False,
+            "model_call_elapsed_seconds": model_call_elapsed_seconds,
         }
         self.last_diagnostics = dict(base_diagnostics)
+
+        def model_chat(messages: list[dict[str, Any]], *, max_tokens: int) -> str:
+            base_diagnostics["model_calls"] = int(base_diagnostics["model_calls"]) + 1
+            self.last_diagnostics = dict(base_diagnostics)
+            call_started = time.perf_counter()
+            try:
+                return self._provider_chat(messages, max_tokens=max_tokens)
+            finally:
+                model_call_elapsed_seconds.append(
+                    round(time.perf_counter() - call_started, 3)
+                )
+                base_diagnostics["model_call_elapsed_seconds"] = list(
+                    model_call_elapsed_seconds
+                )
+                self.last_diagnostics = dict(base_diagnostics)
 
         if (
             context.current_external_impact in {"external_state", "unknown"}
@@ -737,7 +875,11 @@ class QwenVisualDecisionObserver:
             )
             self._metrics["final_blocked_count"] += 1
             self.last_diagnostics.update(
-                {"local_safety_block": "confirmation_gate", "decision_status": "blocked"}
+                {
+                    "local_safety_block": "confirmation_gate",
+                    "decision_status": "blocked",
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                }
             )
             return decision
 
@@ -754,7 +896,11 @@ class QwenVisualDecisionObserver:
             )
             self._metrics["final_blocked_count"] += 1
             self.last_diagnostics.update(
-                {"local_safety_block": block_code, "decision_status": "blocked"}
+                {
+                    "local_safety_block": block_code,
+                    "decision_status": "blocked",
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                }
             )
             return decision
 
@@ -764,11 +910,30 @@ class QwenVisualDecisionObserver:
             decision_number=max(1, int(decision_number)),
         )
         image = frames[trusted_observation.selected_frame_index].convert("RGB")
-        messages = [_vision_message(prompt, image)]
+        messages = _decision_messages(prompt, image)
         self._metrics["model_attempted_count"] += 1
-        raw = self._provider_chat(messages, max_tokens=DECISION_OUTPUT_TOKENS)
+        try:
+            raw = model_chat(messages, max_tokens=DECISION_OUTPUT_TOKENS)
+        except VisionAgentError as service_error:
+            reason = f"Qwen决策服务不可用，本轮安全阻塞：{service_error}"
+            decision = _local_blocked_decision(
+                context,
+                trusted_observation,
+                reason=reason,
+            )
+            self._metrics["final_blocked_count"] += 1
+            self.last_diagnostics.update(
+                failure_diagnostics(
+                    service_error,
+                    stage="requesting_first_decision",
+                    model_calls=int(base_diagnostics["model_calls"]),
+                    elapsed_seconds=time.perf_counter() - started,
+                    safe_stop_reason="决策服务失败，未形成候选动作，控制器与机械臂均未执行。",
+                )
+            )
+            self.last_diagnostics["decision_status"] = "blocked"
+            return decision
         self.last_raw_response = raw
-        base_diagnostics["model_calls"] = 1
         self.last_diagnostics = dict(base_diagnostics)
         try:
             decision = _parse_decision(raw, context=context, observation=trusted_observation)
@@ -781,6 +946,10 @@ class QwenVisualDecisionObserver:
                     "first_output_rejected": True,
                     "candidate_action_from_first_output": False,
                     "protocol_retry_used": True,
+                    "first_error_type": classify_qwen_error(
+                        first_error,
+                        raw_response=self.last_raw_response,
+                    ),
                 }
             )
             self.last_diagnostics = dict(base_diagnostics)
@@ -790,12 +959,43 @@ class QwenVisualDecisionObserver:
                 error=first_error,
                 decision_number=max(1, int(decision_number)),
             )
-            raw = self._provider_chat(
-                [_vision_message(retry_prompt, image)],
-                max_tokens=DECISION_RETRY_TOKENS,
-            )
+            try:
+                raw = model_chat(
+                    _decision_messages(retry_prompt, image),
+                    max_tokens=DECISION_RETRY_TOKENS,
+                )
+            except VisionAgentError as service_error:
+                reason = f"Qwen格式修复请求失败，本轮安全阻塞：{service_error}"
+                decision = _local_blocked_decision(
+                    context,
+                    trusted_observation,
+                    reason=reason,
+                )
+                self._metrics["final_blocked_count"] += 1
+                self.last_diagnostics.update(
+                    failure_diagnostics(
+                        service_error,
+                        stage="requesting_protocol_retry",
+                        model_calls=int(base_diagnostics["model_calls"]),
+                        elapsed_seconds=time.perf_counter() - started,
+                        safe_stop_reason="格式修复请求失败，原始非法输出已丢弃，控制器与机械臂均未执行。",
+                    )
+                )
+                self.last_diagnostics.update(
+                    {
+                        "decision_status": "blocked",
+                        "first_output_rejected": True,
+                        "candidate_action_from_first_output": False,
+                    }
+                )
+                self.last_diagnostics["raw_response_length"] = len(
+                    self.last_raw_response
+                )
+                self.last_diagnostics["raw_response_excerpt"] = (
+                    self.last_raw_response[:1000]
+                )
+                return decision
             self.last_raw_response = raw
-            base_diagnostics["model_calls"] = 2
             self.last_diagnostics = dict(base_diagnostics)
             try:
                 decision = _parse_decision(
@@ -818,9 +1018,26 @@ class QwenVisualDecisionObserver:
                     {
                         "failed_stage": "parsing_protocol_retry",
                         "error": str(retry_error),
+                        "error_type": classify_qwen_error(
+                            retry_error,
+                            raw_response=self.last_raw_response,
+                        ),
                         "retry_failure_blocked": True,
                         "decision_status": "blocked",
+                        "elapsed_seconds": round(
+                            time.perf_counter() - started,
+                            3,
+                        ),
+                        "safe_stop_reason": (
+                            "两次格式输出均非法，所有输出已丢弃，控制器与机械臂均未执行。"
+                        ),
                     }
+                )
+                self.last_diagnostics["raw_response_length"] = len(
+                    self.last_raw_response
+                )
+                self.last_diagnostics["raw_response_excerpt"] = (
+                    self.last_raw_response[:1000]
                 )
                 return decision
             self._metrics["retry_success_count"] += 1
@@ -831,11 +1048,13 @@ class QwenVisualDecisionObserver:
             self._metrics["final_blocked_count"] += 1
         self.last_diagnostics.update(
             {
-                "model_calls": 2 if retry_used else 1,
+                "model_calls": int(base_diagnostics["model_calls"]),
                 "protocol_retry_used": retry_used,
                 "first_pass_success": first_pass,
+                "repair_retry_success": retry_used,
                 "decision_status": decision.proposal.status,
                 "decision_confidence": decision.confidence,
+                "elapsed_seconds": round(time.perf_counter() - started, 3),
             }
         )
         return decision
@@ -932,7 +1151,17 @@ def _decision_retry_prompt(
 - action只能选择可信候选已有element_id并复制原始字段与bounds；不能新建元素。
 - 找不到逐字匹配且唯一的可信候选就blocked；finished只引用可信证据ID或scene。
 - confirmation_gate未允许外部动作时blocked；每轮只允许一个动作，不要计划后续步骤。
-- 顶层只允许协议示例中的字段；这是第{decision_number}轮。不要Markdown。
+- 顶层只允许下方JSON中的字段；绝对不要action、actions、reasoning、analysis、plan或额外字段。
+- 这是第{decision_number}轮。不要Markdown，不要解释，不要把JSON转义成字符串。
+
+必须返回这个形状，并逐字保留身份字段：
+{{"protocol_version":"{QWEN_VISUAL_DECISION_PROTOCOL_VERSION}",
+"task_id":"{context.task_id}","device_id":"{context.device_id}","revision":{context.revision},
+"observation_id":"{observation.observation_id}","fingerprint":"{observation.fingerprint}",
+"page_state":{{"foreground_app_id":"unknown","screen_id":"unknown","summary":"短描述","overlays":[]}},
+"status":"blocked","next_action":null,"target_region":null,"expected_result":{{}},
+"confidence":0.0,"reason":"安全停止原因","completion_evidence_element_ids":[]}}
+若画面明确支持action或finished，只修改status及其协议规定字段，仍不得增加任何键。
 """
 
 
@@ -1131,6 +1360,140 @@ def _resolve_completion_evidence(
     return tuple(evidence)
 
 
+def _canonicalize_trusted_scene(
+    scene: UIScene,
+) -> tuple[UIScene, tuple[tuple[str, str], ...], tuple[dict[str, Any], ...]]:
+    """Collapse duplicate descriptions of one visual object, preserving bounds.
+
+    The canonical element is always one of the original observed elements. No
+    coordinate is averaged or invented. Strongly overlapping but semantically
+    conflicting elements stay separate and are reported as conflicts.
+    """
+
+    elements = list(scene.elements)
+    if len(elements) < 2:
+        return scene, (), ()
+    parents = list(range(len(elements)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    conflicts: list[dict[str, Any]] = []
+    for left in range(len(elements)):
+        for right in range(left + 1, len(elements)):
+            overlap = _bounds_overlap(elements[left].bounds, elements[right].bounds)
+            compatible = _elements_semantically_compatible(
+                elements[left],
+                elements[right],
+            )
+            if overlap["intersection_over_smaller"] >= 0.85 and compatible:
+                union(left, right)
+            elif overlap["iou"] >= 0.5:
+                conflicts.append(
+                    {
+                        "kind": "overlapping_semantic_conflict",
+                        "element_ids": [
+                            elements[left].element_id,
+                            elements[right].element_id,
+                        ],
+                        "iou": round(overlap["iou"], 4),
+                    }
+                )
+
+    groups: dict[int, list[UIElement]] = {}
+    for index, element in enumerate(elements):
+        groups.setdefault(find(index), []).append(element)
+    canonical: list[UIElement] = []
+    aliases: list[tuple[str, str]] = []
+    for group in groups.values():
+        selected = max(group, key=_canonical_element_rank)
+        canonical.append(selected)
+        if len(group) > 1:
+            duplicate_ids = sorted(item.element_id for item in group)
+            conflicts.append(
+                {
+                    "kind": "duplicate_visual_object_collapsed",
+                    "canonical_element_id": selected.element_id,
+                    "element_ids": duplicate_ids,
+                }
+            )
+            aliases.extend(
+                (item.element_id, selected.element_id)
+                for item in group
+                if item.element_id != selected.element_id
+            )
+    canonical.sort(key=lambda item: elements.index(item))
+    if len(canonical) == len(elements):
+        return scene, tuple(sorted(aliases)), tuple(conflicts)
+    return (
+        UIScene(
+            app_id=scene.app_id,
+            screen_id=scene.screen_id,
+            summary=scene.summary,
+            elements=tuple(canonical),
+            overlays=scene.overlays,
+            stable=scene.stable,
+            confidence=scene.confidence,
+            fingerprint=scene.fingerprint,
+            protocol_version=scene.protocol_version,
+        ),
+        tuple(sorted(aliases)),
+        tuple(conflicts),
+    )
+
+
+def _canonical_element_rank(element: UIElement) -> tuple[int, float, float]:
+    left, top, right, bottom = element.bounds
+    area = (right - left) * (bottom - top)
+    return (
+        ROLE_PRIORITY.get(element.role, 0),
+        float(element.confidence),
+        -area,
+    )
+
+
+def _elements_semantically_compatible(left: UIElement, right: UIElement) -> bool:
+    left_texts = {
+        text.strip().casefold()
+        for text in (left.label, *left.evidence)
+        if text.strip()
+    }
+    right_texts = {
+        text.strip().casefold()
+        for text in (right.label, *right.evidence)
+        if text.strip()
+    }
+    if left_texts and right_texts and left_texts.intersection(right_texts):
+        return True
+    return left.meaning.strip().casefold() == right.meaning.strip().casefold()
+
+
+def _bounds_overlap(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> dict[str, float]:
+    intersection_width = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
+    intersection_height = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
+    intersection = intersection_width * intersection_height
+    left_area = (left[2] - left[0]) * (left[3] - left[1])
+    right_area = (right[2] - right[0]) * (right[3] - right[1])
+    union = left_area + right_area - intersection
+    smaller = min(left_area, right_area)
+    return {
+        "iou": intersection / union if union > 0 else 0.0,
+        "intersection_over_smaller": intersection / smaller if smaller > 0 else 0.0,
+    }
+
+
 def _exact_text_candidate_block(
     context: QwenTaskContext,
     observation: TrustedObservation,
@@ -1138,13 +1501,11 @@ def _exact_text_candidate_block(
     """Reject missing or ambiguous structured exact-text targets locally."""
 
     for required_text in context.exact_text_requirements:
-        matches = []
-        for element in observation.scene.elements:
-            if float(element.confidence) < MIN_TARGET_CONFIDENCE:
-                continue
-            visible_texts = (element.label, *element.evidence)
-            if any(text == required_text for text in visible_texts):
-                matches.append(element.element_id)
+        matches = _matching_exact_text_candidates(
+            context,
+            observation,
+            required_text,
+        )
         if not matches:
             return (
                 f"当前可信候选中不存在逐字一致文字：{required_text}",
@@ -1164,18 +1525,41 @@ def _required_exact_candidate_ids(
 ) -> set[str]:
     result: set[str] = set()
     for required_text in context.exact_text_requirements:
-        matches = [
-            element.element_id
-            for element in observation.scene.elements
-            if float(element.confidence) >= MIN_TARGET_CONFIDENCE
-            and required_text in (element.label, *element.evidence)
-        ]
+        matches = _matching_exact_text_candidates(
+            context,
+            observation,
+            required_text,
+        )
         if len(matches) != 1:
             raise GenericStepPlanningError(
                 "逐字一致文字约束缺少本地唯一可信候选。"
             )
         result.add(matches[0])
     return result
+
+
+def _matching_exact_text_candidates(
+    context: QwenTaskContext,
+    observation: TrustedObservation,
+    required_text: str,
+) -> list[str]:
+    roles = set(context.exact_text_target_roles)
+    meanings = set(context.exact_text_target_meanings)
+    matches: list[str] = []
+    for element in observation.scene.elements:
+        if float(element.confidence) < MIN_TARGET_CONFIDENCE:
+            continue
+        if required_text not in (element.label, *element.evidence):
+            continue
+        if roles and element.role not in roles:
+            continue
+        if meanings and element.meaning.strip().casefold() not in meanings:
+            continue
+        if context.current_external_impact != "read_only" and not roles:
+            if element.role not in ACTIONABLE_EXACT_TEXT_ROLES:
+                continue
+        matches.append(element.element_id)
+    return matches
 
 
 def _local_blocked_decision(
@@ -1210,6 +1594,20 @@ def _vision_message(prompt: str, image: Image.Image) -> dict[str, Any]:
             {"type": "image_url", "image_url": {"url": _image_data_url(image)}},
         ],
     }
+
+
+def _decision_messages(prompt: str, image: Image.Image) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是受本地协议约束的单步视觉选择器。只输出一个语法完整的JSON对象；"
+                "禁止Markdown、解释、思考过程、reasoning、analysis、额外字段、代码围栏"
+                "或JSON对象前后的任何文字。"
+            ),
+        },
+        _vision_message(prompt, image),
+    ]
 
 
 def _require_dict(value: Any, name: str) -> dict[str, Any]:

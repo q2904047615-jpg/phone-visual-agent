@@ -39,7 +39,7 @@ class FakeProvider:
 
 
 class SequenceProvider(FakeProvider):
-    def __init__(self, responses: list[str | dict]) -> None:
+    def __init__(self, responses: list[str | dict | BaseException]) -> None:
         super().__init__({})
         self.responses = list(responses)
         self.max_tokens_seen: list[int] = []
@@ -56,6 +56,8 @@ class SequenceProvider(FakeProvider):
         self.max_tokens_seen.append(max_tokens)
         self.call_options = {"timeout": timeout, "max_attempts": max_attempts}
         value = self.responses.pop(0)
+        if isinstance(value, BaseException):
+            raise value
         return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
@@ -182,6 +184,58 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(provider.calls, 2)
         self.assertEqual(provider.max_tokens_seen, [800, 600])
         self.assertTrue(observer.last_diagnostics["compact_retry_used"])
+        self.assertEqual(observer.last_diagnostics["model_calls"], 2)
+        self.assertEqual(
+            len(observer.last_diagnostics["model_call_elapsed_seconds"]),
+            2,
+        )
+        self.assertGreaterEqual(observer.last_diagnostics["elapsed_seconds"], 0.0)
+
+    def test_service_disconnect_is_not_misclassified_as_format_retry(self) -> None:
+        provider = SequenceProvider(
+            [VisionAgentError("千问视觉连接连续1次中断：Server disconnected")]
+        )
+        observer = GenericSceneObserver(provider)
+        with self.assertRaisesRegex(VisionAgentError, "Server disconnected"):
+            observer.observe(frames=stable_frames())
+        self.assertEqual(provider.calls, 1)
+        self.assertFalse(observer.last_diagnostics["format_retry_used"])
+        self.assertEqual(observer.last_diagnostics["error_type"], "service_disconnect")
+        self.assertEqual(observer.last_diagnostics["model_calls"], 1)
+        self.assertIn("未建立可信候选", observer.last_diagnostics["safe_stop_reason"])
+
+    def test_targeted_invalid_json_uses_the_only_format_retry(self) -> None:
+        first = scene_payload()
+        first["elements"] = []
+        first["summary"] = "未知首页"
+        refined = scene_payload()
+        provider = SequenceProvider([first, "{", refined])
+        observer = GenericSceneObserver(provider)
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "查找目标按钮"},
+        )
+        self.assertEqual(scene.elements[0].element_id, "e1")
+        self.assertEqual(provider.calls, 3)
+        self.assertEqual(provider.max_tokens_seen, [800, 1200, 1200])
+        self.assertTrue(observer.last_diagnostics["format_retry_used"])
+        self.assertTrue(observer.last_diagnostics["repair_retry_success"])
+
+    def test_observation_never_uses_two_format_repairs(self) -> None:
+        first_retry = scene_payload()
+        first_retry["elements"] = []
+        first_retry["summary"] = "未知首页"
+        provider = SequenceProvider(["{", first_retry, "{"])
+        observer = GenericSceneObserver(provider)
+        with self.assertRaises(VisionAgentError):
+            observer.observe(
+                frames=stable_frames(),
+                goal_context={"objective": "查找目标按钮"},
+            )
+        self.assertEqual(provider.calls, 3)
+        self.assertEqual(provider.max_tokens_seen, [800, 600, 1200])
+        self.assertTrue(observer.last_diagnostics["format_retry_used"])
+        self.assertFalse(observer.last_diagnostics["repair_retry_success"])
 
     def test_single_evidence_string_is_normalized_before_strict_validation(self) -> None:
         payload = scene_payload()
@@ -265,7 +319,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         )
         self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [800, 800])
+        self.assertEqual(provider.max_tokens_seen, [800, 1200])
         self.assertEqual(scene.elements[0].label, "微信")
         self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
 

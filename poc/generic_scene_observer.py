@@ -4,11 +4,17 @@ import hashlib
 import json
 import re
 import threading
+import time
 from typing import Any
 
 from PIL import Image
 
 from observation_images import measure_frame_sharpness, measure_local_stability
+from qwen_runtime_errors import (
+    FORMAT_ERROR_TYPES,
+    classify_qwen_error,
+    failure_diagnostics,
+)
 from ui_scene import ALLOWED_ROLES, UI_SCENE_PROTOCOL_VERSION, UIScene, UISceneError
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
@@ -16,7 +22,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 GENERIC_SCENE_OBSERVER_VERSION = "2026-08-10-generic-scene-observer-v5"
 COMPACT_OUTPUT_TOKENS = 800
 COMPACT_RETRY_TOKENS = 600
-TARGETED_OUTPUT_TOKENS = 800
+TARGETED_OUTPUT_TOKENS = 1200
 OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 12
 
@@ -80,11 +86,29 @@ class GenericSceneObserver:
         frames: list[Image.Image],
         goal_context: dict[str, Any] | None = None,
     ) -> UIScene:
+        self.last_raw_response = ""
         self.last_diagnostics = {}
         self._set_stage("checking_stability")
+        started = time.perf_counter()
         model_calls = 0
         compact_retry_used = False
+        format_retry_used = False
         targeted_refinement_used = False
+        model_call_elapsed_seconds: list[float] = []
+        model_call_token_budgets: list[int] = []
+
+        def model_chat(messages: list[dict[str, Any]], *, max_tokens: int) -> str:
+            nonlocal model_calls
+            model_calls += 1
+            model_call_token_budgets.append(max_tokens)
+            call_started = time.perf_counter()
+            try:
+                return self._provider_chat(messages, max_tokens=max_tokens)
+            finally:
+                model_call_elapsed_seconds.append(
+                    round(time.perf_counter() - call_started, 3)
+                )
+
         try:
             if len(frames) < 4:
                 raise VisionAgentError("通用页面观察至少需要4帧。")
@@ -113,6 +137,7 @@ class GenericSceneObserver:
                 "image_url": {"url": _image_data_url(frame)},
             }
             first_messages = [
+                _json_only_system_message(),
                 {
                     "role": "user",
                     "content": [
@@ -124,8 +149,7 @@ class GenericSceneObserver:
 
             self._set_stage("waiting_compact_observation")
             try:
-                model_calls += 1
-                raw = self._provider_chat(
+                raw = model_chat(
                     first_messages,
                     max_tokens=COMPACT_OUTPUT_TOKENS,
                 )
@@ -133,11 +157,20 @@ class GenericSceneObserver:
                 self._set_stage("parsing_compact_observation")
                 scene = _parse_scene(raw, fingerprint=fingerprint)
             except VisionAgentError as first_error:
-                if not _compact_retry_allowed(first_error):
+                first_error_type = classify_qwen_error(
+                    first_error,
+                    raw_response=self.last_raw_response,
+                )
+                if (
+                    first_error_type not in FORMAT_ERROR_TYPES
+                    or not _compact_retry_allowed(first_error)
+                ):
                     raise
                 compact_retry_used = True
+                format_retry_used = True
                 self._set_stage("waiting_compact_retry")
                 retry_messages = [
+                    _json_only_system_message(),
                     {
                         "role": "user",
                         "content": [
@@ -149,8 +182,7 @@ class GenericSceneObserver:
                         ],
                     }
                 ]
-                model_calls += 1
-                raw = self._provider_chat(
+                raw = model_chat(
                     retry_messages,
                     max_tokens=COMPACT_RETRY_TOKENS,
                 )
@@ -162,6 +194,7 @@ class GenericSceneObserver:
                 targeted_refinement_used = True
                 self._set_stage("waiting_targeted_refinement")
                 detail_messages = [
+                    _json_only_system_message(),
                     {
                         "role": "user",
                         "content": [
@@ -176,23 +209,64 @@ class GenericSceneObserver:
                         ],
                     }
                 ]
-                model_calls += 1
-                raw = self._provider_chat(
-                    detail_messages,
-                    max_tokens=TARGETED_OUTPUT_TOKENS,
-                )
-                self.last_raw_response = raw
-                self._set_stage("parsing_targeted_refinement")
-                # A failed refinement must stop the controller. Returning the
-                # earlier ambiguous scene would allow action on stale evidence.
-                scene = _parse_scene(raw, fingerprint=fingerprint)
+                try:
+                    raw = model_chat(
+                        detail_messages,
+                        max_tokens=TARGETED_OUTPUT_TOKENS,
+                    )
+                    self.last_raw_response = raw
+                    self._set_stage("parsing_targeted_refinement")
+                    # A failed refinement must stop the controller. Returning the
+                    # earlier ambiguous scene would allow action on stale evidence.
+                    scene = _parse_scene(raw, fingerprint=fingerprint)
+                except VisionAgentError as targeted_error:
+                    targeted_error_type = classify_qwen_error(
+                        targeted_error,
+                        raw_response=self.last_raw_response,
+                    )
+                    if (
+                        format_retry_used
+                        or targeted_error_type not in FORMAT_ERROR_TYPES
+                    ):
+                        raise
+                    format_retry_used = True
+                    self._set_stage("waiting_compact_retry")
+                    targeted_retry_messages = [
+                        _json_only_system_message(),
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": _targeted_retry_prompt(
+                                        context,
+                                        targeted_error,
+                                    ),
+                                },
+                                image_part,
+                            ],
+                        }
+                    ]
+                    raw = model_chat(
+                        targeted_retry_messages,
+                        max_tokens=TARGETED_OUTPUT_TOKENS,
+                    )
+                    self.last_raw_response = raw
+                    self._set_stage("parsing_compact_retry")
+                    scene = _parse_scene(raw, fingerprint=fingerprint)
 
             self.last_diagnostics = {
                 "observer_version": GENERIC_SCENE_OBSERVER_VERSION,
                 "strategy": "compact_then_targeted_on_demand",
                 "model_calls": model_calls,
                 "compact_retry_used": compact_retry_used,
+                "format_retry_used": format_retry_used,
+                "first_pass_success": not format_retry_used,
+                "repair_retry_success": format_retry_used,
                 "targeted_refinement_used": targeted_refinement_used,
+                "model_call_elapsed_seconds": model_call_elapsed_seconds,
+                "model_call_token_budgets": model_call_token_budgets,
+                "elapsed_seconds": round(time.perf_counter() - started, 3),
                 "local_stability": stability.to_dict(),
                 "selected_frame_index": selected_frame_index,
                 "frame_sharpness_scores": [
@@ -201,28 +275,40 @@ class GenericSceneObserver:
                 "frame_size": list(frame.size),
                 "fingerprint": fingerprint,
                 "element_count": len(scene.elements),
-                "output_token_budget": (
-                    TARGETED_OUTPUT_TOKENS
-                    if targeted_refinement_used
-                    else (
-                        COMPACT_RETRY_TOKENS
-                        if compact_retry_used
-                        else COMPACT_OUTPUT_TOKENS
-                    )
-                ),
+                "output_token_budget": model_call_token_budgets[-1],
             }
             self._set_stage("completed")
             return scene
-        except Exception:
+        except Exception as exc:
+            failed_stage = self.status()["last_stage"]
             self._set_stage("failed")
-            if not self.last_diagnostics:
-                self.last_diagnostics = {
+            base = dict(self.last_diagnostics)
+            base.update(
+                {
                     "observer_version": GENERIC_SCENE_OBSERVER_VERSION,
                     "model_calls": model_calls,
                     "compact_retry_used": compact_retry_used,
+                    "format_retry_used": format_retry_used,
+                    "first_pass_success": False,
+                    "repair_retry_success": False,
                     "targeted_refinement_used": targeted_refinement_used,
-                    "failed_stage": self.status()["last_stage"],
+                    "model_call_elapsed_seconds": model_call_elapsed_seconds,
+                    "model_call_token_budgets": model_call_token_budgets,
                 }
+            )
+            base.update(
+                failure_diagnostics(
+                    exc,
+                    raw_response=self.last_raw_response,
+                    stage=failed_stage,
+                    model_calls=model_calls,
+                    elapsed_seconds=time.perf_counter() - started,
+                    safe_stop_reason="观察阶段未建立可信候选，决策模型与控制器均未执行动作。",
+                )
+            )
+            base["raw_response_length"] = len(self.last_raw_response)
+            base["raw_response_excerpt"] = self.last_raw_response[:1000]
+            self.last_diagnostics = base
             raise
         finally:
             self._set_stage("idle")
@@ -247,6 +333,16 @@ class GenericSceneObserver:
             if "unexpected keyword" not in text and "keyword argument" not in text:
                 raise
             return self.provider._chat(messages, max_tokens=max_tokens)
+
+
+def _json_only_system_message() -> dict[str, str]:
+    return {
+        "role": "system",
+        "content": (
+            "你是只读页面观察器。只输出一个语法完整的JSON对象；禁止Markdown、解释、"
+            "思考过程、代码围栏、JSON字符串套壳或对象前后的任何文字。"
+        ),
+    }
 
 
 def _compact_prompt(context: dict[str, Any]) -> str:
@@ -279,7 +375,8 @@ def _compact_retry_prompt(context: dict[str, Any], error: Exception) -> str:
     return f"""
 上一次快速观察超时或JSON不完整，控制器没有执行任何动作。请重新独立观察同一张图。
 目标上下文：{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
-只返回一个最小、完整、可解析JSON；elements最多6个。没有把握就写unknown和空elements，禁止猜。
+只返回一个最小、完整、可解析JSON；不要转义成字符串，不要输出reasoning或说明文字。
+elements最多6个。没有把握就写unknown和空elements，禁止猜。
 格式必须是：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"短描述","elements":[],"overlays":[],
@@ -288,6 +385,20 @@ def _compact_retry_prompt(context: dict[str, Any], error: Exception) -> str:
 role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
 container仅表示与目标有关的页面内容区域；tab_group、tab_bar、navigation_bar、toolbar等其他非点击结构只写进summary，不要放入elements。
 与目标直接相关的元素写states.goal_relevant=true。禁止任何动作或计划字段。不要Markdown。
+"""
+
+
+def _targeted_retry_prompt(context: dict[str, Any], error: Exception) -> str:
+    return f"""
+上一次目标精查输出不是完整、合法的页面观察JSON，控制器没有产生任何候选动作。
+错误摘要：{str(error)[:300]}
+目标上下文：{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
+这是本轮观察唯一一次格式修复。请重新独立观察原图，只返回最小完整JSON；没有可靠目标就返回空elements并降低confidence。
+格式：
+{{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
+"screen_id":"unknown","summary":"短描述","elements":[],"overlays":[],
+"stable":true,"confidence":0.0,"fingerprint":""}}
+元素仅允许element_id、role、meaning、label、bounds、confidence、states、evidence；禁止动作、计划和裸坐标。不要Markdown。
 """
 
 
@@ -310,7 +421,7 @@ def _targeted_prompt(
 快速观察摘要：{json.dumps(compact_scene, ensure_ascii=False, separators=(',', ':'))}
 
 重新检查原图中与目标直接相关的文字、图标、输入框、列表项和最上层弹层。
-只保留最多8个最相关元素；目标元素必须states.goal_relevant=true。看不清或不唯一就不要输出，
+只保留最多4个最相关元素；目标元素必须states.goal_relevant=true。看不清或不唯一就不要输出，
 并降低场景confidence。坐标0..1000，只框元素自身。禁止任何动作、计划或建议字段。
 只返回完整JSON：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",

@@ -1108,7 +1108,7 @@ class QwenVisualDecisionObserver:
                 messages,
                 max_tokens=max_tokens,
                 timeout=DECISION_TIMEOUT_SECONDS,
-                max_attempts=1,
+                max_attempts=2,
             )
         except TypeError as exc:
             text = str(exc)

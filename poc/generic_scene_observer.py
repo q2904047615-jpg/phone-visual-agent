@@ -324,7 +324,7 @@ class GenericSceneObserver:
                 messages,
                 max_tokens=max_tokens,
                 timeout=OBSERVATION_TIMEOUT_SECONDS,
-                max_attempts=1,
+                max_attempts=2,
             )
         except TypeError as exc:
             # Keep simple test providers and local replay providers compatible.

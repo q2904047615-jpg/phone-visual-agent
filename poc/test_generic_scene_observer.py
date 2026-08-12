@@ -123,7 +123,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         self.assertEqual(provider.max_tokens, 800)
         self.assertEqual(provider.call_options["timeout"], 60.0)
-        self.assertEqual(provider.call_options["max_attempts"], 1)
+        self.assertEqual(provider.call_options["max_attempts"], 2)
 
     def test_unstable_frames_do_not_call_model(self) -> None:
         provider = FakeProvider(scene_payload())

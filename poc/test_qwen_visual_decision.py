@@ -38,6 +38,7 @@ class FakeProvider:
     def _chat(self, messages, max_tokens, **kwargs) -> str:
         self.calls += 1
         self.messages = messages
+        self.last_call_options = dict(kwargs)
         return json.dumps(self.payload, ensure_ascii=False)
 
 
@@ -403,6 +404,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
     def test_action_binds_to_preexisting_trusted_candidate(self) -> None:
         provider = FakeProvider(action_payload(self.context, self.observation))
         _observer, decision = self.decide(provider)
+        self.assertEqual(provider.last_call_options["max_attempts"], 2)
         self.assertEqual(decision.proposal.action.params["element_id"], "settings_icon")
         self.assertEqual(
             decision.target_region.bounds,

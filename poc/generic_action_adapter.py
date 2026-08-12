@@ -213,11 +213,24 @@ class GenericSingleActionAdapter:
         last_error: Exception | None = None
         for attempt in range(1, self.post_action_max_observations + 1):
             attempt_deadline = time.monotonic() + self.post_action_timeout
-            frames, paths = self._capture_stable_post_action_frames(
-                deadline=attempt_deadline,
-                evidence_dir=evidence_dir,
-                prefix=f"{evidence_prefix}_after_attempt_{attempt}",
-            )
+            try:
+                frames, paths = self._capture_stable_post_action_frames(
+                    deadline=attempt_deadline,
+                    evidence_dir=evidence_dir,
+                    prefix=f"{evidence_prefix}_after_attempt_{attempt}",
+                )
+            except GenericActionAdapterError as exc:
+                capture_evidence = all_paths + tuple(exc.evidence)
+                prior_errors = (
+                    "；此前" + "；".join(observation_errors)
+                    if observation_errors
+                    else ""
+                )
+                raise GenericActionAdapterError(
+                    f"动作后画面采集失败：{exc}{prior_errors}",
+                    evidence=capture_evidence,
+                    observation_errors=tuple(observation_errors),
+                ) from exc
             all_paths += paths
             try:
                 after = self.observer.observe(

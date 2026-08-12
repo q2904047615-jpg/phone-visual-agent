@@ -74,6 +74,21 @@ class SequenceCapture:
         return Image.new("RGB", (540, 960), self.colors[index])
 
 
+class SecondPostCaptureFailureAdapter(GenericSingleActionAdapter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.post_capture_calls = 0
+
+    def _capture_stable_post_action_frames(self, **kwargs):
+        self.post_capture_calls += 1
+        if self.post_capture_calls == 2:
+            raise GenericActionAdapterError(
+                "动作后画面在限定时间内没有稳定",
+                evidence=("second_capture_timeout.jpg",),
+            )
+        return super()._capture_stable_post_action_frames(**kwargs)
+
+
 def goal():
     return GenericIntentDraft(
         understood=True,
@@ -729,6 +744,47 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(caught.exception.physical_actions, 1)
         self.assertEqual(observer.calls, 3)
         self.assertEqual(capture.calls, 12)
+        self.assertEqual(robot.actions, [("tap", 300, 400)])
+
+    def test_second_capture_failure_keeps_first_format_error_and_evidence(self):
+        observer = FakeSceneObserver(
+            [
+                scene("before", element_id="fresh"),
+                VisionAgentError("模型返回的 JSON 无法解析：first"),
+            ]
+        )
+        robot = FakeRobot()
+        adapter = SecondPostCaptureFailureAdapter(
+            capture=SequenceCapture(["gray"] * 8),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=1,
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaises(GenericActionAdapterError) as caught:
+                adapter.execute(
+                    requested_action=SemanticAction(
+                        node_id="generic_step_1",
+                        action="tap_semantic",
+                        params={"element_id": "e1", "target": "app_icon"},
+                    ),
+                    planned_scene=scene("planned"),
+                    goal=goal(),
+                    confirmed=True,
+                    evidence_dir=Path(temp),
+                )
+
+        self.assertEqual(caught.exception.physical_actions, 1)
+        self.assertEqual(
+            caught.exception.observation_errors,
+            ("第1轮动作后观察失败：模型返回的 JSON 无法解析：first",),
+        )
+        self.assertEqual(len(caught.exception.evidence), 9)
+        self.assertEqual(caught.exception.evidence[-1], "second_capture_timeout.jpg")
+        self.assertEqual(observer.calls, 2)
         self.assertEqual(robot.actions, [("tap", 300, 400)])
 
     def test_post_action_non_format_failure_is_not_retried(self):

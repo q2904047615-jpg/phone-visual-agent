@@ -12,9 +12,7 @@
         "dismiss_overlay",
         "swipe",
         "back",
-        "wait_for_change",
-        "input_verified_text",
-        "long_press"
+        "wait_for_change"
       ]
     }
   ]

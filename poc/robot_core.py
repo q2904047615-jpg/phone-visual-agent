@@ -526,13 +526,15 @@ class RobotController:
             "swipe",
             "back",
             "wait_for_change",
-            "input_verified_text",
-            "long_press",
         }
         self.verified_actions = frozenset(
             default_actions if verified_actions is None else verified_actions
         )
-        allowed_actions = default_actions | {"drag"}
+        allowed_actions = default_actions | {
+            "input_verified_text",
+            "long_press",
+            "drag",
+        }
         unexpected = self.verified_actions - allowed_actions
         if unexpected:
             raise ValueError(
@@ -553,6 +555,12 @@ class RobotController:
                 "drag",
             )
         }
+
+    def _require_verified_action(self, action: str, label: str) -> None:
+        if action not in self.verified_actions:
+            raise WorkflowNotReady(
+                f"当前设备尚未完成{label}真机验收，拒绝执行。"
+            )
 
     def request_stop(self) -> None:
         self.stop_event.set()
@@ -632,6 +640,17 @@ class RobotController:
 
     def vision_tap_relative(self, x: int, y: int) -> tuple[int, int]:
         """Tap a Qwen3-VL coordinate expressed on a 1000×1000 grid."""
+        self._require_verified_action("tap_semantic", "点击")
+        return self._vision_press_relative(
+            x,
+            y,
+            hold_seconds=float(load_workflow_config()["vision_agent"]["tap_hold"]),
+        )
+
+    def vision_dismiss_overlay_relative(self, x: int, y: int) -> tuple[int, int]:
+        """Dismiss one observed overlay through its separately verified entry."""
+
+        self._require_verified_action("dismiss_overlay", "关闭弹层")
         return self._vision_press_relative(
             x,
             y,
@@ -646,6 +665,7 @@ class RobotController:
     ) -> tuple[int, int]:
         """Long-press one calibrated visual target without changing its point."""
 
+        self._require_verified_action("long_press", "长按")
         if not 0.5 <= float(hold_seconds) <= 2.0:
             raise ValueError("通用长按时间必须在0.5～2.0秒之间。")
         return self._vision_press_relative(x, y, hold_seconds=float(hold_seconds))
@@ -659,8 +679,7 @@ class RobotController:
     ) -> tuple[tuple[int, int], tuple[int, int]]:
         """Drag between two calibrated visual points through the seller UI."""
 
-        if "drag" not in self.verified_actions:
-            raise WorkflowNotReady("当前设备尚未完成任意两点拖动真机验收。")
+        self._require_verified_action("drag", "任意两点拖动")
         values = (start_x, start_y, end_x, end_y)
         if any(not 0 <= value <= 1000 for value in values):
             raise ValueError("拖动视觉坐标必须全部在0～1000之间。")
@@ -772,6 +791,10 @@ class RobotController:
         return point
 
     def vision_android_home(self) -> tuple[int, int]:
+        # Android Home is a navigation tap and has no separate action in the
+        # universal protocol.  It therefore inherits the verified semantic-tap
+        # capability instead of silently becoming an additional primitive.
+        self._require_verified_action("tap_semantic", "主页导航点击")
         cfg = load_workflow_config()["vision_agent"]
         return self._vision_nav_tap(
             float(cfg["android_home_x_ratio"]),
@@ -779,6 +802,7 @@ class RobotController:
         )
 
     def vision_android_back(self) -> tuple[int, int]:
+        self._require_verified_action("back", "返回")
         cfg = load_workflow_config()["vision_agent"]
         return self._vision_nav_tap(
             float(cfg["android_back_x_ratio"]),
@@ -786,6 +810,7 @@ class RobotController:
         )
 
     def _vision_swipe(self, direction: str) -> None:
+        self._require_verified_action("swipe", "滑动")
         hwnd, _title = legacy.find_window(self.title)
         self._checkpoint()
         legacy.configure_swipe(hwnd, direction)
@@ -805,6 +830,7 @@ class RobotController:
         self._vision_swipe("right")
 
     def vision_type_text(self, text: str) -> None:
+        self._require_verified_action("input_verified_text", "输入文字")
         hwnd, _title = legacy.find_window(self.title)
         self._checkpoint()
         self._invoke_seller_input(hwnd, text)
@@ -816,6 +842,7 @@ class RobotController:
         pinyin: str,
         keyboard_layout: dict[str, Any] | None = None,
     ) -> None:
+        self._require_verified_action("input_verified_text", "输入文字")
         del text
         if not re.fullmatch(r"[a-z]{1,30}", pinyin):
             raise ValueError("拼音必须是1～30个小写英文字母。")
@@ -873,6 +900,7 @@ class RobotController:
         keyboard and the exact incorrect text. The validated character count
         determines the exact number of physical backspace taps.
         """
+        self._require_verified_action("input_verified_text", "输入文字")
         if (
             isinstance(delete_count, bool)
             or not isinstance(delete_count, int)
@@ -1206,6 +1234,7 @@ class RobotController:
         return point
 
     def _invoke_seller_input(self, hwnd: int, text: str) -> None:
+        self._require_verified_action("input_verified_text", "输入文字")
         if not text or len(text) > 100:
             raise ValueError("文字长度必须在 1～100 个字符之间。")
         if "\n" in text or "\r" in text or not ALLOWED_TEXT_RE.fullmatch(text):
@@ -1271,6 +1300,7 @@ class RobotController:
             return handler(params)
 
     def like_current_douyin(self, _params: dict[str, Any]) -> dict[str, Any]:
+        self._require_verified_action("tap_semantic", "点击")
         ready = workflow_readiness()["douyin_like"]
         if not ready["ready"]:
             raise WorkflowNotReady("抖音首页模板尚未采集。")
@@ -1358,6 +1388,8 @@ class RobotController:
         }
 
     def comment_current_douyin(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_verified_action("input_verified_text", "输入文字")
+        self._require_verified_action("tap_semantic", "点击")
         text = str(params.get("text", "")).strip()
         ready = workflow_readiness()["douyin_comment"]
         if not ready["ready"]:
@@ -1419,6 +1451,8 @@ class RobotController:
         }
 
     def send_wechat_text(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_verified_action("input_verified_text", "输入文字")
+        self._require_verified_action("tap_semantic", "点击")
         text = str(params.get("text", "")).strip()
         ready = workflow_readiness()["wechat"]
         if not ready["ready"]:
@@ -1620,6 +1654,10 @@ class MockRobotController(RobotController):
 
     def vision_tap_relative(self, x: int, y: int) -> tuple[int, int]:
         self.executions.append({"action": "tap", "coordinate": [x, y]})
+        return x, y
+
+    def vision_dismiss_overlay_relative(self, x: int, y: int) -> tuple[int, int]:
+        self.executions.append({"action": "dismiss_overlay", "coordinate": [x, y]})
         return x, y
 
     def vision_long_press_relative(

@@ -125,6 +125,92 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "尚未完成任意两点拖动真机验收"):
             controller.vision_drag_relative(100, 200, 700, 800)
 
+    def test_unverified_input_and_long_press_fail_before_hardware_access(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={
+                "tap_semantic",
+                "dismiss_overlay",
+                "swipe",
+                "back",
+                "wait_for_change",
+            },
+        )
+
+        with patch("robot_core.legacy.find_window") as find_window:
+            with self.assertRaisesRegex(Exception, "输入.*真机验收"):
+                controller.vision_type_text("通用Agent验收草稿")
+            with self.assertRaisesRegex(Exception, "长按.*真机验收"):
+                controller.vision_long_press_relative(500, 500)
+
+        find_window.assert_not_called()
+
+    def test_every_unverified_physical_primitive_fails_before_hardware_access(self):
+        controller = RobotController(title="test", verified_actions=set())
+
+        operations = (
+            ("点击", lambda: controller.vision_tap_relative(500, 500)),
+            ("主页导航", controller.vision_android_home),
+            ("滑动", controller.vision_swipe_up),
+            ("返回", controller.vision_android_back),
+            ("输入", lambda: controller.vision_type_text("草稿")),
+            ("拼音输入", lambda: controller.vision_type_pinyin("草稿", "caogao")),
+            ("退格清空", lambda: controller.vision_clear_text(delete_count=2)),
+            ("长按", lambda: controller.vision_long_press_relative(500, 500)),
+            ("拖动", lambda: controller.vision_drag_relative(100, 100, 900, 900)),
+        )
+        with patch("robot_core.legacy.find_window") as find_window:
+            for label, operation in operations:
+                with self.subTest(label=label), self.assertRaisesRegex(
+                    Exception,
+                    "尚未完成|尚未验证",
+                ):
+                    operation()
+
+        find_window.assert_not_called()
+
+    def test_dismiss_capability_cannot_authorize_an_arbitrary_tap(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"dismiss_overlay"},
+        )
+
+        with patch("robot_core.legacy.find_window") as find_window:
+            with self.assertRaisesRegex(Exception, "点击.*真机验收"):
+                controller.vision_tap_relative(500, 500)
+
+        find_window.assert_not_called()
+
+    def test_dismiss_uses_its_own_verified_physical_entry(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"dismiss_overlay"},
+        )
+
+        with patch.object(
+            controller,
+            "_vision_press_relative",
+            return_value=(270, 480),
+        ) as press:
+            point = controller.vision_dismiss_overlay_relative(500, 500)
+
+        self.assertEqual(point, (270, 480))
+        press.assert_called_once()
+
+    def test_legacy_text_workflows_fail_before_hardware_when_input_is_unverified(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"tap_semantic"},
+        )
+
+        with patch("robot_core.legacy.find_window") as find_window:
+            with self.assertRaisesRegex(Exception, "输入.*真机验收"):
+                controller.comment_current_douyin({"text": "草稿"})
+            with self.assertRaisesRegex(Exception, "输入.*真机验收"):
+                controller.send_wechat_text({"text": "草稿"})
+
+        find_window.assert_not_called()
+
     def test_verified_drag_uses_two_calibrated_points_once(self):
         controller = RobotController(
             title="test",
@@ -3686,6 +3772,14 @@ class StoreAndQueueTests(unittest.TestCase):
 
 
 class DeviceControllerRegistryTests(unittest.TestCase):
+    def test_default_real_device_advertises_only_actions_with_live_evidence(self) -> None:
+        registry = web_app.DeviceControllerRegistry(web_app.DEVICE_REGISTRY_PATH, mock=False)
+        controller = registry.controller(registry.default_device_id)
+
+        self.assertFalse(controller.hardware_capabilities()["input_verified_text"])
+        self.assertFalse(controller.hardware_capabilities()["long_press"])
+        self.assertFalse(controller.hardware_capabilities()["drag"])
+
     def test_two_devices_have_independent_controllers_and_calibrations(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

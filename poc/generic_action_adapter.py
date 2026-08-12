@@ -113,8 +113,8 @@ class GenericSingleActionAdapter:
         )
         if available("tap_semantic", "vision_tap_relative"):
             supported.add("tap_semantic")
-            if bool(declared.get("dismiss_overlay", True)):
-                supported.add("dismiss_overlay")
+        if available("dismiss_overlay", "vision_dismiss_overlay_relative"):
+            supported.add("dismiss_overlay")
         if bool(declared.get("swipe", True)) and any(
             callable(getattr(self.robot, f"vision_swipe_{direction}", None))
             for direction in ("up", "down", "left", "right")
@@ -410,7 +410,10 @@ class GenericSingleActionAdapter:
                 x = max(0, min(1000, round(resolved.normalized_point[0] * 1000)))
                 y = max(0, min(1000, round(resolved.normalized_point[1] * 1000)))
                 physical_actions = 1
-                robot_result = self.robot.vision_tap_relative(x, y)
+                if resolved.kind == "dismiss_overlay":
+                    robot_result = self.robot.vision_dismiss_overlay_relative(x, y)
+                else:
+                    robot_result = self.robot.vision_tap_relative(x, y)
             elif resolved.kind == "swipe":
                 method = getattr(self.robot, f"vision_swipe_{resolved.direction}", None)
                 if not callable(method):

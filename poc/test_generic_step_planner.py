@@ -55,6 +55,10 @@ class FakeRobot:
         self.actions.append(("tap", x, y))
         return (x, y)
 
+    def vision_dismiss_overlay_relative(self, x, y):
+        self.actions.append(("dismiss", x, y))
+        return (x, y)
+
     def vision_swipe_up(self):
         self.actions.append(("swipe", "up"))
 
@@ -1008,6 +1012,30 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(caught.exception.evidence[-1], "second_capture_timeout.jpg")
         self.assertEqual(observer.calls, 2)
         self.assertEqual(robot.actions, [("tap", 300, 400)])
+
+    def test_confirmed_dismiss_uses_dedicated_physical_entry(self):
+        planned = scene("planned", bounds=(0.1, 0.2, 0.3, 0.4))
+        fresh = scene("before", element_id="fresh", bounds=(0.11, 0.21, 0.31, 0.41))
+        after = scene("after", screen_id="app_home", element_id="after")
+        robot = FakeRobot()
+        action = SemanticAction(
+            node_id="generic_step_1",
+            action="dismiss_overlay",
+            params={"element_id": "e1", "target": "close"},
+        )
+
+        result = self._adapter(
+            FakeSceneObserver([fresh, after]),
+            robot,
+        ).execute(
+            requested_action=action,
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual(result.physical_actions, 1)
+        self.assertEqual(robot.actions, [("dismiss", 210, 310)])
 
     def test_second_capture_failure_keeps_first_semantic_mismatch(self):
         unchanged = scene("camera-noise-only", element_id="after")

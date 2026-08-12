@@ -7,6 +7,10 @@ import unittest
 from pathlib import Path
 
 from device_exclusivity import InterProcessLease
+from universal_agent_orchestrator import (
+    DeviceTaskRegistry,
+    UniversalAgentOrchestratorError,
+)
 
 
 class InterProcessLeaseTests(unittest.TestCase):
@@ -56,6 +60,64 @@ lease.release()
                     child.stderr.close()
             self.assertEqual(0, child.returncode)
             self.assertIsNone(InterProcessLease.active_payload(path))
+
+    def test_device_registry_blocks_same_device_but_allows_another_cross_process(self) -> None:
+        child_code = r'''
+import sys
+from pathlib import Path
+from universal_agent_orchestrator import DeviceTaskRegistry
+registry = DeviceTaskRegistry(lease_directory=Path(sys.argv[1]))
+registry.reserve("device-a", "child-session-a")
+print("READY", flush=True)
+sys.stdin.readline()
+registry.release("device-a", "child-session-a")
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            lease_dir = Path(temp)
+            child = subprocess.Popen(
+                [sys.executable, "-c", child_code, str(lease_dir)],
+                cwd=Path(__file__).resolve().parent,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            parent = DeviceTaskRegistry(lease_directory=lease_dir)
+            try:
+                assert child.stdout is not None
+                self.assertEqual("READY", child.stdout.readline().strip())
+                self.assertEqual(
+                    "child-session-a",
+                    parent.active_session("device-a"),
+                )
+                with self.assertRaisesRegex(
+                    UniversalAgentOrchestratorError,
+                    "已有活动任务",
+                ):
+                    parent.reserve("device-a", "parent-session-a")
+
+                parent.reserve("device-b", "parent-session-b")
+                try:
+                    self.assertEqual(
+                        "parent-session-b",
+                        parent.active_session("device-b"),
+                    )
+                    self.assertIsNone(child.poll())
+                finally:
+                    parent.release("device-b", "parent-session-b")
+            finally:
+                if child.stdin is not None:
+                    child.stdin.write("stop\n")
+                    child.stdin.flush()
+                    child.stdin.close()
+                child.wait(timeout=5)
+                if child.stdout is not None:
+                    child.stdout.close()
+                if child.stderr is not None:
+                    child.stderr.close()
+            self.assertEqual(0, child.returncode)
+            self.assertIsNone(parent.active_session("device-a"))
+            self.assertIsNone(parent.active_session("device-b"))
 
 
 if __name__ == "__main__":

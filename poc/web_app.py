@@ -874,6 +874,10 @@ class Runtime:
         )
         self.generic_orchestrator = GenericTaskOrchestrator()
         self.dry_run_lock = threading.Lock()
+        self.device_coordination_lock_guard = threading.RLock()
+        self.device_coordination_locks: dict[str, threading.Lock] = {
+            self.device_controllers.default_device_id: self.dry_run_lock,
+        }
         self.supervised_sessions: dict[str, SupervisedSemanticSession] = {}
         self.supervised_session_dirs: dict[str, Path] = {}
         self.supervised_session_lock = threading.RLock()
@@ -905,6 +909,18 @@ class Runtime:
             # production registry remains strict.
             return self.controller
         return self.device_controllers.controller(device_id)
+
+    def coordination_lock_for_device(self, device_id: str) -> threading.Lock:
+        """Serialize observation/action work per device, not across devices."""
+
+        resolved = str(device_id or "").strip()
+        if not resolved:
+            raise UniversalAgentOrchestratorError("device_id 不能为空。")
+        with self.device_coordination_lock_guard:
+            return self.device_coordination_locks.setdefault(
+                resolved,
+                threading.Lock(),
+            )
 
     def start(self) -> None:
         self.worker.start()
@@ -1200,7 +1216,15 @@ def device() -> dict[str, Any]:
         "model_role": "observation_only",
         "controller": "single_state_controller",
         "legacy_free_agent_enabled": False,
-        "active_orchestrator": runtime.orchestrator_mode,
+        # The public web console always enters the universal supervised loop.
+        # ``orchestrator_mode`` only selects the retained compatibility worker
+        # for old queued tasks and must not be reported as the product path.
+        "active_orchestrator": "universal_agent",
+        "background_compatibility_worker": {
+            "enabled": True,
+            "mode": runtime.orchestrator_mode,
+            "default_user_path": False,
+        },
         "universal_agent": {
             "goal_protocol": "2026-08-10-generic-intent-v1",
             "scene_protocol": UI_SCENE_PROTOCOL_VERSION,
@@ -1229,8 +1253,14 @@ def device() -> dict[str, Any]:
             "supported_app_scope": "dynamic",
             "observer": runtime.generic_scene_observer.status(),
         },
-        "generic_orchestrator": runtime.generic_orchestrator.status(),
+        "generic_orchestrator": {
+            **runtime.generic_orchestrator.status(),
+            "role": "compatibility_only",
+            "default_user_path": False,
+        },
         "semantic_action_adapter": {
+            "role": "compatibility_only",
+            "default_user_path": False,
             "execution_enabled": True,
             "enabled_real_actions": [
                 "ensure_app",
@@ -1380,18 +1410,19 @@ def _supervised_hardware_lock(device_id: str | None = None) -> Iterator[None]:
     )
     if not process_lease.acquire():
         raise HTTPException(status_code=409, detail="另一进程已占用机械臂物理控制权。")
-    if not runtime.dry_run_lock.acquire(blocking=False):
+    coordination_lock = runtime.coordination_lock_for_device(resolved_device)
+    if not coordination_lock.acquire(blocking=False):
         process_lease.release()
         raise HTTPException(status_code=409, detail="已有语义观察或动作正在进行。")
     if not controller.operation_lock.acquire(blocking=False):
-        runtime.dry_run_lock.release()
+        coordination_lock.release()
         process_lease.release()
         raise HTTPException(status_code=409, detail="机械臂物理控制权已被占用。")
     try:
         yield
     finally:
         controller.operation_lock.release()
-        runtime.dry_run_lock.release()
+        coordination_lock.release()
         process_lease.release()
 
 

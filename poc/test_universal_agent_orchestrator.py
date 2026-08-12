@@ -1433,17 +1433,50 @@ class UniversalAgentConfirmTests(unittest.TestCase):
 
 
 class DeviceTaskRegistryTests(unittest.TestCase):
-    def _orchestrator(self, registry, adapter, *, qwen=None):
+    def _orchestrator(self, registry, adapter, *, qwen=None, device_id="device-1"):
         return UniversalAgentOrchestrator(
             deepseek_planner=FakeDeepSeekPlanner(
-                _graph(),
-                replan_result=replace(_graph(), revision=2),
+                _graph(device_id=device_id),
+                replan_result=replace(_graph(device_id=device_id), revision=2),
             ),
             qwen_observer=qwen or FakeQwenObserver(),
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
             device_registry=registry,
         )
+
+    def test_two_different_devices_keep_independent_active_sessions(self) -> None:
+        registry = DeviceTaskRegistry()
+        first_adapter = FakeAdapter(_scene())
+        second_adapter = FakeAdapter(_scene(fingerprint="device-b-frame"))
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            first_session = self._orchestrator(
+                registry,
+                first_adapter,
+                device_id="device-a",
+            ).start(
+                session_id="session-device-a",
+                raw_goal="查看设备 A 的当前详情",
+                device_id="device-a",
+                run_dir=Path(first),
+            )
+            second_session = self._orchestrator(
+                registry,
+                second_adapter,
+                device_id="device-b",
+            ).start(
+                session_id="session-device-b",
+                raw_goal="查看设备 B 的当前详情",
+                device_id="device-b",
+                run_dir=Path(second),
+            )
+
+        self.assertEqual("awaiting_confirmation", first_session.status)
+        self.assertEqual("awaiting_confirmation", second_session.status)
+        self.assertEqual("session-device-a", registry.active_session("device-a"))
+        self.assertEqual("session-device-b", registry.active_session("device-b"))
+        self.assertEqual(0, first_adapter.execute_calls)
+        self.assertEqual(0, second_adapter.execute_calls)
 
     def test_second_active_session_on_same_device_is_rejected(self) -> None:
         registry = DeviceTaskRegistry()

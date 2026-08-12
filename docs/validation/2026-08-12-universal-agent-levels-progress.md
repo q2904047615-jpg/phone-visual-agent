@@ -31,7 +31,7 @@
 Python 全量（加入“相机噪声导致 fingerprint 变化、页面语义未变化”的反例后）：
 
 ```text
-Ran 602 tests in 30.668s
+Ran 604 tests in 31.358s
 OK
 ```
 
@@ -55,6 +55,9 @@ OK
 - 旧会话已暂停并失效其第二次确认权限。新代码服务已启动，机械臂控制端、摄像头在线且当前不忙。
 - 同一句陌生命令在新服务进行了多轮“只观察、零物理动作”的在线协议修复。修复均位于通用边界：空可选 `input_text` 归一为缺失；Qwen 动作/区域的已知字段别名与嵌套等价结构归一；目标区域及候选语义字段由本地可信观察构造；冲突字段仍失败关闭；“启动/launch/start”纳入通用导航词汇且外部状态禁词仍优先拦截。
 - 在线最终结果：新会话 `fbe331637189465c852fbdc77734f83b` 已停在 `awaiting_confirmation`，物理动作数为 0，动作是绑定可信候选 `browser_app_icon` 的 `tap_semantic`；revision 为 1，observation 为 `obs_2e6456aa255646baa81d94ef1e3bf217`，fingerprint 为 `c9f3b41cbf0585615113`。
+- 网页只读实测已从运行服务恢复该会话，展示自然语言入口、动态任务图、当前真实观察、0 个物理动作、精确确认、重新观察、暂停和取消入口；未点击任何执行按钮。
+- `/api/device` 的产品主路径标识已改为 `universal_agent`。旧队列 worker、旧 generic orchestrator 和旧语义适配器只标记为 `compatibility_only/default_user_path=false`，不再把保留的 `legacy` worker 模式误报为网页主路径。
+- 多设备协调锁已从全局锁拆为按 `device_id` 隔离：不同设备可同时取得各自的进程租约、协调锁和控制器锁；同一设备的第二次占用仍失败关闭。两个不同设备也可同时保持独立活动会话和确认范围。
 
 ## 尚需真实硬件完成的验收
 

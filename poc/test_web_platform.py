@@ -8,6 +8,7 @@ import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -3833,7 +3834,12 @@ class ApiEndToEndTests(unittest.TestCase):
                 "model_role": "observation_only",
                 "controller": "single_state_controller",
                 "legacy_free_agent_enabled": False,
-                "active_orchestrator": "legacy",
+                "active_orchestrator": "universal_agent",
+                "background_compatibility_worker": {
+                    "enabled": True,
+                    "mode": "legacy",
+                    "default_user_path": False,
+                },
                 "universal_agent": {
                     "goal_protocol": "2026-08-10-generic-intent-v1",
                     "scene_protocol": "2026-08-10-ui-scene-v2",
@@ -3878,6 +3884,8 @@ class ApiEndToEndTests(unittest.TestCase):
                     "available": True,
                     "execution_enabled": False,
                     "protocol_version": "2026-08-06-generic-plan-v1",
+                    "role": "compatibility_only",
+                    "default_user_path": False,
                     "allowed_actions": [
                         "back",
                         "dismiss_overlay",
@@ -3894,6 +3902,8 @@ class ApiEndToEndTests(unittest.TestCase):
                     ],
                 },
                 "semantic_action_adapter": {
+                    "role": "compatibility_only",
+                    "default_user_path": False,
                     "execution_enabled": True,
                     "enabled_real_actions": [
                         "ensure_app",
@@ -4115,6 +4125,36 @@ class ApiEndToEndTests(unittest.TestCase):
                         self.fail("cross-process lease must block the hardware lock")
             finally:
                 external.release()
+
+    def test_hardware_locks_allow_different_devices_but_reject_same_device(self) -> None:
+        first_controller = SimpleNamespace(operation_lock=threading.Lock())
+        second_controller = SimpleNamespace(operation_lock=threading.Lock())
+        controllers = {
+            "phone-a": first_controller,
+            "phone-b": second_controller,
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            with (
+                patch.object(web_app, "SHARED_DEVICE_LEASE_DIR", Path(temp)),
+                patch.object(
+                    web_app.runtime,
+                    "controller_for_device",
+                    side_effect=lambda device_id: controllers[device_id],
+                ),
+            ):
+                with web_app._supervised_hardware_lock("phone-a"):
+                    with web_app._supervised_hardware_lock("phone-b"):
+                        self.assertTrue(first_controller.operation_lock.locked())
+                        self.assertTrue(second_controller.operation_lock.locked())
+                    with self.assertRaisesRegex(
+                        web_app.HTTPException,
+                        "占用|正在进行",
+                    ):
+                        with web_app._supervised_hardware_lock("phone-a"):
+                            self.fail("同一设备不能取得第二个硬件锁")
+
+        self.assertFalse(first_controller.operation_lock.locked())
+        self.assertFalse(second_controller.operation_lock.locked())
 
     def test_compatibility_physical_endpoints_share_the_process_lease(self) -> None:
         lease = InterProcessLease(

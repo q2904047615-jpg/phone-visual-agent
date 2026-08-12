@@ -4,6 +4,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from PIL import Image
 
 from tap_calibration import (
     Affine2D,
@@ -12,7 +15,23 @@ from tap_calibration import (
     corrected_grid_point,
     fit_affine,
 )
-from run_xy_calibration import locate_magenta_target
+from run_xy_calibration import (
+    locate_magenta_target,
+    probe_single_touch,
+)
+
+
+class FakeProbeRobot:
+    def __init__(self, frame: Image.Image) -> None:
+        self.frame = frame
+        self.tap_calls: list[tuple[int, int]] = []
+
+    def vision_tap_relative(self, x: int, y: int) -> tuple[int, int]:
+        self.tap_calls.append((x, y))
+        return (111, 222)
+
+    def vision_capture(self) -> Image.Image:
+        return self.frame.copy()
 
 
 class TapCalibrationMathTests(unittest.TestCase):
@@ -86,6 +105,88 @@ class TapCalibrationMathTests(unittest.TestCase):
         self.assertAlmostEqual(corrected[1], 0.51, places=6)
         self.assertTrue(payload["accepted_fit"])
         self.assertFalse(payload["enabled"])
+
+    def test_single_touch_probe_dry_run_never_calls_robot(self):
+        frame = Image.new("RGB", (540, 960), "black")
+        robot = FakeProbeRobot(frame)
+        with patch(
+            "run_xy_calibration.wait_for_stable_target",
+            return_value=(frame, (120, 240, (100, 220, 140, 260))),
+        ):
+            result = probe_single_touch(
+                base_url="http://127.0.0.1:8770",
+                robot=robot,
+                execute=False,
+            )
+
+        self.assertEqual("awaiting_explicit_execution", result["status"])
+        self.assertEqual(0, result["physical_actions"])
+        self.assertEqual([], robot.tap_calls)
+
+    def test_single_touch_probe_records_one_verified_contact(self):
+        frame = Image.new("RGB", (540, 960), "black")
+        robot = FakeProbeRobot(frame)
+        record = {
+            "sequence": 3,
+            "target_x": 100.0,
+            "target_y": 200.0,
+            "actual_x": 103.0,
+            "actual_y": 204.0,
+            "viewport_width": 400,
+            "viewport_height": 800,
+        }
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "run_xy_calibration.wait_for_stable_target",
+            return_value=(frame, (120, 240, (100, 220, 140, 260))),
+        ), patch(
+            "run_xy_calibration.request_json",
+            return_value={"samples": []},
+        ), patch(
+            "run_xy_calibration.wait_for_new_sample",
+            return_value=record,
+        ):
+            output = Path(directory) / "probe"
+            result = probe_single_touch(
+                base_url="http://127.0.0.1:8770",
+                robot=robot,
+                execute=True,
+                output_dir=output,
+            )
+
+            saved = json.loads((output / "report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(1, result["physical_actions"])
+        self.assertTrue(result["contact_detected"])
+        self.assertTrue(result["coordinate_passed"])
+        self.assertEqual(1, len(robot.tap_calls))
+        self.assertTrue(saved["passed"])
+
+    def test_single_touch_probe_keeps_failure_evidence_without_retry(self):
+        frame = Image.new("RGB", (540, 960), "black")
+        robot = FakeProbeRobot(frame)
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "run_xy_calibration.wait_for_stable_target",
+            return_value=(frame, (120, 240, (100, 220, 140, 260))),
+        ), patch(
+            "run_xy_calibration.request_json",
+            return_value={"samples": []},
+        ), patch(
+            "run_xy_calibration.wait_for_new_sample",
+            side_effect=TapCalibrationError("手机没有回传触点"),
+        ):
+            output = Path(directory) / "probe"
+            result = probe_single_touch(
+                base_url="http://127.0.0.1:8770",
+                robot=robot,
+                execute=True,
+                output_dir=output,
+            )
+            self.assertTrue((output / "report.json").exists())
+
+        self.assertEqual("failed", result["status"])
+        self.assertEqual(1, result["physical_actions"])
+        self.assertFalse(result["contact_detected"])
+        self.assertEqual(1, len(robot.tap_calls))
 
 
 if __name__ == "__main__":

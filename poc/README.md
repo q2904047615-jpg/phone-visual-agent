@@ -54,6 +54,41 @@ Python 3.12、Pillow 和 NumPy。
 cd 'C:\Users\Administrator\Documents\Claude\Projects\手机自动点击器'
 ```
 
+### 触控执行器单点探测
+
+当控制端记录了正确坐标、但手机画面没有变化时，不要在真实 App 上重复点击。先在手机
+浏览器打开本机安全触点页，用一次可回传的紫红靶点区分“触控笔没有接触”与“XY 偏差”。
+
+在第一个 PowerShell 窗口启动触点页服务：
+
+```powershell
+cd .\poc
+.\.venv\Scripts\python.exe touch_calibration_server.py --host 0.0.0.0 --port 8770
+```
+
+让手机与电脑处于同一局域网，并在手机浏览器打开
+`http://电脑局域网IP:8770/`。随后在第二个 PowerShell 窗口先做零动作预检：
+
+```powershell
+cd .\poc
+.\.venv\Scripts\python.exe run_xy_calibration.py probe
+```
+
+预检只在连续画面中定位靶点，必须显示 `physical_actions: 0`。取得针对当前靶点的新明确
+确认后，才可执行最多一次真实点击：
+
+```powershell
+.\.venv\Scripts\python.exe run_xy_calibration.py probe --execute
+```
+
+结果写入 `poc\output\xy_calibration\probe_时间\`：
+
+- `contact_detected=false`：手机没有回传触点，优先检查触控笔接触、落笔深度和执行器状态；
+- `contact_detected=true`、`coordinate_passed=false`：触控有效但 XY 偏差，需要重新校准；
+- 两项均为 `true`：单点执行器与当前标定通过，可回到全新 Agent 会话继续验收。
+
+`probe` 不会修改 `tap_calibration.json`，也不会自动重试第二次点击。
+
 ### 1. 离线自检
 
 ```powershell

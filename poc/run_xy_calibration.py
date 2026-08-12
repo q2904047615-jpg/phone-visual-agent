@@ -202,14 +202,147 @@ def validate_samples(samples: list[dict[str, object]]) -> dict[str, float | bool
     }
 
 
+def probe_single_touch(
+    *,
+    base_url: str,
+    robot: RobotController,
+    execute: bool,
+    output_dir: Path | None = None,
+) -> dict[str, object]:
+    """Probe one harmless browser target through the production tap path.
+
+    Dry-run only proves that the calibration target is visible and stable.
+    Execute mode issues at most one physical tap, never modifies the active
+    calibration, and records whether the phone reported a touch at all before
+    judging coordinate accuracy.
+    """
+
+    frame, detected = wait_for_stable_target(robot)
+    target_x, target_y, box = detected
+    requested_grid = (
+        int(round(target_x * 1000 / max(1, frame.width - 1))),
+        int(round(target_y * 1000 / max(1, frame.height - 1))),
+    )
+    result: dict[str, object] = {
+        "mode": "single_touch_probe",
+        "ready": True,
+        "execute": bool(execute),
+        "physical_actions": 0,
+        "target_frame": [target_x, target_y],
+        "requested_grid": list(requested_grid),
+        "frame_size": [frame.width, frame.height],
+        "contact_detected": False,
+        "coordinate_passed": False,
+        "passed": False,
+    }
+    if not execute:
+        result["status"] = "awaiting_explicit_execution"
+        return result
+
+    if output_dir is None:
+        raise TapCalibrationError("单点执行探测必须提供证据目录。")
+    output_dir.mkdir(parents=True, exist_ok=False)
+    annotated = frame.copy()
+    draw = ImageDraw.Draw(annotated)
+    draw.rectangle(box, outline="#00ff66", width=3)
+    draw.line(
+        (target_x - 12, target_y, target_x + 12, target_y),
+        fill="#ffff00",
+        width=2,
+    )
+    draw.line(
+        (target_x, target_y - 12, target_x, target_y + 12),
+        fill="#ffff00",
+        width=2,
+    )
+    before_path = output_dir / "before.jpg"
+    annotated.save(before_path, quality=94)
+    result["evidence"] = [str(before_path)]
+
+    previous = request_json(f"{base_url}/api/samples")
+    previous_count = len(previous.get("samples", []))
+    # Count conservatively as soon as the production action method is entered.
+    # If the vendor layer raises after touching the phone, evidence must never
+    # claim that zero physical actions were possible.
+    result["physical_actions"] = 1
+    try:
+        command_frame = robot.vision_tap_relative(*requested_grid)
+        result["command_frame"] = list(command_frame)
+        record = wait_for_new_sample(base_url, previous_count)
+        sample = {
+            "sequence": int(record["sequence"]),
+            "desired_frame": [target_x, target_y],
+            "command_frame": list(command_frame),
+            "target_dom": normalized_dom(record, "target"),
+            "actual_dom": normalized_dom(record, "actual"),
+            "viewport_size": [record["viewport_width"], record["viewport_height"]],
+        }
+        validation = validate_samples([sample])
+        result.update(
+            {
+                "status": "complete",
+                "contact_detected": True,
+                "coordinate_passed": bool(validation["passed"]),
+                "passed": bool(validation["passed"]),
+                "sample": sample,
+                "validation": validation,
+            }
+        )
+    except Exception as exc:
+        result.update(
+            {
+                "status": "failed",
+                "error": str(exc),
+                "passed": False,
+            }
+        )
+    finally:
+        try:
+            after_path = output_dir / "after.jpg"
+            robot.vision_capture().convert("RGB").save(after_path, quality=94)
+            result.setdefault("evidence", []).append(str(after_path))
+        except Exception as capture_error:
+            result["after_capture_error"] = str(capture_error)
+        report_path = output_dir / "report.json"
+        report_path.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        result.setdefault("evidence", []).append(str(report_path))
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect and validate nine physical XY touch points")
-    parser.add_argument("phase", choices=("collect", "validate"))
+    parser.add_argument("phase", choices=("probe", "collect", "validate"))
     parser.add_argument("--base-url", default="http://127.0.0.1:8770")
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="probe 模式下明确允许最多一次物理点击；省略时只做零动作预检",
+    )
     args = parser.parse_args()
     base_url = args.base_url.rstrip("/")
     request_json(f"{base_url}/api/health")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    if args.phase == "probe":
+        output = (
+            OUTPUT_ROOT / f"probe_{timestamp}"
+            if args.execute
+            else None
+        )
+        result = probe_single_touch(
+            base_url=base_url,
+            robot=RobotController(),
+            execute=bool(args.execute),
+            output_dir=output,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not args.execute:
+            print("单点触控预检通过；尚未执行物理动作。")
+            return 0
+        return 0 if result["passed"] else 1
 
     if args.phase == "collect":
         output = OUTPUT_ROOT / f"collect_{timestamp}"

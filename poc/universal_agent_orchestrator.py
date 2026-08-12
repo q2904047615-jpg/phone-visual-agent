@@ -4,8 +4,137 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from deepseek_task_graph import DynamicTaskGraph, ObservedState
+from generic_intent import GenericIntentDraft
 from ui_scene import MIN_TARGET_CONFIDENCE, UISceneError
 from universal_action_controller import action_has_account_effect
+
+
+class UniversalAgentOrchestratorError(RuntimeError):
+    pass
+
+
+class ObservationBridge:
+    """Translate protocol objects without inventing actions or business flow."""
+
+    def goal_draft(self, graph: DynamicTaskGraph) -> GenericIntentDraft:
+        graph.validate()
+        if not graph.goal.target_apps:
+            raise UniversalAgentOrchestratorError(
+                "任务图没有目标 App，不能建立通用观察上下文。"
+            )
+        active = graph.active_subgoal()
+        constraints = list(graph.constraints)
+        if active is not None:
+            constraints.extend(active.constraints)
+        entities = dict(graph.goal.entities)
+        entities["target_apps"] = [
+            {"app_id": item.app_id, "app_name": item.app_name}
+            for item in graph.goal.target_apps
+        ]
+        success_criteria = {
+            item.condition_id: {
+                "description": item.description,
+                "evidence_required": list(item.evidence_required),
+                "satisfied": item.satisfied,
+            }
+            for item in graph.completion_conditions
+        }
+        account_effects = tuple(
+            dict.fromkeys(item.risk_type for item in graph.risk_actions)
+        )
+        primary_app = graph.goal.target_apps[0]
+        draft = GenericIntentDraft(
+            understood=True,
+            app_id=primary_app.app_id,
+            app_name=primary_app.app_name,
+            objective=graph.goal.objective,
+            entities=entities,
+            constraints=tuple(dict.fromkeys(constraints)),
+            success_criteria=success_criteria,
+            account_effects=account_effects,
+            needs_confirmation=True,
+        )
+        draft.validate()
+        return draft
+
+    @staticmethod
+    def _text_items(value: Any) -> tuple[str, ...]:
+        if not isinstance(value, (list, tuple)):
+            return ()
+        return tuple(
+            text
+            for item in value
+            if (text := str(item or "").strip())
+        )
+
+    def observed_state(
+        self,
+        *,
+        graph: DynamicTaskGraph,
+        trusted_observation: Any,
+        action_outcome: str,
+        verification: dict[str, Any],
+    ) -> ObservedState:
+        graph.validate()
+        observation_device = str(
+            getattr(trusted_observation, "device_id", "")
+        ).strip()
+        if observation_device != graph.device_id:
+            raise UniversalAgentOrchestratorError(
+                "任务图与可信观察 device_id 不一致。"
+            )
+        scene = getattr(trusted_observation, "scene", None)
+        if scene is None:
+            raise UniversalAgentOrchestratorError("可信观察缺少 UIScene。")
+        scene.validate()
+        fingerprint = str(
+            getattr(trusted_observation, "fingerprint", "")
+        ).strip()
+        if not fingerprint or scene.fingerprint != fingerprint:
+            raise UniversalAgentOrchestratorError(
+                "可信观察与 UIScene fingerprint 不一致。"
+            )
+        if not isinstance(verification, dict):
+            raise UniversalAgentOrchestratorError("控制器验证结果必须是对象。")
+
+        evidence: list[str] = []
+
+        def add(items: Any) -> None:
+            for item in self._text_items(items):
+                if item not in evidence:
+                    evidence.append(item)
+
+        if scene.summary.strip():
+            add((scene.summary.strip(),))
+        add(scene.overlays)
+        for element in scene.elements:
+            add(element.evidence)
+            visible = " / ".join(
+                item for item in (element.label.strip(), element.meaning.strip()) if item
+            )
+            if visible:
+                add((visible,))
+        add(verification.get("visible_evidence"))
+        if action_outcome == "matched":
+            add(verification.get("completion_evidence"))
+        if not evidence:
+            raise UniversalAgentOrchestratorError(
+                "当前观察没有可交给 DeepSeek 的可见证据。"
+            )
+
+        scene_id = str(
+            getattr(trusted_observation, "observation_id", "")
+        ).strip() or f"{scene.screen_id}:{fingerprint[:16]}"
+        observed = ObservedState(
+            scene_id=scene_id,
+            summary=scene.summary.strip() or "当前可信页面观察",
+            visible_evidence=tuple(evidence),
+            last_action_outcome=str(action_outcome or "not_applicable"),
+            blocked_reasons=self._text_items(verification.get("blocked_reasons")),
+        )
+        observed.validate()
+        return observed
 
 
 @dataclass(frozen=True)

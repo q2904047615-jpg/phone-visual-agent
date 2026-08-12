@@ -3,10 +3,21 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from deepseek_task_graph import (
+    CompletionCondition,
+    DynamicTaskGraph,
+    GraphGoal,
+    Subgoal,
+    TargetApp,
+)
 from generic_step_planner import GenericStepProposal
 from semantic_executor import SemanticAction
 from ui_scene import UIElement, UIScene
-from universal_agent_orchestrator import PhaseOneNavigationPolicy
+from universal_agent_orchestrator import (
+    ObservationBridge,
+    PhaseOneNavigationPolicy,
+    UniversalAgentOrchestratorError,
+)
 
 
 def _scene(
@@ -105,6 +116,46 @@ def _context(*, impact: str = "navigation_only") -> SimpleNamespace:
         revision=1,
         current_external_impact=impact,
     )
+
+
+def _graph(*, device_id: str = "device-1") -> DynamicTaskGraph:
+    graph = DynamicTaskGraph(
+        task_id="task-1",
+        device_id=device_id,
+        revision=1,
+        status="running",
+        goal=GraphGoal(
+            objective="在图片工具中查看公开分类详情",
+            target_apps=(TargetApp(app_id="gallery", app_name="图片工具"),),
+            entities={"category": "风景", "expected_text": "风景"},
+        ),
+        constraints=("仅查看公开信息",),
+        completion_conditions=(
+            CompletionCondition(
+                condition_id="condition-1",
+                description="页面显示风景分类详情",
+                evidence_required=("详情标题可见",),
+            ),
+        ),
+        risk_actions=(),
+        subgoals=(
+            Subgoal(
+                subgoal_id="subgoal-1",
+                objective="查看风景分类详情",
+                status="active",
+                depends_on=(),
+                constraints=("不得改变任何账号状态",),
+                completion_conditions=("详情标题可见",),
+                completion_evidence=(),
+                risk_action_ids=(),
+                external_impact="navigation_only",
+            ),
+        ),
+        active_subgoal_id="subgoal-1",
+        raw_user_goal="看看图片工具里的风景分类",
+    )
+    graph.validate()
+    return graph
 
 
 class PhaseOneNavigationPolicyTests(unittest.TestCase):
@@ -234,6 +285,97 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         self.assertFalse(result.allowed)
         self.assertIn("fingerprint", result.reason)
+
+
+class ObservationBridgeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.bridge = ObservationBridge()
+
+    def test_projects_dynamic_graph_to_generic_goal_without_business_steps(self) -> None:
+        goal = self.bridge.goal_draft(_graph())
+
+        payload = goal.to_dict()
+        self.assertTrue(goal.understood)
+        self.assertEqual("gallery", goal.app_id)
+        self.assertNotIn("operation", payload)
+        self.assertNotIn("steps", str(payload).casefold())
+        self.assertNotIn("coordinate", str(payload).casefold())
+
+    def test_projection_preserves_goal_entities_constraints_and_completion(self) -> None:
+        graph = _graph()
+
+        goal = self.bridge.goal_draft(graph)
+
+        self.assertEqual("风景", goal.entities["category"])
+        self.assertIn("仅查看公开信息", goal.constraints)
+        self.assertIn("不得改变任何账号状态", goal.constraints)
+        self.assertEqual(
+            "页面显示风景分类详情",
+            goal.success_criteria["condition-1"]["description"],
+        )
+
+    def test_builds_observed_state_only_from_visible_evidence(self) -> None:
+        scene = _scene()
+        observation = SimpleNamespace(
+            device_id="device-1",
+            observation_id="obs-1",
+            fingerprint=scene.fingerprint,
+            scene=scene,
+        )
+
+        observed = self.bridge.observed_state(
+            graph=_graph(),
+            trusted_observation=observation,
+            action_outcome="matched",
+            verification={
+                "visible_evidence": ["页面标题已变化"],
+                "internal_debug_note": "不得进入证据",
+            },
+        )
+
+        self.assertIn("页面标题已变化", observed.visible_evidence)
+        self.assertTrue(any("查看详情" in item for item in observed.visible_evidence))
+        self.assertNotIn("不得进入证据", observed.visible_evidence)
+        observed.validate()
+
+    def test_action_failure_is_not_reported_as_completion(self) -> None:
+        scene = _scene()
+        observation = SimpleNamespace(
+            device_id="device-1",
+            observation_id="obs-1",
+            fingerprint=scene.fingerprint,
+            scene=scene,
+        )
+
+        observed = self.bridge.observed_state(
+            graph=_graph(),
+            trusted_observation=observation,
+            action_outcome="mismatched",
+            verification={
+                "completion_evidence": ["模型声称完成"],
+                "blocked_reasons": ["页面没有发生预期变化"],
+            },
+        )
+
+        self.assertNotIn("模型声称完成", observed.visible_evidence)
+        self.assertEqual(("页面没有发生预期变化",), observed.blocked_reasons)
+
+    def test_graph_and_observation_device_mismatch_fails_closed(self) -> None:
+        scene = _scene()
+        observation = SimpleNamespace(
+            device_id="device-other",
+            observation_id="obs-1",
+            fingerprint=scene.fingerprint,
+            scene=scene,
+        )
+
+        with self.assertRaisesRegex(UniversalAgentOrchestratorError, "device_id"):
+            self.bridge.observed_state(
+                graph=_graph(),
+                trusted_observation=observation,
+                action_outcome="not_applicable",
+                verification={},
+            )
 
 
 if __name__ == "__main__":

@@ -6,6 +6,15 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Protocol
 
+from deepseek_semantic_risk_audit import (
+    EXTERNAL_IMPACTS as SUBGOAL_EXTERNAL_IMPACTS,
+    RISK_TYPES,
+    AuditSource,
+    JsonRiskAuditProvider,
+    RiskAuditAssessment,
+    SemanticRiskAuditReport,
+    SemanticRiskAuditor,
+)
 from generic_intent import GenericIntentError, _parse_json_object
 
 
@@ -17,23 +26,6 @@ SUBGOAL_STATUSES = frozenset(
     {"pending", "active", "completed", "blocked", "skipped"}
 )
 RISK_LEVELS = frozenset({"low", "medium", "high", "critical"})
-SUBGOAL_EXTERNAL_IMPACTS = frozenset(
-    {"read_only", "navigation_only", "external_state", "unknown"}
-)
-RISK_TYPES = frozenset(
-    {
-        "message_or_communication",
-        "content_publication",
-        "account_relationship_change",
-        "membership_change",
-        "permission_role_change",
-        "data_mutation",
-        "data_deletion",
-        "transaction_or_payment",
-        "account_or_permission_change",
-        "unknown_external_effect",
-    }
-)
 REPLAN_TRIGGERS = frozenset(
     {
         "observation_changed",
@@ -142,20 +134,6 @@ ACCOUNT_PERMISSION_EFFECT_PATTERN = re.compile(
     r"\b(?:authorize|grant permission|revoke permission|register|login|logout)\b)",
     re.IGNORECASE,
 )
-READ_ONLY_PROOF_PATTERN = re.compile(
-    r"(?:查看|观察|读取|检查|核对|浏览|搜索|查找|识别|判断|确认是否|"
-    r"(?:页面|列表|详情|信息|状态).{0,8}(?:可见|显示)|"
-    r"\b(?:view|observe|read|inspect|check|browse|search|find|verify)\b)",
-    re.IGNORECASE,
-)
-NAVIGATION_PROOF_PATTERN = re.compile(
-    r"(?:打开|进入|前往|切换到|返回到|导航到|"
-    r"(?:页面|界面|列表|详情).{0,8}(?:可见|显示)|"
-    r"\b(?:open|navigate|go to|switch to|return to)\b)",
-    re.IGNORECASE,
-)
-
-
 class JsonTaskGraphProvider(Protocol):
     configured: bool
 
@@ -307,20 +285,6 @@ class Subgoal:
             raise TaskGraphError(
                 f"子目标包含外部状态变化但未声明：{self.subgoal_id}"
             )
-        if self.external_impact == "read_only" and not _proves_read_only(
-            self.objective,
-            *self.completion_conditions,
-        ):
-            raise TaskGraphError(
-                f"子目标无法证明是纯观察，必须标为 unknown：{self.subgoal_id}"
-            )
-        if self.external_impact == "navigation_only" and not _proves_navigation(
-            self.objective,
-            *self.completion_conditions,
-        ):
-            raise TaskGraphError(
-                f"子目标无法证明是纯导航，必须标为 unknown：{self.subgoal_id}"
-            )
         if self.external_impact in {"external_state", "unknown"} and not self.risk_action_ids:
             raise TaskGraphError(
                 f"外部状态或未知影响子目标必须关联风险并失败关闭：{self.subgoal_id}"
@@ -407,6 +371,7 @@ class DynamicTaskGraph:
     clarification_questions: tuple[str, ...] = ()
     replan_history: tuple[ReplanRecord, ...] = ()
     protocol_version: str = DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION
+    raw_user_goal: str = field(default="", repr=False, compare=False)
 
     def validate(self) -> None:
         if self.protocol_version != DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION:
@@ -543,6 +508,7 @@ class DynamicTaskGraph:
     def to_dict(self) -> dict[str, Any]:
         self.validate()
         value = asdict(self)
+        value.pop("raw_user_goal", None)
         value["goal"]["target_apps"] = [asdict(app) for app in self.goal.target_apps]
         value["constraints"] = list(self.constraints)
         value["completion_conditions"] = [
@@ -602,6 +568,8 @@ class DynamicTaskGraph:
         self,
         *,
         confirmed_risk_ids: tuple[str, ...] = (),
+        confirmed_task_id: str | None = None,
+        confirmed_device_id: str | None = None,
         confirmed_subgoal_id: str | None = None,
         confirmed_revision: int | None = None,
     ) -> dict[str, Any]:
@@ -611,12 +579,19 @@ class DynamicTaskGraph:
         current = value["current_subgoal"]
         current_risk_ids = set(current["risk_action_ids"] if current else [])
         confirmed = set(confirmed_risk_ids)
+        if confirmed and confirmed_task_id != self.task_id:
+            raise TaskGraphError("确认记录 task_id 不匹配，禁止跨 task 复用。")
+        if confirmed and confirmed_device_id != self.device_id:
+            raise TaskGraphError("确认记录 device_id 不匹配，禁止跨 device 复用。")
         if confirmed and confirmed_subgoal_id != self.active_subgoal_id:
             raise TaskGraphError("确认记录不属于 current_subgoal，禁止跨子目标复用。")
         if confirmed and confirmed_revision != self.revision:
             raise TaskGraphError("确认记录 revision 不匹配，禁止跨 revision 复用。")
         if not confirmed and (
-            confirmed_subgoal_id is not None or confirmed_revision is not None
+            confirmed_task_id is not None
+            or confirmed_device_id is not None
+            or confirmed_subgoal_id is not None
+            or confirmed_revision is not None
         ):
             raise TaskGraphError("确认作用域不能脱离 confirmed_risk_ids 单独提供。")
         unknown_confirmations = confirmed - current_risk_ids
@@ -676,9 +651,20 @@ class DynamicTaskGraph:
 class DeepSeekTaskGraphPlanner:
     """Create and revise high-level task graphs without any execution capability."""
 
-    def __init__(self, provider: JsonTaskGraphProvider) -> None:
+    def __init__(
+        self,
+        provider: JsonTaskGraphProvider,
+        *,
+        risk_audit_provider: JsonRiskAuditProvider | None = None,
+    ) -> None:
         self.provider = provider
+        self.risk_auditor = SemanticRiskAuditor(risk_audit_provider or provider)
         self.last_raw_response = ""
+        self.last_risk_audit: SemanticRiskAuditReport | None = None
+
+    @property
+    def risk_audit_call_count(self) -> int:
+        return self.risk_auditor.call_count
 
     def plan(
         self,
@@ -700,7 +686,11 @@ class DeepSeekTaskGraphPlanner:
             task_id=resolved_task_id,
             device_id=device_id,
             revision=1,
+            raw_user_goal=text,
+            validate=False,
         )
+        graph.validate()
+        self._audit_and_validate_graph(graph)
         if (
             graph.status == "completed"
             or any(item.status == "completed" for item in graph.subgoals)
@@ -729,11 +719,13 @@ class DeepSeekTaskGraphPlanner:
             task_id=graph.task_id,
             device_id=graph.device_id,
             revision=graph.revision + 1,
+            raw_user_goal=graph.raw_user_goal or graph.goal.objective,
             validate=False,
         )
         _validate_external_impact_revision(graph, candidate)
         _validate_preserved_risk_ids(graph, candidate)
         candidate.validate()
+        self._audit_and_validate_graph(candidate)
         _validate_revision(graph, candidate, observation)
         previous_ids = {item.subgoal_id for item in graph.subgoals}
         completed_ids = tuple(
@@ -773,6 +765,7 @@ class DeepSeekTaskGraphPlanner:
         task_id: str,
         device_id: str,
         revision: int,
+        raw_user_goal: str,
         validate: bool = True,
     ) -> DynamicTaskGraph:
         raw = self.provider.chat_json(
@@ -789,10 +782,28 @@ class DeepSeekTaskGraphPlanner:
             task_id=task_id,
             device_id=device_id,
             revision=revision,
+            raw_user_goal=raw_user_goal,
         )
         if validate:
             graph.validate()
         return graph
+
+    def _audit_and_validate_graph(self, graph: DynamicTaskGraph) -> None:
+        sources = _risk_audit_sources(graph)
+        report = self.risk_auditor.audit(sources)
+        for assessment in report.assessments:
+            try:
+                _reject_low_level_instruction(
+                    assessment.reason,
+                    "risk_audit.reason",
+                )
+            except TaskGraphError as exc:
+                raise TaskGraphError(
+                    "语义风险审计理由包含低层动作表达，拒绝任务图。"
+                ) from exc
+        report = _apply_local_risk_supplements(report, sources)
+        self.last_risk_audit = report
+        _validate_graph_against_risk_audit(graph, report)
 
     def _require_provider(self) -> None:
         if not self.provider.configured:
@@ -911,6 +922,7 @@ def _graph_from_payload(
     task_id: str,
     device_id: str,
     revision: int,
+    raw_user_goal: str,
 ) -> DynamicTaskGraph:
     _expect_keys(
         payload,
@@ -964,6 +976,7 @@ def _graph_from_payload(
         clarification_questions=_text_tuple(
             payload.get("clarification_questions"), "clarification_questions"
         ),
+        raw_user_goal=raw_user_goal,
     )
 
 
@@ -1313,7 +1326,6 @@ def _describes_external_state_change(*values: str) -> bool:
 
 
 def _infer_external_risk_types(*values: str) -> frozenset[str]:
-    text = " ".join(values)
     inferred: set[str] = set()
     patterns = {
         "message_or_communication": COMMUNICATION_EFFECT_PATTERN,
@@ -1326,22 +1338,206 @@ def _infer_external_risk_types(*values: str) -> frozenset[str]:
         "transaction_or_payment": TRANSACTION_EFFECT_PATTERN,
         "account_or_permission_change": ACCOUNT_PERMISSION_EFFECT_PATTERN,
     }
-    for risk_type, pattern in patterns.items():
-        if pattern.search(text):
-            inferred.add(risk_type)
-    if EXTERNAL_STATE_CHANGE_PATTERN.search(text) and not inferred:
-        inferred.add("unknown_external_effect")
+    for value in values:
+        field_inferred: set[str] = set()
+        for risk_type, pattern in patterns.items():
+            if pattern.search(value):
+                field_inferred.add(risk_type)
+        if EXTERNAL_STATE_CHANGE_PATTERN.search(value) and not field_inferred:
+            field_inferred.add("unknown_external_effect")
+        inferred.update(field_inferred)
     return frozenset(inferred)
 
 
-def _proves_read_only(*values: str) -> bool:
-    text = " ".join(values)
-    return bool(READ_ONLY_PROOF_PATTERN.search(text))
+def _risk_audit_sources(graph: DynamicTaskGraph) -> tuple[AuditSource, ...]:
+    sources = [
+        AuditSource(
+            source_id="raw_goal",
+            source_kind="raw_goal",
+            text=graph.raw_user_goal or graph.goal.objective,
+        ),
+        AuditSource(
+            source_id="goal.objective",
+            source_kind="goal_objective",
+            text=graph.goal.objective,
+        ),
+    ]
+    sources.extend(
+        AuditSource(
+            source_id=f"constraints.{index}",
+            source_kind="goal_constraint",
+            text=text,
+        )
+        for index, text in enumerate(graph.constraints)
+    )
+    for condition in graph.completion_conditions:
+        sources.append(
+            AuditSource(
+                source_id=(
+                    f"completion_conditions.{condition.condition_id}.description"
+                ),
+                source_kind="goal_completion_condition",
+                text=condition.description,
+            )
+        )
+        sources.extend(
+            AuditSource(
+                source_id=(
+                    f"completion_conditions.{condition.condition_id}."
+                    f"evidence_required.{index}"
+                ),
+                source_kind="goal_completion_condition",
+                text=text,
+            )
+            for index, text in enumerate(condition.evidence_required)
+        )
+    for subgoal in graph.subgoals:
+        sources.append(
+            AuditSource(
+                source_id=f"subgoals.{subgoal.subgoal_id}.objective",
+                source_kind="subgoal_objective",
+                subgoal_id=subgoal.subgoal_id,
+                text=subgoal.objective,
+            )
+        )
+        sources.extend(
+            AuditSource(
+                source_id=f"subgoals.{subgoal.subgoal_id}.constraints.{index}",
+                source_kind="subgoal_constraint",
+                subgoal_id=subgoal.subgoal_id,
+                text=text,
+            )
+            for index, text in enumerate(subgoal.constraints)
+        )
+        sources.extend(
+            AuditSource(
+                source_id=(
+                    f"subgoals.{subgoal.subgoal_id}.completion_conditions.{index}"
+                ),
+                source_kind="subgoal_completion_condition",
+                subgoal_id=subgoal.subgoal_id,
+                text=text,
+            )
+            for index, text in enumerate(subgoal.completion_conditions)
+        )
+    return tuple(sources)
 
 
-def _proves_navigation(*values: str) -> bool:
-    text = " ".join(values)
-    return bool(NAVIGATION_PROOF_PATTERN.search(text))
+def _apply_local_risk_supplements(
+    report: SemanticRiskAuditReport,
+    sources: tuple[AuditSource, ...],
+) -> SemanticRiskAuditReport:
+    source_map = {item.source_id: item for item in sources}
+    assessments = []
+    for assessment in report.assessments:
+        source = source_map[assessment.source_id]
+        is_negated_constraint = source.source_kind in {
+            "goal_constraint",
+            "subgoal_constraint",
+        } and source.text.strip().lower().startswith(
+            ("不要", "不得", "禁止", "不能", "避免", "do not", "never")
+        )
+        inferred = (
+            frozenset()
+            if is_negated_constraint
+            else _infer_external_risk_types(source.text)
+        )
+        if inferred and assessment.external_impact != "unknown":
+            assessment = replace(
+                assessment,
+                external_impact="external_state",
+                risk_types=tuple(sorted(set(assessment.risk_types) | set(inferred))),
+                reason=(
+                    assessment.reason
+                    + "；本地单字段防御规则提供了额外外部状态证据"
+                ),
+            )
+        assessments.append(assessment)
+    return replace(report, assessments=tuple(assessments))
+
+
+def _validate_graph_against_risk_audit(
+    graph: DynamicTaskGraph,
+    report: SemanticRiskAuditReport,
+) -> None:
+    if graph.status == "blocked":
+        return
+    risks = {item.risk_id: item for item in graph.risk_actions}
+    subgoals = {item.subgoal_id: item for item in graph.subgoals}
+    for subgoal_id, subgoal in subgoals.items():
+        assessments = tuple(
+            item for item in report.assessments if item.subgoal_id == subgoal_id
+        )
+        if not assessments:
+            raise TaskGraphError(
+                f"语义风险审计遗漏子目标，失败关闭为 unknown：{subgoal_id}"
+            )
+        impact, risk_types = _aggregate_audit_assessments(assessments)
+        if impact != subgoal.external_impact:
+            if impact == "unknown":
+                raise TaskGraphError(
+                    f"语义风险审计为 unknown 且任务图未声明匹配风险：{subgoal_id}"
+                )
+            raise TaskGraphError(
+                f"语义风险审计与任务图分类冲突：{subgoal_id} "
+                f"audit={impact} graph={subgoal.external_impact}"
+            )
+        linked_types = {
+            risks[risk_id].risk_type
+            for risk_id in subgoal.risk_action_ids
+            if risk_id in risks
+        }
+        missing = set(risk_types) - linked_types
+        if missing:
+            raise TaskGraphError(
+                f"语义风险审计要求子目标关联匹配风险：{subgoal_id} / "
+                + ", ".join(sorted(missing))
+            )
+
+    global_assessments = tuple(
+        item for item in report.assessments if item.subgoal_id is None
+    )
+    if not global_assessments:
+        raise TaskGraphError("语义风险审计遗漏用户目标，失败关闭为 unknown。")
+    global_impact, global_risk_types = _aggregate_audit_assessments(
+        global_assessments
+    )
+    graph_impacts = {item.external_impact for item in graph.subgoals}
+    graph_risk_types = {item.risk_type for item in graph.risk_actions}
+    if global_impact == "external_state" and "external_state" not in graph_impacts:
+        raise TaskGraphError("语义风险审计与任务图分类冲突：全局目标包含外部状态。")
+    if global_impact == "unknown" and "unknown" not in graph_impacts:
+        raise TaskGraphError("语义风险审计为 unknown 且任务图未声明匹配风险：全局目标。")
+    missing_global = set(global_risk_types) - graph_risk_types
+    if missing_global:
+        raise TaskGraphError(
+            "语义风险审计要求任务图关联匹配风险："
+            + ", ".join(sorted(missing_global))
+        )
+
+
+def _aggregate_audit_assessments(
+    assessments: tuple[RiskAuditAssessment, ...],
+) -> tuple[str, tuple[str, ...]]:
+    impacts = {item.external_impact for item in assessments}
+    if "external_state" in impacts:
+        impact = "external_state"
+        risk_types = {
+            risk_type
+            for item in assessments
+            if item.external_impact == "external_state"
+            for risk_type in item.risk_types
+        }
+    elif "unknown" in impacts:
+        impact = "unknown"
+        risk_types = {"unknown_external_effect"}
+    elif "navigation_only" in impacts:
+        impact = "navigation_only"
+        risk_types = set()
+    else:
+        impact = "read_only"
+        risk_types = set()
+    return impact, tuple(sorted(risk_types))
 
 
 def _reject_control_fields(value: Any, path: str) -> None:

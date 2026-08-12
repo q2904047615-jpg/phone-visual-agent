@@ -3,6 +3,7 @@ import json
 import unittest
 
 from deepseek_task_graph import (
+    DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION,
     DeepSeekTaskGraphPlanner,
     ObservedState,
     TaskGraphError,
@@ -12,13 +13,36 @@ from deepseek_task_graph import (
 class FakeProvider:
     configured = True
 
-    def __init__(self, *payloads):
+    def __init__(
+        self,
+        *payloads,
+        audit_payloads=None,
+        audit_raw_responses=None,
+        audit_error=None,
+    ):
         self.payloads = list(payloads)
+        self.audit_payloads = list(audit_payloads or [])
+        self.audit_raw_responses = list(audit_raw_responses or [])
+        self.audit_error = audit_error
         self.messages = []
+        self.last_graph_payload = None
 
     def chat_json(self, messages, max_tokens=2000):
         self.messages.append(messages)
-        return json.dumps(self.payloads.pop(0), ensure_ascii=False)
+        prompt = messages[0]["content"]
+        if "semantic-risk-audit-v1" in prompt:
+            if self.audit_error is not None:
+                raise self.audit_error
+            if self.audit_raw_responses:
+                return self.audit_raw_responses.pop(0)
+            payload = (
+                self.audit_payloads.pop(0)
+                if self.audit_payloads
+                else audit_payload_for_graph(self.last_graph_payload)
+            )
+            return json.dumps(payload, ensure_ascii=False)
+        self.last_graph_payload = self.payloads.pop(0)
+        return json.dumps(self.last_graph_payload, ensure_ascii=False)
 
 
 def base_payload():
@@ -129,7 +153,120 @@ def active_external_payload():
     return payload
 
 
+def audit_sources_for_graph(payload):
+    sources = [
+        ("raw_goal", "raw_goal", None),
+        ("goal.objective", "goal_objective", None),
+    ]
+    sources.extend(
+        (f"constraints.{index}", "goal_constraint", None)
+        for index, _ in enumerate(payload["constraints"])
+    )
+    for condition in payload["completion_conditions"]:
+        condition_id = condition["condition_id"]
+        sources.append(
+            (
+                f"completion_conditions.{condition_id}.description",
+                "goal_completion_condition",
+                None,
+            )
+        )
+        sources.extend(
+            (
+                f"completion_conditions.{condition_id}.evidence_required.{index}",
+                "goal_completion_condition",
+                None,
+            )
+            for index, _ in enumerate(condition["evidence_required"])
+        )
+    for subgoal in payload["subgoals"]:
+        subgoal_id = subgoal["subgoal_id"]
+        sources.append(
+            (
+                f"subgoals.{subgoal_id}.objective",
+                "subgoal_objective",
+                subgoal_id,
+            )
+        )
+        sources.extend(
+            (
+                f"subgoals.{subgoal_id}.constraints.{index}",
+                "subgoal_constraint",
+                subgoal_id,
+            )
+            for index, _ in enumerate(subgoal["constraints"])
+        )
+        sources.extend(
+            (
+                f"subgoals.{subgoal_id}.completion_conditions.{index}",
+                "subgoal_completion_condition",
+                subgoal_id,
+            )
+            for index, _ in enumerate(subgoal["completion_conditions"])
+        )
+    return sources
+
+
+def audit_payload_for_graph(payload, *, overrides=None, confidence=0.99):
+    overrides = overrides or {}
+    subgoals = {item["subgoal_id"]: item for item in payload["subgoals"]}
+    risks = {item["risk_id"]: item for item in payload["risk_actions"]}
+    graph_impacts = {item["external_impact"] for item in payload["subgoals"]}
+    if "external_state" in graph_impacts:
+        graph_impact = "external_state"
+    elif "unknown" in graph_impacts:
+        graph_impact = "unknown"
+    elif "navigation_only" in graph_impacts:
+        graph_impact = "navigation_only"
+    else:
+        graph_impact = "read_only"
+    graph_risk_types = sorted({item["risk_type"] for item in payload["risk_actions"]})
+    assessments = []
+    for source_id, source_kind, subgoal_id in audit_sources_for_graph(payload):
+        if subgoal_id is None:
+            impact = graph_impact
+            risk_types = graph_risk_types
+        else:
+            subgoal = subgoals[subgoal_id]
+            impact = subgoal["external_impact"]
+            risk_types = sorted(
+                {
+                    risks[risk_id]["risk_type"]
+                    for risk_id in subgoal["risk_action_ids"]
+                }
+            )
+        if impact == "unknown" and not risk_types:
+            risk_types = ["unknown_external_effect"]
+        if impact in {"read_only", "navigation_only"}:
+            risk_types = []
+        override = overrides.get(source_id)
+        if override:
+            impact = override.get("external_impact", impact)
+            risk_types = override.get("risk_types", risk_types)
+            item_confidence = override.get("confidence", confidence)
+        else:
+            item_confidence = confidence
+        assessments.append(
+            {
+                "source_id": source_id,
+                "source_kind": source_kind,
+                "subgoal_id": subgoal_id,
+                "external_impact": impact,
+                "risk_types": risk_types,
+                "reason": "独立语义审计结论",
+                "confidence": item_confidence,
+            }
+        )
+    return {"assessments": assessments}
+
+
 class DeepSeekTaskGraphTests(unittest.TestCase):
+    def test_protocol_remains_v3(self):
+        self.assertEqual(
+            DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION,
+            "2026-08-11-deepseek-task-graph-v3",
+        )
+
     def test_builds_generic_graph_with_device_isolation(self):
         provider = FakeProvider(base_payload())
         graph = DeepSeekTaskGraphPlanner(provider).plan(
@@ -437,6 +574,188 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 device_id="phone-1",
             )
 
+    def test_semantic_audit_rejects_mixed_read_and_external_effect_phrasings(self):
+        cases = (
+            ("查看资料后把他弄进群里", "membership_change"),
+            ("查看资料后和他聊聊需求", "message_or_communication"),
+            ("查看后把他的权限升一下", "permission_role_change"),
+            ("查看后替他买了", "transaction_or_payment"),
+            ("核对资料再把此人纳入小组", "membership_change"),
+            ("读完简介之后跟对方碰一碰想法", "message_or_communication"),
+            ("了解情况后把他的身份提到管理级别", "permission_role_change"),
+            ("看完说明替对方把东西拿下", "transaction_or_payment"),
+        )
+        for objective, risk_type in cases:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="read_only",
+                )
+                source_id = "subgoals.target_state.objective"
+                audit = audit_payload_for_graph(
+                    payload,
+                    overrides={
+                        source_id: {
+                            "external_impact": "external_state",
+                            "risk_types": [risk_type],
+                        }
+                    },
+                )
+                provider = FakeProvider(payload, audit_payloads=[audit])
+                with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
+                    DeepSeekTaskGraphPlanner(provider).plan(
+                        objective,
+                        device_id="phone-1",
+                    )
+
+    def test_semantic_audit_preserves_field_boundaries_for_navigation(self):
+        objective = "打开联系人页面"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        payload["subgoals"][0]["completion_conditions"] = [objective]
+        audit = audit_payload_for_graph(payload)
+        provider = FakeProvider(payload, audit_payloads=[audit])
+        planner = DeepSeekTaskGraphPlanner(provider)
+
+        graph = planner.plan(objective, device_id="phone-1")
+
+        self.assertEqual(graph.active_subgoal().external_impact, "navigation_only")
+        self.assertEqual(planner.risk_audit_call_count, 1)
+        audit_prompt = provider.messages[1][0]["content"]
+        self.assertIn('"source_id": "subgoals.target_state.objective"', audit_prompt)
+        self.assertIn(
+            '"source_id": "subgoals.target_state.completion_conditions.0"',
+            audit_prompt,
+        )
+
+    def test_semantic_audit_can_use_an_independent_provider(self):
+        payload = single_subgoal_payload("查看资料", external_impact="read_only")
+        graph_provider = FakeProvider(payload)
+        audit_provider = FakeProvider(
+            audit_payloads=[audit_payload_for_graph(payload)]
+        )
+        planner = DeepSeekTaskGraphPlanner(
+            graph_provider,
+            risk_audit_provider=audit_provider,
+        )
+
+        graph = planner.plan("查看资料", device_id="phone-1")
+
+        self.assertEqual(graph.active_subgoal().external_impact, "read_only")
+        self.assertEqual(len(graph_provider.messages), 1)
+        self.assertEqual(len(audit_provider.messages), 1)
+        self.assertEqual(planner.risk_audit_call_count, 1)
+
+    def test_semantic_audit_timeout_fails_closed_to_unknown(self):
+        payload = single_subgoal_payload("查看资料", external_impact="read_only")
+        provider = FakeProvider(payload, audit_error=TimeoutError("audit timeout"))
+        planner = DeepSeekTaskGraphPlanner(provider)
+
+        with self.assertRaisesRegex(TaskGraphError, "unknown.*风险"):
+            planner.plan("查看资料", device_id="phone-1")
+
+        self.assertTrue(planner.last_risk_audit.failed_closed)
+        self.assertTrue(
+            all(
+                item.external_impact == "unknown"
+                for item in planner.last_risk_audit.assessments
+            )
+        )
+
+    def test_semantic_audit_invalid_json_fails_closed_to_unknown(self):
+        payload = single_subgoal_payload("查看资料", external_impact="read_only")
+        provider = FakeProvider(payload, audit_raw_responses=["not-json"])
+        planner = DeepSeekTaskGraphPlanner(provider)
+
+        with self.assertRaisesRegex(TaskGraphError, "unknown.*风险"):
+            planner.plan("查看资料", device_id="phone-1")
+
+        self.assertTrue(planner.last_risk_audit.failed_closed)
+
+    def test_failed_audit_accepts_only_unknown_graph_with_confirmation_risk(self):
+        payload = single_subgoal_payload(
+            "处理当前对象",
+            external_impact="unknown",
+        )
+        payload["status"] = "awaiting_confirmation"
+        payload["risk_actions"] = [
+            {
+                "risk_id": "unknown_effect",
+                "description": "外部影响尚不明确",
+                "external_effect": "可能改变外部状态",
+                "risk_type": "unknown_external_effect",
+                "risk_level": "high",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["risk_action_ids"] = ["unknown_effect"]
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(payload, audit_error=TimeoutError("audit timeout"))
+        )
+
+        graph = planner.plan("处理当前对象", device_id="phone-1")
+
+        self.assertEqual(graph.status, "awaiting_confirmation")
+        self.assertEqual(graph.active_subgoal().external_impact, "unknown")
+        self.assertTrue(planner.last_risk_audit.failed_closed)
+
+    def test_semantic_audit_low_confidence_fails_closed_to_unknown(self):
+        payload = single_subgoal_payload("查看资料", external_impact="read_only")
+        audit = audit_payload_for_graph(payload, confidence=0.49)
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(payload, audit_payloads=[audit])
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "unknown.*风险"):
+            planner.plan("查看资料", device_id="phone-1")
+
+        self.assertFalse(planner.last_risk_audit.failed_closed)
+        self.assertTrue(
+            all(
+                item.external_impact == "unknown"
+                for item in planner.last_risk_audit.assessments
+            )
+        )
+
+    def test_semantic_audit_reason_cannot_contain_low_level_actions(self):
+        payload = single_subgoal_payload("查看资料", external_impact="read_only")
+        audit = audit_payload_for_graph(payload)
+        audit["assessments"][0]["reason"] = "需要点击右上角按钮"
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(payload, audit_payloads=[audit])
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "风险审计.*低层动作"):
+            planner.plan("查看资料", device_id="phone-1")
+
+    def test_replan_runs_a_fresh_semantic_risk_audit(self):
+        initial = base_payload()
+        revised = copy.deepcopy(initial)
+        provider = FakeProvider(initial, revised)
+        planner = DeepSeekTaskGraphPlanner(provider)
+        graph = planner.plan("最初的用户目标", device_id="phone-1")
+
+        result = planner.replan(
+            graph,
+            observation(),
+            trigger="observation_changed",
+            reason="画面发生变化",
+        )
+
+        self.assertEqual(result.revision, 2)
+        self.assertEqual(planner.risk_audit_call_count, 2)
+        self.assertEqual(
+            sum(
+                "semantic-risk-audit-v1" in item[0]["content"]
+                for item in provider.messages
+            ),
+            2,
+        )
+        self.assertIn("最初的用户目标", provider.messages[3][0]["content"])
+
     def test_active_external_state_subgoal_must_await_confirmation(self):
         payload = base_payload()
         payload["status"] = "running"
@@ -543,8 +862,19 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             "处理当前对象",
             external_impact="read_only",
         )
-        with self.assertRaisesRegex(TaskGraphError, "无法证明是纯观察"):
-            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+        audit = audit_payload_for_graph(
+            payload,
+            overrides={
+                "subgoals.target_state.objective": {
+                    "external_impact": "unknown",
+                    "risk_types": ["unknown_external_effect"],
+                }
+            },
+        )
+        with self.assertRaisesRegex(TaskGraphError, "unknown.*风险"):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(payload, audit_payloads=[audit])
+            ).plan(
                 "处理当前对象",
                 device_id="phone-1",
             )
@@ -568,10 +898,21 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertTrue(gate["required"])
         self.assertEqual(gate["state"], "awaiting_confirmation")
         self.assertEqual(gate["risk_ids"], ["save_place"])
+        self.assertEqual(
+            gate["scope"],
+            {
+                "task_id": graph.task_id,
+                "device_id": graph.device_id,
+                "revision": graph.revision,
+                "subgoal_id": "save_target",
+            },
+        )
         self.assertFalse(gate["external_state_action_allowed"])
 
         confirmed_gate = graph.to_qwen_context(
             confirmed_risk_ids=("save_place",),
+            confirmed_task_id=graph.task_id,
+            confirmed_device_id=graph.device_id,
             confirmed_subgoal_id="save_target",
             confirmed_revision=graph.revision,
         )["confirmation_gate"]
@@ -586,7 +927,37 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskGraphError, "不属于 current_subgoal"):
             graph.to_qwen_context(
                 confirmed_risk_ids=("save_place",),
+                confirmed_task_id=graph.task_id,
+                confirmed_device_id=graph.device_id,
                 confirmed_subgoal_id="locate_target",
+                confirmed_revision=graph.revision,
+            )
+
+    def test_confirmation_cannot_cross_task(self):
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(active_external_payload())).plan(
+            "目标",
+            device_id="phone-1",
+        )
+        with self.assertRaisesRegex(TaskGraphError, "跨 task"):
+            graph.to_qwen_context(
+                confirmed_risk_ids=("save_place",),
+                confirmed_task_id="other-task",
+                confirmed_device_id=graph.device_id,
+                confirmed_subgoal_id="save_target",
+                confirmed_revision=graph.revision,
+            )
+
+    def test_confirmation_cannot_cross_device(self):
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(active_external_payload())).plan(
+            "目标",
+            device_id="phone-1",
+        )
+        with self.assertRaisesRegex(TaskGraphError, "跨 device"):
+            graph.to_qwen_context(
+                confirmed_risk_ids=("save_place",),
+                confirmed_task_id=graph.task_id,
+                confirmed_device_id="phone-2",
+                confirmed_subgoal_id="save_target",
                 confirmed_revision=graph.revision,
             )
 
@@ -598,6 +969,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskGraphError, "跨子目标复用"):
             graph.to_qwen_context(
                 confirmed_risk_ids=("save_place",),
+                confirmed_task_id=graph.task_id,
+                confirmed_device_id=graph.device_id,
                 confirmed_subgoal_id="locate_target",
                 confirmed_revision=graph.revision,
             )
@@ -618,6 +991,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskGraphError, "跨 revision 复用"):
             revised.to_qwen_context(
                 confirmed_risk_ids=("save_place",),
+                confirmed_task_id=revised.task_id,
+                confirmed_device_id=revised.device_id,
                 confirmed_subgoal_id="save_target",
                 confirmed_revision=graph.revision,
             )

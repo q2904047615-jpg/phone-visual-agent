@@ -772,6 +772,20 @@ class DeviceControllerRegistry:
             device_id = str(raw.get("device_id") or "").strip()
             window_title = str(raw.get("window_title") or "").strip()
             calibration_value = str(raw.get("calibration_path") or "").strip()
+            raw_verified_actions = raw.get("verified_actions")
+            if raw_verified_actions is None:
+                verified_actions = None
+            elif not isinstance(raw_verified_actions, list) or not all(
+                isinstance(item, str) and item.strip()
+                for item in raw_verified_actions
+            ):
+                raise RuntimeError(
+                    f"设备 {device_id or 'missing'} 的 verified_actions 格式无效。"
+                )
+            else:
+                verified_actions = {
+                    str(item).strip() for item in raw_verified_actions
+                }
             if not device_id or device_id in self._controllers:
                 raise RuntimeError("设备注册表存在空或重复的 device_id。")
             effective_window = window_title or "__default_window__"
@@ -788,14 +802,19 @@ class DeviceControllerRegistry:
                 controller = RobotController(
                     window_title,
                     calibration_path=calibration_path,
+                    verified_actions=verified_actions,
                 )
             else:
-                controller = RobotController(calibration_path=calibration_path)
+                controller = RobotController(
+                    calibration_path=calibration_path,
+                    verified_actions=verified_actions,
+                )
             self._controllers[device_id] = controller
             self._descriptors[device_id] = {
                 "device_id": device_id,
                 "window_title": window_title,
                 "calibration_path": str(calibration_path),
+                "verified_actions": sorted(controller.verified_actions),
             }
         if not self._controllers or self.default_device_id not in self._controllers:
             raise RuntimeError("设备注册表必须包含已启用的 default_device_id。")
@@ -1162,6 +1181,10 @@ def apps() -> dict[str, Any]:
 @app.get("/api/device")
 def device() -> dict[str, Any]:
     status = runtime.controller.device_status()
+    capability_provider = getattr(runtime.controller, "hardware_capabilities", None)
+    hardware_capabilities = (
+        capability_provider() if callable(capability_provider) else {}
+    )
     status["default_device_id"] = runtime.device_controllers.default_device_id
     status["devices"] = [
         {
@@ -1188,14 +1211,11 @@ def device() -> dict[str, Any]:
             "automatic_loop_enabled": True,
             "automatic_loop_max_physical_actions": 8,
             "supervised_single_step_enabled": True,
-            "enabled_physical_actions": [
-                "tap_semantic",
-                "dismiss_overlay",
-                "swipe",
-                "back",
-                "input_verified_text",
-                "long_press",
-            ],
+            "enabled_physical_actions": sorted(
+                action
+                for action, enabled in hardware_capabilities.items()
+                if enabled and action != "wait_for_change"
+            ),
             "protocol_physical_actions": [
                 "tap_semantic",
                 "dismiss_overlay",
@@ -1205,11 +1225,7 @@ def device() -> dict[str, Any]:
                 "long_press",
                 "drag",
             ],
-            "hardware_capabilities": {
-                "drag": callable(
-                    getattr(runtime.controller, "vision_drag_relative", None)
-                ),
-            },
+            "hardware_capabilities": hardware_capabilities,
             "supported_app_scope": "dynamic",
             "observer": runtime.generic_scene_observer.status(),
         },

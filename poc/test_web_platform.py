@@ -117,6 +117,37 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             hold_seconds=0.35,
         )
 
+    def test_drag_is_fail_closed_until_device_marks_it_verified(self):
+        controller = RobotController(title="test")
+
+        self.assertFalse(controller.hardware_capabilities()["drag"])
+        with self.assertRaisesRegex(Exception, "尚未完成任意两点拖动真机验收"):
+            controller.vision_drag_relative(100, 200, 700, 800)
+
+    def test_verified_drag_uses_two_calibrated_points_once(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"drag"},
+        )
+        frame = Image.new("RGB", (540, 960), "white")
+
+        with (
+            patch("robot_core.legacy.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch.object(controller, "_checkpoint"),
+            patch(
+                "tap_calibration.corrected_grid_point",
+                side_effect=[(100.0, 200.0), (700.0, 800.0)],
+            ),
+            patch("robot_core.legacy.drag_client_path") as drag,
+            patch("robot_core.legacy.move_cursor_outside_camera") as move_out,
+        ):
+            result = controller.vision_drag_relative(100, 200, 700, 800)
+
+        self.assertEqual(result, ((54, 192), (377, 767)))
+        drag.assert_called_once_with(123, (54, 192), (377, 767))
+        move_out.assert_called_once_with(123)
+
 TEST_NUMERIC_GRID_LAYOUT = {
     "type": "numeric_grid",
     "anchors": {
@@ -3814,12 +3845,13 @@ class ApiEndToEndTests(unittest.TestCase):
                     "automatic_loop_max_physical_actions": 8,
                     "supervised_single_step_enabled": True,
                     "enabled_physical_actions": [
-                        "tap_semantic",
-                        "dismiss_overlay",
-                        "swipe",
                         "back",
+                        "dismiss_overlay",
+                        "drag",
                         "input_verified_text",
                         "long_press",
+                        "swipe",
+                        "tap_semantic",
                     ],
                     "protocol_physical_actions": [
                         "tap_semantic",
@@ -3830,7 +3862,16 @@ class ApiEndToEndTests(unittest.TestCase):
                         "long_press",
                         "drag",
                     ],
-                    "hardware_capabilities": {"drag": True},
+                    "hardware_capabilities": {
+                        "tap_semantic": True,
+                        "dismiss_overlay": True,
+                        "swipe": True,
+                        "back": True,
+                        "wait_for_change": True,
+                        "input_verified_text": True,
+                        "long_press": True,
+                        "drag": True,
+                    },
                     "supported_app_scope": "dynamic",
                 },
                 "generic_orchestrator": {

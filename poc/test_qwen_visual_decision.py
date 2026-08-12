@@ -834,6 +834,26 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         self.assertEqual(decision.proposal.status, "action")
 
+    def test_device_capability_set_rejects_unavailable_action(self) -> None:
+        response = action_payload(self.context, self.observation)
+        provider = SequenceProvider([response, response])
+        observer = QwenVisualDecisionObserver(provider)
+
+        decision = observer.decide(
+            frames=self.frames,
+            task_context=self.context,
+            trusted_observation=self.observation,
+            available_action_kinds={"wait_for_change"},
+        )
+
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(decision.proposal.status, "blocked")
+        self.assertIn("没有本地验证动作能力", decision.reason)
+        self.assertEqual(
+            observer.last_diagnostics["available_action_kinds"],
+            ["wait_for_change"],
+        )
+
     def test_decision_service_disconnect_returns_blocked_with_diagnostics(self) -> None:
         provider = SequenceProvider(
             [VisionAgentError("千问视觉连接连续1次中断：Server disconnected")]

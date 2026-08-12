@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 from PIL import Image
 
@@ -44,6 +44,7 @@ MIN_TRUSTED_FRAME_SHARPNESS = 4.0
 SINGLE_ELEMENT_ACTIONS = frozenset(
     {"tap_semantic", "dismiss_overlay", "input_verified_text", "long_press"}
 )
+QWEN_PROTOCOL_ACTIONS = frozenset(ALLOWED_STEP_ACTIONS)
 
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -945,6 +946,7 @@ class QwenVisualDecisionObserver:
         task_context: QwenTaskContext | dict[str, Any],
         trusted_observation: TrustedObservation,
         decision_number: int = 1,
+        available_action_kinds: Iterable[str] | None = None,
     ) -> QwenVisualDecision:
         started = time.perf_counter()
         self.last_raw_response = ""
@@ -956,6 +958,9 @@ class QwenVisualDecisionObserver:
             else QwenTaskContext.from_dict(task_context)
         )
         context.validate()
+        available_actions = _normalize_available_action_kinds(
+            available_action_kinds
+        )
         trusted_observation.validate_against_frames(frames)
         if context.device_id != trusted_observation.device_id:
             raise VisionAgentError("任务 device_id 与可信观察不一致。")
@@ -975,6 +980,7 @@ class QwenVisualDecisionObserver:
             "first_pass_success": False,
             "repair_retry_success": False,
             "hardware_actions_enabled": False,
+            "available_action_kinds": sorted(available_actions),
             "model_call_elapsed_seconds": model_call_elapsed_seconds,
         }
         self.last_diagnostics = dict(base_diagnostics)
@@ -1038,6 +1044,7 @@ class QwenVisualDecisionObserver:
             context,
             trusted_observation,
             decision_number=max(1, int(decision_number)),
+            available_action_kinds=available_actions,
         )
         image = frames[trusted_observation.selected_frame_index].convert("RGB")
         messages = _decision_messages(prompt, image)
@@ -1066,7 +1073,12 @@ class QwenVisualDecisionObserver:
         self.last_raw_response = raw
         self.last_diagnostics = dict(base_diagnostics)
         try:
-            decision = _parse_decision(raw, context=context, observation=trusted_observation)
+            decision = _parse_decision(
+                raw,
+                context=context,
+                observation=trusted_observation,
+                available_action_kinds=available_actions,
+            )
             self._metrics["first_pass_success_count"] += 1
             first_pass = True
             retry_used = False
@@ -1088,6 +1100,7 @@ class QwenVisualDecisionObserver:
                 trusted_observation,
                 error=first_error,
                 decision_number=max(1, int(decision_number)),
+                available_action_kinds=available_actions,
             )
             try:
                 raw = model_chat(
@@ -1132,6 +1145,7 @@ class QwenVisualDecisionObserver:
                     raw,
                     context=context,
                     observation=trusted_observation,
+                    available_action_kinds=available_actions,
                 )
             except VisionAgentError as retry_error:
                 reason = (
@@ -1214,7 +1228,9 @@ def _decision_prompt(
     observation: TrustedObservation,
     *,
     decision_number: int,
+    available_action_kinds: frozenset[str],
 ) -> str:
+    available_actions = "|".join(sorted(available_action_kinds))
     return f"""
 你是通用手机视觉操作 Agent 的 Qwen 单步视觉选择层。DeepSeek 已给出当前动态任务上下文，
 本地只读观察阶段已从本轮稳定画面生成可信候选。你只能在可信候选中选择一个已有 element_id；
@@ -1226,6 +1242,8 @@ def _decision_prompt(
 本轮可信观察（唯一可执行证据源）：
 {json.dumps(observation.prompt_dict(), ensure_ascii=False, separators=(',', ':'))}
 
+当前设备已经本地验证可用的动作：{available_actions}
+
 只返回一个JSON对象：
 {{
   "protocol_version":"{QWEN_VISUAL_DECISION_PROTOCOL_VERSION}",
@@ -1236,7 +1254,7 @@ def _decision_prompt(
   "fingerprint":"逐字复制输入",
   "page_state":{{"foreground_app_id":"语义描述","screen_id":"语义描述","summary":"短描述","overlays":[]}},
   "status":"action|finished|blocked",
-  "next_action":{{"kind":"tap_semantic|dismiss_overlay|swipe|back|wait_for_change|input_verified_text|long_press|drag","element_id":"单元素动作的可信候选ID","target":"复制meaning","role":"复制role","label":"复制label","states":{{}},"text":"输入时逐字复制goal.entities.input_text","duration_ms":"长按500到2000；默认800","source_element_id":"拖动起点候选","destination_element_id":"拖动终点候选","direction":"仅swipe使用"}},
+  "next_action":{{"kind":"{available_actions}","element_id":"单元素动作的可信候选ID","target":"复制meaning","role":"复制role","label":"复制label","states":{{}},"text":"输入时逐字复制goal.entities.input_text","duration_ms":"长按500到2000；默认800","source_element_id":"拖动起点候选","destination_element_id":"拖动终点候选","direction":"仅swipe使用"}},
   "target_region":{{"kind":"element|element_path|screen|system_navigation","element_id":"单元素或拖动起点候选ID","bounds":[0,0,1000,1000],"destination_element_id":"仅拖动终点","destination_bounds":[0,0,1000,1000],"description":"语义区域"}},
   "expected_result":{{"scene_changed":true}},
   "confidence":0.0,
@@ -1259,6 +1277,7 @@ def _decision_prompt(
 10. task_id/device_id/revision/observation_id/fingerprint必须逐字复制；任何旧值都会被拒绝。
 11. expected_result只描述一个动作后可由新画面验证的变化。
 12. 这是第{decision_number}轮，只根据本轮上下文与本轮观察作答。不要Markdown。
+13. next_action.kind只能来自当前设备可用动作集合；缺少所需动作能力时必须blocked。
 """
 
 
@@ -1268,7 +1287,9 @@ def _decision_retry_prompt(
     *,
     error: Exception,
     decision_number: int,
+    available_action_kinds: frozenset[str],
 ) -> str:
+    available_actions = "|".join(sorted(available_action_kinds))
     return f"""
 上一次输出未通过本地协议，任何候选动作均已丢弃，系统没有执行动作。
 错误：{str(error)[:500]}
@@ -1285,6 +1306,7 @@ def _decision_retry_prompt(
 - confirmation_gate未允许外部动作时blocked；每轮只允许一个动作，不要计划后续步骤。
 - 顶层只允许下方JSON中的字段；绝对不要action、actions、reasoning、analysis、plan或额外字段。
 - 这是第{decision_number}轮。不要Markdown，不要解释，不要把JSON转义成字符串。
+- 当前设备只允许动作：{available_actions}；不得返回集合外动作，无法继续就blocked。
 
 必须返回这个形状，并逐字保留身份字段：
 {{"protocol_version":"{QWEN_VISUAL_DECISION_PROTOCOL_VERSION}",
@@ -1302,6 +1324,7 @@ def _parse_decision(
     *,
     context: QwenTaskContext,
     observation: TrustedObservation,
+    available_action_kinds: frozenset[str] | None = None,
 ) -> QwenVisualDecision:
     try:
         payload = _extract_json_object(raw)
@@ -1351,6 +1374,14 @@ def _parse_decision(
             observation=observation,
             revision=context.revision,
         )
+        if (
+            action is not None
+            and available_action_kinds is not None
+            and action.action not in available_action_kinds
+        ):
+            raise GenericStepPlanningError(
+                f"当前设备没有本地验证动作能力：{action.action}"
+            )
         evidence_ids = _text_tuple(
             payload.get("completion_evidence_element_ids") or [],
             "completion_evidence_element_ids",
@@ -1415,6 +1446,27 @@ def _parse_decision(
         return decision
     except (UISceneError, GenericStepPlanningError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"Qwen视觉单步决策不符合协议：{exc}") from exc
+
+
+def _normalize_available_action_kinds(
+    value: Iterable[str] | None,
+) -> frozenset[str]:
+    if value is None:
+        return QWEN_PROTOCOL_ACTIONS
+    try:
+        normalized = frozenset(str(item or "").strip() for item in value)
+    except TypeError as exc:
+        raise VisionAgentError("设备动作能力必须是可迭代字符串集合。") from exc
+    if "" in normalized:
+        raise VisionAgentError("设备动作能力不能包含空值。")
+    unexpected = normalized - QWEN_PROTOCOL_ACTIONS
+    if unexpected:
+        raise VisionAgentError(
+            "设备动作能力包含协议外动作：" + ", ".join(sorted(unexpected))
+        )
+    if not normalized:
+        raise VisionAgentError("设备没有任何可供 Qwen 选择的通用动作。")
+    return normalized
 
 
 def _parse_action(

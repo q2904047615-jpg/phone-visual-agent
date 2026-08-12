@@ -204,6 +204,19 @@ class GenericActionAdapterTests(unittest.TestCase):
             post_action_settle=0,
         )
 
+    def test_reports_only_callable_device_actions(self):
+        adapter = self._adapter(FakeSceneObserver([]), FakeRobot())
+
+        supported = adapter.supported_action_kinds()
+
+        self.assertIn("tap_semantic", supported)
+        self.assertIn("input_verified_text", supported)
+        self.assertIn("long_press", supported)
+        self.assertIn("drag", supported)
+        self.assertIn("back", supported)
+        self.assertIn("wait_for_change", supported)
+        self.assertIn("swipe", supported)
+
     def test_confirmed_tap_executes_exactly_once_and_reobserves(self):
         planned = scene("planned", bounds=(0.1, 0.2, 0.3, 0.4))
         fresh = scene("before", element_id="fresh", bounds=(0.11, 0.21, 0.31, 0.41))

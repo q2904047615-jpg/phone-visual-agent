@@ -506,6 +506,7 @@ class RobotController:
         title: str = legacy.DEFAULT_WINDOW_TITLE,
         *,
         calibration_path: Path | None = None,
+        verified_actions: set[str] | frozenset[str] | None = None,
     ) -> None:
         self.title = title
         self.calibration_path = (
@@ -519,6 +520,39 @@ class RobotController:
         # the seller window capture routine at the same time. On Windows that
         # occasionally returns a transient, truncated client bitmap.
         self.capture_lock = threading.RLock()
+        default_actions = {
+            "tap_semantic",
+            "dismiss_overlay",
+            "swipe",
+            "back",
+            "wait_for_change",
+            "input_verified_text",
+            "long_press",
+        }
+        self.verified_actions = frozenset(
+            default_actions if verified_actions is None else verified_actions
+        )
+        allowed_actions = default_actions | {"drag"}
+        unexpected = self.verified_actions - allowed_actions
+        if unexpected:
+            raise ValueError(
+                "设备已验证动作包含未知值：" + ", ".join(sorted(unexpected))
+            )
+
+    def hardware_capabilities(self) -> dict[str, bool]:
+        return {
+            action: action in self.verified_actions
+            for action in (
+                "tap_semantic",
+                "dismiss_overlay",
+                "swipe",
+                "back",
+                "wait_for_change",
+                "input_verified_text",
+                "long_press",
+                "drag",
+            )
+        }
 
     def request_stop(self) -> None:
         self.stop_event.set()
@@ -615,6 +649,60 @@ class RobotController:
         if not 0.5 <= float(hold_seconds) <= 2.0:
             raise ValueError("通用长按时间必须在0.5～2.0秒之间。")
         return self._vision_press_relative(x, y, hold_seconds=float(hold_seconds))
+
+    def vision_drag_relative(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Drag between two calibrated visual points through the seller UI."""
+
+        if "drag" not in self.verified_actions:
+            raise WorkflowNotReady("当前设备尚未完成任意两点拖动真机验收。")
+        values = (start_x, start_y, end_x, end_y)
+        if any(not 0 <= value <= 1000 for value in values):
+            raise ValueError("拖动视觉坐标必须全部在0～1000之间。")
+        if (start_x, start_y) == (end_x, end_y):
+            raise ValueError("拖动起点和终点不能相同。")
+        hwnd, _title = legacy.find_window(self.title)
+        frame = self._capture_phone(hwnd)
+        from tap_calibration import corrected_grid_point
+
+        corrected_start = corrected_grid_point(
+            start_x,
+            start_y,
+            (frame.width, frame.height),
+            self.calibration_path,
+        )
+        corrected_end = corrected_grid_point(
+            end_x,
+            end_y,
+            (frame.width, frame.height),
+            self.calibration_path,
+        )
+
+        def to_pixel(point: tuple[float, float]) -> tuple[int, int]:
+            return (
+                min(
+                    frame.width - 1,
+                    max(0, int(round(point[0] * (frame.width - 1) / 1000))),
+                ),
+                min(
+                    frame.height - 1,
+                    max(0, int(round(point[1] * (frame.height - 1) / 1000))),
+                ),
+            )
+
+        start = to_pixel(corrected_start)
+        end = to_pixel(corrected_end)
+        if start == end:
+            raise ValueError("标定后的拖动起点和终点重合。")
+        self._checkpoint()
+        legacy.drag_client_path(hwnd, start, end)
+        legacy.move_cursor_outside_camera(hwnd)
+        return start, end
 
     def _vision_press_relative(
         self,
@@ -1483,7 +1571,19 @@ class MockRobotController(RobotController):
     """No-hardware controller for API tests and UI demonstrations."""
 
     def __init__(self) -> None:
-        super().__init__(title="MOCK")
+        super().__init__(
+            title="MOCK",
+            verified_actions={
+                "tap_semantic",
+                "dismiss_overlay",
+                "swipe",
+                "back",
+                "wait_for_change",
+                "input_verified_text",
+                "long_press",
+                "drag",
+            },
+        )
         self.executions: list[dict[str, Any]] = []
 
     def device_status(self) -> dict[str, Any]:

@@ -467,6 +467,20 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual("back", result.canonical_class)
 
+    def test_rejects_action_missing_from_device_capabilities(self) -> None:
+        scene = _scene()
+        decision = _decision(scene, action_kind="swipe")
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+            available_action_kinds=frozenset({"back", "wait_for_change"}),
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("没有本地验证动作能力", result.reason)
+
     def test_allows_verified_text_input_only_for_focused_input(self) -> None:
         scene = _scene(
             meaning="搜索输入框",

@@ -86,6 +86,43 @@ class GenericSingleActionAdapter:
         }
     )
 
+    def supported_action_kinds(self) -> frozenset[str]:
+        """Return only actions backed by callable methods on this device."""
+
+        capability_provider = getattr(self.robot, "hardware_capabilities", None)
+        declared = capability_provider() if callable(capability_provider) else {}
+        if not isinstance(declared, dict):
+            declared = {}
+
+        def available(action: str, method_name: str) -> bool:
+            return callable(getattr(self.robot, method_name, None)) and bool(
+                declared.get(action, True)
+            )
+
+        supported = (
+            {"wait_for_change"}
+            if bool(declared.get("wait_for_change", True))
+            else set()
+        )
+        if available("tap_semantic", "vision_tap_relative"):
+            supported.add("tap_semantic")
+            if bool(declared.get("dismiss_overlay", True)):
+                supported.add("dismiss_overlay")
+        if bool(declared.get("swipe", True)) and any(
+            callable(getattr(self.robot, f"vision_swipe_{direction}", None))
+            for direction in ("up", "down", "left", "right")
+        ):
+            supported.add("swipe")
+        if available("back", "vision_android_back"):
+            supported.add("back")
+        if available("input_verified_text", "vision_type_text"):
+            supported.add("input_verified_text")
+        if available("long_press", "vision_long_press_relative"):
+            supported.add("long_press")
+        if available("drag", "vision_drag_relative"):
+            supported.add("drag")
+        return frozenset(supported)
+
     def __init__(
         self,
         *,

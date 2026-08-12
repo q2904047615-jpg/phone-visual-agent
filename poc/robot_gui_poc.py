@@ -43,6 +43,8 @@ SW_RESTORE = 9
 GA_ROOT = 2
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
 VK_ESCAPE = 0x1B
 VK_HOME = 0x24
 VK_DOWN = 0x28
@@ -446,6 +448,65 @@ def click_client_point(
     user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
     time.sleep(0.12)
     user32.SetCursorPos(old_cursor.x, old_cursor.y)
+
+
+def drag_client_path(
+    hwnd: int,
+    start: tuple[int, int],
+    end: tuple[int, int],
+    *,
+    duration_seconds: float = 0.8,
+    steps: int = 16,
+) -> None:
+    """Drive the seller UI's right-button touch-down/move/touch-up path."""
+
+    _, _, width, height = client_geometry(hwnd)
+    for name, (x, y) in (("起点", start), ("终点", end)):
+        if not (0 <= x < width and 0 <= y < min(height, DEFAULT_CAMERA_HEIGHT)):
+            raise ValueError(
+                f"拖动{name} ({x}, {y}) 超出摄像头客户区 "
+                f"{width}×{min(height, DEFAULT_CAMERA_HEIGHT)}。"
+            )
+    if start == end:
+        raise ValueError("拖动起点和终点不能相同。")
+    if not 0.3 <= float(duration_seconds) <= 2.0:
+        raise ValueError("拖动时间必须在0.3～2.0秒之间。")
+    if isinstance(steps, bool) or not 4 <= int(steps) <= 60:
+        raise ValueError("拖动插值步数必须在4～60之间。")
+
+    start_point = POINT(*start)
+    end_point = POINT(*end)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(start_point)):
+        raise ctypes.WinError()
+    if not user32.ClientToScreen(hwnd, ctypes.byref(end_point)):
+        raise ctypes.WinError()
+
+    old_cursor = POINT()
+    user32.GetCursorPos(ctypes.byref(old_cursor))
+    user32.ShowWindow(hwnd, SW_RESTORE)
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.1)
+    user32.SetCursorPos(start_point.x, start_point.y)
+    _check_escape("用户按下 Esc，已取消拖动。")
+    pressed = False
+    try:
+        user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+        pressed = True
+        time.sleep(0.12)
+        step_count = int(steps)
+        delay = max(0.01, (float(duration_seconds) - 0.12) / step_count)
+        for index in range(1, step_count + 1):
+            _check_escape("用户按下 Esc，已停止拖动。")
+            ratio = index / step_count
+            x = round(start_point.x + (end_point.x - start_point.x) * ratio)
+            y = round(start_point.y + (end_point.y - start_point.y) * ratio)
+            user32.SetCursorPos(x, y)
+            time.sleep(delay)
+    finally:
+        if pressed:
+            user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+            time.sleep(0.12)
+        user32.SetCursorPos(old_cursor.x, old_cursor.y)
 
 
 def _check_escape(message: str = "用户按下 Esc，已停止执行。") -> None:

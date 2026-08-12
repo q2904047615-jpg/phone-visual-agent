@@ -6,7 +6,16 @@
       "device_id": "device-local-01",
       "enabled": true,
       "window_title": "",
-      "calibration_path": "tap_calibration.json"
+      "calibration_path": "tap_calibration.json",
+      "verified_actions": [
+        "tap_semantic",
+        "dismiss_overlay",
+        "swipe",
+        "back",
+        "wait_for_change",
+        "input_verified_text",
+        "long_press"
+      ]
     }
   ]
 }

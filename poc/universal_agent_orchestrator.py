@@ -398,6 +398,11 @@ class UniversalAgentSessionState:
             "evidence": list(dict.fromkeys(self.evidence_paths)),
             "automatic_loop_enabled": self.automatic_loop_enabled,
             "auto_pause_reason": self.auto_pause_reason,
+            "available_action_kinds": sorted(
+                self.adapter.supported_action_kinds()
+                if callable(getattr(self.adapter, "supported_action_kinds", None))
+                else PhaseOneNavigationPolicy.ALLOWED_ACTIONS
+            ),
             "confirmation_scope": (
                 self.confirmation_authority.scope()
                 if self.confirmation_authority is not None
@@ -568,6 +573,49 @@ class UniversalAgentOrchestrator:
     def _release_if_terminal(self, session: UniversalAgentSessionState) -> None:
         if session.status in DeviceTaskRegistry.TERMINAL_STATUSES:
             self.device_registry.release(session.device_id, session.session_id)
+
+    @staticmethod
+    def _available_action_kinds(
+        session: UniversalAgentSessionState,
+    ) -> frozenset[str]:
+        provider = getattr(session.adapter, "supported_action_kinds", None)
+        if not callable(provider):
+            return PhaseOneNavigationPolicy.ALLOWED_ACTIONS
+        actions = frozenset(str(item or "").strip() for item in provider())
+        if not actions or "" in actions:
+            raise UniversalAgentOrchestratorError(
+                "设备动作能力为空或包含无效动作。"
+            )
+        unexpected = actions - PhaseOneNavigationPolicy.ALLOWED_ACTIONS
+        if unexpected:
+            raise UniversalAgentOrchestratorError(
+                "设备报告了协议外动作：" + ", ".join(sorted(unexpected))
+            )
+        return actions
+
+    def _decide_next_action(
+        self,
+        session: UniversalAgentSessionState,
+        *,
+        frames: list[Any],
+        task_context: Mapping[str, Any],
+        trusted_observation: Any,
+    ) -> Any:
+        kwargs = {
+            "frames": frames,
+            "task_context": task_context,
+            "trusted_observation": trusted_observation,
+            "decision_number": session.step_number,
+            "available_action_kinds": self._available_action_kinds(session),
+        }
+        try:
+            return self.qwen_observer.decide(**kwargs)
+        except TypeError as exc:
+            text = str(exc)
+            if "available_action_kinds" not in text or "unexpected keyword" not in text:
+                raise
+            kwargs.pop("available_action_kinds")
+            return self.qwen_observer.decide(**kwargs)
 
     @staticmethod
     def _policy_payload(decision: NavigationPolicyDecision) -> dict[str, Any]:
@@ -891,11 +939,11 @@ class UniversalAgentOrchestrator:
 
         frames = list(result.after_frames)
         context = revised.to_qwen_context()
-        decision = self.qwen_observer.decide(
+        decision = self._decide_next_action(
+            session,
             frames=frames,
             task_context=context,
             trusted_observation=new_observation,
-            decision_number=session.step_number,
         )
         self._validate_decision_binding(revised, new_observation, decision)
         session.qwen_decision = decision
@@ -923,6 +971,7 @@ class UniversalAgentOrchestrator:
             task_context=QwenTaskContext.from_dict(context),
             trusted_observation=new_observation,
             decision=decision,
+            available_action_kinds=self._available_action_kinds(session),
         )
         session.controller_decision = policy_decision
         self._remember(
@@ -1021,11 +1070,11 @@ class UniversalAgentOrchestrator:
                 )
             else:
                 context = graph.to_qwen_context()
-            decision = self.qwen_observer.decide(
+            decision = self._decide_next_action(
+                session,
                 frames=frames,
                 task_context=context,
                 trusted_observation=observation,
-                decision_number=session.step_number,
             )
             self._validate_decision_binding(graph, observation, decision)
             session.qwen_decision = decision
@@ -1042,6 +1091,7 @@ class UniversalAgentOrchestrator:
                     task_context=QwenTaskContext.from_dict(context),
                     trusted_observation=observation,
                     decision=decision,
+                    available_action_kinds=self._available_action_kinds(session),
                 )
                 session.controller_decision = policy_decision
                 self._remember(
@@ -1126,6 +1176,7 @@ class UniversalAgentOrchestrator:
             task_context=QwenTaskContext.from_dict(context),
             trusted_observation=observation,
             decision=decision,
+            available_action_kinds=self._available_action_kinds(session),
         )
         session.controller_decision = policy_decision
         authority.consumed = True
@@ -1477,11 +1528,11 @@ class UniversalAgentOrchestrator:
                 observation,
             ),
         )
-        decision = self.qwen_observer.decide(
+        decision = self._decide_next_action(
+            session,
             frames=frames,
             task_context=task_context,
             trusted_observation=observation,
-            decision_number=session.step_number,
         )
         self._validate_decision_binding(graph, observation, decision)
         session.qwen_decision = decision
@@ -1497,6 +1548,7 @@ class UniversalAgentOrchestrator:
                 task_context=QwenTaskContext.from_dict(dict(task_context)),
                 trusted_observation=observation,
                 decision=decision,
+                available_action_kinds=self._available_action_kinds(session),
             )
             session.controller_decision = policy_decision
             self._remember(
@@ -1621,11 +1673,11 @@ class UniversalAgentOrchestrator:
             )
 
             task_context = graph.to_qwen_context()
-            decision = self.qwen_observer.decide(
+            decision = self._decide_next_action(
+                session,
                 frames=frames,
                 task_context=task_context,
                 trusted_observation=observation,
-                decision_number=session.step_number,
             )
             self._validate_decision_binding(graph, observation, decision)
             session.qwen_decision = decision
@@ -1640,6 +1692,7 @@ class UniversalAgentOrchestrator:
                     task_context=QwenTaskContext.from_dict(task_context),
                     trusted_observation=observation,
                     decision=decision,
+                    available_action_kinds=self._available_action_kinds(session),
                 )
                 session.controller_decision = policy_decision
                 self._remember(
@@ -1918,6 +1971,7 @@ class PhaseOneNavigationPolicy:
         task_context: Any,
         trusted_observation: Any,
         decision: Any,
+        available_action_kinds: frozenset[str] | None = None,
     ) -> NavigationPolicyDecision:
         impact = str(
             self._value(task_context, "current_external_impact", "unknown")
@@ -1939,6 +1993,11 @@ class PhaseOneNavigationPolicy:
         action_kind = str(self._value(action, "action", "")).strip()
         if action_kind not in self.ALLOWED_ACTIONS:
             return self._deny(f"通用策略不允许动作：{action_kind or 'missing'}。")
+        if (
+            available_action_kinds is not None
+            and action_kind not in available_action_kinds
+        ):
+            return self._deny(f"当前设备没有本地验证动作能力：{action_kind}。")
         if action_kind == "wait_for_change":
             if impact not in {"read_only", "navigation_only"}:
                 return self._deny(f"等待动作不能用于 {impact} 子目标。")

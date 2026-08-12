@@ -637,6 +637,14 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(capture.calls, 12)
         self.assertEqual(len(result.evidence), 12)
         self.assertEqual(len(result.after_frame_paths), 4)
+        self.assertEqual(
+            result.observation_errors,
+            ("第1轮动作后观察失败：模型返回的 JSON 无法解析",),
+        )
+        self.assertEqual(
+            result.to_dict()["observation_errors"],
+            ["第1轮动作后观察失败：模型返回的 JSON 无法解析"],
+        )
 
     def test_two_post_action_format_failures_stop_after_one_robot_action(self):
         observer = FakeSceneObserver(
@@ -674,6 +682,54 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(len(caught.exception.evidence), 12)
         self.assertEqual(observer.calls, 3)
         self.assertEqual(len(robot.actions), 1)
+        self.assertEqual(
+            caught.exception.observation_errors,
+            (
+                "第1轮动作后观察失败：模型返回的 JSON 无法解析",
+                "第2轮动作后观察失败：模型返回的 JSON 无法解析",
+            ),
+        )
+        self.assertIn("第1轮动作后观察失败", str(caught.exception))
+        self.assertIn("第2轮动作后观察失败", str(caught.exception))
+
+    def test_post_action_observation_limit_is_hard_capped_at_two(self):
+        observer = FakeSceneObserver(
+            [
+                scene("before", element_id="fresh"),
+                VisionAgentError("模型返回的 JSON 无法解析：first"),
+                VisionAgentError("模型返回的 JSON 无法解析：second"),
+                scene("after", screen_id="app_home", element_id="after"),
+            ]
+        )
+        robot = FakeRobot()
+        capture = SequenceCapture(["gray"] * 16)
+        adapter = GenericSingleActionAdapter(
+            capture=capture,
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=1,
+            post_action_max_observations=5,
+        )
+
+        with self.assertRaises(GenericActionAdapterError) as caught:
+            adapter.execute(
+                requested_action=SemanticAction(
+                    node_id="generic_step_1",
+                    action="tap_semantic",
+                    params={"element_id": "e1", "target": "app_icon"},
+                ),
+                planned_scene=scene("planned"),
+                goal=goal(),
+                confirmed=True,
+            )
+
+        self.assertEqual(adapter.post_action_max_observations, 2)
+        self.assertEqual(caught.exception.physical_actions, 1)
+        self.assertEqual(observer.calls, 3)
+        self.assertEqual(capture.calls, 12)
+        self.assertEqual(robot.actions, [("tap", 300, 400)])
 
     def test_post_action_non_format_failure_is_not_retried(self):
         observer = FakeSceneObserver(

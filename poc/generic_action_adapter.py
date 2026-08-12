@@ -29,10 +29,12 @@ class GenericActionAdapterError(RuntimeError):
         *,
         physical_actions: int = 0,
         evidence: tuple[str, ...] = (),
+        observation_errors: tuple[str, ...] = (),
     ) -> None:
         super().__init__(message)
         self.physical_actions = int(physical_actions)
         self.evidence = tuple(evidence)
+        self.observation_errors = tuple(observation_errors)
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,7 @@ class GenericActionExecutionResult:
         compare=False,
     )
     after_frame_paths: tuple[str, ...] = ()
+    observation_errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +67,7 @@ class GenericActionExecutionResult:
             "evidence": list(self.evidence),
             "after_frame_count": len(self.after_frames),
             "after_frame_paths": list(self.after_frame_paths),
+            "observation_errors": list(self.observation_errors),
         }
 
 
@@ -91,9 +95,9 @@ class GenericSingleActionAdapter:
         self.frame_interval = max(0.0, float(frame_interval))
         self.post_action_settle = max(0.0, float(post_action_settle))
         self.post_action_timeout = max(0.0, float(post_action_timeout))
-        self.post_action_max_observations = max(
-            1,
-            int(post_action_max_observations),
+        self.post_action_max_observations = min(
+            2,
+            max(1, int(post_action_max_observations)),
         )
 
     def _capture_frame(self) -> Image.Image:
@@ -199,11 +203,13 @@ class GenericSingleActionAdapter:
         tuple[Image.Image, ...],
         tuple[str, ...],
         tuple[str, ...],
+        tuple[str, ...],
     ]:
         if self.post_action_settle:
             time.sleep(min(self.post_action_settle, self.post_action_timeout))
 
         all_paths: tuple[str, ...] = ()
+        observation_errors: list[str] = []
         last_error: Exception | None = None
         for attempt in range(1, self.post_action_max_observations + 1):
             attempt_deadline = time.monotonic() + self.post_action_timeout
@@ -220,19 +226,30 @@ class GenericSingleActionAdapter:
                 )
             except RuntimeError as exc:
                 last_error = exc
+                observation_errors.append(
+                    f"第{attempt}轮动作后观察失败：{exc}"
+                )
                 if (
                     attempt >= self.post_action_max_observations
                     or not self._post_observation_retryable(exc)
                 ):
                     raise GenericActionAdapterError(
-                        f"通用页面观察失败：{exc}",
+                        "通用页面观察失败："
+                        + "；".join(observation_errors),
                         evidence=all_paths,
+                        observation_errors=tuple(observation_errors),
                     ) from exc
                 continue
 
             try:
                 self.controller.verify_after_action(resolved, before, after)
-                return after, tuple(frames), paths, all_paths
+                return (
+                    after,
+                    tuple(frames),
+                    paths,
+                    all_paths,
+                    tuple(observation_errors),
+                )
             except UniversalActionError as exc:
                 last_error = exc
                 # A stable old page, a low-confidence transitional scene, or
@@ -248,6 +265,7 @@ class GenericSingleActionAdapter:
         raise GenericActionAdapterError(
             f"动作后自适应观察仍未通过：{last_error}",
             evidence=all_paths,
+            observation_errors=tuple(observation_errors),
         ) from last_error
 
     def _post_observation_retryable(self, error: RuntimeError) -> bool:
@@ -337,6 +355,7 @@ class GenericSingleActionAdapter:
                 after_frames,
                 after_frame_paths,
                 all_after_paths,
+                observation_errors,
             ) = self._observe_stable_post_action_scene(
                 goal,
                 before=before,
@@ -350,6 +369,9 @@ class GenericSingleActionAdapter:
                 f"单步动作后验证失败：{exc}",
                 physical_actions=physical_actions,
                 evidence=evidence,
+                observation_errors=tuple(
+                    getattr(exc, "observation_errors", ())
+                ),
             ) from exc
 
         return GenericActionExecutionResult(
@@ -363,6 +385,7 @@ class GenericSingleActionAdapter:
             evidence=before_paths + all_after_paths,
             after_frames=after_frames,
             after_frame_paths=after_frame_paths,
+            observation_errors=observation_errors,
         )
 
     def _rebind_action(

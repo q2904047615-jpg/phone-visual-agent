@@ -730,6 +730,46 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     graph_impact,
                 )
 
+    def test_false_positive_audit_cannot_turn_direct_negation_into_external_state(self):
+        objective = "打开浏览器首页，仅查看，不搜索、不登录"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        audit = audit_payload_for_graph(
+            payload,
+            overrides={
+                "raw_goal": {
+                    "external_impact": "external_state",
+                    "risk_types": ["account_or_permission_change"],
+                },
+                "goal.objective": {
+                    "external_impact": "external_state",
+                    "risk_types": ["account_or_permission_change"],
+                },
+                "subgoals.target_state.objective": {
+                    "external_impact": "external_state",
+                    "risk_types": ["account_or_permission_change"],
+                },
+            },
+        )
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(payload, audit_payloads=[audit])
+        )
+
+        graph = planner.plan(objective, device_id="phone-1")
+
+        self.assertEqual(graph.active_subgoal().external_impact, "navigation_only")
+        corrected = {
+            item.source_id: item
+            for item in planner.last_risk_audit.assessments
+            if item.source_id
+            in {"raw_goal", "goal.objective", "subgoals.target_state.objective"}
+        }
+        self.assertTrue(
+            all(item.external_impact == "navigation_only" for item in corrected.values())
+        )
+
     def test_semantic_audit_can_use_an_independent_provider(self):
         payload = single_subgoal_payload("查看资料", external_impact="read_only")
         graph_provider = FakeProvider(payload)

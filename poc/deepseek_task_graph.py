@@ -150,6 +150,11 @@ COORDINATED_EFFECT_NEGATION_PATTERN = re.compile(
     r"[^，。；;]{1,24}(?:或|和|及|以及|、|or|and)\s*$",
     re.IGNORECASE,
 )
+SAFE_NAVIGATION_SEMANTIC_PATTERN = re.compile(
+    r"(?:打开|进入|启动|切换|返回|后退|关闭|取消|查看.{0,12}(?:页|界面|详情)|"
+    r"\b(?:open|enter|launch|navigate|switch|back|close|view)\b)",
+    re.IGNORECASE,
+)
 REPAIRABLE_INITIAL_GRAPH_ERRORS = (
     "任务图至少需要一个全局完成条件。",
     "可推进任务图必须且只能有一个活动子目标。",
@@ -1393,17 +1398,7 @@ def _describes_external_state_change(*values: str) -> bool:
 
 def _infer_external_risk_types(*values: str) -> frozenset[str]:
     inferred: set[str] = set()
-    patterns = {
-        "message_or_communication": COMMUNICATION_EFFECT_PATTERN,
-        "account_relationship_change": ACCOUNT_RELATIONSHIP_EFFECT_PATTERN,
-        "membership_change": MEMBERSHIP_EFFECT_PATTERN,
-        "permission_role_change": PERMISSION_ROLE_EFFECT_PATTERN,
-        "content_publication": CONTENT_PUBLICATION_EFFECT_PATTERN,
-        "data_deletion": DATA_DELETION_EFFECT_PATTERN,
-        "data_mutation": DATA_MUTATION_EFFECT_PATTERN,
-        "transaction_or_payment": TRANSACTION_EFFECT_PATTERN,
-        "account_or_permission_change": ACCOUNT_PERMISSION_EFFECT_PATTERN,
-    }
+    patterns = _external_risk_patterns()
     for value in values:
         field_inferred: set[str] = set()
         for risk_type, pattern in patterns.items():
@@ -1416,6 +1411,33 @@ def _infer_external_risk_types(*values: str) -> frozenset[str]:
             field_inferred.add("unknown_external_effect")
         inferred.update(field_inferred)
     return frozenset(inferred)
+
+
+def _external_risk_patterns() -> dict[str, re.Pattern[str]]:
+    return {
+        "message_or_communication": COMMUNICATION_EFFECT_PATTERN,
+        "account_relationship_change": ACCOUNT_RELATIONSHIP_EFFECT_PATTERN,
+        "membership_change": MEMBERSHIP_EFFECT_PATTERN,
+        "permission_role_change": PERMISSION_ROLE_EFFECT_PATTERN,
+        "content_publication": CONTENT_PUBLICATION_EFFECT_PATTERN,
+        "data_deletion": DATA_DELETION_EFFECT_PATTERN,
+        "data_mutation": DATA_MUTATION_EFFECT_PATTERN,
+        "transaction_or_payment": TRANSACTION_EFFECT_PATTERN,
+        "account_or_permission_change": ACCOUNT_PERMISSION_EFFECT_PATTERN,
+    }
+
+
+def _infer_directly_negated_risk_types(value: str) -> frozenset[str]:
+    negated: set[str] = set()
+    for risk_type, pattern in _external_risk_patterns().items():
+        for match in pattern.finditer(value):
+            prefix = value[: match.start()].rstrip().lower()
+            if (
+                DIRECT_EFFECT_NEGATION_PATTERN.search(prefix)
+                or COORDINATED_EFFECT_NEGATION_PATTERN.search(prefix)
+            ):
+                negated.add(risk_type)
+    return frozenset(negated)
 
 
 def _has_unnegated_effect_match(pattern: re.Pattern[str], value: str) -> bool:
@@ -1523,6 +1545,28 @@ def _apply_local_risk_supplements(
             if is_negated_constraint
             else _infer_external_risk_types(source.text)
         )
+        negated_types = _infer_directly_negated_risk_types(source.text)
+        model_types = frozenset(assessment.risk_types)
+        if (
+            assessment.external_impact == "external_state"
+            and model_types
+            and model_types <= negated_types
+            and not inferred
+        ):
+            corrected_impact = (
+                "navigation_only"
+                if SAFE_NAVIGATION_SEMANTIC_PATTERN.search(source.text)
+                else "read_only"
+            )
+            assessment = replace(
+                assessment,
+                external_impact=corrected_impact,
+                risk_types=(),
+                reason=(
+                    assessment.reason
+                    + "；本地逐匹配否定校验确认该风险类型仅以直接否定形式出现"
+                ),
+            )
         if inferred and assessment.external_impact != "unknown":
             assessment = replace(
                 assessment,

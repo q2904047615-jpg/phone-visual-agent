@@ -1006,7 +1006,7 @@ def _schema_prompt() -> str:
   "goal":{
     "objective":"用户最终想达到的结果",
     "target_apps":[{"app_id":"稳定小写英文ID","app_name":"App名称"}],
-    "entities":{"目标对象或内容":"值","input_text":"需要输入时逐字复制用户指定文字"}
+    "entities":{"目标对象或内容":"值","input_text":"仅在确实需要输入时逐字复制用户指定文字；否则省略此键"}
   },
   "constraints":["全局约束"],
   "completion_conditions":[{
@@ -1069,10 +1069,17 @@ def _graph_from_payload(
         _target_app_from_payload(item)
         for item in _expect_list(raw_goal.get("target_apps"), "goal.target_apps")
     )
+    entities = dict(_expect_dict(raw_goal.get("entities"), "goal.entities"))
+    # Some JSON providers materialize an optional example field as null or an
+    # empty string.  Treat only those two representations as absence.  Any
+    # non-empty value still goes through the strict exact-input validation.
+    optional_input_text = entities.get("input_text")
+    if optional_input_text is None or optional_input_text == "":
+        entities.pop("input_text", None)
     goal = GraphGoal(
         objective=_require_text(raw_goal.get("objective"), "goal.objective"),
         target_apps=target_apps,
-        entities=dict(_expect_dict(raw_goal.get("entities"), "goal.entities")),
+        entities=entities,
     )
     active_value = payload.get("active_subgoal_id")
     active_subgoal_id = None if active_value is None else str(active_value).strip()

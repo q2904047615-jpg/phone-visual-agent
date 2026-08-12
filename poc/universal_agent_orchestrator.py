@@ -1949,8 +1949,10 @@ class PhaseOneNavigationPolicy:
         ("search", frozenset({"search"}), ("搜索",)),
         (
             "open",
-            frozenset({"open", "enter", "navigate", "entry", "launcher"}),
-            ("打开", "进入", "入口"),
+            frozenset(
+                {"open", "enter", "navigate", "entry", "launcher", "launch", "start"}
+            ),
+            ("打开", "进入", "入口", "启动"),
         ),
         ("view", frozenset({"view", "details", "detail"}), ("查看", "详情")),
     )

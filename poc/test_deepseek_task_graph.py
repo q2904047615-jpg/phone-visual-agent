@@ -486,6 +486,30 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskGraphError, "低层控制字段"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan("目标", device_id="phone-1")
 
+    def test_empty_optional_input_text_is_normalized_as_absent(self):
+        for empty_value in ("", None):
+            with self.subTest(empty_value=empty_value):
+                payload = base_payload()
+                payload["goal"]["entities"]["input_text"] = empty_value
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    "只查看页面，不输入",
+                    device_id="phone-1",
+                )
+
+                self.assertNotIn("input_text", graph.goal.entities)
+
+    def test_whitespace_input_text_is_not_silently_removed(self):
+        payload = base_payload()
+        payload["goal"]["entities"]["input_text"] = " "
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "在输入框里输入一个空格",
+            device_id="phone-1",
+        )
+
+        self.assertEqual(" ", graph.goal.entities["input_text"])
+
     def test_risk_action_cannot_disable_confirmation(self):
         payload = base_payload()
         payload["risk_actions"][0]["confirmation_required"] = False

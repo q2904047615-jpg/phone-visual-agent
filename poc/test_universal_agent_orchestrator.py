@@ -543,9 +543,12 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
     def test_allows_generic_app_and_page_entry_navigation(self) -> None:
         for meaning, label in (
             ("浏览器应用入口", "浏览器"),
+            ("启动浏览器应用", "浏览器"),
             ("账户页面入口", "账户"),
             ("application_entry", "工具"),
             ("page_entry", "帮助"),
+            ("launch_application", "工具"),
+            ("start_application", "工具"),
         ):
             with self.subTest(meaning=meaning):
                 scene = _scene(meaning=meaning, label=label, role="icon")

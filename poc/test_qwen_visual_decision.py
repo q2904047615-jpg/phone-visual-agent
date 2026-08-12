@@ -14,6 +14,7 @@ from qwen_visual_decision import (
     QwenTaskContext,
     QwenVisualDecisionObserver,
     TrustedObservation,
+    _decision_retry_prompt,
 )
 from ui_scene import UIElement, UIScene, UISceneError
 from vision_agent import VisionAgentError
@@ -472,6 +473,26 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIs(decision.trusted_observation, self.observation)
         self.assertNotIn("elements", decision.page_state.to_dict())
 
+    def test_action_semantic_fields_are_canonicalized_from_trusted_candidate(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        payload["next_action"].update(
+            {
+                "target": "模型近义词",
+                "role": "模型角色",
+                "label": "模型标签",
+                "states": {"invented": True},
+            }
+        )
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        candidate = self.observation.get_candidate("settings_icon")
+        params = decision.proposal.action.params
+        self.assertEqual(candidate.meaning, params["target"])
+        self.assertEqual(candidate.role, params["role"])
+        self.assertEqual(candidate.label, params["label"])
+        self.assertEqual(candidate.states, params["states"])
+
     def test_prompt_uses_documented_thousand_scale_without_mutating_candidate(self) -> None:
         original_bounds = self.observation.get_candidate("settings_icon").bounds
         prompt = self.observation.prompt_dict()
@@ -916,6 +937,147 @@ class QwenVisualDecisionTests(unittest.TestCase):
         status = observer.status()
         self.assertEqual(status["first_pass_rate"], 0.0)
         self.assertEqual(status["repair_retry_rate"], 1.0)
+
+    def test_known_action_field_aliases_are_normalized_before_trust_checks(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        action = payload["next_action"]
+        action["action_type"] = action.pop("kind")
+        action["target_element_id"] = action.pop("element_id")
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("tap_semantic", decision.proposal.action.action)
+        self.assertEqual(
+            "settings_icon",
+            decision.proposal.action.params["element_id"],
+        )
+
+    def test_action_alias_and_nested_target_region_are_normalized(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        action = payload["next_action"]
+        action["action"] = action.pop("kind")
+        action["target_region"] = payload.pop("target_region")
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("tap_semantic", decision.proposal.action.action)
+        self.assertEqual("settings_icon", decision.target_region.element_id)
+
+    def test_nested_expected_result_is_promoted_and_verified(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        expected = payload.pop("expected_result")
+        payload["next_action"]["expected_result"] = expected
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual(expected, decision.expected_result)
+        self.assertEqual(
+            expected,
+            decision.proposal.action.params["expected_effect"],
+        )
+
+    def test_conflicting_nested_expected_result_is_rejected(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad["next_action"]["expected_result"] = {"other_change": True}
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("与顶层 expected_result 冲突", decision.reason)
+
+    def test_conflicting_nested_target_region_is_rejected(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        nested = copy.deepcopy(bad["target_region"])
+        nested["element_id"] = "other_candidate"
+        bad["next_action"]["target_region"] = nested
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("与顶层 target_region 冲突", decision.reason)
+
+    def test_conflicting_action_field_alias_is_rejected(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad["next_action"]["target_element_id"] = "other_candidate"
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("target_element_id 与 element_id 冲突", decision.reason)
+
+    def test_missing_target_region_kind_is_derived_from_verified_action(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        payload["target_region"].pop("kind")
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("element", decision.target_region.kind)
+
+    def test_missing_target_region_is_built_from_trusted_candidate(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        payload["target_region"] = None
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        candidate = self.observation.get_candidate("settings_icon")
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("element", decision.target_region.kind)
+        self.assertEqual(candidate.element_id, decision.target_region.element_id)
+        self.assertEqual(candidate.bounds, decision.target_region.bounds)
+        self.assertEqual(candidate.label, decision.target_region.description)
+
+    def test_missing_target_region_description_uses_trusted_candidate(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        payload["target_region"]["description"] = ""
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("设置", decision.target_region.description)
+
+    def test_known_target_region_aliases_are_normalized(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        region = payload["target_region"]
+        region["region_type"] = region.pop("kind")
+        region["target_element_id"] = region.pop("element_id")
+        region["target_bounds"] = region.pop("bounds")
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("element", decision.target_region.kind)
+        self.assertEqual("settings_icon", decision.target_region.element_id)
+
+    def test_conflicting_target_region_alias_is_rejected(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad["target_region"]["region_type"] = "screen"
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("region_type 与 kind 冲突", decision.reason)
+
+    def test_retry_prompt_makes_status_and_action_fields_mutually_exclusive(self) -> None:
+        prompt = _decision_retry_prompt(
+            QwenTaskContext.from_dict(self.context),
+            self.observation,
+            error=VisionAgentError("finished/blocked 不能携带 next_action"),
+            decision_number=1,
+            available_action_kinds=frozenset({"tap_semantic", "back"}),
+        )
+
+        self.assertIn('status="action"', prompt)
+        self.assertIn('status="blocked"', prompt)
+        self.assertIn('status="finished"', prompt)
+        self.assertIn("不要混合三种形状", prompt)
+        self.assertIn("绝不能保留B/C的status", prompt)
 
     def test_unstable_real_page_sequence_does_not_call_qwen(self) -> None:
         overlay = load_replay_image("douyin_digit_local_input_com.jpg")

@@ -1278,6 +1278,9 @@ def _decision_prompt(
 11. expected_result只描述一个动作后可由新画面验证的变化。
 12. 这是第{decision_number}轮，只根据本轮上下文与本轮观察作答。不要Markdown。
 13. next_action.kind只能来自当前设备可用动作集合；缺少所需动作能力时必须blocked。
+14. status是互斥判别字段：只要返回非null next_action，就必须是status=action并同时给出target_region和
+    非空expected_result；status=blocked或finished时next_action和target_region必须为null、
+    expected_result必须为空对象。不得把动作字段与终止状态混合。
 """
 
 
@@ -1307,6 +1310,15 @@ def _decision_retry_prompt(
 - 顶层只允许下方JSON中的字段；绝对不要action、actions、reasoning、analysis、plan或额外字段。
 - 这是第{decision_number}轮。不要Markdown，不要解释，不要把JSON转义成字符串。
 - 当前设备只允许动作：{available_actions}；不得返回集合外动作，无法继续就blocked。
+- status是互斥判别字段，必须先选择且只选择下面一种完整形状：
+  A. 执行动作：status="action"，next_action为一个对象，target_region为一个对象，
+     expected_result为非空对象，completion_evidence_element_ids=[]。
+  B. 安全阻塞：status="blocked"，next_action=null，target_region=null，expected_result={{}}，
+     completion_evidence_element_ids=[]。
+  C. 已经完成：status="finished"，next_action=null，target_region=null，expected_result={{}}，
+     completion_evidence_element_ids只引用当前可信候选。
+- 如果你能从当前可信观察选择一个动作，必须使用A并明确写status="action"；绝不能保留B/C的status。
+- 如果使用B或C，绝不能携带任何next_action或target_region。不要混合三种形状。
 
 必须返回这个形状，并逐字保留身份字段：
 {{"protocol_version":"{QWEN_VISUAL_DECISION_PROTOCOL_VERSION}",
@@ -1315,7 +1327,8 @@ def _decision_retry_prompt(
 "page_state":{{"foreground_app_id":"unknown","screen_id":"unknown","summary":"短描述","overlays":[]}},
 "status":"blocked","next_action":null,"target_region":null,"expected_result":{{}},
 "confidence":0.0,"reason":"安全停止原因","completion_evidence_element_ids":[]}}
-若画面明确支持action或finished，只修改status及其协议规定字段，仍不得增加任何键。
+上方JSON只是B形状示例。若画面明确支持动作，不要复制其blocked状态，必须改成完整A形状；
+若已经满足目标才使用完整C形状。仍不得增加任何键。
 """
 
 
@@ -1367,8 +1380,36 @@ def _parse_decision(
         if not isinstance(expected_result, dict):
             raise GenericStepPlanningError("expected_result 必须是JSON对象。")
         _reject_raw_control_data(expected_result)
+        raw_action = payload.get("next_action")
+        nested_target_region = None
+        nested_expected_result = None
+        if isinstance(raw_action, dict):
+            raw_action = dict(raw_action)
+            nested_target_region = raw_action.pop("target_region", None)
+            nested_expected_result = raw_action.pop("expected_result", None)
+        top_level_target_region = payload.get("target_region")
+        if nested_target_region not in (None, {}):
+            if (
+                top_level_target_region not in (None, {})
+                and top_level_target_region != nested_target_region
+            ):
+                raise GenericStepPlanningError(
+                    "next_action.target_region 与顶层 target_region 冲突。"
+                )
+            top_level_target_region = nested_target_region
+        if nested_expected_result not in (None, {}):
+            if expected_result and expected_result != nested_expected_result:
+                raise GenericStepPlanningError(
+                    "next_action.expected_result 与顶层 expected_result 冲突。"
+                )
+            if not isinstance(nested_expected_result, dict):
+                raise GenericStepPlanningError(
+                    "next_action.expected_result 必须是JSON对象。"
+                )
+            expected_result = dict(nested_expected_result)
+            _reject_raw_control_data(expected_result)
         action = _parse_action(
-            payload.get("next_action"),
+            raw_action,
             status=status,
             expected_result=expected_result,
             observation=observation,
@@ -1401,7 +1442,11 @@ def _parse_decision(
             reason=str(payload.get("reason") or "").strip()[:500],
             completion_evidence=completion_evidence,
         )
-        target_region = _parse_target_region(payload.get("target_region"))
+        target_region = _parse_target_region(
+            top_level_target_region,
+            action=action,
+            observation=observation,
+        )
         raw_confidence = payload.get("confidence", 0.0)
         if isinstance(raw_confidence, bool):
             raise GenericStepPlanningError("confidence 不能是布尔值。")
@@ -1483,6 +1528,22 @@ def _parse_action(
         return None
     if not isinstance(value, dict):
         raise GenericStepPlanningError("action 状态缺少唯一 next_action 对象。")
+    value = dict(value)
+    # Qwen occasionally uses two conventional JSON aliases even after a
+    # format-only retry.  Normalize names only; candidate identity and every
+    # semantic field are still checked against the trusted observation below.
+    for alias, canonical in {
+        "action": "kind",
+        "action_type": "kind",
+        "target_element_id": "element_id",
+    }.items():
+        if alias not in value:
+            continue
+        if canonical in value and value[canonical] != value[alias]:
+            raise GenericStepPlanningError(
+                f"next_action.{alias} 与 {canonical} 冲突。"
+            )
+        value[canonical] = value.pop(alias)
     allowed = {
         "kind", "element_id", "target", "role", "label", "states", "direction",
         "text", "duration_ms",
@@ -1512,14 +1573,37 @@ def _parse_action(
         element_id = str(params.get("element_id") or "").strip()
         if not element_id:
             raise GenericStepPlanningError("元素动作缺少可信候选 element_id。")
-        observation.get_candidate(element_id)
+        element = observation.get_candidate(element_id)
+        # element_id is Qwen's only semantic selection.  All descriptive
+        # fields are authoritative local data and must never depend on the
+        # model repeating strings exactly (or on model-authored synonyms).
+        params.update(
+            {
+                "target": element.meaning,
+                "role": element.role,
+                "label": element.label,
+                "states": dict(element.states),
+            }
+        )
     elif kind == "drag":
         source_id = str(params.get("source_element_id") or "").strip()
         destination_id = str(params.get("destination_element_id") or "").strip()
         if not source_id or not destination_id or source_id == destination_id:
             raise GenericStepPlanningError("拖动必须绑定两个不同的可信候选。")
-        observation.get_candidate(source_id)
-        observation.get_candidate(destination_id)
+        source = observation.get_candidate(source_id)
+        destination = observation.get_candidate(destination_id)
+        for prefix, element in (
+            ("source_", source),
+            ("destination_", destination),
+        ):
+            params.update(
+                {
+                    f"{prefix}target": element.meaning,
+                    f"{prefix}role": element.role,
+                    f"{prefix}label": element.label,
+                    f"{prefix}states": dict(element.states),
+                }
+            )
     return SemanticAction(
         node_id=f"qwen_visual_revision_{revision}",
         action=kind,
@@ -1527,11 +1611,79 @@ def _parse_action(
     )
 
 
-def _parse_target_region(value: Any) -> VisualTargetRegion | None:
-    if value in (None, {}):
+def _parse_target_region(
+    value: Any,
+    *,
+    action: SemanticAction | None = None,
+    observation: TrustedObservation | None = None,
+) -> VisualTargetRegion | None:
+    if value in (None, {}) and action is None:
         return None
-    if not isinstance(value, dict):
+    if value in (None, {}):
+        value = {}
+    elif not isinstance(value, dict):
         raise GenericStepPlanningError("target_region 必须是对象或null。")
+    value = dict(value)
+    for alias, canonical in {
+        "type": "kind",
+        "region_type": "kind",
+        "target_element_id": "element_id",
+        "target_bounds": "bounds",
+    }.items():
+        if alias not in value:
+            continue
+        if canonical in value and value[canonical] != value[alias]:
+            raise GenericStepPlanningError(
+                f"target_region.{alias} 与 {canonical} 冲突。"
+            )
+        value[canonical] = value.pop(alias)
+    if action is not None:
+        if observation is None:
+            raise GenericStepPlanningError("本地构造目标区域缺少可信观察。")
+        if action.action in SINGLE_ELEMENT_ACTIONS:
+            element_id = str(action.params.get("element_id") or "").strip()
+            element = observation.get_candidate(element_id)
+            defaults = {
+                "kind": "element",
+                "element_id": element.element_id,
+                "bounds": [item * 1000.0 for item in element.bounds],
+                "description": element.label or element.meaning,
+            }
+        elif action.action == "drag":
+            source = observation.get_candidate(
+                str(action.params.get("source_element_id") or "").strip()
+            )
+            destination = observation.get_candidate(
+                str(action.params.get("destination_element_id") or "").strip()
+            )
+            defaults = {
+                "kind": "element_path",
+                "element_id": source.element_id,
+                "bounds": [item * 1000.0 for item in source.bounds],
+                "destination_element_id": destination.element_id,
+                "destination_bounds": [
+                    item * 1000.0 for item in destination.bounds
+                ],
+                "description": (
+                    f"{source.label or source.meaning} 到 "
+                    f"{destination.label or destination.meaning}"
+                ),
+            }
+        elif action.action == "back":
+            defaults = {
+                "kind": "system_navigation",
+                "bounds": [0.0, 0.0, 1000.0, 1000.0],
+                "description": "系统返回区域",
+            }
+        else:
+            defaults = {
+                "kind": "screen",
+                "bounds": [0.0, 0.0, 1000.0, 1000.0],
+                "description": "当前屏幕",
+            }
+        for key, default in defaults.items():
+            if value.get(key) in (None, "", []):
+                value[key] = default
     allowed = {
         "kind",
         "element_id",

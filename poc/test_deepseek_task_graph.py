@@ -770,6 +770,90 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             all(item.external_impact == "navigation_only" for item in corrected.values())
         )
 
+    def test_safe_negated_goal_replans_once_after_mixed_false_positive_audit(self):
+        objective = "打开浏览器首页，仅查看，不搜索、不登录"
+        first_payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        second_payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        false_positive = audit_payload_for_graph(
+            first_payload,
+            overrides={
+                "raw_goal": {
+                    "external_impact": "external_state",
+                    "risk_types": [
+                        "account_or_permission_change",
+                        "unknown_external_effect",
+                    ],
+                },
+                "goal.objective": {
+                    "external_impact": "external_state",
+                    "risk_types": [
+                        "account_or_permission_change",
+                        "unknown_external_effect",
+                    ],
+                },
+            },
+        )
+        safe_audit = audit_payload_for_graph(second_payload)
+        provider = FakeProvider(
+            first_payload,
+            second_payload,
+            audit_payloads=[false_positive, safe_audit],
+        )
+        planner = DeepSeekTaskGraphPlanner(provider)
+
+        graph = planner.plan(objective, device_id="phone-1")
+
+        self.assertEqual(graph.status, "ready")
+        self.assertEqual(graph.active_subgoal().external_impact, "navigation_only")
+        self.assertEqual(planner.risk_audit_call_count, 2)
+        graph_prompts = [
+            call[0]["content"]
+            for call in provider.messages
+            if "semantic-risk-audit-v1" not in call[0]["content"]
+        ]
+        self.assertEqual(len(graph_prompts), 2)
+        self.assertIn("独立重新规划", graph_prompts[1])
+
+    def test_safe_negated_goal_stops_when_second_audit_still_conflicts(self):
+        objective = "打开浏览器首页，仅查看，不搜索、不登录"
+        first_payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        second_payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        false_positive = audit_payload_for_graph(
+            first_payload,
+            overrides={
+                "raw_goal": {
+                    "external_impact": "external_state",
+                    "risk_types": [
+                        "account_or_permission_change",
+                        "unknown_external_effect",
+                    ],
+                },
+            },
+        )
+        provider = FakeProvider(
+            first_payload,
+            second_payload,
+            audit_payloads=[false_positive, false_positive],
+        )
+        planner = DeepSeekTaskGraphPlanner(provider)
+
+        with self.assertRaisesRegex(TaskGraphError, "全局目标包含外部状态"):
+            planner.plan(objective, device_id="phone-1")
+
+        self.assertEqual(planner.risk_audit_call_count, 2)
+
     def test_semantic_audit_can_use_an_independent_provider(self):
         payload = single_subgoal_payload("查看资料", external_impact="read_only")
         graph_provider = FakeProvider(payload)

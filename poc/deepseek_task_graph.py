@@ -733,7 +733,21 @@ class DeepSeekTaskGraphPlanner:
                 validate=False,
             )
             graph.validate()
-        self._audit_and_validate_graph(graph)
+        try:
+            self._audit_and_validate_graph(graph)
+        except TaskGraphError as exc:
+            if not _retryable_safe_initial_audit_conflict(text, exc):
+                raise
+            graph = self._request_graph(
+                _retry_safe_initial_audit_prompt(text),
+                task_id=resolved_task_id,
+                device_id=device_id,
+                revision=1,
+                raw_user_goal=text,
+                validate=False,
+            )
+            graph.validate()
+            self._audit_and_validate_graph(graph)
         if (
             graph.status == "completed"
             or any(item.status == "completed" for item in graph.subgoals)
@@ -906,6 +920,38 @@ def _repair_initial_prompt(
 4. external_state 或 unknown 必须声明并关联风险；成为 active 时必须等待本地用户确认。
 5. 只返回符合结构的完整 JSON 对象，不要 Markdown。
 """
+
+
+def _retry_safe_initial_audit_prompt(raw_goal: str) -> str:
+    return f"""
+你是通用手机视觉操作 Agent 的 DeepSeek 高层任务图规划器。上一次独立语义风险审计与任务图
+分类发生冲突，但本地逐词校验没有发现任何未被否定的外部状态效果。请根据用户原始目标进行
+一次独立重新规划；不要沿用上一次任务图或审计结论，不要解释，也不要输出点击、滑动、输入、
+坐标、Shell、系统命令或任何 App 专用固定流程。
+
+用户原始目标：{json.dumps(raw_goal, ensure_ascii=False)}
+
+{_schema_prompt()}
+
+重新规划规则：
+1. 明确否定或禁止的效果词是约束，不是正向目标；例如“不登录”“不要发送”本身不构成外部
+   状态动作，但“不要忘记登录”“不能只查看而要发送”仍包含正向外部效果。
+2. read_only、navigation_only、external_state、unknown 必须按完整句子语义重新判断。
+3. external_state 或 unknown 必须声明并关联风险；成为 active 时必须等待本地用户确认。
+4. 初始规划没有画面证据，不能宣称任何目标或子目标已经完成。
+5. 只返回符合结构的完整 JSON 对象，不要 Markdown。
+"""
+
+
+def _retryable_safe_initial_audit_conflict(
+    raw_goal: str,
+    error: TaskGraphError,
+) -> bool:
+    return (
+        "语义风险审计与任务图分类冲突" in str(error)
+        and not _describes_external_state_change(raw_goal)
+        and bool(_infer_directly_negated_risk_types(raw_goal))
+    )
 
 
 def _replan_prompt(

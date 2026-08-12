@@ -6,6 +6,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -1594,6 +1595,31 @@ class DeviceTaskRegistryTests(unittest.TestCase):
         self.assertEqual("paused", session.status)
         self.assertTrue(authority.consumed)
         self.assertEqual("paused", session.snapshot()["status"])
+        self.assertIsNone(registry.active_session("device-1"))
+        self.assertEqual(0, adapter.execute_calls)
+
+    def test_pause_releases_device_even_when_terminal_snapshot_write_fails(self) -> None:
+        registry = DeviceTaskRegistry()
+        adapter = FakeAdapter(_scene())
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(registry, adapter)
+            session = orchestrator.start(
+                session_id="session-pause-write-failure",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            authority = session.confirmation_authority
+            with patch.object(
+                orchestrator,
+                "_write_terminal_snapshot",
+                side_effect=OSError("disk full"),
+            ):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    orchestrator.pause(session)
+
+        self.assertEqual("paused", session.status)
+        self.assertTrue(authority.consumed)
         self.assertIsNone(registry.active_session("device-1"))
         self.assertEqual(0, adapter.execute_calls)
 

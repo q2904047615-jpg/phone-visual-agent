@@ -89,6 +89,7 @@ class CapabilityTrial:
     report_path: Path
     promotion_authority: PromotionAuthority | None = field(default=None, repr=False)
     promotion_result: dict[str, Any] | None = None
+    confirmation_attempted: bool = False
     operation_lock: threading.Lock = field(
         default_factory=threading.Lock,
         repr=False,
@@ -122,6 +123,7 @@ class CapabilityTrial:
                 self.promotion_result
                 and self.promotion_result.get("requires_restart")
             ),
+            "confirmation_attempted": self.confirmation_attempted,
         }
 
 
@@ -160,6 +162,15 @@ class RecoveredCapabilityTrial:
             if isinstance(self.stored_snapshot.get("promotion"), Mapping)
             else None
         )
+        if self.promotion_result is None:
+            try:
+                loaded_promotion = json.loads(
+                    (self.run_dir / "promotion.json").read_text(encoding="utf-8")
+                )
+                if isinstance(loaded_promotion, dict):
+                    self.promotion_result = loaded_promotion
+            except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+                pass
 
     def snapshot(self) -> dict[str, Any]:
         payload = json.loads(json.dumps(self.stored_snapshot, ensure_ascii=False))
@@ -373,6 +384,19 @@ class CapabilityAcceptanceManager:
             trials = list(self._trials.values())
         return [trial.snapshot() for trial in trials]
 
+    def request_stop_all(self) -> list[str]:
+        with self._guard:
+            trials = list(self._trials.values())
+        requested: list[str] = []
+        for trial in trials:
+            if isinstance(trial, RecoveredCapabilityTrial) or trial.report_path.exists():
+                continue
+            request_stop = getattr(trial.controller, "request_stop", None)
+            if callable(request_stop):
+                request_stop()
+                requested.append(trial.trial_id)
+        return requested
+
     def approve_risks(
         self,
         trial_id: str,
@@ -569,9 +593,12 @@ class CapabilityAcceptanceManager:
         try:
             if trial.report_path.exists():
                 raise CapabilityAcceptanceError("验收报告已经生成，禁止重复执行或覆盖。")
+            if trial.confirmation_attempted:
+                raise CapabilityAcceptanceError("验收动作确认已经尝试，禁止重复执行。")
             self._ensure_candidate(trial)
             before_snapshot = trial.session.snapshot()
             before_actions = int(getattr(trial.session, "physical_actions", 0))
+            trial.confirmation_attempted = True
             result = None
             try:
                 result = trial.orchestrator.confirm_one(trial.session, confirmation)
@@ -636,6 +663,16 @@ class CapabilityAcceptanceManager:
             if active_session is not None:
                 raise CapabilityAcceptanceError(
                     f"设备 {trial.device_id} 仍有活动任务：{active_session}，不能晋级。"
+                )
+            try:
+                current_revision = str(self.code_revision_provider() or "").strip()
+            except Exception:
+                authority.consumed = True
+                raise
+            if current_revision != trial.code_revision:
+                authority.consumed = True
+                raise CapabilityAcceptanceError(
+                    "验收后代码状态发生变化，晋级确认已作废；请重启后重新验收。"
                 )
             result = self.promoter_factory(self.registry_path).promote(
                 trial.report_path,

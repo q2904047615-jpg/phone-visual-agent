@@ -3863,11 +3863,22 @@ class ApiEndToEndTests(unittest.TestCase):
         cls.temp_dir.cleanup()
 
     def setUp(self) -> None:
+        from universal_agent_orchestrator import DeviceTaskRegistry
+
+        self.device_registry_patcher = patch.object(
+            web_app.runtime,
+            "device_task_registry",
+            DeviceTaskRegistry(),
+        )
+        self.device_registry_patcher.start()
         with web_app.runtime.supervised_session_lock:
             web_app.runtime.supervised_sessions.clear()
             web_app.runtime.supervised_session_dirs.clear()
         with web_app.runtime.generic_supervised_session_lock:
             web_app.runtime.generic_supervised_sessions.clear()
+
+    def tearDown(self) -> None:
+        self.device_registry_patcher.stop()
 
     def _universal_api_orchestrator(self, *, device_id="phone-01", graph=None):
         from test_universal_agent_orchestrator import (
@@ -4140,6 +4151,21 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertNotIn('api("/api/agent/supervised/start"', script.text)
         self.assertNotIn("wechatView", script.text)
         self.assertNotIn("douyinView", script.text)
+
+    def test_capability_revision_must_match_loaded_service_code(self) -> None:
+        runtime = web_app.Runtime.__new__(web_app.Runtime)
+        runtime.loaded_code_revision = "loaded-revision"
+
+        with patch.object(web_app, "current_code_revision", return_value="loaded-revision"):
+            self.assertEqual(runtime.capability_code_revision(), "loaded-revision")
+        with (
+            patch.object(web_app, "current_code_revision", return_value="new-revision"),
+            self.assertRaisesRegex(
+                web_app.CapabilityAcceptanceError,
+                "服务启动后代码状态发生变化",
+            ),
+        ):
+            runtime.capability_code_revision()
 
     def test_generic_supervised_auto_request_is_strict_and_bounded(self) -> None:
         request = web_app.GenericSupervisedAutoRequest(device_id="phone-01")
@@ -4594,6 +4620,36 @@ class ApiEndToEndTests(unittest.TestCase):
         finally:
             lease.release()
 
+    def test_capability_trial_blocks_every_compatibility_hardware_entry(self) -> None:
+        from universal_agent_orchestrator import DeviceTaskRegistry
+
+        device_id = web_app.runtime.device_controllers.default_device_id
+        isolated_registry = DeviceTaskRegistry()
+        with patch.object(
+            web_app.runtime,
+            "device_task_registry",
+            isolated_registry,
+        ):
+            isolated_registry.reserve(device_id, "capability-trial-test")
+            try:
+                before_executions = list(web_app.runtime.controller.executions)
+                for endpoint, text in (
+                    ("/api/agent/execute-ensure-app-step", "打开设置"),
+                    ("/api/agent/execute-observe-step", "查看设置"),
+                    ("/api/agent/execute-tap-heart-step", "点赞当前视频"),
+                ):
+                    with self.subTest(endpoint=endpoint):
+                        response = self.client.post(
+                            endpoint,
+                            headers=self.headers,
+                            json={"confirmed": True, "text": text},
+                        )
+                        self.assertEqual(409, response.status_code, response.text)
+                        self.assertIn("已有活动任务", response.text)
+                self.assertEqual(before_executions, web_app.runtime.controller.executions)
+            finally:
+                isolated_registry.release(device_id, "capability-trial-test")
+
     def test_legacy_worker_declares_the_same_cross_process_action_lease(self) -> None:
         import inspect
 
@@ -4601,6 +4657,8 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertIn("physical_hardware_action.lease", source)
         self.assertIn("process_lease.acquire()", source)
         self.assertIn("process_lease.release()", source)
+        self.assertIn("self.device_task_registry.reserve", source)
+        self.assertIn("self.device_task_registry.release", source)
 
     def test_v3_confirm_api_rejects_cross_device_scope(self) -> None:
         orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
@@ -5560,6 +5618,83 @@ class ApiEndToEndTests(unittest.TestCase):
             time.sleep(0.05)
         self.assertEqual(final["status"], "succeeded")
         self.assertTrue(final["result"]["mock"])
+
+    def test_capability_trial_blocks_legacy_task_confirmation_before_queue(self) -> None:
+        from universal_agent_orchestrator import DeviceTaskRegistry
+
+        created = self.client.post(
+            "/api/tasks",
+            headers=self.headers,
+            json={
+                "app_id": "douyin",
+                "operation": "douyin.like_current",
+                "params": {},
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        task = created.json()
+        device_id = web_app.runtime.device_controllers.default_device_id
+        isolated_registry = DeviceTaskRegistry()
+        with patch.object(
+            web_app.runtime,
+            "device_task_registry",
+            isolated_registry,
+        ):
+            isolated_registry.reserve(device_id, "capability-trial-test")
+            try:
+                confirmed = self.client.post(
+                    f"/api/tasks/{task['id']}/confirm",
+                    headers=self.headers,
+                )
+            finally:
+                isolated_registry.release(device_id, "capability-trial-test")
+
+        self.assertEqual(confirmed.status_code, 409, confirmed.text)
+        self.assertIn("已有活动任务", confirmed.text)
+        self.assertEqual(
+            web_app.runtime.store.get(task["id"])["status"],
+            "awaiting_confirmation",
+        )
+
+    def test_capability_trial_blocks_already_queued_legacy_worker_task(self) -> None:
+        from universal_agent_orchestrator import DeviceTaskRegistry
+
+        task = web_app.runtime.store.create(
+            "douyin",
+            "douyin.search",
+            {"keyword": "机械臂"},
+        )
+        web_app.runtime.store.transition(
+            task["id"],
+            {"awaiting_confirmation"},
+            "queued",
+            message="测试验收会话占用设备后注入旧队列。",
+        )
+        device_id = web_app.runtime.device_controllers.default_device_id
+        before_executions = list(web_app.runtime.controller.executions)
+        isolated_registry = DeviceTaskRegistry()
+        with patch.object(
+            web_app.runtime,
+            "device_task_registry",
+            isolated_registry,
+        ):
+            isolated_registry.reserve(device_id, "capability-trial-test")
+            try:
+                web_app.runtime.jobs.put(task["id"])
+                deadline = time.monotonic() + 3
+                final = None
+                while time.monotonic() < deadline:
+                    final = web_app.runtime.store.get(task["id"])
+                    if final["status"] == "failed":
+                        break
+                    time.sleep(0.05)
+            finally:
+                isolated_registry.release(device_id, "capability-trial-test")
+
+        self.assertIsNotNone(final)
+        self.assertEqual(final["status"], "failed")
+        self.assertIn("已有活动任务", final["error"])
+        self.assertEqual(before_executions, web_app.runtime.controller.executions)
 
     def test_legacy_free_agent_task_is_rejected(self) -> None:
         created = self.client.post(

@@ -1730,19 +1730,21 @@ class UniversalAgentOrchestrator:
             raise
 
     def pause(self, session: UniversalAgentSessionState) -> None:
-        with self.device_registry.device_lock(session.device_id):
-            for authority in (
-                session.confirmation_authority,
-                session.risk_confirmation_authority,
-            ):
-                if authority is not None:
-                    authority.consumed = True
-                    authority.invalid_reason = "paused"
-            session.confirmed_risk_ids = ()
-            session.status = "paused"
-            session.failed_reason = "用户已暂停；旧确认和旧观察不可复用。"
-            self._write_terminal_snapshot(session)
-        self.device_registry.release(session.device_id, session.session_id)
+        try:
+            with self.device_registry.device_lock(session.device_id):
+                for authority in (
+                    session.confirmation_authority,
+                    session.risk_confirmation_authority,
+                ):
+                    if authority is not None:
+                        authority.consumed = True
+                        authority.invalid_reason = "paused"
+                session.confirmed_risk_ids = ()
+                session.status = "paused"
+                session.failed_reason = "用户已暂停；旧确认和旧观察不可复用。"
+                self._write_terminal_snapshot(session)
+        finally:
+            self.device_registry.release(session.device_id, session.session_id)
 
     def invalidate_confirmation(
         self,
@@ -1772,19 +1774,21 @@ class UniversalAgentOrchestrator:
             self._write_terminal_snapshot(session)
 
     def cancel(self, session: UniversalAgentSessionState) -> None:
-        with self.device_registry.device_lock(session.device_id):
-            for authority in (
-                session.confirmation_authority,
-                session.risk_confirmation_authority,
-            ):
-                if authority is not None:
-                    authority.consumed = True
-                    authority.invalid_reason = "cancelled"
-            session.confirmed_risk_ids = ()
-            session.status = "cancelled"
-            session.failed_reason = "用户已取消任务。"
-            self._write_terminal_snapshot(session)
-        self.device_registry.release(session.device_id, session.session_id)
+        try:
+            with self.device_registry.device_lock(session.device_id):
+                for authority in (
+                    session.confirmation_authority,
+                    session.risk_confirmation_authority,
+                ):
+                    if authority is not None:
+                        authority.consumed = True
+                        authority.invalid_reason = "cancelled"
+                session.confirmed_risk_ids = ()
+                session.status = "cancelled"
+                session.failed_reason = "用户已取消任务。"
+                self._write_terminal_snapshot(session)
+        finally:
+            self.device_registry.release(session.device_id, session.session_id)
 
 
 @dataclass(frozen=True)

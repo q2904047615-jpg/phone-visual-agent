@@ -110,9 +110,6 @@ DEVICE_REGISTRY_PATH = Path(
 def current_code_revision() -> str:
     """Return a reproducible revision; dirty worktrees are never promotable."""
 
-    explicit = str(os.environ.get("PHONE_VISUAL_AGENT_CODE_REVISION") or "").strip()
-    if explicit:
-        return explicit
     repository = ROOT.parent
     try:
         revision = subprocess.run(
@@ -125,7 +122,7 @@ def current_code_revision() -> str:
         ).stdout.strip()
         dirty = bool(
             subprocess.run(
-                ["git", "status", "--porcelain", "--untracked-files=no"],
+                ["git", "status", "--porcelain"],
                 cwd=repository,
                 check=True,
                 capture_output=True,
@@ -951,6 +948,7 @@ class DeviceControllerRegistry:
 
 class Runtime:
     def __init__(self) -> None:
+        self.loaded_code_revision = current_code_revision()
         self.store = TaskStore(DB_PATH)
         self.device_controllers = DeviceControllerRegistry(
             DEVICE_REGISTRY_PATH,
@@ -992,7 +990,7 @@ class Runtime:
             device_registry=self.device_task_registry,
             output_dir=WEB_OUTPUT_DIR,
             registry_path=DEVICE_REGISTRY_PATH,
-            code_revision_provider=current_code_revision,
+            code_revision_provider=self.capability_code_revision,
         )
         self.state_observer = DashScopePageObserver(self.vision_provider)
         self.state_runner = StateGraphRunner(
@@ -1036,6 +1034,14 @@ class Runtime:
             # production registry remains strict.
             return self.controller
         return self.device_controllers.controller(device_id)
+
+    def capability_code_revision(self) -> str:
+        current = current_code_revision()
+        if current != self.loaded_code_revision:
+            raise CapabilityAcceptanceError(
+                "服务启动后代码状态发生变化，必须安全重启后才能进行真机验收。"
+            )
+        return self.loaded_code_revision
 
     def capability_trial_orchestrator(
         self,
@@ -1110,12 +1116,16 @@ class Runtime:
                     raise VisionAgentError(
                         "通用编排器当前仅完成计划编译与校验，实机执行尚未启用。"
                     )
+                device_id = self.device_controllers.default_device_id
+                device_session_id = f"legacy-worker-{os.getpid()}-{task_id}"
+                self.device_task_registry.reserve(device_id, device_session_id)
                 process_lease = InterProcessLease(
                     SHARED_DEVICE_LEASE_DIR / "physical_hardware_action.lease",
                     owner_id=f"worker-{os.getpid()}-{task_id}",
                     metadata={"purpose": "legacy_worker_task", "task_id": task_id},
                 )
                 if not process_lease.acquire():
+                    self.device_task_registry.release(device_id, device_session_id)
                     raise VisionAgentError("另一进程已占用机械臂物理控制权。")
                 try:
                     if isinstance(self.controller, MockRobotController):
@@ -1129,7 +1139,13 @@ class Runtime:
                             task["params"],
                         )
                 finally:
-                    process_lease.release()
+                    try:
+                        process_lease.release()
+                    finally:
+                        self.device_task_registry.release(
+                            device_id,
+                            device_session_id,
+                        )
                 self.store.transition(
                     task_id,
                     {"running"},
@@ -1571,15 +1587,39 @@ def _supervised_hardware_lock(device_id: str | None = None) -> Iterator[None]:
         process_lease.release()
 
 
-def _acquire_compatibility_hardware_lease(purpose: str) -> InterProcessLease:
+def _acquire_compatibility_hardware_lease(purpose: str) -> Any:
+    device_id = runtime.device_controllers.default_device_id
+    session_id = (
+        f"compat-{purpose}-{os.getpid()}-{threading.get_ident()}-"
+        f"{uuid.uuid4().hex[:8]}"
+    )
+    try:
+        runtime.device_task_registry.reserve(device_id, session_id)
+    except UniversalAgentOrchestratorError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     lease = InterProcessLease(
         SHARED_DEVICE_LEASE_DIR / "physical_hardware_action.lease",
         owner_id=f"compat-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex[:8]}",
         metadata={"purpose": str(purpose)},
     )
     if not lease.acquire():
+        runtime.device_task_registry.release(device_id, session_id)
         raise HTTPException(status_code=409, detail="另一进程已占用机械臂物理控制权。")
-    return lease
+
+    class CombinedCompatibilityLease:
+        def __init__(self) -> None:
+            self.released = False
+
+        def release(self) -> None:
+            if self.released:
+                return
+            self.released = True
+            try:
+                lease.release()
+            finally:
+                runtime.device_task_registry.release(device_id, session_id)
+
+    return CombinedCompatibilityLease()
 
 
 def _require_generic_session_device(
@@ -3253,6 +3293,13 @@ def confirm_task(
     x_control_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
+    device_id = runtime.device_controllers.default_device_id
+    active_session = runtime.device_task_registry.active_session(device_id)
+    if active_session is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"设备 {device_id} 已有活动任务：{active_session}。",
+        )
     status = runtime.controller.device_status()
     if not status.get("controller_online") or not status.get("camera_online"):
         raise HTTPException(status_code=409, detail="控制端或摄像头离线，拒绝执行。")
@@ -3336,6 +3383,9 @@ def stop_all(
 ) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
     runtime.controller.request_stop()
+    capability_stop_requested = (
+        runtime.capability_acceptance_manager.request_stop_all()
+    )
     cancelled: list[str] = []
     for item in runtime.store.list(100):
         if item["status"] == "queued":
@@ -3352,6 +3402,7 @@ def stop_all(
     return {
         "stop_requested": True,
         "queued_cancelled": cancelled,
+        "capability_stop_requested": capability_stop_requested,
         "note": "正在执行的任务会在当前最小动作结束后停止。",
     }
 

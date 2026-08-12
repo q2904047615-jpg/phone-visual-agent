@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
@@ -364,6 +364,20 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             "capability-trial-trial-001",
         )
 
+    def test_global_stop_reaches_provisional_controller_without_action(self):
+        trial = self.manager.start(
+            device_id="device-a",
+            candidate_action="drag",
+            text="拖动一个安全控件",
+        )
+        trial.controller.request_stop = Mock()
+
+        requested = self.manager.request_stop_all()
+
+        self.assertEqual(requested, ["trial-001"])
+        trial.controller.request_stop.assert_called_once_with()
+        self.assertEqual(trial.session.physical_actions, 0)
+
     def test_confirm_writes_promotable_report_after_one_action(self):
         trial = self.manager.start(
             device_id="device-a",
@@ -464,6 +478,40 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             1,
         )
 
+    def test_report_storage_failure_after_action_still_prevents_retry(self):
+        trial = self.manager.start(
+            device_id="device-a",
+            candidate_action="drag",
+            text="拖动一个安全控件",
+        )
+        confirmation = trial.session.snapshot()["confirmation_scope"]
+
+        with (
+            patch.object(
+                self.manager,
+                "_write_pass_or_fail_report",
+                side_effect=OSError("report disk full"),
+            ),
+            patch.object(
+                self.manager,
+                "_write_exception_report",
+                side_effect=OSError("failure report disk full"),
+            ),
+        ):
+            with self.assertRaisesRegex(OSError, "failure report disk full"):
+                self.manager.confirm("trial-001", confirmation)
+
+        self.assertTrue(trial.confirmation_attempted)
+        self.assertFalse(trial.report_path.exists())
+        self.assertEqual(trial.session.physical_actions, 1)
+        self.assertIsNone(self.device_registry.active_session("device-a"))
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "禁止重复执行"):
+            self.manager.confirm("trial-001", confirmation)
+        self.assertEqual(
+            [call[0] for call in self.orchestrator_calls].count("confirm"),
+            1,
+        )
+
     def test_promotion_updates_disk_once_and_records_restart_requirement(self):
         trial = self.manager.start(
             device_id="device-a",
@@ -519,6 +567,27 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             )
 
         self.assertFalse(trial.promotion_authority.consumed)
+        registry = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        device = next(item for item in registry["devices"] if item["device_id"] == "device-a")
+        self.assertNotIn("drag", device["verified_actions"])
+
+    def test_code_revision_drift_consumes_promotion_authority_without_writing(self):
+        trial = self.manager.start(
+            device_id="device-a",
+            candidate_action="drag",
+            text="拖动一个安全控件",
+        )
+        self.manager.confirm(
+            "trial-001",
+            trial.session.snapshot()["confirmation_scope"],
+        )
+        scope = self.manager.promotion_scope("trial-001")
+        self.manager.code_revision_provider = lambda: "different-revision"
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "代码状态发生变化"):
+            self.manager.promote("trial-001", scope.to_dict())
+
+        self.assertTrue(trial.promotion_authority.consumed)
         registry = json.loads(self.registry_path.read_text(encoding="utf-8"))
         device = next(item for item in registry["devices"] if item["device_id"] == "device-a")
         self.assertNotIn("drag", device["verified_actions"])

@@ -574,12 +574,149 @@
     return { requests, limitReached: requests >= maxRequests };
   }
 
+  function adaptCapabilityTrial(value) {
+    const envelope = asObject(value);
+    const raw = asObject(envelope.trial || value);
+    const sessionRaw = asObject(raw.session);
+    const report = asObject(raw.report);
+    const promotionScope = asObject(raw.promotion_scope);
+    const actionScope = asObject(raw.action_confirmation_scope);
+    const riskScope = asObject(raw.risk_confirmation_scope);
+    const trialId = String(firstDefined(raw.trial_id, ""));
+    const deviceId = String(firstDefined(raw.device_id, ""));
+    const action = String(firstDefined(raw.candidate_action, ""));
+    const session = Object.keys(sessionRaw).length
+      ? adaptSession(sessionRaw, { fallbackDeviceId: deviceId })
+      : null;
+    return {
+      trialId,
+      deviceId,
+      action,
+      text: String(firstDefined(raw.text, "")),
+      codeRevision: String(firstDefined(raw.code_revision, "")),
+      session,
+      status: String(firstDefined(sessionRaw.status, report.status, "unknown")),
+      physicalActions: Number(firstDefined(sessionRaw.physical_actions, report.physical_actions, 0)),
+      actionConfirmationScope: actionScope,
+      riskConfirmationScope: riskScope,
+      report: Object.keys(report).length ? report : null,
+      passed: report.status === "passed",
+      promotionScope: Object.keys(promotionScope).length ? promotionScope : null,
+      promotion: Object.keys(asObject(raw.promotion)).length ? asObject(raw.promotion) : null,
+      requiresRestart: raw.requires_restart === true,
+      readOnlyRecovered: raw.read_only_recovered === true,
+      raw,
+    };
+  }
+
+  function capabilityScopeFingerprint(scope) {
+    return JSON.stringify(Object.keys(scope).sort().reduce((result, key) => {
+      const value = scope[key];
+      result[key] = Array.isArray(value) ? [...value].map(String).sort() : value;
+      return result;
+    }, {}));
+  }
+
+  function currentCapabilityConfirmationScope(trial) {
+    const view = adaptCapabilityTrial(trial);
+    const riskPhase = view.status === "awaiting_risk_confirmation";
+    const scope = asObject(riskPhase
+      ? view.riskConfirmationScope
+      : view.actionConfirmationScope);
+    if (
+      !view.trialId
+      || !view.deviceId
+      || !view.action
+      || scope.trial_id !== view.trialId
+      || scope.device_id !== view.deviceId
+      || scope.action !== view.action
+      || !scope.session_id
+      || !scope.task_id
+      || !Number.isInteger(scope.revision)
+      || !scope.subgoal_id
+      || !Array.isArray(scope.risk_ids)
+      || (!riskPhase && (!scope.observation_id || !scope.fingerprint))
+      || (!riskPhase && view.session?.visualAction?.actionType !== view.action)
+    ) {
+      throw new Error("真机验收确认缺少 trial、action 或精确画面作用域。");
+    }
+    return { view, phase: riskPhase ? "risk" : "action", scope: { ...scope } };
+  }
+
+  function createCapabilityConfirmationGrant(trial) {
+    const current = currentCapabilityConfirmationScope(trial);
+    return {
+      phase: current.phase,
+      scope: current.scope,
+      fingerprint: capabilityScopeFingerprint(current.scope),
+      consumed: false,
+    };
+  }
+
+  function consumeCapabilityConfirmationGrant(grant, trial) {
+    if (!grant || grant.consumed) throw new Error("本次真机验收确认已使用或不存在。");
+    const current = currentCapabilityConfirmationScope(trial);
+    if (
+      grant.phase !== current.phase
+      || grant.fingerprint !== capabilityScopeFingerprint(current.scope)
+    ) {
+      throw new Error("验收 trial、action、任务或画面已经变化，请重新确认。");
+    }
+    grant.consumed = true;
+    return { confirmed: true, confirmation: { ...grant.scope } };
+  }
+
+  function currentPromotionScope(trial) {
+    const view = adaptCapabilityTrial(trial);
+    const scope = asObject(view.promotionScope);
+    if (
+      !view.passed
+      || view.readOnlyRecovered
+      || view.promotion
+      || !view.trialId
+      || !view.deviceId
+      || !view.action
+      || scope.trial_id !== view.trialId
+      || scope.device_id !== view.deviceId
+      || scope.action !== view.action
+      || !/^[0-9a-f]{64}$/.test(String(scope.report_sha256 || ""))
+      || !/^[0-9a-f]{64}$/.test(String(scope.registry_sha256 || ""))
+    ) {
+      throw new Error("验收报告未通过、摘要无效或能力已经晋级。");
+    }
+    return { view, scope: { ...scope } };
+  }
+
+  function createPromotionGrant(trial) {
+    const current = currentPromotionScope(trial);
+    return {
+      scope: current.scope,
+      fingerprint: capabilityScopeFingerprint(current.scope),
+      consumed: false,
+    };
+  }
+
+  function consumePromotionGrant(grant, trial) {
+    if (!grant || grant.consumed) throw new Error("本次能力晋级确认已使用或不存在。");
+    const current = currentPromotionScope(trial);
+    if (grant.fingerprint !== capabilityScopeFingerprint(current.scope)) {
+      throw new Error("验收报告或设备注册表摘要已经变化，请重新确认。");
+    }
+    grant.consumed = true;
+    return { confirmed: true, ...grant.scope };
+  }
+
   return {
+    adaptCapabilityTrial,
     adaptSession,
     buildRequestPayload,
     buildAutoRequestPayload,
     consumeConfirmationGrant,
+    consumeCapabilityConfirmationGrant,
+    consumePromotionGrant,
+    createCapabilityConfirmationGrant,
     createConfirmationGrant,
+    createPromotionGrant,
     displayValue,
     runAutoAdvanceLoop,
     shouldAutoAdvance,

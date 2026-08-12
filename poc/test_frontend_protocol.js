@@ -74,6 +74,50 @@ function safeActionSession() {
   };
 }
 
+function capabilityTrial({ passed = false } = {}) {
+  const session = safeActionSession();
+  session.session_id = "capability-session-001";
+  session.qwen_decision.next_action.action = "drag";
+  session.confirmation_scope = {
+    ...session.confirmation_scope,
+    session_id: session.session_id,
+    device_id: "phone-01",
+  };
+  const report = passed ? {
+    status: "passed",
+    trial_id: "trial-001",
+    device_id: "phone-01",
+    candidate_action: "drag",
+    physical_actions: 1,
+    before_frame_paths: ["before-1.jpg", "before-2.jpg", "before-3.jpg", "before-4.jpg"],
+    after_frame_paths: ["after-1.jpg", "after-2.jpg", "after-3.jpg", "after-4.jpg"],
+  } : null;
+  return {
+    trial_id: "trial-001",
+    device_id: "phone-01",
+    candidate_action: "drag",
+    text: "拖动安全控件",
+    code_revision: "330d4c1",
+    session,
+    action_confirmation_scope: {
+      ...session.confirmation_scope,
+      trial_id: "trial-001",
+      action: "drag",
+    },
+    risk_confirmation_scope: null,
+    report,
+    promotion_scope: passed ? {
+      trial_id: "trial-001",
+      device_id: "phone-01",
+      action: "drag",
+      report_sha256: "a".repeat(64),
+      registry_sha256: "b".repeat(64),
+    } : null,
+    promotion: null,
+    requires_restart: false,
+  };
+}
+
 test("real DeepSeek 438cd22 to_dict snapshot exposes every formal v3 task graph field", () => {
   const view = Protocol.adaptSession({
     session_id: "session-deepseek-full",
@@ -352,4 +396,59 @@ test("current Qwen v2 fields win over conflicting legacy fallback data after a v
   assert.equal(view.visualAction.protocol, "qwen-visual-decision-v3");
   assert.equal(view.visualAction.actionType, "tap_semantic");
   assert.equal(view.visualAction.elementId, "settings_icon");
+});
+
+test("capability action grant binds trial action and exact visual scope once", () => {
+  const trial = capabilityTrial();
+  const view = Protocol.adaptCapabilityTrial(trial);
+  assert.equal(view.trialId, "trial-001");
+  assert.equal(view.action, "drag");
+  assert.equal(view.physicalActions, 0);
+  const grant = Protocol.createCapabilityConfirmationGrant(trial);
+  assert.deepEqual(Protocol.consumeCapabilityConfirmationGrant(grant, trial), {
+    confirmed: true,
+    confirmation: trial.action_confirmation_scope,
+  });
+  assert.throws(
+    () => Protocol.consumeCapabilityConfirmationGrant(grant, trial),
+    /已使用或不存在/,
+  );
+});
+
+test("capability confirmation refuses trial action observation or decision drift", () => {
+  const mutations = [
+    trial => { trial.trial_id = "trial-changed"; },
+    trial => { trial.candidate_action = "long_press"; },
+    trial => { trial.action_confirmation_scope.observation_id = "obs-changed"; },
+    trial => { trial.session.qwen_decision.next_action.action = "long_press"; },
+  ];
+  for (const mutate of mutations) {
+    const original = capabilityTrial();
+    const grant = Protocol.createCapabilityConfirmationGrant(original);
+    const changed = capabilityTrial();
+    mutate(changed);
+    assert.throws(
+      () => Protocol.consumeCapabilityConfirmationGrant(grant, changed),
+      /缺少|变化/,
+    );
+  }
+});
+
+test("promotion grant requires a passed report and exact immutable hashes", () => {
+  const trial = capabilityTrial({ passed: true });
+  const grant = Protocol.createPromotionGrant(trial);
+  assert.deepEqual(Protocol.consumePromotionGrant(grant, trial), {
+    confirmed: true,
+    ...trial.promotion_scope,
+  });
+  assert.throws(() => Protocol.consumePromotionGrant(grant, trial), /已使用或不存在/);
+  assert.throws(() => Protocol.createPromotionGrant(capabilityTrial()), /未通过/);
+
+  const changed = capabilityTrial({ passed: true });
+  const changedGrant = Protocol.createPromotionGrant(changed);
+  changed.promotion_scope.report_sha256 = "c".repeat(64);
+  assert.throws(
+    () => Protocol.consumePromotionGrant(changedGrant, changed),
+    /摘要已经变化/,
+  );
 });

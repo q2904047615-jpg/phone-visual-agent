@@ -8,7 +8,10 @@ const { chromium } = require("playwright");
 const staticRoot = path.join(__dirname, "static");
 const deepSeekFixture = require("./frontend_contract_fixtures/deepseek_task_graph_v3.json");
 const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v2.json");
-const requests = { start: [], approveRisk: [], confirm: [], next: [], auto: [], pause: [], cancel: [], stop: [] };
+const requests = {
+  start: [], approveRisk: [], confirm: [], next: [], auto: [], pause: [], cancel: [], stop: [],
+  capabilityStart: [], capabilityConfirm: [], capabilityPromote: [], capabilityCancel: [],
+};
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -134,6 +137,55 @@ function cancelledSession() {
   return session;
 }
 
+function capabilityTrial({ failed = false, completed = false, promoted = false } = {}) {
+  const session = safeActionSession();
+  session.session_id = "capability-session-browser";
+  session.qwen_decision.next_action.action = "drag";
+  session.confirmation_scope = {
+    ...session.confirmation_scope,
+    session_id: session.session_id,
+  };
+  if (completed) {
+    session.status = "paused";
+    session.physical_actions = 1;
+  }
+  const report = completed ? {
+    status: failed ? "failed" : "passed",
+    trial_id: "capability-trial-browser",
+    device_id: "phone-01",
+    candidate_action: "drag",
+    physical_actions: 1,
+    action_outcome: failed ? "mismatch" : "matched",
+    error: failed ? "动作后验证未通过" : "",
+    before_frame_paths: ["before-1.jpg", "before-2.jpg", "before-3.jpg", "before-4.jpg"],
+    after_frame_paths: ["after-1.jpg", "after-2.jpg", "after-3.jpg", "after-4.jpg"],
+  } : null;
+  return {
+    trial_id: "capability-trial-browser",
+    device_id: "phone-01",
+    candidate_action: "drag",
+    text: failed ? "失败验收样本" : "拖动安全测试滑块",
+    code_revision: "330d4c1",
+    session,
+    action_confirmation_scope: completed ? null : {
+      ...session.confirmation_scope,
+      trial_id: "capability-trial-browser",
+      action: "drag",
+    },
+    risk_confirmation_scope: null,
+    report,
+    promotion_scope: completed && !failed ? {
+      trial_id: "capability-trial-browser",
+      device_id: "phone-01",
+      action: "drag",
+      report_sha256: "a".repeat(64),
+      registry_sha256: "b".repeat(64),
+    } : null,
+    promotion: promoted ? { device_id: "phone-01", action: "drag", requires_restart: true } : null,
+    requires_restart: promoted,
+  };
+}
+
 function json(response, status, body) {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
@@ -155,6 +207,8 @@ function readBody(request) {
 }
 
 function createServer() {
+  let currentCapabilityTrial = null;
+  let capabilityShouldFail = false;
   return http.createServer(async (request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
     if (url.pathname === "/") {
@@ -178,6 +232,11 @@ function createServer() {
         controller_online: true,
         camera_online: true,
         busy: false,
+        default_device_id: "phone-01",
+        devices: [{
+          device_id: "phone-01",
+          verified_actions: ["tap_semantic", "dismiss_overlay", "swipe", "back", "wait_for_change"],
+        }],
         generic_supervised_execution: { active_sessions: [] },
         execution_architecture: { universal_agent: { observer: { current_stage: "idle" } } },
       });
@@ -199,6 +258,57 @@ function createServer() {
             ? safeActionSession("finished")
             : safeActionSession();
       json(response, 200, { session });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/capability-acceptance/start") {
+      const body = await readBody(request);
+      requests.capabilityStart.push(body);
+      capabilityShouldFail = body.text.includes("失败");
+      currentCapabilityTrial = capabilityTrial({ failed: capabilityShouldFail });
+      json(response, 200, { physical_actions: 0, trial: currentCapabilityTrial });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/capability-acceptance") {
+      json(response, 200, { trials: [] });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/capability-acceptance/capability-trial-browser") {
+      json(response, 200, { trial: currentCapabilityTrial });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/capability-acceptance/capability-trial-browser/confirm") {
+      requests.capabilityConfirm.push(await readBody(request));
+      currentCapabilityTrial = capabilityTrial({ failed: capabilityShouldFail, completed: true });
+      if (capabilityShouldFail) {
+        json(response, 409, { detail: { error: "动作后验证未通过", physical_actions: 1, trial: currentCapabilityTrial } });
+      } else {
+        json(response, 200, { physical_actions: 1, execution: { physical_actions: 1 }, trial: currentCapabilityTrial });
+      }
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/api/capability-acceptance/capability-trial-browser/promotion-preview") {
+      json(response, 200, { physical_actions: 0, promotion_scope: currentCapabilityTrial.promotion_scope });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/capability-acceptance/capability-trial-browser/promote") {
+      requests.capabilityPromote.push(await readBody(request));
+      currentCapabilityTrial = capabilityTrial({ completed: true, promoted: true });
+      json(response, 200, {
+        physical_actions: 0,
+        promotion: currentCapabilityTrial.promotion,
+        trial: currentCapabilityTrial,
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/capability-acceptance/capability-trial-browser/cancel") {
+      requests.capabilityCancel.push(await readBody(request));
+      currentCapabilityTrial.session.status = "cancelled";
+      json(response, 200, { physical_actions: 0, trial: currentCapabilityTrial });
+      return;
+    }
+    if (request.method === "GET" && /\/api\/capability-acceptance\/capability-trial-browser\/evidence\/(before|after)\/[0-3]$/.test(url.pathname)) {
+      response.writeHead(200, { "Content-Type": "image/png" });
+      response.end(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
       return;
     }
     if (request.method === "POST" && url.pathname.endsWith("/confirm")) {
@@ -470,5 +580,91 @@ test("Qwen blocked and finished states render without executable controls", { ti
       await browser.close();
       await new Promise(resolve => server.close(resolve));
     }
+  }
+});
+
+test("capability panel performs one confirmed action then a separate zero-action promotion", { timeout: 30000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const server = createServer();
+  const { browser, page } = await launchFixturePage(server);
+  const pageErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  try {
+    await page.locator("#capabilityAction").selectOption("drag");
+    await page.locator("#capabilityGoal").fill("拖动安全测试滑块");
+    await page.locator("#startCapabilityTrial").click();
+    await page.locator("#capabilityStatus").getByText(/trial capability-trial-browser/).waitFor({ timeout: 5000 });
+    assert.deepEqual(requests.capabilityStart, [{
+      device_id: "phone-01",
+      action: "drag",
+      text: "拖动安全测试滑块",
+    }]);
+    assert.equal(requests.capabilityConfirm.length, 0);
+    assert.match(await page.locator("#capabilityStatus").innerText(), /physical_actions 0/);
+
+    await page.locator("#reviewCapabilityAction").click();
+    assert.match(await page.locator("#riskWarning").innerText(), /trial=capability-trial-browser/);
+    assert.match(await page.locator("#riskWarning").innerText(), /action=drag/);
+    const confirmResponse = page.waitForResponse(
+      response => response.url().endsWith("/capability-trial-browser/confirm"),
+    );
+    await page.locator("#confirmRiskAction").click();
+    await confirmResponse;
+    await page.locator("#capabilityBadge").getByText("待确认启用").waitFor({ timeout: 5000 });
+    assert.equal(requests.capabilityConfirm.length, 1);
+    assert.equal(requests.capabilityConfirm[0].confirmation.trial_id, "capability-trial-browser");
+    assert.equal(requests.capabilityConfirm[0].confirmation.action, "drag");
+    assert.equal(requests.capabilityConfirm[0].confirmation.observation_id, "obs_0123456789abcdef0123456789abcdef");
+    assert.equal(await page.locator("#capabilityEvidence figure").count(), 8);
+
+    await page.locator("#reviewCapabilityPromotion").click();
+    await page.locator("#promotionDialog").waitFor({ state: "visible", timeout: 5000 });
+    assert.match(await page.locator("#promotionTarget").innerText(), /phone-01 \/ drag/);
+    assert.equal(requests.capabilityPromote.length, 0);
+    const promotionResponse = page.waitForResponse(
+      response => response.url().endsWith("/capability-trial-browser/promote"),
+    );
+    await page.locator("#confirmPromotion").click();
+    await promotionResponse;
+    await page.locator("#capabilityBadge").getByText("等待重启").waitFor({ timeout: 5000 });
+    assert.deepEqual(requests.capabilityPromote, [{
+      confirmed: true,
+      trial_id: "capability-trial-browser",
+      device_id: "phone-01",
+      action: "drag",
+      report_sha256: "a".repeat(64),
+      registry_sha256: "b".repeat(64),
+    }]);
+    assert.equal(requests.confirm.length, 0);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("failed capability evidence never exposes a promotion button or retries", { timeout: 30000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const server = createServer();
+  const { browser, page } = await launchFixturePage(server);
+  try {
+    await page.locator("#capabilityAction").selectOption("drag");
+    await page.locator("#capabilityGoal").fill("失败验收样本");
+    await page.locator("#startCapabilityTrial").click();
+    await page.locator("#reviewCapabilityAction").click();
+    const failedResponse = page.waitForResponse(
+      response => response.url().endsWith("/capability-trial-browser/confirm"),
+    );
+    await page.locator("#confirmRiskAction").click();
+    await failedResponse;
+    await page.locator("#capabilityBadge").getByText("验收失败").waitFor({ timeout: 5000 });
+    assert.equal(requests.capabilityConfirm.length, 1);
+    assert.equal(requests.capabilityPromote.length, 0);
+    assert.equal(await page.locator("#reviewCapabilityPromotion").count(), 0);
+    assert.equal(await page.locator("#capabilityEvidence figure").count(), 8);
+    assert.match(await page.locator("#capabilityStatus").innerText(), /动作后验证未通过/);
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
   }
 });

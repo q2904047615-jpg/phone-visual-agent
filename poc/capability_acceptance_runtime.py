@@ -125,6 +125,72 @@ class CapabilityTrial:
         }
 
 
+@dataclass
+class RecoveredCapabilityTrial:
+    """Read-only trial metadata; one-shot authorities never survive restart."""
+
+    trial_id: str
+    candidate_action: str
+    text: str
+    device_id: str
+    run_dir: Path
+    code_revision: str
+    report_path: Path
+    stored_snapshot: dict[str, Any] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        raw_session = self.stored_snapshot.get("session")
+        session_snapshot = dict(raw_session) if isinstance(raw_session, Mapping) else {}
+
+        class RecoveredSession:
+            def __init__(self, payload: dict[str, Any]) -> None:
+                self._payload = payload
+                self.physical_actions = int(payload.get("physical_actions", 0) or 0)
+                self.session_id = str(payload.get("session_id") or "")
+
+            def snapshot(self) -> dict[str, Any]:
+                return json.loads(json.dumps(self._payload, ensure_ascii=False))
+
+        self.session = RecoveredSession(session_snapshot)
+        self.controller = None
+        self.orchestrator = None
+        self.promotion_authority = None
+        self.promotion_result = (
+            dict(self.stored_snapshot.get("promotion"))
+            if isinstance(self.stored_snapshot.get("promotion"), Mapping)
+            else None
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        payload = json.loads(json.dumps(self.stored_snapshot, ensure_ascii=False))
+        report = None
+        if self.report_path.is_file():
+            try:
+                loaded = json.loads(self.report_path.read_text(encoding="utf-8"))
+                report = loaded if isinstance(loaded, dict) else None
+            except (OSError, UnicodeError, ValueError, TypeError):
+                report = None
+        payload.update(
+            {
+                "trial_id": self.trial_id,
+                "candidate_action": self.candidate_action,
+                "text": self.text,
+                "device_id": self.device_id,
+                "code_revision": self.code_revision,
+                "session": self.session.snapshot(),
+                "report": report,
+                "promotion_scope": None,
+                "promotion": self.promotion_result,
+                "requires_restart": bool(
+                    self.promotion_result
+                    and self.promotion_result.get("requires_restart")
+                ),
+                "read_only_recovered": True,
+            }
+        )
+        return payload
+
+
 class CapabilityAcceptanceManager:
     """Run one provisional generic action without mutating product controllers."""
 
@@ -148,8 +214,58 @@ class CapabilityAcceptanceManager:
         self.code_revision_provider = code_revision_provider
         self.id_factory = id_factory or (lambda: uuid.uuid4().hex)
         self.promoter_factory = promoter_factory or CapabilityRegistryPromoter
-        self._trials: dict[str, CapabilityTrial] = {}
+        self._trials: dict[str, CapabilityTrial | RecoveredCapabilityTrial] = {}
         self._guard = threading.RLock()
+        self._recover_read_only_trials()
+
+    def _recover_read_only_trials(self) -> None:
+        if not self.output_dir.is_dir():
+            return
+        output_root = self.output_dir.resolve()
+        for run_dir in sorted(self.output_dir.glob("capability_acceptance_*")):
+            try:
+                resolved_dir = run_dir.resolve(strict=True)
+                if output_root not in resolved_dir.parents:
+                    continue
+                stored = json.loads(
+                    (resolved_dir / "trial.json").read_text(encoding="utf-8")
+                )
+                if not isinstance(stored, dict):
+                    continue
+                trial_id = str(stored.get("trial_id") or "").strip()
+                device_id = str(stored.get("device_id") or "").strip()
+                action = str(stored.get("candidate_action") or "").strip()
+                text_value = str(stored.get("text") or "").strip()
+                revision = str(stored.get("code_revision") or "").strip()
+                if (
+                    not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", trial_id)
+                    or resolved_dir.name != f"capability_acceptance_{trial_id}"
+                    or not device_id
+                    or action not in PROMOTABLE_ACTIONS
+                    or not text_value
+                    or not revision
+                ):
+                    continue
+                self._trials[trial_id] = RecoveredCapabilityTrial(
+                    trial_id=trial_id,
+                    candidate_action=action,
+                    text=text_value,
+                    device_id=device_id,
+                    run_dir=resolved_dir,
+                    code_revision=revision,
+                    report_path=resolved_dir / "acceptance_report.json",
+                    stored_snapshot=stored,
+                )
+            except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+
+    @staticmethod
+    def _require_live_trial(trial: Any) -> CapabilityTrial:
+        if isinstance(trial, RecoveredCapabilityTrial):
+            raise CapabilityAcceptanceError(
+                "该验收会话来自服务重启前，仅可查看；确认权限不会跨进程恢复。"
+            )
+        return trial
 
     @staticmethod
     def _validate_start_values(device_id: str, action: str, text: str) -> tuple[str, str, str]:
@@ -252,12 +368,17 @@ class CapabilityAcceptanceManager:
             raise CapabilityAcceptanceError("真机能力验收会话不存在。")
         return trial
 
+    def snapshots(self) -> list[dict[str, Any]]:
+        with self._guard:
+            trials = list(self._trials.values())
+        return [trial.snapshot() for trial in trials]
+
     def approve_risks(
         self,
         trial_id: str,
         confirmation: Mapping[str, Any],
     ) -> Any:
-        trial = self.get(trial_id)
+        trial = self._require_live_trial(self.get(trial_id))
         result = trial.orchestrator.approve_risks(trial.session, confirmation)
         if int(getattr(trial.session, "physical_actions", 0)) != 0:
             raise CapabilityAcceptanceError("验收风险确认错误地产生了物理动作。")
@@ -442,7 +563,7 @@ class CapabilityAcceptanceManager:
         trial_id: str,
         confirmation: Mapping[str, Any],
     ) -> Any:
-        trial = self.get(trial_id)
+        trial = self._require_live_trial(self.get(trial_id))
         if not trial.operation_lock.acquire(blocking=False):
             raise CapabilityAcceptanceError("验收确认或晋级正在处理中。")
         try:
@@ -493,7 +614,7 @@ class CapabilityAcceptanceManager:
             trial.operation_lock.release()
 
     def promotion_scope(self, trial_id: str) -> PromotionScope:
-        trial = self.get(trial_id)
+        trial = self._require_live_trial(self.get(trial_id))
         authority = trial.promotion_authority
         if authority is None or authority.consumed:
             raise CapabilityAcceptanceError("当前验收没有可用的能力晋级确认。")
@@ -504,7 +625,7 @@ class CapabilityAcceptanceManager:
         trial_id: str,
         confirmation: Mapping[str, Any],
     ) -> dict[str, Any]:
-        trial = self.get(trial_id)
+        trial = self._require_live_trial(self.get(trial_id))
         if not trial.operation_lock.acquire(blocking=False):
             raise CapabilityAcceptanceError("验收确认或晋级正在处理中。")
         try:
@@ -528,8 +649,12 @@ class CapabilityAcceptanceManager:
             trial.operation_lock.release()
 
     def cancel(self, trial_id: str) -> None:
-        trial = self.get(trial_id)
-        trial.orchestrator.cancel(trial.session)
-        if trial.promotion_authority is not None:
-            trial.promotion_authority.consumed = True
-        _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
+        trial = self._require_live_trial(self.get(trial_id))
+        request_stop = getattr(trial.controller, "request_stop", None)
+        if callable(request_stop):
+            request_stop()
+        with trial.operation_lock:
+            trial.orchestrator.cancel(trial.session)
+            if trial.promotion_authority is not None:
+                trial.promotion_authority.consumed = True
+            _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())

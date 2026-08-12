@@ -4124,11 +4124,15 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertIn('id="pauseButton"', home.text)
         self.assertIn('id="stopButton"', home.text)
         self.assertIn('id="riskDialog"', home.text)
+        self.assertIn('id="capabilityAcceptancePanel"', home.text)
+        self.assertIn('id="promotionDialog"', home.text)
         self.assertIn('id="deviceId"', home.text)
         self.assertNotIn("微信工作流", home.text)
         self.assertNotIn("抖音工作流", home.text)
         self.assertIn('/assets/protocol_adapter.js', home.text)
         self.assertIn("/api/agent/generic-supervised/start", script.text)
+        self.assertIn("/api/capability-acceptance/start", script.text)
+        self.assertIn("createPromotionGrant", protocol_adapter.text)
         self.assertNotIn("/api/agent/generic-supervised/${view.sessionId}/auto", script.text)
         self.assertNotIn('id="confirmSafeLoop"', home.text)
         self.assertIn("nextSupervisedAgent", script.text)
@@ -4232,14 +4236,6 @@ class ApiEndToEndTests(unittest.TestCase):
                 side_effect=lambda _device_id: nullcontext(),
             ),
         ):
-            wrong = self.client.post(
-                path,
-                headers=self.headers,
-                json={
-                    "confirmed": True,
-                    "confirmation": {**scope, "action": "long_press"},
-                },
-            )
             first = self.client.post(
                 path,
                 headers=self.headers,
@@ -4259,14 +4255,34 @@ class ApiEndToEndTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(wrong.status_code, 409, wrong.text)
-        self.assertEqual(wrong.json()["detail"]["physical_actions"], 0)
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(first.json()["physical_actions"], 1)
         self.assertEqual(replay.status_code, 409, replay.text)
         self.assertEqual(extra.status_code, 422, extra.text)
         self.assertEqual([call[0] for call in calls].count("confirm"), 2)
         self.assertEqual(before_executions, web_app.runtime.controller.executions)
+
+    def test_capability_outer_scope_mismatch_is_terminal_without_action(self) -> None:
+        manager, trial, calls = self._fake_capability_manager()
+        scope = {
+            **trial.session.snapshot()["confirmation_scope"],
+            "trial_id": trial.trial_id,
+            "action": "long_press",
+        }
+        path = f"/api/capability-acceptance/{trial.trial_id}/confirm"
+        with patch.object(web_app.runtime, "capability_acceptance_manager", manager):
+            wrong = self.client.post(
+                path,
+                headers=self.headers,
+                json={"confirmed": True, "confirmation": scope},
+            )
+
+        self.assertEqual(wrong.status_code, 409, wrong.text)
+        self.assertEqual(wrong.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(trial.session.physical_actions, 0)
+        self.assertEqual(trial.session.status, "cancelled")
+        self.assertEqual([call[0] for call in calls].count("confirm"), 0)
+        self.assertEqual([call[0] for call in calls].count("cancel"), 1)
 
     def test_capability_promotion_is_separate_zero_action_and_requires_restart(self) -> None:
         manager, trial, calls = self._fake_capability_manager()
@@ -4310,6 +4326,51 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertEqual(replay.status_code, 409, replay.text)
         self.assertEqual([call[0] for call in calls].count("promote"), 2)
         self.assertEqual(before_executions, web_app.runtime.controller.executions)
+
+    def test_capability_evidence_endpoint_is_token_and_trial_bound(self) -> None:
+        manager, trial, _calls = self._fake_capability_manager()
+        run_dir = Path(self.temp_dir.name) / "capability-evidence"
+        run_dir.mkdir(exist_ok=True)
+        frame = run_dir / "before-1.jpg"
+        Image.new("RGB", (8, 8), "white").save(frame, format="JPEG")
+        outside = Path(self.temp_dir.name) / "outside.jpg"
+        Image.new("RGB", (8, 8), "black").save(outside, format="JPEG")
+        trial.run_dir = run_dir
+        trial.report_path = run_dir / "acceptance_report.json"
+        trial.report_path.write_text(
+            json.dumps(
+                {
+                    "before_frame_paths": [str(frame)],
+                    "after_frame_paths": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        path = f"/api/capability-acceptance/{trial.trial_id}/evidence/before/0"
+
+        with patch.object(web_app.runtime, "capability_acceptance_manager", manager):
+            forbidden = self.client.get(path)
+            accepted = self.client.get(path, headers=self.headers)
+            missing = self.client.get(
+                f"/api/capability-acceptance/{trial.trial_id}/evidence/before/1",
+                headers=self.headers,
+            )
+            trial.report_path.write_text(
+                json.dumps(
+                    {
+                        "before_frame_paths": [str(outside)],
+                        "after_frame_paths": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            escaped = self.client.get(path, headers=self.headers)
+
+        self.assertEqual(forbidden.status_code, 403, forbidden.text)
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.headers["content-type"], "image/jpeg")
+        self.assertEqual(missing.status_code, 404, missing.text)
+        self.assertEqual(escaped.status_code, 404, escaped.text)
 
     def test_v3_confirm_request_requires_scope_and_forbids_extra_fields(self) -> None:
         orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()

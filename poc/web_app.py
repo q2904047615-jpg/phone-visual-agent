@@ -1803,6 +1803,15 @@ def start_capability_acceptance(
         ) from exc
 
 
+@app.get("/api/capability-acceptance")
+def list_capability_acceptance(
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    return {"trials": runtime.capability_acceptance_manager.snapshots()}
+
+
 @app.get("/api/capability-acceptance/{trial_id}")
 def get_capability_acceptance(
     trial_id: str,
@@ -1820,6 +1829,47 @@ def get_capability_acceptance(
     }
 
 
+@app.get("/api/capability-acceptance/{trial_id}/evidence/{phase}/{index}")
+def get_capability_acceptance_evidence(
+    trial_id: str,
+    phase: Literal["before", "after"],
+    index: int,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> FileResponse:
+    verify_local_request(request, x_control_token)
+    try:
+        trial = runtime.capability_acceptance_manager.get(trial_id)
+        report = json.loads(trial.report_path.read_text(encoding="utf-8"))
+        paths = report.get(f"{phase}_frame_paths")
+        if (
+            not isinstance(paths, list)
+            or isinstance(index, bool)
+            or index < 0
+            or index >= len(paths)
+            or not isinstance(paths[index], str)
+        ):
+            raise CapabilityAcceptanceError("验收证据索引不存在。")
+        evidence_path = Path(paths[index]).resolve(strict=True)
+        trial_root = trial.run_dir.resolve(strict=True)
+        if (
+            evidence_path.suffix.lower() not in {".jpg", ".jpeg"}
+            or evidence_path == trial_root
+            or trial_root not in evidence_path.parents
+        ):
+            raise CapabilityAcceptanceError("验收证据路径越出当前 trial。")
+    except (
+        CapabilityAcceptanceError,
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(evidence_path, media_type="image/jpeg")
+
+
 @app.post("/api/capability-acceptance/{trial_id}/approve-risk")
 def approve_capability_acceptance_risk(
     trial_id: str,
@@ -1833,12 +1883,16 @@ def approve_capability_acceptance_risk(
         trial = runtime.capability_acceptance_manager.get(trial_id)
         if body.confirmed is not True or body.confirmation is None:
             raise CapabilityAcceptanceError("验收风险确认必须提交完整精确作用域。")
-        _require_capability_trial_binding(
-            trial,
-            trial_id=body.confirmation.trial_id,
-            device_id=body.confirmation.device_id,
-            action=body.confirmation.action,
-        )
+        try:
+            _require_capability_trial_binding(
+                trial,
+                trial_id=body.confirmation.trial_id,
+                device_id=body.confirmation.device_id,
+                action=body.confirmation.action,
+            )
+        except CapabilityAcceptanceError:
+            runtime.capability_acceptance_manager.cancel(trial_id)
+            raise
         _require_supervised_device_ready(trial.device_id)
         before_actions = int(getattr(trial.session, "physical_actions", 0))
         with _supervised_hardware_lock(trial.device_id):
@@ -1877,12 +1931,16 @@ def confirm_capability_acceptance(
         trial = runtime.capability_acceptance_manager.get(trial_id)
         if body.confirmed is not True or body.confirmation is None:
             raise CapabilityAcceptanceError("执行验收动作前必须提交完整精确作用域。")
-        _require_capability_trial_binding(
-            trial,
-            trial_id=body.confirmation.trial_id,
-            device_id=body.confirmation.device_id,
-            action=body.confirmation.action,
-        )
+        try:
+            _require_capability_trial_binding(
+                trial,
+                trial_id=body.confirmation.trial_id,
+                device_id=body.confirmation.device_id,
+                action=body.confirmation.action,
+            )
+        except CapabilityAcceptanceError:
+            runtime.capability_acceptance_manager.cancel(trial_id)
+            raise
         _require_supervised_device_ready(trial.device_id)
         before_actions = int(getattr(trial.session, "physical_actions", 0))
         with _supervised_hardware_lock(trial.device_id):
@@ -1956,12 +2014,6 @@ def promote_capability_acceptance(
         trial = runtime.capability_acceptance_manager.get(trial_id)
         if body.confirmed is not True:
             raise CapabilityAcceptanceError("能力晋级需要单独明确确认。")
-        _require_capability_trial_binding(
-            trial,
-            trial_id=body.trial_id,
-            device_id=body.device_id,
-            action=body.action,
-        )
         confirmation = body.model_dump(exclude={"confirmed"})
         result = runtime.capability_acceptance_manager.promote(
             trial_id,

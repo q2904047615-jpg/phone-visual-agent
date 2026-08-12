@@ -301,6 +301,39 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
         self.assertEqual(self.orchestrator_calls, [])
         self.assertFalse((self.root / "output").exists())
 
+    def test_restart_recovers_trial_read_only_without_authority_or_hardware(self):
+        trial = self.manager.start(
+            device_id="device-a",
+            candidate_action="drag",
+            text="拖动一个安全控件",
+        )
+        recovered_provisional_calls = []
+        recovered_orchestrator_calls = []
+        recovered = CapabilityAcceptanceManager(
+            provisional_controller_factory=lambda *args: recovered_provisional_calls.append(args),
+            orchestrator_factory=lambda *args: recovered_orchestrator_calls.append(args),
+            device_registry=DeviceTaskRegistry(),
+            output_dir=self.root / "output",
+            registry_path=self.registry_path,
+            code_revision_provider=lambda: "new-revision",
+            id_factory=lambda: "trial-002",
+        )
+
+        snapshot = recovered.get(trial.trial_id).snapshot()
+
+        self.assertTrue(snapshot["read_only_recovered"])
+        self.assertEqual(snapshot["trial_id"], "trial-001")
+        self.assertEqual(snapshot["session"]["physical_actions"], 0)
+        self.assertIsNone(snapshot["promotion_scope"])
+        self.assertEqual(recovered_provisional_calls, [])
+        self.assertEqual(recovered_orchestrator_calls, [])
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "仅可查看"):
+            recovered.confirm("trial-001", {})
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "仅可查看"):
+            recovered.promotion_scope("trial-001")
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "仅可查看"):
+            recovered.cancel("trial-001")
+
     def test_mismatched_qwen_action_cancels_without_physical_action(self):
         self.proposed_action = "long_press"
 

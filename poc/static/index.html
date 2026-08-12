@@ -147,6 +147,25 @@
           </section>
         </div>
       </div>
+
+      <section id="capabilityAcceptancePanel" class="panel capability-panel" aria-labelledby="capabilityTitle">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">LIVE DEVICE CAPABILITY ACCEPTANCE</p>
+            <h2 id="capabilityTitle">真机能力验收</h2>
+          </div>
+          <span id="capabilityBadge" class="pill neutral">未开始</span>
+        </div>
+        <p class="capability-intro">为当前设备尚未验证的通用动作生成一次真机计划。启动只观察，物理动作数为 0；动作与能力启用分别需要一次精确确认。</p>
+        <div class="capability-form">
+          <label><span>待验收动作</span><select id="capabilityAction" aria-label="待验收通用动作"></select></label>
+          <label class="capability-goal"><span>通用验收目标</span><textarea id="capabilityGoal" rows="2" maxlength="500" placeholder="例如：将当前页面中明确标记为测试对象的滑块拖到右侧终点。"></textarea></label>
+          <button id="startCapabilityTrial" class="primary-button" type="button">生成验收计划（0 动作）</button>
+        </div>
+        <div id="capabilityStatus" class="capability-status empty-state">请选择一个尚未验证的通用动作。这里不提供连续执行。</div>
+        <div id="capabilityEvidence" class="capability-evidence" hidden></div>
+        <div id="capabilityControls" class="action-controls"></div>
+      </section>
     </main>
   </div>
 
@@ -168,6 +187,25 @@
       <div class="dialog-actions">
         <button value="cancel" class="secondary-button">取消</button>
         <button id="confirmRiskAction" value="default" class="danger-confirm">确认当前一步</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="promotionDialog" class="risk-dialog">
+    <form method="dialog">
+      <p class="eyebrow">CAPABILITY PROMOTION CONFIRMATION</p>
+      <h2>确认启用该设备能力</h2>
+      <div class="risk-level high">独立确认 · 只修改一个设备的一项能力</div>
+      <dl class="risk-details">
+        <div><dt>验收会话</dt><dd id="promotionTrial">—</dd></div>
+        <div><dt>设备 / 动作</dt><dd id="promotionTarget">—</dd></div>
+        <div><dt>报告摘要</dt><dd id="promotionReportHash">—</dd></div>
+        <div><dt>注册表摘要</dt><dd id="promotionRegistryHash">—</dd></div>
+      </dl>
+      <div class="warning-box">此操作不会触发机械臂，只会原子写入设备注册表。新能力不会热更新；必须等当前任务安全结束后手动重启服务才生效。</div>
+      <div class="dialog-actions">
+        <button value="cancel" class="secondary-button">取消</button>
+        <button id="confirmPromotion" value="default" class="danger-confirm">确认启用该能力</button>
       </div>
     </form>
   </dialog>

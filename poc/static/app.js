@@ -13,7 +13,21 @@ const state = {
   busy: false,
   stopRequested: false,
   pendingConfirmationGrant: null,
+  capabilityTrial: null,
+  capabilityDeviceId: "",
+  pendingPromotionGrant: null,
+  capabilityEvidenceUrls: [],
 };
+
+const promotableCapabilityActions = [
+  "tap_semantic",
+  "dismiss_overlay",
+  "swipe",
+  "back",
+  "input_verified_text",
+  "long_press",
+  "drag",
+];
 
 const statusNames = {
   idle: "等待目标",
@@ -53,7 +67,7 @@ const semanticActionNames = {
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
-  if (options.method && options.method !== "GET") headers["X-Control-Token"] = state.token;
+  if (state.token) headers["X-Control-Token"] = state.token;
   if (options.body) headers["Content-Type"] = "application/json";
   const response = await fetch(path, { ...options, headers });
   const data = await response.json().catch(() => ({}));
@@ -348,6 +362,104 @@ function bindActionEvents() {
   document.querySelector("#cancelSupervisedAgent")?.addEventListener("click", cancelSupervisedAgent);
 }
 
+function currentDeviceDescriptor() {
+  const devices = Array.isArray(state.device?.devices) ? state.device.devices : [];
+  return devices.find(item => String(item.device_id || "") === state.deviceId) || null;
+}
+
+function unverifiedCapabilityActions() {
+  const verified = new Set(currentDeviceDescriptor()?.verified_actions || []);
+  return promotableCapabilityActions.filter(action => !verified.has(action));
+}
+
+function renderCapabilityAcceptance() {
+  const view = capabilityView();
+  const status = document.querySelector("#capabilityStatus");
+  const badge = document.querySelector("#capabilityBadge");
+  const controls = document.querySelector("#capabilityControls");
+  const select = document.querySelector("#capabilityAction");
+  const goal = document.querySelector("#capabilityGoal");
+  const start = document.querySelector("#startCapabilityTrial");
+  const available = unverifiedCapabilityActions();
+
+  if (!view) {
+    const previous = select.value;
+    select.replaceChildren(...available.map(action => {
+      const option = document.createElement("option");
+      option.value = action;
+      option.textContent = semanticActionNames[action] || action;
+      return option;
+    }));
+    if (available.includes(previous)) select.value = previous;
+    status.className = "capability-status empty-state";
+    status.textContent = available.length
+      ? "选择一个尚未验证的通用动作。生成计划只调用规划和视觉观察，物理动作数为 0。"
+      : "当前设备没有待验收的通用动作。";
+    badge.className = "pill neutral";
+    badge.textContent = "未开始";
+    controls.innerHTML = "";
+    document.querySelector("#capabilityEvidence").hidden = true;
+  } else {
+    select.replaceChildren(Object.assign(document.createElement("option"), {
+      value: view.action,
+      textContent: semanticActionNames[view.action] || view.action,
+    }));
+    select.value = view.action;
+    const report = view.report;
+    const canPromote = Boolean(view.passed && view.promotionScope && !view.readOnlyRecovered);
+    const reportState = report?.status || "尚未生成报告";
+    status.className = "capability-status active";
+    status.innerHTML = `
+      <strong>${escapeHtml(semanticActionNames[view.action] || view.action)} · ${escapeHtml(view.status)}</strong>
+      <div class="capability-meta">
+        <span>trial ${escapeHtml(view.trialId)}</span>
+        <span>device ${escapeHtml(view.deviceId)}</span>
+        <span>action ${escapeHtml(view.action)}</span>
+        <span>physical_actions ${escapeHtml(view.physicalActions)}</span>
+        <span>report ${escapeHtml(reportState)}</span>
+        <span>revision ${escapeHtml(view.codeRevision || "—")}</span>
+      </div>
+      <small>${view.requiresRestart
+        ? "能力配置已写入；等待安全重启后生效。"
+        : report?.status === "failed"
+          ? escapeHtml(report.error || "本次验收未满足通过标准，禁止晋级和重试。")
+          : view.passed
+            ? "八帧证据和单动作结果已通过；仍需独立确认才能写入能力配置。"
+            : "当前验收不提供连续执行，每次确认最多一个物理动作。"}</small>`;
+    badge.className = `pill ${view.requiresRestart ? "success" : view.readOnlyRecovered ? "neutral" : canPromote ? "risk" : report?.status === "failed" ? "danger" : "active"}`;
+    badge.textContent = view.requiresRestart ? "等待重启" : view.readOnlyRecovered ? "只读恢复" : canPromote ? "待确认启用" : view.passed ? "报告通过 · 晋级不可用" : report?.status === "failed" ? "验收失败" : "等待单步确认";
+
+    const disabled = state.busy || state.paused ? "disabled" : "";
+    if (view.readOnlyRecovered) {
+      controls.innerHTML = `<button id="resetCapabilityTrial" class="secondary-button">关闭只读记录</button>`;
+    } else if (view.requiresRestart) {
+      controls.innerHTML = `<button id="resetCapabilityTrial" class="secondary-button">关闭本次结果</button>`;
+    } else if (canPromote) {
+      controls.innerHTML = `
+        <button id="reviewCapabilityPromotion" class="danger-confirm" ${disabled}>确认启用该能力</button>
+        <button id="resetCapabilityTrial" class="secondary-button">保留报告并关闭</button>`;
+    } else if (report?.status === "failed") {
+      controls.innerHTML = `<button id="resetCapabilityTrial" class="secondary-button">开始新的验收</button>`;
+    } else if (["awaiting_confirmation", "awaiting_risk_confirmation"].includes(view.status)) {
+      controls.innerHTML = `
+        <button id="reviewCapabilityAction" class="risk-button" ${disabled}>${view.status === "awaiting_risk_confirmation" ? "确认风险范围（0 动作）" : "确认执行本次验收动作"}</button>
+        <button id="cancelCapabilityTrial" class="text-button" ${state.busy ? "disabled" : ""}>取消验收</button>`;
+    } else {
+      controls.innerHTML = `<button id="cancelCapabilityTrial" class="text-button" ${state.busy ? "disabled" : ""}>取消验收</button>`;
+    }
+  }
+
+  const ordinarySessionActive = Boolean(sessionView() && !sessionView().isTerminal);
+  const trialActive = Boolean(view && !view.report && !view.requiresRestart);
+  select.disabled = Boolean(view) || state.busy;
+  goal.disabled = Boolean(view) || state.busy;
+  start.disabled = !available.length || ordinarySessionActive || trialActive || state.busy || state.paused;
+  document.querySelector("#reviewCapabilityAction")?.addEventListener("click", openCapabilityDialog);
+  document.querySelector("#reviewCapabilityPromotion")?.addEventListener("click", openPromotionDialog);
+  document.querySelector("#cancelCapabilityTrial")?.addEventListener("click", cancelCapabilityTrial);
+  document.querySelector("#resetCapabilityTrial")?.addEventListener("click", resetCapabilityTrial);
+}
+
 function render() {
   const view = sessionView();
   const deviceSelect = document.querySelector("#deviceId");
@@ -366,8 +478,11 @@ function render() {
     }
   }
   deviceSelect.value = state.deviceId;
-  deviceSelect.disabled = !!view && !view.isTerminal;
-  document.querySelector("#startSupervisedAgent").disabled = state.busy || state.paused;
+  const acceptance = capabilityView();
+  deviceSelect.disabled = (!!view && !view.isTerminal) || Boolean(acceptance && !acceptance.report);
+  document.querySelector("#startSupervisedAgent").disabled = state.busy
+    || state.paused
+    || Boolean(acceptance && !acceptance.report);
   document.querySelector("#agentText").disabled = state.busy;
   document.querySelector("#pauseButton").textContent = state.paused ? "▶ 继续推进" : "Ⅱ 暂停推进";
   document.querySelector("#pauseButton").classList.toggle("active", state.paused);
@@ -376,6 +491,7 @@ function render() {
   renderTrace();
   renderScene();
   renderAction();
+  renderCapabilityAcceptance();
 }
 
 async function refreshDevice() {
@@ -437,6 +553,209 @@ async function startSupervisedAgent() {
   }
 }
 
+async function startCapabilityTrial() {
+  const action = document.querySelector("#capabilityAction").value;
+  const text = document.querySelector("#capabilityGoal").value.trim();
+  const current = sessionView();
+  if (!action) return toast("当前设备没有可选择的待验收动作。", true);
+  if (!text) return toast("请填写一个通用、可见且安全的真机验收目标。", true);
+  if (current && !current.isTerminal) return toast("当前设备已有普通 Agent 会话。", true);
+  if (state.capabilityTrial) return toast("请先关闭当前验收结果。", true);
+  state.capabilityDeviceId = state.deviceId;
+  try {
+    const response = await withVisionProgress("生成验收计划并观察当前画面（0 动作）", () =>
+      api("/api/capability-acceptance/start", {
+        method: "POST",
+        body: JSON.stringify({
+          device_id: state.capabilityDeviceId,
+          action,
+          text,
+        }),
+      })
+    );
+    state.capabilityTrial = response.trial;
+    toast("验收计划已生成，物理动作数为 0。请核对精确作用域。")
+    render();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function openCapabilityDialog() {
+  const view = capabilityView();
+  if (!view || state.paused || state.busy) return;
+  try {
+    state.pendingConfirmationGrant = Protocol.createCapabilityConfirmationGrant(state.capabilityTrial);
+    state.pendingConfirmationGrant.kind = "capability";
+  } catch (error) {
+    state.pendingConfirmationGrant = null;
+    return toast(error.message, true);
+  }
+  const riskPhase = state.pendingConfirmationGrant.phase === "risk";
+  const session = view.session;
+  document.querySelector("#riskTitle").textContent = riskPhase
+    ? "确认验收子目标的风险范围"
+    : "确认执行本次真机验收动作";
+  const level = document.querySelector("#riskLevel");
+  level.className = "risk-level high";
+  level.textContent = riskPhase ? "此确认只允许观察 · 物理动作 0" : "真机动作 · 最多执行一次";
+  document.querySelector("#riskGoal").textContent = view.text || session?.objective || "—";
+  document.querySelector("#riskAction").textContent = `${semanticActionNames[view.action] || view.action} · trial=${view.trialId}`;
+  document.querySelector("#riskReason").textContent = session?.visualAction?.reason || "依据当前真实画面提出唯一候选动作。";
+  document.querySelector("#riskExpected").textContent = riskPhase
+    ? "生成一个与候选动作完全一致的视觉动作，不触发机械臂"
+    : Protocol.displayValue(session?.visualAction?.expectedChange);
+  document.querySelector("#riskDevice").textContent = view.deviceId;
+  const scope = state.pendingConfirmationGrant.scope;
+  document.querySelector("#riskWarning").textContent = riskPhase
+    ? `仅确认 trial=${view.trialId}、action=${view.action}、session=${scope.session_id}、task=${scope.task_id}、revision=${scope.revision}、subgoal=${scope.subgoal_id}、risk_ids=${scope.risk_ids.join(",") || "—"} 的观察权限；本次物理动作数必须保持 0。`
+    : `只授权 trial=${view.trialId}、action=${view.action}、session=${scope.session_id}、task=${scope.task_id}、revision=${scope.revision}、subgoal=${scope.subgoal_id}、observation_id=${scope.observation_id}、fingerprint=${scope.fingerprint} 对应的一个动作；失败不自动重试。`;
+  document.querySelector("#confirmRiskAction").className = riskPhase ? "primary-button" : "danger-confirm";
+  document.querySelector("#riskDialog").showModal();
+}
+
+async function advanceCapabilityTrial(grant) {
+  const view = capabilityView();
+  if (!view || state.paused || state.busy) return;
+  try {
+    const payload = Protocol.consumeCapabilityConfirmationGrant(grant, state.capabilityTrial);
+    const riskPhase = grant.phase === "risk";
+    const response = await withVisionProgress(
+      riskPhase ? "确认验收风险范围并观察（0 动作）" : "执行唯一验收动作并采集八帧证据",
+      () => api(`/api/capability-acceptance/${view.trialId}/${riskPhase ? "approve-risk" : "confirm"}`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
+    );
+    state.capabilityTrial = response.trial;
+    if (!riskPhase) await loadCapabilityEvidence();
+    toast(riskPhase
+      ? "风险范围已确认，机械臂尚未动作；请再次核对具体动作。"
+      : "本次单动作已终结，已生成验收报告；不会自动重试。")
+    render();
+  } catch (error) {
+    await refreshCapabilityTrial().catch(() => {});
+    await loadCapabilityEvidence().catch(() => {});
+    toast(error.message, true);
+  }
+}
+
+async function refreshCapabilityTrial() {
+  const view = capabilityView();
+  if (!view?.trialId) return;
+  const response = await api(`/api/capability-acceptance/${view.trialId}`);
+  state.capabilityTrial = response.trial;
+  render();
+}
+
+function clearCapabilityEvidenceUrls() {
+  state.capabilityEvidenceUrls.forEach(url => URL.revokeObjectURL(url));
+  state.capabilityEvidenceUrls = [];
+}
+
+async function loadCapabilityEvidence() {
+  clearCapabilityEvidenceUrls();
+  const view = capabilityView();
+  const container = document.querySelector("#capabilityEvidence");
+  const report = view?.report;
+  if (!view || !report) {
+    container.hidden = true;
+    container.innerHTML = "";
+    return;
+  }
+  const items = [];
+  for (const phase of ["before", "after"]) {
+    const paths = report[`${phase}_frame_paths`] || [];
+    for (let index = 0; index < paths.length; index += 1) {
+      try {
+        const response = await fetch(
+          `/api/capability-acceptance/${view.trialId}/evidence/${phase}/${index}`,
+          { headers: { "X-Control-Token": state.token } },
+        );
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const url = URL.createObjectURL(await response.blob());
+        state.capabilityEvidenceUrls.push(url);
+        items.push({ phase, index, path: paths[index], url });
+      } catch (_error) {
+        items.push({ phase, index, path: paths[index], url: "" });
+      }
+    }
+  }
+  container.hidden = !items.length;
+  container.innerHTML = items.map(item => `<figure>
+    ${item.url ? `<img src="${item.url}" alt="${item.phase === "before" ? "动作前" : "动作后"}证据 ${item.index + 1}">` : ""}
+    <figcaption>${item.phase === "before" ? "动作前" : "动作后"} ${item.index + 1} · ${escapeHtml(item.path)}</figcaption>
+  </figure>`).join("");
+}
+
+async function openPromotionDialog() {
+  const view = capabilityView();
+  if (!view?.passed || state.busy) return;
+  try {
+    const preview = await api(`/api/capability-acceptance/${view.trialId}/promotion-preview`);
+    state.capabilityTrial = {
+      ...state.capabilityTrial,
+      promotion_scope: preview.promotion_scope,
+    };
+    state.pendingPromotionGrant = Protocol.createPromotionGrant(state.capabilityTrial);
+    const scope = state.pendingPromotionGrant.scope;
+    document.querySelector("#promotionTrial").textContent = scope.trial_id;
+    document.querySelector("#promotionTarget").textContent = `${scope.device_id} / ${scope.action}`;
+    document.querySelector("#promotionReportHash").textContent = scope.report_sha256;
+    document.querySelector("#promotionRegistryHash").textContent = scope.registry_sha256;
+    document.querySelector("#promotionDialog").showModal();
+  } catch (error) {
+    state.pendingPromotionGrant = null;
+    toast(error.message, true);
+  }
+}
+
+async function promoteCapability(grant) {
+  const view = capabilityView();
+  if (!view || state.busy) return;
+  try {
+    const payload = Protocol.consumePromotionGrant(grant, state.capabilityTrial);
+    state.busy = true;
+    render();
+    const response = await api(`/api/capability-acceptance/${view.trialId}/promote`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.capabilityTrial = response.trial;
+    toast("能力配置已原子写入；不会热更新，请等待安全重启。")
+  } catch (error) {
+    await refreshCapabilityTrial().catch(() => {});
+    toast(error.message, true);
+  } finally {
+    state.busy = false;
+    render();
+  }
+}
+
+async function cancelCapabilityTrial() {
+  const view = capabilityView();
+  if (!view || state.busy) return;
+  try {
+    const response = await api(`/api/capability-acceptance/${view.trialId}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ device_id: view.deviceId, action: view.action }),
+    });
+    state.capabilityTrial = response.trial;
+    toast("真机能力验收已取消，未执行后续动作。")
+    render();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function resetCapabilityTrial() {
+  clearCapabilityEvidenceUrls();
+  state.capabilityTrial = null;
+  state.capabilityDeviceId = "";
+  state.pendingPromotionGrant = null;
+  render();
+}
+
 function openRiskDialog() {
   const view = sessionView();
   if (!view || state.paused || state.busy || !view.risk.requiresConfirmation) return;
@@ -469,6 +788,12 @@ function openRiskDialog() {
     : `确认只授权 session=${view.sessionId}、observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 对应的一个动作。执行后必须重新观察。`;
   document.querySelector("#confirmRiskAction").className = highAttention ? "danger-confirm" : "primary-button";
   document.querySelector("#riskDialog").showModal();
+}
+
+function capabilityView() {
+  return state.capabilityTrial
+    ? Protocol.adaptCapabilityTrial(state.capabilityTrial)
+    : null;
 }
 
 async function advanceSupervisedAgent(grant) {
@@ -572,6 +897,7 @@ async function stopTasks() {
     const payload = Protocol.buildRequestPayload(lockedSessionDeviceId());
     const result = await api("/api/stop", { method: "POST", body: JSON.stringify(payload) });
     if (!requestWasRunning) await finalizeStopIfRequested();
+    if (capabilityView() && !capabilityView().report) await cancelCapabilityTrial();
     toast(result.note || "停止请求已发送。");
     await refreshDevice();
     render();
@@ -594,6 +920,20 @@ async function restoreActiveSession() {
   }
 }
 
+async function restoreCapabilityTrial() {
+  try {
+    const response = await api("/api/capability-acceptance");
+    const trials = Array.isArray(response.trials) ? response.trials : [];
+    const matching = trials.filter(item => String(item.device_id || "") === state.deviceId);
+    if (!matching.length) return;
+    state.capabilityTrial = matching[matching.length - 1];
+    state.capabilityDeviceId = state.deviceId;
+    await loadCapabilityEvidence().catch(() => {});
+  } catch (_error) {
+    state.capabilityTrial = null;
+  }
+}
+
 async function init() {
   try {
     const session = await api("/api/session");
@@ -604,6 +944,7 @@ async function init() {
     mode.classList.toggle("live-mode", !session.mock);
     await refreshDevice();
     await restoreActiveSession();
+    if (!state.supervisedSession) await restoreCapabilityTrial();
     render();
     setInterval(() => {
       const preview = document.querySelector("#phonePreview");
@@ -616,6 +957,7 @@ async function init() {
 }
 
 document.querySelector("#startSupervisedAgent").addEventListener("click", startSupervisedAgent);
+document.querySelector("#startCapabilityTrial").addEventListener("click", startCapabilityTrial);
 document.querySelector("#pauseButton").addEventListener("click", togglePause);
 document.querySelector("#stopButton").addEventListener("click", stopTasks);
 document.querySelector("#deviceId").addEventListener("change", event => {
@@ -629,7 +971,15 @@ document.querySelector("#agentText").addEventListener("keydown", event => {
 document.querySelector("#riskDialog").addEventListener("close", event => {
   const grant = state.pendingConfirmationGrant;
   state.pendingConfirmationGrant = null;
-  if (event.target.returnValue === "default" && grant) advanceSupervisedAgent(grant);
+  if (event.target.returnValue === "default" && grant) {
+    if (grant.kind === "capability") advanceCapabilityTrial(grant);
+    else advanceSupervisedAgent(grant);
+  }
+});
+document.querySelector("#promotionDialog").addEventListener("close", event => {
+  const grant = state.pendingPromotionGrant;
+  state.pendingPromotionGrant = null;
+  if (event.target.returnValue === "default" && grant) promoteCapability(grant);
 });
 
 init();

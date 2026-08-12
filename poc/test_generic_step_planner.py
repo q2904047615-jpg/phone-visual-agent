@@ -269,7 +269,25 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         planned = input_scene("planned", "field-planned")
         fresh = input_scene("before", "field-fresh")
-        after = input_scene("after", "field-after")
+        after = UIScene(
+            app_id="browser",
+            screen_id="search",
+            summary="输入框已显示新文字",
+            elements=(
+                UIElement(
+                    element_id="field-after",
+                    role="input",
+                    meaning="搜索输入框",
+                    label="搜索",
+                    bounds=(0.1, 0.1, 0.9, 0.2),
+                    confidence=0.96,
+                    states={"focused": True, "value": "蓝牙设置"},
+                ),
+            ),
+            stable=True,
+            confidence=0.95,
+            fingerprint="after",
+        )
         observer = FakeSceneObserver([fresh, after])
         robot = FakeRobot()
         action = SemanticAction(
@@ -604,14 +622,16 @@ class GenericActionAdapterTests(unittest.TestCase):
             action="tap_semantic",
             params={"element_id": "e1", "target": "app_icon"},
         )
-        with self.assertRaisesRegex(GenericActionAdapterError, "没有可验证变化") as ctx:
-            self._adapter(observer, robot).execute(
-                requested_action=action,
-                planned_scene=planned,
-                goal=goal(),
-                confirmed=True,
-            )
-        self.assertEqual(ctx.exception.physical_actions, 1)
+        result = self._adapter(observer, robot).execute(
+            requested_action=action,
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+        self.assertEqual(result.physical_actions, 1)
+        self.assertEqual(result.action_outcome, "mismatched")
+        self.assertTrue(result.verification_errors)
+        self.assertIn("没有可验证", result.verification_errors[-1])
         self.assertEqual(len(robot.actions), 1)
 
     def test_post_action_waits_until_four_frame_window_is_locally_stable(self):
@@ -861,6 +881,44 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(observer.calls, 2)
         self.assertEqual(robot.actions, [("tap", 300, 400)])
 
+    def test_second_capture_failure_keeps_first_semantic_mismatch(self):
+        unchanged = scene("camera-noise-only", element_id="after")
+        observer = FakeSceneObserver(
+            [scene("before", element_id="fresh"), unchanged]
+        )
+        robot = FakeRobot()
+        adapter = SecondPostCaptureFailureAdapter(
+            capture=SequenceCapture(["gray"] * 8),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=1,
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaises(GenericActionAdapterError) as caught:
+                adapter.execute(
+                    requested_action=SemanticAction(
+                        node_id="generic_step_1",
+                        action="tap_semantic",
+                        params={"element_id": "e1", "target": "app_icon"},
+                    ),
+                    planned_scene=scene("planned"),
+                    goal=goal(),
+                    confirmed=True,
+                    evidence_dir=Path(temp),
+                )
+
+        self.assertEqual(caught.exception.physical_actions, 1)
+        self.assertEqual(len(caught.exception.verification_errors), 1)
+        self.assertIn("语义变化", caught.exception.verification_errors[0])
+        self.assertIn("语义变化", str(caught.exception))
+        self.assertEqual(len(caught.exception.evidence), 9)
+        self.assertEqual(caught.exception.evidence[-1], "second_capture_timeout.jpg")
+        self.assertEqual(observer.calls, 2)
+        self.assertEqual(robot.actions, [("tap", 300, 400)])
+
     def test_post_action_non_format_failure_is_not_retried(self):
         observer = FakeSceneObserver(
             [scene("before", element_id="fresh"), VisionAgentError("请求超时")]
@@ -988,7 +1046,24 @@ class GenericSupervisedSessionTests(unittest.TestCase):
     def test_confirmed_terminal_scene_change_finishes_without_replanning(self):
         initial = scene("initial", screen_id="video_detail", app_id="douyin")
         before = scene("video-a", screen_id="video_detail", app_id="douyin")
-        after = scene("video-b", screen_id="video_detail", app_id="douyin")
+        after = UIScene(
+            app_id="douyin",
+            screen_id="video_detail",
+            summary="下一条公开视频可见",
+            elements=(
+                UIElement(
+                    element_id="next-video",
+                    role="image",
+                    meaning="next_public_video",
+                    label="下一条视频",
+                    bounds=(0.05, 0.05, 0.95, 0.90),
+                    confidence=0.96,
+                ),
+            ),
+            stable=True,
+            confidence=0.95,
+            fingerprint="video-b",
+        )
         observer = FakeSceneObserver([before, after])
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(

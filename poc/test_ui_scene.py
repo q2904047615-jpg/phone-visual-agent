@@ -200,9 +200,12 @@ class UISceneTests(unittest.TestCase):
         )
         resolved = controller.resolve_one(action, before)
         unchanged = scene(element("five", "digit_5"), fingerprint="before")
-        with self.assertRaisesRegex(UniversalActionError, "没有可验证变化"):
+        with self.assertRaisesRegex(UniversalActionError, "没有可验证"):
             controller.verify_after_action(resolved, before, unchanged)
-        changed = scene(element("five", "digit_5"), fingerprint="after")
+        camera_noise_only = scene(element("five", "digit_5"), fingerprint="noise")
+        with self.assertRaisesRegex(UniversalActionError, "语义变化"):
+            controller.verify_after_action(resolved, before, camera_noise_only)
+        changed = scene(element("result", "result_page"), fingerprint="after")
         controller.verify_after_action(resolved, before, changed)
 
     def test_verified_input_requires_focused_input_and_preserves_exact_text(self) -> None:

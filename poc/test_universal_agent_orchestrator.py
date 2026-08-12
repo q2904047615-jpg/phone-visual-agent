@@ -345,10 +345,14 @@ class FakeExecutingAdapter(FakeAdapter):
         after_scene: UIScene,
         *,
         execute_error: GenericActionAdapterError | None = None,
+        action_outcome: str = "matched",
+        verification_errors: tuple[str, ...] = (),
     ) -> None:
         super().__init__(scene)
         self.after_scene = after_scene
         self.execute_error = execute_error
+        self.action_outcome = action_outcome
+        self.verification_errors = verification_errors
 
     def execute(self, *, requested_action, planned_scene, goal, confirmed, evidence_dir):
         self.execute_calls += 1
@@ -371,6 +375,8 @@ class FakeExecutingAdapter(FakeAdapter):
             before_scene=planned_scene,
             after_scene=self.after_scene,
             physical_actions=1,
+            action_outcome=self.action_outcome,
+            verification_errors=self.verification_errors,
             robot_result={"ok": True},
             evidence=("before-1.jpg", "after-1.jpg"),
             after_frames=after_frames,
@@ -1350,6 +1356,77 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertIn("revision", session.failed_reason)
         self.assertEqual(1, adapter.execute_calls)
         self.assertEqual(1, len(qwen.calls))
+
+    def test_semantic_noop_is_recorded_and_replanned_without_retry(self) -> None:
+        initial = _graph()
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_result=replace(initial, revision=2),
+        )
+        adapter = FakeExecutingAdapter(
+            _scene(),
+            _scene(fingerprint="camera-noise-only"),
+            action_outcome="mismatched",
+            verification_errors=(
+                "第2轮动作结果不匹配：动作后页面没有可验证的语义变化。",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, adapter = self._started(
+                temp,
+                planner=planner,
+                adapter=adapter,
+            )
+
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+            verification = json.loads(
+                (Path(temp) / "verification_step_1.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("mismatched", result.action_outcome)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(1, len(planner.replan_calls))
+        _graph_before, observed, trigger, reason = planner.replan_calls[0]
+        self.assertEqual("mismatched", observed.last_action_outcome)
+        self.assertEqual("action_result_mismatch", trigger)
+        self.assertIn("必须重规划", reason)
+        self.assertFalse(verification["matched"])
+        self.assertEqual("mismatched", verification["action_outcome"])
+        self.assertIn("语义变化", verification["blocked_reasons"][0])
+
+    def test_safe_loop_stops_after_one_semantic_noop(self) -> None:
+        initial = _graph()
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_result=replace(initial, revision=2),
+        )
+        adapter = FakeExecutingAdapter(
+            _scene(),
+            _scene(fingerprint="camera-noise-only"),
+            action_outcome="mismatched",
+            verification_errors=("动作后页面没有可验证的语义变化。",),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, adapter = self._started(
+                temp,
+                planner=planner,
+                adapter=adapter,
+            )
+
+            result = orchestrator.run_safe_loop(
+                session,
+                _confirmation(session),
+                max_physical_actions=3,
+                max_iterations=8,
+            )
+
+        self.assertEqual(1, result["physical_actions"])
+        self.assertEqual(1, result["iterations"])
+        self.assertIn("预期语义变化", result["pause_reason"])
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
 
 
 class DeviceTaskRegistryTests(unittest.TestCase):

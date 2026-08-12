@@ -872,13 +872,21 @@ class UniversalAgentOrchestrator:
     ) -> None:
         previous_graph = session.task_graph
         assert previous_graph is not None
+        action_outcome = str(getattr(result, "action_outcome", "matched"))
+        matched = action_outcome == "matched"
+        verification_errors = tuple(
+            str(item)
+            for item in getattr(result, "verification_errors", ())
+            if str(item).strip()
+        )
         verification = {
-            "matched": True,
-            "action_outcome": "matched",
+            "matched": matched,
+            "action_outcome": action_outcome,
             "physical_actions": result.physical_actions,
             "before_fingerprint": result.before_scene.fingerprint,
             "after_fingerprint": result.after_scene.fingerprint,
             "visible_evidence": [result.after_scene.summary],
+            "blocked_reasons": list(verification_errors),
             "after_frame_paths": list(result.after_frame_paths),
         }
         self._remember(
@@ -891,15 +899,21 @@ class UniversalAgentOrchestrator:
         observed = self.bridge.observed_state(
             graph=previous_graph,
             trusted_observation=new_observation,
-            action_outcome="matched",
+            action_outcome=action_outcome,
             verification=verification,
         )
         try:
             revised = self.deepseek_planner.replan(
                 previous_graph,
                 observed,
-                trigger="observation_changed",
-                reason="一个动作已经执行并由新的可信画面验证。",
+                trigger=(
+                    "observation_changed" if matched else "action_result_mismatch"
+                ),
+                reason=(
+                    "一个动作已经执行并由新的可信画面验证。"
+                    if matched
+                    else "动作已执行，但新画面没有证明预期语义变化，必须重规划。"
+                ),
             )
             self._validate_graph_identity(
                 revised,
@@ -1246,6 +1260,8 @@ class UniversalAgentOrchestrator:
         )
         session.status = "verifying"
         if (
+            getattr(result, "action_outcome", "matched") == "matched"
+            and
             result.resolved_action.kind != "wait_for_change"
             and result.after_scene.fingerprint == observation.fingerprint
         ):
@@ -1266,6 +1282,8 @@ class UniversalAgentOrchestrator:
         if (
             new_observation.observation_id == observation.observation_id
             or (
+                getattr(result, "action_outcome", "matched") == "matched"
+                and
                 result.resolved_action.kind != "wait_for_change"
                 and new_observation.fingerprint == observation.fingerprint
             )
@@ -1474,8 +1492,13 @@ class UniversalAgentOrchestrator:
                     break
                 seen.add(signature)
 
-                self._confirm_one_locked(session, requested_confirmation)
+                result = self._confirm_one_locked(session, requested_confirmation)
                 iterations += 1
+                if getattr(result, "action_outcome", "matched") != "matched":
+                    session.auto_pause_reason = (
+                        "动作后没有出现预期语义变化，已停止自动推进并完成重规划。"
+                    )
+                    break
                 request_actions = session.physical_actions - start_actions
                 if request_actions >= max_physical_actions:
                     session.auto_pause_reason = "达到本次安全自动推进的物理动作上限。"

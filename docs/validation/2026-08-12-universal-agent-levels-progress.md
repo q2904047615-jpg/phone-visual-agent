@@ -28,11 +28,10 @@
 
 ## 测试结果
 
-Python 全量：
+Python 全量（加入“相机噪声导致 fingerprint 变化、页面语义未变化”的反例后）：
 
 ```text
-Ran 584 tests in 27.745s
-OK
+Ran 587 tests in 27.440s
 OK
 ```
 
@@ -46,14 +45,18 @@ OK
 
 ## 真机当前状态
 
-- 机械臂控制端在线，摄像头在线，当前不忙。
-- 现有真机会话仍停在 `awaiting_confirmation`，目标是点击桌面上的“浏览器”。
-- 当前会话物理动作数为 0；确认绑定 observation `obs_5db675f327924977ae6f14ed00258ee0` 和 fingerprint `5043ee51686f3afa7445`。
-- 本轮没有把“继续”或“完成所有层级”解释为这一个具体物理动作的确认，因此没有执行。
+- 用户明确确认后，旧服务会话 `acc53be0caff41ccb6779db89cbaf062` 执行了 1 次“点击浏览器”物理动作。
+- 动作前后画面仍是同一个 Android 桌面，浏览器没有打开；真实结果不通过。
+- 动作前 fingerprint 为 `f7a89af49da849d7e8e4`，动作后为 `a7f9b74d9c5b769aa872`。fingerprint 虽变化，但可见元素、角色、语义和状态没有变化，证明单独依赖摄像头 fingerprint 会产生假阳性。
+- 动作前证据：`poc/output/web/generic_supervised_20260812_180711_acc53be0/qwen_visual_revision_1_23637210a3b14a708afb2f3a53523a9f_before_4.jpg`。
+- 动作后证据：`poc/output/web/generic_supervised_20260812_180711_acc53be0/qwen_visual_revision_1_23637210a3b14a708afb2f3a53523a9f_after_attempt_1_4.jpg`。
+- 旧服务曾把 fingerprint 变化写成 `matched=true`，但 DeepSeek 没有结束子目标，新的精确确认门也阻止了自动重复点击；第二次动作未执行。
+- 通用控制器现同时比较 fingerprint 和场景语义签名。语义未变化会记录为 `mismatched`、写入失败证据、触发 `action_result_mismatch` 重规划，并在安全循环中立即停止；不会重试机械臂。
+- 旧会话已暂停并失效其第二次确认权限。新代码服务已启动，机械臂控制端、摄像头在线且当前不忙。
 
 ## 尚需真实硬件完成的验收
 
-- 当前浏览器点击的动作前后截图、页面变化、DeepSeek 新 revision。
+- 浏览器点击已有一次真实失败证据；仍需一次新会话、新确认下的成功页面变化和 DeepSeek 新 revision 才算通过。
 - 真实输入和真实长按各一次；每次都要单独确认并保存前后证据。
 - 任意两点拖动代码路径已经接入，但尚未进行一次受监督真机动作和动作后画面验证；当前设备的 `verified_actions` 因此不含 `drag`，Qwen 不能提出该动作。
 - 至少三个真实 App 的陌生命令、多步路径变化和结果验证。

@@ -288,12 +288,17 @@ class UniversalActionController:
             raise UniversalActionError("动作后的页面不稳定或置信度不足。")
         if (
             resolved.kind not in {"observe", "verify", "finish", "wait_for_change"}
-            and before.fingerprint
-            and after.fingerprint
-            and before.fingerprint == after.fingerprint
             and resolved.expected_effect.get("allow_unchanged") is not True
+            and (
+                (
+                    before.fingerprint
+                    and after.fingerprint
+                    and before.fingerprint == after.fingerprint
+                )
+                or self.scenes_semantically_equivalent(before, after)
+            )
         ):
-            raise UniversalActionError("动作后页面没有可验证变化。")
+            raise UniversalActionError("动作后页面没有可验证的语义变化。")
         expected = resolved.expected_effect
         expected_app = str(expected.get("app_id") or "").strip()
         if expected_app and after.foreground_app_id != expected_app:
@@ -320,6 +325,46 @@ class UniversalActionController:
                 )
             except UISceneError as exc:
                 raise UniversalActionError(f"动作结果缺少元素状态证据：{exc}") from exc
+
+    @classmethod
+    def scenes_semantically_equivalent(
+        cls,
+        before: UIScene,
+        after: UIScene,
+    ) -> bool:
+        """Ignore camera noise and model box jitter when comparing scenes."""
+
+        def freeze(value: Any) -> Any:
+            if isinstance(value, dict):
+                return tuple(
+                    sorted((str(key), freeze(item)) for key, item in value.items())
+                )
+            if isinstance(value, (list, tuple)):
+                return tuple(freeze(item) for item in value)
+            return value
+
+        def signature(scene: UIScene) -> tuple[Any, ...]:
+            elements = tuple(
+                sorted(
+                    (
+                        element.role.casefold(),
+                        element.meaning.casefold(),
+                        element.label.casefold(),
+                        freeze(element.states),
+                    )
+                    for element in scene.elements
+                )
+            )
+            return (
+                scene.foreground_app_id.casefold(),
+                scene.screen_id.casefold(),
+                tuple(sorted(item.casefold() for item in scene.overlays)),
+                elements,
+            )
+
+        before.validate()
+        after.validate()
+        return signature(before) == signature(after)
 
     def completion_evidence_after_action(
         self,

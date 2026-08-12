@@ -30,11 +30,13 @@ class GenericActionAdapterError(RuntimeError):
         physical_actions: int = 0,
         evidence: tuple[str, ...] = (),
         observation_errors: tuple[str, ...] = (),
+        verification_errors: tuple[str, ...] = (),
     ) -> None:
         super().__init__(message)
         self.physical_actions = int(physical_actions)
         self.evidence = tuple(evidence)
         self.observation_errors = tuple(observation_errors)
+        self.verification_errors = tuple(verification_errors)
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,8 @@ class GenericActionExecutionResult:
     before_scene: UIScene
     after_scene: UIScene
     physical_actions: int
+    action_outcome: str = "matched"
+    verification_errors: tuple[str, ...] = ()
     robot_result: Any = None
     evidence: tuple[str, ...] = ()
     after_frames: tuple[Image.Image, ...] = field(
@@ -63,6 +67,8 @@ class GenericActionExecutionResult:
             "before_scene": self.before_scene.to_dict(),
             "after_scene": self.after_scene.to_dict(),
             "physical_actions": self.physical_actions,
+            "action_outcome": self.action_outcome,
+            "verification_errors": list(self.verification_errors),
             "robot_result": self.robot_result,
             "evidence": list(self.evidence),
             "after_frame_count": len(self.after_frames),
@@ -251,12 +257,14 @@ class GenericSingleActionAdapter:
         tuple[str, ...],
         tuple[str, ...],
         tuple[str, ...],
+        tuple[str, ...],
     ]:
         if self.post_action_settle:
             time.sleep(min(self.post_action_settle, self.post_action_timeout))
 
         all_paths: tuple[str, ...] = ()
         observation_errors: list[str] = []
+        verification_errors: list[str] = []
         last_error: Exception | None = None
         for attempt in range(1, self.post_action_max_observations + 1):
             attempt_deadline = time.monotonic() + self.post_action_timeout
@@ -269,14 +277,15 @@ class GenericSingleActionAdapter:
             except GenericActionAdapterError as exc:
                 capture_evidence = all_paths + tuple(exc.evidence)
                 prior_errors = (
-                    "；此前" + "；".join(observation_errors)
-                    if observation_errors
+                    "；此前" + "；".join(observation_errors + verification_errors)
+                    if observation_errors or verification_errors
                     else ""
                 )
                 raise GenericActionAdapterError(
                     f"动作后画面采集失败：{exc}{prior_errors}",
                     evidence=capture_evidence,
                     observation_errors=tuple(observation_errors),
+                    verification_errors=tuple(verification_errors),
                 ) from exc
             all_paths += paths
             try:
@@ -295,9 +304,10 @@ class GenericSingleActionAdapter:
                 ):
                     raise GenericActionAdapterError(
                         "通用页面观察失败："
-                        + "；".join(observation_errors),
+                        + "；".join(verification_errors + observation_errors),
                         evidence=all_paths,
                         observation_errors=tuple(observation_errors),
+                        verification_errors=tuple(verification_errors),
                     ) from exc
                 continue
 
@@ -309,9 +319,13 @@ class GenericSingleActionAdapter:
                     paths,
                     all_paths,
                     tuple(observation_errors),
+                    tuple(verification_errors),
                 )
             except UniversalActionError as exc:
                 last_error = exc
+                verification_errors.append(
+                    f"第{attempt}轮动作结果不匹配：{exc}"
+                )
                 # A stable old page, a low-confidence transitional scene, or
                 # an expected destination that is still loading can all be a
                 # legitimate intermediate state.  Re-observe at most once,
@@ -322,11 +336,14 @@ class GenericSingleActionAdapter:
                     time.sleep(self.frame_interval)
 
         assert last_error is not None
-        raise GenericActionAdapterError(
-            f"动作后自适应观察仍未通过：{last_error}",
-            evidence=all_paths,
-            observation_errors=tuple(observation_errors),
-        ) from last_error
+        return (
+            after,
+            tuple(frames),
+            paths,
+            all_paths,
+            tuple(observation_errors),
+            tuple(verification_errors),
+        )
 
     def _post_observation_retryable(self, error: RuntimeError) -> bool:
         diagnostics = getattr(self.observer, "last_diagnostics", {})
@@ -459,6 +476,7 @@ class GenericSingleActionAdapter:
                 after_frame_paths,
                 all_after_paths,
                 observation_errors,
+                verification_errors,
             ) = self._observe_stable_post_action_scene(
                 goal,
                 before=before,
@@ -475,6 +493,9 @@ class GenericSingleActionAdapter:
                 observation_errors=tuple(
                     getattr(exc, "observation_errors", ())
                 ),
+                verification_errors=tuple(
+                    getattr(exc, "verification_errors", ())
+                ),
             ) from exc
 
         return GenericActionExecutionResult(
@@ -484,6 +505,10 @@ class GenericSingleActionAdapter:
             before_scene=before,
             after_scene=after,
             physical_actions=physical_actions,
+            action_outcome=(
+                "mismatched" if verification_errors else "matched"
+            ),
+            verification_errors=verification_errors,
             robot_result=robot_result,
             evidence=before_paths + all_after_paths,
             after_frames=after_frames,

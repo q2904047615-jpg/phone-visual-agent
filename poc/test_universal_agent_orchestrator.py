@@ -750,6 +750,33 @@ class UniversalAgentStartTests(unittest.TestCase):
 
         self.assertEqual([4], seen)
 
+    def test_refresh_reobserves_and_redecides_without_physical_action(self) -> None:
+        adapter = FakeAdapter(_scene())
+        qwen = FakeQwenObserver()
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(
+                FakeDeepSeekPlanner(_graph()), qwen, adapter
+            )
+            session = orchestrator.start(
+                session_id="session-refresh",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            old_scope = dict(session.snapshot()["confirmation_scope"])
+
+            orchestrator.refresh_decision(session)
+
+        self.assertEqual(2, adapter.capture_calls)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertNotEqual(
+            old_scope["observation_id"],
+            session.snapshot()["confirmation_scope"]["observation_id"],
+        )
+
     def test_external_state_blocks_before_qwen_and_robot(self) -> None:
         adapter = FakeAdapter(_scene())
         qwen = FakeQwenObserver()

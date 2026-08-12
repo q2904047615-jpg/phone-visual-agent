@@ -3679,6 +3679,43 @@ class ApiEndToEndTests(unittest.TestCase):
         with web_app.runtime.generic_supervised_session_lock:
             web_app.runtime.generic_supervised_sessions.clear()
 
+    def _universal_api_orchestrator(self, *, device_id="phone-01", graph=None):
+        from test_universal_agent_orchestrator import (
+            FakeDeepSeekPlanner,
+            FakeExecutingAdapter,
+            FakeQwenObserver,
+            _graph,
+            _scene,
+            _trusted_factory,
+        )
+        from universal_agent_orchestrator import (
+            DeviceTaskRegistry,
+            UniversalAgentOrchestrator,
+        )
+
+        initial = graph or _graph(device_id=device_id)
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_result=replace(initial, revision=initial.revision + 1),
+        )
+        qwen = FakeQwenObserver()
+        adapter = FakeExecutingAdapter(
+            _scene(),
+            _scene(
+                fingerprint="frame-after-api",
+                meaning="open_more",
+                label="查看更多",
+            ),
+        )
+        orchestrator = UniversalAgentOrchestrator(
+            deepseek_planner=planner,
+            qwen_observer=qwen,
+            adapter_factory=lambda _device_id: adapter,
+            trusted_observation_factory=_trusted_factory,
+            device_registry=DeviceTaskRegistry(),
+        )
+        return orchestrator, planner, qwen, adapter
+
     def test_home_and_device_are_available(self) -> None:
         self.assertEqual(self.client.get("/").status_code, 200)
         device = self.client.get("/api/device").json()
@@ -3800,14 +3837,26 @@ class ApiEndToEndTests(unittest.TestCase):
             )
 
     def test_v3_confirm_request_requires_scope_and_forbids_extra_fields(self) -> None:
-        from test_v3_confirmation_scope import confirmation, make_session
-
-        session, adapter = make_session()
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        session = orchestrator.start(
+            session_id="api-scope",
+            raw_goal="查看详情",
+            device_id="phone-01",
+            run_dir=web_app.WEB_OUTPUT_DIR / "api-scope",
+        )
         with web_app.runtime.generic_supervised_session_lock:
             web_app.runtime.generic_supervised_sessions[session.session_id] = session
         path = f"/api/agent/generic-supervised/{session.session_id}/confirm"
+        scope = session.snapshot()["confirmation_scope"]
 
-        with patch.object(web_app, "_require_supervised_device_ready"):
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
             missing = self.client.post(
                 path,
                 headers=self.headers,
@@ -3815,24 +3864,24 @@ class ApiEndToEndTests(unittest.TestCase):
             )
         self.assertEqual(missing.status_code, 409, missing.text)
         self.assertEqual(missing.json()["detail"]["physical_actions"], 0)
-        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(adapter.execute_calls, 0)
 
         with self.assertRaises(ValueError):
             web_app.GenericSupervisedStepRequest(
                 confirmed="true",
-                confirmation=confirmation(session),
+                confirmation=scope,
             )
 
         for payload in (
             {
                 "confirmed": True,
-                "confirmation": confirmation(session),
+                "confirmation": scope,
                 "unexpected": "forbidden",
             },
             {
                 "confirmed": True,
                 "confirmation": {
-                    **confirmation(session),
+                    **scope,
                     "unexpected": "forbidden",
                 },
             },
@@ -3845,37 +3894,64 @@ class ApiEndToEndTests(unittest.TestCase):
                         json=payload,
                     )
                 self.assertEqual(rejected.status_code, 422, rejected.text)
-                self.assertEqual(adapter.calls, 0)
+                self.assertEqual(adapter.execute_calls, 0)
 
     def test_v3_confirm_api_atomically_consumes_one_scope(self) -> None:
-        from test_v3_confirmation_scope import confirmation, make_session
-
-        session, adapter = make_session()
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        session = orchestrator.start(
+            session_id="api-confirm-once",
+            raw_goal="查看详情",
+            device_id="phone-01",
+            run_dir=web_app.WEB_OUTPUT_DIR / "api-confirm-once",
+        )
         with web_app.runtime.generic_supervised_session_lock:
             web_app.runtime.generic_supervised_sessions[session.session_id] = session
         path = f"/api/agent/generic-supervised/{session.session_id}/confirm"
-        payload = {"confirmed": True, "confirmation": confirmation(session)}
+        payload = {
+            "confirmed": True,
+            "confirmation": session.snapshot()["confirmation_scope"],
+        }
 
-        with patch.object(web_app, "_require_supervised_device_ready"):
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
             first = self.client.post(path, headers=self.headers, json=payload)
             replay = self.client.post(path, headers=self.headers, json=payload)
 
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(first.json()["execution"]["physical_actions"], 1)
+        self.assertEqual(first.json()["session"]["task_graph"]["revision"], 2)
+        self.assertEqual(len(first.json()["execution"]["after_frame_paths"]), 4)
         self.assertEqual(replay.status_code, 409, replay.text)
         self.assertEqual(replay.json()["detail"]["physical_actions"], 0)
-        self.assertEqual(adapter.calls, 1)
+        self.assertEqual(adapter.execute_calls, 1)
 
     def test_v3_confirm_api_rejects_cross_device_scope(self) -> None:
-        from test_v3_confirmation_scope import confirmation, make_session
-
-        session, adapter = make_session()
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        session = orchestrator.start(
+            session_id="api-cross-device",
+            raw_goal="查看详情",
+            device_id="phone-01",
+            run_dir=web_app.WEB_OUTPUT_DIR / "api-cross-device",
+        )
         with web_app.runtime.generic_supervised_session_lock:
             web_app.runtime.generic_supervised_sessions[session.session_id] = session
-        scope = confirmation(session)
+        scope = session.snapshot()["confirmation_scope"]
         scope["device_id"] = "phone-02"
 
-        with patch.object(web_app, "_require_supervised_device_ready"):
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
             response = self.client.post(
                 f"/api/agent/generic-supervised/{session.session_id}/confirm",
                 headers=self.headers,
@@ -3883,7 +3959,7 @@ class ApiEndToEndTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(response.json()["detail"]["physical_actions"], 0)
-        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(adapter.execute_calls, 0)
 
     def test_plan_preview_compiles_without_creating_or_running_task(self) -> None:
         before = len(web_app.runtime.store.list(100))
@@ -4015,102 +4091,176 @@ class ApiEndToEndTests(unittest.TestCase):
         )
 
     def test_generic_supervised_api_starts_unexecuted_and_requires_confirmation(self) -> None:
-        draft = GenericIntentDraft(
-            understood=True,
-            app_id="settings",
-            app_name="设置",
-            objective="打开设置",
-            success_criteria={"screen": "设置首页"},
-        )
-        scene = UIScene(
-            app_id="unknown",
-            screen_id="android_home",
-            summary="安卓桌面",
-            elements=(
-                UIElement(
-                    element_id="settings_icon",
-                    role="icon",
-                    meaning="app_icon",
-                    label="设置",
-                    bounds=(0.6, 0.2, 0.8, 0.4),
-                    confidence=0.97,
-                ),
-            ),
-            stable=True,
-            confidence=0.96,
-            fingerprint="home",
-        )
-        proposal = GenericStepProposal(
-            status="action",
-            action=SemanticAction(
-                node_id="generic_step_1",
-                action="tap_semantic",
-                params={
-                    "element_id": "settings_icon",
-                    "target": "app_icon",
-                    "role": "icon",
-                    "label": "设置",
-                },
-            ),
-            reason="设置图标清晰可见",
-        )
-
-        class StartOnlyAdapter:
-            def capture_scene(self, *_args, **_kwargs):
-                return scene, [], ()
-
+        orchestrator, planner, qwen, adapter = self._universal_api_orchestrator()
         before_executions = len(web_app.runtime.controller.executions)
         with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
             patch.object(
                 web_app.runtime.generic_intent_parser,
                 "parse",
-                return_value=draft,
+                side_effect=AssertionError("legacy parser must not run"),
             ),
             patch.object(
                 web_app.runtime.generic_step_planner,
                 "propose",
-                return_value=proposal,
-            ),
-            patch.object(
-                web_app,
-                "_new_generic_action_adapter",
-                return_value=StartOnlyAdapter(),
+                side_effect=AssertionError("legacy step planner must not run"),
             ),
         ):
             started = self.client.post(
                 "/api/agent/generic-supervised/start",
                 headers=self.headers,
-                json={"text": "打开设置", "device_id": "phone-01"},
+                json={"text": "查看当前页面的详情", "device_id": "phone-01"},
             )
-        self.assertEqual(started.status_code, 200, started.text)
-        payload = started.json()
-        session_id = payload["session"]["session_id"]
-        self.assertEqual(payload["physical_actions"], 0)
-        self.assertEqual(payload["session"]["status"], "awaiting_confirmation")
-        self.assertEqual(
-            len(web_app.runtime.controller.executions),
-            before_executions,
-        )
+            self.assertEqual(started.status_code, 200, started.text)
+            payload = started.json()
+            session_id = payload["session"]["session_id"]
+            self.assertEqual(payload["physical_actions"], 0)
+            self.assertEqual(
+                payload["session"]["status"], "awaiting_confirmation"
+            )
+            self.assertEqual(len(planner.plan_calls), 1)
+            self.assertEqual(len(qwen.calls), 1)
+            self.assertEqual(adapter.capture_calls, 1)
+            self.assertEqual(adapter.execute_calls, 0)
 
-        rejected = self.client.post(
-            f"/api/agent/generic-supervised/{session_id}/confirm",
-            headers=self.headers,
-            json={"confirmed": False},
-        )
-        self.assertEqual(rejected.status_code, 409, rejected.text)
-        self.assertEqual(rejected.json()["detail"]["physical_actions"], 0)
-        self.assertEqual(
-            len(web_app.runtime.controller.executions),
-            before_executions,
-        )
+            rejected = self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/confirm",
+                headers=self.headers,
+                json={"confirmed": False},
+            )
+            self.assertEqual(rejected.status_code, 409, rejected.text)
+            self.assertEqual(rejected.json()["detail"]["physical_actions"], 0)
 
-        cancelled = self.client.post(
-            f"/api/agent/generic-supervised/{session_id}/cancel",
-            headers=self.headers,
-            json={"device_id": "phone-01"},
-        )
+            cancelled = self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/cancel",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
         self.assertEqual(cancelled.status_code, 200, cancelled.text)
         self.assertEqual(cancelled.json()["session"]["status"], "cancelled")
+        self.assertEqual(
+            len(web_app.runtime.controller.executions),
+            before_executions,
+        )
+
+    def test_external_state_start_blocks_before_qwen_or_robot(self) -> None:
+        from test_universal_agent_orchestrator import _external_graph
+
+        orchestrator, _planner, qwen, adapter = self._universal_api_orchestrator(
+            device_id="device-1",
+            graph=_external_graph(),
+        )
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            response = self.client.post(
+                "/api/agent/generic-supervised/start",
+                headers=self.headers,
+                json={
+                    "text": "向联系人发送一条消息",
+                    "device_id": "device-1",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["session"]["status"], "blocked")
+        self.assertEqual(response.json()["physical_actions"], 0)
+        self.assertEqual(len(qwen.calls), 0)
+        self.assertEqual(adapter.capture_calls, 0)
+        self.assertEqual(adapter.execute_calls, 0)
+
+    def test_same_device_second_generic_session_returns_409(self) -> None:
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            first = self.client.post(
+                "/api/agent/generic-supervised/start",
+                headers=self.headers,
+                json={"text": "查看详情", "device_id": "phone-01"},
+            )
+            second = self.client.post(
+                "/api/agent/generic-supervised/start",
+                headers=self.headers,
+                json={"text": "返回上一页", "device_id": "phone-01"},
+            )
+            session_id = first.json()["session"]["session_id"]
+            self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/cancel",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 409, second.text)
+        self.assertEqual(second.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(adapter.capture_calls, 1)
+        self.assertEqual(adapter.execute_calls, 0)
+
+    def test_next_reobserves_with_zero_actions_and_auto_is_disabled(self) -> None:
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            started = self.client.post(
+                "/api/agent/generic-supervised/start",
+                headers=self.headers,
+                json={"text": "查看详情", "device_id": "phone-01"},
+            )
+            session_id = started.json()["session"]["session_id"]
+            first_observation = started.json()["session"]["confirmation_scope"][
+                "observation_id"
+            ]
+            refreshed = self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/next",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+            automatic = self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/auto",
+                headers=self.headers,
+                json={"device_id": "phone-01", "max_physical_actions": 1},
+            )
+            self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/cancel",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+
+        self.assertEqual(refreshed.status_code, 200, refreshed.text)
+        self.assertEqual(refreshed.json()["physical_actions"], 0)
+        self.assertNotEqual(
+            first_observation,
+            refreshed.json()["session"]["confirmation_scope"]["observation_id"],
+        )
+        self.assertEqual(automatic.status_code, 409, automatic.text)
+        self.assertEqual(
+            automatic.json()["detail"]["code"],
+            "phase_one_manual_confirmation_required",
+        )
+        self.assertEqual(automatic.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(adapter.capture_calls, 2)
+        self.assertEqual(adapter.execute_calls, 0)
 
     def test_supervised_session_starts_paused_and_requires_confirmation(self) -> None:
         before_tasks = len(web_app.runtime.store.list(100))

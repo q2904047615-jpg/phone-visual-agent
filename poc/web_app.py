@@ -25,7 +25,14 @@ from generic_intent import GenericIntentError, GenericIntentParser
 from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
 from generic_scene_observer import GenericSceneObserver
 from generic_step_planner import GenericStepPlanner, GenericStepPlanningError
-from generic_supervised_runtime import GenericSupervisedSession
+from deepseek_task_graph import DeepSeekTaskGraphPlanner, TaskGraphError
+from qwen_visual_decision import QwenVisualDecisionObserver
+from universal_agent_orchestrator import (
+    DeviceTaskRegistry,
+    UniversalAgentOrchestrator,
+    UniversalAgentOrchestratorError,
+    UniversalAgentSessionState,
+)
 from universal_action_controller import (
     UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
     UniversalActionController,
@@ -674,6 +681,8 @@ class GenericConfirmationScopeRequest(StrictAgentRequest):
     revision: StrictInt = Field(ge=1)
     subgoal_id: StrictStr = Field(min_length=1, max_length=128)
     risk_ids: list[StrictStr] = Field(default_factory=list)
+    observation_id: StrictStr = Field(min_length=1, max_length=128)
+    fingerprint: StrictStr = Field(min_length=1, max_length=256)
 
 
 class GenericSupervisedStepRequest(StrictAgentRequest):
@@ -730,6 +739,24 @@ class Runtime:
         self.generic_intent_parser = GenericIntentParser(self.intent_provider)
         self.generic_scene_observer = GenericSceneObserver(self.vision_provider)
         self.generic_step_planner = GenericStepPlanner(self.intent_provider)
+        self.deepseek_task_graph_planner = DeepSeekTaskGraphPlanner(
+            self.intent_provider
+        )
+        self.qwen_visual_decision_observer = QwenVisualDecisionObserver(
+            self.vision_provider
+        )
+        self.device_task_registry = DeviceTaskRegistry()
+        self.universal_agent_orchestrator = UniversalAgentOrchestrator(
+            deepseek_planner=self.deepseek_task_graph_planner,
+            qwen_observer=self.qwen_visual_decision_observer,
+            adapter_factory=lambda _device_id: GenericSingleActionAdapter(
+                capture=self.controller.vision_capture,
+                observer=self.generic_scene_observer,
+                robot=self.controller,
+                controller=UniversalActionController(),
+            ),
+            device_registry=self.device_task_registry,
+        )
         self.state_observer = DashScopePageObserver(self.vision_provider)
         self.state_runner = StateGraphRunner(
             self.controller,
@@ -740,7 +767,7 @@ class Runtime:
         self.supervised_sessions: dict[str, SupervisedSemanticSession] = {}
         self.supervised_session_dirs: dict[str, Path] = {}
         self.supervised_session_lock = threading.RLock()
-        self.generic_supervised_sessions: dict[str, GenericSupervisedSession] = {}
+        self.generic_supervised_sessions: dict[str, UniversalAgentSessionState] = {}
         self.generic_supervised_session_lock = threading.RLock()
         requested_orchestrator = os.environ.get(
             "ROBOT_ORCHESTRATOR_MODE",
@@ -1190,7 +1217,7 @@ def _supervised_hardware_lock() -> Iterator[None]:
 
 
 def _require_generic_session_device(
-    session: GenericSupervisedSession,
+    session: UniversalAgentSessionState,
     requested_device_id: str,
 ) -> None:
     if str(requested_device_id or "") != session.device_id:
@@ -1251,25 +1278,31 @@ def _new_generic_action_adapter() -> GenericSingleActionAdapter:
     )
 
 
-def _write_generic_supervised_report(session: GenericSupervisedSession) -> str:
-    report_path = session.run_dir / "report.json"
-    report_path.write_text(
-        json.dumps(
-            {
-                "mode": (
-                    "generic_supervised_controlled_loop"
-                    if session.automatic_loop_enabled
-                    else "generic_supervised_single_step"
-                ),
-                "automatic_loop_enabled": session.automatic_loop_enabled,
-                "session": session.snapshot(),
-            },
-            ensure_ascii=False,
-            indent=2,
+def _write_generic_supervised_report(session: UniversalAgentSessionState) -> str:
+    """Return the atomic report already maintained by the orchestrator."""
+
+    return str(session.run_dir / "report.json")
+
+
+def _generic_supervised_failure(
+    session: UniversalAgentSessionState | None,
+    exc: Exception,
+    *,
+    request_action_count: int = 0,
+) -> dict[str, Any]:
+    physical_actions = max(0, int(request_action_count))
+    if isinstance(exc, GenericActionAdapterError):
+        physical_actions = max(physical_actions, int(exc.physical_actions))
+    return {
+        "success": False,
+        "physical_actions": physical_actions,
+        "error": str(exc),
+        "evidence": (
+            list(session.snapshot().get("evidence", [])) if session else []
         ),
-        encoding="utf-8",
-    )
-    return str(report_path)
+        "session": session.snapshot() if session else None,
+        "report": _write_generic_supervised_report(session) if session else None,
+    }
 
 
 @app.post("/api/agent/generic-supervised/start")
@@ -1278,22 +1311,10 @@ def start_generic_supervised_session(
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Understand a goal, observe once and propose one unexecuted semantic action."""
+    """Plan with DeepSeek, observe with Qwen and propose zero executed actions."""
 
     verify_local_request(request, x_control_token)
     _require_supervised_device_ready()
-    with runtime.generic_supervised_session_lock:
-        active = [
-            item
-            for item in runtime.generic_supervised_sessions.values()
-            if item.status in {"awaiting_confirmation", "paused_after_action"}
-        ]
-        if active:
-            raise HTTPException(
-                status_code=409,
-                detail="已有通用单步会话，请继续或取消后再新建。",
-            )
-
     session_id = uuid.uuid4().hex
     run_dir = WEB_OUTPUT_DIR / (
         "generic_supervised_"
@@ -1301,38 +1322,14 @@ def start_generic_supervised_session(
         + session_id[:8]
     )
     run_dir.mkdir(parents=True, exist_ok=True)
-    adapter = _new_generic_action_adapter()
     try:
         with _supervised_hardware_lock():
-            goal = runtime.generic_intent_parser.parse(body.text)
-            if not goal.understood:
-                raise GenericStepPlanningError(goal.message)
-            scene, _frames, _paths = adapter.capture_scene(
-                goal,
-                evidence_dir=run_dir,
-                prefix="initial_scene",
+            session = runtime.universal_agent_orchestrator.start(
+                session_id=session_id,
+                raw_goal=body.text,
+                device_id=body.device_id,
+                run_dir=run_dir,
             )
-            proposal = runtime.generic_step_planner.propose(
-                goal,
-                scene,
-                step_number=1,
-            )
-            if proposal.action is not None:
-                UniversalActionController().resolve_one(
-                    proposal.action,
-                    scene,
-                    confirmed=True,
-                )
-        session = GenericSupervisedSession.start(
-            session_id=session_id,
-            device_id=body.device_id,
-            goal=goal,
-            scene=scene,
-            proposal=proposal,
-            planner=runtime.generic_step_planner,
-            adapter=adapter,
-            run_dir=run_dir,
-        )
         with runtime.generic_supervised_session_lock:
             runtime.generic_supervised_sessions[session_id] = session
         report = _write_generic_supervised_report(session)
@@ -1344,22 +1341,17 @@ def start_generic_supervised_session(
             "report": report,
         }
     except (
-        GenericIntentError,
         IntentProviderError,
-        GenericStepPlanningError,
         GenericActionAdapterError,
         UniversalActionError,
+        UniversalAgentOrchestratorError,
+        TaskGraphError,
+        VisionAgentError,
     ) as exc:
-        failure = {
-            "success": False,
-            "physical_actions": 0,
-            "error": str(exc),
-            "evidence": [str(path) for path in sorted(run_dir.glob("*.jpg"))],
-        }
-        (run_dir / "report.json").write_text(
-            json.dumps(failure, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        failure = _generic_supervised_failure(None, exc)
+        failure["evidence"] = [
+            str(path) for path in sorted(run_dir.glob("*.jpg"))
+        ]
         raise HTTPException(status_code=409, detail=failure) from exc
 
 
@@ -1383,24 +1375,25 @@ def confirm_generic_supervised_session(
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Execute exactly the confirmed action, reobserve and pause."""
+    """Consume one exact authority scope and execute at most one action."""
 
     verify_local_request(request, x_control_token)
     _require_supervised_device_ready()
+    with runtime.generic_supervised_session_lock:
+        session = runtime.generic_supervised_sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
+    before_actions = session.physical_actions
     try:
-        with runtime.generic_supervised_session_lock:
-            session = runtime.generic_supervised_sessions.get(session_id)
-            if session is None:
-                raise HTTPException(status_code=404, detail="通用单步会话不存在。")
-            with _supervised_hardware_lock():
-                result = session.confirm_v3(
-                    confirmed=body.confirmed,
-                    confirmation=(
-                        body.confirmation.model_dump()
-                        if body.confirmation is not None
-                        else None
-                    ),
-                )
+        if body.confirmed is not True or body.confirmation is None:
+            raise UniversalAgentOrchestratorError(
+                "执行一个动作前必须提交完整且明确的确认作用域。"
+            )
+        with _supervised_hardware_lock():
+            result = runtime.universal_agent_orchestrator.confirm_one(
+                session,
+                body.confirmation.model_dump(),
+            )
         report = _write_generic_supervised_report(session)
         return {
             "mode": "generic_supervised_single_step",
@@ -1409,18 +1402,22 @@ def confirm_generic_supervised_session(
             "session": session.snapshot(),
             "report": report,
         }
-    except GenericActionAdapterError as exc:
-        report = _write_generic_supervised_report(session)
+    except (
+        GenericActionAdapterError,
+        UniversalActionError,
+        UniversalAgentOrchestratorError,
+        IntentProviderError,
+        TaskGraphError,
+        VisionAgentError,
+    ) as exc:
+        request_actions = max(0, session.physical_actions - before_actions)
         raise HTTPException(
             status_code=409,
-            detail={
-                "success": False,
-                "physical_actions": exc.physical_actions,
-                "error": str(exc),
-                "evidence": list(exc.evidence),
-                "session": session.snapshot(),
-                "report": report,
-            },
+            detail=_generic_supervised_failure(
+                session,
+                exc,
+                request_action_count=request_actions,
+            ),
         ) from exc
 
 
@@ -1435,46 +1432,41 @@ def plan_next_generic_supervised_step(
 
     verify_local_request(request, x_control_token)
     _require_supervised_device_ready()
+    with runtime.generic_supervised_session_lock:
+        session = runtime.generic_supervised_sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
+    _require_generic_session_device(session, body.device_id)
+    before_actions = session.physical_actions
     try:
-        with runtime.generic_supervised_session_lock:
-            session = runtime.generic_supervised_sessions.get(session_id)
-            if session is None:
-                raise HTTPException(status_code=404, detail="通用单步会话不存在。")
-            _require_generic_session_device(session, body.device_id)
-            with _supervised_hardware_lock():
-                scene, _frames, _paths = session.adapter.capture_scene(
-                    session.goal,
-                    evidence_dir=session.run_dir,
-                    prefix=f"step_{session.step_number + 1}_scene",
-                )
-                proposal = session.plan_next(scene)
+        with _supervised_hardware_lock():
+            decision = runtime.universal_agent_orchestrator.refresh_decision(session)
         report = _write_generic_supervised_report(session)
         return {
             "mode": "generic_supervised_single_step",
             "physical_actions": 0,
             "automatic_loop_enabled": False,
-            "proposal": proposal.to_dict(),
+            "proposal": decision.proposal.to_dict(),
             "session": session.snapshot(),
             "report": report,
         }
     except (
-        GenericStepPlanningError,
         GenericActionAdapterError,
         UniversalActionError,
         IntentProviderError,
+        UniversalAgentOrchestratorError,
+        TaskGraphError,
+        VisionAgentError,
     ) as exc:
-        session.status = "failed"
-        session.failed_reason = str(exc)
-        report = _write_generic_supervised_report(session)
         raise HTTPException(
             status_code=409,
-            detail={
-                "success": False,
-                "physical_actions": 0,
-                "error": str(exc),
-                "session": session.snapshot(),
-                "report": report,
-            },
+            detail=_generic_supervised_failure(
+                session,
+                exc,
+                request_action_count=max(
+                    0, session.physical_actions - before_actions
+                ),
+            ),
         ) from exc
 
 
@@ -1485,53 +1477,26 @@ def run_generic_supervised_safe_loop(
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Repeat verified low-risk navigation steps and stop at safety boundaries."""
+    """Remain present for compatibility but never provide an action bypass."""
 
     verify_local_request(request, x_control_token)
-    _require_supervised_device_ready()
-    try:
-        with runtime.generic_supervised_session_lock:
-            session = runtime.generic_supervised_sessions.get(session_id)
-            if session is None:
-                raise HTTPException(status_code=404, detail="通用单步会话不存在。")
-            history_start = len(session.history)
-            _require_generic_session_device(session, body.device_id)
-            with _supervised_hardware_lock():
-                summary = session.run_safe_loop(
-                    confirmed=True,
-                    max_physical_actions=body.max_physical_actions,
-                )
-        report = _write_generic_supervised_report(session)
-        return {
-            "mode": "generic_supervised_controlled_loop",
-            "automatic_loop_enabled": True,
-            "summary": summary,
+    with runtime.generic_supervised_session_lock:
+        session = runtime.generic_supervised_sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
+    _require_generic_session_device(session, body.device_id)
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "success": False,
+            "code": "phase_one_manual_confirmation_required",
+            "physical_actions": 0,
+            "automatic_loop_enabled": False,
+            "error": "第一阶段必须逐步核对并确认，自动连续执行未启用。",
             "session": session.snapshot(),
-            "report": report,
-        }
-    except (
-        GenericStepPlanningError,
-        GenericActionAdapterError,
-        UniversalActionError,
-        IntentProviderError,
-    ) as exc:
-        session.status = "failed"
-        session.failed_reason = str(exc)
-        physical_actions = sum(
-            int(item.get("execution", {}).get("physical_actions", 0))
-            for item in session.history[history_start:]
-        )
-        report = _write_generic_supervised_report(session)
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "success": False,
-                "physical_actions": physical_actions,
-                "error": str(exc),
-                "session": session.snapshot(),
-                "report": report,
-            },
-        ) from exc
+            "report": _write_generic_supervised_report(session),
+        },
+    )
 
 
 @app.post("/api/agent/generic-supervised/{session_id}/cancel")
@@ -1547,7 +1512,7 @@ def cancel_generic_supervised_session(
         if session is None:
             raise HTTPException(status_code=404, detail="通用单步会话不存在。")
         _require_generic_session_device(session, body.device_id)
-        session.cancel()
+        runtime.universal_agent_orchestrator.cancel(session)
     report = _write_generic_supervised_report(session)
     return {"session": session.snapshot(), "report": report}
 
@@ -1567,7 +1532,7 @@ def pause_generic_supervised_session(
         if session is None:
             raise HTTPException(status_code=404, detail="通用单步会话不存在。")
         _require_generic_session_device(session, body.device_id)
-        session.pause()
+        runtime.universal_agent_orchestrator.pause(session)
     report = _write_generic_supervised_report(session)
     return {
         "physical_actions": 0,

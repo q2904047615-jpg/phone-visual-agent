@@ -816,6 +816,134 @@ class UniversalAgentOrchestrator:
         session.status = "awaiting_confirmation"
         self._bind_confirmation(session)
 
+    def refresh_decision(self, session: UniversalAgentSessionState) -> Any:
+        """Capture a fresh trusted scene and replace the pending decision.
+
+        This is the read-only implementation behind the web ``/next`` route.
+        It deliberately never calls ``adapter.execute`` and always invalidates
+        the previous confirmation before touching the camera.
+        """
+
+        if self.device_registry.active_session(session.device_id) != session.session_id:
+            raise UniversalAgentOrchestratorError(
+                "当前会话已不再拥有该设备，禁止重新观察。"
+            )
+        try:
+            with self.device_registry.device_lock(session.device_id):
+                return self._refresh_decision_locked(session)
+        finally:
+            self._release_if_terminal(session)
+
+    def _refresh_decision_locked(self, session: UniversalAgentSessionState) -> Any:
+        graph = session.task_graph
+        goal = session.goal_draft
+        if graph is None or goal is None:
+            raise UniversalAgentOrchestratorError("当前会话缺少任务图或目标投影。")
+        self._validate_graph_identity(graph, device_id=session.device_id)
+        current = graph.active_subgoal()
+        impact = current.external_impact if current is not None else "unknown"
+        if current is None or impact in {"external_state", "unknown"}:
+            raise UniversalAgentOrchestratorError(
+                f"第一阶段禁止重新观察后推进 {impact} 子目标。"
+            )
+
+        authority = session.confirmation_authority
+        if authority is not None:
+            authority.consumed = True
+            authority.invalid_reason = "fresh_observation_requested"
+        session.confirmation_authority = None
+        before_actions = session.physical_actions
+        try:
+            session.status = "observing"
+            observation_id = f"obs_{uuid.uuid4().hex}"
+            scene, frames, frame_paths = session.adapter.capture_scene(
+                goal,
+                evidence_dir=session.run_dir,
+                prefix=(
+                    f"refresh_step_{session.step_number}_"
+                    f"{observation_id[-8:]}_frame"
+                ),
+            )
+            self._remember(session, frame_paths)
+            observation = self.trusted_observation_factory(
+                frames=frames,
+                device_id=session.device_id,
+                scene=scene,
+                observation_id=observation_id,
+            )
+            session.trusted_observation = observation
+            self._remember(
+                session,
+                session.evidence_store.write_trusted_observation(
+                    session.step_number,
+                    observation,
+                ),
+            )
+
+            context = graph.to_qwen_context()
+            decision = self.qwen_observer.decide(
+                frames=frames,
+                task_context=context,
+                trusted_observation=observation,
+                decision_number=session.step_number,
+            )
+            self._validate_decision_binding(graph, observation, decision)
+            session.qwen_decision = decision
+            self._remember(
+                session,
+                session.evidence_store.write_qwen_decision(
+                    session.step_number,
+                    decision,
+                ),
+            )
+
+            if decision.proposal.status == "action":
+                policy_decision = self.policy.evaluate(
+                    task_context=context,
+                    trusted_observation=observation,
+                    decision=decision,
+                )
+                session.controller_decision = policy_decision
+                self._remember(
+                    session,
+                    session.evidence_store.write_controller_decision(
+                        session.step_number,
+                        self._policy_payload(policy_decision),
+                    ),
+                )
+                if policy_decision.allowed:
+                    session.status = "awaiting_confirmation"
+                    session.failed_reason = ""
+                    self._bind_confirmation(session)
+                else:
+                    session.status = "blocked"
+                    session.failed_reason = policy_decision.reason
+            else:
+                session.status = "blocked"
+                session.failed_reason = (
+                    decision.proposal.reason
+                    if decision.proposal.status == "blocked"
+                    else "重新观察后的完成候选必须由 DeepSeek 新 revision 复核。"
+                )
+                session.controller_decision = NavigationPolicyDecision(
+                    allowed=False,
+                    reason=session.failed_reason,
+                )
+            if session.physical_actions != before_actions:
+                raise UniversalAgentOrchestratorError(
+                    "重新观察路径错误地改变了物理动作计数。"
+                )
+            self._write_terminal_snapshot(session)
+            return decision
+        except Exception as exc:
+            session.status = "failed"
+            session.failed_reason = str(exc)
+            try:
+                self._write_terminal_snapshot(session)
+            except Exception:
+                pass
+            raise
+
     def confirm_one(
         self,
         session: UniversalAgentSessionState,

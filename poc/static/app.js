@@ -340,6 +340,20 @@ function bindActionEvents() {
 function render() {
   const view = sessionView();
   const deviceSelect = document.querySelector("#deviceId");
+  const registeredDevices = Array.isArray(state.device?.devices) ? state.device.devices : [];
+  if (!view && registeredDevices.length) {
+    const enabledIds = registeredDevices.map(item => String(item.device_id || "")).filter(Boolean);
+    deviceSelect.replaceChildren(...enabledIds.map(deviceId => {
+      const option = document.createElement("option");
+      option.value = deviceId;
+      option.textContent = deviceId;
+      return option;
+    }));
+    if (!enabledIds.includes(state.deviceId)) {
+      state.deviceId = String(state.device.default_device_id || enabledIds[0]);
+      localStorage.setItem("visual-agent-device-id", state.deviceId);
+    }
+  }
   deviceSelect.value = state.deviceId;
   deviceSelect.disabled = !!view && !view.isTerminal;
   document.querySelector("#startSupervisedAgent").disabled = state.busy || state.paused;
@@ -442,6 +456,13 @@ function openRiskDialog() {
     ? `确认只授权 task=${view.taskId}、revision=${view.revision ?? "—"}、subgoal=${view.currentSubgoal.id}、risk_ids=${view.risk.riskIds.join(",") || "—"}、observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 的当前一步；任何字段变化都必须重新确认。`
     : `确认只授权 observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 对应的一个动作。执行后必须重新观察。`;
   document.querySelector("#confirmRiskAction").className = risk ? "danger-confirm" : "primary-button";
+  const safeLoopKinds = new Set(["tap_semantic", "dismiss_overlay", "swipe", "back", "wait_for_change"]);
+  document.querySelector("#confirmSafeLoop").hidden = !(
+    !riskPhase
+    && ["read_only", "navigation_only"].includes(view.risk.currentExternalImpact)
+    && safeLoopKinds.has(view.visualAction.actionType)
+    && view.controllerGate.allowed
+  );
   document.querySelector("#riskDialog").showModal();
 }
 
@@ -489,8 +510,29 @@ async function nextSupervisedAgent() {
   }
 }
 
-async function autoSupervisedAgent() {
-  toast("第一阶段需要逐步核对并确认，自动连续执行未启用。", true);
+async function autoSupervisedAgent(grant) {
+  const view = sessionView();
+  if (!view || state.paused || state.busy || grant?.phase === "risk") return;
+  try {
+    const confirmation = Protocol.consumeConfirmationGrant(grant, view, lockedSessionDeviceId());
+    const payload = Protocol.buildAutoRequestPayload(
+      lockedSessionDeviceId(),
+      confirmation,
+      { maxPhysicalActions: 3, maxIterations: 8 },
+    );
+    const response = await withVisionProgress("连续执行低风险导航并逐步验证", () =>
+      api(`/api/agent/generic-supervised/${view.sessionId}/auto`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      })
+    );
+    state.supervisedSession = response.session;
+    await finalizeStopIfRequested();
+    toast(response.execution?.pause_reason || "安全连续推进已暂停。");
+    render();
+  } catch (error) {
+    toast(error.message, true);
+  }
 }
 
 async function cancelSupervisedAgent({ quiet = false } = {}) {
@@ -608,6 +650,7 @@ document.querySelector("#riskDialog").addEventListener("close", event => {
   const grant = state.pendingConfirmationGrant;
   state.pendingConfirmationGrant = null;
   if (event.target.returnValue === "default" && grant) advanceSupervisedAgent(grant);
+  if (event.target.returnValue === "auto" && grant) autoSupervisedAgent(grant);
 });
 
 init();

@@ -332,6 +332,8 @@ class UniversalAgentSessionState:
     status: str = "created"
     step_number: int = 1
     physical_actions: int = 0
+    automatic_loop_enabled: bool = False
+    auto_pause_reason: str = ""
     history: list[dict[str, Any]] = field(default_factory=list)
     evidence_paths: list[str] = field(default_factory=list)
     failed_reason: str = ""
@@ -394,7 +396,8 @@ class UniversalAgentSessionState:
             "controller_decision": controller,
             "history": list(self.history),
             "evidence": list(dict.fromkeys(self.evidence_paths)),
-            "automatic_loop_enabled": False,
+            "automatic_loop_enabled": self.automatic_loop_enabled,
+            "auto_pause_reason": self.auto_pause_reason,
             "confirmation_scope": (
                 self.confirmation_authority.scope()
                 if self.confirmation_authority is not None
@@ -1304,6 +1307,147 @@ class UniversalAgentOrchestrator:
                 return result
         finally:
             self._release_if_terminal(session)
+
+    def run_safe_loop(
+        self,
+        session: UniversalAgentSessionState,
+        confirmation: Mapping[str, Any],
+        *,
+        max_physical_actions: int = 3,
+        max_iterations: int = 8,
+    ) -> dict[str, Any]:
+        """Advance generic low-risk navigation and stop at every safety boundary."""
+
+        if self.device_registry.active_session(session.device_id) != session.session_id:
+            raise UniversalAgentOrchestratorError(
+                "当前会话已不再拥有该设备，禁止自动推进。"
+            )
+        if isinstance(max_physical_actions, bool) or not isinstance(
+            max_physical_actions, int
+        ):
+            raise UniversalAgentOrchestratorError("自动推进动作上限格式无效。")
+        if isinstance(max_iterations, bool) or not isinstance(max_iterations, int):
+            raise UniversalAgentOrchestratorError("自动推进迭代上限格式无效。")
+        if not 1 <= max_physical_actions <= 8:
+            raise UniversalAgentOrchestratorError("自动推进最多允许1～8个物理动作。")
+        if not 1 <= max_iterations <= 16:
+            raise UniversalAgentOrchestratorError("自动推进最多允许1～16轮观察。")
+
+        try:
+            with self.device_registry.device_lock(session.device_id):
+                return self._run_safe_loop_locked(
+                    session,
+                    confirmation,
+                    max_physical_actions=max_physical_actions,
+                    max_iterations=max_iterations,
+                )
+        finally:
+            self._release_if_terminal(session)
+
+    def _run_safe_loop_locked(
+        self,
+        session: UniversalAgentSessionState,
+        confirmation: Mapping[str, Any],
+        *,
+        max_physical_actions: int,
+        max_iterations: int,
+    ) -> dict[str, Any]:
+        safe_action_kinds = {
+            "tap_semantic",
+            "dismiss_overlay",
+            "swipe",
+            "back",
+            "wait_for_change",
+        }
+        requested_confirmation = dict(confirmation)
+        start_actions = session.physical_actions
+        iterations = 0
+        seen: set[str] = set()
+        if session.status != "awaiting_confirmation":
+            raise UniversalAgentOrchestratorError(
+                f"当前状态不能启动安全自动推进：{session.status}。"
+            )
+        session.automatic_loop_enabled = True
+        session.auto_pause_reason = ""
+        try:
+            while iterations < max_iterations:
+                if session.status != "awaiting_confirmation":
+                    session.auto_pause_reason = {
+                        "awaiting_risk_confirmation": "下一子目标需要单独确认风险范围。",
+                        "succeeded": "目标已由新画面和 DeepSeek revision 证明完成。",
+                        "blocked": "当前视觉决策或本地策略已阻止继续。",
+                        "failed": "当前动作或验证失败，禁止自动重试。",
+                    }.get(session.status, f"会话状态 {session.status} 不允许继续。")
+                    break
+
+                graph = session.task_graph
+                decision = session.qwen_decision
+                current = graph.active_subgoal() if graph is not None else None
+                action = (
+                    decision.proposal.action
+                    if decision is not None and decision.proposal.status == "action"
+                    else None
+                )
+                impact = current.external_impact if current is not None else "unknown"
+                if (
+                    current is None
+                    or impact not in {"read_only", "navigation_only"}
+                    or action is None
+                    or action.action not in safe_action_kinds
+                    or action_has_account_effect(action)
+                ):
+                    session.auto_pause_reason = (
+                        "下一步不是可自动推进的低风险导航动作，等待人工核对。"
+                    )
+                    break
+
+                signature = json.dumps(
+                    {
+                        "revision": graph.revision,
+                        "subgoal_id": current.subgoal_id,
+                        "observation_id": getattr(
+                            session.trusted_observation, "observation_id", ""
+                        ),
+                        "fingerprint": getattr(
+                            session.trusted_observation, "fingerprint", ""
+                        ),
+                        "action": action.to_dict(),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                if signature in seen:
+                    session.status = "blocked"
+                    session.failed_reason = "检测到同一 revision、画面和动作重复，已停止循环。"
+                    session.auto_pause_reason = session.failed_reason
+                    break
+                seen.add(signature)
+
+                self._confirm_one_locked(session, requested_confirmation)
+                iterations += 1
+                request_actions = session.physical_actions - start_actions
+                if request_actions >= max_physical_actions:
+                    session.auto_pause_reason = "达到本次安全自动推进的物理动作上限。"
+                    break
+                if session.status == "awaiting_confirmation":
+                    scope = session.snapshot().get("confirmation_scope")
+                    if not isinstance(scope, dict):
+                        raise UniversalAgentOrchestratorError(
+                            "自动推进后的下一动作缺少权威确认作用域。"
+                        )
+                    requested_confirmation = scope
+        finally:
+            session.automatic_loop_enabled = False
+            if not session.auto_pause_reason and iterations >= max_iterations:
+                session.auto_pause_reason = "达到本次安全自动推进的迭代上限。"
+            self._write_terminal_snapshot(session)
+
+        return {
+            "physical_actions": session.physical_actions - start_actions,
+            "iterations": iterations,
+            "status": session.status,
+            "pause_reason": session.auto_pause_reason,
+        }
 
     def _observe_after_risk_confirmation(
         self,

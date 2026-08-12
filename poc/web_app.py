@@ -93,6 +93,12 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 DB_PATH = WEB_OUTPUT_DIR / "tasks.sqlite3"
 CONTROL_TOKEN = secrets.token_urlsafe(24)
+DEVICE_REGISTRY_PATH = Path(
+    os.environ.get(
+        "ROBOT_DEVICE_REGISTRY",
+        Path(__file__).with_name("device_registry.json"),
+    )
+)
 
 OPERATION_APP = {
     "wechat.send_text_to_file_transfer": "wechat",
@@ -705,8 +711,12 @@ class GenericSupervisedStepRequest(StrictAgentRequest):
     confirmation: GenericConfirmationScopeRequest | None = None
 
 
-class GenericSupervisedAutoRequest(GenericSupervisedDeviceRequest):
-    max_physical_actions: Literal[1] = 1
+class GenericSupervisedAutoRequest(StrictAgentRequest):
+    device_id: StrictStr = Field(min_length=1, max_length=128)
+    confirmed: StrictBool = False
+    confirmation: GenericConfirmationScopeRequest | None = None
+    max_physical_actions: StrictInt = Field(default=3, ge=1, le=8)
+    max_iterations: StrictInt = Field(default=8, ge=1, le=16)
 
 
 def build_generic_plan_preview(
@@ -741,13 +751,77 @@ def build_generic_plan_preview(
     }
 
 
+class DeviceControllerRegistry:
+    """Resolve one controller and calibration per device_id."""
+
+    def __init__(self, path: Path, *, mock: bool = False) -> None:
+        self.path = Path(path)
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"设备注册表无法读取：{exc}") from exc
+        if payload.get("version") != 1 or not isinstance(payload.get("devices"), list):
+            raise RuntimeError("设备注册表版本或 devices 格式无效。")
+        self.default_device_id = str(payload.get("default_device_id") or "").strip()
+        self._controllers: dict[str, RobotController] = {}
+        self._descriptors: dict[str, dict[str, Any]] = {}
+        enabled_windows: set[str] = set()
+        for raw in payload["devices"]:
+            if not isinstance(raw, dict) or raw.get("enabled") is not True:
+                continue
+            device_id = str(raw.get("device_id") or "").strip()
+            window_title = str(raw.get("window_title") or "").strip()
+            calibration_value = str(raw.get("calibration_path") or "").strip()
+            if not device_id or device_id in self._controllers:
+                raise RuntimeError("设备注册表存在空或重复的 device_id。")
+            effective_window = window_title or "__default_window__"
+            if effective_window in enabled_windows:
+                raise RuntimeError("两台已启用设备不能绑定同一个机械臂控制窗口。")
+            enabled_windows.add(effective_window)
+            calibration_path = Path(calibration_value or "tap_calibration.json")
+            if not calibration_path.is_absolute():
+                calibration_path = self.path.parent / calibration_path
+            controller: RobotController
+            if mock:
+                controller = MockRobotController()
+            elif window_title:
+                controller = RobotController(
+                    window_title,
+                    calibration_path=calibration_path,
+                )
+            else:
+                controller = RobotController(calibration_path=calibration_path)
+            self._controllers[device_id] = controller
+            self._descriptors[device_id] = {
+                "device_id": device_id,
+                "window_title": window_title,
+                "calibration_path": str(calibration_path),
+            }
+        if not self._controllers or self.default_device_id not in self._controllers:
+            raise RuntimeError("设备注册表必须包含已启用的 default_device_id。")
+
+    def controller(self, device_id: str) -> RobotController:
+        resolved = str(device_id or "").strip()
+        controller = self._controllers.get(resolved)
+        if controller is None:
+            raise UniversalAgentOrchestratorError(
+                f"device_id 未登记或未启用：{resolved or 'missing'}。"
+            )
+        return controller
+
+    def descriptors(self) -> list[dict[str, Any]]:
+        return [dict(self._descriptors[key]) for key in sorted(self._descriptors)]
+
+
 class Runtime:
     def __init__(self) -> None:
         self.store = TaskStore(DB_PATH)
-        self.controller: RobotController = (
-            MockRobotController()
-            if os.environ.get("ROBOT_WEB_MOCK") == "1"
-            else RobotController()
+        self.device_controllers = DeviceControllerRegistry(
+            DEVICE_REGISTRY_PATH,
+            mock=os.environ.get("ROBOT_WEB_MOCK") == "1",
+        )
+        self.controller: RobotController = self.device_controllers.controller(
+            self.device_controllers.default_device_id
         )
         self.vision_provider = DashScopeVisionProvider()
         self.intent_provider = DeepSeekIntentProvider()
@@ -766,10 +840,10 @@ class Runtime:
         self.universal_agent_orchestrator = UniversalAgentOrchestrator(
             deepseek_planner=self.deepseek_task_graph_planner,
             qwen_observer=self.qwen_visual_decision_observer,
-            adapter_factory=lambda _device_id: GenericSingleActionAdapter(
-                capture=self.controller.vision_capture,
+            adapter_factory=lambda device_id: GenericSingleActionAdapter(
+                capture=self.controller_for_device(device_id).vision_capture,
                 observer=self.generic_scene_observer,
-                robot=self.controller,
+                robot=self.controller_for_device(device_id),
                 controller=UniversalActionController(),
             ),
             device_registry=self.device_task_registry,
@@ -803,6 +877,15 @@ class Runtime:
             name="robot-task-worker",
             daemon=True,
         )
+
+    def controller_for_device(self, device_id: str) -> RobotController:
+        if str(device_id or "").strip() == self.device_controllers.default_device_id:
+            return self.controller
+        if isinstance(self.controller, MockRobotController):
+            # Test and explicit mock mode accepts logical device IDs while the
+            # production registry remains strict.
+            return self.controller
+        return self.device_controllers.controller(device_id)
 
     def start(self) -> None:
         self.worker.start()
@@ -1079,6 +1162,14 @@ def apps() -> dict[str, Any]:
 @app.get("/api/device")
 def device() -> dict[str, Any]:
     status = runtime.controller.device_status()
+    status["default_device_id"] = runtime.device_controllers.default_device_id
+    status["devices"] = [
+        {
+            **descriptor,
+            **runtime.controller_for_device(descriptor["device_id"]).device_status(),
+        }
+        for descriptor in runtime.device_controllers.descriptors()
+    ]
     status["state_controller_protocol"] = STATE_CONTROLLER_PROTOCOL_VERSION
     status["vision_agent"] = runtime.state_runner.status()
     status["intent_agent"] = runtime.intent_provider.status()
@@ -1094,7 +1185,8 @@ def device() -> dict[str, Any]:
             "goal_preview_enabled": True,
             "scene_preview_enabled": True,
             "hardware_execution_enabled": True,
-            "automatic_loop_enabled": False,
+            "automatic_loop_enabled": True,
+            "automatic_loop_max_physical_actions": 8,
             "supervised_single_step_enabled": True,
             "enabled_physical_actions": [
                 "tap_semantic",
@@ -1170,9 +1262,9 @@ def device() -> dict[str, Any]:
         ]
     status["generic_supervised_execution"] = {
         "enabled": True,
-        "automatic_loop_enabled": False,
+        "automatic_loop_enabled": True,
         "max_physical_actions_per_confirmation": 1,
-        "max_safe_loop_physical_actions": 0,
+        "max_safe_loop_physical_actions": 8,
         "active_sessions": [
             {
                 "session_id": item["session_id"],
@@ -1233,8 +1325,11 @@ def preview_agent_plan(body: AgentRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-def _require_supervised_device_ready() -> None:
-    status = runtime.controller.device_status()
+def _require_supervised_device_ready(device_id: str | None = None) -> None:
+    controller = runtime.controller_for_device(
+        device_id or runtime.device_controllers.default_device_id
+    )
+    status = controller.device_status()
     if not status.get("controller_online") or not status.get("camera_online"):
         raise HTTPException(status_code=409, detail="控制端或摄像头离线。")
     if status.get("busy"):
@@ -1251,25 +1346,35 @@ def _require_supervised_device_ready() -> None:
 
 
 @contextmanager
-def _supervised_hardware_lock() -> Iterator[None]:
+def _supervised_hardware_lock(device_id: str | None = None) -> Iterator[None]:
+    resolved_device = str(
+        device_id or runtime.device_controllers.default_device_id
+    ).strip()
+    controller = runtime.controller_for_device(resolved_device)
+    lease_path = (
+        SHARED_DEVICE_LEASE_DIR / "physical_hardware_action.lease"
+        if resolved_device == runtime.device_controllers.default_device_id
+        else SHARED_DEVICE_LEASE_DIR
+        / f"physical_hardware_action_{re.sub(r'[^A-Za-z0-9_.-]+', '_', resolved_device)}.lease"
+    )
     process_lease = InterProcessLease(
-        SHARED_DEVICE_LEASE_DIR / "physical_hardware_action.lease",
+        lease_path,
         owner_id=f"web-{os.getpid()}-{threading.get_ident()}",
-        metadata={"purpose": "physical_hardware_action"},
+        metadata={"purpose": "physical_hardware_action", "device_id": resolved_device},
     )
     if not process_lease.acquire():
         raise HTTPException(status_code=409, detail="另一进程已占用机械臂物理控制权。")
     if not runtime.dry_run_lock.acquire(blocking=False):
         process_lease.release()
         raise HTTPException(status_code=409, detail="已有语义观察或动作正在进行。")
-    if not runtime.controller.operation_lock.acquire(blocking=False):
+    if not controller.operation_lock.acquire(blocking=False):
         runtime.dry_run_lock.release()
         process_lease.release()
         raise HTTPException(status_code=409, detail="机械臂物理控制权已被占用。")
     try:
         yield
     finally:
-        runtime.controller.operation_lock.release()
+        controller.operation_lock.release()
         runtime.dry_run_lock.release()
         process_lease.release()
 
@@ -1383,7 +1488,7 @@ def start_generic_supervised_session(
     """Plan with DeepSeek, observe with Qwen and propose zero executed actions."""
 
     verify_local_request(request, x_control_token)
-    _require_supervised_device_ready()
+    _require_supervised_device_ready(body.device_id)
     session_id = uuid.uuid4().hex
     run_dir = WEB_OUTPUT_DIR / (
         "generic_supervised_"
@@ -1392,7 +1497,7 @@ def start_generic_supervised_session(
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     try:
-        with _supervised_hardware_lock():
+        with _supervised_hardware_lock(body.device_id):
             session = runtime.universal_agent_orchestrator.start(
                 session_id=session_id,
                 raw_goal=body.text,
@@ -1447,11 +1552,11 @@ def approve_generic_supervised_risk(
     """Approve one graph-bound risk scope, then observe without acting."""
 
     verify_local_request(request, x_control_token)
-    _require_supervised_device_ready()
     with runtime.generic_supervised_session_lock:
         session = runtime.generic_supervised_sessions.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="通用单步会话不存在。")
+    _require_supervised_device_ready(session.device_id)
     before_actions = session.physical_actions
     try:
         if body.confirmed is not True or body.confirmation is None:
@@ -1459,7 +1564,7 @@ def approve_generic_supervised_risk(
                 "调用 Qwen 观察外部状态子目标前必须确认完整风险作用域。"
             )
         _require_generic_session_device(session, body.confirmation.device_id)
-        with _supervised_hardware_lock():
+        with _supervised_hardware_lock(session.device_id):
             decision = runtime.universal_agent_orchestrator.approve_risks(
                 session,
                 body.confirmation.model_dump(),
@@ -1512,7 +1617,7 @@ def confirm_generic_supervised_session(
     if session is None:
         raise HTTPException(status_code=404, detail="通用单步会话不存在。")
     try:
-        _require_supervised_device_ready()
+        _require_supervised_device_ready(session.device_id)
     except HTTPException:
         try:
             runtime.universal_agent_orchestrator.invalidate_confirmation(
@@ -1528,7 +1633,7 @@ def confirm_generic_supervised_session(
             raise UniversalAgentOrchestratorError(
                 "执行一个动作前必须提交完整且明确的确认作用域。"
             )
-        with _supervised_hardware_lock():
+        with _supervised_hardware_lock(session.device_id):
             result = runtime.universal_agent_orchestrator.confirm_one(
                 session,
                 body.confirmation.model_dump(),
@@ -1570,15 +1675,15 @@ def plan_next_generic_supervised_step(
     """Reobserve and propose the next action without touching the robot."""
 
     verify_local_request(request, x_control_token)
-    _require_supervised_device_ready()
     with runtime.generic_supervised_session_lock:
         session = runtime.generic_supervised_sessions.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="通用单步会话不存在。")
     _require_generic_session_device(session, body.device_id)
+    _require_supervised_device_ready(session.device_id)
     before_actions = session.physical_actions
     try:
-        with _supervised_hardware_lock():
+        with _supervised_hardware_lock(session.device_id):
             decision = runtime.universal_agent_orchestrator.refresh_decision(session)
         report = _write_generic_supervised_report(session)
         return {
@@ -1616,7 +1721,7 @@ def run_generic_supervised_safe_loop(
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Remain present for compatibility but never provide an action bypass."""
+    """Run only bounded low-risk navigation; stop before every risk boundary."""
 
     verify_local_request(request, x_control_token)
     with runtime.generic_supervised_session_lock:
@@ -1624,18 +1729,56 @@ def run_generic_supervised_safe_loop(
     if session is None:
         raise HTTPException(status_code=404, detail="通用单步会话不存在。")
     _require_generic_session_device(session, body.device_id)
-    raise HTTPException(
-        status_code=409,
-        detail={
-            "success": False,
-            "code": "phase_one_manual_confirmation_required",
-            "physical_actions": 0,
+    try:
+        _require_supervised_device_ready(session.device_id)
+    except HTTPException:
+        try:
+            runtime.universal_agent_orchestrator.invalidate_confirmation(
+                session,
+                reason="device_readiness_failed",
+            )
+        except Exception:
+            pass
+        raise
+    before_actions = session.physical_actions
+    try:
+        if body.confirmed is not True or body.confirmation is None:
+            raise UniversalAgentOrchestratorError(
+                "启动安全连续推进前必须确认当前精确动作作用域。"
+            )
+        with _supervised_hardware_lock(session.device_id):
+            result = runtime.universal_agent_orchestrator.run_safe_loop(
+                session,
+                body.confirmation.model_dump(),
+                max_physical_actions=body.max_physical_actions,
+                max_iterations=body.max_iterations,
+            )
+        report = _write_generic_supervised_report(session)
+        return {
+            "mode": "generic_supervised_safe_loop",
             "automatic_loop_enabled": False,
-            "error": "第一阶段必须逐步核对并确认，自动连续执行未启用。",
+            "execution": result,
             "session": session.snapshot(),
-            "report": _write_generic_supervised_report(session),
-        },
-    )
+            "report": report,
+        }
+    except (
+        GenericActionAdapterError,
+        UniversalActionError,
+        UniversalAgentOrchestratorError,
+        IntentProviderError,
+        TaskGraphError,
+        VisionAgentError,
+    ) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_generic_supervised_failure(
+                session,
+                exc,
+                request_action_count=max(
+                    0, session.physical_actions - before_actions
+                ),
+            ),
+        ) from exc
 
 
 @app.post("/api/agent/generic-supervised/{session_id}/cancel")

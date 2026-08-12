@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import tempfile
 import threading
 import time
@@ -3652,6 +3653,67 @@ class StoreAndQueueTests(unittest.TestCase):
         self.assertIn("上次退出", loaded["error"])
 
 
+class DeviceControllerRegistryTests(unittest.TestCase):
+    def test_two_devices_have_independent_controllers_and_calibrations(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "devices.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "default_device_id": "phone-a",
+                        "devices": [
+                            {
+                                "device_id": "phone-a",
+                                "enabled": True,
+                                "window_title": "controller-a",
+                                "calibration_path": "calibration-a.json",
+                            },
+                            {
+                                "device_id": "phone-b",
+                                "enabled": True,
+                                "window_title": "controller-b",
+                                "calibration_path": "calibration-b.json",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            registry = web_app.DeviceControllerRegistry(path, mock=False)
+
+            first = registry.controller("phone-a")
+            second = registry.controller("phone-b")
+
+        self.assertIsNot(first, second)
+        self.assertEqual(first.title, "controller-a")
+        self.assertEqual(second.title, "controller-b")
+        self.assertTrue(str(first.calibration_path).endswith("calibration-a.json"))
+        self.assertTrue(str(second.calibration_path).endswith("calibration-b.json"))
+        with self.assertRaisesRegex(web_app.UniversalAgentOrchestratorError, "未登记"):
+            registry.controller("phone-c")
+
+    def test_duplicate_enabled_window_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "devices.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "default_device_id": "phone-a",
+                        "devices": [
+                            {"device_id": "phone-a", "enabled": True, "window_title": "same"},
+                            {"device_id": "phone-b", "enabled": True, "window_title": "same"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "同一个机械臂控制窗口"):
+                web_app.DeviceControllerRegistry(path)
+
+
 class ApiEndToEndTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -3722,6 +3784,8 @@ class ApiEndToEndTests(unittest.TestCase):
         device = self.client.get("/api/device").json()
         self.assertTrue(device["controller_online"])
         self.assertTrue(device["camera_online"])
+        self.assertEqual(device["default_device_id"], "device-local-01")
+        self.assertEqual(device["devices"][0]["device_id"], "device-local-01")
         self.assertNotIn("legacy_free_agent", device)
         architecture = dict(device["execution_architecture"])
         universal = dict(architecture["universal_agent"])
@@ -3746,7 +3810,8 @@ class ApiEndToEndTests(unittest.TestCase):
                     "goal_preview_enabled": True,
                     "scene_preview_enabled": True,
                     "hardware_execution_enabled": True,
-                    "automatic_loop_enabled": False,
+                    "automatic_loop_enabled": True,
+                    "automatic_loop_max_physical_actions": 8,
                     "supervised_single_step_enabled": True,
                     "enabled_physical_actions": [
                         "tap_semantic",
@@ -3821,28 +3886,24 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertNotIn("抖音工作流", home.text)
         self.assertIn('/assets/protocol_adapter.js', home.text)
         self.assertIn("/api/agent/generic-supervised/start", script.text)
-        self.assertNotIn("/api/agent/generic-supervised/${view.sessionId}/auto", script.text)
-        self.assertIn("自动连续执行未启用", script.text)
+        self.assertIn("/api/agent/generic-supervised/${view.sessionId}/auto", script.text)
+        self.assertIn('id="confirmSafeLoop"', home.text)
         self.assertIn("nextSupervisedAgent", script.text)
         self.assertIn("togglePause", script.text)
         self.assertNotIn('api("/api/agent/supervised/start"', script.text)
         self.assertNotIn("wechatView", script.text)
         self.assertNotIn("douyinView", script.text)
 
-    def test_generic_supervised_auto_request_allows_exactly_one_physical_action(self) -> None:
+    def test_generic_supervised_auto_request_is_strict_and_bounded(self) -> None:
         request = web_app.GenericSupervisedAutoRequest(device_id="phone-01")
-        self.assertNotIn("confirmed", request.model_dump())
-        self.assertNotIn("confirmation", request.model_dump())
-        self.assertEqual(request.max_physical_actions, 1)
+        self.assertFalse(request.confirmed)
+        self.assertIsNone(request.confirmation)
+        self.assertEqual(request.max_physical_actions, 3)
+        self.assertEqual(request.max_iterations, 8)
         with self.assertRaises(ValueError):
             web_app.GenericSupervisedAutoRequest(
                 device_id="phone-01",
-                max_physical_actions=2,
-            )
-        with self.assertRaises(ValueError):
-            web_app.GenericSupervisedAutoRequest(
-                device_id="phone-01",
-                confirmed=True,
+                max_physical_actions=9,
             )
         with self.assertRaises(ValueError):
             web_app.GenericSupervisedAutoRequest(
@@ -3961,7 +4022,7 @@ class ApiEndToEndTests(unittest.TestCase):
             "confirmation": session.snapshot()["confirmation_scope"],
         }
 
-        def offline() -> None:
+        def offline(_device_id=None) -> None:
             raise web_app.HTTPException(status_code=409, detail="控制端或摄像头离线。")
 
         with (
@@ -4347,7 +4408,7 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertEqual(adapter.capture_calls, 1)
         self.assertEqual(adapter.execute_calls, 0)
 
-    def test_next_reobserves_with_zero_actions_and_auto_is_disabled(self) -> None:
+    def test_next_reobserves_then_bounded_auto_executes_one_verified_action(self) -> None:
         orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
         with (
             patch.object(web_app, "_require_supervised_device_ready"),
@@ -4374,7 +4435,13 @@ class ApiEndToEndTests(unittest.TestCase):
             automatic = self.client.post(
                 f"/api/agent/generic-supervised/{session_id}/auto",
                 headers=self.headers,
-                json={"device_id": "phone-01", "max_physical_actions": 1},
+                json={
+                    "device_id": "phone-01",
+                    "confirmed": True,
+                    "confirmation": refreshed.json()["session"]["confirmation_scope"],
+                    "max_physical_actions": 1,
+                    "max_iterations": 8,
+                },
             )
             self.client.post(
                 f"/api/agent/generic-supervised/{session_id}/cancel",
@@ -4388,14 +4455,11 @@ class ApiEndToEndTests(unittest.TestCase):
             first_observation,
             refreshed.json()["session"]["confirmation_scope"]["observation_id"],
         )
-        self.assertEqual(automatic.status_code, 409, automatic.text)
-        self.assertEqual(
-            automatic.json()["detail"]["code"],
-            "phase_one_manual_confirmation_required",
-        )
-        self.assertEqual(automatic.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(automatic.status_code, 200, automatic.text)
+        self.assertEqual(automatic.json()["execution"]["physical_actions"], 1)
+        self.assertEqual(automatic.json()["session"]["physical_actions"], 1)
         self.assertEqual(adapter.capture_calls, 2)
-        self.assertEqual(adapter.execute_calls, 0)
+        self.assertEqual(adapter.execute_calls, 1)
 
     def test_supervised_session_starts_paused_and_requires_confirmation(self) -> None:
         before_tasks = len(web_app.runtime.store.list(100))

@@ -443,8 +443,20 @@
     return { ...values, device_id: deviceId };
   }
 
-  function buildAutoRequestPayload(sessionDeviceId) {
-    return buildRequestPayload(sessionDeviceId, { max_physical_actions: 1 });
+  function buildAutoRequestPayload(sessionDeviceId, confirmationPayload, values = {}) {
+    if (
+      !confirmationPayload
+      || confirmationPayload.confirmed !== true
+      || !asObject(confirmationPayload.confirmation).observation_id
+      || !asObject(confirmationPayload.confirmation).fingerprint
+    ) {
+      throw new Error("安全连续推进必须携带当前精确动作确认。")
+    }
+    return buildRequestPayload(sessionDeviceId, {
+      ...confirmationPayload,
+      max_physical_actions: Number(firstDefined(values.maxPhysicalActions, 3)),
+      max_iterations: Number(firstDefined(values.maxIterations, 8)),
+    });
   }
 
   function confirmationScope(session, sessionDeviceId) {

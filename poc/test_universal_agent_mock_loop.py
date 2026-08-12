@@ -124,6 +124,10 @@ class RecordingRobot:
         self.calls.append(("back", ()))
         return {"ok": True, "kind": "back"}
 
+    def vision_swipe_up(self):
+        self.calls.append(("swipe_up", ()))
+        return {"ok": True, "kind": "swipe"}
+
 
 class ScriptedQwen:
     def __init__(self, action_kind: str, *, unsafe: bool = False) -> None:
@@ -135,6 +139,11 @@ class ScriptedQwen:
         self.calls.append((frames, task_context, trusted_observation, decision_number))
         if self.action_kind == "back":
             params = {"expected_effect": {"scene_changed": True}}
+        elif self.action_kind == "swipe":
+            params = {
+                "direction": "up",
+                "expected_effect": {"scene_changed": True},
+            }
         else:
             element = trusted_observation.scene.elements[0]
             params = {
@@ -156,13 +165,21 @@ class ScriptedQwen:
             reason="合成可信观察中存在唯一通用候选。",
         )
         region = SimpleNamespace(
-            kind="system_navigation" if self.action_kind == "back" else "element",
+            kind=(
+                "system_navigation"
+                if self.action_kind == "back"
+                else "screen"
+                if self.action_kind == "swipe"
+                else "element"
+            ),
             element_id=(
-                "" if self.action_kind == "back" else trusted_observation.scene.elements[0].element_id
+                ""
+                if self.action_kind in {"back", "swipe"}
+                else trusted_observation.scene.elements[0].element_id
             ),
             bounds=(
                 (0.0, 0.0, 1.0, 1.0)
-                if self.action_kind == "back"
+                if self.action_kind in {"back", "swipe"}
                 else trusted_observation.scene.elements[0].bounds
             ),
         )
@@ -310,6 +327,42 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         self.assertEqual(2, session.task_graph.revision)
         self.assertEqual(2, len(qwen.calls))
         self.assertEqual("synthetic.reader", session.goal_draft.app_id)
+
+    def test_third_unseen_app_combines_generic_swipe_without_code_branch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, qwen, _capture, robot = self._session(
+                temp,
+                app_id="synthetic.timeline",
+                app_name="合成时间线",
+                raw_goal="这页没有我要的公开条目，往下翻一屏再判断",
+                action_kind="swipe",
+            )
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("swipe_up", ())], robot.calls)
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual("synthetic.timeline", session.goal_draft.app_id)
+
+    def test_two_phrasings_use_the_same_generic_action_contract(self):
+        outcomes = []
+        for index, wording in enumerate(
+            ("把眼前条目的内容页打开", "进入当前唯一可见项目看看详情"),
+            start=1,
+        ):
+            with tempfile.TemporaryDirectory() as temp:
+                orchestrator, session, _planner, _qwen, _capture, robot = self._session(
+                    temp,
+                    app_id=f"synthetic.paraphrase-{index}",
+                    app_name="合成目录",
+                    raw_goal=wording,
+                    action_kind="tap_semantic",
+                )
+                result = orchestrator.confirm_one(session, _confirmation(session))
+                outcomes.append((result.resolved_action.kind, robot.calls[0][0]))
+
+        self.assertEqual([("tap_semantic", "tap"), ("tap_semantic", "tap")], outcomes)
 
     def test_non_navigation_button_is_blocked_without_robot_call(self):
         with tempfile.TemporaryDirectory() as temp:

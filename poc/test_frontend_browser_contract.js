@@ -218,11 +218,9 @@ function createServer() {
     }
     if (request.method === "POST" && url.pathname.endsWith("/auto")) {
       requests.auto.push(await readBody(request));
-      json(response, 409, {
-        detail: {
-          code: "phase_one_manual_confirmation_required",
-          physical_actions: 0,
-        },
+      json(response, 200, {
+        execution: { physical_actions: 1, iterations: 1, pause_reason: "达到动作上限" },
+        session: afterActionSession(),
       });
       return;
     }
@@ -414,6 +412,37 @@ test("external-state graph requires risk approval before exact action confirmati
     assert.match(await page.locator("#riskWarning").innerText(), /51277d0d9e6f986b00dc/);
     assert.equal(requests.confirm.length, 0);
     assert.equal(await page.locator("#autoSupervisedAgent").count(), 0);
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("browser offers bounded auto only for a reviewed safe navigation action", { timeout: 30000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const server = createServer();
+  const { browser, page } = await launchFixturePage(server);
+  try {
+    await page.locator("#agentText").fill("连续查看安全页面");
+    await page.locator("#startSupervisedAgent").click();
+    await page.locator("#reviewAction").click();
+    await page.locator("#confirmSafeLoop").waitFor({ state: "visible" });
+    const autoResponse = page.waitForResponse(
+      response => response.url().endsWith("/auto"),
+      { timeout: 5000 },
+    );
+    await page.locator("#confirmSafeLoop").click();
+    await autoResponse;
+    assert.equal(requests.auto.length, 1);
+    assert.equal(requests.confirm.length, 0);
+    assert.equal(requests.auto[0].confirmed, true);
+    assert.equal(requests.auto[0].device_id, "phone-01");
+    assert.equal(requests.auto[0].max_physical_actions, 3);
+    assert.equal(requests.auto[0].max_iterations, 8);
+    assert.equal(
+      requests.auto[0].confirmation.observation_id,
+      "obs_0123456789abcdef0123456789abcdef",
+    );
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));

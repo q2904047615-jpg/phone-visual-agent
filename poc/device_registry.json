@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "default_device_id": "device-local-01",
+  "devices": [
+    {
+      "device_id": "device-local-01",
+      "enabled": true,
+      "window_title": "",
+      "calibration_path": "tap_calibration.json"
+    }
+  ]
+}

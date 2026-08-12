@@ -274,6 +274,29 @@ test("risk approval grant excludes observation and cannot execute a physical act
   });
 });
 
+test("bounded safe loop payload requires the exact current action confirmation", () => {
+  const view = Protocol.adaptSession(safeActionSession());
+  const confirmation = Protocol.consumeConfirmationGrant(
+    Protocol.createConfirmationGrant(view, "phone-01"),
+    view,
+    "phone-01",
+  );
+  const payload = Protocol.buildAutoRequestPayload(
+    "phone-01",
+    confirmation,
+    { maxPhysicalActions: 3, maxIterations: 8 },
+  );
+  assert.equal(payload.confirmed, true);
+  assert.equal(payload.device_id, "phone-01");
+  assert.equal(payload.max_physical_actions, 3);
+  assert.equal(payload.max_iterations, 8);
+  assert.equal(payload.confirmation.observation_id, "obs_0123456789abcdef0123456789abcdef");
+  assert.throws(
+    () => Protocol.buildAutoRequestPayload("phone-01", { confirmed: false }),
+    /精确动作确认/,
+  );
+});
+
 test("confirmation scope cannot cross revision, risk, subgoal, task, device, observation, or fingerprint", () => {
   const original = Protocol.adaptSession(safeActionSession());
   const mutations = [

@@ -501,8 +501,18 @@ def _window_title(hwnd: int) -> str:
 class RobotController:
     """Safe, single-machine adapter used by the local web task worker."""
 
-    def __init__(self, title: str = legacy.DEFAULT_WINDOW_TITLE) -> None:
+    def __init__(
+        self,
+        title: str = legacy.DEFAULT_WINDOW_TITLE,
+        *,
+        calibration_path: Path | None = None,
+    ) -> None:
         self.title = title
+        self.calibration_path = (
+            Path(calibration_path)
+            if calibration_path is not None
+            else Path(__file__).with_name("tap_calibration.json")
+        )
         self.stop_event = threading.Event()
         self.operation_lock = threading.Lock()
         # The browser MJPEG preview and the vision worker can otherwise call
@@ -622,7 +632,12 @@ class RobotController:
         # ratios and intentionally does not pass through this transform.
         from tap_calibration import corrected_grid_point
 
-        x, y = corrected_grid_point(x, y, (frame.width, frame.height))
+        x, y = corrected_grid_point(
+            x,
+            y,
+            (frame.width, frame.height),
+            self.calibration_path,
+        )
         point = (
             min(frame.width - 1, max(0, int(round(x * (frame.width - 1) / 1000)))),
             min(frame.height - 1, max(0, int(round(y * (frame.height - 1) / 1000)))),

@@ -1156,6 +1156,85 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertEqual(2, session.step_number)
         self.assertEqual(2, session.task_graph.revision)
 
+    def test_safe_loop_runs_two_verified_navigation_actions_then_completes(self) -> None:
+        initial = _graph()
+
+        class SequentialPlanner(FakeDeepSeekPlanner):
+            def replan(self, graph, observation, *, trigger, reason):
+                self.replan_calls.append((graph, observation, trigger, reason))
+                if graph.revision == 1:
+                    return replace(initial, revision=2)
+                return _completed_graph(graph)
+
+        class SequentialAdapter(FakeExecutingAdapter):
+            def __init__(self):
+                super().__init__(
+                    _scene(),
+                    _scene(fingerprint="frame-b", meaning="open_more", label="查看更多"),
+                )
+                self.after_scenes = [
+                    self.after_scene,
+                    _scene(
+                        fingerprint="frame-c",
+                        meaning="open_final",
+                        label="打开最终详情",
+                    ),
+                ]
+
+            def execute(self, **kwargs):
+                self.after_scene = self.after_scenes[self.execute_calls]
+                return super().execute(**kwargs)
+
+        planner = SequentialPlanner(initial)
+        adapter = SequentialAdapter()
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, qwen, _adapter = self._started(
+                temp,
+                planner=planner,
+                adapter=adapter,
+            )
+
+            result = orchestrator.run_safe_loop(
+                session,
+                _confirmation(session),
+                max_physical_actions=3,
+                max_iterations=8,
+            )
+
+        self.assertEqual(2, result["physical_actions"])
+        self.assertEqual(2, result["iterations"])
+        self.assertEqual("succeeded", result["status"])
+        self.assertEqual(2, adapter.execute_calls)
+        self.assertEqual(2, session.physical_actions)
+        self.assertEqual(3, session.task_graph.revision)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertFalse(session.automatic_loop_enabled)
+
+    def test_safe_loop_rejects_external_risk_stage_with_zero_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = UniversalAgentOrchestrator(
+                deepseek_planner=FakeDeepSeekPlanner(_external_graph()),
+                qwen_observer=FakeQwenObserver(),
+                adapter_factory=lambda _device_id: FakeAdapter(_scene()),
+                trusted_observation_factory=_trusted_factory,
+            )
+            session = orchestrator.start(
+                session_id="session-auto-risk",
+                raw_goal="发送一条消息",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError,
+                "awaiting_risk_confirmation",
+            ):
+                orchestrator.run_safe_loop(
+                    session,
+                    _risk_confirmation(session),
+                )
+
+        self.assertEqual(0, session.physical_actions)
+
     def test_confirmation_requires_observation_id_and_fingerprint(self) -> None:
         for missing in ("observation_id", "fingerprint"):
             with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temp:

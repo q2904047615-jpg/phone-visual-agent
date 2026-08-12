@@ -1639,8 +1639,21 @@ class PhaseOneNavigationPolicy:
             return self._deny("目标区域没有逐项复用可信候选 bounds。")
 
         conflicts = self._value(trusted_observation, "candidate_conflicts", ()) or ()
-        if any(element.element_id in str(conflict) for conflict in conflicts):
-            return self._deny("当前候选存在语义冲突或不唯一。")
+        for conflict in conflicts:
+            if not isinstance(conflict, dict):
+                if element.element_id in str(conflict):
+                    return self._deny("当前候选存在语义冲突或不唯一。")
+                continue
+            conflict_ids = conflict.get("element_ids") or []
+            resolved_duplicate = (
+                conflict.get("kind") == "duplicate_visual_object_collapsed"
+                and conflict.get("canonical_element_id") == element.element_id
+                and element.element_id in conflict_ids
+            )
+            if resolved_duplicate:
+                continue
+            if element.element_id in conflict_ids or element.element_id in str(conflict):
+                return self._deny("当前候选存在语义冲突或不唯一。")
 
         canonical = self._semantic_class(
             element.meaning,

@@ -465,6 +465,45 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual("open", result.canonical_class)
 
+    def test_allows_canonical_candidate_after_duplicate_alias_collapse(self) -> None:
+        scene = _scene(meaning="open_browser", label="浏览器", role="icon")
+        decision = _decision(scene)
+        decision.trusted_observation.candidate_conflicts = (
+            {
+                "kind": "duplicate_visual_object_collapsed",
+                "canonical_element_id": "candidate-1",
+                "element_ids": ["candidate-1", "candidate-label"],
+            },
+        )
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+
+    def test_rejects_unresolved_overlap_conflict_for_candidate(self) -> None:
+        scene = _scene(meaning="open_browser", label="浏览器", role="icon")
+        decision = _decision(scene)
+        decision.trusted_observation.candidate_conflicts = (
+            {
+                "kind": "overlapping_semantic_conflict",
+                "element_ids": ["candidate-1", "other-action"],
+                "iou": 0.8,
+            },
+        )
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("冲突", result.reason)
+
     def test_rejects_toggle_input_and_keyboard_roles(self) -> None:
         for role in ("toggle", "input", "keyboard_key"):
             with self.subTest(role=role):

@@ -13,12 +13,12 @@ import webbrowser
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
 from intent_provider import DeepSeekIntentProvider, IntentProviderError
 from generic_intent import GenericIntentError, GenericIntentParser
@@ -654,13 +654,35 @@ class GenericSceneRequest(BaseModel):
     goal: dict[str, Any] = Field(default_factory=dict)
 
 
-class GenericSupervisedStepRequest(BaseModel):
-    confirmed: bool = False
+class StrictAgentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
-class GenericSupervisedAutoRequest(BaseModel):
-    confirmed: bool = False
-    max_physical_actions: int = Field(default=4, ge=1, le=8)
+class GenericSupervisedStartRequest(StrictAgentRequest):
+    text: StrictStr = Field(min_length=1, max_length=500)
+    device_id: StrictStr = Field(min_length=1, max_length=128)
+
+
+class GenericSupervisedDeviceRequest(StrictAgentRequest):
+    device_id: StrictStr = Field(min_length=1, max_length=128)
+
+
+class GenericConfirmationScopeRequest(StrictAgentRequest):
+    session_id: StrictStr = Field(min_length=1, max_length=128)
+    task_id: StrictStr = Field(min_length=1, max_length=128)
+    device_id: StrictStr = Field(min_length=1, max_length=128)
+    revision: StrictInt = Field(ge=1)
+    subgoal_id: StrictStr = Field(min_length=1, max_length=128)
+    risk_ids: list[StrictStr] = Field(default_factory=list)
+
+
+class GenericSupervisedStepRequest(StrictAgentRequest):
+    confirmed: StrictBool = False
+    confirmation: GenericConfirmationScopeRequest | None = None
+
+
+class GenericSupervisedAutoRequest(GenericSupervisedDeviceRequest):
+    max_physical_actions: Literal[1] = 1
 
 
 def build_generic_plan_preview(
@@ -1167,6 +1189,21 @@ def _supervised_hardware_lock() -> Iterator[None]:
         runtime.dry_run_lock.release()
 
 
+def _require_generic_session_device(
+    session: GenericSupervisedSession,
+    requested_device_id: str,
+) -> None:
+    if str(requested_device_id or "") != session.device_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "success": False,
+                "physical_actions": 0,
+                "error": "请求device_id与会话锁定设备不一致。",
+            },
+        )
+
+
 @app.post("/api/agent/generic-scene")
 def observe_generic_scene(
     body: GenericSceneRequest,
@@ -1237,7 +1274,7 @@ def _write_generic_supervised_report(session: GenericSupervisedSession) -> str:
 
 @app.post("/api/agent/generic-supervised/start")
 def start_generic_supervised_session(
-    body: AgentRequest,
+    body: GenericSupervisedStartRequest,
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
@@ -1288,6 +1325,7 @@ def start_generic_supervised_session(
                 )
         session = GenericSupervisedSession.start(
             session_id=session_id,
+            device_id=body.device_id,
             goal=goal,
             scene=scene,
             proposal=proposal,
@@ -1349,13 +1387,20 @@ def confirm_generic_supervised_session(
 
     verify_local_request(request, x_control_token)
     _require_supervised_device_ready()
-    with runtime.generic_supervised_session_lock:
-        session = runtime.generic_supervised_sessions.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
     try:
-        with _supervised_hardware_lock():
-            result = session.confirm(confirmed=body.confirmed)
+        with runtime.generic_supervised_session_lock:
+            session = runtime.generic_supervised_sessions.get(session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="通用单步会话不存在。")
+            with _supervised_hardware_lock():
+                result = session.confirm_v3(
+                    confirmed=body.confirmed,
+                    confirmation=(
+                        body.confirmation.model_dump()
+                        if body.confirmation is not None
+                        else None
+                    ),
+                )
         report = _write_generic_supervised_report(session)
         return {
             "mode": "generic_supervised_single_step",
@@ -1382,6 +1427,7 @@ def confirm_generic_supervised_session(
 @app.post("/api/agent/generic-supervised/{session_id}/next")
 def plan_next_generic_supervised_step(
     session_id: str,
+    body: GenericSupervisedDeviceRequest,
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
@@ -1389,18 +1435,19 @@ def plan_next_generic_supervised_step(
 
     verify_local_request(request, x_control_token)
     _require_supervised_device_ready()
-    with runtime.generic_supervised_session_lock:
-        session = runtime.generic_supervised_sessions.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
     try:
-        with _supervised_hardware_lock():
-            scene, _frames, _paths = session.adapter.capture_scene(
-                session.goal,
-                evidence_dir=session.run_dir,
-                prefix=f"step_{session.step_number + 1}_scene",
-            )
-            proposal = session.plan_next(scene)
+        with runtime.generic_supervised_session_lock:
+            session = runtime.generic_supervised_sessions.get(session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="通用单步会话不存在。")
+            _require_generic_session_device(session, body.device_id)
+            with _supervised_hardware_lock():
+                scene, _frames, _paths = session.adapter.capture_scene(
+                    session.goal,
+                    evidence_dir=session.run_dir,
+                    prefix=f"step_{session.step_number + 1}_scene",
+                )
+                proposal = session.plan_next(scene)
         report = _write_generic_supervised_report(session)
         return {
             "mode": "generic_supervised_single_step",
@@ -1442,17 +1489,18 @@ def run_generic_supervised_safe_loop(
 
     verify_local_request(request, x_control_token)
     _require_supervised_device_ready()
-    with runtime.generic_supervised_session_lock:
-        session = runtime.generic_supervised_sessions.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
-    history_start = len(session.history)
     try:
-        with _supervised_hardware_lock():
-            summary = session.run_safe_loop(
-                confirmed=body.confirmed,
-                max_physical_actions=body.max_physical_actions,
-            )
+        with runtime.generic_supervised_session_lock:
+            session = runtime.generic_supervised_sessions.get(session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="通用单步会话不存在。")
+            history_start = len(session.history)
+            _require_generic_session_device(session, body.device_id)
+            with _supervised_hardware_lock():
+                summary = session.run_safe_loop(
+                    confirmed=True,
+                    max_physical_actions=body.max_physical_actions,
+                )
         report = _write_generic_supervised_report(session)
         return {
             "mode": "generic_supervised_controlled_loop",
@@ -1489,17 +1537,43 @@ def run_generic_supervised_safe_loop(
 @app.post("/api/agent/generic-supervised/{session_id}/cancel")
 def cancel_generic_supervised_session(
     session_id: str,
+    body: GenericSupervisedDeviceRequest,
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
     with runtime.generic_supervised_session_lock:
         session = runtime.generic_supervised_sessions.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
-    session.cancel()
+        if session is None:
+            raise HTTPException(status_code=404, detail="通用单步会话不存在。")
+        _require_generic_session_device(session, body.device_id)
+        session.cancel()
     report = _write_generic_supervised_report(session)
     return {"session": session.snapshot(), "report": report}
+
+
+@app.post("/api/agent/generic-supervised/{session_id}/pause")
+def pause_generic_supervised_session(
+    session_id: str,
+    body: GenericSupervisedDeviceRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Invalidate any pending confirmation without touching hardware."""
+
+    verify_local_request(request, x_control_token)
+    with runtime.generic_supervised_session_lock:
+        session = runtime.generic_supervised_sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="通用单步会话不存在。")
+        _require_generic_session_device(session, body.device_id)
+        session.pause()
+    report = _write_generic_supervised_report(session)
+    return {
+        "physical_actions": 0,
+        "session": session.snapshot(),
+        "report": report,
+    }
 
 
 def _write_supervised_report(

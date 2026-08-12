@@ -3751,12 +3751,139 @@ class ApiEndToEndTests(unittest.TestCase):
         )
 
     def test_home_uses_generic_supervised_single_step_endpoints(self) -> None:
+        home = self.client.get("/")
         script = self.client.get("/assets/app.js")
+        protocol_adapter = self.client.get("/assets/protocol_adapter.js")
+        styles = self.client.get("/assets/styles.css")
+        self.assertEqual(home.status_code, 200)
         self.assertEqual(script.status_code, 200)
+        self.assertEqual(protocol_adapter.status_code, 200)
+        self.assertEqual(styles.status_code, 200)
+        self.assertIn("你希望手机完成什么", home.text)
+        self.assertIn("动态计划", home.text)
+        self.assertIn("当前画面", home.text)
+        self.assertIn("步骤记录", home.text)
+        self.assertIn('id="pauseButton"', home.text)
+        self.assertIn('id="stopButton"', home.text)
+        self.assertIn('id="riskDialog"', home.text)
+        self.assertIn('id="deviceId"', home.text)
+        self.assertNotIn("微信工作流", home.text)
+        self.assertNotIn("抖音工作流", home.text)
+        self.assertIn('/assets/protocol_adapter.js', home.text)
         self.assertIn("/api/agent/generic-supervised/start", script.text)
-        self.assertIn("/api/agent/generic-supervised/${session.session_id}/auto", script.text)
+        self.assertIn("/api/agent/generic-supervised/${view.sessionId}/auto", script.text)
         self.assertIn("nextSupervisedAgent", script.text)
+        self.assertIn("togglePause", script.text)
         self.assertNotIn('api("/api/agent/supervised/start"', script.text)
+        self.assertNotIn("wechatView", script.text)
+        self.assertNotIn("douyinView", script.text)
+
+    def test_generic_supervised_auto_request_allows_exactly_one_physical_action(self) -> None:
+        request = web_app.GenericSupervisedAutoRequest(device_id="phone-01")
+        self.assertNotIn("confirmed", request.model_dump())
+        self.assertNotIn("confirmation", request.model_dump())
+        self.assertEqual(request.max_physical_actions, 1)
+        with self.assertRaises(ValueError):
+            web_app.GenericSupervisedAutoRequest(
+                device_id="phone-01",
+                max_physical_actions=2,
+            )
+        with self.assertRaises(ValueError):
+            web_app.GenericSupervisedAutoRequest(
+                device_id="phone-01",
+                confirmed=True,
+            )
+        with self.assertRaises(ValueError):
+            web_app.GenericSupervisedAutoRequest(
+                device_id="phone-01",
+                max_physical_actions="1",
+            )
+
+    def test_v3_confirm_request_requires_scope_and_forbids_extra_fields(self) -> None:
+        from test_v3_confirmation_scope import confirmation, make_session
+
+        session, adapter = make_session()
+        with web_app.runtime.generic_supervised_session_lock:
+            web_app.runtime.generic_supervised_sessions[session.session_id] = session
+        path = f"/api/agent/generic-supervised/{session.session_id}/confirm"
+
+        with patch.object(web_app, "_require_supervised_device_ready"):
+            missing = self.client.post(
+                path,
+                headers=self.headers,
+                json={"confirmed": True},
+            )
+        self.assertEqual(missing.status_code, 409, missing.text)
+        self.assertEqual(missing.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(adapter.calls, 0)
+
+        with self.assertRaises(ValueError):
+            web_app.GenericSupervisedStepRequest(
+                confirmed="true",
+                confirmation=confirmation(session),
+            )
+
+        for payload in (
+            {
+                "confirmed": True,
+                "confirmation": confirmation(session),
+                "unexpected": "forbidden",
+            },
+            {
+                "confirmed": True,
+                "confirmation": {
+                    **confirmation(session),
+                    "unexpected": "forbidden",
+                },
+            },
+        ):
+            with self.subTest(payload=payload):
+                with patch.object(web_app, "_require_supervised_device_ready"):
+                    rejected = self.client.post(
+                        path,
+                        headers=self.headers,
+                        json=payload,
+                    )
+                self.assertEqual(rejected.status_code, 422, rejected.text)
+                self.assertEqual(adapter.calls, 0)
+
+    def test_v3_confirm_api_atomically_consumes_one_scope(self) -> None:
+        from test_v3_confirmation_scope import confirmation, make_session
+
+        session, adapter = make_session()
+        with web_app.runtime.generic_supervised_session_lock:
+            web_app.runtime.generic_supervised_sessions[session.session_id] = session
+        path = f"/api/agent/generic-supervised/{session.session_id}/confirm"
+        payload = {"confirmed": True, "confirmation": confirmation(session)}
+
+        with patch.object(web_app, "_require_supervised_device_ready"):
+            first = self.client.post(path, headers=self.headers, json=payload)
+            replay = self.client.post(path, headers=self.headers, json=payload)
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["execution"]["physical_actions"], 1)
+        self.assertEqual(replay.status_code, 409, replay.text)
+        self.assertEqual(replay.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(adapter.calls, 1)
+
+    def test_v3_confirm_api_rejects_cross_device_scope(self) -> None:
+        from test_v3_confirmation_scope import confirmation, make_session
+
+        session, adapter = make_session()
+        with web_app.runtime.generic_supervised_session_lock:
+            web_app.runtime.generic_supervised_sessions[session.session_id] = session
+        scope = confirmation(session)
+        scope["device_id"] = "phone-02"
+
+        with patch.object(web_app, "_require_supervised_device_ready"):
+            response = self.client.post(
+                f"/api/agent/generic-supervised/{session.session_id}/confirm",
+                headers=self.headers,
+                json={"confirmed": True, "confirmation": scope},
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(adapter.calls, 0)
 
     def test_plan_preview_compiles_without_creating_or_running_task(self) -> None:
         before = len(web_app.runtime.store.list(100))
@@ -3953,7 +4080,7 @@ class ApiEndToEndTests(unittest.TestCase):
             started = self.client.post(
                 "/api/agent/generic-supervised/start",
                 headers=self.headers,
-                json={"text": "打开设置"},
+                json={"text": "打开设置", "device_id": "phone-01"},
             )
         self.assertEqual(started.status_code, 200, started.text)
         payload = started.json()
@@ -3980,6 +4107,7 @@ class ApiEndToEndTests(unittest.TestCase):
         cancelled = self.client.post(
             f"/api/agent/generic-supervised/{session_id}/cancel",
             headers=self.headers,
+            json={"device_id": "phone-01"},
         )
         self.assertEqual(cancelled.status_code, 200, cancelled.text)
         self.assertEqual(cancelled.json()["session"]["status"], "cancelled")

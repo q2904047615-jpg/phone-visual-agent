@@ -670,8 +670,11 @@ class GenericSupervisedSessionTests(unittest.TestCase):
                 adapter=adapter,
                 run_dir=Path(temp),
             )
+            first = session.run_safe_loop(confirmed=True)
+            self.assertEqual(first["physical_actions"], 1)
+            self.assertEqual(session.status, "paused_after_action")
             summary = session.run_safe_loop(confirmed=True)
-        self.assertEqual(summary["physical_actions"], 1)
+        self.assertEqual(summary["physical_actions"], 0)
         self.assertEqual(session.status, "succeeded")
         self.assertTrue(session.automatic_loop_enabled)
         self.assertEqual(robot.actions, [("tap", 300, 400)])

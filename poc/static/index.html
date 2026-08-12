@@ -3,64 +3,176 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>机械臂控制台</title>
+  <meta name="theme-color" content="#0b1020">
+  <title>Phone Visual Agent</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
-  <div class="shell">
+  <div class="app-shell">
     <aside class="sidebar">
-      <a class="brand" href="#/">
-        <span class="brand-mark">R</span>
-        <span><strong>Robot Desk</strong><small>本机机械臂控制台</small></span>
+      <a class="brand" href="#top" aria-label="返回控制台顶部">
+        <span class="brand-mark">VA</span>
+        <span>
+          <strong>Visual Agent</strong>
+          <small>通用手机操作控制台</small>
+        </span>
       </a>
-      <nav>
-        <a data-route="home" href="#/"><span>⌂</span>总览</a>
-        <a data-route="wechat" href="#/apps/wechat"><span>微</span>微信</a>
-        <a data-route="douyin" href="#/apps/douyin"><span>抖</span>抖音</a>
-        <a data-route="tasks" href="#/tasks"><span>✓</span>任务记录</a>
-        <a data-route="settings" href="#/settings"><span>⚙</span>设置</a>
-      </nav>
+
+      <div class="side-section">
+        <p class="side-label">执行闭环</p>
+        <ol class="loop-list">
+          <li><span>1</span>理解目标</li>
+          <li><span>2</span>观察画面</li>
+          <li><span>3</span>提出一步</li>
+          <li><span>4</span>确认与执行</li>
+          <li><span>5</span>重新观察</li>
+        </ol>
+      </div>
+
+      <div class="architecture-note">
+        <span class="architecture-dot"></span>
+        <div>
+          <strong>动态计划</strong>
+          <p>步骤由目标和新画面实时生成，不使用 App 固定流程。</p>
+        </div>
+      </div>
+
       <div class="sidebar-foot">
         <div id="modeBadge" class="mode-badge">正在连接</div>
-        <small>仅监听 127.0.0.1</small>
+        <small>本机服务 · 127.0.0.1</small>
       </div>
     </aside>
 
-    <main>
-      <header>
+    <main id="top">
+      <header class="topbar">
         <div>
-          <p class="eyebrow">LOCAL AUTOMATION</p>
-          <h1 id="pageTitle">机械臂总览</h1>
+          <p class="eyebrow">UNIVERSAL PHONE OPERATOR</p>
+          <h1>Agent 控制台</h1>
+          <p class="page-subtitle">描述结果，不必编写点击步骤。系统每次只处理一个可验证动作。</p>
         </div>
-        <button id="stopButton" class="stop-button">■ 停止任务</button>
+        <div class="topbar-actions">
+          <label class="device-field" for="deviceId">
+            <span>设备</span>
+            <select id="deviceId" aria-label="目标设备">
+              <option value="device-local-01">device-local-01</option>
+            </select>
+            <small>接口预留 · 当前仅单设备</small>
+          </label>
+          <button id="pauseButton" class="control-button pause-button" type="button">Ⅱ 暂停推进</button>
+          <button id="stopButton" class="control-button stop-button" type="button">■ 停止任务</button>
+        </div>
       </header>
 
-      <section id="statusStrip" class="status-strip">
+      <section class="status-strip" aria-label="系统状态">
         <div><span id="controllerDot" class="dot"></span><b>控制端</b><em id="controllerText">检测中</em></div>
-        <div><span id="cameraDot" class="dot"></span><b>摄像头</b><em id="cameraText">检测中</em></div>
-        <div><span id="queueDot" class="dot"></span><b>执行队列</b><em id="queueText">读取中</em></div>
+        <div><span id="cameraDot" class="dot"></span><b>画面</b><em id="cameraText">检测中</em></div>
+        <div><span id="agentDot" class="dot"></span><b>Agent</b><em id="agentTextStatus">等待中</em></div>
+        <div><span id="safetyDot" class="dot online"></span><b>安全门</b><em id="safetyText">一次一动作</em></div>
       </section>
 
-      <div id="toast" class="toast" role="status"></div>
-      <div id="view"></div>
+      <section class="command-card" aria-labelledby="commandTitle">
+        <div class="command-copy">
+          <p class="eyebrow">NATURAL LANGUAGE GOAL</p>
+          <h2 id="commandTitle">你希望手机完成什么？</h2>
+          <p>可以更换 App、措辞和目标；请直接描述期望结果与限制条件。</p>
+        </div>
+        <div class="command-entry">
+          <textarea id="agentText" rows="3" maxlength="500"
+            placeholder="例如：打开系统设置，找到蓝牙页面，但不要更改任何开关。"></textarea>
+          <div class="command-actions">
+            <span id="commandHint">开始后先理解目标并观察当前画面，不会立即执行物理动作。</span>
+            <button id="startSupervisedAgent" class="primary-button" type="button">生成动态计划</button>
+          </div>
+        </div>
+      </section>
+
+      <div class="console-grid">
+        <div class="console-column">
+          <section class="panel plan-panel" aria-labelledby="planTitle">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">LIVE PLAN</p>
+                <h2 id="planTitle">动态计划</h2>
+              </div>
+              <span id="planBadge" class="pill neutral">等待目标</span>
+            </div>
+            <div id="goalSummary" class="goal-summary empty-state">输入目标后，这里会展示目标、约束和可验证的完成条件。</div>
+            <div id="planList" class="plan-list"></div>
+          </section>
+
+          <section class="panel trace-panel" aria-labelledby="traceTitle">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">STEP TRACE</p>
+                <h2 id="traceTitle">步骤记录</h2>
+              </div>
+              <span id="traceCount" class="pill neutral">0 条</span>
+            </div>
+            <div id="traceList" class="trace-list empty-state">还没有执行记录。每次观察、确认、动作和验证都会显示在这里。</div>
+          </section>
+        </div>
+
+        <div class="console-column">
+          <section class="panel preview-panel" aria-labelledby="previewTitle">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">CURRENT OBSERVATION</p>
+                <h2 id="previewTitle">当前画面</h2>
+              </div>
+              <span id="livePill" class="pill live">● LIVE</span>
+            </div>
+            <div class="preview-wrap">
+              <img id="phonePreview" src="/api/preview.jpg" alt="当前手机摄像头画面">
+              <div id="previewOverlay" class="preview-overlay">等待观察</div>
+            </div>
+            <div id="sceneMeta" class="scene-meta">
+              <span><b>页面</b><em>尚未识别</em></span>
+              <span><b>稳定性</b><em>—</em></span>
+              <span><b>置信度</b><em>—</em></span>
+            </div>
+          </section>
+
+          <section class="panel action-panel" aria-labelledby="actionTitle">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">NEXT VERIFIED ACTION</p>
+                <h2 id="actionTitle">当前步骤</h2>
+              </div>
+              <span id="sessionBadge" class="pill neutral">未开始</span>
+            </div>
+            <div id="actionContent" class="empty-state">Agent 将结合目标和当前画面，只提出一个下一动作。</div>
+            <div id="actionControls" class="action-controls"></div>
+            <p id="pauseNotice" class="pause-notice" hidden>已暂停推进：不会再发起下一步；若当前最小动作已开始，会在完成后停住。</p>
+          </section>
+        </div>
+      </div>
     </main>
   </div>
 
-  <dialog id="confirmDialog">
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <dialog id="riskDialog" class="risk-dialog">
     <form method="dialog">
-      <p class="eyebrow">ACTION CONFIRMATION</p>
-      <h2>确认执行机械臂任务？</h2>
-      <p id="confirmSummary" class="confirm-summary"></p>
-      <div class="warning-box">
-        这会操作真实手机并可能改变 App 内数据。请确认手机画面、账号及目标页面均正确。
-      </div>
+      <p class="eyebrow">RISK CONFIRMATION</p>
+      <h2 id="riskTitle">确认当前动作</h2>
+      <div id="riskLevel" class="risk-level">正在评估</div>
+      <dl class="risk-details">
+        <div><dt>目标</dt><dd id="riskGoal">—</dd></div>
+        <div><dt>动作</dt><dd id="riskAction">—</dd></div>
+        <div><dt>判断理由</dt><dd id="riskReason">—</dd></div>
+        <div><dt>预期变化</dt><dd id="riskExpected">动作后重新观察并验证</dd></div>
+        <div><dt>设备</dt><dd id="riskDevice">device-local-01</dd></div>
+      </dl>
+      <div id="riskWarning" class="warning-box">确认只授权当前一个动作，不授权后续步骤。</div>
       <div class="dialog-actions">
-        <button value="cancel" class="secondary-button">返回检查</button>
-        <button id="confirmExecute" value="default" class="primary-button">确认并执行</button>
+        <button value="cancel" class="secondary-button">取消</button>
+        <button id="confirmRiskAction" value="default" class="danger-confirm">确认当前一步</button>
       </div>
     </form>
   </dialog>
 
+  <script src="/assets/protocol_adapter.js"></script>
   <script src="/assets/app.js"></script>
 </body>
 </html>

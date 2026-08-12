@@ -9,6 +9,7 @@ from PIL import Image
 
 from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
 from generic_intent import GenericIntentDraft
+from generic_scene_observer import _local_frame_fingerprint
 from generic_step_planner import (
     GenericStepPlanner,
     GenericStepPlanningError,
@@ -201,6 +202,81 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(robot.actions, [("tap", 600, 700)])
         self.assertEqual(result.physical_actions, 1)
         self.assertEqual(observer.calls, 2)
+
+    def test_execution_result_keeps_exact_four_verified_after_frames(self):
+        gray = Image.new("RGB", (540, 960), "gray")
+        white = Image.new("RGB", (540, 960), "white")
+        before_fingerprint = _local_frame_fingerprint(gray)
+        after_fingerprint = _local_frame_fingerprint(white)
+        planned = scene(before_fingerprint)
+        fresh = scene(before_fingerprint, element_id="fresh")
+        after = scene(
+            after_fingerprint,
+            screen_id="app_home",
+            element_id="after",
+        )
+        observer = FakeSceneObserver([fresh, after])
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+        action = SemanticAction(
+            node_id="generic_step_1",
+            action="tap_semantic",
+            params={"element_id": "e1", "target": "app_icon"},
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            result = adapter.execute(
+                requested_action=action,
+                planned_scene=planned,
+                goal=goal(),
+                confirmed=True,
+                evidence_dir=Path(temp),
+            )
+
+        self.assertEqual(4, len(result.after_frames))
+        self.assertTrue(
+            all(frame.getpixel((0, 0)) == (255, 255, 255) for frame in result.after_frames)
+        )
+        self.assertEqual(4, len(result.after_frame_paths))
+
+    def test_after_frame_fingerprint_matches_after_scene(self):
+        gray = Image.new("RGB", (540, 960), "gray")
+        white = Image.new("RGB", (540, 960), "white")
+        before_fingerprint = _local_frame_fingerprint(gray)
+        after_fingerprint = _local_frame_fingerprint(white)
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=FakeSceneObserver(
+                [
+                    scene(before_fingerprint, element_id="fresh"),
+                    scene(after_fingerprint, screen_id="app_home", element_id="after"),
+                ]
+            ),
+            robot=FakeRobot(),
+            frame_interval=0,
+            post_action_settle=0,
+        )
+        action = SemanticAction(
+            node_id="generic_step_1",
+            action="tap_semantic",
+            params={"element_id": "e1", "target": "app_icon"},
+        )
+
+        result = adapter.execute(
+            requested_action=action,
+            planned_scene=scene(before_fingerprint),
+            goal=goal(),
+            confirmed=True,
+        )
+
+        selected_fingerprint = _local_frame_fingerprint(result.after_frames[0])
+        self.assertEqual(result.after_scene.fingerprint, selected_fingerprint)
 
     def test_rebind_uses_unique_visible_label_when_meaning_wording_changes(self):
         planned = UIScene(

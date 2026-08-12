@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -42,6 +42,12 @@ class GenericActionExecutionResult:
     physical_actions: int
     robot_result: Any = None
     evidence: tuple[str, ...] = ()
+    after_frames: tuple[Image.Image, ...] = field(
+        default_factory=tuple,
+        repr=False,
+        compare=False,
+    )
+    after_frame_paths: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,6 +59,8 @@ class GenericActionExecutionResult:
             "physical_actions": self.physical_actions,
             "robot_result": self.robot_result,
             "evidence": list(self.evidence),
+            "after_frame_count": len(self.after_frames),
+            "after_frame_paths": list(self.after_frame_paths),
         }
 
 
@@ -182,7 +190,12 @@ class GenericSingleActionAdapter:
         before: UIScene,
         resolved: ResolvedSemanticAction,
         evidence_dir: Path | None,
-    ) -> tuple[UIScene, tuple[str, ...]]:
+    ) -> tuple[
+        UIScene,
+        tuple[Image.Image, ...],
+        tuple[str, ...],
+        tuple[str, ...],
+    ]:
         deadline = time.monotonic() + self.post_action_timeout
         if self.post_action_settle:
             time.sleep(min(self.post_action_settle, self.post_action_timeout))
@@ -209,7 +222,7 @@ class GenericSingleActionAdapter:
 
             try:
                 self.controller.verify_after_action(resolved, before, after)
-                return after, all_paths
+                return after, tuple(frames), paths, all_paths
             except UniversalActionError as exc:
                 last_error = exc
                 # A stable old page, a low-confidence transitional scene, or
@@ -303,7 +316,12 @@ class GenericSingleActionAdapter:
             ) from exc
 
         try:
-            after, after_paths = self._observe_stable_post_action_scene(
+            (
+                after,
+                after_frames,
+                after_frame_paths,
+                all_after_paths,
+            ) = self._observe_stable_post_action_scene(
                 goal,
                 before=before,
                 resolved=resolved,
@@ -325,7 +343,9 @@ class GenericSingleActionAdapter:
             after_scene=after,
             physical_actions=physical_actions,
             robot_result=robot_result,
-            evidence=before_paths + after_paths,
+            evidence=before_paths + all_after_paths,
+            after_frames=after_frames,
+            after_frame_paths=after_frame_paths,
         )
 
     def _rebind_action(

@@ -11,6 +11,20 @@ Qwen 决策入口接收 `TaskGraph.to_qwen_context()` 的完整上下文：
 - `risk_actions`、`confirmation_gate`；
 - 当前稳定帧序列与本地只读观察阶段生成的 `TrustedObservation`。
 
+正式共享协议是 `2026-08-11-deepseek-task-graph-v3`。其
+`confirmation_gate.scope` 必须且只能包含 `task_id`、`device_id`、
+`revision`、`subgoal_id`，并与顶层任务、设备、revision 和当前子目标逐项一致。
+`risk_ids` 还必须与当前子目标和 `risk_actions` 完整一致。
+
+`2026-08-11-deepseek-task-graph-v2` 只作为旧数据迁移输入：只读或导航上下文
+可以继续解析；涉及 `external_state` 或 `unknown` 时，因为没有可核验的 scope，
+必须在观察前 `blocked`，不能使用旧版确认执行外部状态动作。
+
+交叉契约样本 `deepseek_v3_contract_438cd22.json` 是实际运行 DeepSeek 提交
+`438cd2258cdca681abe42da11b70c399df58063e` 的
+`DynamicTaskGraph.to_qwen_context()` 生成，并记录了来源文件和方法；当前 Qwen
+分支没有复制或修改 DeepSeek 协议实现。
+
 `TrustedObservation` 保存本轮 `observation_id`、本地画面 `fingerprint`、多帧稳定性、所选帧和可信候选元素。模型不能在决策输出中创建元素，也不能修改已有候选的 `element_id`、文字、语义、角色、状态或原始 `bounds`。
 
 ## 输出边界
@@ -21,7 +35,8 @@ Qwen 决策入口接收 `TaskGraph.to_qwen_context()` 的完整上下文：
 - 点击或关闭动作必须绑定一个已有可信候选；滑动、返回和等待只允许整屏/系统语义区域；
 - `page_state` 仅是语义描述，禁止携带候选元素，不能作为执行证据；
 - `finished` 必须引用可信候选 ID 或本轮可信 scene；
-- 未满足 `confirmation_gate` 的外部状态子目标在调用观察或决策模型前直接 `blocked`。
+- scope 缺失、冲突或过期，以及未满足 `confirmation_gate` 的外部状态子目标，
+  都在调用观察或决策模型前直接 `blocked`。
 - 决策格式错误最多修复重试一次；第一次非法输出不会形成候选动作，第二次仍非法则安全返回 `blocked`。
 - 观察格式错误同样最多修复一次；网络断连和服务超时不会伪装成格式修复。
 

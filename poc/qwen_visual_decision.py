@@ -30,7 +30,11 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
 QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-11-qwen-visual-decision-v2"
-SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v2"
+SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v3"
+MIGRATION_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v2"
+SUPPORTED_TASK_CONTEXT_PROTOCOLS = frozenset(
+    {SUPPORTED_TASK_CONTEXT_PROTOCOL, MIGRATION_TASK_CONTEXT_PROTOCOL}
+)
 QWEN_VISUAL_DECISION_MODEL_ROLE = "trusted_observation_single_step_selector"
 DECISION_TIMEOUT_SECONDS = 60.0
 DECISION_OUTPUT_TOKENS = 1800
@@ -147,7 +151,7 @@ class QwenTaskContext:
         return context
 
     def validate(self) -> None:
-        if self.protocol_version != SUPPORTED_TASK_CONTEXT_PROTOCOL:
+        if self.protocol_version not in SUPPORTED_TASK_CONTEXT_PROTOCOLS:
             raise VisionAgentError(
                 f"不支持的DeepSeek任务上下文协议：{self.protocol_version}"
             )
@@ -207,12 +211,16 @@ class QwenTaskContext:
             self.current_subgoal.get("risk_action_ids") or [],
             "current_subgoal.risk_action_ids",
         )
+        if len(subgoal_risk_ids) != len(set(subgoal_risk_ids)):
+            raise VisionAgentError("current_subgoal.risk_action_ids 含重复风险ID。")
         gate_allowed = {
             "required",
             "state",
             "risk_ids",
             "external_state_action_allowed",
         }
+        if self.protocol_version == SUPPORTED_TASK_CONTEXT_PROTOCOL:
+            gate_allowed.add("scope")
         if set(self.confirmation_gate) != gate_allowed:
             raise VisionAgentError("confirmation_gate 字段不完整或包含协议外字段。")
         required = self.confirmation_gate.get("required")
@@ -226,16 +234,43 @@ class QwenTaskContext:
             self.confirmation_gate.get("risk_ids") or [],
             "confirmation_gate.risk_ids",
         )
+        if len(gate_risk_ids) != len(set(gate_risk_ids)):
+            raise VisionAgentError("confirmation_gate.risk_ids 含重复风险ID。")
         if set(gate_risk_ids) != set(subgoal_risk_ids) or set(risk_ids) != set(
             subgoal_risk_ids
         ):
             raise VisionAgentError(
                 "risk_actions、current_subgoal 与 confirmation_gate 风险ID不一致。"
             )
+
+        if self.protocol_version == SUPPORTED_TASK_CONTEXT_PROTOCOL:
+            scope = _require_dict(
+                self.confirmation_gate.get("scope"),
+                "confirmation_gate.scope",
+            )
+            scope_allowed = {"task_id", "device_id", "revision", "subgoal_id"}
+            if set(scope) != scope_allowed:
+                raise VisionAgentError(
+                    "confirmation_gate.scope 字段缺失或包含协议外字段。"
+                )
+            expected_scope = {
+                "task_id": self.task_id,
+                "device_id": self.device_id,
+                "revision": self.revision,
+                "subgoal_id": str(self.current_subgoal["subgoal_id"]),
+            }
+            for field, expected in expected_scope.items():
+                if type(scope[field]) is not type(expected) or scope[field] != expected:
+                    raise VisionAgentError(
+                        f"confirmation_gate.scope.{field} 与当前上下文不一致。"
+                    )
+
         external = self.current_external_impact in {"external_state", "unknown"}
         if external:
             if not required or not gate_risk_ids:
                 raise VisionAgentError("外部状态子目标必须关闭风险确认门。")
+            if state not in {"awaiting_confirmation", "confirmed"}:
+                raise VisionAgentError("外部状态子目标的确认门状态无效。")
             if state == "confirmed" and not allowed:
                 raise VisionAgentError("确认门状态与 external_state_action_allowed 冲突。")
             if state != "confirmed" and allowed:
@@ -245,17 +280,20 @@ class QwenTaskContext:
 
     @property
     def external_action_allowed(self) -> bool:
-        return bool(self.confirmation_gate["external_state_action_allowed"])
+        return bool(
+            self.protocol_version == SUPPORTED_TASK_CONTEXT_PROTOCOL
+            and self.confirmation_gate["external_state_action_allowed"]
+        )
 
     @property
     def pre_observation_block_reason(self) -> str | None:
         """Return the local gate that must run before either Qwen call."""
 
-        if (
-            self.current_external_impact in {"external_state", "unknown"}
-            and not self.external_action_allowed
-        ):
-            return "风险确认门未满足，本轮禁止调用观察或决策模型。"
+        if self.current_external_impact in {"external_state", "unknown"}:
+            if self.protocol_version == MIGRATION_TASK_CONTEXT_PROTOCOL:
+                return "v2迁移上下文缺少确认作用域，禁止调用观察或决策模型。"
+            if not self.external_action_allowed:
+                return "风险确认门未满足，本轮禁止调用观察或决策模型。"
         return None
 
     @property

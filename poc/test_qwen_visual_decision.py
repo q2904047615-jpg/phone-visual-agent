@@ -216,7 +216,7 @@ def task_context(
     risk_ids = ["risk_send"] if external else []
     impact = "external_state" if external else "navigation_only"
     return {
-        "protocol_version": "2026-08-11-deepseek-task-graph-v2",
+        "protocol_version": "2026-08-11-deepseek-task-graph-v3",
         "task_id": task_id,
         "device_id": "offline_phone_01",
         "revision": revision,
@@ -267,6 +267,12 @@ def task_context(
             "required": external,
             "state": "confirmed" if confirmed else "awaiting_confirmation" if external else "not_required",
             "risk_ids": risk_ids,
+            "scope": {
+                "task_id": task_id,
+                "device_id": "offline_phone_01",
+                "revision": revision,
+                "subgoal_id": "current_target",
+            },
             "external_state_action_allowed": bool(external and confirmed),
         },
     }
@@ -364,6 +370,10 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual(len(set(first_frames)), 4)
         for case in manifest["cases"]:
             parsed = QwenTaskContext.from_dict(case["task_context"])
+            self.assertEqual(
+                parsed.protocol_version,
+                "2026-08-11-deepseek-task-graph-v3",
+            )
             self.assertEqual(parsed.device_id, "offline_phone_01")
             for field in (
                 "protocol_version",
@@ -377,6 +387,18 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 "confirmation_gate",
             ):
                 self.assertIn(field, case["task_context"])
+            scope = case["task_context"]["confirmation_gate"]["scope"]
+            self.assertEqual(
+                set(scope),
+                {"task_id", "device_id", "revision", "subgoal_id"},
+            )
+            self.assertEqual(scope["task_id"], case["task_context"]["task_id"])
+            self.assertEqual(scope["device_id"], case["task_context"]["device_id"])
+            self.assertEqual(scope["revision"], case["task_context"]["revision"])
+            self.assertEqual(
+                scope["subgoal_id"],
+                case["task_context"]["current_subgoal"]["subgoal_id"],
+            )
 
     def test_action_binds_to_preexisting_trusted_candidate(self) -> None:
         provider = FakeProvider(action_payload(self.context, self.observation))

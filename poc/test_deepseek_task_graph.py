@@ -701,6 +701,33 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             audit_prompt,
         )
 
+    def test_semantic_audit_allows_disagreement_between_safe_impacts(self):
+        cases = (
+            ("navigation_only", "read_only"),
+            ("read_only", "navigation_only"),
+        )
+        for graph_impact, audit_impact in cases:
+            with self.subTest(graph_impact=graph_impact, audit_impact=audit_impact):
+                payload = single_subgoal_payload(
+                    "目标页面可见",
+                    external_impact=graph_impact,
+                )
+                audit = audit_payload_for_graph(payload)
+                for assessment in audit["assessments"]:
+                    if assessment["subgoal_id"] == "target_state":
+                        assessment["external_impact"] = audit_impact
+                        assessment["risk_types"] = []
+                graph = DeepSeekTaskGraphPlanner(
+                    FakeProvider(payload, audit_payloads=[audit])
+                ).plan(
+                    "目标页面可见",
+                    device_id="phone-1",
+                )
+                self.assertEqual(
+                    graph.active_subgoal().external_impact,
+                    graph_impact,
+                )
+
     def test_semantic_audit_can_use_an_independent_provider(self):
         payload = single_subgoal_payload("查看资料", external_impact="read_only")
         graph_provider = FakeProvider(payload)

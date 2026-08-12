@@ -1554,7 +1554,11 @@ def _validate_graph_against_risk_audit(
                 f"语义风险审计遗漏子目标，失败关闭为 unknown：{subgoal_id}"
             )
         impact, risk_types = _aggregate_audit_assessments(assessments)
-        if impact != subgoal.external_impact:
+        safe_classification_disagreement = {
+            impact,
+            subgoal.external_impact,
+        } <= {"read_only", "navigation_only"}
+        if impact != subgoal.external_impact and not safe_classification_disagreement:
             if impact == "unknown":
                 raise TaskGraphError(
                     f"语义风险审计为 unknown 且任务图未声明匹配风险：{subgoal_id}"

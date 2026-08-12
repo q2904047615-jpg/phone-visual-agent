@@ -341,6 +341,10 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(provider.max_tokens_seen, [800, 1200])
         self.assertEqual(scene.elements[0].label, "微信")
         self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
+        targeted_text = provider.messages_seen[1][1]["content"][0]["text"]
+        self.assertIn("置信度只评价当前画面观察本身是否可靠", targeted_text)
+        self.assertIn("不能因为目标尚未完成而降低", targeted_text)
+        self.assertIn("模糊、遮挡或不唯一时仍必须降低", targeted_text)
 
     def test_target_app_already_open_does_not_refine_open_goal(self) -> None:
         payload = scene_payload()

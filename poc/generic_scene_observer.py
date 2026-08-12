@@ -426,6 +426,8 @@ def _targeted_prompt(
 重新检查原图中与目标直接相关的文字、图标、输入框、列表项和最上层弹层。
 只保留最多4个最相关元素；目标元素必须states.goal_relevant=true。看不清或不唯一就不要输出，
 并降低场景confidence。坐标0..1000，只框元素自身。禁止任何动作、计划或建议字段。
+置信度只评价当前画面观察本身是否可靠，不能因为目标尚未完成而降低；例如清晰桌面上唯一目标
+应用入口可形成高可信观察，即使应用尚未打开。模糊、遮挡或不唯一时仍必须降低，禁止虚增。
 只返回完整JSON：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"目标精查后的当前画面","elements":[],"overlays":[],

@@ -274,7 +274,7 @@ test("risk approval grant excludes observation and cannot execute a physical act
   });
 });
 
-test("bounded safe loop payload requires the exact current action confirmation", () => {
+test("compatibility auto payload is hard-bounded to one exact confirmed action", () => {
   const view = Protocol.adaptSession(safeActionSession());
   const confirmation = Protocol.consumeConfirmationGrant(
     Protocol.createConfirmationGrant(view, "phone-01"),
@@ -288,8 +288,8 @@ test("bounded safe loop payload requires the exact current action confirmation",
   );
   assert.equal(payload.confirmed, true);
   assert.equal(payload.device_id, "phone-01");
-  assert.equal(payload.max_physical_actions, 3);
-  assert.equal(payload.max_iterations, 8);
+  assert.equal(payload.max_physical_actions, 1);
+  assert.equal(payload.max_iterations, 1);
   assert.equal(payload.confirmation.observation_id, "obs_0123456789abcdef0123456789abcdef");
   assert.throws(
     () => Protocol.buildAutoRequestPayload("phone-01", { confirmed: false }),

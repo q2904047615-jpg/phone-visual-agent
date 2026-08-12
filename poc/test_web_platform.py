@@ -3847,8 +3847,8 @@ class ApiEndToEndTests(unittest.TestCase):
                     "goal_preview_enabled": True,
                     "scene_preview_enabled": True,
                     "hardware_execution_enabled": True,
-                    "automatic_loop_enabled": True,
-                    "automatic_loop_max_physical_actions": 8,
+                    "automatic_loop_enabled": False,
+                    "automatic_loop_max_physical_actions": 1,
                     "supervised_single_step_enabled": True,
                     "enabled_physical_actions": [
                         "back",
@@ -3937,8 +3937,8 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertNotIn("抖音工作流", home.text)
         self.assertIn('/assets/protocol_adapter.js', home.text)
         self.assertIn("/api/agent/generic-supervised/start", script.text)
-        self.assertIn("/api/agent/generic-supervised/${view.sessionId}/auto", script.text)
-        self.assertIn('id="confirmSafeLoop"', home.text)
+        self.assertNotIn("/api/agent/generic-supervised/${view.sessionId}/auto", script.text)
+        self.assertNotIn('id="confirmSafeLoop"', home.text)
         self.assertIn("nextSupervisedAgent", script.text)
         self.assertIn("togglePause", script.text)
         self.assertNotIn('api("/api/agent/supervised/start"', script.text)
@@ -3949,12 +3949,12 @@ class ApiEndToEndTests(unittest.TestCase):
         request = web_app.GenericSupervisedAutoRequest(device_id="phone-01")
         self.assertFalse(request.confirmed)
         self.assertIsNone(request.confirmation)
-        self.assertEqual(request.max_physical_actions, 3)
-        self.assertEqual(request.max_iterations, 8)
+        self.assertEqual(request.max_physical_actions, 1)
+        self.assertEqual(request.max_iterations, 1)
         with self.assertRaises(ValueError):
             web_app.GenericSupervisedAutoRequest(
                 device_id="phone-01",
-                max_physical_actions=9,
+                max_physical_actions=2,
             )
         with self.assertRaises(ValueError):
             web_app.GenericSupervisedAutoRequest(
@@ -4529,7 +4529,7 @@ class ApiEndToEndTests(unittest.TestCase):
                     "confirmed": True,
                     "confirmation": refreshed.json()["session"]["confirmation_scope"],
                     "max_physical_actions": 1,
-                    "max_iterations": 8,
+                    "max_iterations": 1,
                 },
             )
             self.client.post(

@@ -715,8 +715,8 @@ class GenericSupervisedAutoRequest(StrictAgentRequest):
     device_id: StrictStr = Field(min_length=1, max_length=128)
     confirmed: StrictBool = False
     confirmation: GenericConfirmationScopeRequest | None = None
-    max_physical_actions: StrictInt = Field(default=3, ge=1, le=8)
-    max_iterations: StrictInt = Field(default=8, ge=1, le=16)
+    max_physical_actions: StrictInt = Field(default=1, ge=1, le=1)
+    max_iterations: StrictInt = Field(default=1, ge=1, le=1)
 
 
 def build_generic_plan_preview(
@@ -1232,8 +1232,8 @@ def device() -> dict[str, Any]:
             "goal_preview_enabled": True,
             "scene_preview_enabled": True,
             "hardware_execution_enabled": True,
-            "automatic_loop_enabled": True,
-            "automatic_loop_max_physical_actions": 8,
+            "automatic_loop_enabled": False,
+            "automatic_loop_max_physical_actions": 1,
             "supervised_single_step_enabled": True,
             "enabled_physical_actions": sorted(
                 action
@@ -1308,9 +1308,9 @@ def device() -> dict[str, Any]:
         ]
     status["generic_supervised_execution"] = {
         "enabled": True,
-        "automatic_loop_enabled": True,
+        "automatic_loop_enabled": False,
         "max_physical_actions_per_confirmation": 1,
-        "max_safe_loop_physical_actions": 8,
+        "max_safe_loop_physical_actions": 1,
         "active_sessions": [
             {
                 "session_id": item["session_id"],
@@ -1781,7 +1781,7 @@ def run_generic_supervised_safe_loop(
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Run only bounded low-risk navigation; stop before every risk boundary."""
+    """Compatibility route that consumes one exact confirmation for one action."""
 
     verify_local_request(request, x_control_token)
     with runtime.generic_supervised_session_lock:
@@ -1804,7 +1804,7 @@ def run_generic_supervised_safe_loop(
     try:
         if body.confirmed is not True or body.confirmation is None:
             raise UniversalAgentOrchestratorError(
-                "启动安全连续推进前必须确认当前精确动作作用域。"
+                "执行兼容单步请求前必须确认当前精确动作作用域。"
             )
         with _supervised_hardware_lock(session.device_id):
             result = runtime.universal_agent_orchestrator.run_safe_loop(

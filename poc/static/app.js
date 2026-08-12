@@ -468,13 +468,6 @@ function openRiskDialog() {
     ? `确认只授权 session=${view.sessionId}、task=${view.taskId}、revision=${view.revision ?? "—"}、subgoal=${view.currentSubgoal.id}、risk_ids=${view.risk.riskIds.join(",") || "—"}、observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 的当前一步；任何字段变化都必须重新确认。`
     : `确认只授权 session=${view.sessionId}、observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 对应的一个动作。执行后必须重新观察。`;
   document.querySelector("#confirmRiskAction").className = highAttention ? "danger-confirm" : "primary-button";
-  const safeLoopKinds = new Set(["tap_semantic", "dismiss_overlay", "swipe", "back", "wait_for_change"]);
-  document.querySelector("#confirmSafeLoop").hidden = !(
-    !riskPhase
-    && ["read_only", "navigation_only"].includes(view.risk.currentExternalImpact)
-    && safeLoopKinds.has(view.visualAction.actionType)
-    && view.controllerGate.allowed
-  );
   document.querySelector("#riskDialog").showModal();
 }
 
@@ -516,31 +509,6 @@ async function nextSupervisedAgent() {
     );
     state.supervisedSession = response.session;
     await finalizeStopIfRequested();
-    render();
-  } catch (error) {
-    toast(error.message, true);
-  }
-}
-
-async function autoSupervisedAgent(grant) {
-  const view = sessionView();
-  if (!view || state.paused || state.busy || grant?.phase === "risk") return;
-  try {
-    const confirmation = Protocol.consumeConfirmationGrant(grant, view, lockedSessionDeviceId());
-    const payload = Protocol.buildAutoRequestPayload(
-      lockedSessionDeviceId(),
-      confirmation,
-      { maxPhysicalActions: 3, maxIterations: 8 },
-    );
-    const response = await withVisionProgress("连续执行低风险导航并逐步验证", () =>
-      api(`/api/agent/generic-supervised/${view.sessionId}/auto`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      })
-    );
-    state.supervisedSession = response.session;
-    await finalizeStopIfRequested();
-    toast(response.execution?.pause_reason || "安全连续推进已暂停。");
     render();
   } catch (error) {
     toast(error.message, true);
@@ -662,7 +630,6 @@ document.querySelector("#riskDialog").addEventListener("close", event => {
   const grant = state.pendingConfirmationGrant;
   state.pendingConfirmationGrant = null;
   if (event.target.returnValue === "default" && grant) advanceSupervisedAgent(grant);
-  if (event.target.returnValue === "auto" && grant) autoSupervisedAgent(grant);
 });
 
 init();

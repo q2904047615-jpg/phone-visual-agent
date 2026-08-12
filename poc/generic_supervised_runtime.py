@@ -23,6 +23,7 @@ from universal_action_controller import (
 
 DEEPSEEK_TASK_GRAPH_V3 = "2026-08-11-deepseek-task-graph-v3"
 QWEN_VISUAL_DECISION_V2 = "2026-08-12-qwen-visual-decision-v3"
+_SCOPED_CONFIRMATION_CAPABILITY = object()
 
 
 @dataclass
@@ -92,18 +93,17 @@ class GenericSupervisedSession:
         )
 
     def confirm(self, *, confirmed: bool) -> GenericActionExecutionResult:
-        """Legacy low-risk confirmation; external-state steps require v3 scope."""
+        """Reject the retired boolean-only confirmation path."""
 
-        if confirmed is not True:
-            raise GenericActionAdapterError("必须明确确认当前这一个语义动作。")
-        if self.current_action_has_account_effect():
+        raise GenericActionAdapterError(
+            "旧裸布尔确认入口已关闭；动作必须使用服务端完整确认作用域。"
+        )
+
+    def _execute_current_action(self, capability: object) -> GenericActionExecutionResult:
+        if capability is not _SCOPED_CONFIRMATION_CAPABILITY:
             raise GenericActionAdapterError(
-                "外部状态动作必须使用服务端权威v3确认作用域。"
+                "动作执行缺少已消费的服务端完整确认作用域。"
             )
-        self.invalidate_v3_confirmation("legacy_confirmation_path")
-        return self._execute_current_action()
-
-    def _execute_current_action(self) -> GenericActionExecutionResult:
         if self.status != "awaiting_confirmation":
             raise GenericActionAdapterError(
                 f"当前会话状态不能执行动作：{self.status}"
@@ -216,10 +216,15 @@ class GenericSupervisedSession:
             )
 
         requested_scope = self._normalize_requested_confirmation(confirmation)
-        if requested_scope != current_scope:
+        expected_confirmation = {
+            **current_scope,
+            "observation_id": observation_id,
+            "fingerprint": fingerprint,
+        }
+        if requested_scope != expected_confirmation:
             self.invalidate_v3_confirmation("request_scope_mismatch")
             raise GenericActionAdapterError(
-                "确认的任务、设备、revision、子目标或risk_ids与当前权威作用域不一致。"
+                "确认的任务、设备、revision、子目标、risk_ids或画面身份与当前权威作用域不一致。"
             )
 
         # Consume before entering the adapter.  Failure and partial failure are
@@ -227,7 +232,7 @@ class GenericSupervisedSession:
         authority.consumed = True
         authority.invalid_reason = "consumed_before_execution"
         try:
-            return self._execute_current_action()
+            return self._execute_current_action(_SCOPED_CONFIRMATION_CAPABILITY)
         finally:
             authority.consumed = True
             if not authority.invalid_reason:
@@ -387,78 +392,40 @@ class GenericSupervisedSession:
             "revision": value.get("revision"),
             "subgoal_id": str(value.get("subgoal_id") or ""),
             "risk_ids": sorted(str(item) for item in raw_risk_ids),
+            "observation_id": str(value.get("observation_id") or ""),
+            "fingerprint": str(value.get("fingerprint") or ""),
         }
 
     def run_safe_loop(
         self,
         *,
         confirmed: bool,
+        confirmation: dict[str, Any] | None = None,
         max_physical_actions: int = 1,
-        max_iterations: int = 8,
+        max_iterations: int = 1,
     ) -> dict[str, Any]:
-        """Advance safe navigation steps until completion or a safety boundary.
+        """Fail closed: the retired compatibility loop has no execution grant."""
 
-        The existing single-action adapter remains the only component allowed to
-        touch the robot.  This method merely repeats its already verified
-        observe -> execute one action -> reobserve contract.
-        """
-
-        if confirmed is not True:
-            raise GenericActionAdapterError("必须明确确认启动安全自动推进。")
-        automatic_block = self._v3_automatic_block_reason()
-        if automatic_block:
-            self.invalidate_v3_confirmation("automatic_advance_blocked")
-            raise GenericActionAdapterError(automatic_block)
-        self.invalidate_v3_confirmation("automatic_advance")
-        if self.status not in {"awaiting_confirmation", "paused_after_action"}:
+        if confirmed is not True or not isinstance(confirmation, dict):
             raise GenericActionAdapterError(
-                f"当前会话状态不能自动推进：{self.status}"
+                "旧自动推进入口缺少服务端完整确认作用域，拒绝执行。"
             )
-        if int(max_physical_actions) != 1:
-            raise GenericActionAdapterError("自动推进每次请求只允许一个物理动作。")
-        action_limit = 1
-        iteration_limit = max(action_limit, min(16, int(max_iterations)))
-        self.automatic_loop_enabled = True
-        self.auto_pause_reason = ""
-        physical_actions = 0
-        iterations = 0
-        seen_steps: set[str] = set()
-
-        if self.status == "paused_after_action":
-            self.plan_next(self.current_scene)
-
-        while self.status == "awaiting_confirmation":
-            if self.proposal is None or self.proposal.action is None:
-                raise GenericActionAdapterError("自动推进缺少待执行动作。")
-            if self.current_action_has_account_effect():
-                self.auto_pause_reason = "下一步会改变账号状态，等待单独确认。"
-                break
-            if iterations >= iteration_limit:
-                self.status = "paused_after_action"
-                self.auto_pause_reason = "达到单次自动推进迭代上限。"
-                break
-            signature = self._step_signature()
-            if signature in seen_steps:
-                self.status = "blocked"
-                self.failed_reason = "检测到相同页面和相同动作重复出现，已停止循环。"
-                self.auto_pause_reason = self.failed_reason
-                break
-            seen_steps.add(signature)
-            iterations += 1
-
-            result = self.confirm(confirmed=True)
-            physical_actions += result.physical_actions
-            if physical_actions >= action_limit:
-                self.auto_pause_reason = "达到单次自动推进物理动作上限。"
-                break
-            self.plan_next(self.current_scene)
-
-        return {
-            "physical_actions": physical_actions,
-            "iterations": iterations,
-            "status": self.status,
-            "pause_reason": self.auto_pause_reason,
-        }
+        if (
+            isinstance(max_physical_actions, bool)
+            or not isinstance(max_physical_actions, int)
+            or max_physical_actions != 1
+        ):
+            raise GenericActionAdapterError("每次确认只允许一个物理动作。")
+        if (
+            isinstance(max_iterations, bool)
+            or not isinstance(max_iterations, int)
+            or max_iterations != 1
+        ):
+            raise GenericActionAdapterError("每次确认只允许一个动作轮次。")
+        self.invalidate_v3_confirmation("retired_compatibility_loop")
+        raise GenericActionAdapterError(
+            "旧自动推进执行入口已关闭；请使用通用编排器的精确单步确认接口。"
+        )
 
     def _v3_automatic_block_reason(self) -> str:
         graph = self.task_graph if isinstance(self.task_graph, dict) else None

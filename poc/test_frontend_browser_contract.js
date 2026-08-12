@@ -432,7 +432,7 @@ test("external-state graph requires risk approval before exact action confirmati
   }
 });
 
-test("browser offers bounded auto only for a reviewed safe navigation action", { timeout: 30000 }, async () => {
+test("browser never offers one-confirmation multi-action execution", { timeout: 30000 }, async () => {
   Object.values(requests).forEach(items => { items.length = 0; });
   const server = createServer();
   const { browser, page } = await launchFixturePage(server);
@@ -440,23 +440,12 @@ test("browser offers bounded auto only for a reviewed safe navigation action", {
     await page.locator("#agentText").fill("连续查看安全页面");
     await page.locator("#startSupervisedAgent").click();
     await page.locator("#reviewAction").click();
-    await page.locator("#confirmSafeLoop").waitFor({ state: "visible" });
-    const autoResponse = page.waitForResponse(
-      response => response.url().endsWith("/auto"),
-      { timeout: 5000 },
-    );
-    await page.locator("#confirmSafeLoop").click();
-    await autoResponse;
-    assert.equal(requests.auto.length, 1);
+    await page.locator("#riskDialog").waitFor({ state: "visible" });
+    assert.equal(await page.locator("#confirmSafeLoop").count(), 0);
+    assert.match(await page.locator("#riskWarning").innerText(), /一个动作/);
+    await page.keyboard.press("Escape");
+    assert.equal(requests.auto.length, 0);
     assert.equal(requests.confirm.length, 0);
-    assert.equal(requests.auto[0].confirmed, true);
-    assert.equal(requests.auto[0].device_id, "phone-01");
-    assert.equal(requests.auto[0].max_physical_actions, 3);
-    assert.equal(requests.auto[0].max_iterations, 8);
-    assert.equal(
-      requests.auto[0].confirmation.observation_id,
-      "obs_0123456789abcdef0123456789abcdef",
-    );
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));

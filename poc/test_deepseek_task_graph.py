@@ -400,6 +400,34 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual(len(provider.messages), 3)
         self.assertIn("可推进任务图必须且只能有一个活动子目标", provider.messages[1][0]["content"])
 
+    def test_initial_plan_repairs_one_missing_required_field_error(self):
+        invalid = base_payload()
+        del invalid["goal"]["entities"]
+        repaired = base_payload()
+        provider = FakeProvider(invalid, repaired)
+
+        graph = DeepSeekTaskGraphPlanner(provider).plan(
+            "点击浏览器",
+            device_id="phone-1",
+        )
+
+        self.assertEqual({"place": "图书馆"}, graph.goal.entities)
+        self.assertEqual(len(provider.messages), 3)
+        self.assertIn("goal 缺少字段：entities", provider.messages[1][0]["content"])
+
+    def test_protocol_field_named_like_a_repairable_error_is_still_rejected(self):
+        invalid = base_payload()
+        invalid["goal"]["缺少字段"] = "不能利用字段名触发修复"
+        provider = FakeProvider(invalid, base_payload())
+
+        with self.assertRaisesRegex(TaskGraphError, "协议外字段"):
+            DeepSeekTaskGraphPlanner(provider).plan(
+                "点击浏览器",
+                device_id="phone-1",
+            )
+
+        self.assertEqual(len(provider.messages), 1)
+
     def test_rejects_low_level_action_fields(self):
         payload = base_payload()
         payload["subgoals"][0]["steps"] = [{"tap": [10, 20]}]

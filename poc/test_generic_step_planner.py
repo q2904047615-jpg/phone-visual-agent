@@ -1127,7 +1127,7 @@ class GenericSupervisedSessionTests(unittest.TestCase):
             reason="设置图标清晰可见",
         )
 
-    def test_confirmation_executes_one_action_then_pauses(self):
+    def test_legacy_boolean_confirmation_is_disabled_without_execution(self):
         initial = scene("initial")
         before = scene("before", element_id="fresh")
         after = scene("after", screen_id="app_home", element_id="after")
@@ -1161,17 +1161,14 @@ class GenericSupervisedSessionTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
             self.assertEqual(session.status, "awaiting_confirmation")
-            with self.assertRaisesRegex(GenericActionAdapterError, "明确确认"):
+            with self.assertRaisesRegex(GenericActionAdapterError, "完整确认作用域"):
                 session.confirm(confirmed=False)
-            result = session.confirm(confirmed=True)
-            self.assertEqual(result.physical_actions, 1)
-            self.assertEqual(robot.actions, [("tap", 300, 400)])
-            self.assertEqual(session.status, "paused_after_action")
-            self.assertIsNone(session.proposal)
-            with self.assertRaisesRegex(GenericActionAdapterError, "不能执行"):
+            with self.assertRaisesRegex(GenericActionAdapterError, "完整确认作用域"):
                 session.confirm(confirmed=True)
+            self.assertEqual(robot.actions, [])
+            self.assertEqual(session.status, "awaiting_confirmation")
 
-    def test_confirmed_terminal_scene_change_finishes_without_replanning(self):
+    def test_legacy_boolean_confirmation_cannot_execute_terminal_scene_change(self):
         initial = scene("initial", screen_id="video_detail", app_id="douyin")
         before = scene("video-a", screen_id="video_detail", app_id="douyin")
         after = UIScene(
@@ -1227,16 +1224,14 @@ class GenericSupervisedSessionTests(unittest.TestCase):
                 adapter=adapter,
                 run_dir=Path(temp),
             )
-            result = session.confirm(confirmed=True)
+            with self.assertRaisesRegex(GenericActionAdapterError, "完整确认作用域"):
+                session.confirm(confirmed=True)
 
-        self.assertEqual(result.physical_actions, 1)
-        self.assertEqual(session.status, "succeeded")
-        self.assertEqual(session.proposal.status, "finished")
+        self.assertEqual(session.status, "awaiting_confirmation")
         self.assertEqual(provider.calls, 0)
-        self.assertEqual(robot.actions, [("swipe", "up")])
-        self.assertIn("场景指纹发生变化", session.history[-1]["completion_evidence"][0])
+        self.assertEqual(robot.actions, [])
 
-    def test_terminal_claim_without_machine_verifiable_effect_only_pauses(self):
+    def test_legacy_boolean_confirmation_cannot_submit_unproven_terminal_claim(self):
         initial = scene("initial")
         before = scene("before", element_id="fresh")
         after = scene("after", screen_id="app_home", element_id="after")
@@ -1273,10 +1268,11 @@ class GenericSupervisedSessionTests(unittest.TestCase):
                 adapter=adapter,
                 run_dir=Path(temp),
             )
-            session.confirm(confirmed=True)
+            with self.assertRaisesRegex(GenericActionAdapterError, "完整确认作用域"):
+                session.confirm(confirmed=True)
 
-        self.assertEqual(session.status, "paused_after_action")
-        self.assertIsNone(session.proposal)
+        self.assertEqual(session.status, "awaiting_confirmation")
+        self.assertEqual(adapter.robot.actions, [])
 
     def test_next_only_plans_and_does_not_touch_robot(self):
         initial = scene("initial")
@@ -1317,7 +1313,7 @@ class GenericSupervisedSessionTests(unittest.TestCase):
         self.assertEqual(session.status, "succeeded")
         self.assertEqual(robot.actions, [])
 
-    def test_safe_loop_executes_navigation_then_finishes(self):
+    def test_legacy_safe_loop_requires_exact_scope_and_never_executes(self):
         initial = scene("initial")
         before = scene("before", element_id="fresh")
         after = scene(
@@ -1355,14 +1351,44 @@ class GenericSupervisedSessionTests(unittest.TestCase):
                 adapter=adapter,
                 run_dir=Path(temp),
             )
-            first = session.run_safe_loop(confirmed=True)
-            self.assertEqual(first["physical_actions"], 1)
-            self.assertEqual(session.status, "paused_after_action")
-            summary = session.run_safe_loop(confirmed=True)
-        self.assertEqual(summary["physical_actions"], 0)
-        self.assertEqual(session.status, "succeeded")
-        self.assertTrue(session.automatic_loop_enabled)
-        self.assertEqual(robot.actions, [("tap", 300, 400)])
+            with self.assertRaisesRegex(
+                GenericActionAdapterError,
+                "完整确认作用域",
+            ):
+                session.run_safe_loop(confirmed=True)
+        self.assertEqual(session.status, "awaiting_confirmation")
+        self.assertEqual(robot.actions, [])
+
+    def test_safe_loop_rejects_more_than_one_iteration_before_execution(self):
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=lambda: Image.new("RGB", (540, 960), "gray"),
+            observer=FakeSceneObserver([]),
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            session = GenericSupervisedSession.start(
+                session_id="auto-bounded",
+                goal=goal(),
+                scene=scene("initial"),
+                proposal=self._proposal(),
+                planner=GenericStepPlanner(FakeTextProvider({})),
+                adapter=adapter,
+                run_dir=Path(temp),
+            )
+            with self.assertRaisesRegex(
+                GenericActionAdapterError,
+                "每次确认只允许一个动作轮次",
+            ):
+                session.run_safe_loop(
+                    confirmed=True,
+                    confirmation={},
+                    max_iterations=2,
+                )
+
+        self.assertEqual(robot.actions, [])
 
     def test_safe_loop_pauses_before_account_effect(self):
         proposal = GenericStepProposal(
@@ -1392,10 +1418,9 @@ class GenericSupervisedSessionTests(unittest.TestCase):
                 adapter=adapter,
                 run_dir=Path(temp),
             )
-            summary = session.run_safe_loop(confirmed=True)
-        self.assertEqual(summary["physical_actions"], 0)
+            with self.assertRaisesRegex(GenericActionAdapterError, "完整确认作用域"):
+                session.run_safe_loop(confirmed=True)
         self.assertEqual(session.status, "awaiting_confirmation")
-        self.assertIn("账号状态", session.auto_pause_reason)
         self.assertEqual(robot.actions, [])
 
     def test_natural_language_like_button_is_reported_as_account_effect(self):

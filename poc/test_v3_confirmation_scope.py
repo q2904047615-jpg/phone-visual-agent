@@ -147,6 +147,8 @@ def confirmation(session):
         "revision": 1,
         "subgoal_id": "save_target",
         "risk_ids": ["save_place"],
+        "observation_id": session.qwen_decision["observation_id"],
+        "fingerprint": session.qwen_decision["fingerprint"],
     }
 
 
@@ -171,6 +173,8 @@ class V3ConfirmationScopeTests(unittest.TestCase):
             "risk_missing": lambda value: value.update(risk_ids=[]),
             "risk_extra": lambda value: value.update(risk_ids=["save_place", "extra"]),
             "risk_other": lambda value: value.update(risk_ids=["other"]),
+            "observation": lambda value: value.update(observation_id="stale-observation"),
+            "fingerprint": lambda value: value.update(fingerprint="stale-fingerprint"),
         }
         for label, mutate in mutations.items():
             with self.subTest(label=label):
@@ -290,8 +294,12 @@ class V3ConfirmationScopeTests(unittest.TestCase):
 
     def test_external_v3_and_blocked_or_finished_decisions_cannot_auto_run(self):
         session, adapter = make_session()
-        with self.assertRaisesRegex(GenericActionAdapterError, "禁止自动推进"):
-            session.run_safe_loop(confirmed=True, max_physical_actions=1)
+        with self.assertRaisesRegex(GenericActionAdapterError, "执行入口已关闭"):
+            session.run_safe_loop(
+                confirmed=True,
+                confirmation=confirmation(session),
+                max_physical_actions=1,
+            )
         self.assertEqual(adapter.calls, 0)
 
         for status in ("blocked", "finished"):
@@ -315,9 +323,10 @@ class V3ConfirmationScopeTests(unittest.TestCase):
                     },
                     "external_state_action_allowed": False,
                 }
-                with self.assertRaisesRegex(GenericActionAdapterError, "没有自动执行入口"):
+                with self.assertRaisesRegex(GenericActionAdapterError, "执行入口已关闭"):
                     blocked_session.run_safe_loop(
                         confirmed=True,
+                        confirmation=confirmation(blocked_session),
                         max_physical_actions=1,
                     )
                 self.assertEqual(blocked_adapter.calls, 0)

@@ -1179,7 +1179,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertEqual(2, session.step_number)
         self.assertEqual(2, session.task_graph.revision)
 
-    def test_safe_loop_runs_two_verified_navigation_actions_then_completes(self) -> None:
+    def test_safe_loop_executes_one_confirmed_action_then_pauses_for_new_confirmation(self) -> None:
         initial = _graph()
 
         class SequentialPlanner(FakeDeepSeekPlanner):
@@ -1220,18 +1220,36 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             result = orchestrator.run_safe_loop(
                 session,
                 _confirmation(session),
-                max_physical_actions=3,
-                max_iterations=8,
+                max_physical_actions=1,
+                max_iterations=1,
             )
 
-        self.assertEqual(2, result["physical_actions"])
-        self.assertEqual(2, result["iterations"])
-        self.assertEqual("succeeded", result["status"])
-        self.assertEqual(2, adapter.execute_calls)
-        self.assertEqual(2, session.physical_actions)
-        self.assertEqual(3, session.task_graph.revision)
+        self.assertEqual(1, result["physical_actions"])
+        self.assertEqual(1, result["iterations"])
+        self.assertEqual("awaiting_confirmation", result["status"])
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(2, session.task_graph.revision)
         self.assertEqual(2, len(qwen.calls))
         self.assertFalse(session.automatic_loop_enabled)
+
+    def test_safe_loop_rejects_more_than_one_physical_action_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, adapter = self._started(temp)
+
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError,
+                "每次确认最多执行一个物理动作",
+            ):
+                orchestrator.run_safe_loop(
+                    session,
+                    _confirmation(session),
+                    max_physical_actions=2,
+                    max_iterations=1,
+                )
+
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
 
     def test_safe_loop_rejects_external_risk_stage_with_zero_actions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1421,8 +1439,8 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             result = orchestrator.run_safe_loop(
                 session,
                 _confirmation(session),
-                max_physical_actions=3,
-                max_iterations=8,
+                max_physical_actions=1,
+                max_iterations=1,
             )
 
         self.assertEqual(1, result["physical_actions"])

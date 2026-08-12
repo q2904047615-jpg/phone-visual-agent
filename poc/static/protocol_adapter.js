@@ -454,8 +454,8 @@
     }
     return buildRequestPayload(sessionDeviceId, {
       ...confirmationPayload,
-      max_physical_actions: Number(firstDefined(values.maxPhysicalActions, 3)),
-      max_iterations: Number(firstDefined(values.maxIterations, 8)),
+      max_physical_actions: 1,
+      max_iterations: 1,
     });
   }
 

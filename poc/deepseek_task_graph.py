@@ -160,6 +160,13 @@ REPAIRABLE_INITIAL_GRAPH_ERRORS = (
     "任务图至少需要一个全局完成条件。",
     "可推进任务图必须且只能有一个活动子目标。",
 )
+REPAIRABLE_INITIAL_GRAPH_ERROR_FRAGMENTS = (
+    "文本模型没有返回有效 JSON",
+    "文本模型返回内容不是 JSON 对象",
+    "缺少字段",
+    "必须是对象",
+    "必须是数组",
+)
 REPAIRABLE_REPLAN_ERROR_FRAGMENTS = (
     "文本模型没有返回有效 JSON",
     "文本模型返回内容不是 JSON 对象",
@@ -728,18 +735,18 @@ class DeepSeekTaskGraphPlanner:
         _validate_task_id(resolved_task_id)
         self._require_provider()
         prompt = _initial_prompt(text)
-        graph = self._request_graph(
-            prompt,
-            task_id=resolved_task_id,
-            device_id=device_id,
-            revision=1,
-            raw_user_goal=text,
-            validate=False,
-        )
         try:
+            graph = self._request_graph(
+                prompt,
+                task_id=resolved_task_id,
+                device_id=device_id,
+                revision=1,
+                raw_user_goal=text,
+                validate=False,
+            )
             graph.validate()
         except TaskGraphError as exc:
-            if str(exc) not in REPAIRABLE_INITIAL_GRAPH_ERRORS:
+            if not _retryable_initial_output_error(exc):
                 raise
             invalid_response = self.last_raw_response
             graph = self._request_graph(
@@ -1015,6 +1022,15 @@ def _retryable_safe_initial_audit_conflict(
         "语义风险审计与任务图分类冲突" in str(error)
         and not _describes_external_state_change(raw_goal)
         and bool(_infer_directly_negated_risk_types(raw_goal))
+    )
+
+
+def _retryable_initial_output_error(error: TaskGraphError) -> bool:
+    text = str(error)
+    if "协议外字段" in text:
+        return False
+    return text in REPAIRABLE_INITIAL_GRAPH_ERRORS or any(
+        fragment in text for fragment in REPAIRABLE_INITIAL_GRAPH_ERROR_FRAGMENTS
     )
 
 

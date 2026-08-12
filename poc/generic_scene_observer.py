@@ -382,6 +382,8 @@ elements最多6个。没有把握就写unknown和空elements，禁止猜。
 "screen_id":"unknown","summary":"短描述","elements":[],"overlays":[],
 "stable":true,"confidence":0.0,"fingerprint":""}}
 元素格式仅允许element_id、role、meaning、label、bounds、confidence、states、evidence。
+bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能是x/y/width/height对象、
+两个点或嵌套数组。
 role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
 container仅表示与目标有关的页面内容区域；tab_group、tab_bar、navigation_bar、toolbar等其他非点击结构只写进summary，不要放入elements。
 与目标直接相关的元素写states.goal_relevant=true。禁止任何动作或计划字段。不要Markdown。
@@ -399,6 +401,7 @@ def _targeted_retry_prompt(context: dict[str, Any], error: Exception) -> str:
 "screen_id":"unknown","summary":"短描述","elements":[],"overlays":[],
 "stable":true,"confidence":0.0,"fingerprint":""}}
 元素仅允许element_id、role、meaning、label、bounds、confidence、states、evidence；禁止动作、计划和裸坐标。不要Markdown。
+bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能是x/y/width/height对象、两个点或嵌套数组。
 """
 
 

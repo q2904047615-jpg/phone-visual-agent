@@ -43,6 +43,7 @@ class SequenceProvider(FakeProvider):
         super().__init__({})
         self.responses = list(responses)
         self.max_tokens_seen: list[int] = []
+        self.messages_seen: list[list[dict]] = []
 
     def _chat(
         self,
@@ -53,6 +54,7 @@ class SequenceProvider(FakeProvider):
         max_attempts: int | None = None,
     ) -> str:
         self.calls += 1
+        self.messages_seen.append(messages)
         self.max_tokens_seen.append(max_tokens)
         self.call_options = {"timeout": timeout, "max_attempts": max_attempts}
         value = self.responses.pop(0)
@@ -190,6 +192,23 @@ class GenericSceneObserverTests(unittest.TestCase):
             2,
         )
         self.assertGreaterEqual(observer.last_diagnostics["elapsed_seconds"], 0.0)
+
+    def test_bounds_object_retry_prompt_requires_four_number_array(self) -> None:
+        invalid = scene_payload()
+        invalid["elements"][0]["bounds"] = {
+            "x": 100,
+            "y": 600,
+            "width": 160,
+            "height": 160,
+        }
+        provider = SequenceProvider([invalid, scene_payload()])
+        scene = GenericSceneObserver(provider).observe(frames=stable_frames())
+        self.assertEqual(scene.elements[0].bounds, (0.1, 0.6, 0.26, 0.76))
+        retry_text = provider.messages_seen[1][1]["content"][0]["text"]
+        self.assertIn(
+            "bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]",
+            retry_text,
+        )
 
     def test_service_disconnect_is_not_misclassified_as_format_retry(self) -> None:
         provider = SequenceProvider(

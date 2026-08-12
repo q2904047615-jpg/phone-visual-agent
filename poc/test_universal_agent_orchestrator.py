@@ -465,6 +465,40 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual("open", result.canonical_class)
 
+    def test_allows_generic_app_and_page_entry_navigation(self) -> None:
+        for meaning, label in (
+            ("浏览器应用入口", "浏览器"),
+            ("账户页面入口", "账户"),
+            ("application_entry", "工具"),
+            ("page_entry", "帮助"),
+        ):
+            with self.subTest(meaning=meaning):
+                scene = _scene(meaning=meaning, label=label, role="icon")
+                decision = _decision(scene)
+                result = self.policy.evaluate(
+                    task_context=_context(),
+                    trusted_observation=decision.trusted_observation,
+                    decision=decision,
+                )
+                self.assertTrue(result.allowed)
+                self.assertEqual("open", result.canonical_class)
+
+    def test_external_effect_entry_stays_forbidden(self) -> None:
+        for meaning, label in (
+            ("支付入口", "支付"),
+            ("send_message_entry", "消息"),
+            ("删除入口", "删除"),
+        ):
+            with self.subTest(meaning=meaning):
+                scene = _scene(meaning=meaning, label=label, role="icon")
+                decision = _decision(scene)
+                result = self.policy.evaluate(
+                    task_context=_context(),
+                    trusted_observation=decision.trusted_observation,
+                    decision=decision,
+                )
+                self.assertFalse(result.allowed)
+
     def test_allows_canonical_candidate_after_duplicate_alias_collapse(self) -> None:
         scene = _scene(meaning="open_browser", label="浏览器", role="icon")
         decision = _decision(scene)

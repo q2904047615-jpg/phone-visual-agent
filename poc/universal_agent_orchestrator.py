@@ -1486,7 +1486,11 @@ class PhaseOneNavigationPolicy:
         ("menu", frozenset({"menu", "more"}), ("菜单", "更多")),
         ("list", frozenset({"list", "item"}), ("列表", "条目")),
         ("search", frozenset({"search"}), ("搜索",)),
-        ("open", frozenset({"open", "enter", "navigate"}), ("打开", "进入")),
+        (
+            "open",
+            frozenset({"open", "enter", "navigate", "entry", "launcher"}),
+            ("打开", "进入", "入口"),
+        ),
         ("view", frozenset({"view", "details", "detail"}), ("查看", "详情")),
     )
 

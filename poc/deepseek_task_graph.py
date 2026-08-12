@@ -137,6 +137,12 @@ ACCOUNT_PERMISSION_EFFECT_PATTERN = re.compile(
     r"\b(?:authorize|grant permission|revoke permission|register|login|logout)\b)",
     re.IGNORECASE,
 )
+DIRECT_EFFECT_NEGATION_PATTERN = re.compile(
+    r"(?:不|未|勿|不要|不得|禁止|不能|避免|无需|无须|"
+    r"do\s+not|don't|never|without)\s*"
+    r"(?:(?:进行|执行|发生|出现)\s*)?$",
+    re.IGNORECASE,
+)
 class JsonTaskGraphProvider(Protocol):
     configured: bool
 
@@ -1344,12 +1350,24 @@ def _infer_external_risk_types(*values: str) -> frozenset[str]:
     for value in values:
         field_inferred: set[str] = set()
         for risk_type, pattern in patterns.items():
-            if pattern.search(value):
+            if _has_unnegated_effect_match(pattern, value):
                 field_inferred.add(risk_type)
-        if EXTERNAL_STATE_CHANGE_PATTERN.search(value) and not field_inferred:
+        if (
+            _has_unnegated_effect_match(EXTERNAL_STATE_CHANGE_PATTERN, value)
+            and not field_inferred
+        ):
             field_inferred.add("unknown_external_effect")
         inferred.update(field_inferred)
     return frozenset(inferred)
+
+
+def _has_unnegated_effect_match(pattern: re.Pattern[str], value: str) -> bool:
+    for match in pattern.finditer(value):
+        prefix = value[: match.start()].rstrip().lower()
+        if DIRECT_EFFECT_NEGATION_PATTERN.search(prefix):
+            continue
+        return True
+    return False
 
 
 def _risk_audit_sources(graph: DynamicTaskGraph) -> tuple[AuditSource, ...]:

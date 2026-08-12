@@ -521,6 +521,30 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 device_id="phone-1",
             )
 
+    def test_directly_negated_external_effect_is_a_safety_constraint(self):
+        objective = "打开浏览器首页，仅查看，不搜索、不登录"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            objective,
+            device_id="phone-1",
+        )
+        self.assertEqual(graph.subgoals[0].external_impact, "navigation_only")
+
+    def test_negation_word_does_not_hide_a_positive_external_effect(self):
+        objective = "不要忘记登录并同步数据"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                objective,
+                device_id="phone-1",
+            )
+
     def test_relationship_communication_membership_and_role_effects_fail_closed(self):
         dangerous_goals = (
             "加好友",

@@ -59,6 +59,17 @@ Qwen 的 `foreground_app_id/new_foreground_app_id/new_screen_id/screen_change`
 
 浏览器契约验证了：风险确认不会发送动作确认字段；风险确认后才显示具体动作；安全导航可选择有界连续推进；外部状态不能出现连续推进入口。
 
+最新真实运行页面又完成一次只读浏览器验收：页面恢复会话
+`1565af53bbcb463cbf61952e05365f11`，显示 DeepSeek 动态计划、revision 1、
+当前真实画面、Qwen 目标区域、控制器结果、预期 `app_id/screen_id`、证据路径和
+累计动作 0。加载期间只有 GET 请求、无 POST、无浏览器控制台错误。
+
+本次发现并修复了确认文案混淆：低风险 `awaiting_confirmation` 现在统一显示
+“等待当前动作确认 / 需要当前动作确认 / 确认当前动作”；只有
+`awaiting_risk_confirmation` 才显示风险范围确认。外部状态完成风险范围确认后，
+界面也会明确切换到当前动作确认。协议 14 项、浏览器契约 4 项复跑通过；只读截图为
+`poc/output/web/live_console_readonly_confirm_labels_20260812.png`。
+
 ## 真机当前状态
 
 - 用户明确确认后，旧服务会话 `acc53be0caff41ccb6779db89cbaf062` 执行了 1 次“点击浏览器”物理动作。

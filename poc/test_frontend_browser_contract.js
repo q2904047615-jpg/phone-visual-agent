@@ -299,6 +299,11 @@ test("browser renders controller evidence and confirms one exact observation", {
     assert.match(actionText, /51277d0d9e6f986b00dc/);
     assert.match(actionText, /本地策略/);
     assert.match(actionText, /仅允许当前通用导航动作/);
+    assert.match(await page.locator("#sessionBadge").innerText(), /等待当前动作确认/);
+    assert.match(await page.locator("#safetyText").innerText(), /等待当前动作确认/);
+    assert.match(actionText, /需要当前动作确认/);
+    assert.equal(await page.locator("#reviewAction").innerText(), "确认当前动作");
+    assert.doesNotMatch(actionText, /需要风险范围确认/);
 
     await page.locator("#reviewAction").click();
     const warning = await page.locator("#riskWarning").innerText();
@@ -376,9 +381,10 @@ test("external-state graph requires risk approval before exact action confirmati
   try {
     await page.locator("#agentText").fill("外部状态风险任务");
     await page.locator("#startSupervisedAgent").click();
-    await page.locator("#sessionBadge").getByText("等待风险确认").waitFor();
+    await page.locator("#sessionBadge").getByText("等待风险范围确认").waitFor();
     assert.equal(await page.locator("#autoSupervisedAgent").count(), 0);
     assert.equal(await page.locator("#reviewAction").count(), 1);
+    assert.equal(await page.locator("#reviewAction").innerText(), "查看风险范围并确认");
     assert.equal(requests.auto.length, 0);
     const goalText = await page.locator("#goalSummary").innerText();
     assert.match(goalText, /确认门 · awaiting_risk_confirmation/);
@@ -395,6 +401,8 @@ test("external-state graph requires risk approval before exact action confirmati
     await page.locator("#confirmRiskAction").click();
     await approvalResponse;
     await page.locator("#reviewAction").waitFor({ timeout: 5000 });
+    assert.match(await page.locator("#sessionBadge").innerText(), /等待当前动作确认/);
+    assert.equal(await page.locator("#reviewAction").innerText(), "确认当前动作");
     assert.deepEqual(requests.approveRisk[0], {
       confirmed: true,
       confirmation: {

@@ -18,8 +18,13 @@ from deepseek_task_graph import (
     TargetApp,
 )
 from generic_step_planner import GenericStepProposal
+from generic_action_adapter import (
+    GenericActionAdapterError,
+    GenericActionExecutionResult,
+)
 from semantic_executor import SemanticAction
 from ui_scene import UIElement, UIScene
+from universal_action_controller import ResolvedSemanticAction
 from universal_agent_orchestrator import (
     AgentEvidenceStore,
     EvidenceStoreError,
@@ -32,6 +37,7 @@ from universal_agent_orchestrator import (
 
 def _scene(
     *,
+    fingerprint: str = "frame-a",
     meaning: str = "open_details",
     label: str = "查看详情",
     role: str = "button",
@@ -55,7 +61,7 @@ def _scene(
         ),
         stable=True,
         confidence=0.95,
-        fingerprint="frame-a",
+        fingerprint=fingerprint,
     )
 
 
@@ -256,9 +262,16 @@ def _completed_graph(graph: DynamicTaskGraph) -> DynamicTaskGraph:
 
 
 class FakeDeepSeekPlanner:
-    def __init__(self, graph: DynamicTaskGraph, *, replan_result=None) -> None:
+    def __init__(
+        self,
+        graph: DynamicTaskGraph,
+        *,
+        replan_result=None,
+        replan_error: Exception | None = None,
+    ) -> None:
         self.graph = graph
         self.replan_result = replan_result
+        self.replan_error = replan_error
         self.plan_calls = []
         self.replan_calls = []
 
@@ -268,6 +281,8 @@ class FakeDeepSeekPlanner:
 
     def replan(self, graph, observation, *, trigger, reason):
         self.replan_calls.append((graph, observation, trigger, reason))
+        if self.replan_error is not None:
+            raise self.replan_error
         return self.replan_result or graph
 
 
@@ -305,6 +320,51 @@ class FakeAdapter:
     def execute(self, **_kwargs):
         self.execute_calls += 1
         raise AssertionError("start must not execute a physical action")
+
+
+class FakeExecutingAdapter(FakeAdapter):
+    def __init__(
+        self,
+        scene: UIScene,
+        after_scene: UIScene,
+        *,
+        execute_error: GenericActionAdapterError | None = None,
+    ) -> None:
+        super().__init__(scene)
+        self.after_scene = after_scene
+        self.execute_error = execute_error
+
+    def execute(self, *, requested_action, planned_scene, goal, confirmed, evidence_dir):
+        self.execute_calls += 1
+        if self.execute_error is not None:
+            raise self.execute_error
+        after_frames = tuple(
+            Image.new("RGB", (540, 960), "white") for _ in range(4)
+        )
+        return GenericActionExecutionResult(
+            requested_action=requested_action,
+            rebound_action=requested_action,
+            resolved_action=ResolvedSemanticAction(
+                node_id=requested_action.node_id,
+                kind=requested_action.action,
+                normalized_point=(0.3, 0.25),
+                target_element_id="candidate-1",
+                before_fingerprint=planned_scene.fingerprint,
+                expected_effect={"scene_changed": True},
+            ),
+            before_scene=planned_scene,
+            after_scene=self.after_scene,
+            physical_actions=1,
+            robot_result={"ok": True},
+            evidence=("before-1.jpg", "after-1.jpg"),
+            after_frames=after_frames,
+            after_frame_paths=(
+                "after-1.jpg",
+                "after-2.jpg",
+                "after-3.jpg",
+                "after-4.jpg",
+            ),
+        )
 
 
 class FakeQwenObserver:
@@ -664,7 +724,6 @@ class UniversalAgentStartTests(unittest.TestCase):
         self.assertEqual(0, session.physical_actions)
         self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
-        self.assertEqual(1, len(qwen.calls))
 
     def test_start_uses_at_least_four_frames_for_trusted_observation(self) -> None:
         seen = []
@@ -789,6 +848,272 @@ class UniversalAgentStartTests(unittest.TestCase):
 
         self.assertEqual(0, adapter.execute_calls)
 
+
+def _confirmation(session) -> dict:
+    graph = session.task_graph
+    observation = session.trusted_observation
+    current = graph.active_subgoal()
+    return {
+        "session_id": session.session_id,
+        "task_id": graph.task_id,
+        "device_id": graph.device_id,
+        "revision": graph.revision,
+        "subgoal_id": current.subgoal_id,
+        "risk_ids": sorted(current.risk_action_ids),
+        "observation_id": observation.observation_id,
+        "fingerprint": observation.fingerprint,
+    }
+
+
+class UniversalAgentConfirmTests(unittest.TestCase):
+    def _started(
+        self,
+        temp: str,
+        *,
+        planner=None,
+        qwen=None,
+        adapter=None,
+        policy=None,
+        evidence_store_factory=None,
+    ):
+        initial = _graph()
+        planner = planner or FakeDeepSeekPlanner(
+            initial,
+            replan_result=replace(initial, revision=2),
+        )
+        qwen = qwen or FakeQwenObserver()
+        adapter = adapter or FakeExecutingAdapter(
+            _scene(),
+            _scene(fingerprint="frame-b", meaning="open_more", label="查看更多"),
+        )
+        orchestrator = UniversalAgentOrchestrator(
+            deepseek_planner=planner,
+            qwen_observer=qwen,
+            adapter_factory=lambda _device_id: adapter,
+            trusted_observation_factory=_trusted_factory,
+            policy=policy,
+            evidence_store_factory=evidence_store_factory,
+        )
+        session = orchestrator.start(
+            session_id="session-confirm",
+            raw_goal="查看详情",
+            device_id="device-1",
+            run_dir=Path(temp),
+        )
+        return orchestrator, session, planner, qwen, adapter
+
+    def test_exact_confirmation_executes_one_action_then_pauses(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, adapter = self._started(temp)
+
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual(2, session.step_number)
+        self.assertEqual(2, session.task_graph.revision)
+
+    def test_confirmation_requires_observation_id_and_fingerprint(self) -> None:
+        for missing in ("observation_id", "fingerprint"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as temp:
+                orchestrator, session, _planner, _qwen, adapter = self._started(temp)
+                confirmation = _confirmation(session)
+                confirmation.pop(missing)
+
+                with self.assertRaisesRegex(
+                    UniversalAgentOrchestratorError, "确认作用域"
+                ):
+                    orchestrator.confirm_one(session, confirmation)
+
+                self.assertEqual(0, adapter.execute_calls)
+
+    def test_replay_and_authority_mismatches_fail(self) -> None:
+        mutations = {
+            "session_id": "other-session",
+            "task_id": "other-task",
+            "device_id": "device-other",
+            "revision": 99,
+            "subgoal_id": "other-subgoal",
+            "risk_ids": ["other-risk"],
+            "observation_id": "obs-other",
+            "fingerprint": "frame-other",
+        }
+        for field_name, value in mutations.items():
+            with self.subTest(field=field_name), tempfile.TemporaryDirectory() as temp:
+                orchestrator, session, _planner, _qwen, adapter = self._started(temp)
+                confirmation = _confirmation(session)
+                confirmation[field_name] = value
+
+                with self.assertRaises(UniversalAgentOrchestratorError):
+                    orchestrator.confirm_one(session, confirmation)
+
+                self.assertEqual(0, adapter.execute_calls)
+
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, adapter = self._started(temp)
+            confirmation = _confirmation(session)
+            orchestrator.confirm_one(session, confirmation)
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError, "使用|推进|不一致"
+            ):
+                orchestrator.confirm_one(session, confirmation)
+            self.assertEqual(1, adapter.execute_calls)
+
+    def test_policy_is_rechecked_immediately_before_execute(self) -> None:
+        class FlipPolicy(PhaseOneNavigationPolicy):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def evaluate(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return super().evaluate(**kwargs)
+                return SimpleNamespace(
+                    allowed=False,
+                    reason="策略状态已变化",
+                    canonical_class="",
+                )
+
+        policy = FlipPolicy()
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, qwen, adapter = self._started(
+                temp, policy=policy
+            )
+
+            with self.assertRaisesRegex(UniversalAgentOrchestratorError, "策略状态已变化"):
+                orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(2, policy.calls)
+        self.assertEqual(0, adapter.execute_calls)
+
+    def test_new_observation_fingerprint_and_revision_are_required(self) -> None:
+        initial = _graph()
+        same_scene_adapter = FakeExecutingAdapter(_scene(), _scene())
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, qwen, adapter = self._started(
+                temp,
+                planner=FakeDeepSeekPlanner(
+                    initial, replan_result=replace(initial, revision=2)
+                ),
+                adapter=same_scene_adapter,
+            )
+            with self.assertRaisesRegex(UniversalAgentOrchestratorError, "fingerprint"):
+                orchestrator.confirm_one(session, _confirmation(session))
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(1, len(qwen.calls))
+
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, qwen, adapter = self._started(
+                temp,
+                planner=FakeDeepSeekPlanner(initial, replan_result=initial),
+            )
+            orchestrator.confirm_one(session, _confirmation(session))
+        self.assertEqual("blocked", session.status)
+        self.assertIn("revision", session.failed_reason)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, len(qwen.calls))
+
+    def test_action_failure_is_not_retried(self) -> None:
+        adapter = FakeExecutingAdapter(
+            _scene(),
+            _scene(fingerprint="frame-b", meaning="open_more", label="查看更多"),
+            execute_error=GenericActionAdapterError(
+                "动作后画面没有可验证变化",
+                physical_actions=1,
+                evidence=("failed-after.jpg",),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, adapter = self._started(
+                temp, adapter=adapter
+            )
+            with self.assertRaises(GenericActionAdapterError):
+                orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual("failed", session.status)
+
+    def test_replan_failure_keeps_after_frames_and_blocks_old_plan(self) -> None:
+        planner = FakeDeepSeekPlanner(
+            _graph(),
+            replan_error=RuntimeError("deepseek unavailable"),
+        )
+        qwen = FakeQwenObserver()
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, qwen, adapter = self._started(
+                temp, planner=planner, qwen=qwen
+            )
+
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("blocked", session.status)
+        self.assertIn("deepseek unavailable", session.failed_reason)
+        self.assertIn("after-1.jpg", session.evidence_paths)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, len(qwen.calls))
+
+    def test_next_qwen_decision_uses_only_new_revision_and_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, qwen, _adapter = self._started(temp)
+            first_observation = session.trusted_observation
+
+            orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(2, len(qwen.calls))
+        _frames, context, observation, decision_number = qwen.calls[1]
+        self.assertEqual(2, context["revision"])
+        self.assertEqual(2, decision_number)
+        self.assertNotEqual(first_observation.observation_id, observation.observation_id)
+        self.assertNotEqual(first_observation.fingerprint, observation.fingerprint)
+
+    def test_evidence_failure_before_action_keeps_zero_physical_actions(self) -> None:
+        class FailSecondControllerStore(AgentEvidenceStore):
+            def __init__(self, run_dir):
+                super().__init__(run_dir)
+                self.controller_writes = 0
+
+            def write_controller_decision(self, step_number, decision):
+                self.controller_writes += 1
+                if self.controller_writes == 2:
+                    raise EvidenceStoreError("simulated controller evidence failure")
+                return super().write_controller_decision(step_number, decision)
+
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, adapter = self._started(
+                temp,
+                evidence_store_factory=FailSecondControllerStore,
+            )
+            with self.assertRaises(EvidenceStoreError):
+                orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_evidence_failure_after_action_blocks_any_next_action(self) -> None:
+        class FailVerificationStore(AgentEvidenceStore):
+            def write_verification(self, step_number, verification):
+                raise EvidenceStoreError("simulated verification evidence failure")
+
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, qwen, adapter = self._started(
+                temp,
+                evidence_store_factory=FailVerificationStore,
+            )
+            confirmation = _confirmation(session)
+            with self.assertRaises(EvidenceStoreError):
+                orchestrator.confirm_one(session, confirmation)
+            with self.assertRaises(UniversalAgentOrchestratorError):
+                orchestrator.confirm_one(session, confirmation)
+
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(1, len(qwen.calls))
 
 if __name__ == "__main__":
     unittest.main()

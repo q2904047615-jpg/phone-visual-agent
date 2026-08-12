@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping
 import uuid
 
 from deepseek_task_graph import DynamicTaskGraph, ObservedState
+from generic_action_adapter import GenericActionAdapterError
 from generic_intent import GenericIntentDraft
 from qwen_visual_decision import TrustedObservation
 from ui_scene import MIN_TARGET_CONFIDENCE, UISceneError
@@ -262,6 +263,32 @@ class ObservationBridge:
 
 
 @dataclass
+class ConfirmationAuthority:
+    session_id: str
+    task_id: str
+    device_id: str
+    revision: int
+    subgoal_id: str
+    risk_ids: tuple[str, ...]
+    observation_id: str
+    fingerprint: str
+    consumed: bool = False
+    invalid_reason: str = ""
+
+    def scope(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "task_id": self.task_id,
+            "device_id": self.device_id,
+            "revision": self.revision,
+            "subgoal_id": self.subgoal_id,
+            "risk_ids": sorted(self.risk_ids),
+            "observation_id": self.observation_id,
+            "fingerprint": self.fingerprint,
+        }
+
+
+@dataclass
 class UniversalAgentSessionState:
     session_id: str
     raw_goal: str
@@ -341,10 +368,18 @@ class UniversalAgentSessionState:
             "history": list(self.history),
             "evidence": list(dict.fromkeys(self.evidence_paths)),
             "automatic_loop_enabled": False,
+            "confirmation_scope": (
+                self.confirmation_authority.scope()
+                if self.confirmation_authority is not None
+                and not self.confirmation_authority.consumed
+                else None
+            ),
             "confirmation_ready": bool(
                 self.status == "awaiting_confirmation"
                 and self.controller_decision is not None
                 and self.controller_decision.allowed
+                and self.confirmation_authority is not None
+                and not self.confirmation_authority.consumed
             ),
         }
 
@@ -463,6 +498,394 @@ class UniversalAgentOrchestrator:
         )
         self._remember(session, report_path)
 
+    def _current_confirmation_scope(
+        self,
+        session: UniversalAgentSessionState,
+    ) -> dict[str, Any]:
+        graph = session.task_graph
+        observation = session.trusted_observation
+        decision = session.qwen_decision
+        if graph is None or observation is None or decision is None:
+            raise UniversalAgentOrchestratorError(
+                "当前会话没有完整的确认权威状态。"
+            )
+        self._validate_graph_identity(graph, device_id=session.device_id)
+        self._validate_decision_binding(graph, observation, decision)
+        if decision.proposal.status != "action":
+            raise UniversalAgentOrchestratorError(
+                "blocked/finished 决策没有可确认动作。"
+            )
+        current = graph.active_subgoal()
+        if current is None:
+            raise UniversalAgentOrchestratorError("当前任务没有活动子目标。")
+        return {
+            "session_id": session.session_id,
+            "task_id": graph.task_id,
+            "device_id": graph.device_id,
+            "revision": graph.revision,
+            "subgoal_id": current.subgoal_id,
+            "risk_ids": sorted(current.risk_action_ids),
+            "observation_id": str(observation.observation_id),
+            "fingerprint": str(observation.fingerprint),
+        }
+
+    def _bind_confirmation(self, session: UniversalAgentSessionState) -> None:
+        scope = self._current_confirmation_scope(session)
+        session.confirmation_authority = ConfirmationAuthority(
+            session_id=scope["session_id"],
+            task_id=scope["task_id"],
+            device_id=scope["device_id"],
+            revision=scope["revision"],
+            subgoal_id=scope["subgoal_id"],
+            risk_ids=tuple(scope["risk_ids"]),
+            observation_id=scope["observation_id"],
+            fingerprint=scope["fingerprint"],
+        )
+
+    @staticmethod
+    def _normalize_confirmation(value: Mapping[str, Any]) -> dict[str, Any]:
+        required = {
+            "session_id",
+            "task_id",
+            "device_id",
+            "revision",
+            "subgoal_id",
+            "risk_ids",
+            "observation_id",
+            "fingerprint",
+        }
+        if not isinstance(value, Mapping) or set(value) != required:
+            raise UniversalAgentOrchestratorError(
+                "确认作用域字段缺失或包含额外字段。"
+            )
+        risk_ids = value.get("risk_ids")
+        if not isinstance(risk_ids, list):
+            raise UniversalAgentOrchestratorError("确认作用域 risk_ids 必须是数组。")
+        revision = value.get("revision")
+        if isinstance(revision, bool) or not isinstance(revision, int):
+            raise UniversalAgentOrchestratorError("确认作用域 revision 格式无效。")
+        return {
+            "session_id": str(value.get("session_id") or ""),
+            "task_id": str(value.get("task_id") or ""),
+            "device_id": str(value.get("device_id") or ""),
+            "revision": revision,
+            "subgoal_id": str(value.get("subgoal_id") or ""),
+            "risk_ids": sorted(str(item) for item in risk_ids),
+            "observation_id": str(value.get("observation_id") or ""),
+            "fingerprint": str(value.get("fingerprint") or ""),
+        }
+
+    def _validate_and_consume_confirmation(
+        self,
+        session: UniversalAgentSessionState,
+        confirmation: Mapping[str, Any],
+    ) -> None:
+        authority = session.confirmation_authority
+        if session.status != "awaiting_confirmation":
+            raise UniversalAgentOrchestratorError(
+                f"会话已推进，当前状态不能确认：{session.status}。"
+            )
+        if authority is None:
+            raise UniversalAgentOrchestratorError("当前会话没有可用确认作用域。")
+        if authority.consumed:
+            raise UniversalAgentOrchestratorError("当前确认已使用，禁止重放。")
+        current_scope = self._current_confirmation_scope(session)
+        if current_scope != authority.scope():
+            authority.consumed = True
+            authority.invalid_reason = "authoritative_state_changed"
+            raise UniversalAgentOrchestratorError(
+                "任务、画面或视觉决策已经变化，当前确认已失效。"
+            )
+        try:
+            requested = self._normalize_confirmation(confirmation)
+        except UniversalAgentOrchestratorError:
+            authority.consumed = True
+            authority.invalid_reason = "invalid_confirmation_shape"
+            raise
+        if requested != current_scope:
+            authority.consumed = True
+            authority.invalid_reason = "confirmation_scope_mismatch"
+            raise UniversalAgentOrchestratorError(
+                "确认作用域与当前 task/device/revision/subgoal/risk/observation 不一致。"
+            )
+
+    def _advance_after_observation(
+        self,
+        session: UniversalAgentSessionState,
+        *,
+        result: Any,
+        new_observation: Any,
+    ) -> None:
+        previous_graph = session.task_graph
+        assert previous_graph is not None
+        verification = {
+            "matched": True,
+            "action_outcome": "matched",
+            "physical_actions": result.physical_actions,
+            "before_fingerprint": result.before_scene.fingerprint,
+            "after_fingerprint": result.after_scene.fingerprint,
+            "visible_evidence": [result.after_scene.summary],
+            "after_frame_paths": list(result.after_frame_paths),
+        }
+        self._remember(
+            session,
+            session.evidence_store.write_verification(
+                max(1, session.step_number - 1),
+                verification,
+            ),
+        )
+        observed = self.bridge.observed_state(
+            graph=previous_graph,
+            trusted_observation=new_observation,
+            action_outcome="matched",
+            verification=verification,
+        )
+        try:
+            revised = self.deepseek_planner.replan(
+                previous_graph,
+                observed,
+                trigger="observation_changed",
+                reason="一个动作已经执行并由新的可信画面验证。",
+            )
+            self._validate_graph_identity(
+                revised,
+                device_id=session.device_id,
+                previous=previous_graph,
+            )
+        except Exception as exc:
+            session.status = "blocked"
+            session.failed_reason = f"DeepSeek 重规划失败：{exc}"
+            session.confirmation_authority = None
+            return
+
+        session.task_graph = revised
+        session.goal_draft = self.bridge.goal_draft(revised)
+        self._remember(
+            session,
+            session.evidence_store.write_task_graph(revised),
+            session.evidence_store.write_risk_audit(revised),
+        )
+        if revised.status == "completed":
+            session.status = "succeeded"
+            session.confirmation_authority = None
+            return
+        current = revised.active_subgoal()
+        impact = current.external_impact if current is not None else "unknown"
+        if current is None or impact in {"external_state", "unknown"}:
+            session.status = "blocked"
+            session.failed_reason = (
+                "重规划后的当前子目标属于第一阶段禁止范围："
+                f"{impact}。"
+            )
+            session.confirmation_authority = None
+            return
+
+        frames = list(result.after_frames)
+        context = revised.to_qwen_context()
+        decision = self.qwen_observer.decide(
+            frames=frames,
+            task_context=context,
+            trusted_observation=new_observation,
+            decision_number=session.step_number,
+        )
+        self._validate_decision_binding(revised, new_observation, decision)
+        session.qwen_decision = decision
+        self._remember(
+            session,
+            session.evidence_store.write_qwen_decision(
+                session.step_number,
+                decision,
+            ),
+        )
+        if decision.proposal.status != "action":
+            session.status = "blocked"
+            session.failed_reason = (
+                decision.proposal.reason
+                if decision.proposal.status == "blocked"
+                else "Qwen 完成候选未被当前 DeepSeek revision 确认为完成。"
+            )
+            session.controller_decision = NavigationPolicyDecision(
+                allowed=False,
+                reason=session.failed_reason,
+            )
+            session.confirmation_authority = None
+            return
+        policy_decision = self.policy.evaluate(
+            task_context=context,
+            trusted_observation=new_observation,
+            decision=decision,
+        )
+        session.controller_decision = policy_decision
+        self._remember(
+            session,
+            session.evidence_store.write_controller_decision(
+                session.step_number,
+                self._policy_payload(policy_decision),
+            ),
+        )
+        if not policy_decision.allowed:
+            session.status = "blocked"
+            session.failed_reason = policy_decision.reason
+            session.confirmation_authority = None
+            return
+        session.status = "awaiting_confirmation"
+        self._bind_confirmation(session)
+
+    def confirm_one(
+        self,
+        session: UniversalAgentSessionState,
+        confirmation: Mapping[str, Any],
+    ) -> Any:
+        self._validate_and_consume_confirmation(session, confirmation)
+        authority = session.confirmation_authority
+        assert authority is not None
+        graph = session.task_graph
+        observation = session.trusted_observation
+        decision = session.qwen_decision
+        assert graph is not None and observation is not None and decision is not None
+
+        context = graph.to_qwen_context()
+        policy_decision = self.policy.evaluate(
+            task_context=context,
+            trusted_observation=observation,
+            decision=decision,
+        )
+        session.controller_decision = policy_decision
+        authority.consumed = True
+        authority.invalid_reason = "consumed_before_execution"
+        if not policy_decision.allowed:
+            session.status = "blocked"
+            session.failed_reason = policy_decision.reason
+            self._remember(
+                session,
+                session.evidence_store.write_controller_decision(
+                    session.step_number,
+                    self._policy_payload(policy_decision),
+                ),
+            )
+            self._write_terminal_snapshot(session)
+            raise UniversalAgentOrchestratorError(policy_decision.reason)
+
+        try:
+            self._remember(
+                session,
+                session.evidence_store.write_controller_decision(
+                    session.step_number,
+                    {
+                        **self._policy_payload(policy_decision),
+                        "phase": "pre_execute_recheck",
+                    },
+                ),
+            )
+        except Exception:
+            session.status = "failed"
+            session.failed_reason = "执行前控制器证据写入失败。"
+            raise
+
+        session.status = "executing_one_action"
+        try:
+            result = session.adapter.execute(
+                requested_action=decision.proposal.action,
+                planned_scene=observation.scene,
+                goal=session.goal_draft,
+                confirmed=True,
+                evidence_dir=session.run_dir,
+            )
+        except GenericActionAdapterError as exc:
+            session.physical_actions += max(0, int(exc.physical_actions))
+            self._remember(session, exc.evidence)
+            session.status = "failed"
+            session.failed_reason = str(exc)
+            try:
+                self._write_terminal_snapshot(session)
+            except Exception:
+                pass
+            raise
+
+        physical_actions = int(result.physical_actions)
+        if physical_actions < 0 or physical_actions > 1:
+            session.physical_actions += max(0, physical_actions)
+            session.status = "failed"
+            session.failed_reason = (
+                f"单次确认返回了非法物理动作数：{physical_actions}。"
+            )
+            raise UniversalAgentOrchestratorError(session.failed_reason)
+        session.physical_actions += physical_actions
+        self._remember(
+            session,
+            result.evidence,
+            result.after_frame_paths,
+        )
+        session.status = "verifying"
+        if (
+            result.resolved_action.kind != "wait_for_change"
+            and result.after_scene.fingerprint == observation.fingerprint
+        ):
+            session.status = "failed"
+            session.failed_reason = "动作后 fingerprint 没有变化，禁止继续。"
+            try:
+                self._write_terminal_snapshot(session)
+            except Exception:
+                pass
+            raise UniversalAgentOrchestratorError(session.failed_reason)
+
+        new_observation = self.trusted_observation_factory(
+            frames=list(result.after_frames),
+            device_id=session.device_id,
+            scene=result.after_scene,
+            observation_id=f"obs_{uuid.uuid4().hex}",
+        )
+        if (
+            new_observation.observation_id == observation.observation_id
+            or (
+                result.resolved_action.kind != "wait_for_change"
+                and new_observation.fingerprint == observation.fingerprint
+            )
+        ):
+            session.status = "failed"
+            session.failed_reason = "动作后可信观察 observation/fingerprint 未更新。"
+            raise UniversalAgentOrchestratorError(session.failed_reason)
+        session.trusted_observation = new_observation
+        session.step_number += 1
+        self._remember(
+            session,
+            session.evidence_store.write_trusted_observation(
+                session.step_number,
+                new_observation,
+            ),
+        )
+        session.history.append(
+            {
+                "step_number": session.step_number - 1,
+                "task_revision": graph.revision,
+                "qwen_decision": UniversalAgentSessionState._serialize(decision),
+                "execution": result.to_dict(),
+                "after_observation_id": new_observation.observation_id,
+                "after_fingerprint": new_observation.fingerprint,
+            }
+        )
+        try:
+            session.status = "replanning"
+            self._advance_after_observation(
+                session,
+                result=result,
+                new_observation=new_observation,
+            )
+            self._write_terminal_snapshot(session)
+            return result
+        except EvidenceStoreError as exc:
+            session.status = "failed"
+            session.failed_reason = str(exc)
+            raise
+        except Exception as exc:
+            session.status = "failed"
+            session.failed_reason = str(exc)
+            try:
+                self._write_terminal_snapshot(session)
+            except Exception:
+                pass
+            raise
+
     def start(
         self,
         *,
@@ -575,6 +998,7 @@ class UniversalAgentOrchestrator:
                 )
                 if policy_decision.allowed:
                     session.status = "awaiting_confirmation"
+                    self._bind_confirmation(session)
                 else:
                     session.status = "blocked"
                     session.failed_reason = policy_decision.reason

@@ -3,13 +3,17 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+from PIL import Image
 
 from deepseek_task_graph import (
     CompletionCondition,
     DynamicTaskGraph,
     GraphGoal,
+    RiskAction,
     Subgoal,
     TargetApp,
 )
@@ -21,6 +25,7 @@ from universal_agent_orchestrator import (
     EvidenceStoreError,
     ObservationBridge,
     PhaseOneNavigationPolicy,
+    UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
 )
 
@@ -161,6 +166,200 @@ def _graph(*, device_id: str = "device-1") -> DynamicTaskGraph:
     )
     graph.validate()
     return graph
+
+
+def _external_graph(*, impact: str = "external_state") -> DynamicTaskGraph:
+    risk_type = (
+        "message_or_communication"
+        if impact == "external_state"
+        else "unknown_external_effect"
+    )
+    graph = DynamicTaskGraph(
+        task_id="task-1",
+        device_id="device-1",
+        revision=1,
+        status="awaiting_confirmation",
+        goal=GraphGoal(
+            objective=(
+                "向目标联系人发送需求询问"
+                if impact == "external_state"
+                else "处理影响尚不明确的目标状态"
+            ),
+            target_apps=(TargetApp(app_id="sample", app_name="示例工具"),),
+            entities={"contact": "目标联系人"},
+        ),
+        constraints=("任何外部影响都必须失败关闭",),
+        completion_conditions=(
+            CompletionCondition(
+                condition_id="condition-1",
+                description="目标外部状态已经产生",
+                evidence_required=("页面显示结果",),
+            ),
+        ),
+        risk_actions=(
+            RiskAction(
+                risk_id="risk-1",
+                description=(
+                    "发送需求询问" if impact == "external_state" else "影响不明确"
+                ),
+                external_effect=(
+                    "向外部对象发送消息"
+                    if impact == "external_state"
+                    else "可能改变外部状态"
+                ),
+                risk_type=risk_type,
+                risk_level="high",
+                subgoal_ids=("subgoal-1",),
+            ),
+        ),
+        subgoals=(
+            Subgoal(
+                subgoal_id="subgoal-1",
+                objective=(
+                    "目标联系人收到需求询问"
+                    if impact == "external_state"
+                    else "目标状态达到但影响仍不明确"
+                ),
+                status="active",
+                depends_on=(),
+                constraints=("必须等待明确确认",),
+                completion_conditions=("页面显示结果",),
+                completion_evidence=(),
+                risk_action_ids=("risk-1",),
+                external_impact=impact,
+            ),
+        ),
+        active_subgoal_id="subgoal-1",
+        raw_user_goal="测试风险目标",
+    )
+    graph.validate()
+    return graph
+
+
+def _completed_graph(graph: DynamicTaskGraph) -> DynamicTaskGraph:
+    completed = replace(
+        graph,
+        revision=graph.revision + 1,
+        status="completed",
+        completion_conditions=tuple(
+            replace(item, satisfied=True, evidence=("详情标题可见",))
+            for item in graph.completion_conditions
+        ),
+        subgoals=tuple(
+            replace(item, status="completed", completion_evidence=("详情标题可见",))
+            for item in graph.subgoals
+        ),
+        active_subgoal_id=None,
+    )
+    completed.validate()
+    return completed
+
+
+class FakeDeepSeekPlanner:
+    def __init__(self, graph: DynamicTaskGraph, *, replan_result=None) -> None:
+        self.graph = graph
+        self.replan_result = replan_result
+        self.plan_calls = []
+        self.replan_calls = []
+
+    def plan(self, raw_goal, *, device_id, task_id=None):
+        self.plan_calls.append((raw_goal, device_id, task_id))
+        return self.graph
+
+    def replan(self, graph, observation, *, trigger, reason):
+        self.replan_calls.append((graph, observation, trigger, reason))
+        return self.replan_result or graph
+
+
+class FakeTrustedObservation:
+    def __init__(self, *, device_id: str, scene: UIScene, observation_id="obs-start"):
+        self.device_id = device_id
+        self.scene = scene
+        self.observation_id = observation_id
+        self.fingerprint = scene.fingerprint
+        self.candidate_conflicts = ()
+
+    def to_dict(self):
+        return {
+            "observation_id": self.observation_id,
+            "device_id": self.device_id,
+            "fingerprint": self.fingerprint,
+            "scene": self.scene.to_dict(),
+            "candidate_conflicts": [],
+        }
+
+
+class FakeAdapter:
+    def __init__(self, scene: UIScene) -> None:
+        self.scene = scene
+        self.capture_calls = 0
+        self.execute_calls = 0
+
+    def capture_scene(self, goal, *, evidence_dir, prefix):
+        self.capture_calls += 1
+        frames = [Image.new("RGB", (540, 960), "white") for _ in range(4)]
+        return self.scene, frames, tuple(
+            str(evidence_dir / f"{prefix}_{index}.jpg") for index in range(1, 5)
+        )
+
+    def execute(self, **_kwargs):
+        self.execute_calls += 1
+        raise AssertionError("start must not execute a physical action")
+
+
+class FakeQwenObserver:
+    def __init__(self, status="action", *, mutate_identity=None) -> None:
+        self.status = status
+        self.mutate_identity = mutate_identity
+        self.calls = []
+
+    def decide(self, *, frames, task_context, trusted_observation, decision_number=1):
+        self.calls.append((frames, task_context, trusted_observation, decision_number))
+        if self.status == "action":
+            decision = _decision(trusted_observation.scene)
+        else:
+            proposal = GenericStepProposal(
+                status=self.status,
+                action=None,
+                reason="当前画面不能继续" if self.status == "blocked" else "完成证据可见",
+                completion_evidence=("详情标题可见",) if self.status == "finished" else (),
+            )
+            decision = SimpleNamespace(
+                proposal=proposal,
+                target_region=None,
+                confidence=0.95,
+            )
+        decision.task_id = task_context["task_id"]
+        decision.device_id = task_context["device_id"]
+        decision.revision = task_context["revision"]
+        decision.observation_id = trusted_observation.observation_id
+        decision.fingerprint = trusted_observation.fingerprint
+        decision.trusted_observation = trusted_observation
+        if self.mutate_identity:
+            setattr(decision, self.mutate_identity[0], self.mutate_identity[1])
+        decision.to_dict = lambda: {
+            "task_id": decision.task_id,
+            "device_id": decision.device_id,
+            "revision": decision.revision,
+            "observation_id": decision.observation_id,
+            "fingerprint": decision.fingerprint,
+            "status": decision.proposal.status,
+            "next_action": (
+                decision.proposal.action.to_dict() if decision.proposal.action else None
+            ),
+            "reason": decision.proposal.reason,
+        }
+        return decision
+
+
+def _trusted_factory(*, frames, device_id, scene, observation_id=None):
+    if len(frames) < 4:
+        raise AssertionError("trusted observation requires four frames")
+    return FakeTrustedObservation(
+        device_id=device_id,
+        scene=scene,
+        observation_id=observation_id or "obs-start",
+    )
 
 
 class PhaseOneNavigationPolicyTests(unittest.TestCase):
@@ -437,6 +636,158 @@ class AgentEvidenceStoreTests(unittest.TestCase):
                 store.write_json("bad.json", {"value": object()})
 
             self.assertFalse((Path(temp).parent / "outside.json").exists())
+
+
+class UniversalAgentStartTests(unittest.TestCase):
+    def _orchestrator(self, planner, qwen, adapter):
+        return UniversalAgentOrchestrator(
+            deepseek_planner=planner,
+            qwen_observer=qwen,
+            adapter_factory=lambda _device_id: adapter,
+            trusted_observation_factory=_trusted_factory,
+        )
+
+    def test_start_plans_observes_and_decides_with_zero_physical_actions(self) -> None:
+        graph = _graph()
+        planner = FakeDeepSeekPlanner(graph)
+        qwen = FakeQwenObserver()
+        adapter = FakeAdapter(_scene())
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(planner, qwen, adapter).start(
+                session_id="session-1",
+                raw_goal="看看公开分类详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual(1, adapter.capture_calls)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(1, len(qwen.calls))
+
+    def test_start_uses_at_least_four_frames_for_trusted_observation(self) -> None:
+        seen = []
+
+        def recording_factory(**kwargs):
+            seen.append(len(kwargs["frames"]))
+            return _trusted_factory(**kwargs)
+
+        adapter = FakeAdapter(_scene())
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = UniversalAgentOrchestrator(
+                deepseek_planner=FakeDeepSeekPlanner(_graph()),
+                qwen_observer=FakeQwenObserver(),
+                adapter_factory=lambda _device_id: adapter,
+                trusted_observation_factory=recording_factory,
+            )
+            orchestrator.start(
+                session_id="session-1",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual([4], seen)
+
+    def test_external_state_blocks_before_qwen_and_robot(self) -> None:
+        adapter = FakeAdapter(_scene())
+        qwen = FakeQwenObserver()
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                FakeDeepSeekPlanner(_external_graph()), qwen, adapter
+            ).start(
+                session_id="session-risk",
+                raw_goal="向目标联系人发送需求询问",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("blocked", session.status)
+        self.assertEqual(0, len(qwen.calls))
+        self.assertEqual(0, adapter.capture_calls)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_unknown_impact_blocks_before_qwen_and_robot(self) -> None:
+        adapter = FakeAdapter(_scene())
+        qwen = FakeQwenObserver()
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                FakeDeepSeekPlanner(_external_graph(impact="unknown")), qwen, adapter
+            ).start(
+                session_id="session-unknown",
+                raw_goal="处理影响尚不明确的状态",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("blocked", session.status)
+        self.assertEqual([], qwen.calls)
+        self.assertEqual(0, adapter.capture_calls)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_qwen_blocked_has_no_confirmation_entry(self) -> None:
+        adapter = FakeAdapter(_scene())
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                FakeDeepSeekPlanner(_graph()), FakeQwenObserver("blocked"), adapter
+            ).start(
+                session_id="session-blocked",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("blocked", session.status)
+        self.assertIsNone(session.confirmation_authority)
+        self.assertEqual(0, adapter.execute_calls)
+
+    def test_qwen_finished_requires_deepseek_completion_revision(self) -> None:
+        initial = _graph()
+        completed = _completed_graph(initial)
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                FakeDeepSeekPlanner(initial, replan_result=completed),
+                FakeQwenObserver("finished"),
+                FakeAdapter(_scene()),
+            ).start(
+                session_id="session-finished",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual(0, session.physical_actions)
+
+        with tempfile.TemporaryDirectory() as temp:
+            not_completed = self._orchestrator(
+                FakeDeepSeekPlanner(initial, replan_result=replace(initial, revision=2)),
+                FakeQwenObserver("finished"),
+                FakeAdapter(_scene()),
+            ).start(
+                session_id="session-unproven",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+        self.assertEqual("blocked", not_completed.status)
+
+    def test_protocol_or_identity_mismatch_fails_with_zero_actions(self) -> None:
+        adapter = FakeAdapter(_scene())
+        qwen = FakeQwenObserver(mutate_identity=("device_id", "device-other"))
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(UniversalAgentOrchestratorError, "device_id"):
+                self._orchestrator(FakeDeepSeekPlanner(_graph()), qwen, adapter).start(
+                    session_id="session-stale",
+                    raw_goal="查看详情",
+                    device_id="device-1",
+                    run_dir=Path(temp),
+                )
+
+        self.assertEqual(0, adapter.execute_calls)
 
 
 if __name__ == "__main__":

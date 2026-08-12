@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import uuid
 
 from deepseek_task_graph import DynamicTaskGraph, ObservedState
 from generic_intent import GenericIntentDraft
+from qwen_visual_decision import TrustedObservation
 from ui_scene import MIN_TARGET_CONFIDENCE, UISceneError
 from universal_action_controller import action_has_account_effect
 
@@ -257,6 +259,385 @@ class ObservationBridge:
         )
         observed.validate()
         return observed
+
+
+@dataclass
+class UniversalAgentSessionState:
+    session_id: str
+    raw_goal: str
+    device_id: str
+    run_dir: Path
+    adapter: Any = field(repr=False)
+    evidence_store: AgentEvidenceStore = field(repr=False)
+    task_graph: DynamicTaskGraph | None = None
+    goal_draft: GenericIntentDraft | None = None
+    trusted_observation: Any = None
+    qwen_decision: Any = None
+    controller_decision: NavigationPolicyDecision | None = None
+    confirmation_authority: Any = field(default=None, repr=False)
+    status: str = "created"
+    step_number: int = 1
+    physical_actions: int = 0
+    history: list[dict[str, Any]] = field(default_factory=list)
+    evidence_paths: list[str] = field(default_factory=list)
+    failed_reason: str = ""
+    created_at: str = field(
+        default_factory=lambda: datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        )
+    )
+
+    @staticmethod
+    def _serialize(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, Mapping):
+            return dict(value)
+        method = getattr(value, "to_dict", None)
+        if callable(method):
+            return method()
+        return value
+
+    def snapshot(self) -> dict[str, Any]:
+        decision = self._serialize(self.qwen_decision)
+        graph = self._serialize(self.task_graph)
+        observation = self._serialize(self.trusted_observation)
+        proposal = (
+            self._serialize(getattr(self.qwen_decision, "proposal", None))
+            if self.qwen_decision is not None
+            else None
+        )
+        controller = (
+            {
+                "allowed": self.controller_decision.allowed,
+                "reason": self.controller_decision.reason,
+                "canonical_class": self.controller_decision.canonical_class,
+                "policy_version": PhaseOneNavigationPolicy.VERSION,
+            }
+            if self.controller_decision is not None
+            else None
+        )
+        scene = (
+            self._serialize(getattr(self.trusted_observation, "scene", None))
+            if self.trusted_observation is not None
+            else None
+        )
+        return {
+            "session_id": self.session_id,
+            "raw_goal": self.raw_goal,
+            "device_id": self.device_id,
+            "created_at": self.created_at,
+            "status": self.status,
+            "step_number": self.step_number,
+            "physical_actions": self.physical_actions,
+            "failed_reason": self.failed_reason,
+            "task_graph": graph,
+            "goal": self._serialize(self.goal_draft),
+            "trusted_observation": observation,
+            "current_scene": scene,
+            "qwen_decision": decision,
+            "proposal": proposal,
+            "controller_decision": controller,
+            "history": list(self.history),
+            "evidence": list(dict.fromkeys(self.evidence_paths)),
+            "automatic_loop_enabled": False,
+            "confirmation_ready": bool(
+                self.status == "awaiting_confirmation"
+                and self.controller_decision is not None
+                and self.controller_decision.allowed
+            ),
+        }
+
+
+class UniversalAgentOrchestrator:
+    """Coordinate the generic one-action visual loop without App workflows."""
+
+    def __init__(
+        self,
+        *,
+        deepseek_planner: Any,
+        qwen_observer: Any,
+        adapter_factory: Callable[[str], Any],
+        trusted_observation_factory: Callable[..., Any] | None = None,
+        evidence_store_factory: Callable[[Path], AgentEvidenceStore] | None = None,
+        policy: PhaseOneNavigationPolicy | None = None,
+        bridge: ObservationBridge | None = None,
+    ) -> None:
+        self.deepseek_planner = deepseek_planner
+        self.qwen_observer = qwen_observer
+        self.adapter_factory = adapter_factory
+        self.trusted_observation_factory = (
+            trusted_observation_factory or TrustedObservation.from_scene
+        )
+        self.evidence_store_factory = evidence_store_factory or AgentEvidenceStore
+        self.policy = policy or PhaseOneNavigationPolicy()
+        self.bridge = bridge or ObservationBridge()
+
+    @staticmethod
+    def _policy_payload(decision: NavigationPolicyDecision) -> dict[str, Any]:
+        return {
+            "allowed": decision.allowed,
+            "reason": decision.reason,
+            "canonical_class": decision.canonical_class,
+            "policy_version": PhaseOneNavigationPolicy.VERSION,
+        }
+
+    @staticmethod
+    def _validate_graph_identity(
+        graph: DynamicTaskGraph,
+        *,
+        device_id: str,
+        previous: DynamicTaskGraph | None = None,
+    ) -> None:
+        graph.validate()
+        if graph.device_id != device_id:
+            raise UniversalAgentOrchestratorError(
+                "DeepSeek 任务图 device_id 与会话设备不一致。"
+            )
+        if previous is not None:
+            if graph.task_id != previous.task_id or graph.device_id != previous.device_id:
+                raise UniversalAgentOrchestratorError(
+                    "DeepSeek 重规划改变了 task_id 或 device_id。"
+                )
+            if graph.revision <= previous.revision:
+                raise UniversalAgentOrchestratorError(
+                    "DeepSeek 重规划 revision 没有增加。"
+                )
+
+    @staticmethod
+    def _validate_decision_binding(
+        graph: DynamicTaskGraph,
+        observation: Any,
+        decision: Any,
+    ) -> None:
+        expected = {
+            "task_id": graph.task_id,
+            "device_id": graph.device_id,
+            "revision": graph.revision,
+            "observation_id": str(
+                getattr(observation, "observation_id", "")
+            ),
+            "fingerprint": str(getattr(observation, "fingerprint", "")),
+        }
+        for field_name, expected_value in expected.items():
+            actual = getattr(decision, field_name, None)
+            if actual != expected_value:
+                raise UniversalAgentOrchestratorError(
+                    f"Qwen 决策 {field_name} 与当前权威状态不一致。"
+                )
+        bound = getattr(decision, "trusted_observation", None)
+        if bound is None or (
+            str(getattr(bound, "observation_id", ""))
+            != expected["observation_id"]
+            or str(getattr(bound, "fingerprint", ""))
+            != expected["fingerprint"]
+        ):
+            raise UniversalAgentOrchestratorError(
+                "Qwen 决策没有绑定当前可信观察。"
+            )
+        proposal = getattr(decision, "proposal", None)
+        if proposal is None:
+            raise UniversalAgentOrchestratorError("Qwen 决策缺少 proposal。")
+        proposal.validate(observation.scene)
+
+    @staticmethod
+    def _remember(session: UniversalAgentSessionState, *paths: Any) -> None:
+        for path in paths:
+            if path is None:
+                continue
+            values = path if isinstance(path, (list, tuple)) else (path,)
+            for item in values:
+                text = str(item or "").strip()
+                if text and text not in session.evidence_paths:
+                    session.evidence_paths.append(text)
+
+    def _write_terminal_snapshot(self, session: UniversalAgentSessionState) -> None:
+        session_path = session.evidence_store.write_session(session)
+        self._remember(session, session_path)
+        report_path = session.evidence_store.write_report(
+            {
+                "mode": "universal_agent_safe_live_loop",
+                "policy_version": PhaseOneNavigationPolicy.VERSION,
+                "session": session.snapshot(),
+            }
+        )
+        self._remember(session, report_path)
+
+    def start(
+        self,
+        *,
+        session_id: str,
+        raw_goal: str,
+        device_id: str,
+        run_dir: Path,
+    ) -> UniversalAgentSessionState:
+        adapter = self.adapter_factory(device_id)
+        store = self.evidence_store_factory(Path(run_dir))
+        session = UniversalAgentSessionState(
+            session_id=str(session_id or "").strip(),
+            raw_goal=" ".join(str(raw_goal or "").split()),
+            device_id=str(device_id or "").strip(),
+            run_dir=Path(run_dir),
+            adapter=adapter,
+            evidence_store=store,
+        )
+        if not session.session_id or not session.raw_goal or not session.device_id:
+            raise UniversalAgentOrchestratorError(
+                "启动通用 Agent 需要 session_id、目标和 device_id。"
+            )
+        try:
+            session.status = "planning"
+            graph = self.deepseek_planner.plan(
+                session.raw_goal,
+                device_id=session.device_id,
+            )
+            self._validate_graph_identity(graph, device_id=session.device_id)
+            session.task_graph = graph
+            session.goal_draft = self.bridge.goal_draft(graph)
+            self._remember(
+                session,
+                store.write_task_graph(graph),
+                store.write_risk_audit(graph),
+            )
+
+            current = graph.active_subgoal()
+            impact = current.external_impact if current is not None else "unknown"
+            if impact in {"external_state", "unknown"}:
+                session.status = "blocked"
+                session.failed_reason = (
+                    f"第一阶段禁止 {impact} 子目标进入 Qwen 或机械臂执行。"
+                )
+                session.controller_decision = NavigationPolicyDecision(
+                    allowed=False,
+                    reason=session.failed_reason,
+                )
+                self._remember(
+                    session,
+                    store.write_controller_decision(
+                        session.step_number,
+                        self._policy_payload(session.controller_decision),
+                    ),
+                )
+                self._write_terminal_snapshot(session)
+                return session
+            if current is None:
+                session.status = "blocked"
+                session.failed_reason = "任务图没有活动子目标。"
+                self._write_terminal_snapshot(session)
+                return session
+
+            session.status = "observing"
+            scene, frames, frame_paths = adapter.capture_scene(
+                session.goal_draft,
+                evidence_dir=session.run_dir,
+                prefix=f"before_step_{session.step_number}_frame",
+            )
+            self._remember(session, frame_paths)
+            observation = self.trusted_observation_factory(
+                frames=frames,
+                device_id=session.device_id,
+                scene=scene,
+            )
+            session.trusted_observation = observation
+            self._remember(
+                session,
+                store.write_trusted_observation(session.step_number, observation),
+            )
+
+            task_context = graph.to_qwen_context()
+            decision = self.qwen_observer.decide(
+                frames=frames,
+                task_context=task_context,
+                trusted_observation=observation,
+                decision_number=session.step_number,
+            )
+            self._validate_decision_binding(graph, observation, decision)
+            session.qwen_decision = decision
+            self._remember(
+                session,
+                store.write_qwen_decision(session.step_number, decision),
+            )
+
+            proposal = decision.proposal
+            if proposal.status == "action":
+                policy_decision = self.policy.evaluate(
+                    task_context=task_context,
+                    trusted_observation=observation,
+                    decision=decision,
+                )
+                session.controller_decision = policy_decision
+                self._remember(
+                    session,
+                    store.write_controller_decision(
+                        session.step_number,
+                        self._policy_payload(policy_decision),
+                    ),
+                )
+                if policy_decision.allowed:
+                    session.status = "awaiting_confirmation"
+                else:
+                    session.status = "blocked"
+                    session.failed_reason = policy_decision.reason
+            elif proposal.status == "blocked":
+                session.status = "blocked"
+                session.failed_reason = proposal.reason
+                session.controller_decision = NavigationPolicyDecision(
+                    allowed=False,
+                    reason=proposal.reason,
+                )
+            elif proposal.status == "finished":
+                observed = self.bridge.observed_state(
+                    graph=graph,
+                    trusted_observation=observation,
+                    action_outcome="not_applicable",
+                    verification={
+                        "completion_evidence": list(proposal.completion_evidence),
+                        "visible_evidence": list(proposal.completion_evidence),
+                    },
+                )
+                revised = self.deepseek_planner.replan(
+                    graph,
+                    observed,
+                    trigger="subgoal_completed",
+                    reason="Qwen 在当前可信画面中提出完成候选，要求 DeepSeek 复核。",
+                )
+                self._validate_graph_identity(
+                    revised,
+                    device_id=session.device_id,
+                    previous=graph,
+                )
+                session.task_graph = revised
+                self._remember(
+                    session,
+                    store.write_task_graph(revised),
+                    store.write_risk_audit(revised),
+                )
+                if revised.status == "completed":
+                    session.status = "succeeded"
+                else:
+                    session.status = "blocked"
+                    session.failed_reason = (
+                        "Qwen 的完成候选没有被 DeepSeek 新 revision 确认为完成。"
+                    )
+            else:
+                raise UniversalAgentOrchestratorError(
+                    f"不支持的 Qwen 状态：{proposal.status}"
+                )
+
+            if session.physical_actions != 0:
+                raise UniversalAgentOrchestratorError(
+                    "start 路径错误地触发了物理动作。"
+                )
+            self._write_terminal_snapshot(session)
+            return session
+        except Exception as exc:
+            session.status = "failed"
+            session.failed_reason = str(exc)
+            try:
+                self._write_terminal_snapshot(session)
+            except Exception:
+                pass
+            raise
 
 
 @dataclass(frozen=True)

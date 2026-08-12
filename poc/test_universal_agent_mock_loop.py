@@ -1,0 +1,333 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+import tempfile
+import unittest
+
+from PIL import Image, ImageDraw
+
+from deepseek_task_graph import TargetApp
+from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
+from generic_step_planner import GenericStepProposal
+from semantic_executor import SemanticAction
+from ui_scene import UIElement, UIScene
+from universal_agent_orchestrator import UniversalAgentOrchestrator
+
+from test_universal_agent_orchestrator import (
+    FakeDeepSeekPlanner,
+    _confirmation,
+    _graph,
+    _trusted_factory,
+)
+
+
+def synthetic_frame(*, page: str, unstable_variant: int = 0) -> Image.Image:
+    """Create an owned, generic phone UI frame with no third-party assets."""
+
+    colors = {
+        "before": (244, 247, 250),
+        "after": (220, 238, 255),
+        "unstable": (
+            (255, 255, 255) if unstable_variant % 2 else (0, 0, 0)
+        ),
+    }
+    image = Image.new("RGB", (540, 960), colors[page])
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((36, 80, 504, 170), radius=18, fill=(28, 38, 54))
+    draw.rounded_rectangle((64, 260, 476, 390), radius=22, fill=(255, 255, 255))
+    draw.rounded_rectangle((64, 430, 476, 560), radius=22, fill=(255, 255, 255))
+    draw.rectangle((80, 300, 320, 326), fill=(80, 100, 130))
+    if page == "after":
+        draw.rectangle((80, 470, 420, 500), fill=(40, 118, 205))
+    elif page == "unstable":
+        draw.rectangle(
+            (0, 0, 540, 220),
+            fill=(0, 0, 0) if unstable_variant % 2 else (255, 255, 255),
+        )
+        x = 80 if unstable_variant % 2 else 280
+        draw.rectangle((x, 650, x + 160, 720), fill=(210, 56, 72))
+    return image
+
+
+def scene(
+    *,
+    app_id: str,
+    fingerprint: str,
+    action_kind: str,
+    unsafe: bool = False,
+) -> UIScene:
+    elements = ()
+    if action_kind == "tap_semantic":
+        elements = (
+            UIElement(
+                element_id="generic-entry",
+                role="toggle" if unsafe else "button",
+                meaning="enable_setting" if unsafe else "open_details",
+                label="启用" if unsafe else "查看内容",
+                bounds=(0.12, 0.27, 0.88, 0.42),
+                confidence=0.98,
+                evidence=("合成画面中的唯一候选",),
+            ),
+        )
+    return UIScene(
+        app_id=app_id,
+        screen_id="after" if fingerprint.endswith("after") else "before",
+        summary="合成详情页" if fingerprint.endswith("after") else "合成入口页",
+        elements=elements,
+        stable=True,
+        confidence=0.98,
+        fingerprint=fingerprint,
+    )
+
+
+class ScriptedObserver:
+    def __init__(self, before_scene: UIScene, after_scene: UIScene) -> None:
+        self.before_scene = before_scene
+        self.after_scene = after_scene
+        self.calls = 0
+
+    def observe(self, *, frames, goal_context):
+        del goal_context
+        self.calls += 1
+        pixel = frames[-1].getpixel((0, 0))
+        return self.after_scene if pixel == (220, 238, 255) else self.before_scene
+
+
+class ScriptedCapture:
+    def __init__(self, *, unstable_after: bool = False) -> None:
+        self.calls = 0
+        self.unstable_after = unstable_after
+
+    def __call__(self) -> Image.Image:
+        self.calls += 1
+        if self.calls <= 8:
+            return synthetic_frame(page="before")
+        if self.unstable_after:
+            return synthetic_frame(
+                page="unstable",
+                unstable_variant=self.calls,
+            )
+        return synthetic_frame(page="after")
+
+
+class RecordingRobot:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[int, ...]]] = []
+
+    def vision_tap_relative(self, x: int, y: int):
+        self.calls.append(("tap", (x, y)))
+        return {"ok": True, "kind": "tap"}
+
+    def vision_android_back(self):
+        self.calls.append(("back", ()))
+        return {"ok": True, "kind": "back"}
+
+
+class ScriptedQwen:
+    def __init__(self, action_kind: str, *, unsafe: bool = False) -> None:
+        self.action_kind = action_kind
+        self.unsafe = unsafe
+        self.calls = []
+
+    def decide(self, *, frames, task_context, trusted_observation, decision_number=1):
+        self.calls.append((frames, task_context, trusted_observation, decision_number))
+        if self.action_kind == "back":
+            params = {"expected_effect": {"scene_changed": True}}
+        else:
+            element = trusted_observation.scene.elements[0]
+            params = {
+                "element_id": element.element_id,
+                "target": element.meaning,
+                "meaning": element.meaning,
+                "role": element.role,
+                "label": element.label,
+                "expected_effect": {"scene_changed": True},
+            }
+        action = SemanticAction(
+            node_id=f"synthetic-{decision_number}",
+            action=self.action_kind,
+            params=params,
+        )
+        proposal = GenericStepProposal(
+            status="action",
+            action=action,
+            reason="合成可信观察中存在唯一通用候选。",
+        )
+        region = SimpleNamespace(
+            kind="system_navigation" if self.action_kind == "back" else "element",
+            element_id=(
+                "" if self.action_kind == "back" else trusted_observation.scene.elements[0].element_id
+            ),
+            bounds=(
+                (0.0, 0.0, 1.0, 1.0)
+                if self.action_kind == "back"
+                else trusted_observation.scene.elements[0].bounds
+            ),
+        )
+        decision = SimpleNamespace(
+            task_id=task_context["task_id"],
+            device_id=task_context["device_id"],
+            revision=task_context["revision"],
+            observation_id=trusted_observation.observation_id,
+            fingerprint=trusted_observation.fingerprint,
+            trusted_observation=trusted_observation,
+            target_region=region,
+            confidence=0.97,
+            proposal=proposal,
+        )
+        decision.to_dict = lambda: {
+            "task_id": decision.task_id,
+            "device_id": decision.device_id,
+            "revision": decision.revision,
+            "observation_id": decision.observation_id,
+            "fingerprint": decision.fingerprint,
+            "status": "action",
+            "next_action": action.to_dict(),
+            "reason": proposal.reason,
+        }
+        return decision
+
+
+def graph_for(*, app_id: str, app_name: str, raw_goal: str):
+    graph = _graph(device_id="device-1")
+    graph = replace(
+        graph,
+        goal=replace(
+            graph.goal,
+            objective=raw_goal,
+            target_apps=(TargetApp(app_id=app_id, app_name=app_name),),
+        ),
+        raw_user_goal=raw_goal,
+    )
+    graph.validate()
+    return graph
+
+
+class UniversalAgentMockLoopTests(unittest.TestCase):
+    def _session(
+        self,
+        temp: str,
+        *,
+        app_id: str,
+        app_name: str,
+        raw_goal: str,
+        action_kind: str,
+        unsafe: bool = False,
+        unstable_after: bool = False,
+    ):
+        initial = graph_for(app_id=app_id, app_name=app_name, raw_goal=raw_goal)
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_result=replace(initial, revision=2),
+        )
+        before = scene(
+            app_id=app_id,
+            fingerprint=f"{app_id}-before",
+            action_kind=action_kind,
+            unsafe=unsafe,
+        )
+        after = scene(
+            app_id=app_id,
+            fingerprint=f"{app_id}-after",
+            action_kind=action_kind,
+            unsafe=unsafe,
+        )
+        capture = ScriptedCapture(unstable_after=unstable_after)
+        observer = ScriptedObserver(before, after)
+        robot = RecordingRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=capture,
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=0.02,
+            post_action_max_observations=1,
+        )
+        qwen = ScriptedQwen(action_kind, unsafe=unsafe)
+        orchestrator = UniversalAgentOrchestrator(
+            deepseek_planner=planner,
+            qwen_observer=qwen,
+            adapter_factory=lambda _device_id: adapter,
+            trusted_observation_factory=_trusted_factory,
+        )
+        session = orchestrator.start(
+            session_id=f"session-{app_id}",
+            raw_goal=raw_goal,
+            device_id="device-1",
+            run_dir=Path(temp),
+        )
+        return orchestrator, session, planner, qwen, capture, robot
+
+    def test_unseen_open_goal_executes_one_navigation_tap_and_replans(self):
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, planner, qwen, _capture, robot = self._session(
+                temp,
+                app_id="synthetic.catalog",
+                app_name="合成目录",
+                raw_goal="把眼前这个条目的内容页打开给我看",
+                action_kind="tap_semantic",
+            )
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(["tap"], [item[0] for item in robot.calls])
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual("synthetic.catalog", session.goal_draft.app_id)
+
+    def test_rephrased_back_goal_executes_one_back_and_replans(self):
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, planner, qwen, _capture, robot = self._session(
+                temp,
+                app_id="synthetic.reader",
+                app_name="合成阅读器",
+                raw_goal="我不想停在这里，退回刚才那一层",
+                action_kind="back",
+            )
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("back", ())], robot.calls)
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual("synthetic.reader", session.goal_draft.app_id)
+
+    def test_non_navigation_button_is_blocked_without_robot_call(self):
+        with tempfile.TemporaryDirectory() as temp:
+            _orchestrator, session, _planner, _qwen, _capture, robot = self._session(
+                temp,
+                app_id="synthetic.controls",
+                app_name="合成控制页",
+                raw_goal="把这个开关启用",
+                action_kind="tap_semantic",
+                unsafe=True,
+            )
+
+        self.assertEqual("blocked", session.status)
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual([], robot.calls)
+
+    def test_unstable_after_frames_fail_after_one_action_without_retry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, qwen, _capture, robot = self._session(
+                temp,
+                app_id="synthetic.unstable",
+                app_name="合成动态页",
+                raw_goal="进入这个公开信息入口",
+                action_kind="tap_semantic",
+                unstable_after=True,
+            )
+            with self.assertRaisesRegex(GenericActionAdapterError, "没有稳定"):
+                orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(["tap"], [item[0] for item in robot.calls])
+        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual("failed", session.status)
+
+
+if __name__ == "__main__":
+    unittest.main()

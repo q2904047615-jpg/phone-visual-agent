@@ -1,0 +1,9 @@
+{
+  "fixture_type": "owned_synthetic_ui",
+  "scenario": "navigation_open",
+  "before": "generic entry page",
+  "after": "generic detail page",
+  "external_impact": "navigation_only",
+  "expected_physical_actions": 1,
+  "generator": "test_universal_agent_mock_loop.synthetic_frame"
+}

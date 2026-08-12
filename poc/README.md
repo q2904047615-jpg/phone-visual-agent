@@ -4,6 +4,22 @@
 
 > 新增：多 App 本机网页控制台请查看 [README_WEB.md](README_WEB.md)，或双击项目根目录的 `启动机械臂网页控制台.cmd`。
 
+## 当前通用 Agent 主路径（第一阶段）
+
+当前官方受监督入口是 `/api/agent/generic-supervised/*`，数据流固定为：自然语言目标 → DeepSeek 动态任务图 → 四帧可信观察 → Qwen 唯一下一视觉动作 → 本地通用导航策略 → 用户对当前 task/revision/subgoal/risk/observation/fingerprint 的精确确认 → 最多一个机械臂动作 → 四帧重新观察与验证 → DeepSeek 新 revision。新命令只要能由已开放的通用动作组合完成，就不应修改代码或增加 App 分支。
+
+第一阶段只开放经过本地策略验证的低风险导航动作，包括通用语义入口点击、关闭遮挡层、滑动、系统返回和等待变化。外部状态、未知影响、输入、开关、账号效果及非导航按钮均阻断；网页自动连续执行关闭，同一设备同一时间只能有一个活动会话。
+
+离线与模拟闭环测试：
+
+```powershell
+cd .\poc
+.\.venv\Scripts\python.exe -m unittest test_universal_agent_orchestrator test_universal_agent_mock_loop -v
+node test_frontend_protocol.js
+```
+
+合成模拟测试使用 Pillow 自有画面，不依赖任何真实 App 脚本。通过这些测试只证明代码协议、安全门和模拟机械臂闭环；不等于真实摄像头、真实机械臂、多台手机并行、文字输入或外部状态动作已经验收。下面保留的旧单功能 PoC 仅作为历史底层动作证据，不是通用 Agent 的任务编排方式。
+
 这个 PoC 不修改卖家软件、不破解串口协议。它把现有
 `智联新途机械臂控制端` 当作执行器：
 

@@ -1,5 +1,9 @@
 # 通用手机视觉 Agent 第一阶段离线验证报告
 
+> 历史阶段记录：本文保留第一阶段当时的边界和测试数字。当前完整进度、
+> 真机会话与最新回归结果以同目录
+> `2026-08-12-universal-agent-levels-progress.md` 为准。
+
 日期：2026-08-12
 分支：`codex/universal-agent-safe-live-loop-design`
 范围：纯离线代码、模拟机械臂、网页协议与浏览器契约；未执行真实机械臂动作。

@@ -28,12 +28,24 @@
 
 ## 测试结果
 
-Python 全量（加入“相机噪声导致 fingerprint 变化、页面语义未变化”的反例后）：
+Python 全量（加入安全语义重绑定与 Qwen 等价 JSON 结构反例后）：
 
 ```text
-Ran 604 tests in 31.358s
+Ran 610 tests in 31.390s
 OK
 ```
+
+在线 Qwen 脱敏截图用例 `settings_list_scroll_single_action` 已复跑通过：
+
+```text
+report_status=complete, passed=1, failed=0
+hardware_actions_enabled=false
+```
+
+报告位于 `poc/output/offline_qwen_visual_decision/20260812_223151_241031/report.json`。
+解析器兼容模型常见的 `type + params` 等价动作结构，但只保留当前动作类型
+实际生效的本地参数。滑动距离提示和模型局部区域不进入控制器；`x/y`、裸坐标、
+冲突字段和未知字段继续失败关闭。
 
 前端协议与真实浏览器契约：
 
@@ -54,14 +66,16 @@ OK
 - 通用控制器现同时比较 fingerprint 和场景语义签名。语义未变化会记录为 `mismatched`、写入失败证据、触发 `action_result_mismatch` 重规划，并在安全循环中立即停止；不会重试机械臂。
 - 旧会话已暂停并失效其第二次确认权限。新代码服务已启动，机械臂控制端、摄像头在线且当前不忙。
 - 同一句陌生命令在新服务进行了多轮“只观察、零物理动作”的在线协议修复。修复均位于通用边界：空可选 `input_text` 归一为缺失；Qwen 动作/区域的已知字段别名与嵌套等价结构归一；目标区域及候选语义字段由本地可信观察构造；冲突字段仍失败关闭；“启动/launch/start”纳入通用导航词汇且外部状态禁词仍优先拦截。
-- 在线最终结果：新会话 `fbe331637189465c852fbdc77734f83b` 已停在 `awaiting_confirmation`，物理动作数为 0，动作是绑定可信候选 `browser_app_icon` 的 `tap_semantic`；revision 为 1，observation 为 `obs_2e6456aa255646baa81d94ef1e3bf217`，fingerprint 为 `c9f3b41cbf0585615113`。
+- 会话 `fbe331637189465c852fbdc77734f83b` 的确认在执行前重新观察时安全停止，原因是同一浏览器图标被 Qwen 用另一种同义措辞描述；机械臂动作数保持 0，旧确认已经失效。
+- 通用重绑定现只允许“未知页面信息变得更明确”和同一个低风险导航语义类别内的模型措辞变化，并继续逐项要求相同 label、role、states 与至少 0.60 IoU。`return -> save_and_return` 等风险语义变化仍以 0 动作拒绝。确认失败证据也会包含确认时重新采集的四帧。
+- 修复并重启后，新会话 `bbdcfc2253c24552be0f43104e77498a` 已停在 `awaiting_confirmation`，物理动作数为 0，动作是绑定可信候选 `browser_app_icon` 的 `tap_semantic`；revision 为 1，observation 为 `obs_3680de47e9c74697b963133c0617ac63`，fingerprint 为 `d9317f1ca5b56ee43b3b`。
 - 网页只读实测已从运行服务恢复该会话，展示自然语言入口、动态任务图、当前真实观察、0 个物理动作、精确确认、重新观察、暂停和取消入口；未点击任何执行按钮。
 - `/api/device` 的产品主路径标识已改为 `universal_agent`。旧队列 worker、旧 generic orchestrator 和旧语义适配器只标记为 `compatibility_only/default_user_path=false`，不再把保留的 `legacy` worker 模式误报为网页主路径。
 - 多设备协调锁已从全局锁拆为按 `device_id` 隔离：不同设备可同时取得各自的进程租约、协调锁和控制器锁；同一设备的第二次占用仍失败关闭。两个不同设备也可同时保持独立活动会话和确认范围。
 
 ## 尚需真实硬件完成的验收
 
-- 浏览器点击已有一次真实失败证据；新会话已经重新形成合法确认门，仍需新的精确确认、成功页面变化和 DeepSeek 新 revision 才算通过。
+- 浏览器点击已有一次真实失败证据；最新会话已经重新形成合法确认门，仍需针对该新会话的精确确认、成功页面变化和 DeepSeek 新 revision 才算通过。更早确认不能复用。
 - 真实输入和真实长按各一次；每次都要单独确认并保存前后证据。
 - 任意两点拖动代码路径已经接入，但尚未进行一次受监督真机动作和动作后画面验证；当前设备的 `verified_actions` 因此不含 `drag`，Qwen 不能提出该动作。
 - 至少三个真实 App 的陌生命令、多步路径变化和结果验证。

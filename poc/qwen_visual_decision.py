@@ -1529,12 +1529,24 @@ def _parse_action(
     if not isinstance(value, dict):
         raise GenericStepPlanningError("action 状态缺少唯一 next_action 对象。")
     value = dict(value)
+    nested_params = value.pop("params", None)
+    if nested_params is not None:
+        if not isinstance(nested_params, dict):
+            raise GenericStepPlanningError("next_action.params 必须是JSON对象。")
+        _reject_raw_control_data(nested_params)
+        for field, nested_value in nested_params.items():
+            if field in value and value[field] != nested_value:
+                raise GenericStepPlanningError(
+                    f"next_action.params.{field} 与顶层字段冲突。"
+                )
+            value[field] = nested_value
     # Qwen occasionally uses two conventional JSON aliases even after a
     # format-only retry.  Normalize names only; candidate identity and every
     # semantic field are still checked against the trusted observation below.
     for alias, canonical in {
         "action": "kind",
         "action_type": "kind",
+        "type": "kind",
         "target_element_id": "element_id",
     }.items():
         if alias not in value:
@@ -1544,6 +1556,23 @@ def _parse_action(
                 f"next_action.{alias} 与 {canonical} 冲突。"
             )
         value[canonical] = value.pop(alias)
+    kind = str(value.get("kind") or "").strip().lower()
+    if "distance" in value:
+        distance = value.pop("distance")
+        if kind != "swipe":
+            raise GenericStepPlanningError(
+                "next_action.distance 只允许作为swipe的非权威提示。"
+            )
+        if (
+            isinstance(distance, bool)
+            or not isinstance(distance, (int, float))
+            or not 0 < float(distance) <= 1000
+        ):
+            raise GenericStepPlanningError(
+                "next_action.distance 必须是1到1000的数值提示。"
+            )
+        # The device exposes only a calibrated fixed swipe.  Model-authored
+        # distance never reaches the controller or hardware.
     allowed = {
         "kind", "element_id", "target", "role", "label", "states", "direction",
         "text", "duration_ms",
@@ -1556,12 +1585,30 @@ def _parse_action(
         raise GenericStepPlanningError(
             "next_action 包含协议外字段：" + ", ".join(sorted(unexpected))
         )
-    kind = str(value.get("kind") or "").strip().lower()
     if kind not in ALLOWED_STEP_ACTIONS:
         raise GenericStepPlanningError(f"唯一下一动作不在通用白名单：{kind}")
+    parameter_fields_by_kind = {
+        "tap_semantic": {"element_id", "target", "role", "label", "states"},
+        "dismiss_overlay": {"element_id", "target", "role", "label", "states"},
+        "input_verified_text": {
+            "element_id", "target", "role", "label", "states", "text",
+        },
+        "long_press": {
+            "element_id", "target", "role", "label", "states", "duration_ms",
+        },
+        "drag": {
+            "source_element_id", "source_target", "source_role", "source_label",
+            "source_states", "destination_element_id", "destination_target",
+            "destination_role", "destination_label", "destination_states",
+        },
+        "swipe": {"direction"},
+        "back": set(),
+        "wait_for_change": set(),
+    }
+    effective_fields = parameter_fields_by_kind[kind]
     params = {
         key: value[key]
-        for key in allowed - {"kind"}
+        for key in effective_fields
         if key in value and value[key] not in (None, "", {}, [])
     }
     params["expected_effect"] = dict(expected_result)
@@ -1681,9 +1728,19 @@ def _parse_target_region(
                 "bounds": [0.0, 0.0, 1000.0, 1000.0],
                 "description": "当前屏幕",
             }
-        for key, default in defaults.items():
-            if value.get(key) in (None, "", []):
-                value[key] = default
+        if action.action in SINGLE_ELEMENT_ACTIONS or action.action == "drag":
+            for key, default in defaults.items():
+                if value.get(key) in (None, "", []):
+                    value[key] = default
+        else:
+            # Screen/system actions have no model-authoritative region.  The
+            # local controller always records the actual full-screen region;
+            # model-authored container bounds or element IDs are ignored.
+            value = {
+                **defaults,
+                "description": str(value.get("description") or "").strip()
+                or defaults["description"],
+            }
     allowed = {
         "kind",
         "element_id",

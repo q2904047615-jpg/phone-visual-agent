@@ -953,6 +953,77 @@ class QwenVisualDecisionTests(unittest.TestCase):
             decision.proposal.action.params["element_id"],
         )
 
+    def test_nested_swipe_params_use_only_local_verified_direction(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        payload["next_action"] = {
+            "type": "swipe",
+            "params": {"direction": "up", "distance": 300},
+        }
+        payload["target_region"] = {
+            "element_id": "settings_icon",
+            "bounds": [680, 200, 860, 350],
+            "description": "模型建议的局部滚动区域",
+        }
+        payload["expected_result"] = {"list_content_changed": True}
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("swipe", decision.proposal.action.action)
+        self.assertEqual("up", decision.proposal.action.params["direction"])
+        self.assertNotIn("distance", decision.proposal.action.params)
+        for irrelevant in (
+            "element_id",
+            "target",
+            "role",
+            "label",
+            "states",
+            "duration_ms",
+            "source_element_id",
+            "destination_element_id",
+        ):
+            self.assertNotIn(irrelevant, decision.proposal.action.params)
+        self.assertEqual("screen", decision.target_region.kind)
+        self.assertEqual("", decision.target_region.element_id)
+        self.assertEqual((0.0, 0.0, 1.0, 1.0), decision.target_region.bounds)
+
+    def test_conflicting_nested_action_param_is_rejected(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad["next_action"] = {
+            "kind": "swipe",
+            "direction": "down",
+            "params": {"direction": "up"},
+        }
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("params.direction", decision.reason)
+
+    def test_nested_action_params_still_reject_raw_coordinates(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad["next_action"] = {
+            "type": "swipe",
+            "params": {"direction": "up", "x": 400, "y": 600},
+        }
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("禁止字段", decision.reason)
+
+    def test_nested_action_params_must_be_an_object(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad["next_action"] = {"type": "swipe", "params": "direction=up"}
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("params 必须是JSON对象", decision.reason)
+
     def test_action_alias_and_nested_target_region_are_normalized(self) -> None:
         payload = action_payload(self.context, self.observation)
         action = payload["next_action"]

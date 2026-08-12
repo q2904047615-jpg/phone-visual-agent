@@ -47,6 +47,99 @@ ACCOUNT_EFFECT_STATE_KEYS = frozenset(
     }
 )
 
+FORBIDDEN_SEMANTIC_ENGLISH = frozenset(
+    {
+        "send",
+        "publish",
+        "post",
+        "comment",
+        "follow",
+        "unfollow",
+        "like",
+        "favorite",
+        "subscribe",
+        "pay",
+        "purchase",
+        "buy",
+        "order",
+        "delete",
+        "remove",
+        "submit",
+        "save",
+        "invite",
+        "join",
+        "input",
+        "type",
+        "drag",
+        "longpress",
+        "confirm",
+        "approve",
+        "accept",
+        "agree",
+        "authorize",
+    }
+)
+FORBIDDEN_SEMANTIC_CHINESE = (
+    "发送",
+    "发布",
+    "评论",
+    "关注",
+    "取关",
+    "点赞",
+    "收藏",
+    "订阅",
+    "支付",
+    "购买",
+    "下单",
+    "删除",
+    "移除",
+    "提交",
+    "保存",
+    "邀请",
+    "加入",
+    "输入",
+    "长按",
+    "拖动",
+    "确认",
+    "确定",
+    "同意",
+    "批准",
+    "授权",
+)
+NAVIGATION_SEMANTIC_CLASSES = (
+    ("back", frozenset({"back", "return", "previous"}), ("返回", "后退", "上一页")),
+    ("close", frozenset({"close", "cancel", "dismiss"}), ("关闭", "取消", "收起")),
+    ("tab", frozenset({"tab", "switch"}), ("标签", "切换")),
+    ("menu", frozenset({"menu", "more"}), ("菜单", "更多")),
+    ("list", frozenset({"list", "item"}), ("列表", "条目")),
+    ("search", frozenset({"search"}), ("搜索",)),
+    (
+        "open",
+        frozenset({"open", "enter", "navigate", "entry", "launcher", "launch", "start"}),
+        ("打开", "进入", "入口", "启动"),
+    ),
+    ("view", frozenset({"view", "details", "detail"}), ("查看", "详情")),
+)
+
+
+def navigation_semantic_class(*values: str) -> str:
+    """Classify only locally known navigation semantics, failing risky text closed."""
+
+    combined = " ".join(str(value or "").strip() for value in values)
+    tokens = {
+        token
+        for token in re.split(r"[^a-z0-9]+", combined.casefold())
+        if token
+    }
+    if tokens.intersection(FORBIDDEN_SEMANTIC_ENGLISH) or any(
+        marker in combined for marker in FORBIDDEN_SEMANTIC_CHINESE
+    ):
+        return "forbidden"
+    for canonical, english, chinese in NAVIGATION_SEMANTIC_CLASSES:
+        if tokens.intersection(english) or any(marker in combined for marker in chinese):
+            return canonical
+    return ""
+
 
 def action_account_effect_marker(action: SemanticAction) -> str:
     """Return the concrete marker proving that an action may change an account.

@@ -456,6 +456,134 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
         self.assertEqual(robot.actions, [])
 
+    def test_rebind_accepts_same_navigation_class_after_model_wording_drift(self):
+        planned = UIScene(
+            app_id="unknown",
+            screen_id="unknown",
+            summary="主屏幕",
+            elements=(
+                UIElement(
+                    element_id="browser_app_icon",
+                    role="icon",
+                    meaning="启动浏览器应用",
+                    label="浏览器",
+                    bounds=(0.12, 0.03, 0.33, 0.17),
+                    confidence=0.98,
+                    states={"goal_relevant": True},
+                ),
+            ),
+            stable=True,
+            confidence=0.97,
+            fingerprint="planned",
+        )
+        fresh = UIScene(
+            app_id="launcher",
+            screen_id="home_screen",
+            summary="主屏幕",
+            elements=(
+                UIElement(
+                    element_id="browser_icon",
+                    role="icon",
+                    meaning="launch_browser_app",
+                    label="浏览器",
+                    bounds=(0.13, 0.03, 0.32, 0.16),
+                    confidence=0.98,
+                    states={"goal_relevant": True},
+                ),
+            ),
+            stable=True,
+            confidence=0.96,
+            fingerprint="fresh",
+        )
+        after = UIScene(
+            app_id="browser",
+            screen_id="browser_home",
+            summary="浏览器首页",
+            stable=True,
+            confidence=0.95,
+            fingerprint="after",
+        )
+        robot = FakeRobot()
+        result = self._adapter(
+            FakeSceneObserver([fresh, after]),
+            robot,
+        ).execute(
+            requested_action=SemanticAction(
+                node_id="open-browser",
+                action="tap_semantic",
+                params={
+                    "element_id": "browser_app_icon",
+                    "target": "启动浏览器应用",
+                    "role": "icon",
+                    "label": "浏览器",
+                    "states": {"goal_relevant": True},
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("tap", 225, 95)], robot.actions)
+        self.assertEqual("launch_browser_app", result.rebound_action.params["target"])
+
+    def test_rebind_rejects_risky_meaning_drift_even_when_label_and_region_match(self):
+        planned = UIScene(
+            app_id="settings",
+            screen_id="edit",
+            summary="编辑页",
+            elements=(
+                UIElement(
+                    element_id="return_button",
+                    role="button",
+                    meaning="return",
+                    label="返回",
+                    bounds=(0.1, 0.1, 0.3, 0.2),
+                    confidence=0.96,
+                    states={"enabled": True},
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = UIScene(
+            app_id="settings",
+            screen_id="edit",
+            summary="编辑页",
+            elements=(
+                UIElement(
+                    element_id="save_return_button",
+                    role="button",
+                    meaning="save_and_return",
+                    label="返回",
+                    bounds=(0.1, 0.1, 0.3, 0.2),
+                    confidence=0.96,
+                    states={"enabled": True},
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        robot = FakeRobot()
+
+        with self.assertRaisesRegex(GenericActionAdapterError, "语义"):
+            self._adapter(FakeSceneObserver([fresh]), robot).execute(
+                requested_action=SemanticAction(
+                    node_id="return",
+                    action="tap_semantic",
+                    params={
+                        "element_id": "return_button",
+                        "target": "return",
+                        "role": "button",
+                        "label": "返回",
+                        "states": {"enabled": True},
+                    },
+                ),
+                planned_scene=planned,
+                goal=goal(),
+                confirmed=True,
+            )
+
+        self.assertEqual([], robot.actions)
+
     def test_changed_target_region_before_confirmation_stops_without_robot_action(self):
         planned = scene("planned")
         fresh = scene("fresh", bounds=(0.65, 0.65, 0.85, 0.85))

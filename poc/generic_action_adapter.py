@@ -19,6 +19,7 @@ from universal_action_controller import (
     ResolvedSemanticAction,
     UniversalActionController,
     UniversalActionError,
+    navigation_semantic_class,
 )
 
 
@@ -375,7 +376,13 @@ class GenericSingleActionAdapter:
             evidence_dir=evidence_dir,
             prefix=f"{evidence_prefix}_before",
         )
-        rebound = self._rebind_action(requested_action, planned_scene, before)
+        try:
+            rebound = self._rebind_action(requested_action, planned_scene, before)
+        except GenericActionAdapterError as exc:
+            raise GenericActionAdapterError(
+                str(exc),
+                evidence=before_paths + tuple(getattr(exc, "evidence", ())),
+            ) from exc
         try:
             resolved = self.controller.resolve_one(
                 rebound,
@@ -532,7 +539,10 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError(
                 f"确认时前台 App 已变化：{planned_app} -> {fresh_app}"
             )
-        if planned_scene.screen_id != fresh_scene.screen_id:
+        if (
+            planned_scene.screen_id != "unknown"
+            and planned_scene.screen_id != fresh_scene.screen_id
+        ):
             raise GenericActionAdapterError(
                 f"确认时页面已变化：{planned_scene.screen_id} -> {fresh_scene.screen_id}"
             )
@@ -555,7 +565,6 @@ class GenericSingleActionAdapter:
                 raise GenericActionAdapterError(f"原始场景目标无效：{exc}") from exc
             matches = fresh_scene.find_elements(
                 label=original.label or None,
-                meaning=original.meaning,
                 role=original.role,
                 states=dict(original.states),
             )
@@ -566,7 +575,22 @@ class GenericSingleActionAdapter:
                 )
             current = matches[0]
             if current.meaning.casefold() != original.meaning.casefold():
-                raise GenericActionAdapterError("确认时目标语义已经变化，旧确认失效。")
+                original_class = navigation_semantic_class(
+                    original.meaning,
+                    original.label,
+                )
+                current_class = navigation_semantic_class(
+                    current.meaning,
+                    current.label,
+                )
+                if (
+                    not original_class
+                    or original_class == "forbidden"
+                    or current_class != original_class
+                ):
+                    raise GenericActionAdapterError(
+                        "确认时目标语义已经变化，旧确认失效。"
+                    )
             if current.label != original.label or current.states != original.states:
                 raise GenericActionAdapterError(
                     "确认时目标标签或状态已经变化，旧确认失效。"

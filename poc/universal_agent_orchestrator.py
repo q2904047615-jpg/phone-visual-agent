@@ -17,7 +17,10 @@ from generic_action_adapter import GenericActionAdapterError
 from generic_intent import GenericIntentDraft
 from qwen_visual_decision import QwenTaskContext, TrustedObservation
 from ui_scene import MIN_TARGET_CONFIDENCE, UISceneError
-from universal_action_controller import action_has_account_effect
+from universal_action_controller import (
+    action_has_account_effect,
+    navigation_semantic_class,
+)
 
 
 class UniversalAgentOrchestratorError(RuntimeError):
@@ -1881,82 +1884,6 @@ class PhaseOneNavigationPolicy:
     NAVIGATION_ROLES = frozenset(
         {"button", "icon", "text", "tab", "image", "list_item"}
     )
-    FORBIDDEN_ENGLISH = frozenset(
-        {
-            "send",
-            "publish",
-            "post",
-            "comment",
-            "follow",
-            "unfollow",
-            "like",
-            "favorite",
-            "subscribe",
-            "pay",
-            "purchase",
-            "buy",
-            "order",
-            "delete",
-            "remove",
-            "submit",
-            "save",
-            "invite",
-            "join",
-            "input",
-            "type",
-            "drag",
-            "longpress",
-            "confirm",
-            "approve",
-            "accept",
-            "agree",
-            "authorize",
-        }
-    )
-    FORBIDDEN_CHINESE = (
-        "发送",
-        "发布",
-        "评论",
-        "关注",
-        "取关",
-        "点赞",
-        "收藏",
-        "订阅",
-        "支付",
-        "购买",
-        "下单",
-        "删除",
-        "移除",
-        "提交",
-        "保存",
-        "邀请",
-        "加入",
-        "输入",
-        "长按",
-        "拖动",
-        "确认",
-        "确定",
-        "同意",
-        "批准",
-        "授权",
-    )
-    NAVIGATION_CLASSES = (
-        ("back", frozenset({"back", "return", "previous"}), ("返回", "后退", "上一页")),
-        ("close", frozenset({"close", "cancel", "dismiss"}), ("关闭", "取消", "收起")),
-        ("tab", frozenset({"tab", "switch"}), ("标签", "切换")),
-        ("menu", frozenset({"menu", "more"}), ("菜单", "更多")),
-        ("list", frozenset({"list", "item"}), ("列表", "条目")),
-        ("search", frozenset({"search"}), ("搜索",)),
-        (
-            "open",
-            frozenset(
-                {"open", "enter", "navigate", "entry", "launcher", "launch", "start"}
-            ),
-            ("打开", "进入", "入口", "启动"),
-        ),
-        ("view", frozenset({"view", "details", "detail"}), ("查看", "详情")),
-    )
-
     def __init__(self, *, min_confidence: float = MIN_TARGET_CONFIDENCE) -> None:
         self.min_confidence = float(min_confidence)
 
@@ -1979,16 +1906,7 @@ class PhaseOneNavigationPolicy:
         }
 
     def _semantic_class(self, *values: str) -> str:
-        combined = " ".join(str(value or "").strip() for value in values)
-        tokens = self._tokens(combined)
-        if tokens.intersection(self.FORBIDDEN_ENGLISH) or any(
-            marker in combined for marker in self.FORBIDDEN_CHINESE
-        ):
-            return "forbidden"
-        for canonical, english, chinese in self.NAVIGATION_CLASSES:
-            if tokens.intersection(english) or any(marker in combined for marker in chinese):
-                return canonical
-        return ""
+        return navigation_semantic_class(*values)
 
     def evaluate(
         self,

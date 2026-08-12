@@ -2,7 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const Protocol = require("./static/protocol_adapter.js");
-const deepSeekFixture = require("./frontend_contract_fixtures/deepseek_task_graph_v2.json");
+const deepSeekFixture = require("./frontend_contract_fixtures/deepseek_task_graph_v3.json");
+const deepSeekV2Fixture = require("./frontend_contract_fixtures/deepseek_task_graph_v2.json");
 const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v2.json");
 
 function clone(value) {
@@ -34,15 +35,16 @@ function safeActionSession() {
   };
 }
 
-test("real DeepSeek to_dict snapshot exposes every v2 task graph field", () => {
+test("real DeepSeek 438cd22 to_dict snapshot exposes every formal v3 task graph field", () => {
   const view = Protocol.adaptSession({
     session_id: "session-deepseek-full",
     task_graph: clone(deepSeekFixture.task_graph),
     goal: { objective: "错误的旧目标" },
   });
 
-  assert.equal(view.protocol, "deepseek-task-graph-v2");
-  assert.equal(view.protocolVersion, "2026-08-11-deepseek-task-graph-v2");
+  assert.equal(view.protocol, "deepseek-task-graph-v3");
+  assert.equal(view.protocolVersion, "2026-08-11-deepseek-task-graph-v3");
+  assert.equal(view.compatibilityFallback, false);
   assert.equal(view.taskId, "task-map-001");
   assert.equal(view.deviceId, "phone-01");
   assert.equal(view.revision, 1);
@@ -61,10 +63,11 @@ test("real DeepSeek to_dict snapshot exposes every v2 task graph field", () => {
   assert.deepEqual(view.risk.confirmationGate.riskIds, ["save_place"]);
 });
 
-test("real DeepSeek to_qwen_context snapshot keeps its exact field names", () => {
+test("real DeepSeek 438cd22 to_qwen_context snapshot keeps v3 gate scope", () => {
   const view = Protocol.adaptSession(externalSession());
 
-  assert.equal(view.protocolVersion, "2026-08-11-deepseek-task-graph-v2");
+  assert.equal(view.protocolVersion, "2026-08-11-deepseek-task-graph-v3");
+  assert.equal(view.compatibilityFallback, false);
   assert.equal(view.status, "awaiting_confirmation");
   assert.equal(view.objective, "在地图应用中找到图书馆并保存地点");
   assert.deepEqual(view.constraints, ["不要发起导航"]);
@@ -74,9 +77,29 @@ test("real DeepSeek to_qwen_context snapshot keeps its exact field names", () =>
   assert.equal(view.risk.currentExternalImpact, "external_state");
   assert.equal(view.risk.requiresConfirmation, true);
   assert.equal(view.risk.blocksAutomatic, true);
+  assert.deepEqual(view.risk.confirmationGate.scope, {
+    taskId: "task-map-001",
+    deviceId: "phone-01",
+    revision: 1,
+    subgoalId: "save_target",
+  });
+});
+
+test("DeepSeek v2 is labelled as explicit compatibility data", () => {
+  const view = Protocol.adaptSession({
+    session_id: "legacy-v2",
+    task_graph: clone(deepSeekV2Fixture.task_graph),
+  });
+  assert.equal(view.protocol, "deepseek-task-graph-v2-compatibility");
+  assert.equal(view.compatibilityFallback, true);
 });
 
 test("real Qwen decision.to_dict snapshot exposes the complete unique next action", () => {
+  assert.equal(qwenFixture.source.commit, "af9b6e7e6c4525980430e01dd82b59ce47d9fb81");
+  assert.equal(
+    qwenFixture.source.input_task_context_protocol,
+    "2026-08-11-deepseek-task-graph-v3",
+  );
   const view = Protocol.adaptSession(safeActionSession());
   const action = view.visualAction;
 
@@ -172,7 +195,6 @@ test("an explicit confirmation grant is scoped and can be consumed only once", (
       subgoal_id: "save_target",
       risk_ids: ["save_place"],
     },
-    device_id: "phone-01",
   });
   assert.throws(
     () => Protocol.consumeConfirmationGrant(grant, view, "phone-01"),
@@ -240,7 +262,7 @@ test("pause after one safe response prevents the next request and keeps the lock
   assert.notEqual(requests[0].device_id, laterSelectedDeviceId);
 });
 
-test("new Qwen v2 fields win over conflicting legacy fallback data", () => {
+test("current Qwen v2 fields win over conflicting legacy fallback data after a v3 graph", () => {
   const session = safeActionSession();
   session.current_action = {
     action_type: "swipe",

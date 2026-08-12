@@ -6,9 +6,9 @@ const path = require("node:path");
 const { chromium } = require("playwright");
 
 const staticRoot = path.join(__dirname, "static");
-const deepSeekFixture = require("./frontend_contract_fixtures/deepseek_task_graph_v2.json");
+const deepSeekFixture = require("./frontend_contract_fixtures/deepseek_task_graph_v3.json");
 const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v2.json");
-const requests = { start: [], confirm: [], next: [], auto: [], cancel: [], stop: [] };
+const requests = { start: [], confirm: [], next: [], auto: [], pause: [], cancel: [], stop: [] };
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -137,6 +137,11 @@ function createServer() {
       json(response, 200, { session: safeActionSession() });
       return;
     }
+    if (request.method === "POST" && url.pathname.endsWith("/pause")) {
+      requests.pause.push(await readBody(request));
+      json(response, 200, { physical_actions: 0, session: safeActionSession() });
+      return;
+    }
     if (request.method === "POST" && url.pathname.endsWith("/cancel")) {
       requests.cancel.push(await readBody(request));
       json(response, 200, { session: cancelledSession() });
@@ -179,7 +184,7 @@ test("browser renders real DeepSeek/Qwen snapshots and pauses after one safe req
     const goalText = await page.locator("#goalSummary").innerText();
     assert.match(goalText, /在地图应用中找到图书馆并保存地点/);
     assert.doesNotMatch(goalText, /未命名目标/);
-    assert.match(goalText, /2026-08-11-deepseek-task-graph-v2/);
+    assert.match(goalText, /2026-08-11-deepseek-task-graph-v3/);
     assert.match(goalText, /revision 1/);
     assert.match(goalText, /phone-01/);
     assert.match(goalText, /地图 \(maps\)/);
@@ -228,6 +233,8 @@ test("browser renders real DeepSeek/Qwen snapshots and pauses after one safe req
     });
     assert.equal(Object.prototype.hasOwnProperty.call(requests.auto[0], "confirmed"), false);
     assert.equal(await page.locator("#pauseNotice").isVisible(), true);
+    assert.equal(requests.pause.length, 1);
+    assert.deepEqual(requests.pause[0], { device_id: "phone-01" });
 
     await page.locator("#pauseButton").click();
     await page.locator("#cancelSupervisedAgent").click();
@@ -259,6 +266,7 @@ test("external-state graph cannot auto-confirm and explicit consent is fully sco
     assert.match(goalText, /确认门 · awaiting_confirmation/);
     assert.match(goalText, /required=true/);
     assert.match(goalText, /风险 save_place · 保存目标地点/);
+    assert.match(goalText, /scope task-map-001 \/ phone-01 \/ r1 \/ save_target/);
     assert.match(await page.locator("#actionContent").innerText(), /等待视觉决策/);
     assert.match(await page.locator("#actionContent").innerText(), /Qwen 唯一动作尚未产生/);
 
@@ -282,7 +290,6 @@ test("external-state graph cannot auto-confirm and explicit consent is fully sco
         subgoal_id: "save_target",
         risk_ids: ["save_place"],
       },
-      device_id: "phone-01",
     });
     await page.locator("#reviewAction").getByText("查看风险并确认").waitFor();
     assert.equal(requests.confirm.length, 1);

@@ -6,6 +6,8 @@
   const terminalStatuses = new Set(["succeeded", "completed", "blocked", "failed", "cancelled"]);
   const activeSubgoalStatuses = new Set(["current", "running", "active", "in_progress"]);
   const externalImpacts = new Set(["external_state", "unknown"]);
+  const formalDeepSeekProtocol = "2026-08-11-deepseek-task-graph-v3";
+  const legacyDeepSeekV2Protocol = "2026-08-11-deepseek-task-graph-v2";
 
   function asObject(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -103,6 +105,16 @@
         raw: item,
       };
     });
+  }
+
+  function normalizeConfirmationGateScope(rawScope) {
+    const scope = asObject(rawScope);
+    return {
+      taskId: String(firstDefined(scope.task_id, "")),
+      deviceId: String(firstDefined(scope.device_id, "")),
+      revision: firstDefined(scope.revision, null),
+      subgoalId: String(firstDefined(scope.subgoal_id, "")),
+    };
   }
 
   function isQwenV2Decision(value) {
@@ -327,13 +339,17 @@
     visualAction.accountEffectPossible = accountEffectPossible;
 
     const protocolVersion = String(firstDefined(graph.protocol_version, qwenContext.protocol_version, ""));
+    const formalV3 = protocolVersion === formalDeepSeekProtocol;
+    const compatibilityV2 = protocolVersion === legacyDeepSeekV2Protocol;
     const targetApps = normalizeTargetApps(firstDefined(graphGoal.target_apps, asObject(qwenContext.goal).target_apps));
     return {
-      protocol: protocolVersion.includes("deepseek-task-graph-v2")
-        ? "deepseek-task-graph-v2"
+      protocol: formalV3
+        ? "deepseek-task-graph-v3"
+        : compatibilityV2
+          ? "deepseek-task-graph-v2-compatibility"
         : (graph.subgoals ? "deepseek-task-graph" : (graph.nodes ? "legacy-task-graph" : "legacy-session")),
       protocolVersion,
-      compatibilityFallback: !protocolVersion.includes("deepseek-task-graph-v2"),
+      compatibilityFallback: !formalV3,
       sessionId: String(firstDefined(session.session_id, session.id, "")),
       taskId,
       deviceId,
@@ -371,6 +387,7 @@
           state: gateState,
           riskIds: gateRiskIds,
           externalStateActionAllowed: rawGate.external_state_action_allowed === true,
+          scope: normalizeConfirmationGateScope(rawGate.scope),
           raw: rawGate,
         },
         maxPhysicalActions: 1,
@@ -393,12 +410,28 @@
 
   function confirmationScope(session, sessionDeviceId) {
     if (!session) throw new Error("当前没有可确认的会话。");
+    const gateScope = session.risk?.confirmationGate?.scope || {};
+    const canonicalRevision = session.revision === null || session.revision === undefined
+      ? null
+      : Number(session.revision);
+    const gateRevision = gateScope.revision === null || gateScope.revision === undefined
+      ? canonicalRevision
+      : Number(gateScope.revision);
+    if (
+      (gateScope.taskId && gateScope.taskId !== session.taskId)
+      || (gateScope.deviceId && gateScope.deviceId !== session.deviceId)
+      || (gateScope.subgoalId && gateScope.subgoalId !== session.currentSubgoal?.id)
+      || gateRevision !== canonicalRevision
+      || String(sessionDeviceId || "") !== String(session.deviceId || "")
+    ) {
+      throw new Error("任务、revision、子目标、风险或设备已经变化，请重新确认。");
+    }
     return {
       session_id: String(session.sessionId || ""),
-      task_id: String(session.taskId || ""),
-      device_id: String(sessionDeviceId || ""),
-      revision: session.revision === null || session.revision === undefined ? null : Number(session.revision),
-      subgoal_id: String(session.currentSubgoal?.id || ""),
+      task_id: String(gateScope.taskId || session.taskId || ""),
+      device_id: String(gateScope.deviceId || sessionDeviceId || ""),
+      revision: gateRevision,
+      subgoal_id: String(gateScope.subgoalId || session.currentSubgoal?.id || ""),
       risk_ids: [...(session.risk?.riskIds || [])].map(String).sort(),
     };
   }
@@ -416,7 +449,20 @@
 
   function createConfirmationGrant(session, sessionDeviceId) {
     if (!session?.risk?.requiresConfirmation) throw new Error("当前步骤不需要风险确认。");
+    if (session.protocol !== "deepseek-task-graph-v3" || session.compatibilityFallback) {
+      throw new Error("当前会话没有正式DeepSeek v3确认作用域，拒绝确认。");
+    }
     const scope = confirmationScope(session, sessionDeviceId);
+    if (
+      !scope.session_id
+      || !scope.task_id
+      || !scope.device_id
+      || !scope.subgoal_id
+      || !Number.isInteger(scope.revision)
+      || scope.device_id !== String(sessionDeviceId || "")
+    ) {
+      throw new Error("当前DeepSeek v3确认作用域不完整或设备不一致。");
+    }
     if (externalImpacts.has(session.risk.currentExternalImpact) && !scope.risk_ids.length) {
       throw new Error("外部状态或未知影响步骤缺少 risk_ids，拒绝确认。");
     }
@@ -430,7 +476,7 @@
       throw new Error("任务、revision、子目标、风险或设备已经变化，请重新确认。");
     }
     grant.consumed = true;
-    return buildRequestPayload(sessionDeviceId, {
+    return {
       confirmed: true,
       confirmation: {
         session_id: grant.scope.session_id,
@@ -440,7 +486,7 @@
         subgoal_id: grant.scope.subgoal_id,
         risk_ids: [...grant.scope.risk_ids],
       },
-    });
+    };
   }
 
   function shouldAutoAdvance(context) {

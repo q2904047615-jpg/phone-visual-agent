@@ -160,6 +160,10 @@ function renderGoalAndPlan() {
     return;
   }
 
+  const gateScope = view.risk.confirmationGate.scope || {};
+  const gateScopeText = gateScope.taskId
+    ? `scope ${gateScope.taskId} / ${gateScope.deviceId || "—"} / r${gateScope.revision ?? "—"} / ${gateScope.subgoalId || "—"}`
+    : "";
   goalElement.className = "goal-summary";
   goalElement.innerHTML = `
     <div class="goal-title-row">
@@ -168,11 +172,13 @@ function renderGoalAndPlan() {
     </div>
     <div class="goal-chips">
       ${view.protocolVersion ? `<span>协议 · ${escapeHtml(view.protocolVersion)}</span>` : ""}
+      ${view.compatibilityFallback ? `<span>旧版兼容数据 · 不作为 v3 确认依据</span>` : ""}
       ${view.targetApps.map(app => `<span>目标应用 · ${escapeHtml(app.name)}${app.id ? ` (${escapeHtml(app.id)})` : ""}</span>`).join("")}
       ${!view.targetApps.length && view.appName ? `<span>目标应用 · ${escapeHtml(view.appName)}</span>` : ""}
       ${view.constraints.map(item => `<span>限制 · ${escapeHtml(item)}</span>`).join("")}
       ${view.completionConditions.map(item => `<span>完成 · ${escapeHtml(item)}</span>`).join("")}
       <span>确认门 · ${escapeHtml(view.risk.confirmationGate.state)} · required=${view.risk.confirmationGate.required ? "true" : "false"} · external_allowed=${view.risk.confirmationGate.externalStateActionAllowed ? "true" : "false"}</span>
+      ${gateScopeText ? `<span>${escapeHtml(gateScopeText)}</span>` : ""}
       ${view.risk.actions.map(item => `<span>风险 ${escapeHtml(item.id)} · ${escapeHtml(item.description)}</span>`).join("")}
     </div>`;
 
@@ -530,7 +536,20 @@ async function finalizeStopIfRequested() {
 
 function togglePause() {
   state.paused = !state.paused;
-  if (state.paused) state.pendingConfirmationGrant = null;
+  if (state.paused) {
+    state.pendingConfirmationGrant = null;
+    const view = sessionView();
+    if (view && !view.isTerminal) {
+      const payload = Protocol.buildRequestPayload(lockedSessionDeviceId());
+      api(`/api/agent/generic-supervised/${view.sessionId}/pause`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }).then(response => {
+        if (response?.session) state.supervisedSession = response.session;
+        render();
+      }).catch(error => toast(`服务端暂停确认失效失败：${error.message}`, true));
+    }
+  }
   toast(state.paused
     ? "已暂停推进。当前请求结束后，网页不会发起下一次请求。"
     : "已恢复，可由你确认后继续生成或执行下一步。");

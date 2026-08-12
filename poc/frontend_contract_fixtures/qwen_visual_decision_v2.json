@@ -1,8 +1,10 @@
 {
   "source": {
     "branch": "agent/qwen-next-action",
-    "commit": "1d892ad01834b32160c9a59105ceb0713d830828",
-    "serializer": "QwenVisualDecision.to_dict()"
+    "commit": "af9b6e7e6c4525980430e01dd82b59ce47d9fb81",
+    "serializer": "QwenVisualDecisionObserver.decide() / QwenVisualDecision.to_dict()",
+    "input_task_context_protocol": "2026-08-11-deepseek-task-graph-v3",
+    "generated_from": "test_qwen_visual_decision.task_context() / launcher_stable"
   },
   "decision": {
     "protocol_version": "2026-08-11-qwen-visual-decision-v2",
@@ -63,7 +65,9 @@
         "reason": "外圈静态UI多帧一致"
       },
       "selected_frame_index": 0,
-      "frame_sharpness_scores": [9.405, 9.395, 9.396, 9.393]
+      "frame_sharpness_scores": [9.405, 9.395, 9.396, 9.393],
+      "candidate_aliases": {},
+      "candidate_conflicts": []
     },
     "status": "action",
     "next_action": {

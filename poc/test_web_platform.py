@@ -3745,7 +3745,7 @@ class ApiEndToEndTests(unittest.TestCase):
                     "goal_preview_enabled": True,
                     "scene_preview_enabled": True,
                     "hardware_execution_enabled": True,
-                    "automatic_loop_enabled": True,
+                    "automatic_loop_enabled": False,
                     "supervised_single_step_enabled": True,
                     "enabled_physical_actions": [
                         "tap_semantic",
@@ -3808,7 +3808,8 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertNotIn("抖音工作流", home.text)
         self.assertIn('/assets/protocol_adapter.js', home.text)
         self.assertIn("/api/agent/generic-supervised/start", script.text)
-        self.assertIn("/api/agent/generic-supervised/${view.sessionId}/auto", script.text)
+        self.assertNotIn("/api/agent/generic-supervised/${view.sessionId}/auto", script.text)
+        self.assertIn("自动连续执行未启用", script.text)
         self.assertIn("nextSupervisedAgent", script.text)
         self.assertIn("togglePause", script.text)
         self.assertNotIn('api("/api/agent/supervised/start"', script.text)

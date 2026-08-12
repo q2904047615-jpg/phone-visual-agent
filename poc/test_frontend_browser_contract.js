@@ -17,7 +17,17 @@ function clone(value) {
 function externalSession() {
   return {
     session_id: "session-browser-external",
+    status: "blocked",
     task_graph: clone(deepSeekFixture.to_qwen_context),
+    controller_decision: {
+      allowed: false,
+      reason: "第一阶段禁止 external_state 子目标进入 Qwen 或机械臂执行。",
+      canonical_class: "",
+      policy_version: "2026-08-12-phase-one-navigation-v1",
+    },
+    failed_reason: "第一阶段禁止 external_state 子目标进入 Qwen 或机械臂执行。",
+    physical_actions: 0,
+    evidence: [],
     history: [],
   };
 }
@@ -42,14 +52,61 @@ function safeActionSession(decisionStatus = "action") {
   }
   return {
     session_id: `session-browser-${decisionStatus}`,
+    status: decisionStatus === "action" ? "awaiting_confirmation" : "blocked",
     task_graph: graph,
     qwen_decision: decision,
+    controller_decision: {
+      allowed: decisionStatus === "action",
+      reason: decisionStatus === "action"
+        ? "仅允许当前通用导航动作。"
+        : "当前视觉决策不可执行。",
+      canonical_class: decisionStatus === "action" ? "navigation_open" : "",
+      policy_version: "2026-08-12-phase-one-navigation-v1",
+    },
+    confirmation_scope: decisionStatus === "action" ? {
+      session_id: `session-browser-${decisionStatus}`,
+      task_id: "task-map-001",
+      device_id: "phone-01",
+      revision: 1,
+      subgoal_id: "locate_target",
+      risk_ids: [],
+      observation_id: "obs_0123456789abcdef0123456789abcdef",
+      fingerprint: "51277d0d9e6f986b00dc",
+    } : null,
+    confirmation_ready: decisionStatus === "action",
+    physical_actions: 0,
+    evidence: ["before_step_1_frame_1.jpg"],
     history: [],
   };
 }
 
+function afterActionSession() {
+  const session = safeActionSession();
+  session.task_graph.revision = 2;
+  session.qwen_decision.revision = 2;
+  session.qwen_decision.observation_id = "obs_after_0123456789abcdef";
+  session.qwen_decision.fingerprint = "after-frame-fingerprint";
+  session.confirmation_scope.revision = 2;
+  session.confirmation_scope.observation_id = session.qwen_decision.observation_id;
+  session.confirmation_scope.fingerprint = session.qwen_decision.fingerprint;
+  session.physical_actions = 1;
+  session.evidence = ["before-1.jpg", "after-1.jpg", "after-2.jpg", "after-3.jpg", "after-4.jpg"];
+  session.history = [{
+    step_number: 1,
+    qwen_decision: clone(qwenFixture.decision),
+    execution: {
+      physical_actions: 1,
+      evidence: ["before-1.jpg", "after-1.jpg"],
+      after_frame_paths: ["after-1.jpg", "after-2.jpg", "after-3.jpg", "after-4.jpg"],
+    },
+    reason: "动作后新画面已验证",
+  }];
+  return session;
+}
+
 function cancelledSession() {
   const session = safeActionSession();
+  session.status = "cancelled";
   session.task_graph.status = "cancelled";
   return session;
 }
@@ -123,7 +180,7 @@ function createServer() {
     }
     if (request.method === "POST" && url.pathname.endsWith("/confirm")) {
       requests.confirm.push(await readBody(request));
-      json(response, 200, { session: externalSession() });
+      json(response, 200, { session: afterActionSession() });
       return;
     }
     if (request.method === "POST" && url.pathname.endsWith("/next")) {
@@ -133,8 +190,12 @@ function createServer() {
     }
     if (request.method === "POST" && url.pathname.endsWith("/auto")) {
       requests.auto.push(await readBody(request));
-      await new Promise(resolve => setTimeout(resolve, 160));
-      json(response, 200, { session: safeActionSession() });
+      json(response, 409, {
+        detail: {
+          code: "phase_one_manual_confirmation_required",
+          physical_actions: 0,
+        },
+      });
       return;
     }
     if (request.method === "POST" && url.pathname.endsWith("/pause")) {
@@ -169,7 +230,7 @@ async function launchFixturePage(server) {
   return { browser, page };
 }
 
-test("browser renders real DeepSeek/Qwen snapshots and pauses after one safe request", { timeout: 30000 }, async () => {
+test("browser renders controller evidence and confirms one exact observation", { timeout: 30000 }, async () => {
   Object.values(requests).forEach(items => { items.length = 0; });
   const server = createServer();
   const { browser, page } = await launchFixturePage(server);
@@ -179,7 +240,7 @@ test("browser renders real DeepSeek/Qwen snapshots and pauses after one safe req
   try {
     await page.locator("#agentText").fill("运行真实协议快照");
     await page.locator("#startSupervisedAgent").click();
-    await page.locator("#goalSummary").getByText("task-map-001").waitFor();
+    await page.locator("#goalSummary").getByText(/目标 · task-map-001/).waitFor({ timeout: 5000 });
 
     const goalText = await page.locator("#goalSummary").innerText();
     assert.match(goalText, /在地图应用中找到图书馆并保存地点/);
@@ -190,7 +251,7 @@ test("browser renders real DeepSeek/Qwen snapshots and pauses after one safe req
     assert.match(goalText, /地图 \(maps\)/);
     assert.match(goalText, /不要发起导航/);
     assert.match(goalText, /目标地点已保存/);
-    assert.match(goalText, /required=false/);
+    assert.match(goalText, /required=true/);
     assert.match(goalText, /external_allowed=false/);
 
     assert.equal(await page.locator("#planList .plan-step.current").count(), 1);
@@ -210,6 +271,38 @@ test("browser renders real DeepSeek/Qwen snapshots and pauses after one safe req
     assert.match(actionText, /revision 1/);
     assert.match(actionText, /obs_0123456789abcdef0123456789abcdef/);
     assert.match(actionText, /51277d0d9e6f986b00dc/);
+    assert.match(actionText, /本地策略/);
+    assert.match(actionText, /仅允许当前通用导航动作/);
+
+    await page.locator("#reviewAction").click();
+    const warning = await page.locator("#riskWarning").innerText();
+    assert.match(warning, /obs_0123456789abcdef0123456789abcdef/);
+    assert.match(warning, /51277d0d9e6f986b00dc/);
+    const confirmResponse = page.waitForResponse(
+      response => response.url().endsWith("/confirm"),
+      { timeout: 5000 },
+    );
+    await page.locator("#confirmRiskAction").click();
+    await confirmResponse;
+    await page.locator("#sceneMeta").getByText("1", { exact: true }).waitFor({ timeout: 5000 });
+
+    assert.deepEqual(requests.confirm[0], {
+      confirmed: true,
+      confirmation: {
+        session_id: "session-browser-action",
+        task_id: "task-map-001",
+        device_id: "phone-01",
+        revision: 1,
+        subgoal_id: "locate_target",
+        risk_ids: [],
+        observation_id: "obs_0123456789abcdef0123456789abcdef",
+        fingerprint: "51277d0d9e6f986b00dc",
+      },
+    });
+    assert.match(await page.locator("#sceneMeta").innerText(), /累计动作\s*1/);
+    assert.match(await page.locator("#traceList").innerText(), /after-1.jpg/);
+    assert.equal(await page.locator("#autoSupervisedAgent").count(), 0);
+    assert.equal(requests.auto.length, 0);
 
     await page.locator("#deviceId").evaluate(select => {
       select.disabled = false;
@@ -219,26 +312,24 @@ test("browser renders real DeepSeek/Qwen snapshots and pauses after one safe req
     });
 
     await page.locator("#nextSupervisedAgent").click();
-    await page.locator("#autoSupervisedAgent").waitFor();
+    await page.locator("#reviewAction").waitFor({ timeout: 5000 });
     assert.equal(requests.next.length, 1);
     assert.equal(requests.next[0].device_id, "phone-01");
-
-    await page.locator("#autoSupervisedAgent").click();
     await page.locator("#pauseButton").click();
-    await page.waitForTimeout(500);
-    assert.equal(requests.auto.length, 1);
-    assert.deepEqual(requests.auto[0], {
-      max_physical_actions: 1,
-      device_id: "phone-01",
-    });
-    assert.equal(Object.prototype.hasOwnProperty.call(requests.auto[0], "confirmed"), false);
+    await page.waitForTimeout(100);
+    assert.equal(requests.auto.length, 0);
     assert.equal(await page.locator("#pauseNotice").isVisible(), true);
     assert.equal(requests.pause.length, 1);
     assert.deepEqual(requests.pause[0], { device_id: "phone-01" });
 
     await page.locator("#pauseButton").click();
+    const cancelResponse = page.waitForResponse(
+      response => response.url().endsWith("/cancel"),
+      { timeout: 5000 },
+    );
     await page.locator("#cancelSupervisedAgent").click();
-    await page.locator("#sessionBadge").getByText("已停止").waitFor();
+    await cancelResponse;
+    await page.locator("#sessionBadge").getByText("已停止").waitFor({ timeout: 5000 });
     assert.equal(requests.cancel[0].device_id, "phone-01");
 
     await page.locator("#stopButton").click();
@@ -251,7 +342,7 @@ test("browser renders real DeepSeek/Qwen snapshots and pauses after one safe req
   }
 });
 
-test("external-state graph cannot auto-confirm and explicit consent is fully scoped", { timeout: 30000 }, async () => {
+test("external-state graph is blocked before confirmation controls", { timeout: 30000 }, async () => {
   Object.values(requests).forEach(items => { items.length = 0; });
   const server = createServer();
   const { browser, page } = await launchFixturePage(server);
@@ -259,40 +350,17 @@ test("external-state graph cannot auto-confirm and explicit consent is fully sco
   try {
     await page.locator("#agentText").fill("外部状态风险任务");
     await page.locator("#startSupervisedAgent").click();
-    await page.locator("#reviewAction").getByText("查看风险并确认").waitFor();
+    await page.locator("#sessionBadge").getByText("已阻止").waitFor();
     assert.equal(await page.locator("#autoSupervisedAgent").count(), 0);
+    assert.equal(await page.locator("#reviewAction").count(), 0);
     assert.equal(requests.auto.length, 0);
     const goalText = await page.locator("#goalSummary").innerText();
     assert.match(goalText, /确认门 · awaiting_confirmation/);
     assert.match(goalText, /required=true/);
     assert.match(goalText, /风险 save_place · 保存目标地点/);
     assert.match(goalText, /scope task-map-001 \/ phone-01 \/ r1 \/ save_target/);
-    assert.match(await page.locator("#actionContent").innerText(), /等待视觉决策/);
-    assert.match(await page.locator("#actionContent").innerText(), /Qwen 唯一动作尚未产生/);
-
-    await page.locator("#reviewAction").click();
-    const warning = await page.locator("#riskWarning").innerText();
-    assert.match(warning, /task=task-map-001/);
-    assert.match(warning, /revision=1/);
-    assert.match(warning, /subgoal=save_target/);
-    assert.match(warning, /risk_ids=save_place/);
-    const confirmResponse = page.waitForResponse(response => response.url().endsWith("/confirm"));
-    await page.locator("#confirmRiskAction").click();
-    await confirmResponse;
-
-    assert.deepEqual(requests.confirm[0], {
-      confirmed: true,
-      confirmation: {
-        session_id: "session-browser-external",
-        task_id: "task-map-001",
-        device_id: "phone-01",
-        revision: 1,
-        subgoal_id: "save_target",
-        risk_ids: ["save_place"],
-      },
-    });
-    await page.locator("#reviewAction").getByText("查看风险并确认").waitFor();
-    assert.equal(requests.confirm.length, 1);
+    assert.match(await page.locator("#actionContent").innerText(), /第一阶段禁止 external_state/);
+    assert.equal(requests.confirm.length, 0);
     assert.equal(await page.locator("#autoSupervisedAgent").count(), 0);
   } finally {
     await browser.close();
@@ -308,8 +376,11 @@ test("Qwen blocked and finished states render without executable controls", { ti
     try {
       await page.locator("#agentText").fill(`Qwen ${status}`);
       await page.locator("#startSupervisedAgent").click();
-      await page.locator("#actionContent").getByText(status === "blocked" ? "Qwen 已阻止" : "Qwen 判断已完成").waitFor();
-      assert.match(await page.locator("#actionContent").innerText(), /不可执行/);
+      await page.locator("#actionContent").getByText("已阻止").waitFor({ timeout: 5000 });
+      assert.match(
+        await page.locator("#actionContent").innerText(),
+        status === "blocked" ? /没有可靠且唯一/ : /当前可见证据已满足目标/,
+      );
       assert.equal(await page.locator("#actionControls button").count(), 0);
     } finally {
       await browser.close();

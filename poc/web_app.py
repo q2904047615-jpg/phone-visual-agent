@@ -1067,7 +1067,7 @@ def device() -> dict[str, Any]:
             "goal_preview_enabled": True,
             "scene_preview_enabled": True,
             "hardware_execution_enabled": True,
-            "automatic_loop_enabled": True,
+            "automatic_loop_enabled": False,
             "supervised_single_step_enabled": True,
             "enabled_physical_actions": [
                 "tap_semantic",
@@ -1122,9 +1122,9 @@ def device() -> dict[str, Any]:
         ]
     status["generic_supervised_execution"] = {
         "enabled": True,
-        "automatic_loop_enabled": True,
+        "automatic_loop_enabled": False,
         "max_physical_actions_per_confirmation": 1,
-        "max_safe_loop_physical_actions": 8,
+        "max_safe_loop_physical_actions": 0,
         "active_sessions": [
             {
                 "session_id": item["session_id"],

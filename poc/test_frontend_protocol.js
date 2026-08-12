@@ -29,8 +29,28 @@ function safeActionSession() {
   graph.active_subgoal_id = "locate_target";
   return {
     session_id: "session-safe-action",
+    status: "awaiting_confirmation",
     task_graph: graph,
     qwen_decision: clone(qwenFixture.decision),
+    controller_decision: {
+      allowed: true,
+      reason: "仅允许当前通用导航动作。",
+      canonical_class: "navigation_open",
+      policy_version: "2026-08-12-phase-one-navigation-v1",
+    },
+    confirmation_scope: {
+      session_id: "session-safe-action",
+      task_id: "task-map-001",
+      device_id: "phone-01",
+      revision: 1,
+      subgoal_id: "locate_target",
+      risk_ids: [],
+      observation_id: "obs_0123456789abcdef0123456789abcdef",
+      fingerprint: "51277d0d9e6f986b00dc",
+    },
+    confirmation_ready: true,
+    physical_actions: 0,
+    evidence: ["before_step_1_frame_1.jpg"],
     history: [],
   };
 }
@@ -78,10 +98,14 @@ test("real DeepSeek 438cd22 to_qwen_context snapshot keeps v3 gate scope", () =>
   assert.equal(view.risk.requiresConfirmation, true);
   assert.equal(view.risk.blocksAutomatic, true);
   assert.deepEqual(view.risk.confirmationGate.scope, {
+    sessionId: "",
     taskId: "task-map-001",
     deviceId: "phone-01",
     revision: 1,
     subgoalId: "save_target",
+    riskIds: [],
+    observationId: "",
+    fingerprint: "",
   });
 });
 
@@ -171,29 +195,38 @@ test("each confirmation and impact signal independently closes automatic advance
   }
 });
 
-test("automatic requests omit confirmed and remain limited to one physical action", () => {
-  const payload = Protocol.buildAutoRequestPayload("phone-01");
-  assert.deepEqual(payload, {
-    max_physical_actions: 1,
-    device_id: "phone-01",
+test("phase one never auto advances physical actions", async () => {
+  const view = Protocol.adaptSession(safeActionSession());
+  assert.equal(
+    Protocol.shouldAutoAdvance({ session: view, paused: false, busy: false }),
+    false,
+  );
+  let sent = 0;
+  const outcome = await Protocol.runAutoAdvanceLoop({
+    getContext: () => ({ session: view, paused: false, busy: false }),
+    sendOne: async () => { sent += 1; },
+    applyResponse: async () => {},
   });
-  assert.equal(Object.prototype.hasOwnProperty.call(payload, "confirmed"), false);
+  assert.deepEqual(outcome, { requests: 0, limitReached: false });
+  assert.equal(sent, 0);
 });
 
 test("an explicit confirmation grant is scoped and can be consumed only once", () => {
-  const view = Protocol.adaptSession(externalSession());
+  const view = Protocol.adaptSession(safeActionSession());
   const grant = Protocol.createConfirmationGrant(view, "phone-01");
   const payload = Protocol.consumeConfirmationGrant(grant, view, "phone-01");
 
   assert.deepEqual(payload, {
     confirmed: true,
     confirmation: {
-      session_id: "session-cross-contract",
+      session_id: "session-safe-action",
       task_id: "task-map-001",
       device_id: "phone-01",
       revision: 1,
-      subgoal_id: "save_target",
-      risk_ids: ["save_place"],
+      subgoal_id: "locate_target",
+      risk_ids: [],
+      observation_id: "obs_0123456789abcdef0123456789abcdef",
+      fingerprint: "51277d0d9e6f986b00dc",
     },
   });
   assert.throws(
@@ -202,18 +235,20 @@ test("an explicit confirmation grant is scoped and can be consumed only once", (
   );
 });
 
-test("confirmation scope cannot cross revision, risk, subgoal, task, or device", () => {
-  const original = Protocol.adaptSession(externalSession());
+test("confirmation scope cannot cross revision, risk, subgoal, task, device, observation, or fingerprint", () => {
+  const original = Protocol.adaptSession(safeActionSession());
   const mutations = [
     session => { session.task_graph.revision = 2; },
-    session => { session.task_graph.confirmation_gate.risk_ids = ["different_risk"]; },
-    session => { session.task_graph.current_subgoal.subgoal_id = "different_subgoal"; },
+    session => { session.confirmation_scope.risk_ids = ["different_risk"]; },
+    session => { session.confirmation_scope.subgoal_id = "different_subgoal"; },
     session => { session.task_graph.task_id = "different-task"; },
+    session => { session.confirmation_scope.observation_id = "obs-changed"; },
+    session => { session.confirmation_scope.fingerprint = "frame-changed"; },
   ];
 
   for (const mutate of mutations) {
     const grant = Protocol.createConfirmationGrant(original, "phone-01");
-    const changedRaw = externalSession();
+    const changedRaw = safeActionSession();
     mutate(changedRaw);
     const changed = Protocol.adaptSession(changedRaw);
     assert.throws(
@@ -229,37 +264,16 @@ test("confirmation scope cannot cross revision, risk, subgoal, task, or device",
   );
 });
 
-test("pause after one safe response prevents the next request and keeps the locked device", async () => {
-  let paused = false;
-  let session = Protocol.adaptSession(safeActionSession());
-  const lockedSessionDeviceId = "phone-01";
-  const laterSelectedDeviceId = "phone-02";
-  const requests = [];
-
-  const outcome = await Protocol.runAutoAdvanceLoop({
-    getContext: () => ({
-      session,
-      sessionDeviceId: lockedSessionDeviceId,
-      paused,
-      busy: false,
-    }),
-    sendOne: async payload => {
-      requests.push(payload);
-      return safeActionSession();
-    },
-    applyResponse: async response => {
-      session = Protocol.adaptSession(response);
-      paused = true;
-    },
+test("adapter exposes controller gate action count and evidence", () => {
+  const view = Protocol.adaptSession(safeActionSession());
+  assert.deepEqual(view.controllerGate, {
+    allowed: true,
+    reason: "仅允许当前通用导航动作。",
+    canonicalClass: "navigation_open",
+    policyVersion: "2026-08-12-phase-one-navigation-v1",
   });
-
-  assert.equal(outcome.requests, 1);
-  assert.equal(requests.length, 1);
-  assert.deepEqual(requests[0], {
-    max_physical_actions: 1,
-    device_id: lockedSessionDeviceId,
-  });
-  assert.notEqual(requests[0].device_id, laterSelectedDeviceId);
+  assert.equal(view.physicalActions, 0);
+  assert.deepEqual(view.evidence, ["before_step_1_frame_1.jpg"]);
 });
 
 test("current Qwen v2 fields win over conflicting legacy fallback data after a v3 graph", () => {

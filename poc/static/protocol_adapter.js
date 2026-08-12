@@ -110,10 +110,14 @@
   function normalizeConfirmationGateScope(rawScope) {
     const scope = asObject(rawScope);
     return {
+      sessionId: String(firstDefined(scope.session_id, "")),
       taskId: String(firstDefined(scope.task_id, "")),
       deviceId: String(firstDefined(scope.device_id, "")),
       revision: firstDefined(scope.revision, null),
       subgoalId: String(firstDefined(scope.subgoal_id, "")),
+      riskIds: normalizeStringList(scope.risk_ids),
+      observationId: String(firstDefined(scope.observation_id, "")),
+      fingerprint: String(firstDefined(scope.fingerprint, "")),
     };
   }
 
@@ -235,6 +239,10 @@
         reason: String(firstDefined(entry.reason, proposal.reason, "已执行并重新观察")),
         physicalActions: Number(firstDefined(asObject(entry.execution).physical_actions, 0)),
         completionEvidence: normalizeStringList(entry.completion_evidence),
+        evidence: normalizeStringList(firstDefined(
+          asObject(entry.execution).evidence,
+          asObject(entry.execution).after_frame_paths,
+        )),
         raw: entry,
       };
     });
@@ -268,7 +276,7 @@
     if (!subgoals.some(item => item.id === currentSubgoal.id) && Object.keys(currentSubgoal.raw).length) {
       subgoals.push(currentSubgoal);
     }
-    const status = String(firstDefined(graph.status, graph.task_status, qwenContext.task_status, session.status, "idle")).toLowerCase();
+    const status = String(firstDefined(session.status, graph.status, graph.task_status, qwenContext.task_status, "idle")).toLowerCase();
     const taskId = String(firstDefined(graph.task_id, qwenContext.task_id, session.task_id, session.session_id, ""));
     const deviceId = String(firstDefined(graph.device_id, qwenContext.device_id, session.device_id, options.fallbackDeviceId, ""));
     const revision = firstDefined(graph.revision, qwenContext.revision, session.revision, null);
@@ -303,17 +311,30 @@
 
     const riskActions = normalizeRiskActions(firstDefined(graph.risk_actions, qwenContext.risk_actions));
     const rawGate = asObject(firstDefined(graph.confirmation_gate, qwenContext.confirmation_gate, session.confirmation_gate));
+    const authorityScope = normalizeConfirmationGateScope(firstDefined(
+      session.confirmation_scope,
+      rawGate.scope,
+    ));
     const currentExternalImpact = String(firstDefined(
       graph.current_external_impact,
       qwenContext.current_external_impact,
       currentSubgoal.externalImpact,
       "unknown",
     ));
-    const gateRiskIds = normalizeStringList(firstDefined(rawGate.risk_ids, currentSubgoal.riskIds));
+    const gateRiskIds = normalizeStringList(firstDefined(
+      asObject(session.confirmation_scope).risk_ids,
+      rawGate.risk_ids,
+      currentSubgoal.riskIds,
+    ));
     const currentRiskActions = riskActions.filter(item => (
       gateRiskIds.includes(item.id) || item.subgoalIds.includes(currentSubgoal.id)
     ));
-    const gateRequired = Boolean(firstDefined(rawGate.required, externalImpacts.has(currentExternalImpact)));
+    const gateRequired = Boolean(
+      session.confirmation_ready === true
+      || status === "awaiting_confirmation"
+      || rawGate.required === true
+      || externalImpacts.has(currentExternalImpact)
+    );
     const gateState = String(firstDefined(
       rawGate.state,
       gateRequired ? (status === "awaiting_confirmation" ? "awaiting_confirmation" : "unconfirmed") : "not_required",
@@ -387,11 +408,19 @@
           state: gateState,
           riskIds: gateRiskIds,
           externalStateActionAllowed: rawGate.external_state_action_allowed === true,
-          scope: normalizeConfirmationGateScope(rawGate.scope),
+          scope: authorityScope,
           raw: rawGate,
         },
         maxPhysicalActions: 1,
       },
+      controllerGate: {
+        allowed: asObject(session.controller_decision).allowed === true,
+        reason: String(firstDefined(asObject(session.controller_decision).reason, "")),
+        canonicalClass: String(firstDefined(asObject(session.controller_decision).canonical_class, "")),
+        policyVersion: String(firstDefined(asObject(session.controller_decision).policy_version, "")),
+      },
+      physicalActions: Number(firstDefined(session.physical_actions, 0)),
+      evidence: normalizeStringList(session.evidence),
       autoPauseReason: String(firstDefined(session.auto_pause_reason, "")),
       failedReason: String(firstDefined(session.failed_reason, "")),
       raw: session,
@@ -421,18 +450,22 @@
       (gateScope.taskId && gateScope.taskId !== session.taskId)
       || (gateScope.deviceId && gateScope.deviceId !== session.deviceId)
       || (gateScope.subgoalId && gateScope.subgoalId !== session.currentSubgoal?.id)
+      || (gateScope.observationId && gateScope.observationId !== session.visualAction?.observationId)
+      || (gateScope.fingerprint && gateScope.fingerprint !== session.visualAction?.fingerprint)
       || gateRevision !== canonicalRevision
       || String(sessionDeviceId || "") !== String(session.deviceId || "")
     ) {
       throw new Error("任务、revision、子目标、风险或设备已经变化，请重新确认。");
     }
     return {
-      session_id: String(session.sessionId || ""),
+      session_id: String(gateScope.sessionId || session.sessionId || ""),
       task_id: String(gateScope.taskId || session.taskId || ""),
       device_id: String(gateScope.deviceId || sessionDeviceId || ""),
       revision: gateRevision,
       subgoal_id: String(gateScope.subgoalId || session.currentSubgoal?.id || ""),
-      risk_ids: [...(session.risk?.riskIds || [])].map(String).sort(),
+      risk_ids: [...(gateScope.riskIds || session.risk?.riskIds || [])].map(String).sort(),
+      observation_id: String(gateScope.observationId || session.visualAction?.observationId || ""),
+      fingerprint: String(gateScope.fingerprint || session.visualAction?.fingerprint || ""),
     };
   }
 
@@ -444,6 +477,8 @@
       revision: scope.revision,
       subgoal_id: scope.subgoal_id,
       risk_ids: [...scope.risk_ids].sort(),
+      observation_id: scope.observation_id,
+      fingerprint: scope.fingerprint,
     });
   }
 
@@ -458,6 +493,8 @@
       || !scope.task_id
       || !scope.device_id
       || !scope.subgoal_id
+      || !scope.observation_id
+      || !scope.fingerprint
       || !Number.isInteger(scope.revision)
       || scope.device_id !== String(sessionDeviceId || "")
     ) {
@@ -485,19 +522,15 @@
         revision: grant.scope.revision,
         subgoal_id: grant.scope.subgoal_id,
         risk_ids: [...grant.scope.risk_ids],
+        observation_id: grant.scope.observation_id,
+        fingerprint: grant.scope.fingerprint,
       },
     };
   }
 
   function shouldAutoAdvance(context) {
-    const session = context?.session;
-    if (!session || context.paused || context.busy || session.isTerminal) return false;
-    if (session.status === "awaiting_confirmation") return false;
-    if (session.risk?.blocksAutomatic || session.risk?.requiresConfirmation || session.risk?.hasCurrentRisk) return false;
-    if (externalImpacts.has(session.risk?.currentExternalImpact)) return false;
-    if (["blocked", "finished"].includes(session.visualAction?.status)) return false;
-    if (session.visualAction?.status === "action" && !session.visualAction.isExecutable) return false;
-    return ["ready", "running", "paused_after_action"].includes(session.status);
+    void context;
+    return false;
   }
 
   async function runAutoAdvanceLoop(options) {

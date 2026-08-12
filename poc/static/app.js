@@ -178,6 +178,8 @@ function renderGoalAndPlan() {
       ${view.constraints.map(item => `<span>限制 · ${escapeHtml(item)}</span>`).join("")}
       ${view.completionConditions.map(item => `<span>完成 · ${escapeHtml(item)}</span>`).join("")}
       <span>确认门 · ${escapeHtml(view.risk.confirmationGate.state)} · required=${view.risk.confirmationGate.required ? "true" : "false"} · external_allowed=${view.risk.confirmationGate.externalStateActionAllowed ? "true" : "false"}</span>
+      <span>影响等级 · ${escapeHtml(view.risk.currentExternalImpact)}</span>
+      <span>本地策略 · ${view.controllerGate.allowed ? "允许" : "阻止"} · ${escapeHtml(view.controllerGate.reason || "尚未判定")}</span>
       ${gateScopeText ? `<span>${escapeHtml(gateScopeText)}</span>` : ""}
       ${view.risk.actions.map(item => `<span>风险 ${escapeHtml(item.id)} · ${escapeHtml(item.description)}</span>`).join("")}
     </div>`;
@@ -224,6 +226,7 @@ function renderTrace() {
         <div class="trace-title"><strong>步骤 ${escapeHtml(item.stepNumber)} · ${escapeHtml(actionLabel(item.action))}</strong><time>${item.physicalActions} 个物理动作</time></div>
         <p>${escapeHtml(item.reason)}</p>
         <small>目标：${escapeHtml(item.action.semanticTarget)} · 验证：${escapeHtml(item.completionEvidence.join("；") || "已保存动作后画面")}</small>
+        <small>证据：${escapeHtml(item.evidence.join("；") || "—")}</small>
       </div>
     </article>`).join("");
   trace.className = "trace-list";
@@ -245,7 +248,9 @@ function renderScene() {
   meta.innerHTML = `
     <span><b>页面</b><em>${escapeHtml(view.scene.summary)}</em></span>
     <span><b>稳定性</b><em>${view.scene.stable ? "稳定" : "不稳定"}</em></span>
-    <span><b>置信度</b><em>${escapeHtml(confidenceLabel(view.scene.confidence))}</em></span>`;
+    <span><b>置信度</b><em>${escapeHtml(confidenceLabel(view.scene.confidence))}</em></span>
+    <span><b>累计动作</b><em>${escapeHtml(view.physicalActions)}</em></span>
+    <span><b>证据</b><em>${escapeHtml(view.evidence.join("；") || "—")}</em></span>`;
 }
 
 function renderAction() {
@@ -280,7 +285,7 @@ function renderAction() {
       : `<div class="compatibility-note">Qwen 唯一动作尚未产生</div>`;
   content.className = "action-content";
   content.innerHTML = view.isTerminal
-    ? `<h3>${escapeHtml(statusNames[view.status] || view.status)}</h3><p>${escapeHtml(action.reason || view.failedReason || "会话已经结束。")}</p>`
+    ? `<h3>${escapeHtml(statusNames[view.status] || view.status)}</h3><p>${escapeHtml(view.failedReason || action.reason || "会话已经结束。")}</p>`
     : (action.status === "finished"
       ? `<div class="next-action-title"><span>${escapeHtml(decisionStatusNames.finished)}</span><b class="safe-tag">不可执行</b></div>
          <h3>${escapeHtml(view.currentSubgoal.label)}</h3>
@@ -298,11 +303,12 @@ function renderAction() {
            <span><b>目标区域</b>${escapeHtml(Protocol.displayValue(action.targetRegion))}</span>
            <span><b>预期变化</b>${escapeHtml(Protocol.displayValue(action.expectedChange))}</span>
            <span><b>动作置信度</b>${escapeHtml(confidenceLabel(action.confidence))}</span>
+           <span><b>本地策略</b>${view.controllerGate.allowed ? "允许" : "阻止"} · ${escapeHtml(view.controllerGate.reason || "尚未判定")}</span>
          </div>
          <p>${escapeHtml(action.reason || riskSummary || "等待 Qwen 生成唯一下一视觉动作。")}</p>
          ${riskSummary ? `<small>当前风险：${escapeHtml(riskSummary)}</small>` : ""}
          ${actionMetadata}
-         <small>确认只绑定当前任务、revision、子目标和 risk_ids；动作后必须重新观察。</small>`);
+         <small>确认绑定当前任务、revision、子目标、risk_ids、observation_id 和 fingerprint；动作后必须重新观察。</small>`);
 
   const disabled = state.busy || state.paused ? "disabled" : "";
   if (view.isTerminal || ["finished", "blocked"].includes(action.status)) {
@@ -310,23 +316,23 @@ function renderAction() {
   } else if (view.risk.requiresConfirmation || view.status === "awaiting_confirmation") {
     controls.innerHTML = `
       <button id="reviewAction" class="${risk ? "risk-button" : "primary-button"}" ${disabled}>${risk ? "查看风险并确认" : "确认当前一步"}</button>
+      <button id="nextSupervisedAgent" class="secondary-button" ${disabled}>放弃旧确认并重新观察</button>
       <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
   } else {
-    const autoAllowed = Protocol.shouldAutoAdvance({ session: view, paused: state.paused, busy: state.busy });
     controls.innerHTML = `
       <button id="nextSupervisedAgent" class="primary-button" ${disabled}>观察并生成下一步</button>
-      ${autoAllowed ? `<button id="autoSupervisedAgent" class="secondary-button" ${disabled}>自动推进安全步骤</button>` : ""}
       <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
   }
-  badge.className = `pill ${risk ? "risk" : (view.isTerminal ? (view.status === "succeeded" || view.status === "completed" ? "success" : "danger") : "active")}`;
-  badge.textContent = risk ? "等待风险确认" : (statusNames[view.status] || view.status);
+  badge.className = `pill ${view.isTerminal ? (view.status === "succeeded" || view.status === "completed" ? "success" : "danger") : (risk ? "risk" : "active")}`;
+  badge.textContent = view.isTerminal
+    ? (statusNames[view.status] || view.status)
+    : (risk ? "等待风险确认" : (statusNames[view.status] || view.status));
   bindActionEvents();
 }
 
 function bindActionEvents() {
   document.querySelector("#reviewAction")?.addEventListener("click", openRiskDialog);
   document.querySelector("#nextSupervisedAgent")?.addEventListener("click", nextSupervisedAgent);
-  document.querySelector("#autoSupervisedAgent")?.addEventListener("click", autoSupervisedAgent);
   document.querySelector("#cancelSupervisedAgent")?.addEventListener("click", cancelSupervisedAgent);
 }
 
@@ -427,8 +433,8 @@ function openRiskDialog() {
   document.querySelector("#riskExpected").textContent = Protocol.displayValue(view.visualAction.expectedChange);
   document.querySelector("#riskDevice").textContent = lockedSessionDeviceId();
   document.querySelector("#riskWarning").textContent = risk
-    ? `确认只授权 task=${view.taskId}、revision=${view.revision ?? "—"}、subgoal=${view.currentSubgoal.id}、risk_ids=${view.risk.riskIds.join(",") || "—"} 的当前一步；任何字段变化都必须重新确认。`
-    : "确认只授权当前一个动作。执行后系统必须重新观察，不会自动沿用旧画面继续点击。";
+    ? `确认只授权 task=${view.taskId}、revision=${view.revision ?? "—"}、subgoal=${view.currentSubgoal.id}、risk_ids=${view.risk.riskIds.join(",") || "—"}、observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 的当前一步；任何字段变化都必须重新确认。`
+    : `确认只授权 observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 对应的一个动作。执行后必须重新观察。`;
   document.querySelector("#confirmRiskAction").className = risk ? "danger-confirm" : "primary-button";
   document.querySelector("#riskDialog").showModal();
 }
@@ -474,39 +480,7 @@ async function nextSupervisedAgent() {
 }
 
 async function autoSupervisedAgent() {
-  const initial = sessionView();
-  if (!Protocol.shouldAutoAdvance({ session: initial, paused: state.paused, busy: state.busy })) return;
-  state.pendingConfirmationGrant = null;
-  try {
-    const outcome = await Protocol.runAutoAdvanceLoop({
-      maxRequests: 8,
-      getContext: () => ({
-        session: sessionView(),
-        sessionDeviceId: lockedSessionDeviceId(),
-        paused: state.paused || state.stopRequested,
-        busy: false,
-      }),
-      sendOne: payload => {
-        const view = sessionView();
-        return withVisionProgress("执行一个安全动作并重新观察", () =>
-          api(`/api/agent/generic-supervised/${view.sessionId}/auto`, {
-            method: "POST",
-            body: JSON.stringify(payload),
-          })
-        );
-      },
-      applyResponse: async response => {
-        state.supervisedSession = response.session;
-        await finalizeStopIfRequested();
-        render();
-      },
-    });
-    const view = sessionView();
-    if (view?.autoPauseReason) toast(view.autoPauseReason);
-    else if (outcome.limitReached) toast("网页已达到本轮逐次请求上限，请核对画面后再继续。");
-  } catch (error) {
-    toast(error.message, true);
-  }
+  toast("第一阶段需要逐步核对并确认，自动连续执行未启用。", true);
 }
 
 async function cancelSupervisedAgent({ quiet = false } = {}) {

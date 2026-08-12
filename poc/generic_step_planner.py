@@ -9,7 +9,7 @@ from semantic_executor import SemanticAction
 from ui_scene import UIScene
 
 
-GENERIC_STEP_PROTOCOL_VERSION = "2026-08-10-generic-step-v1"
+GENERIC_STEP_PROTOCOL_VERSION = "2026-08-12-generic-step-v2"
 ALLOWED_STEP_ACTIONS = frozenset(
     {
         "tap_semantic",
@@ -17,6 +17,9 @@ ALLOWED_STEP_ACTIONS = frozenset(
         "swipe",
         "back",
         "wait_for_change",
+        "input_verified_text",
+        "long_press",
+        "drag",
     }
 )
 
@@ -50,11 +53,41 @@ class GenericStepProposal:
                 raise GenericStepPlanningError(
                     f"单步动作不在通用白名单：{self.action.action}"
                 )
-            if self.action.action in {"tap_semantic", "dismiss_overlay"}:
+            if self.action.action in {
+                "tap_semantic",
+                "dismiss_overlay",
+                "input_verified_text",
+                "long_press",
+            }:
                 element_id = str(self.action.params.get("element_id") or "").strip()
                 if not element_id:
-                    raise GenericStepPlanningError("点击动作必须引用当前场景 element_id。")
+                    raise GenericStepPlanningError("元素动作必须引用当前场景 element_id。")
                 scene.get_element(element_id)
+            if self.action.action == "input_verified_text":
+                text = self.action.params.get("text")
+                if not isinstance(text, str) or not text or len(text) > 100:
+                    raise GenericStepPlanningError("输入动作 text 必须为1～100个字符。")
+                if "\n" in text or "\r" in text:
+                    raise GenericStepPlanningError("输入动作 text 不得包含换行。")
+                if scene.get_element(str(self.action.params["element_id"])).role != "input":
+                    raise GenericStepPlanningError("输入动作必须绑定 input 元素。")
+            if self.action.action == "long_press":
+                duration_ms = self.action.params.get("duration_ms", 800)
+                if (
+                    isinstance(duration_ms, bool)
+                    or not isinstance(duration_ms, (int, float))
+                    or not 500 <= float(duration_ms) <= 2000
+                ):
+                    raise GenericStepPlanningError("长按 duration_ms 必须在500～2000之间。")
+            if self.action.action == "drag":
+                source_id = str(self.action.params.get("source_element_id") or "").strip()
+                destination_id = str(
+                    self.action.params.get("destination_element_id") or ""
+                ).strip()
+                if not source_id or not destination_id or source_id == destination_id:
+                    raise GenericStepPlanningError("拖动必须绑定两个不同的可信元素。")
+                scene.get_element(source_id)
+                scene.get_element(destination_id)
             if self.action.action == "swipe":
                 direction = str(self.action.params.get("direction") or "").strip()
                 if direction not in {"up", "down", "left", "right"}:

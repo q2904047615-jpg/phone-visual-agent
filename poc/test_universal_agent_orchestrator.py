@@ -44,6 +44,7 @@ def _scene(
     role: str = "button",
     bounds: tuple[float, float, float, float] = (0.1, 0.2, 0.5, 0.3),
     confidence: float = 0.96,
+    states: dict | None = None,
 ) -> UIScene:
     return UIScene(
         app_id="sample.app",
@@ -57,6 +58,7 @@ def _scene(
                 label=label,
                 bounds=bounds,
                 confidence=confidence,
+                states=states or {},
                 evidence=("画面中可见目标",),
             ),
         ),
@@ -89,6 +91,11 @@ def _decision(
         }
     elif action_kind in {"back", "wait_for_change"}:
         params = {"expected_effect": {"scene_changed": action_kind == "back"}}
+    elif action_kind == "input_verified_text":
+        params["text"] = "蓝牙设置"
+        params["states"] = dict(element.states)
+    elif action_kind == "long_press":
+        params["duration_ms"] = 800
     action = SemanticAction(node_id="node-1", action=action_kind, params=params)
     observation = SimpleNamespace(
         device_id="device-1",
@@ -107,31 +114,39 @@ def _decision(
         target_region=SimpleNamespace(
             kind=(
                 "element"
-                if action_kind in {"tap_semantic", "dismiss_overlay"}
+                if action_kind
+                in {"tap_semantic", "dismiss_overlay", "input_verified_text", "long_press"}
                 else "system_navigation"
                 if action_kind == "back"
                 else "screen"
             ),
             element_id=(
                 element.element_id
-                if action_kind in {"tap_semantic", "dismiss_overlay"}
+                if action_kind
+                in {"tap_semantic", "dismiss_overlay", "input_verified_text", "long_press"}
                 else ""
             ),
             bounds=(
                 element.bounds
-                if action_kind in {"tap_semantic", "dismiss_overlay"}
+                if action_kind
+                in {"tap_semantic", "dismiss_overlay", "input_verified_text", "long_press"}
                 else (0.0, 0.0, 1.0, 1.0)
             ),
         ),
     )
 
 
-def _context(*, impact: str = "navigation_only") -> SimpleNamespace:
+def _context(
+    *,
+    impact: str = "navigation_only",
+    external_action_allowed: bool = False,
+) -> SimpleNamespace:
     return SimpleNamespace(
         task_id="task-1",
         device_id="device-1",
         revision=1,
         current_external_impact=impact,
+        external_action_allowed=external_action_allowed,
     )
 
 
@@ -451,6 +466,46 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         self.assertTrue(result.allowed)
         self.assertEqual("back", result.canonical_class)
+
+    def test_allows_verified_text_input_only_for_focused_input(self) -> None:
+        scene = _scene(
+            meaning="搜索输入框",
+            label="搜索",
+            role="input",
+            states={"focused": True},
+        )
+        decision = _decision(scene, action_kind="input_verified_text")
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("input", result.canonical_class)
+
+    def test_allows_external_effect_only_with_scope_confirmation(self) -> None:
+        scene = _scene(meaning="send_message", label="发送", role="button")
+        decision = _decision(scene)
+
+        denied = self.policy.evaluate(
+            task_context=_context(impact="external_state"),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+        allowed = self.policy.evaluate(
+            task_context=_context(
+                impact="external_state",
+                external_action_allowed=True,
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(denied.allowed)
+        self.assertTrue(allowed.allowed)
+        self.assertEqual("external", allowed.canonical_class)
 
     def test_allows_canonical_navigation_tap(self) -> None:
         scene = _scene(meaning="open_details", label="查看详情", role="list_item")
@@ -853,7 +908,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             session.snapshot()["confirmation_scope"]["observation_id"],
         )
 
-    def test_external_state_blocks_before_qwen_and_robot(self) -> None:
+    def test_external_state_waits_for_risk_confirmation_before_qwen_and_robot(self) -> None:
         adapter = FakeAdapter(_scene())
         qwen = FakeQwenObserver()
         with tempfile.TemporaryDirectory() as temp:
@@ -866,13 +921,15 @@ class UniversalAgentStartTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
 
-        self.assertEqual("blocked", session.status)
+        self.assertEqual("awaiting_risk_confirmation", session.status)
+        self.assertTrue(session.snapshot()["risk_confirmation_ready"])
+        self.assertEqual(["risk-1"], session.snapshot()["risk_confirmation_scope"]["risk_ids"])
         self.assertEqual(0, len(qwen.calls))
         self.assertEqual(0, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
 
-    def test_unknown_impact_blocks_before_qwen_and_robot(self) -> None:
+    def test_unknown_impact_waits_for_risk_confirmation_before_qwen_and_robot(self) -> None:
         adapter = FakeAdapter(_scene())
         qwen = FakeQwenObserver()
         with tempfile.TemporaryDirectory() as temp:
@@ -885,7 +942,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
 
-        self.assertEqual("blocked", session.status)
+        self.assertEqual("awaiting_risk_confirmation", session.status)
         self.assertEqual([], qwen.calls)
         self.assertEqual(0, adapter.capture_calls)
         self.assertEqual(0, session.physical_actions)
@@ -967,6 +1024,86 @@ def _confirmation(session) -> dict:
         "observation_id": observation.observation_id,
         "fingerprint": observation.fingerprint,
     }
+
+
+def _risk_confirmation(session) -> dict:
+    return dict(session.snapshot()["risk_confirmation_scope"])
+
+
+class UniversalAgentRiskConfirmationTests(unittest.TestCase):
+    def _started(self, temp: str, *, impact: str = "external_state"):
+        initial = _external_graph(impact=impact)
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_result=replace(initial, revision=2),
+        )
+        qwen = FakeQwenObserver()
+        adapter = FakeExecutingAdapter(
+            _scene(),
+            _scene(fingerprint="frame-b", meaning="open_more", label="查看更多"),
+        )
+        orchestrator = UniversalAgentOrchestrator(
+            deepseek_planner=planner,
+            qwen_observer=qwen,
+            adapter_factory=lambda _device_id: adapter,
+            trusted_observation_factory=_trusted_factory,
+        )
+        session = orchestrator.start(
+            session_id="session-risk-confirm",
+            raw_goal="向目标联系人发送需求询问",
+            device_id="device-1",
+            run_dir=Path(temp),
+        )
+        return orchestrator, session, qwen, adapter
+
+    def test_risk_approval_observes_once_then_requires_action_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, qwen, adapter = self._started(temp)
+
+            decision = orchestrator.approve_risks(
+                session,
+                _risk_confirmation(session),
+            )
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual(("risk-1",), session.confirmed_risk_ids)
+        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(1, adapter.capture_calls)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+        self.assertIsNotNone(session.snapshot()["confirmation_scope"])
+
+    def test_risk_scope_mismatch_is_consumed_without_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, qwen, adapter = self._started(temp)
+            scope = _risk_confirmation(session)
+            scope["revision"] = 99
+
+            with self.assertRaisesRegex(UniversalAgentOrchestratorError, "不一致"):
+                orchestrator.approve_risks(session, scope)
+
+        self.assertEqual([], qwen.calls)
+        self.assertEqual(0, adapter.capture_calls)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertTrue(session.risk_confirmation_authority.consumed)
+
+    def test_action_confirmation_executes_once_then_new_revision_requires_new_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, qwen, adapter = self._started(temp)
+            orchestrator.approve_risks(session, _risk_confirmation(session))
+
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual("awaiting_risk_confirmation", session.status)
+        self.assertEqual((), session.confirmed_risk_ids)
+        self.assertEqual(1, len(qwen.calls))
+        self.assertIsNone(session.snapshot()["confirmation_scope"])
+        self.assertTrue(session.snapshot()["risk_confirmation_ready"])
 
 
 class UniversalAgentConfirmTests(unittest.TestCase):

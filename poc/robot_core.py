@@ -588,6 +588,31 @@ class RobotController:
 
     def vision_tap_relative(self, x: int, y: int) -> tuple[int, int]:
         """Tap a Qwen3-VL coordinate expressed on a 1000×1000 grid."""
+        return self._vision_press_relative(
+            x,
+            y,
+            hold_seconds=float(load_workflow_config()["vision_agent"]["tap_hold"]),
+        )
+
+    def vision_long_press_relative(
+        self,
+        x: int,
+        y: int,
+        hold_seconds: float = 0.8,
+    ) -> tuple[int, int]:
+        """Long-press one calibrated visual target without changing its point."""
+
+        if not 0.5 <= float(hold_seconds) <= 2.0:
+            raise ValueError("通用长按时间必须在0.5～2.0秒之间。")
+        return self._vision_press_relative(x, y, hold_seconds=float(hold_seconds))
+
+    def _vision_press_relative(
+        self,
+        x: int,
+        y: int,
+        *,
+        hold_seconds: float,
+    ) -> tuple[int, int]:
         if not (0 <= x <= 1000 and 0 <= y <= 1000):
             raise ValueError("视觉 Agent 坐标必须在0～1000之间。")
         hwnd, _title = legacy.find_window(self.title)
@@ -613,9 +638,7 @@ class RobotController:
             point[0],
             point[1],
             countdown=0,
-            hold_seconds=float(
-                load_workflow_config()["vision_agent"]["tap_hold"]
-            ),
+            hold_seconds=hold_seconds,
         )
         legacy.move_cursor_outside_camera(hwnd)
         return point
@@ -1483,6 +1506,37 @@ class MockRobotController(RobotController):
     def vision_tap_relative(self, x: int, y: int) -> tuple[int, int]:
         self.executions.append({"action": "tap", "coordinate": [x, y]})
         return x, y
+
+    def vision_long_press_relative(
+        self,
+        x: int,
+        y: int,
+        hold_seconds: float = 0.8,
+    ) -> tuple[int, int]:
+        self.executions.append(
+            {
+                "action": "long_press",
+                "coordinate": [x, y],
+                "hold_seconds": hold_seconds,
+            }
+        )
+        return x, y
+
+    def vision_drag_relative(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        self.executions.append(
+            {
+                "action": "drag",
+                "start": [start_x, start_y],
+                "end": [end_x, end_y],
+            }
+        )
+        return (start_x, start_y), (end_x, end_y)
 
     def vision_android_home(self) -> tuple[int, int]:
         self.executions.append({"action": "android_home"})

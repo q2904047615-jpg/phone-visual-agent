@@ -22,7 +22,7 @@ from universal_action_controller import (
 
 
 DEEPSEEK_TASK_GRAPH_V3 = "2026-08-11-deepseek-task-graph-v3"
-QWEN_VISUAL_DECISION_V2 = "2026-08-11-qwen-visual-decision-v2"
+QWEN_VISUAL_DECISION_V2 = "2026-08-12-qwen-visual-decision-v3"
 
 
 @dataclass

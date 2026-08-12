@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import re
 from typing import Any
 
@@ -8,7 +8,7 @@ from semantic_executor import SemanticAction
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-11-universal-action-v3"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-12-universal-action-v4"
 
 
 class UniversalActionError(RuntimeError):
@@ -125,9 +125,12 @@ class ResolvedSemanticAction:
     node_id: str
     kind: str
     normalized_point: tuple[float, float] | None = None
+    normalized_end_point: tuple[float, float] | None = None
     text: str | None = None
     direction: str | None = None
+    hold_seconds: float | None = None
     target_element_id: str | None = None
+    destination_element_id: str | None = None
     before_fingerprint: str = ""
     expected_effect: dict[str, Any] = field(default_factory=dict)
 
@@ -135,6 +138,8 @@ class ResolvedSemanticAction:
         value = asdict(self)
         if self.normalized_point is not None:
             value["normalized_point"] = list(self.normalized_point)
+        if self.normalized_end_point is not None:
+            value["normalized_end_point"] = list(self.normalized_end_point)
         return value
 
 
@@ -191,18 +196,53 @@ class UniversalActionController:
             text = str(action.params.get("text") or "")
             if not text:
                 raise UniversalActionError("文字输入动作缺少 text。")
-            field_meaning = str(action.params.get("field") or "active_input").strip()
-            element = scene.resolve_unique(
-                meaning=field_meaning,
-                role="input",
-                min_confidence=self.min_confidence,
-            )
+            if len(text) > 100 or "\n" in text or "\r" in text:
+                raise UniversalActionError("文字输入必须为1～100个无换行字符。")
+            element = self._resolve_target(action, scene, required_role="input")
+            if element.states.get("focused") is not True:
+                raise UniversalActionError("文字输入前必须有当前画面证明输入框已聚焦。")
             return ResolvedSemanticAction(
                 node_id=action.node_id,
                 kind="input_verified_text",
                 normalized_point=element.center,
                 text=text,
                 target_element_id=element.element_id,
+                before_fingerprint=scene.fingerprint,
+                expected_effect=expected_effect,
+            )
+        if action.action == "long_press":
+            element = self._resolve_target(action, scene)
+            duration_ms = action.params.get("duration_ms", 800)
+            if isinstance(duration_ms, bool) or not isinstance(duration_ms, (int, float)):
+                raise UniversalActionError("长按 duration_ms 格式无效。")
+            if not 500 <= float(duration_ms) <= 2000:
+                raise UniversalActionError("长按 duration_ms 必须在500～2000之间。")
+            resolved = self._point_action(
+                action,
+                element,
+                expected_effect,
+                scene.fingerprint,
+            )
+            return replace(
+                resolved,
+                hold_seconds=float(duration_ms) / 1000.0,
+            )
+        if action.action == "drag":
+            source = self._resolve_target(action, scene, prefix="source_")
+            destination = self._resolve_target(
+                action,
+                scene,
+                prefix="destination_",
+            )
+            if source.element_id == destination.element_id:
+                raise UniversalActionError("拖动起点和终点不能是同一元素。")
+            return ResolvedSemanticAction(
+                node_id=action.node_id,
+                kind="drag",
+                normalized_point=source.center,
+                normalized_end_point=destination.center,
+                target_element_id=source.element_id,
+                destination_element_id=destination.element_id,
                 before_fingerprint=scene.fingerprint,
                 expected_effect=expected_effect,
             )
@@ -350,16 +390,29 @@ class UniversalActionController:
         # A terminal flag with only free-form text is not machine-verifiable.
         return tuple(evidence)
 
-    def _resolve_target(self, action: SemanticAction, scene: UIScene) -> UIElement:
-        target = str(action.params.get("target") or "").strip()
-        element_id = str(action.params.get("element_id") or "").strip()
+    def _resolve_target(
+        self,
+        action: SemanticAction,
+        scene: UIScene,
+        *,
+        prefix: str = "",
+        required_role: str | None = None,
+    ) -> UIElement:
+        target = str(action.params.get(f"{prefix}target") or "").strip()
+        element_id = str(action.params.get(f"{prefix}element_id") or "").strip()
         if not target and not element_id:
-            raise UniversalActionError("tap_semantic 缺少 target 或 element_id。")
-        role = str(action.params.get("role") or "").strip() or None
-        label = str(action.params.get("label") or "").strip() or None
-        states = action.params.get("states") or {}
+            raise UniversalActionError(
+                f"{action.action} 缺少 {prefix}target 或 {prefix}element_id。"
+            )
+        role = str(action.params.get(f"{prefix}role") or "").strip() or None
+        if required_role is not None:
+            if role is not None and role != required_role:
+                raise UniversalActionError(f"动作目标角色必须为 {required_role}。")
+            role = required_role
+        label = str(action.params.get(f"{prefix}label") or "").strip() or None
+        states = action.params.get(f"{prefix}states") or {}
         if not isinstance(states, dict):
-            raise UniversalActionError("tap_semantic.states 格式无效。")
+            raise UniversalActionError(f"{action.action}.{prefix}states 格式无效。")
         try:
             if element_id:
                 element = scene.get_element(

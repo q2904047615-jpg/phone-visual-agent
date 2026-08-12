@@ -205,6 +205,90 @@ class UISceneTests(unittest.TestCase):
         changed = scene(element("five", "digit_5"), fingerprint="after")
         controller.verify_after_action(resolved, before, changed)
 
+    def test_verified_input_requires_focused_input_and_preserves_exact_text(self) -> None:
+        current = scene(
+            element(
+                "search-field",
+                "搜索输入框",
+                role="input",
+                states={"focused": True},
+            )
+        )
+        action = SemanticAction(
+            node_id="type-query",
+            action="input_verified_text",
+            params={
+                "element_id": "search-field",
+                "target": "搜索输入框",
+                "role": "input",
+                "label": "搜索输入框",
+                "states": {"focused": True},
+                "text": "蓝牙设置",
+            },
+        )
+
+        resolved = UniversalActionController().resolve_one(action, current)
+
+        self.assertEqual("input_verified_text", resolved.kind)
+        self.assertEqual("蓝牙设置", resolved.text)
+        self.assertEqual("search-field", resolved.target_element_id)
+
+    def test_verified_input_rejects_unfocused_field(self) -> None:
+        current = scene(element("field", "查询框", role="input"))
+        action = SemanticAction(
+            node_id="type",
+            action="input_verified_text",
+            params={"element_id": "field", "target": "查询框", "text": "测试"},
+        )
+
+        with self.assertRaisesRegex(UniversalActionError, "已聚焦"):
+            UniversalActionController().resolve_one(action, current)
+
+    def test_long_press_has_bounded_duration(self) -> None:
+        current = scene(element("item", "列表项目", role="list_item"))
+        action = SemanticAction(
+            node_id="hold",
+            action="long_press",
+            params={
+                "element_id": "item",
+                "target": "列表项目",
+                "duration_ms": 900,
+            },
+        )
+
+        resolved = UniversalActionController().resolve_one(action, current)
+
+        self.assertEqual("long_press", resolved.kind)
+        self.assertEqual(0.9, resolved.hold_seconds)
+
+    def test_drag_resolves_two_distinct_semantic_elements(self) -> None:
+        source = element("source", "待移动项目", role="list_item")
+        destination = UIElement(
+            element_id="destination",
+            role="container",
+            meaning="目标区域",
+            label="目标区域",
+            bounds=(0.6, 0.6, 0.9, 0.9),
+            confidence=0.95,
+            evidence=("visible",),
+        )
+        current = scene(source, destination)
+        action = SemanticAction(
+            node_id="drag",
+            action="drag",
+            params={
+                "source_element_id": "source",
+                "source_target": "待移动项目",
+                "destination_element_id": "destination",
+                "destination_target": "目标区域",
+            },
+        )
+
+        resolved = UniversalActionController().resolve_one(action, current)
+
+        self.assertEqual(source.center, resolved.normalized_point)
+        self.assertEqual(destination.center, resolved.normalized_end_point)
+
 
 if __name__ == "__main__":
     unittest.main()

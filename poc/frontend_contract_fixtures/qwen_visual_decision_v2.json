@@ -7,7 +7,7 @@
     "generated_from": "test_qwen_visual_decision.task_context() / launcher_stable"
   },
   "decision": {
-    "protocol_version": "2026-08-11-qwen-visual-decision-v2",
+    "protocol_version": "2026-08-12-qwen-visual-decision-v3",
     "task_id": "task-map-001",
     "device_id": "phone-01",
     "revision": 1,

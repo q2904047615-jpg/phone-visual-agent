@@ -62,6 +62,16 @@ class FakeRobot:
         self.actions.append(("back",))
         return (500, 950)
 
+    def vision_type_text(self, text):
+        self.actions.append(("input", text))
+
+    def vision_long_press_relative(self, x, y, hold_seconds):
+        self.actions.append(("long_press", x, y, hold_seconds))
+        return (x, y)
+
+    def vision_drag_relative(self, start_x, start_y, end_x, end_y):
+        self.actions.append(("drag", start_x, start_y, end_x, end_y))
+
 
 class SequenceCapture:
     def __init__(self, colors):
@@ -221,6 +231,57 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(robot.actions, [("tap", 210, 310)])
         self.assertEqual(result.physical_actions, 1)
         self.assertEqual(observer.calls, 2)
+
+    def test_confirmed_input_executes_exact_text_once_and_reobserves(self):
+        def input_scene(fingerprint, element_id):
+            return UIScene(
+                app_id="browser",
+                screen_id="search",
+                summary="输入框已聚焦",
+                elements=(
+                    UIElement(
+                        element_id=element_id,
+                        role="input",
+                        meaning="搜索输入框",
+                        label="搜索",
+                        bounds=(0.1, 0.1, 0.9, 0.2),
+                        confidence=0.96,
+                        states={"focused": True},
+                    ),
+                ),
+                stable=True,
+                confidence=0.95,
+                fingerprint=fingerprint,
+            )
+
+        planned = input_scene("planned", "field-planned")
+        fresh = input_scene("before", "field-fresh")
+        after = input_scene("after", "field-after")
+        observer = FakeSceneObserver([fresh, after])
+        robot = FakeRobot()
+        action = SemanticAction(
+            node_id="input-step",
+            action="input_verified_text",
+            params={
+                "element_id": "field-planned",
+                "target": "搜索输入框",
+                "role": "input",
+                "label": "搜索",
+                "states": {"focused": True},
+                "text": "蓝牙设置",
+            },
+        )
+
+        result = self._adapter(observer, robot).execute(
+            requested_action=action,
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("input", "蓝牙设置")], robot.actions)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(2, observer.calls)
 
     def test_execution_result_keeps_exact_four_verified_after_frames(self):
         gray = Image.new("RGB", (540, 960), "gray")

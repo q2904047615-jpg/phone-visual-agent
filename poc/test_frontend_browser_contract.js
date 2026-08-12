@@ -8,7 +8,7 @@ const { chromium } = require("playwright");
 const staticRoot = path.join(__dirname, "static");
 const deepSeekFixture = require("./frontend_contract_fixtures/deepseek_task_graph_v3.json");
 const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v2.json");
-const requests = { start: [], confirm: [], next: [], auto: [], pause: [], cancel: [], stop: [] };
+const requests = { start: [], approveRisk: [], confirm: [], next: [], auto: [], pause: [], cancel: [], stop: [] };
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -17,19 +17,42 @@ function clone(value) {
 function externalSession() {
   return {
     session_id: "session-browser-external",
-    status: "blocked",
-    task_graph: clone(deepSeekFixture.to_qwen_context),
-    controller_decision: {
-      allowed: false,
-      reason: "第一阶段禁止 external_state 子目标进入 Qwen 或机械臂执行。",
-      canonical_class: "",
-      policy_version: "2026-08-12-phase-one-navigation-v1",
+    status: "awaiting_risk_confirmation",
+    task_graph: clone(deepSeekFixture.task_graph),
+    risk_confirmation_scope: {
+      session_id: "session-browser-external",
+      task_id: "task-map-001",
+      device_id: "phone-01",
+      revision: 1,
+      subgoal_id: "save_target",
+      risk_ids: ["save_place"],
     },
-    failed_reason: "第一阶段禁止 external_state 子目标进入 Qwen 或机械臂执行。",
+    risk_confirmation_ready: true,
     physical_actions: 0,
     evidence: [],
     history: [],
   };
+}
+
+function externalActionSession() {
+  const session = externalSession();
+  session.status = "awaiting_confirmation";
+  session.risk_confirmation_ready = false;
+  session.confirmed_risk_ids = ["save_place"];
+  session.qwen_decision = clone(qwenFixture.decision);
+  session.controller_decision = {
+    allowed: true,
+    reason: "当前外部状态动作已通过作用域确认。",
+    canonical_class: "external",
+    policy_version: "2026-08-12-universal-action-policy-v2",
+  };
+  session.confirmation_scope = {
+    ...session.risk_confirmation_scope,
+    observation_id: "obs_0123456789abcdef0123456789abcdef",
+    fingerprint: "51277d0d9e6f986b00dc",
+  };
+  session.confirmation_ready = true;
+  return session;
 }
 
 function safeActionSession(decisionStatus = "action") {
@@ -183,6 +206,11 @@ function createServer() {
       json(response, 200, { session: afterActionSession() });
       return;
     }
+    if (request.method === "POST" && url.pathname.endsWith("/approve-risk")) {
+      requests.approveRisk.push(await readBody(request));
+      json(response, 200, { physical_actions: 0, session: externalActionSession() });
+      return;
+    }
     if (request.method === "POST" && url.pathname.endsWith("/next")) {
       requests.next.push(await readBody(request));
       json(response, 200, { session: safeActionSession() });
@@ -265,7 +293,7 @@ test("browser renders controller evidence and confirms one exact observation", {
     assert.match(actionText, /scene_changed=true/);
     assert.match(actionText, /92%/);
     assert.match(actionText, /可信候选唯一且清晰/);
-    assert.match(actionText, /2026-08-11-qwen-visual-decision-v2/);
+    assert.match(actionText, /2026-08-12-qwen-visual-decision-v3/);
     assert.match(actionText, /status action/);
     assert.match(actionText, /task task-map-001/);
     assert.match(actionText, /revision 1/);
@@ -342,7 +370,7 @@ test("browser renders controller evidence and confirms one exact observation", {
   }
 });
 
-test("external-state graph is blocked before confirmation controls", { timeout: 30000 }, async () => {
+test("external-state graph requires risk approval before exact action confirmation", { timeout: 30000 }, async () => {
   Object.values(requests).forEach(items => { items.length = 0; });
   const server = createServer();
   const { browser, page } = await launchFixturePage(server);
@@ -350,16 +378,40 @@ test("external-state graph is blocked before confirmation controls", { timeout: 
   try {
     await page.locator("#agentText").fill("外部状态风险任务");
     await page.locator("#startSupervisedAgent").click();
-    await page.locator("#sessionBadge").getByText("已阻止").waitFor();
+    await page.locator("#sessionBadge").getByText("等待风险确认").waitFor();
     assert.equal(await page.locator("#autoSupervisedAgent").count(), 0);
-    assert.equal(await page.locator("#reviewAction").count(), 0);
+    assert.equal(await page.locator("#reviewAction").count(), 1);
     assert.equal(requests.auto.length, 0);
     const goalText = await page.locator("#goalSummary").innerText();
-    assert.match(goalText, /确认门 · awaiting_confirmation/);
+    assert.match(goalText, /确认门 · awaiting_risk_confirmation/);
     assert.match(goalText, /required=true/);
     assert.match(goalText, /风险 save_place · 保存目标地点/);
     assert.match(goalText, /scope task-map-001 \/ phone-01 \/ r1 \/ save_target/);
-    assert.match(await page.locator("#actionContent").innerText(), /第一阶段禁止 external_state/);
+    assert.match(await page.locator("#actionContent").innerText(), /Qwen 唯一动作尚未产生/);
+    await page.locator("#reviewAction").click();
+    assert.match(await page.locator("#riskWarning").innerText(), /此确认本身不会触发机械臂/);
+    const approvalResponse = page.waitForResponse(
+      response => response.url().endsWith("/approve-risk"),
+      { timeout: 5000 },
+    );
+    await page.locator("#confirmRiskAction").click();
+    await approvalResponse;
+    await page.locator("#reviewAction").waitFor({ timeout: 5000 });
+    assert.deepEqual(requests.approveRisk[0], {
+      confirmed: true,
+      confirmation: {
+        session_id: "session-browser-external",
+        task_id: "task-map-001",
+        device_id: "phone-01",
+        revision: 1,
+        subgoal_id: "save_target",
+        risk_ids: ["save_place"],
+      },
+    });
+    assert.equal(requests.confirm.length, 0);
+    await page.locator("#reviewAction").click();
+    assert.match(await page.locator("#riskWarning").innerText(), /obs_0123456789abcdef0123456789abcdef/);
+    assert.match(await page.locator("#riskWarning").innerText(), /51277d0d9e6f986b00dc/);
     assert.equal(requests.confirm.length, 0);
     assert.equal(await page.locator("#autoSupervisedAgent").count(), 0);
   } finally {

@@ -123,7 +123,7 @@
 
   function isQwenV2Decision(value) {
     const decision = asObject(value);
-    return String(decision.protocol_version || "").includes("qwen-visual-decision-v2")
+    return /qwen-visual-decision-v[23]/.test(String(decision.protocol_version || ""))
       || (Object.prototype.hasOwnProperty.call(decision, "next_action")
         && decision.task_id !== undefined
         && decision.revision !== undefined
@@ -147,7 +147,9 @@
     ));
     const isExecutable = status === "action" && Boolean(actionType);
     return {
-      protocol: "qwen-visual-decision-v2",
+      protocol: String(firstDefined(decision.protocol_version, "")).includes("-v3")
+        ? "qwen-visual-decision-v3"
+        : "qwen-visual-decision-v2",
       protocolVersion: String(firstDefined(decision.protocol_version, "")),
       status,
       actionType,
@@ -311,8 +313,9 @@
 
     const riskActions = normalizeRiskActions(firstDefined(graph.risk_actions, qwenContext.risk_actions));
     const rawGate = asObject(firstDefined(graph.confirmation_gate, qwenContext.confirmation_gate, session.confirmation_gate));
+    const confirmationPhase = status === "awaiting_risk_confirmation" ? "risk" : "action";
     const authorityScope = normalizeConfirmationGateScope(firstDefined(
-      session.confirmation_scope,
+      confirmationPhase === "risk" ? session.risk_confirmation_scope : session.confirmation_scope,
       rawGate.scope,
     ));
     const currentExternalImpact = String(firstDefined(
@@ -322,6 +325,7 @@
       "unknown",
     ));
     const gateRiskIds = normalizeStringList(firstDefined(
+      asObject(session.risk_confirmation_scope).risk_ids,
       asObject(session.confirmation_scope).risk_ids,
       rawGate.risk_ids,
       currentSubgoal.riskIds,
@@ -331,17 +335,22 @@
     ));
     const gateRequired = Boolean(
       session.confirmation_ready === true
+      || session.risk_confirmation_ready === true
+      || status === "awaiting_risk_confirmation"
       || status === "awaiting_confirmation"
       || rawGate.required === true
       || externalImpacts.has(currentExternalImpact)
     );
     const gateState = String(firstDefined(
       rawGate.state,
-      gateRequired ? (status === "awaiting_confirmation" ? "awaiting_confirmation" : "unconfirmed") : "not_required",
+      gateRequired
+        ? (["awaiting_risk_confirmation", "awaiting_confirmation"].includes(status) ? status : "unconfirmed")
+        : "not_required",
     ));
     const requiresConfirmation = Boolean(
       gateRequired
       || currentActionMeta.requires_confirmation
+      || status === "awaiting_risk_confirmation"
       || status === "awaiting_confirmation"
     );
     const hasCurrentRisk = gateRiskIds.length > 0 || currentRiskActions.length > 0;
@@ -409,6 +418,7 @@
           riskIds: gateRiskIds,
           externalStateActionAllowed: rawGate.external_state_action_allowed === true,
           scope: authorityScope,
+          phase: confirmationPhase,
           raw: rawGate,
         },
         maxPhysicalActions: 1,
@@ -488,13 +498,12 @@
       throw new Error("当前会话没有正式DeepSeek v3确认作用域，拒绝确认。");
     }
     const scope = confirmationScope(session, sessionDeviceId);
+    const phase = session.risk?.confirmationGate?.phase === "risk" ? "risk" : "action";
     if (
       !scope.session_id
       || !scope.task_id
       || !scope.device_id
       || !scope.subgoal_id
-      || !scope.observation_id
-      || !scope.fingerprint
       || !Number.isInteger(scope.revision)
       || scope.device_id !== String(sessionDeviceId || "")
     ) {
@@ -503,7 +512,10 @@
     if (externalImpacts.has(session.risk.currentExternalImpact) && !scope.risk_ids.length) {
       throw new Error("外部状态或未知影响步骤缺少 risk_ids，拒绝确认。");
     }
-    return { scope, consumed: false };
+    if (phase === "action" && (!scope.observation_id || !scope.fingerprint)) {
+      throw new Error("当前动作确认缺少 observation_id 或 fingerprint。");
+    }
+    return { scope, phase, consumed: false };
   }
 
   function consumeConfirmationGrant(grant, session, sessionDeviceId) {
@@ -513,18 +525,21 @@
       throw new Error("任务、revision、子目标、风险或设备已经变化，请重新确认。");
     }
     grant.consumed = true;
+    const confirmation = {
+      session_id: grant.scope.session_id,
+      task_id: grant.scope.task_id,
+      device_id: grant.scope.device_id,
+      revision: grant.scope.revision,
+      subgoal_id: grant.scope.subgoal_id,
+      risk_ids: [...grant.scope.risk_ids],
+    };
+    if (grant.phase !== "risk") {
+      confirmation.observation_id = grant.scope.observation_id;
+      confirmation.fingerprint = grant.scope.fingerprint;
+    }
     return {
       confirmed: true,
-      confirmation: {
-        session_id: grant.scope.session_id,
-        task_id: grant.scope.task_id,
-        device_id: grant.scope.device_id,
-        revision: grant.scope.revision,
-        subgoal_id: grant.scope.subgoal_id,
-        risk_ids: [...grant.scope.risk_ids],
-        observation_id: grant.scope.observation_id,
-        fingerprint: grant.scope.fingerprint,
-      },
+      confirmation,
     };
   }
 

@@ -358,6 +358,65 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual(self.observation.local_stability.frame_count, 4)
         self.assertEqual(self.observation.scene.fingerprint, self.observation.fingerprint)
 
+    def test_input_action_must_copy_structured_text_exactly(self) -> None:
+        context = task_context()
+        context["goal"]["entities"] = {"input_text": "蓝牙设置"}
+        context["current_subgoal"]["objective"] = "在已聚焦输入框输入查询词"
+        field = UIElement(
+            element_id="query_field",
+            role="input",
+            meaning="搜索输入框",
+            label="搜索",
+            bounds=(0.08, 0.12, 0.92, 0.22),
+            confidence=0.97,
+            states={"focused": True},
+            evidence=("输入光标可见",),
+        )
+        observation = trusted_observation(self.frames, elements=(field,))
+        payload = action_payload(context, observation, element_id="query_field")
+        payload["next_action"].update(
+            {"kind": "input_verified_text", "text": "蓝牙设置"}
+        )
+        payload["expected_result"] = {"content_changed": True}
+
+        _observer, decision = self.decide(
+            FakeProvider(payload),
+            context=context,
+            observation=observation,
+        )
+
+        self.assertEqual("input_verified_text", decision.proposal.action.action)
+        self.assertEqual("蓝牙设置", decision.proposal.action.params["text"])
+
+    def test_input_action_rejects_model_invented_text(self) -> None:
+        context = task_context()
+        context["goal"]["entities"] = {"input_text": "蓝牙设置"}
+        field = UIElement(
+            element_id="query_field",
+            role="input",
+            meaning="搜索输入框",
+            label="搜索",
+            bounds=(0.08, 0.12, 0.92, 0.22),
+            confidence=0.97,
+            states={"focused": True},
+            evidence=("输入光标可见",),
+        )
+        observation = trusted_observation(self.frames, elements=(field,))
+        payload = action_payload(context, observation, element_id="query_field")
+        payload["next_action"].update(
+            {"kind": "input_verified_text", "text": "打开蓝牙设置"}
+        )
+
+        observer, decision = self.decide(
+            FakeProvider(payload),
+            context=context,
+            observation=observation,
+        )
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("input_text", decision.proposal.reason)
+        self.assertTrue(observer.last_diagnostics["retry_failure_blocked"])
+
     def test_offline_manifest_uses_full_context_and_multiple_page_types(self) -> None:
         manifest = json.loads(
             (ROOT / "evals" / "qwen_visual_decision" / "cases.json").read_text(

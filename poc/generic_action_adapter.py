@@ -74,7 +74,17 @@ class GenericActionExecutionResult:
 class GenericSingleActionAdapter:
     """The only generic bridge from a verified scene to one robot action."""
 
-    PHYSICAL_KINDS = frozenset({"tap_semantic", "dismiss_overlay", "swipe", "back"})
+    PHYSICAL_KINDS = frozenset(
+        {
+            "tap_semantic",
+            "dismiss_overlay",
+            "swipe",
+            "back",
+            "input_verified_text",
+            "long_press",
+            "drag",
+        }
+    )
 
     def __init__(
         self,
@@ -351,6 +361,49 @@ class GenericSingleActionAdapter:
             elif resolved.kind == "back":
                 physical_actions = 1
                 robot_result = self.robot.vision_android_back()
+            elif resolved.kind == "input_verified_text":
+                if not resolved.text:
+                    raise GenericActionAdapterError("输入动作缺少已校验文字。")
+                method = getattr(self.robot, "vision_type_text", None)
+                if not callable(method):
+                    raise GenericActionAdapterError("机械臂不支持经过验证的文字输入。")
+                physical_actions = 1
+                robot_result = method(resolved.text)
+            elif resolved.kind == "long_press":
+                if resolved.normalized_point is None or resolved.hold_seconds is None:
+                    raise GenericActionAdapterError("长按动作缺少已校验落点或时长。")
+                method = getattr(self.robot, "vision_long_press_relative", None)
+                if not callable(method):
+                    raise GenericActionAdapterError("机械臂不支持通用长按。")
+                x = max(0, min(1000, round(resolved.normalized_point[0] * 1000)))
+                y = max(0, min(1000, round(resolved.normalized_point[1] * 1000)))
+                physical_actions = 1
+                robot_result = method(x, y, resolved.hold_seconds)
+            elif resolved.kind == "drag":
+                if (
+                    resolved.normalized_point is None
+                    or resolved.normalized_end_point is None
+                ):
+                    raise GenericActionAdapterError("拖动动作缺少已校验起点或终点。")
+                method = getattr(self.robot, "vision_drag_relative", None)
+                if not callable(method):
+                    raise GenericActionAdapterError(
+                        "当前机械臂控制端没有经过验收的任意拖动能力。"
+                    )
+                start_x = max(
+                    0, min(1000, round(resolved.normalized_point[0] * 1000))
+                )
+                start_y = max(
+                    0, min(1000, round(resolved.normalized_point[1] * 1000))
+                )
+                end_x = max(
+                    0, min(1000, round(resolved.normalized_end_point[0] * 1000))
+                )
+                end_y = max(
+                    0, min(1000, round(resolved.normalized_end_point[1] * 1000))
+                )
+                physical_actions = 1
+                robot_result = method(start_x, start_y, end_x, end_y)
             elif resolved.kind == "wait_for_change":
                 time.sleep(max(0.5, self.post_action_settle))
         except GenericActionAdapterError:
@@ -421,61 +474,77 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError(
                 f"确认时页面已变化：{planned_scene.screen_id} -> {fresh_scene.screen_id}"
             )
-        if requested.action not in {"tap_semantic", "dismiss_overlay"}:
+        single_element_actions = {
+            "tap_semantic",
+            "dismiss_overlay",
+            "input_verified_text",
+            "long_press",
+        }
+        if requested.action not in single_element_actions | {"drag"}:
             return requested
 
-        original_id = str(requested.params.get("element_id") or "").strip()
-        try:
-            original = planned_scene.get_element(original_id)
-        except UISceneError as exc:
-            raise GenericActionAdapterError(f"原始场景目标无效：{exc}") from exc
-        match_filters = {
-            "role": original.role,
-            "states": dict(original.states),
-        }
-        matches = fresh_scene.find_elements(
-            label=original.label or None,
-            meaning=original.meaning,
-            **match_filters,
-        )
-        if len(matches) != 1:
-            raise GenericActionAdapterError(
-                f"确认时目标语义不再严格唯一：{original.meaning}，匹配{len(matches)}个"
+        def rebind_element(prefix: str = "") -> UIElement:
+            original_id = str(
+                requested.params.get(f"{prefix}element_id") or ""
+            ).strip()
+            try:
+                original = planned_scene.get_element(original_id)
+            except UISceneError as exc:
+                raise GenericActionAdapterError(f"原始场景目标无效：{exc}") from exc
+            matches = fresh_scene.find_elements(
+                label=original.label or None,
+                meaning=original.meaning,
+                role=original.role,
+                states=dict(original.states),
             )
-        current = matches[0]
-        if current.meaning.casefold() != original.meaning.casefold():
-            raise GenericActionAdapterError("确认时目标语义已经变化，旧确认失效。")
-        if current.label != original.label or current.states != original.states:
-            raise GenericActionAdapterError(
-                "确认时目标标签或状态已经变化，旧确认失效。"
-            )
-        left = max(original.bounds[0], current.bounds[0])
-        top = max(original.bounds[1], current.bounds[1])
-        right = min(original.bounds[2], current.bounds[2])
-        bottom = min(original.bounds[3], current.bounds[3])
-        intersection = max(0.0, right - left) * max(0.0, bottom - top)
-        original_area = max(0.0, original.bounds[2] - original.bounds[0]) * max(
-            0.0, original.bounds[3] - original.bounds[1]
-        )
-        current_area = max(0.0, current.bounds[2] - current.bounds[0]) * max(
-            0.0, current.bounds[3] - current.bounds[1]
-        )
-        union = original_area + current_area - intersection
-        overlap = intersection / union if union > 0 else 0.0
-        if overlap < 0.60:
-            raise GenericActionAdapterError(
-                "确认时目标区域已明显移动，旧确认失效。"
+            if len(matches) != 1:
+                raise GenericActionAdapterError(
+                    "确认时目标语义不再严格唯一："
+                    f"{original.meaning}，匹配{len(matches)}个"
+                )
+            current = matches[0]
+            if current.meaning.casefold() != original.meaning.casefold():
+                raise GenericActionAdapterError("确认时目标语义已经变化，旧确认失效。")
+            if current.label != original.label or current.states != original.states:
+                raise GenericActionAdapterError(
+                    "确认时目标标签或状态已经变化，旧确认失效。"
+                )
+            left = max(original.bounds[0], current.bounds[0])
+            top = max(original.bounds[1], current.bounds[1])
+            right = min(original.bounds[2], current.bounds[2])
+            bottom = min(original.bounds[3], current.bounds[3])
+            intersection = max(0.0, right - left) * max(0.0, bottom - top)
+            original_area = max(
+                0.0, original.bounds[2] - original.bounds[0]
+            ) * max(0.0, original.bounds[3] - original.bounds[1])
+            current_area = max(
+                0.0, current.bounds[2] - current.bounds[0]
+            ) * max(0.0, current.bounds[3] - current.bounds[1])
+            union = original_area + current_area - intersection
+            overlap = intersection / union if union > 0 else 0.0
+            if overlap < 0.60:
+                raise GenericActionAdapterError(
+                    "确认时目标区域已明显移动，旧确认失效。"
+                )
+            return current
+
+        prefixes = ("source_", "destination_") if requested.action == "drag" else ("",)
+        params = dict(requested.params)
+        for prefix in prefixes:
+            current = rebind_element(prefix)
+            params.update(
+                {
+                    f"{prefix}element_id": current.element_id,
+                    f"{prefix}target": current.meaning,
+                    f"{prefix}role": current.role,
+                    f"{prefix}label": current.label,
+                    f"{prefix}states": dict(current.states),
+                }
             )
         return SemanticAction(
             node_id=requested.node_id,
             action=requested.action,
-            params={
-                **requested.params,
-                "element_id": current.element_id,
-                "target": current.meaning,
-                "role": current.role,
-                "label": current.label,
-            },
+            params=params,
         )
 
     @staticmethod

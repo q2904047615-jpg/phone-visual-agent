@@ -686,6 +686,20 @@ class GenericConfirmationScopeRequest(StrictAgentRequest):
     fingerprint: StrictStr = Field(min_length=1, max_length=256)
 
 
+class GenericRiskConfirmationScopeRequest(StrictAgentRequest):
+    session_id: StrictStr = Field(min_length=1, max_length=128)
+    task_id: StrictStr = Field(min_length=1, max_length=128)
+    device_id: StrictStr = Field(min_length=1, max_length=128)
+    revision: StrictInt = Field(ge=1)
+    subgoal_id: StrictStr = Field(min_length=1, max_length=128)
+    risk_ids: list[StrictStr] = Field(min_length=1)
+
+
+class GenericRiskApprovalRequest(StrictAgentRequest):
+    confirmed: StrictBool = False
+    confirmation: GenericRiskConfirmationScopeRequest | None = None
+
+
 class GenericSupervisedStepRequest(StrictAgentRequest):
     confirmed: StrictBool = False
     confirmation: GenericConfirmationScopeRequest | None = None
@@ -1087,7 +1101,23 @@ def device() -> dict[str, Any]:
                 "dismiss_overlay",
                 "swipe",
                 "back",
+                "input_verified_text",
+                "long_press",
             ],
+            "protocol_physical_actions": [
+                "tap_semantic",
+                "dismiss_overlay",
+                "swipe",
+                "back",
+                "input_verified_text",
+                "long_press",
+                "drag",
+            ],
+            "hardware_capabilities": {
+                "drag": callable(
+                    getattr(runtime.controller, "vision_drag_relative", None)
+                ),
+            },
             "supported_app_scope": "dynamic",
             "observer": runtime.generic_scene_observer.status(),
         },
@@ -1132,6 +1162,7 @@ def device() -> dict[str, Any]:
             item.snapshot()
             for item in runtime.generic_supervised_sessions.values()
             if item.status in {
+                "awaiting_risk_confirmation",
                 "awaiting_confirmation",
                 "paused_after_action",
                 "needs_reobservation",
@@ -1404,6 +1435,66 @@ def get_generic_supervised_session(session_id: str) -> dict[str, Any]:
         "session": session.snapshot(),
         "report": str(session.run_dir / "report.json"),
     }
+
+
+@app.post("/api/agent/generic-supervised/{session_id}/approve-risk")
+def approve_generic_supervised_risk(
+    session_id: str,
+    body: GenericRiskApprovalRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Approve one graph-bound risk scope, then observe without acting."""
+
+    verify_local_request(request, x_control_token)
+    _require_supervised_device_ready()
+    with runtime.generic_supervised_session_lock:
+        session = runtime.generic_supervised_sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
+    before_actions = session.physical_actions
+    try:
+        if body.confirmed is not True or body.confirmation is None:
+            raise UniversalAgentOrchestratorError(
+                "调用 Qwen 观察外部状态子目标前必须确认完整风险作用域。"
+            )
+        _require_generic_session_device(session, body.confirmation.device_id)
+        with _supervised_hardware_lock():
+            decision = runtime.universal_agent_orchestrator.approve_risks(
+                session,
+                body.confirmation.model_dump(),
+            )
+        request_actions = session.physical_actions - before_actions
+        if request_actions != 0:
+            raise UniversalAgentOrchestratorError(
+                "风险确认路径错误地触发了物理动作。"
+            )
+        report = _write_generic_supervised_report(session)
+        return {
+            "mode": "generic_supervised_single_step",
+            "physical_actions": 0,
+            "automatic_loop_enabled": False,
+            "proposal": decision.proposal.to_dict(),
+            "session": session.snapshot(),
+            "report": report,
+        }
+    except (
+        GenericActionAdapterError,
+        UniversalActionError,
+        UniversalAgentOrchestratorError,
+        IntentProviderError,
+        TaskGraphError,
+        VisionAgentError,
+    ) as exc:
+        request_actions = max(0, session.physical_actions - before_actions)
+        raise HTTPException(
+            status_code=409,
+            detail=_generic_supervised_failure(
+                session,
+                exc,
+                request_action_count=request_actions,
+            ),
+        ) from exc
 
 
 @app.post("/api/agent/generic-supervised/{session_id}/confirm")

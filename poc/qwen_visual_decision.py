@@ -29,7 +29,7 @@ from universal_action_controller import UniversalActionController, UniversalActi
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-11-qwen-visual-decision-v2"
+QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-12-qwen-visual-decision-v3"
 SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v3"
 MIGRATION_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v2"
 SUPPORTED_TASK_CONTEXT_PROTOCOLS = frozenset(
@@ -41,6 +41,9 @@ DECISION_OUTPUT_TOKENS = 1800
 DECISION_RETRY_TOKENS = 1200
 MIN_DECISION_CONFIDENCE = 0.72
 MIN_TRUSTED_FRAME_SHARPNESS = 4.0
+SINGLE_ELEMENT_ACTIONS = frozenset(
+    {"tap_semantic", "dismiss_overlay", "input_verified_text", "long_press"}
+)
 
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -353,6 +356,20 @@ class QwenTaskContext:
         return tuple(values)
 
     @property
+    def requested_input_text(self) -> str | None:
+        """Return the exact text authorized by DeepSeek, never model-invented text."""
+
+        entities = self.goal.get("entities") or {}
+        raw = entities.get("input_text")
+        if raw is None:
+            return None
+        if not isinstance(raw, str) or not raw or len(raw) > 100:
+            raise VisionAgentError("goal.entities.input_text 必须为1～100个字符。")
+        if "\n" in raw or "\r" in raw:
+            raise VisionAgentError("goal.entities.input_text 不得包含换行。")
+        return raw
+
+    @property
     def exact_text_target_meanings(self) -> tuple[str, ...]:
         entities = self.goal.get("entities") or {}
         values: list[str] = []
@@ -601,9 +618,11 @@ class VisualTargetRegion:
     bounds: tuple[float, float, float, float]
     description: str
     element_id: str = ""
+    destination_element_id: str = ""
+    destination_bounds: tuple[float, float, float, float] | None = None
 
     def validate(self, observation: TrustedObservation, action: SemanticAction) -> None:
-        if self.kind not in {"element", "screen", "system_navigation"}:
+        if self.kind not in {"element", "element_path", "screen", "system_navigation"}:
             raise GenericStepPlanningError(f"不支持的目标区域类型：{self.kind}")
         if len(self.bounds) != 4:
             raise GenericStepPlanningError("目标区域 bounds 必须包含4个数值。")
@@ -612,9 +631,9 @@ class VisualTargetRegion:
             raise GenericStepPlanningError(f"目标区域超出归一化画面：{self.bounds}")
         if not self.description.strip():
             raise GenericStepPlanningError("目标区域缺少可读描述。")
-        if action.action in {"tap_semantic", "dismiss_overlay"}:
+        if action.action in SINGLE_ELEMENT_ACTIONS:
             if self.kind != "element":
-                raise GenericStepPlanningError("点击动作必须绑定可信候选元素。")
+                raise GenericStepPlanningError("元素动作必须绑定可信候选元素。")
             action_id = str(action.params.get("element_id") or "").strip()
             if not self.element_id or self.element_id != action_id:
                 raise GenericStepPlanningError("目标区域 element_id 与动作不一致。")
@@ -623,9 +642,36 @@ class VisualTargetRegion:
                 raise GenericStepPlanningError(
                     "目标区域必须逐项复用可信候选的原始 bounds。"
                 )
+            if self.destination_element_id or self.destination_bounds is not None:
+                raise GenericStepPlanningError("单元素动作不能携带拖动终点。")
+        elif action.action == "drag":
+            if self.kind != "element_path":
+                raise GenericStepPlanningError("拖动动作必须绑定可信元素路径。")
+            source_id = str(action.params.get("source_element_id") or "").strip()
+            destination_id = str(
+                action.params.get("destination_element_id") or ""
+            ).strip()
+            if (
+                not source_id
+                or not destination_id
+                or self.element_id != source_id
+                or self.destination_element_id != destination_id
+            ):
+                raise GenericStepPlanningError("拖动目标区域与动作元素不一致。")
+            source = observation.get_candidate(source_id)
+            destination = observation.get_candidate(destination_id)
+            if any(abs(a - b) > 0.0001 for a, b in zip(self.bounds, source.bounds)):
+                raise GenericStepPlanningError("拖动起点必须复用可信候选 bounds。")
+            if self.destination_bounds is None or any(
+                abs(a - b) > 0.0001
+                for a, b in zip(self.destination_bounds, destination.bounds)
+            ):
+                raise GenericStepPlanningError("拖动终点必须复用可信候选 bounds。")
         else:
-            if self.element_id:
+            if self.element_id or self.destination_element_id:
                 raise GenericStepPlanningError("屏幕/系统动作不能伪造 element_id。")
+            if self.destination_bounds is not None:
+                raise GenericStepPlanningError("屏幕/系统动作不能携带拖动终点。")
             if self.bounds != (0.0, 0.0, 1.0, 1.0):
                 raise GenericStepPlanningError("屏幕/系统动作只能描述整屏区域。")
             expected_kind = "system_navigation" if action.action == "back" else "screen"
@@ -637,6 +683,12 @@ class VisualTargetRegion:
             "kind": self.kind,
             "element_id": self.element_id or None,
             "bounds": list(self.bounds),
+            "destination_element_id": self.destination_element_id or None,
+            "destination_bounds": (
+                list(self.destination_bounds)
+                if self.destination_bounds is not None
+                else None
+            ),
             "description": self.description,
         }
 
@@ -695,7 +747,7 @@ class QwenVisualDecision:
             ):
                 raise GenericStepPlanningError("风险确认门未满足，禁止产生外部状态动作。")
             self.target_region.validate(self.trusted_observation, action)
-            if action.action in {"tap_semantic", "dismiss_overlay"}:
+            if action.action in SINGLE_ELEMENT_ACTIONS:
                 element = self.trusted_observation.get_candidate(
                     str(action.params.get("element_id") or "")
                 )
@@ -716,6 +768,46 @@ class QwenVisualDecision:
                 requested_states = action.params.get("states") or {}
                 if any(element.states.get(k) != v for k, v in requested_states.items()):
                     raise GenericStepPlanningError("动作 states 与可信候选不一致。")
+                if action.action == "input_verified_text":
+                    if element.role != "input":
+                        raise GenericStepPlanningError("输入动作必须绑定 input 候选。")
+                    authorized = context.requested_input_text
+                    if authorized is None or action.params.get("text") != authorized:
+                        raise GenericStepPlanningError(
+                            "输入文字没有逐字复用DeepSeek结构化 input_text。"
+                        )
+                if action.action == "long_press":
+                    duration_ms = action.params.get("duration_ms", 800)
+                    if (
+                        isinstance(duration_ms, bool)
+                        or not isinstance(duration_ms, (int, float))
+                        or not 500 <= float(duration_ms) <= 2000
+                    ):
+                        raise GenericStepPlanningError(
+                            "长按 duration_ms 必须在500～2000之间。"
+                        )
+            elif action.action == "drag":
+                for prefix in ("source_", "destination_"):
+                    element = self.trusted_observation.get_candidate(
+                        str(action.params.get(f"{prefix}element_id") or "")
+                    )
+                    for field, expected in {
+                        "target": element.meaning,
+                        "role": element.role,
+                        "label": element.label,
+                    }.items():
+                        if str(action.params.get(f"{prefix}{field}") or "") != expected:
+                            raise GenericStepPlanningError(
+                                f"拖动动作未逐字复制可信候选 {prefix}{field}。"
+                            )
+                    requested_states = action.params.get(f"{prefix}states") or {}
+                    if any(
+                        element.states.get(k) != v
+                        for k, v in requested_states.items()
+                    ):
+                        raise GenericStepPlanningError(
+                            f"拖动动作 {prefix}states 与可信候选不一致。"
+                        )
             if dict(action.params.get("expected_effect") or {}) != self.expected_result:
                 raise GenericStepPlanningError("动作 expected_effect 与顶层预期不一致。")
             if float(self.confidence) < MIN_DECISION_CONFIDENCE:
@@ -1144,8 +1236,8 @@ def _decision_prompt(
   "fingerprint":"逐字复制输入",
   "page_state":{{"foreground_app_id":"语义描述","screen_id":"语义描述","summary":"短描述","overlays":[]}},
   "status":"action|finished|blocked",
-  "next_action":{{"kind":"tap_semantic|dismiss_overlay|swipe|back|wait_for_change","element_id":"点击时必须是可信候选ID","target":"复制meaning","role":"复制role","label":"复制label","states":{{}},"direction":"仅swipe使用"}},
-  "target_region":{{"kind":"element|screen|system_navigation","element_id":"点击时复制候选ID","bounds":[0,0,1000,1000],"description":"语义区域"}},
+  "next_action":{{"kind":"tap_semantic|dismiss_overlay|swipe|back|wait_for_change|input_verified_text|long_press|drag","element_id":"单元素动作的可信候选ID","target":"复制meaning","role":"复制role","label":"复制label","states":{{}},"text":"输入时逐字复制goal.entities.input_text","duration_ms":"长按500到2000；默认800","source_element_id":"拖动起点候选","destination_element_id":"拖动终点候选","direction":"仅swipe使用"}},
+  "target_region":{{"kind":"element|element_path|screen|system_navigation","element_id":"单元素或拖动起点候选ID","bounds":[0,0,1000,1000],"destination_element_id":"仅拖动终点","destination_bounds":[0,0,1000,1000],"description":"语义区域"}},
   "expected_result":{{"scene_changed":true}},
   "confidence":0.0,
   "reason":"当前画面与当前子目标支持此结论的依据",
@@ -1155,16 +1247,18 @@ def _decision_prompt(
 严格规则：
 1. 每轮最多一个next_action，禁止actions、steps、plan、后续动作或裸坐标。
 2. page_state只是语义描述，禁止elements、bounds或任何可执行候选字段。
-3. tap_semantic/dismiss_overlay只能引用可信观察中现有且置信度>=0.72的唯一element_id；
+3. tap_semantic/dismiss_overlay/input_verified_text/long_press只能引用可信观察中现有且置信度>=0.72的唯一element_id；
    target/role/label/states必须逐字复制，target_region.bounds必须逐项复制候选原始bounds。
-4. swipe/wait使用整屏[0,0,1000,1000]和kind=screen；back使用整屏和kind=system_navigation。
-5. 找不到可靠候选、文字不完全一致、候选不唯一、画面模糊或置信度不足时必须blocked。
-6. finished只能用completion_evidence_element_ids引用可信候选ID，或用scene引用可信scene摘要；
+4. input_verified_text只能绑定role=input的候选，text必须逐字复制goal.entities.input_text；不能改写、补全或推断。
+5. drag必须绑定两个不同可信候选并逐字复制两端字段和bounds；long_press时长限制500到2000毫秒。
+6. swipe/wait使用整屏[0,0,1000,1000]和kind=screen；back使用整屏和kind=system_navigation。
+7. 找不到可靠候选、文字不完全一致、候选不唯一、画面模糊或置信度不足时必须blocked。
+8. finished只能用completion_evidence_element_ids引用可信候选ID，或用scene引用可信scene摘要；
    禁止自由编写完成证据。
-7. confirmation_gate没有允许外部状态动作时必须blocked；你不能自行改写或批准确认门。
-8. task_id/device_id/revision/observation_id/fingerprint必须逐字复制；任何旧值都会被拒绝。
-9. expected_result只描述一个动作后可由新画面验证的变化。
-10. 这是第{decision_number}轮，只根据本轮上下文与本轮观察作答。不要Markdown。
+9. confirmation_gate没有允许外部状态动作时必须blocked；你不能自行改写或批准确认门。
+10. task_id/device_id/revision/observation_id/fingerprint必须逐字复制；任何旧值都会被拒绝。
+11. expected_result只描述一个动作后可由新画面验证的变化。
+12. 这是第{decision_number}轮，只根据本轮上下文与本轮观察作答。不要Markdown。
 """
 
 
@@ -1281,13 +1375,25 @@ def _parse_decision(
         if isinstance(raw_confidence, bool):
             raise GenericStepPlanningError("confidence 不能是布尔值。")
         confidence = min(float(raw_confidence), float(observation.scene.confidence))
-        if action and action.action in {"tap_semantic", "dismiss_overlay"}:
+        if action and action.action in SINGLE_ELEMENT_ACTIONS:
             confidence = min(
                 confidence,
                 float(
                     observation.get_candidate(
                         str(action.params.get("element_id") or "")
                     ).confidence
+                ),
+            )
+        elif action and action.action == "drag":
+            confidence = min(
+                confidence,
+                *(
+                    float(
+                        observation.get_candidate(
+                            str(action.params.get(f"{prefix}element_id") or "")
+                        ).confidence
+                    )
+                    for prefix in ("source_", "destination_")
                 ),
             )
         decision = QwenVisualDecision(
@@ -1325,7 +1431,13 @@ def _parse_action(
         return None
     if not isinstance(value, dict):
         raise GenericStepPlanningError("action 状态缺少唯一 next_action 对象。")
-    allowed = {"kind", "element_id", "target", "role", "label", "states", "direction"}
+    allowed = {
+        "kind", "element_id", "target", "role", "label", "states", "direction",
+        "text", "duration_ms",
+        "source_element_id", "source_target", "source_role", "source_label",
+        "source_states", "destination_element_id", "destination_target",
+        "destination_role", "destination_label", "destination_states",
+    }
     unexpected = set(value) - allowed
     if unexpected:
         raise GenericStepPlanningError(
@@ -1340,14 +1452,22 @@ def _parse_action(
         if key in value and value[key] not in (None, "", {}, [])
     }
     params["expected_effect"] = dict(expected_result)
-    if not isinstance(params.get("states", {}), dict):
-        raise GenericStepPlanningError("next_action.states 必须是对象。")
+    for field in ("states", "source_states", "destination_states"):
+        if not isinstance(params.get(field, {}), dict):
+            raise GenericStepPlanningError(f"next_action.{field} 必须是对象。")
     _reject_raw_control_data(params)
-    if kind in {"tap_semantic", "dismiss_overlay"}:
+    if kind in SINGLE_ELEMENT_ACTIONS:
         element_id = str(params.get("element_id") or "").strip()
         if not element_id:
-            raise GenericStepPlanningError("点击动作缺少可信候选 element_id。")
+            raise GenericStepPlanningError("元素动作缺少可信候选 element_id。")
         observation.get_candidate(element_id)
+    elif kind == "drag":
+        source_id = str(params.get("source_element_id") or "").strip()
+        destination_id = str(params.get("destination_element_id") or "").strip()
+        if not source_id or not destination_id or source_id == destination_id:
+            raise GenericStepPlanningError("拖动必须绑定两个不同的可信候选。")
+        observation.get_candidate(source_id)
+        observation.get_candidate(destination_id)
     return SemanticAction(
         node_id=f"qwen_visual_revision_{revision}",
         action=kind,
@@ -1360,7 +1480,14 @@ def _parse_target_region(value: Any) -> VisualTargetRegion | None:
         return None
     if not isinstance(value, dict):
         raise GenericStepPlanningError("target_region 必须是对象或null。")
-    allowed = {"kind", "element_id", "bounds", "description"}
+    allowed = {
+        "kind",
+        "element_id",
+        "bounds",
+        "destination_element_id",
+        "destination_bounds",
+        "description",
+    }
     unexpected = set(value) - allowed
     if unexpected:
         raise GenericStepPlanningError(
@@ -1373,10 +1500,29 @@ def _parse_target_region(value: Any) -> VisualTargetRegion | None:
         bounds = tuple(float(item) / 1000.0 for item in raw_bounds)
     except (TypeError, ValueError) as exc:
         raise GenericStepPlanningError("target_region.bounds 含有非数值。") from exc
+    destination_bounds = None
+    raw_destination = value.get("destination_bounds")
+    if raw_destination is not None:
+        if not isinstance(raw_destination, (list, tuple)) or len(raw_destination) != 4:
+            raise GenericStepPlanningError(
+                "target_region.destination_bounds 必须包含4个数值。"
+            )
+        try:
+            destination_bounds = tuple(
+                float(item) / 1000.0 for item in raw_destination
+            )
+        except (TypeError, ValueError) as exc:
+            raise GenericStepPlanningError(
+                "target_region.destination_bounds 含有非数值。"
+            ) from exc
     return VisualTargetRegion(
         kind=str(value.get("kind") or "").strip().lower(),
         element_id=str(value.get("element_id") or "").strip(),
         bounds=bounds,  # type: ignore[arg-type]
+        destination_element_id=str(
+            value.get("destination_element_id") or ""
+        ).strip(),
+        destination_bounds=destination_bounds,  # type: ignore[arg-type]
         description=str(value.get("description") or "").strip()[:200],
     )
 

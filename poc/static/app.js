@@ -19,6 +19,7 @@ const statusNames = {
   idle: "等待目标",
   ready: "准备执行",
   awaiting_confirmation: "等待确认",
+  awaiting_risk_confirmation: "等待风险范围确认",
   paused_after_action: "已完成一步",
   running: "执行中",
   succeeded: "目标完成",
@@ -271,7 +272,7 @@ function renderAction() {
   const action = view.visualAction;
   const risk = view.risk.blocksAutomatic;
   const riskSummary = view.risk.currentActions.map(item => `${item.id}：${item.description}`).join("；");
-  const actionMetadata = action.protocol === "qwen-visual-decision-v2"
+  const actionMetadata = ["qwen-visual-decision-v2", "qwen-visual-decision-v3"].includes(action.protocol)
     ? `<div class="action-metadata">
          <span>${escapeHtml(action.protocolVersion || "qwen-v2")}</span>
          <span>status ${escapeHtml(action.status)}</span>
@@ -415,13 +416,16 @@ function openRiskDialog() {
   const view = sessionView();
   if (!view || state.paused || state.busy || !view.risk.requiresConfirmation) return;
   const risk = view.risk.blocksAutomatic;
+  const riskPhase = view.risk.confirmationGate.phase === "risk";
   try {
     state.pendingConfirmationGrant = Protocol.createConfirmationGrant(view, lockedSessionDeviceId());
   } catch (error) {
     state.pendingConfirmationGrant = null;
     return toast(error.message, true);
   }
-  document.querySelector("#riskTitle").textContent = risk ? "确认外部状态动作" : "确认当前单步动作";
+  document.querySelector("#riskTitle").textContent = riskPhase
+    ? "确认当前子目标的风险范围"
+    : (risk ? "确认外部状态动作" : "确认当前单步动作");
   const level = document.querySelector("#riskLevel");
   level.className = `risk-level ${risk ? "high" : "guarded"}`;
   level.textContent = risk ? "高关注 · 可能改变账号或对外产生影响" : "受控动作 · 仅授权当前一步";
@@ -432,7 +436,9 @@ function openRiskDialog() {
   document.querySelector("#riskReason").textContent = view.risk.currentActions.map(item => `${item.id} [${item.level}]：${item.description}；${item.externalEffect}`).join("\n") || view.visualAction.reason;
   document.querySelector("#riskExpected").textContent = Protocol.displayValue(view.visualAction.expectedChange);
   document.querySelector("#riskDevice").textContent = lockedSessionDeviceId();
-  document.querySelector("#riskWarning").textContent = risk
+  document.querySelector("#riskWarning").textContent = riskPhase
+    ? `本次仅允许 Qwen 针对 task=${view.taskId}、revision=${view.revision ?? "—"}、subgoal=${view.currentSubgoal.id}、risk_ids=${view.risk.riskIds.join(",") || "—"} 观察并提出一个动作；此确认本身不会触发机械臂。具体动作产生后仍需再次确认。`
+    : risk
     ? `确认只授权 task=${view.taskId}、revision=${view.revision ?? "—"}、subgoal=${view.currentSubgoal.id}、risk_ids=${view.risk.riskIds.join(",") || "—"}、observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 的当前一步；任何字段变化都必须重新确认。`
     : `确认只授权 observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 对应的一个动作。执行后必须重新观察。`;
   document.querySelector("#confirmRiskAction").className = risk ? "danger-confirm" : "primary-button";
@@ -444,15 +450,19 @@ async function advanceSupervisedAgent(grant) {
   if (!view || state.paused || state.busy) return;
   try {
     const payload = Protocol.consumeConfirmationGrant(grant, view, lockedSessionDeviceId());
-    const response = await withVisionProgress("执行当前一步并重新观察", () =>
-      api(`/api/agent/generic-supervised/${view.sessionId}/confirm`, {
+    const riskPhase = grant?.phase === "risk";
+    const response = await withVisionProgress(
+      riskPhase ? "确认风险范围并生成唯一动作" : "执行当前一步并重新观察",
+      () => api(`/api/agent/generic-supervised/${view.sessionId}/${riskPhase ? "approve-risk" : "confirm"}`, {
         method: "POST",
         body: JSON.stringify(payload),
       })
     );
     state.supervisedSession = response.session;
     await finalizeStopIfRequested();
-    toast("当前一步已处理，并已重新观察画面。");
+    toast(riskPhase
+      ? "风险范围已确认，机械臂尚未动作；请核对并再次确认具体动作。"
+      : "当前一步已处理，并已重新观察画面。");
     render();
   } catch (error) {
     toast(error.message, true);

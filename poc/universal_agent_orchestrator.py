@@ -15,7 +15,7 @@ from deepseek_task_graph import DynamicTaskGraph, ObservedState
 from device_exclusivity import InterProcessLease
 from generic_action_adapter import GenericActionAdapterError
 from generic_intent import GenericIntentDraft
-from qwen_visual_decision import TrustedObservation
+from qwen_visual_decision import QwenTaskContext, TrustedObservation
 from ui_scene import MIN_TARGET_CONFIDENCE, UISceneError
 from universal_action_controller import action_has_account_effect
 
@@ -292,6 +292,28 @@ class ConfirmationAuthority:
 
 
 @dataclass
+class RiskConfirmationAuthority:
+    session_id: str
+    task_id: str
+    device_id: str
+    revision: int
+    subgoal_id: str
+    risk_ids: tuple[str, ...]
+    consumed: bool = False
+    invalid_reason: str = ""
+
+    def scope(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "task_id": self.task_id,
+            "device_id": self.device_id,
+            "revision": self.revision,
+            "subgoal_id": self.subgoal_id,
+            "risk_ids": sorted(self.risk_ids),
+        }
+
+
+@dataclass
 class UniversalAgentSessionState:
     session_id: str
     raw_goal: str
@@ -305,6 +327,8 @@ class UniversalAgentSessionState:
     qwen_decision: Any = None
     controller_decision: NavigationPolicyDecision | None = None
     confirmation_authority: Any = field(default=None, repr=False)
+    risk_confirmation_authority: Any = field(default=None, repr=False)
+    confirmed_risk_ids: tuple[str, ...] = ()
     status: str = "created"
     step_number: int = 1
     physical_actions: int = 0
@@ -384,6 +408,18 @@ class UniversalAgentSessionState:
                 and self.confirmation_authority is not None
                 and not self.confirmation_authority.consumed
             ),
+            "risk_confirmation_scope": (
+                self.risk_confirmation_authority.scope()
+                if self.risk_confirmation_authority is not None
+                and not self.risk_confirmation_authority.consumed
+                else None
+            ),
+            "risk_confirmation_ready": bool(
+                self.status == "awaiting_risk_confirmation"
+                and self.risk_confirmation_authority is not None
+                and not self.risk_confirmation_authority.consumed
+            ),
+            "confirmed_risk_ids": list(self.confirmed_risk_ids),
         }
 
 
@@ -697,6 +733,51 @@ class UniversalAgentOrchestrator:
             "fingerprint": str(value.get("fingerprint") or ""),
         }
 
+    def _bind_risk_confirmation(self, session: UniversalAgentSessionState) -> None:
+        graph = session.task_graph
+        if graph is None:
+            raise UniversalAgentOrchestratorError("风险确认缺少任务图。")
+        current = graph.active_subgoal()
+        if current is None or not current.risk_action_ids:
+            raise UniversalAgentOrchestratorError("当前子目标没有可确认风险。")
+        session.risk_confirmation_authority = RiskConfirmationAuthority(
+            session_id=session.session_id,
+            task_id=graph.task_id,
+            device_id=graph.device_id,
+            revision=graph.revision,
+            subgoal_id=current.subgoal_id,
+            risk_ids=tuple(current.risk_action_ids),
+        )
+
+    @staticmethod
+    def _normalize_risk_confirmation(value: Mapping[str, Any]) -> dict[str, Any]:
+        required = {
+            "session_id",
+            "task_id",
+            "device_id",
+            "revision",
+            "subgoal_id",
+            "risk_ids",
+        }
+        if not isinstance(value, Mapping) or set(value) != required:
+            raise UniversalAgentOrchestratorError(
+                "风险确认作用域字段缺失或包含额外字段。"
+            )
+        risk_ids = value.get("risk_ids")
+        revision = value.get("revision")
+        if not isinstance(risk_ids, list):
+            raise UniversalAgentOrchestratorError("风险确认 risk_ids 必须是数组。")
+        if isinstance(revision, bool) or not isinstance(revision, int):
+            raise UniversalAgentOrchestratorError("风险确认 revision 格式无效。")
+        return {
+            "session_id": str(value.get("session_id") or ""),
+            "task_id": str(value.get("task_id") or ""),
+            "device_id": str(value.get("device_id") or ""),
+            "revision": revision,
+            "subgoal_id": str(value.get("subgoal_id") or ""),
+            "risk_ids": sorted(str(item) for item in risk_ids),
+        }
+
     def _validate_and_consume_confirmation(
         self,
         session: UniversalAgentSessionState,
@@ -782,6 +863,9 @@ class UniversalAgentOrchestrator:
 
         session.task_graph = revised
         session.goal_draft = self.bridge.goal_draft(revised)
+        session.confirmation_authority = None
+        session.risk_confirmation_authority = None
+        session.confirmed_risk_ids = ()
         self._remember(
             session,
             session.evidence_store.write_task_graph(revised),
@@ -789,17 +873,17 @@ class UniversalAgentOrchestrator:
         )
         if revised.status == "completed":
             session.status = "succeeded"
-            session.confirmation_authority = None
             return
         current = revised.active_subgoal()
         impact = current.external_impact if current is not None else "unknown"
-        if current is None or impact in {"external_state", "unknown"}:
+        if current is None:
             session.status = "blocked"
-            session.failed_reason = (
-                "重规划后的当前子目标属于第一阶段禁止范围："
-                f"{impact}。"
-            )
-            session.confirmation_authority = None
+            session.failed_reason = "重规划后的任务图没有活动子目标。"
+            return
+        if impact in {"external_state", "unknown"}:
+            session.status = "awaiting_risk_confirmation"
+            session.failed_reason = ""
+            self._bind_risk_confirmation(session)
             return
 
         frames = list(result.after_frames)
@@ -833,7 +917,7 @@ class UniversalAgentOrchestrator:
             session.confirmation_authority = None
             return
         policy_decision = self.policy.evaluate(
-            task_context=context,
+            task_context=QwenTaskContext.from_dict(context),
             trusted_observation=new_observation,
             decision=decision,
         )
@@ -879,9 +963,16 @@ class UniversalAgentOrchestrator:
         self._validate_graph_identity(graph, device_id=session.device_id)
         current = graph.active_subgoal()
         impact = current.external_impact if current is not None else "unknown"
-        if current is None or impact in {"external_state", "unknown"}:
+        if session.status == "awaiting_risk_confirmation":
             raise UniversalAgentOrchestratorError(
-                f"第一阶段禁止重新观察后推进 {impact} 子目标。"
+                "当前子目标必须先确认风险范围，禁止提前调用 Qwen。"
+            )
+        if current is None or (
+            impact in {"external_state", "unknown"}
+            and not session.confirmed_risk_ids
+        ):
+            raise UniversalAgentOrchestratorError(
+                f"当前 {impact} 子目标缺少有效风险确认。"
             )
 
         authority = session.confirmation_authority
@@ -917,7 +1008,16 @@ class UniversalAgentOrchestrator:
                 ),
             )
 
-            context = graph.to_qwen_context()
+            if session.confirmed_risk_ids:
+                context = graph.to_qwen_context(
+                    confirmed_risk_ids=session.confirmed_risk_ids,
+                    confirmed_task_id=graph.task_id,
+                    confirmed_device_id=graph.device_id,
+                    confirmed_subgoal_id=graph.active_subgoal_id,
+                    confirmed_revision=graph.revision,
+                )
+            else:
+                context = graph.to_qwen_context()
             decision = self.qwen_observer.decide(
                 frames=frames,
                 task_context=context,
@@ -936,7 +1036,7 @@ class UniversalAgentOrchestrator:
 
             if decision.proposal.status == "action":
                 policy_decision = self.policy.evaluate(
-                    task_context=context,
+                    task_context=QwenTaskContext.from_dict(context),
                     trusted_observation=observation,
                     decision=decision,
                 )
@@ -1009,9 +1109,18 @@ class UniversalAgentOrchestrator:
         decision = session.qwen_decision
         assert graph is not None and observation is not None and decision is not None
 
-        context = graph.to_qwen_context()
+        if session.confirmed_risk_ids:
+            context = graph.to_qwen_context(
+                confirmed_risk_ids=session.confirmed_risk_ids,
+                confirmed_task_id=graph.task_id,
+                confirmed_device_id=graph.device_id,
+                confirmed_subgoal_id=graph.active_subgoal_id,
+                confirmed_revision=graph.revision,
+            )
+        else:
+            context = graph.to_qwen_context()
         policy_decision = self.policy.evaluate(
-            task_context=context,
+            task_context=QwenTaskContext.from_dict(context),
             trusted_observation=observation,
             decision=decision,
         )
@@ -1151,6 +1260,126 @@ class UniversalAgentOrchestrator:
                 pass
             raise
 
+    def approve_risks(
+        self,
+        session: UniversalAgentSessionState,
+        confirmation: Mapping[str, Any],
+    ) -> Any:
+        """Consume one graph-bound risk approval, then observe without acting."""
+
+        if self.device_registry.active_session(session.device_id) != session.session_id:
+            raise UniversalAgentOrchestratorError(
+                "当前会话已不再拥有该设备，禁止确认风险。"
+            )
+        try:
+            with self.device_registry.device_lock(session.device_id):
+                if session.status != "awaiting_risk_confirmation":
+                    raise UniversalAgentOrchestratorError(
+                        f"当前状态不能确认风险：{session.status}。"
+                    )
+                authority = session.risk_confirmation_authority
+                if authority is None or authority.consumed:
+                    raise UniversalAgentOrchestratorError("当前风险确认已失效或已使用。")
+                requested = self._normalize_risk_confirmation(confirmation)
+                if requested != authority.scope():
+                    authority.consumed = True
+                    authority.invalid_reason = "risk_scope_mismatch"
+                    raise UniversalAgentOrchestratorError(
+                        "风险确认与当前 task/device/revision/subgoal/risk 不一致。"
+                    )
+                authority.consumed = True
+                authority.invalid_reason = "consumed_before_observation"
+                session.confirmed_risk_ids = tuple(authority.risk_ids)
+                graph = session.task_graph
+                assert graph is not None
+                context = graph.to_qwen_context(
+                    confirmed_risk_ids=session.confirmed_risk_ids,
+                    confirmed_task_id=graph.task_id,
+                    confirmed_device_id=graph.device_id,
+                    confirmed_subgoal_id=graph.active_subgoal_id,
+                    confirmed_revision=graph.revision,
+                )
+                result = self._observe_after_risk_confirmation(session, context)
+                self._write_terminal_snapshot(session)
+                return result
+        finally:
+            self._release_if_terminal(session)
+
+    def _observe_after_risk_confirmation(
+        self,
+        session: UniversalAgentSessionState,
+        task_context: Mapping[str, Any],
+    ) -> Any:
+        graph = session.task_graph
+        assert graph is not None and session.goal_draft is not None
+        before_actions = session.physical_actions
+        session.status = "observing"
+        scene, frames, frame_paths = session.adapter.capture_scene(
+            session.goal_draft,
+            evidence_dir=session.run_dir,
+            prefix=f"before_step_{session.step_number}_frame",
+        )
+        self._remember(session, frame_paths)
+        observation = self.trusted_observation_factory(
+            frames=frames,
+            device_id=session.device_id,
+            scene=scene,
+        )
+        session.trusted_observation = observation
+        self._remember(
+            session,
+            session.evidence_store.write_trusted_observation(
+                session.step_number,
+                observation,
+            ),
+        )
+        decision = self.qwen_observer.decide(
+            frames=frames,
+            task_context=task_context,
+            trusted_observation=observation,
+            decision_number=session.step_number,
+        )
+        self._validate_decision_binding(graph, observation, decision)
+        session.qwen_decision = decision
+        self._remember(
+            session,
+            session.evidence_store.write_qwen_decision(
+                session.step_number,
+                decision,
+            ),
+        )
+        if decision.proposal.status == "action":
+            policy_decision = self.policy.evaluate(
+                task_context=QwenTaskContext.from_dict(dict(task_context)),
+                trusted_observation=observation,
+                decision=decision,
+            )
+            session.controller_decision = policy_decision
+            self._remember(
+                session,
+                session.evidence_store.write_controller_decision(
+                    session.step_number,
+                    self._policy_payload(policy_decision),
+                ),
+            )
+            if policy_decision.allowed:
+                session.status = "awaiting_confirmation"
+                session.failed_reason = ""
+                self._bind_confirmation(session)
+            else:
+                session.status = "blocked"
+                session.failed_reason = policy_decision.reason
+        else:
+            session.status = "blocked"
+            session.failed_reason = (
+                decision.proposal.reason
+                if decision.proposal.status == "blocked"
+                else "外部状态目标的完成候选必须由 DeepSeek 新 revision 复核。"
+            )
+        if session.physical_actions != before_actions:
+            raise UniversalAgentOrchestratorError("风险确认路径错误地触发了物理动作。")
+        return decision
+
     def start(
         self,
         *,
@@ -1215,27 +1444,17 @@ class UniversalAgentOrchestrator:
 
             current = graph.active_subgoal()
             impact = current.external_impact if current is not None else "unknown"
-            if impact in {"external_state", "unknown"}:
-                session.status = "blocked"
-                session.failed_reason = (
-                    f"第一阶段禁止 {impact} 子目标进入 Qwen 或机械臂执行。"
-                )
-                session.controller_decision = NavigationPolicyDecision(
-                    allowed=False,
-                    reason=session.failed_reason,
-                )
-                self._remember(
-                    session,
-                    store.write_controller_decision(
-                        session.step_number,
-                        self._policy_payload(session.controller_decision),
-                    ),
-                )
-                self._write_terminal_snapshot(session)
-                return session
             if current is None:
                 session.status = "blocked"
                 session.failed_reason = "任务图没有活动子目标。"
+                self._write_terminal_snapshot(session)
+                return session
+            if impact in {"external_state", "unknown"}:
+                session.status = "awaiting_risk_confirmation"
+                session.failed_reason = ""
+                session.confirmed_risk_ids = ()
+                session.confirmation_authority = None
+                self._bind_risk_confirmation(session)
                 self._write_terminal_snapshot(session)
                 return session
 
@@ -1274,7 +1493,7 @@ class UniversalAgentOrchestrator:
             proposal = decision.proposal
             if proposal.status == "action":
                 policy_decision = self.policy.evaluate(
-                    task_context=task_context,
+                    task_context=QwenTaskContext.from_dict(task_context),
                     trusted_observation=observation,
                     decision=decision,
                 )
@@ -1355,10 +1574,14 @@ class UniversalAgentOrchestrator:
 
     def pause(self, session: UniversalAgentSessionState) -> None:
         with self.device_registry.device_lock(session.device_id):
-            authority = session.confirmation_authority
-            if authority is not None:
-                authority.consumed = True
-                authority.invalid_reason = "paused"
+            for authority in (
+                session.confirmation_authority,
+                session.risk_confirmation_authority,
+            ):
+                if authority is not None:
+                    authority.consumed = True
+                    authority.invalid_reason = "paused"
+            session.confirmed_risk_ids = ()
             session.status = "paused"
             session.failed_reason = "用户已暂停；旧确认和旧观察不可复用。"
             self._write_terminal_snapshot(session)
@@ -1375,11 +1598,16 @@ class UniversalAgentOrchestrator:
         if self.device_registry.active_session(session.device_id) != session.session_id:
             return
         with self.device_registry.device_lock(session.device_id):
-            authority = session.confirmation_authority
-            if authority is not None:
-                authority.consumed = True
-                authority.invalid_reason = str(reason or "invalidated")
+            for authority in (
+                session.confirmation_authority,
+                session.risk_confirmation_authority,
+            ):
+                if authority is not None:
+                    authority.consumed = True
+                    authority.invalid_reason = str(reason or "invalidated")
             session.confirmation_authority = None
+            session.risk_confirmation_authority = None
+            session.confirmed_risk_ids = ()
             session.status = "needs_reobservation"
             session.failed_reason = (
                 "设备或摄像头状态变化；旧确认已失效，必须重新观察后再确认。"
@@ -1388,10 +1616,14 @@ class UniversalAgentOrchestrator:
 
     def cancel(self, session: UniversalAgentSessionState) -> None:
         with self.device_registry.device_lock(session.device_id):
-            authority = session.confirmation_authority
-            if authority is not None:
-                authority.consumed = True
-                authority.invalid_reason = "cancelled"
+            for authority in (
+                session.confirmation_authority,
+                session.risk_confirmation_authority,
+            ):
+                if authority is not None:
+                    authority.consumed = True
+                    authority.invalid_reason = "cancelled"
+            session.confirmed_risk_ids = ()
             session.status = "cancelled"
             session.failed_reason = "用户已取消任务。"
             self._write_terminal_snapshot(session)
@@ -1406,17 +1638,26 @@ class NavigationPolicyDecision:
 
 
 class PhaseOneNavigationPolicy:
-    """Fail-closed gate for the first real-device navigation milestone.
+    """Fail-closed gate for one generic visual action.
 
     This class classifies one already proposed visual action.  It never plans
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
-    VERSION = "2026-08-12-phase-one-navigation-v1"
+    VERSION = "2026-08-12-universal-action-policy-v2"
     ALLOWED_ACTIONS = frozenset(
-        {"swipe", "back", "wait_for_change", "tap_semantic", "dismiss_overlay"}
+        {
+            "swipe",
+            "back",
+            "wait_for_change",
+            "tap_semantic",
+            "dismiss_overlay",
+            "input_verified_text",
+            "long_press",
+            "drag",
+        }
     )
-    FORBIDDEN_ROLES = frozenset({"toggle", "input", "keyboard_key"})
+    FORBIDDEN_ROLES = frozenset({"keyboard_key"})
     NAVIGATION_ROLES = frozenset(
         {"button", "icon", "text", "tab", "image", "list_item"}
     )
@@ -1537,8 +1778,13 @@ class PhaseOneNavigationPolicy:
         impact = str(
             self._value(task_context, "current_external_impact", "unknown")
         ).strip()
-        if impact in {"external_state", "unknown"}:
-            return self._deny(f"第一阶段禁止 {impact} 子目标进入视觉或机械臂执行。")
+        if impact == "unknown":
+            return self._deny("unknown 子目标禁止进入视觉或机械臂执行。")
+        external_allowed = bool(
+            self._value(task_context, "external_action_allowed", False)
+        )
+        if impact == "external_state" and not external_allowed:
+            return self._deny("external_state 子目标缺少当前作用域确认。")
 
         proposal = self._value(decision, "proposal", None)
         if proposal is None or str(self._value(proposal, "status", "")) != "action":
@@ -1548,12 +1794,12 @@ class PhaseOneNavigationPolicy:
             return self._deny("当前 Qwen 决策缺少动作。")
         action_kind = str(self._value(action, "action", "")).strip()
         if action_kind not in self.ALLOWED_ACTIONS:
-            return self._deny(f"第一阶段不允许动作：{action_kind or 'missing'}。")
+            return self._deny(f"通用策略不允许动作：{action_kind or 'missing'}。")
         if action_kind == "wait_for_change":
             if impact not in {"read_only", "navigation_only"}:
                 return self._deny(f"等待动作不能用于 {impact} 子目标。")
-        elif impact != "navigation_only":
-            return self._deny(f"物理导航动作要求 navigation_only，当前为 {impact}。")
+        elif impact not in {"navigation_only", "external_state"}:
+            return self._deny(f"物理动作不能用于 {impact} 子目标。")
 
         for field in ("task_id", "device_id", "revision"):
             expected = self._value(task_context, field, None)
@@ -1603,7 +1849,7 @@ class PhaseOneNavigationPolicy:
         if float(self._value(decision, "confidence", 0.0)) < self.min_confidence:
             return self._deny("Qwen 决策置信度不足。")
 
-        if action_has_account_effect(action):
+        if action_has_account_effect(action) and not external_allowed:
             return self._deny("动作语义可能改变账号或外部状态。")
 
         if action_kind == "swipe":
@@ -1616,13 +1862,74 @@ class PhaseOneNavigationPolicy:
         if action_kind == "wait_for_change":
             return NavigationPolicyDecision(True, "允许等待页面变化，不产生物理动作。", "wait")
 
+        if action_kind == "drag":
+            source_id = str(action.params.get("source_element_id") or "").strip()
+            destination_id = str(
+                action.params.get("destination_element_id") or ""
+            ).strip()
+            try:
+                source = scene.get_element(source_id, min_confidence=self.min_confidence)
+                destination = scene.get_element(
+                    destination_id,
+                    min_confidence=self.min_confidence,
+                )
+            except UISceneError as exc:
+                return self._deny(f"拖动端点不能由可信观察唯一解析：{exc}")
+            if source.element_id == destination.element_id:
+                return self._deny("拖动起点和终点不能相同。")
+            for prefix, element in (
+                ("source_", source),
+                ("destination_", destination),
+            ):
+                for field, expected in {
+                    "target": element.meaning,
+                    "role": element.role,
+                    "label": element.label,
+                }.items():
+                    if str(action.params.get(f"{prefix}{field}") or "") != expected:
+                        return self._deny(f"拖动动作没有逐字复用 {prefix}{field}。")
+            region = self._value(decision, "target_region", None)
+            if (
+                region is None
+                or str(self._value(region, "kind", "")) != "element_path"
+                or str(self._value(region, "element_id", "")) != source.element_id
+                or tuple(self._value(region, "bounds", ())) != tuple(source.bounds)
+                or str(self._value(region, "destination_element_id", ""))
+                != destination.element_id
+                or tuple(self._value(region, "destination_bounds", ()))
+                != tuple(destination.bounds)
+            ):
+                return self._deny("拖动路径没有逐项复用两端可信候选 bounds。")
+            if any(
+                self._semantic_class(element.meaning, element.label) == "forbidden"
+                for element in (source, destination)
+            ) and not external_allowed:
+                return self._deny("拖动端点包含外部状态、输入或破坏性语义。")
+            return NavigationPolicyDecision(True, "允许一个双候选语义拖动。", "drag")
+
         element_id = str(action.params.get("element_id") or "").strip()
         try:
             element = scene.get_element(element_id, min_confidence=self.min_confidence)
         except UISceneError as exc:
             return self._deny(f"当前可信观察不能唯一解析候选：{exc}")
-        if element.role in self.FORBIDDEN_ROLES or element.role not in self.NAVIGATION_ROLES:
-            return self._deny(f"候选角色 {element.role} 不允许作为第一阶段导航点击。")
+        if element.role in self.FORBIDDEN_ROLES:
+            return self._deny(f"候选角色 {element.role} 不允许进入通用动作。")
+        if action_kind == "input_verified_text":
+            if element.role != "input" or element.states.get("focused") is not True:
+                return self._deny("输入动作要求最新画面证明 input 候选已聚焦。")
+            text = action.params.get("text")
+            if (
+                not isinstance(text, str)
+                or not text
+                or len(text) > 100
+                or "\n" in text
+                or "\r" in text
+            ):
+                return self._deny("输入文字格式无效。")
+        elif element.role not in self.NAVIGATION_ROLES and not (
+            impact == "external_state" and external_allowed and element.role == "toggle"
+        ):
+            return self._deny(f"候选角色 {element.role} 不允许用于当前动作。")
         expected_fields = {
             "target": element.meaning,
             "role": element.role,
@@ -1665,9 +1972,21 @@ class PhaseOneNavigationPolicy:
             str(action.params.get("target") or ""),
         )
         if canonical == "forbidden":
-            return self._deny("候选包含外部状态、输入或破坏性语义。")
+            if impact == "external_state" and external_allowed:
+                canonical = "external"
+            elif action_kind == "input_verified_text":
+                canonical = "input"
+            else:
+                return self._deny("候选包含外部状态、输入或破坏性语义。")
         if not canonical:
-            return self._deny("本地策略无法证明候选属于通用导航语义。")
+            if action_kind == "input_verified_text":
+                canonical = "input"
+            elif action_kind == "long_press":
+                canonical = "long_press"
+            elif impact == "external_state" and external_allowed:
+                canonical = "external"
+            else:
+                return self._deny("本地策略无法证明候选属于通用导航语义或动作语义。")
         if action_kind == "dismiss_overlay" and canonical not in {"close", "back"}:
             return self._deny("关闭弹层动作只能指向关闭、取消或返回语义。")
 

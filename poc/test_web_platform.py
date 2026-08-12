@@ -3742,7 +3742,7 @@ class ApiEndToEndTests(unittest.TestCase):
                 "universal_agent": {
                     "goal_protocol": "2026-08-10-generic-intent-v1",
                     "scene_protocol": "2026-08-10-ui-scene-v2",
-                    "action_protocol": "2026-08-11-universal-action-v3",
+                    "action_protocol": "2026-08-12-universal-action-v4",
                     "goal_preview_enabled": True,
                     "scene_preview_enabled": True,
                     "hardware_execution_enabled": True,
@@ -3753,7 +3753,19 @@ class ApiEndToEndTests(unittest.TestCase):
                         "dismiss_overlay",
                         "swipe",
                         "back",
+                        "input_verified_text",
+                        "long_press",
                     ],
+                    "protocol_physical_actions": [
+                        "tap_semantic",
+                        "dismiss_overlay",
+                        "swipe",
+                        "back",
+                        "input_verified_text",
+                        "long_press",
+                        "drag",
+                    ],
+                    "hardware_capabilities": {"drag": True},
                     "supported_app_scope": "dynamic",
                 },
                 "generic_orchestrator": {
@@ -4255,7 +4267,7 @@ class ApiEndToEndTests(unittest.TestCase):
             before_executions,
         )
 
-    def test_external_state_start_blocks_before_qwen_or_robot(self) -> None:
+    def test_external_state_requires_risk_approval_before_qwen_or_robot(self) -> None:
         from test_universal_agent_orchestrator import _external_graph
 
         orchestrator, _planner, qwen, adapter = self._universal_api_orchestrator(
@@ -4278,12 +4290,28 @@ class ApiEndToEndTests(unittest.TestCase):
                     "device_id": "device-1",
                 },
             )
+            self.assertEqual(response.status_code, 200, response.text)
+            session = response.json()["session"]
+            self.assertEqual(session["status"], "awaiting_risk_confirmation")
+            self.assertEqual(response.json()["physical_actions"], 0)
+            self.assertEqual(len(qwen.calls), 0)
+            self.assertEqual(adapter.capture_calls, 0)
+            self.assertEqual(adapter.execute_calls, 0)
 
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["session"]["status"], "blocked")
-        self.assertEqual(response.json()["physical_actions"], 0)
-        self.assertEqual(len(qwen.calls), 0)
-        self.assertEqual(adapter.capture_calls, 0)
+            approved = self.client.post(
+                f"/api/agent/generic-supervised/{session['session_id']}/approve-risk",
+                headers=self.headers,
+                json={
+                    "confirmed": True,
+                    "confirmation": session["risk_confirmation_scope"],
+                },
+            )
+
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertEqual(approved.json()["session"]["status"], "awaiting_confirmation")
+        self.assertEqual(approved.json()["physical_actions"], 0)
+        self.assertEqual(len(qwen.calls), 1)
+        self.assertEqual(adapter.capture_calls, 1)
         self.assertEqual(adapter.execute_calls, 0)
 
     def test_same_device_second_generic_session_returns_409(self) -> None:

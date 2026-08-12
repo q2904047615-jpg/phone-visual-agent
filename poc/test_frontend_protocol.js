@@ -19,6 +19,25 @@ function externalSession({ includeDecision = false } = {}) {
   };
 }
 
+function riskApprovalSession() {
+  return {
+    session_id: "session-risk-approval",
+    status: "awaiting_risk_confirmation",
+    task_graph: clone(deepSeekFixture.task_graph),
+    risk_confirmation_scope: {
+      session_id: "session-risk-approval",
+      task_id: "task-map-001",
+      device_id: "phone-01",
+      revision: 1,
+      subgoal_id: "save_target",
+      risk_ids: ["save_place"],
+    },
+    risk_confirmation_ready: true,
+    physical_actions: 0,
+    history: [],
+  };
+}
+
 function safeActionSession() {
   const graph = clone(deepSeekFixture.task_graph);
   graph.status = "running";
@@ -127,8 +146,8 @@ test("real Qwen decision.to_dict snapshot exposes the complete unique next actio
   const view = Protocol.adaptSession(safeActionSession());
   const action = view.visualAction;
 
-  assert.equal(action.protocol, "qwen-visual-decision-v2");
-  assert.equal(action.protocolVersion, "2026-08-11-qwen-visual-decision-v2");
+  assert.equal(action.protocol, "qwen-visual-decision-v3");
+  assert.equal(action.protocolVersion, "2026-08-12-qwen-visual-decision-v3");
   assert.equal(action.status, "action");
   assert.equal(action.actionType, "tap_semantic");
   assert.equal(action.semanticTarget, "设置");
@@ -235,6 +254,26 @@ test("an explicit confirmation grant is scoped and can be consumed only once", (
   );
 });
 
+test("risk approval grant excludes observation and cannot execute a physical action", () => {
+  const view = Protocol.adaptSession(riskApprovalSession());
+  assert.equal(view.status, "awaiting_risk_confirmation");
+  assert.equal(view.risk.confirmationGate.phase, "risk");
+  assert.equal(view.visualAction.actionType, "");
+  const grant = Protocol.createConfirmationGrant(view, "phone-01");
+  assert.equal(grant.phase, "risk");
+  assert.deepEqual(Protocol.consumeConfirmationGrant(grant, view, "phone-01"), {
+    confirmed: true,
+    confirmation: {
+      session_id: "session-risk-approval",
+      task_id: "task-map-001",
+      device_id: "phone-01",
+      revision: 1,
+      subgoal_id: "save_target",
+      risk_ids: ["save_place"],
+    },
+  });
+});
+
 test("confirmation scope cannot cross revision, risk, subgoal, task, device, observation, or fingerprint", () => {
   const original = Protocol.adaptSession(safeActionSession());
   const mutations = [
@@ -287,7 +326,7 @@ test("current Qwen v2 fields win over conflicting legacy fallback data after a v
     action: { action: "back", params: { target: "错误旧动作" } },
   };
   const view = Protocol.adaptSession(session);
-  assert.equal(view.visualAction.protocol, "qwen-visual-decision-v2");
+  assert.equal(view.visualAction.protocol, "qwen-visual-decision-v3");
   assert.equal(view.visualAction.actionType, "tap_semantic");
   assert.equal(view.visualAction.elementId, "settings_icon");
 });

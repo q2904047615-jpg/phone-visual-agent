@@ -196,6 +196,14 @@ class GraphGoal:
                 raise TaskGraphError(f"目标 App ID 重复：{app.app_id}")
             app_ids.add(app.app_id)
         _reject_control_fields(self.entities, "goal.entities")
+        input_text = self.entities.get("input_text")
+        if input_text is not None:
+            if not isinstance(input_text, str) or not input_text or len(input_text) > 100:
+                raise TaskGraphError(
+                    "goal.entities.input_text 必须为1～100个逐字输入字符。"
+                )
+            if "\n" in input_text or "\r" in input_text:
+                raise TaskGraphError("goal.entities.input_text 不得包含换行。")
 
 
 @dataclass(frozen=True)
@@ -998,7 +1006,7 @@ def _schema_prompt() -> str:
   "goal":{
     "objective":"用户最终想达到的结果",
     "target_apps":[{"app_id":"稳定小写英文ID","app_name":"App名称"}],
-    "entities":{"目标对象或内容":"值"}
+    "entities":{"目标对象或内容":"值","input_text":"需要输入时逐字复制用户指定文字"}
   },
   "constraints":["全局约束"],
   "completion_conditions":[{

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
 import os
 from pathlib import Path
 import re
+import threading
 from typing import Any, Callable, Mapping
 import uuid
 
@@ -384,6 +386,83 @@ class UniversalAgentSessionState:
         }
 
 
+class DeviceTaskRegistry:
+    """Own active-session identity and one re-entrant lock per device."""
+
+    TERMINAL_STATUSES = frozenset(
+        {"succeeded", "blocked", "failed", "paused", "cancelled"}
+    )
+
+    def __init__(self) -> None:
+        self._guard = threading.RLock()
+        self._locks: dict[str, threading.RLock] = {}
+        self._active: dict[str, str] = {}
+        self._owners: dict[str, tuple[int, int]] = {}
+
+    @staticmethod
+    def _id(value: str, field_name: str) -> str:
+        result = str(value or "").strip()
+        if not result:
+            raise UniversalAgentOrchestratorError(f"{field_name} 不能为空。")
+        return result
+
+    def reserve(self, device_id: str, session_id: str) -> None:
+        device = self._id(device_id, "device_id")
+        session = self._id(session_id, "session_id")
+        with self._guard:
+            active = self._active.get(device)
+            if active is not None and active != session:
+                raise UniversalAgentOrchestratorError(
+                    f"设备 {device} 已有活动任务：{active}。"
+                )
+            self._active[device] = session
+            self._locks.setdefault(device, threading.RLock())
+
+    def release(self, device_id: str, session_id: str) -> None:
+        device = self._id(device_id, "device_id")
+        session = self._id(session_id, "session_id")
+        with self._guard:
+            if self._active.get(device) == session:
+                self._active.pop(device, None)
+
+    def active_session(self, device_id: str) -> str | None:
+        device = self._id(device_id, "device_id")
+        with self._guard:
+            return self._active.get(device)
+
+    @contextmanager
+    def device_lock(self, device_id: str):
+        device = self._id(device_id, "device_id")
+        with self._guard:
+            lock = self._locks.setdefault(device, threading.RLock())
+        lock.acquire()
+        thread_id = threading.get_ident()
+        with self._guard:
+            owner, depth = self._owners.get(device, (thread_id, 0))
+            if depth and owner != thread_id:
+                lock.release()
+                raise UniversalAgentOrchestratorError(
+                    f"设备锁所有者异常：{device}。"
+                )
+            self._owners[device] = (thread_id, depth + 1)
+        try:
+            yield
+        finally:
+            with self._guard:
+                owner, depth = self._owners.get(device, (thread_id, 1))
+                if owner == thread_id and depth <= 1:
+                    self._owners.pop(device, None)
+                elif owner == thread_id:
+                    self._owners[device] = (owner, depth - 1)
+            lock.release()
+
+    def is_locked_by_current_thread(self, device_id: str) -> bool:
+        device = self._id(device_id, "device_id")
+        with self._guard:
+            owner = self._owners.get(device)
+            return bool(owner and owner[0] == threading.get_ident() and owner[1] > 0)
+
+
 class UniversalAgentOrchestrator:
     """Coordinate the generic one-action visual loop without App workflows."""
 
@@ -397,6 +476,7 @@ class UniversalAgentOrchestrator:
         evidence_store_factory: Callable[[Path], AgentEvidenceStore] | None = None,
         policy: PhaseOneNavigationPolicy | None = None,
         bridge: ObservationBridge | None = None,
+        device_registry: DeviceTaskRegistry | None = None,
     ) -> None:
         self.deepseek_planner = deepseek_planner
         self.qwen_observer = qwen_observer
@@ -407,6 +487,11 @@ class UniversalAgentOrchestrator:
         self.evidence_store_factory = evidence_store_factory or AgentEvidenceStore
         self.policy = policy or PhaseOneNavigationPolicy()
         self.bridge = bridge or ObservationBridge()
+        self.device_registry = device_registry or DeviceTaskRegistry()
+
+    def _release_if_terminal(self, session: UniversalAgentSessionState) -> None:
+        if session.status in DeviceTaskRegistry.TERMINAL_STATUSES:
+            self.device_registry.release(session.device_id, session.session_id)
 
     @staticmethod
     def _policy_payload(decision: NavigationPolicyDecision) -> dict[str, Any]:
@@ -736,6 +821,21 @@ class UniversalAgentOrchestrator:
         session: UniversalAgentSessionState,
         confirmation: Mapping[str, Any],
     ) -> Any:
+        if self.device_registry.active_session(session.device_id) != session.session_id:
+            raise UniversalAgentOrchestratorError(
+                "当前会话已不再拥有该设备，禁止执行。"
+            )
+        try:
+            with self.device_registry.device_lock(session.device_id):
+                return self._confirm_one_locked(session, confirmation)
+        finally:
+            self._release_if_terminal(session)
+
+    def _confirm_one_locked(
+        self,
+        session: UniversalAgentSessionState,
+        confirmation: Mapping[str, Any],
+    ) -> Any:
         self._validate_and_consume_confirmation(session, confirmation)
         authority = session.confirmation_authority
         assert authority is not None
@@ -887,6 +987,31 @@ class UniversalAgentOrchestrator:
             raise
 
     def start(
+        self,
+        *,
+        session_id: str,
+        raw_goal: str,
+        device_id: str,
+        run_dir: Path,
+    ) -> UniversalAgentSessionState:
+        resolved_session = str(session_id or "").strip()
+        resolved_device = str(device_id or "").strip()
+        self.device_registry.reserve(resolved_device, resolved_session)
+        try:
+            with self.device_registry.device_lock(resolved_device):
+                session = self._start_reserved(
+                    session_id=resolved_session,
+                    raw_goal=raw_goal,
+                    device_id=resolved_device,
+                    run_dir=run_dir,
+                )
+        except Exception:
+            self.device_registry.release(resolved_device, resolved_session)
+            raise
+        self._release_if_terminal(session)
+        return session
+
+    def _start_reserved(
         self,
         *,
         session_id: str,
@@ -1062,6 +1187,28 @@ class UniversalAgentOrchestrator:
             except Exception:
                 pass
             raise
+
+    def pause(self, session: UniversalAgentSessionState) -> None:
+        with self.device_registry.device_lock(session.device_id):
+            authority = session.confirmation_authority
+            if authority is not None:
+                authority.consumed = True
+                authority.invalid_reason = "paused"
+            session.status = "paused"
+            session.failed_reason = "用户已暂停；旧确认和旧观察不可复用。"
+            self._write_terminal_snapshot(session)
+        self.device_registry.release(session.device_id, session.session_id)
+
+    def cancel(self, session: UniversalAgentSessionState) -> None:
+        with self.device_registry.device_lock(session.device_id):
+            authority = session.confirmation_authority
+            if authority is not None:
+                authority.consumed = True
+                authority.invalid_reason = "cancelled"
+            session.status = "cancelled"
+            session.failed_reason = "用户已取消任务。"
+            self._write_terminal_snapshot(session)
+        self.device_registry.release(session.device_id, session.session_id)
 
 
 @dataclass(frozen=True)

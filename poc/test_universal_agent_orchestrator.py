@@ -28,6 +28,7 @@ from universal_action_controller import ResolvedSemanticAction
 from universal_agent_orchestrator import (
     AgentEvidenceStore,
     EvidenceStoreError,
+    DeviceTaskRegistry,
     ObservationBridge,
     PhaseOneNavigationPolicy,
     UniversalAgentOrchestrator,
@@ -1016,6 +1017,145 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertIn("revision", session.failed_reason)
         self.assertEqual(1, adapter.execute_calls)
         self.assertEqual(1, len(qwen.calls))
+
+
+class DeviceTaskRegistryTests(unittest.TestCase):
+    def _orchestrator(self, registry, adapter, *, qwen=None):
+        return UniversalAgentOrchestrator(
+            deepseek_planner=FakeDeepSeekPlanner(
+                _graph(),
+                replan_result=replace(_graph(), revision=2),
+            ),
+            qwen_observer=qwen or FakeQwenObserver(),
+            adapter_factory=lambda _device_id: adapter,
+            trusted_observation_factory=_trusted_factory,
+            device_registry=registry,
+        )
+
+    def test_second_active_session_on_same_device_is_rejected(self) -> None:
+        registry = DeviceTaskRegistry()
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            self._orchestrator(registry, FakeAdapter(_scene())).start(
+                session_id="session-first",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(first),
+            )
+            second_qwen = FakeQwenObserver()
+            with self.assertRaisesRegex(UniversalAgentOrchestratorError, "已有活动任务"):
+                self._orchestrator(
+                    registry,
+                    FakeAdapter(_scene()),
+                    qwen=second_qwen,
+                ).start(
+                    session_id="session-second",
+                    raw_goal="查看另一个页面",
+                    device_id="device-1",
+                    run_dir=Path(second),
+                )
+
+        self.assertEqual([], second_qwen.calls)
+        self.assertEqual("session-first", registry.active_session("device-1"))
+
+    def test_terminal_session_releases_device(self) -> None:
+        registry = DeviceTaskRegistry()
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            blocked = self._orchestrator(
+                registry,
+                FakeAdapter(_scene()),
+                qwen=FakeQwenObserver("blocked"),
+            ).start(
+                session_id="session-blocked",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(first),
+            )
+            next_session = self._orchestrator(
+                registry,
+                FakeAdapter(_scene()),
+            ).start(
+                session_id="session-next",
+                raw_goal="查看另一个详情",
+                device_id="device-1",
+                run_dir=Path(second),
+            )
+
+        self.assertEqual("blocked", blocked.status)
+        self.assertEqual("awaiting_confirmation", next_session.status)
+        self.assertEqual("session-next", registry.active_session("device-1"))
+
+    def test_pause_invalidates_confirmation_but_keeps_session_inspectable(self) -> None:
+        registry = DeviceTaskRegistry()
+        adapter = FakeAdapter(_scene())
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(registry, adapter)
+            session = orchestrator.start(
+                session_id="session-pause",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            authority = session.confirmation_authority
+
+            orchestrator.pause(session)
+
+        self.assertEqual("paused", session.status)
+        self.assertTrue(authority.consumed)
+        self.assertEqual("paused", session.snapshot()["status"])
+        self.assertIsNone(registry.active_session("device-1"))
+        self.assertEqual(0, adapter.execute_calls)
+
+    def test_cancel_releases_device_and_never_calls_robot(self) -> None:
+        registry = DeviceTaskRegistry()
+        adapter = FakeAdapter(_scene())
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(registry, adapter)
+            session = orchestrator.start(
+                session_id="session-cancel",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+            orchestrator.cancel(session)
+
+        self.assertEqual("cancelled", session.status)
+        self.assertIsNone(registry.active_session("device-1"))
+        self.assertEqual(0, adapter.execute_calls)
+
+    def test_observe_execute_and_post_observe_share_device_lock(self) -> None:
+        registry = DeviceTaskRegistry()
+
+        class LockCheckingAdapter(FakeExecutingAdapter):
+            def capture_scene(self, *args, **kwargs):
+                if not registry.is_locked_by_current_thread("device-1"):
+                    raise AssertionError("capture must hold device lock")
+                return super().capture_scene(*args, **kwargs)
+
+            def execute(self, **kwargs):
+                if not registry.is_locked_by_current_thread("device-1"):
+                    raise AssertionError("execute and post-observe must hold device lock")
+                return super().execute(**kwargs)
+
+        adapter = LockCheckingAdapter(
+            _scene(),
+            _scene(fingerprint="frame-b", meaning="open_more", label="查看更多"),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(registry, adapter)
+            session = orchestrator.start(
+                session_id="session-lock",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, adapter.execute_calls)
+
+
+class UniversalAgentConfirmFailureTests(unittest.TestCase):
+    _started = UniversalAgentConfirmTests._started
 
     def test_action_failure_is_not_retried(self) -> None:
         adapter = FakeExecutingAdapter(

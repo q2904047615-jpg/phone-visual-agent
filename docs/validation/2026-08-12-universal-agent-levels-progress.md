@@ -31,7 +31,7 @@
 Python 全量（加入安全语义重绑定与 Qwen 等价 JSON 结构反例后）：
 
 ```text
-Ran 616 tests in 33.442s
+Ran 616 tests in 34.526s
 OK
 ```
 
@@ -88,6 +88,13 @@ Qwen 的 `foreground_app_id/new_foreground_app_id/new_screen_id/screen_change`
 - 网页只读实测已从运行服务恢复该会话，展示自然语言入口、动态任务图、当前真实观察、0 个物理动作、精确确认、重新观察、暂停和取消入口；未点击任何执行按钮。
 - `/api/device` 的产品主路径标识已改为 `universal_agent`。旧队列 worker、旧 generic orchestrator 和旧语义适配器只标记为 `compatibility_only/default_user_path=false`，不再把保留的 `legacy` worker 模式误报为网页主路径。
 - 多设备协调锁已从全局锁拆为按 `device_id` 隔离：不同设备可同时取得各自的进程租约、协调锁和控制器锁；同一设备的第二次占用仍失败关闭。两个不同设备也可同时保持独立活动会话和确认范围。
+- 在当前真实运行服务中，当会话 `1565af53bbcb463cbf61952e05365f11`
+  占用 `device-local-01` 时，第二个同设备启动请求返回 409，`physical_actions=0`；
+  DeepSeek 与 Qwen 请求 ID、原会话状态、observation 和动作数均未变化，活动会话仍只有 1 个。
+  该运行版本会在拒绝前留下一个空输出目录；新代码已把活动会话快速检查提前到建目录和
+  硬件协调锁之前，并继续保留编排器的原子设备预留作为竞态最终防线。API/设备注册表
+  定向 42 项与全量 616 项通过；新快速拒绝测试还断言第二个请求不会新增目录、不会再次
+  调用 DeepSeek/Qwen/相机适配器，也不会执行机械臂。
 
 ## 尚需真实硬件完成的验收
 

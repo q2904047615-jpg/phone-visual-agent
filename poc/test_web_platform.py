@@ -4457,35 +4457,43 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertEqual(adapter.execute_calls, 0)
 
     def test_same_device_second_generic_session_returns_409(self) -> None:
-        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
-        with (
-            patch.object(web_app, "_require_supervised_device_ready"),
-            patch.object(
-                web_app.runtime,
-                "universal_agent_orchestrator",
-                orchestrator,
-            ),
-        ):
-            first = self.client.post(
-                "/api/agent/generic-supervised/start",
-                headers=self.headers,
-                json={"text": "查看详情", "device_id": "phone-01"},
-            )
-            second = self.client.post(
-                "/api/agent/generic-supervised/start",
-                headers=self.headers,
-                json={"text": "返回上一页", "device_id": "phone-01"},
-            )
-            session_id = first.json()["session"]["session_id"]
-            self.client.post(
-                f"/api/agent/generic-supervised/{session_id}/cancel",
-                headers=self.headers,
-                json={"device_id": "phone-01"},
-            )
+        orchestrator, planner, qwen, adapter = self._universal_api_orchestrator()
+        with tempfile.TemporaryDirectory() as temp:
+            with (
+                patch.object(web_app, "WEB_OUTPUT_DIR", Path(temp)),
+                patch.object(web_app, "_require_supervised_device_ready"),
+                patch.object(
+                    web_app.runtime,
+                    "universal_agent_orchestrator",
+                    orchestrator,
+                ),
+            ):
+                first = self.client.post(
+                    "/api/agent/generic-supervised/start",
+                    headers=self.headers,
+                    json={"text": "查看详情", "device_id": "phone-01"},
+                )
+                directories_after_first = sorted(Path(temp).iterdir())
+                second = self.client.post(
+                    "/api/agent/generic-supervised/start",
+                    headers=self.headers,
+                    json={"text": "返回上一页", "device_id": "phone-01"},
+                )
+                directories_after_second = sorted(Path(temp).iterdir())
+                session_id = first.json()["session"]["session_id"]
+                self.client.post(
+                    f"/api/agent/generic-supervised/{session_id}/cancel",
+                    headers=self.headers,
+                    json={"device_id": "phone-01"},
+                )
 
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(second.status_code, 409, second.text)
         self.assertEqual(second.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(directories_after_second, directories_after_first)
+        self.assertEqual(len(directories_after_first), 1)
+        self.assertEqual(len(planner.plan_calls), 1)
+        self.assertEqual(len(qwen.calls), 1)
         self.assertEqual(adapter.capture_calls, 1)
         self.assertEqual(adapter.execute_calls, 0)
 

@@ -1535,6 +1535,19 @@ def start_generic_supervised_session(
     """Plan with DeepSeek, observe with Qwen and propose zero executed actions."""
 
     verify_local_request(request, x_control_token)
+    active_session_id = (
+        runtime.universal_agent_orchestrator.device_registry.active_session(
+            body.device_id
+        )
+    )
+    if active_session_id is not None:
+        exc = UniversalAgentOrchestratorError(
+            f"设备 {body.device_id} 已有活动任务：{active_session_id}。"
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=_generic_supervised_failure(None, exc),
+        )
     _require_supervised_device_ready(body.device_id)
     session_id = uuid.uuid4().hex
     run_dir = WEB_OUTPUT_DIR / (

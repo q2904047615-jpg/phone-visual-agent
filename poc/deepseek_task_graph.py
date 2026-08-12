@@ -143,6 +143,17 @@ DIRECT_EFFECT_NEGATION_PATTERN = re.compile(
     r"(?:(?:进行|执行|发生|出现)\s*)?$",
     re.IGNORECASE,
 )
+COORDINATED_EFFECT_NEGATION_PATTERN = re.compile(
+    r"(?:不|未|勿|不要|不得|禁止|不能|避免|无需|无须|"
+    r"do\s+not|don't|never|without)\s*"
+    r"(?:(?:进行|执行|发生|出现)\s*)?"
+    r"[^，。；;]{1,24}(?:或|和|及|以及|、|or|and)\s*$",
+    re.IGNORECASE,
+)
+REPAIRABLE_INITIAL_GRAPH_ERRORS = (
+    "任务图至少需要一个全局完成条件。",
+    "可推进任务图必须且只能有一个活动子目标。",
+)
 class JsonTaskGraphProvider(Protocol):
     configured: bool
 
@@ -698,7 +709,25 @@ class DeepSeekTaskGraphPlanner:
             raw_user_goal=text,
             validate=False,
         )
-        graph.validate()
+        try:
+            graph.validate()
+        except TaskGraphError as exc:
+            if str(exc) not in REPAIRABLE_INITIAL_GRAPH_ERRORS:
+                raise
+            invalid_response = self.last_raw_response
+            graph = self._request_graph(
+                _repair_initial_prompt(
+                    text,
+                    invalid_response=invalid_response,
+                    validation_error=str(exc),
+                ),
+                task_id=resolved_task_id,
+                device_id=device_id,
+                revision=1,
+                raw_user_goal=text,
+                validate=False,
+            )
+            graph.validate()
         self._audit_and_validate_graph(graph)
         if (
             graph.status == "completed"
@@ -843,6 +872,34 @@ def _initial_prompt(raw_goal: str) -> str:
    账号权限或未知外部影响等跨 App 语义，不得描述 App 页面路径。
 8. 信息不足时 status=blocked、active_subgoal_id=null，并填写 clarification_questions。
 9. 只返回 JSON 对象，不要 Markdown。
+"""
+
+
+def _repair_initial_prompt(
+    raw_goal: str,
+    *,
+    invalid_response: str,
+    validation_error: str,
+) -> str:
+    return f"""
+你是通用手机视觉操作 Agent 的 DeepSeek 高层任务图规划器。上一次 JSON 未通过本地协议校验。
+请根据校验错误重新生成完整任务图，不要解释、不要局部补丁，也不要输出点击、滑动、输入、
+坐标、Shell、系统命令或任何 App 专用固定流程。
+
+用户原始目标：{json.dumps(raw_goal, ensure_ascii=False)}
+本地校验错误：{json.dumps(validation_error, ensure_ascii=False)}
+上一次无效 JSON：
+{invalid_response}
+
+{_schema_prompt()}
+
+修复规则：
+1. status 为 ready、running 或 awaiting_confirmation 时，必须恰好一个子目标 status=active，
+   且 active_subgoal_id 必须等于该子目标 ID。
+2. blocked 或 completed 时 active_subgoal_id=null，且不能有 active 子目标。
+3. 至少返回一个全局 completion_conditions；初始规划不得宣称任何条件或子目标已完成。
+4. external_state 或 unknown 必须声明并关联风险；成为 active 时必须等待本地用户确认。
+5. 只返回符合结构的完整 JSON 对象，不要 Markdown。
 """
 
 
@@ -1364,7 +1421,10 @@ def _infer_external_risk_types(*values: str) -> frozenset[str]:
 def _has_unnegated_effect_match(pattern: re.Pattern[str], value: str) -> bool:
     for match in pattern.finditer(value):
         prefix = value[: match.start()].rstrip().lower()
-        if DIRECT_EFFECT_NEGATION_PATTERN.search(prefix):
+        if (
+            DIRECT_EFFECT_NEGATION_PATTERN.search(prefix)
+            or COORDINATED_EFFECT_NEGATION_PATTERN.search(prefix)
+        ):
             continue
         return True
     return False

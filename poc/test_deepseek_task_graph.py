@@ -386,6 +386,20 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskGraphError, "初始规划没有观察证据"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan("目标", device_id="phone-1")
 
+    def test_initial_plan_repairs_one_structural_status_error(self):
+        invalid = base_payload()
+        invalid["subgoals"][0]["status"] = "pending"
+        repaired = base_payload()
+        provider = FakeProvider(invalid, repaired)
+        graph = DeepSeekTaskGraphPlanner(provider).plan(
+            "目标",
+            device_id="phone-1",
+        )
+        self.assertEqual(graph.active_subgoal_id, "locate_target")
+        self.assertEqual(graph.active_subgoal().status, "active")
+        self.assertEqual(len(provider.messages), 3)
+        self.assertIn("可推进任务图必须且只能有一个活动子目标", provider.messages[1][0]["content"])
+
     def test_rejects_low_level_action_fields(self):
         payload = base_payload()
         payload["subgoals"][0]["steps"] = [{"tap": [10, 20]}]
@@ -527,6 +541,21 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             objective,
             external_impact="navigation_only",
         )
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            objective,
+            device_id="phone-1",
+        )
+        self.assertEqual(graph.subgoals[0].external_impact, "navigation_only")
+
+    def test_coordinated_negation_covers_each_prohibited_effect(self):
+        objective = "浏览器首页可见"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        payload["subgoals"][0]["constraints"] = [
+            "仅打开浏览器，不进行搜索或登录"
+        ]
         graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
             objective,
             device_id="phone-1",

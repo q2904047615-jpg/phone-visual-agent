@@ -31,21 +31,25 @@
 Python 全量（加入安全语义重绑定与 Qwen 等价 JSON 结构反例后）：
 
 ```text
-Ran 610 tests in 31.390s
+Ran 613 tests in 32.411s
 OK
 ```
 
-在线 Qwen 脱敏截图用例 `settings_list_scroll_single_action` 已复跑通过：
+在线 Qwen 脱敏截图用例 `launcher_text_icon_single_action` 与
+`settings_list_scroll_single_action` 已使用当前代码同批复跑通过：
 
 ```text
-report_status=complete, passed=1, failed=0
+report_status=complete, passed=2, failed=0
 hardware_actions_enabled=false
 ```
 
-报告位于 `poc/output/offline_qwen_visual_decision/20260812_223151_241031/report.json`。
+报告位于 `poc/output/offline_qwen_visual_decision/20260812_224044_945173/report.json`。
 解析器兼容模型常见的 `type + params` 等价动作结构，但只保留当前动作类型
 实际生效的本地参数。滑动距离提示和模型局部区域不进入控制器；`x/y`、裸坐标、
 冲突字段和未知字段继续失败关闭。
+Qwen 的 `foreground_app_id/new_foreground_app_id/new_screen_id/screen_change`
+等已知预期结果别名会归一成控制器实际校验的 `app_id/screen_id/scene_changed`；
+无法由控制器证明的自然语言结果键会在动作前被拒绝，不再退化成“只要页面有变化就算匹配”。
 
 前端协议与真实浏览器契约：
 

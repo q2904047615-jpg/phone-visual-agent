@@ -1275,7 +1275,9 @@ def _decision_prompt(
    禁止自由编写完成证据。
 9. confirmation_gate没有允许外部状态动作时必须blocked；你不能自行改写或批准确认门。
 10. task_id/device_id/revision/observation_id/fingerprint必须逐字复制；任何旧值都会被拒绝。
-11. expected_result只描述一个动作后可由新画面验证的变化。
+11. expected_result只描述一个动作后可由新画面验证的变化，且只能按需使用：
+    scene_changed、content_changed、current_video_changed、app_id、screen_id、
+    element_state={{"meaning":"逐字语义","states":{{"状态":true}}}}；不得编写自然语言条件或其他键。
 12. 这是第{decision_number}轮，只根据本轮上下文与本轮观察作答。不要Markdown。
 13. next_action.kind只能来自当前设备可用动作集合；缺少所需动作能力时必须blocked。
 14. status是互斥判别字段：只要返回非null next_action，就必须是status=action并同时给出target_region和
@@ -1308,6 +1310,8 @@ def _decision_retry_prompt(
 - 找不到逐字匹配且唯一的可信候选就blocked；finished只引用可信证据ID或scene。
 - confirmation_gate未允许外部动作时blocked；每轮只允许一个动作，不要计划后续步骤。
 - 顶层只允许下方JSON中的字段；绝对不要action、actions、reasoning、analysis、plan或额外字段。
+- expected_result只能按需使用scene_changed、content_changed、current_video_changed、app_id、screen_id、
+  element_state；不得使用new_*别名、自然语言条件或其他键。
 - 这是第{decision_number}轮。不要Markdown，不要解释，不要把JSON转义成字符串。
 - 当前设备只允许动作：{available_actions}；不得返回集合外动作，无法继续就blocked。
 - status是互斥判别字段，必须先选择且只选择下面一种完整形状：
@@ -1376,10 +1380,9 @@ def _parse_decision(
 
         page_state = ModelPageState.from_dict(payload.get("page_state"))
         status = str(payload.get("status") or "").strip().lower()
-        expected_result = payload.get("expected_result") or {}
-        if not isinstance(expected_result, dict):
-            raise GenericStepPlanningError("expected_result 必须是JSON对象。")
-        _reject_raw_control_data(expected_result)
+        expected_result = _normalize_expected_result(
+            payload.get("expected_result") or {}
+        )
         raw_action = payload.get("next_action")
         nested_target_region = None
         nested_expected_result = None
@@ -1398,16 +1401,16 @@ def _parse_decision(
                 )
             top_level_target_region = nested_target_region
         if nested_expected_result not in (None, {}):
-            if expected_result and expected_result != nested_expected_result:
-                raise GenericStepPlanningError(
-                    "next_action.expected_result 与顶层 expected_result 冲突。"
-                )
             if not isinstance(nested_expected_result, dict):
                 raise GenericStepPlanningError(
                     "next_action.expected_result 必须是JSON对象。"
                 )
-            expected_result = dict(nested_expected_result)
-            _reject_raw_control_data(expected_result)
+            normalized_nested = _normalize_expected_result(nested_expected_result)
+            if expected_result and expected_result != normalized_nested:
+                raise GenericStepPlanningError(
+                    "next_action.expected_result 与顶层 expected_result 冲突。"
+                )
+            expected_result = normalized_nested
         action = _parse_action(
             raw_action,
             status=status,
@@ -1491,6 +1494,91 @@ def _parse_decision(
         return decision
     except (UISceneError, GenericStepPlanningError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"Qwen视觉单步决策不符合协议：{exc}") from exc
+
+
+def _normalize_expected_result(value: Any) -> dict[str, Any]:
+    """Normalize model wording into the controller's verifiable effect schema."""
+
+    if not isinstance(value, dict):
+        raise GenericStepPlanningError("expected_result 必须是JSON对象。")
+    _reject_raw_control_data(value)
+    aliases = {
+        "foreground_app_id": "app_id",
+        "new_foreground_app_id": "app_id",
+        "new_app_id": "app_id",
+        "new_screen_id": "screen_id",
+        "screen_change": "scene_changed",
+        "page_changed": "scene_changed",
+        "list_content_changed": "content_changed",
+        "scroll_occurred": "content_changed",
+        "new_items_visible": "content_changed",
+    }
+    allowed = {
+        "scene_changed",
+        "content_changed",
+        "current_video_changed",
+        "app_id",
+        "screen_id",
+        "element_state",
+        "allow_unchanged",
+        "goal_complete_on_success",
+    }
+    normalized: dict[str, Any] = {}
+    for raw_key, item in value.items():
+        key = aliases.get(str(raw_key), str(raw_key))
+        if key not in allowed:
+            raise GenericStepPlanningError(
+                f"expected_result 包含协议外字段：{raw_key}"
+            )
+        if key in normalized and normalized[key] != item:
+            raise GenericStepPlanningError(
+                f"expected_result.{raw_key} 与 {key} 冲突。"
+            )
+        normalized[key] = item
+
+    for key in (
+        "scene_changed",
+        "content_changed",
+        "current_video_changed",
+        "allow_unchanged",
+        "goal_complete_on_success",
+    ):
+        if key in normalized and not isinstance(normalized[key], bool):
+            raise GenericStepPlanningError(f"expected_result.{key} 必须是布尔值。")
+    for key in ("app_id", "screen_id"):
+        if key in normalized:
+            if not isinstance(normalized[key], str) or not normalized[key].strip():
+                raise GenericStepPlanningError(
+                    f"expected_result.{key} 必须是非空字符串。"
+                )
+            normalized[key] = normalized[key].strip()
+    if "element_state" in normalized:
+        element_state = normalized["element_state"]
+        if not isinstance(element_state, dict):
+            raise GenericStepPlanningError(
+                "expected_result.element_state 必须是JSON对象。"
+            )
+        unexpected = set(element_state) - {"meaning", "states"}
+        if unexpected:
+            raise GenericStepPlanningError(
+                "expected_result.element_state 包含协议外字段："
+                + ", ".join(sorted(unexpected))
+            )
+        meaning = element_state.get("meaning")
+        states = element_state.get("states")
+        if not isinstance(meaning, str) or not meaning.strip():
+            raise GenericStepPlanningError(
+                "expected_result.element_state.meaning 必须是非空字符串。"
+            )
+        if not isinstance(states, dict) or not states:
+            raise GenericStepPlanningError(
+                "expected_result.element_state.states 必须是非空对象。"
+            )
+        normalized["element_state"] = {
+            "meaning": meaning.strip(),
+            "states": dict(states),
+        }
+    return normalized
 
 
 def _normalize_available_action_kinds(

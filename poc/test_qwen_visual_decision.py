@@ -1050,9 +1050,59 @@ class QwenVisualDecisionTests(unittest.TestCase):
             decision.proposal.action.params["expected_effect"],
         )
 
+    def test_expected_result_aliases_normalize_to_controller_contract(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        payload["expected_result"] = {
+            "screen_change": True,
+            "new_foreground_app_id": "settings",
+            "new_screen_id": "settings_main",
+        }
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual(
+            {
+                "scene_changed": True,
+                "app_id": "settings",
+                "screen_id": "settings_main",
+            },
+            decision.expected_result,
+        )
+        self.assertEqual(
+            decision.expected_result,
+            decision.proposal.action.params["expected_effect"],
+        )
+
+    def test_expected_result_conflicting_alias_is_rejected(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad["expected_result"] = {
+            "app_id": "settings",
+            "new_foreground_app_id": "browser",
+        }
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("expected_result", decision.reason)
+        self.assertIn("冲突", decision.reason)
+
+    def test_expected_result_unsupported_claim_is_rejected(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad["expected_result"] = {
+            "scene_changed": True,
+            "no_search_or_login_ui": True,
+        }
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("协议外字段", decision.reason)
+
     def test_conflicting_nested_expected_result_is_rejected(self) -> None:
         bad = action_payload(self.context, self.observation)
-        bad["next_action"]["expected_result"] = {"other_change": True}
+        bad["next_action"]["expected_result"] = {"scene_changed": False}
         provider = SequenceProvider([bad, bad])
 
         _observer, decision = self.decide(provider)

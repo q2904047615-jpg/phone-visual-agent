@@ -31,7 +31,7 @@
 Python 全量（加入安全语义重绑定与 Qwen 等价 JSON 结构反例后）：
 
 ```text
-Ran 613 tests in 32.411s
+Ran 616 tests in 33.442s
 OK
 ```
 
@@ -72,7 +72,8 @@ Qwen 的 `foreground_app_id/new_foreground_app_id/new_screen_id/screen_change`
 - 同一句陌生命令在新服务进行了多轮“只观察、零物理动作”的在线协议修复。修复均位于通用边界：空可选 `input_text` 归一为缺失；Qwen 动作/区域的已知字段别名与嵌套等价结构归一；目标区域及候选语义字段由本地可信观察构造；冲突字段仍失败关闭；“启动/launch/start”纳入通用导航词汇且外部状态禁词仍优先拦截。
 - 会话 `fbe331637189465c852fbdc77734f83b` 的确认在执行前重新观察时安全停止，原因是同一浏览器图标被 Qwen 用另一种同义措辞描述；机械臂动作数保持 0，旧确认已经失效。
 - 通用重绑定现只允许“未知页面信息变得更明确”和同一个低风险导航语义类别内的模型措辞变化，并继续逐项要求相同 label、role、states 与至少 0.60 IoU。`return -> save_and_return` 等风险语义变化仍以 0 动作拒绝。确认失败证据也会包含确认时重新采集的四帧。
-- 修复并重启后，新会话 `bbdcfc2253c24552be0f43104e77498a` 已停在 `awaiting_confirmation`，物理动作数为 0，动作是绑定可信候选 `browser_app_icon` 的 `tap_semantic`；revision 为 1，observation 为 `obs_3680de47e9c74697b963133c0617ac63`，fingerprint 为 `d9317f1ca5b56ee43b3b`。
+- 会话 `bbdcfc2253c24552be0f43104e77498a` 在发现预期结果别名尚未全部进入控制器验证后被主动取消，动作数为 0；会话 `ee065a20d1224b9782357cf00201cb3e` 因 Qwen 把候选 `bounds` 放进动作对象而安全阻止，动作数同样为 0。
+- 结果别名现归一到控制器协议；冗余 `next_action.bounds` 只有逐项等于可信候选区域时才会接受并丢弃，改动后的区域或屏幕动作携带元素区域仍拒绝。最新会话 `1565af53bbcb463cbf61952e05365f11` 已停在 `awaiting_confirmation`，物理动作数为 0，动作是绑定可信候选 `browser_app_icon` 的 `tap_semantic`；其 `expected_effect` 已是控制器直接验证的 `app_id=browser`、`screen_id=browser_home`，revision 为 1，observation 为 `obs_560060a8606d4e619fc9ea1ebfd228e2`，fingerprint 为 `d82edb72783b6a813cc3`。
 - 网页只读实测已从运行服务恢复该会话，展示自然语言入口、动态任务图、当前真实观察、0 个物理动作、精确确认、重新观察、暂停和取消入口；未点击任何执行按钮。
 - `/api/device` 的产品主路径标识已改为 `universal_agent`。旧队列 worker、旧 generic orchestrator 和旧语义适配器只标记为 `compatibility_only/default_user_path=false`，不再把保留的 `legacy` worker 模式误报为网页主路径。
 - 多设备协调锁已从全局锁拆为按 `device_id` 隔离：不同设备可同时取得各自的进程租约、协调锁和控制器锁；同一设备的第二次占用仍失败关闭。两个不同设备也可同时保持独立活动会话和确认范围。

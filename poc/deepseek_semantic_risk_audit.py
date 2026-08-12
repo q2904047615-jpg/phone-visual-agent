@@ -130,6 +130,11 @@ account_or_permission_change | unknown_external_effect
 7. read_only/navigation_only 的 risk_types 必须为空数组。
 8. 只输出结构化风险判断。禁止输出点击、坐标、输入内容、Shell、系统命令或任何操作步骤。
 9. 不得返回确认结果；确认只能来自本地控制器。
+10. 明确否定或禁止的效果词只是安全约束，不会因为出现效果词就变成 external_state。例如
+    “不登录”“不要发送”“禁止删除”“不搜索、不登录”应判断句中剩余的正向目标；并列否定
+    对同一短语中的各并列项生效。
+11. 否定词没有直接否定效果时不能降级风险。例如“不要忘记登录”“不能只查看而要发送”仍然
+    包含正向外部效果，必须按 external_state 判断。
 
 输入 sources：
 {source_json}

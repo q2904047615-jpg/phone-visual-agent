@@ -700,6 +700,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             '"source_id": "subgoals.target_state.completion_conditions.0"',
             audit_prompt,
         )
+        self.assertIn("不登录", audit_prompt)
+        self.assertIn("不要忘记登录", audit_prompt)
 
     def test_semantic_audit_allows_disagreement_between_safe_impacts(self):
         cases = (

@@ -170,7 +170,7 @@ function renderGoalAndPlan() {
 
   const gateScope = view.risk.confirmationGate.scope || {};
   const gateScopeText = gateScope.taskId
-    ? `scope ${gateScope.taskId} / ${gateScope.deviceId || "—"} / r${gateScope.revision ?? "—"} / ${gateScope.subgoalId || "—"}`
+    ? `scope ${gateScope.sessionId || view.sessionId || "—"} / ${gateScope.taskId} / ${gateScope.deviceId || "—"} / r${gateScope.revision ?? "—"} / ${gateScope.subgoalId || "—"}`
     : "";
   goalElement.className = "goal-summary";
   goalElement.innerHTML = `
@@ -179,6 +179,7 @@ function renderGoalAndPlan() {
       <code>${escapeHtml(view.deviceId || lockedSessionDeviceId())}</code>
     </div>
     <div class="goal-chips">
+      <span>会话 · ${escapeHtml(view.sessionId || "—")}</span>
       ${view.protocolVersion ? `<span>协议 · ${escapeHtml(view.protocolVersion)}</span>` : ""}
       ${view.compatibilityFallback ? `<span>旧版兼容数据 · 不作为 v3 确认依据</span>` : ""}
       ${view.targetApps.map(app => `<span>目标应用 · ${escapeHtml(app.name)}${app.id ? ` (${escapeHtml(app.id)})` : ""}</span>`).join("")}
@@ -285,6 +286,7 @@ function renderAction() {
     ? `<div class="action-metadata">
          <span>${escapeHtml(action.protocolVersion || "qwen-v2")}</span>
          <span>status ${escapeHtml(action.status)}</span>
+         <span>session ${escapeHtml(view.sessionId || "—")}</span>
          <span>task ${escapeHtml(action.taskId || "—")}</span>
          <span>revision ${escapeHtml(action.revision ?? "—")}</span>
          <span>observation ${escapeHtml(action.observationId || "—")}</span>
@@ -461,10 +463,10 @@ function openRiskDialog() {
   document.querySelector("#riskExpected").textContent = Protocol.displayValue(view.visualAction.expectedChange);
   document.querySelector("#riskDevice").textContent = lockedSessionDeviceId();
   document.querySelector("#riskWarning").textContent = riskPhase
-    ? `本次仅允许 Qwen 针对 task=${view.taskId}、revision=${view.revision ?? "—"}、subgoal=${view.currentSubgoal.id}、risk_ids=${view.risk.riskIds.join(",") || "—"} 观察并提出一个动作；此确认本身不会触发机械臂。具体动作产生后仍需再次确认。`
+    ? `本次仅允许 Qwen 针对 session=${view.sessionId}、task=${view.taskId}、revision=${view.revision ?? "—"}、subgoal=${view.currentSubgoal.id}、risk_ids=${view.risk.riskIds.join(",") || "—"} 观察并提出一个动作；此确认本身不会触发机械臂。具体动作产生后仍需再次确认。`
     : highAttention
-    ? `确认只授权 task=${view.taskId}、revision=${view.revision ?? "—"}、subgoal=${view.currentSubgoal.id}、risk_ids=${view.risk.riskIds.join(",") || "—"}、observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 的当前一步；任何字段变化都必须重新确认。`
-    : `确认只授权 observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 对应的一个动作。执行后必须重新观察。`;
+    ? `确认只授权 session=${view.sessionId}、task=${view.taskId}、revision=${view.revision ?? "—"}、subgoal=${view.currentSubgoal.id}、risk_ids=${view.risk.riskIds.join(",") || "—"}、observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 的当前一步；任何字段变化都必须重新确认。`
+    : `确认只授权 session=${view.sessionId}、observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 对应的一个动作。执行后必须重新观察。`;
   document.querySelector("#confirmRiskAction").className = highAttention ? "danger-confirm" : "primary-button";
   const safeLoopKinds = new Set(["tap_semantic", "dismiss_overlay", "swipe", "back", "wait_for_change"]);
   document.querySelector("#confirmSafeLoop").hidden = !(

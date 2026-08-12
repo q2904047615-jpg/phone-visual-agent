@@ -70,6 +70,11 @@ Qwen 的 `foreground_app_id/new_foreground_app_id/new_screen_id/screen_change`
 界面也会明确切换到当前动作确认。协议 14 项、浏览器契约 4 项复跑通过；只读截图为
 `poc/output/web/live_console_readonly_confirm_labels_20260812.png`。
 
+确认作用域的可核对信息也已补齐：动态计划 scope、Qwen 动作元数据和风险/动作确认弹窗
+现在都显式显示 `session_id`，并与 `task/device/revision/subgoal/observation/fingerprint`
+一起呈现。更新后的 Node 语法检查、前端协议 `14/14` 和浏览器契约 `4/4` 通过；浏览器
+契约还断言风险确认与具体动作确认始终使用同一个模拟会话 ID。
+
 ## 真机当前状态
 
 - 用户明确确认后，旧服务会话 `acc53be0caff41ccb6779db89cbaf062` 执行了 1 次“点击浏览器”物理动作。

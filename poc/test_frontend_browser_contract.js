@@ -273,6 +273,8 @@ test("browser renders controller evidence and confirms one exact observation", {
     assert.doesNotMatch(goalText, /未命名目标/);
     assert.match(goalText, /2026-08-11-deepseek-task-graph-v3/);
     assert.match(goalText, /revision 1/);
+    assert.match(goalText, /会话 · session-browser-action/);
+    assert.match(goalText, /scope session-browser-action \/ task-map-001 \/ phone-01 \/ r1 \/ locate_target/);
     assert.match(goalText, /phone-01/);
     assert.match(goalText, /地图 \(maps\)/);
     assert.match(goalText, /不要发起导航/);
@@ -293,6 +295,7 @@ test("browser renders controller evidence and confirms one exact observation", {
     assert.match(actionText, /可信候选唯一且清晰/);
     assert.match(actionText, /2026-08-12-qwen-visual-decision-v3/);
     assert.match(actionText, /status action/);
+    assert.match(actionText, /session session-browser-action/);
     assert.match(actionText, /task task-map-001/);
     assert.match(actionText, /revision 1/);
     assert.match(actionText, /obs_0123456789abcdef0123456789abcdef/);
@@ -307,6 +310,7 @@ test("browser renders controller evidence and confirms one exact observation", {
 
     await page.locator("#reviewAction").click();
     const warning = await page.locator("#riskWarning").innerText();
+    assert.match(warning, /session=session-browser-action/);
     assert.match(warning, /obs_0123456789abcdef0123456789abcdef/);
     assert.match(warning, /51277d0d9e6f986b00dc/);
     const confirmResponse = page.waitForResponse(
@@ -390,9 +394,10 @@ test("external-state graph requires risk approval before exact action confirmati
     assert.match(goalText, /确认门 · awaiting_risk_confirmation/);
     assert.match(goalText, /required=true/);
     assert.match(goalText, /风险 save_place · 保存目标地点/);
-    assert.match(goalText, /scope task-map-001 \/ phone-01 \/ r1 \/ save_target/);
+    assert.match(goalText, /scope session-browser-external \/ task-map-001 \/ phone-01 \/ r1 \/ save_target/);
     assert.match(await page.locator("#actionContent").innerText(), /Qwen 唯一动作尚未产生/);
     await page.locator("#reviewAction").click();
+    assert.match(await page.locator("#riskWarning").innerText(), /session=session-browser-external/);
     assert.match(await page.locator("#riskWarning").innerText(), /此确认本身不会触发机械臂/);
     const approvalResponse = page.waitForResponse(
       response => response.url().endsWith("/approve-risk"),
@@ -416,6 +421,7 @@ test("external-state graph requires risk approval before exact action confirmati
     });
     assert.equal(requests.confirm.length, 0);
     await page.locator("#reviewAction").click();
+    assert.match(await page.locator("#riskWarning").innerText(), /session=session-browser-external/);
     assert.match(await page.locator("#riskWarning").innerText(), /obs_0123456789abcdef0123456789abcdef/);
     assert.match(await page.locator("#riskWarning").innerText(), /51277d0d9e6f986b00dc/);
     assert.equal(requests.confirm.length, 0);

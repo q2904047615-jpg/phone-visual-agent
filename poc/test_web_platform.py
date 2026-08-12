@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from contextlib import nullcontext
 import json
 import tempfile
 import threading
@@ -3905,6 +3906,103 @@ class ApiEndToEndTests(unittest.TestCase):
         )
         return orchestrator, planner, qwen, adapter
 
+    def _fake_capability_manager(self, *, device_id="capability-api-device"):
+        calls = []
+
+        class Session:
+            def __init__(self):
+                self.physical_actions = 0
+                self.status = "awaiting_confirmation"
+
+            def snapshot(self):
+                return {
+                    "session_id": "capability-session-001",
+                    "status": self.status,
+                    "physical_actions": self.physical_actions,
+                    "confirmation_scope": {
+                        "session_id": "capability-session-001",
+                        "task_id": "task-001",
+                        "device_id": device_id,
+                        "revision": 1,
+                        "subgoal_id": "subgoal-001",
+                        "risk_ids": [],
+                        "observation_id": "obs-001",
+                        "fingerprint": "frame-001",
+                    },
+                }
+
+        session = Session()
+        trial = SimpleNamespace(
+            trial_id="trial-api-001",
+            device_id=device_id,
+            candidate_action="drag",
+            session=session,
+        )
+        trial.snapshot = lambda: {
+            "trial_id": trial.trial_id,
+            "device_id": trial.device_id,
+            "candidate_action": trial.candidate_action,
+            "session": session.snapshot(),
+            "report": None,
+            "promotion_scope": None,
+            "promotion": None,
+            "requires_restart": False,
+        }
+
+        class Manager:
+            def __init__(self):
+                self.promoted = False
+
+            def start(self, *, device_id, candidate_action, text):
+                calls.append(("start", device_id, candidate_action, text))
+                return trial
+
+            def get(self, trial_id):
+                calls.append(("get", trial_id))
+                if trial_id != trial.trial_id:
+                    raise web_app.CapabilityAcceptanceError("不存在")
+                return trial
+
+            def confirm(self, trial_id, confirmation):
+                calls.append(("confirm", trial_id, dict(confirmation)))
+                if session.physical_actions:
+                    raise web_app.CapabilityAcceptanceError("动作确认已使用")
+                session.physical_actions = 1
+                session.status = "paused"
+                return {
+                    "physical_actions": 1,
+                    "action_outcome": "matched",
+                }
+
+            def promotion_scope(self, trial_id):
+                calls.append(("promotion_scope", trial_id))
+                return SimpleNamespace(
+                    to_dict=lambda: {
+                        "trial_id": trial.trial_id,
+                        "device_id": trial.device_id,
+                        "action": trial.candidate_action,
+                        "report_sha256": "a" * 64,
+                        "registry_sha256": "b" * 64,
+                    }
+                )
+
+            def promote(self, trial_id, confirmation):
+                calls.append(("promote", trial_id, dict(confirmation)))
+                if self.promoted:
+                    raise web_app.CapabilityAcceptanceError("晋级确认已使用")
+                self.promoted = True
+                return {
+                    "device_id": trial.device_id,
+                    "action": trial.candidate_action,
+                    "requires_restart": True,
+                }
+
+            def cancel(self, trial_id):
+                calls.append(("cancel", trial_id))
+                session.status = "cancelled"
+
+        return Manager(), trial, calls
+
     def test_home_and_device_are_available(self) -> None:
         self.assertEqual(self.client.get("/").status_code, 200)
         device = self.client.get("/api/device").json()
@@ -4055,6 +4153,163 @@ class ApiEndToEndTests(unittest.TestCase):
                 device_id="phone-01",
                 max_physical_actions="1",
             )
+
+    def test_capability_acceptance_requests_are_strict(self) -> None:
+        with self.assertRaises(ValueError):
+            web_app.CapabilityAcceptanceStartRequest(
+                device_id="device-a",
+                action="drag",
+                text="拖动安全控件",
+                unexpected="forbidden",
+            )
+        with self.assertRaises(ValueError):
+            web_app.CapabilityActionConfirmationRequest(confirmed="true")
+        with self.assertRaises(ValueError):
+            web_app.CapabilityPromotionRequest(
+                confirmed=True,
+                trial_id="trial-a",
+                device_id="device-a",
+                action="drag",
+                report_sha256="not-a-sha",
+                registry_sha256="b" * 64,
+            )
+
+    def test_capability_acceptance_api_starts_at_zero_and_binds_action_scope(self) -> None:
+        manager, trial, calls = self._fake_capability_manager()
+        before_executions = list(web_app.runtime.controller.executions)
+        with (
+            patch.object(web_app.runtime, "capability_acceptance_manager", manager),
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app,
+                "_supervised_hardware_lock",
+                side_effect=lambda _device_id: nullcontext(),
+            ),
+        ):
+            missing_token = self.client.post(
+                "/api/capability-acceptance/start",
+                json={
+                    "device_id": trial.device_id,
+                    "action": "drag",
+                    "text": "拖动安全控件",
+                },
+            )
+            started = self.client.post(
+                "/api/capability-acceptance/start",
+                headers=self.headers,
+                json={
+                    "device_id": trial.device_id,
+                    "action": "drag",
+                    "text": "拖动安全控件",
+                },
+            )
+
+        self.assertEqual(missing_token.status_code, 403, missing_token.text)
+        self.assertEqual(started.status_code, 200, started.text)
+        payload = started.json()
+        self.assertEqual(payload["physical_actions"], 0)
+        scope = payload["trial"]["action_confirmation_scope"]
+        self.assertEqual(scope["trial_id"], trial.trial_id)
+        self.assertEqual(scope["action"], "drag")
+        self.assertEqual([call[0] for call in calls], ["start"])
+        self.assertEqual(before_executions, web_app.runtime.controller.executions)
+
+    def test_capability_action_confirmation_is_exact_once(self) -> None:
+        manager, trial, calls = self._fake_capability_manager()
+        scope = {
+            **trial.session.snapshot()["confirmation_scope"],
+            "trial_id": trial.trial_id,
+            "action": trial.candidate_action,
+        }
+        path = f"/api/capability-acceptance/{trial.trial_id}/confirm"
+        before_executions = list(web_app.runtime.controller.executions)
+        with (
+            patch.object(web_app.runtime, "capability_acceptance_manager", manager),
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app,
+                "_supervised_hardware_lock",
+                side_effect=lambda _device_id: nullcontext(),
+            ),
+        ):
+            wrong = self.client.post(
+                path,
+                headers=self.headers,
+                json={
+                    "confirmed": True,
+                    "confirmation": {**scope, "action": "long_press"},
+                },
+            )
+            first = self.client.post(
+                path,
+                headers=self.headers,
+                json={"confirmed": True, "confirmation": scope},
+            )
+            replay = self.client.post(
+                path,
+                headers=self.headers,
+                json={"confirmed": True, "confirmation": scope},
+            )
+            extra = self.client.post(
+                path,
+                headers=self.headers,
+                json={
+                    "confirmed": True,
+                    "confirmation": {**scope, "unexpected": "forbidden"},
+                },
+            )
+
+        self.assertEqual(wrong.status_code, 409, wrong.text)
+        self.assertEqual(wrong.json()["detail"]["physical_actions"], 0)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["physical_actions"], 1)
+        self.assertEqual(replay.status_code, 409, replay.text)
+        self.assertEqual(extra.status_code, 422, extra.text)
+        self.assertEqual([call[0] for call in calls].count("confirm"), 2)
+        self.assertEqual(before_executions, web_app.runtime.controller.executions)
+
+    def test_capability_promotion_is_separate_zero_action_and_requires_restart(self) -> None:
+        manager, trial, calls = self._fake_capability_manager()
+        path = f"/api/capability-acceptance/{trial.trial_id}"
+        before_executions = list(web_app.runtime.controller.executions)
+        with (
+            patch.object(web_app.runtime, "capability_acceptance_manager", manager),
+            patch.object(
+                web_app.runtime.vision_provider,
+                "status",
+                side_effect=AssertionError("promotion must not inspect Qwen"),
+            ),
+        ):
+            preview = self.client.get(
+                f"{path}/promotion-preview",
+                headers=self.headers,
+            )
+            scope = preview.json()["promotion_scope"]
+            refused = self.client.post(
+                f"{path}/promote",
+                headers=self.headers,
+                json={"confirmed": False, **scope},
+            )
+            promoted = self.client.post(
+                f"{path}/promote",
+                headers=self.headers,
+                json={"confirmed": True, **scope},
+            )
+            replay = self.client.post(
+                f"{path}/promote",
+                headers=self.headers,
+                json={"confirmed": True, **scope},
+            )
+
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.json()["physical_actions"], 0)
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(promoted.status_code, 200, promoted.text)
+        self.assertEqual(promoted.json()["physical_actions"], 0)
+        self.assertTrue(promoted.json()["promotion"]["requires_restart"])
+        self.assertEqual(replay.status_code, 409, replay.text)
+        self.assertEqual([call[0] for call in calls].count("promote"), 2)
+        self.assertEqual(before_executions, web_app.runtime.controller.executions)
 
     def test_v3_confirm_request_requires_scope_and_forbids_extra_fields(self) -> None:
         orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()

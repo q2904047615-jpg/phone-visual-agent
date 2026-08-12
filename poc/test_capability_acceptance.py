@@ -139,6 +139,14 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(CapabilityAcceptanceError, message):
                     validate_acceptance_report(self.report_path)
 
+    def test_report_rejects_uncommitted_code_revision(self) -> None:
+        self._mutate_report(
+            lambda report: report.__setitem__("code_revision", "86b63d8+dirty")
+        )
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "未提交代码"):
+            validate_acceptance_report(self.report_path)
+
     def test_report_rejects_unchanged_observation_or_fingerprint(self) -> None:
         mutations = (
             lambda report: report["after_observation"].__setitem__("observation_id", "obs-before"),

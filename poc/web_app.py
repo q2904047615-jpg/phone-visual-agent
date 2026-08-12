@@ -6,6 +6,7 @@ import queue
 import re
 import secrets
 import sqlite3
+import subprocess
 import threading
 import time
 import uuid
@@ -20,6 +21,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
+from capability_acceptance import (
+    CapabilityAcceptanceError,
+    PROMOTABLE_ACTIONS,
+)
+from capability_acceptance_runtime import CapabilityAcceptanceManager
 from intent_provider import DeepSeekIntentProvider, IntentProviderError
 from generic_intent import GenericIntentError, GenericIntentParser
 from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
@@ -99,6 +105,39 @@ DEVICE_REGISTRY_PATH = Path(
         Path(__file__).with_name("device_registry.json"),
     )
 )
+
+
+def current_code_revision() -> str:
+    """Return a reproducible revision; dirty worktrees are never promotable."""
+
+    explicit = str(os.environ.get("PHONE_VISUAL_AGENT_CODE_REVISION") or "").strip()
+    if explicit:
+        return explicit
+    repository = ROOT.parent
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=no"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CapabilityAcceptanceError(f"无法读取当前 Git 提交：{exc}") from exc
+    if not revision:
+        raise CapabilityAcceptanceError("当前 Git 提交为空。")
+    return revision + ("+dirty" if dirty else "")
 
 OPERATION_APP = {
     "wechat.send_text_to_file_transfer": "wechat",
@@ -719,6 +758,46 @@ class GenericSupervisedAutoRequest(StrictAgentRequest):
     max_iterations: StrictInt = Field(default=1, ge=1, le=1)
 
 
+class CapabilityAcceptanceStartRequest(StrictAgentRequest):
+    device_id: StrictStr = Field(min_length=1, max_length=128)
+    action: StrictStr = Field(min_length=1, max_length=64)
+    text: StrictStr = Field(min_length=1, max_length=500)
+
+
+class CapabilityActionConfirmationScopeRequest(GenericConfirmationScopeRequest):
+    trial_id: StrictStr = Field(min_length=1, max_length=128)
+    action: StrictStr = Field(min_length=1, max_length=64)
+
+
+class CapabilityRiskConfirmationScopeRequest(GenericRiskConfirmationScopeRequest):
+    trial_id: StrictStr = Field(min_length=1, max_length=128)
+    action: StrictStr = Field(min_length=1, max_length=64)
+
+
+class CapabilityActionConfirmationRequest(StrictAgentRequest):
+    confirmed: StrictBool = False
+    confirmation: CapabilityActionConfirmationScopeRequest | None = None
+
+
+class CapabilityRiskApprovalRequest(StrictAgentRequest):
+    confirmed: StrictBool = False
+    confirmation: CapabilityRiskConfirmationScopeRequest | None = None
+
+
+class CapabilityPromotionRequest(StrictAgentRequest):
+    confirmed: StrictBool = False
+    trial_id: StrictStr = Field(min_length=1, max_length=128)
+    device_id: StrictStr = Field(min_length=1, max_length=128)
+    action: StrictStr = Field(min_length=1, max_length=64)
+    report_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    registry_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CapabilityCancelRequest(StrictAgentRequest):
+    device_id: StrictStr = Field(min_length=1, max_length=128)
+    action: StrictStr = Field(min_length=1, max_length=64)
+
+
 def build_generic_plan_preview(
     parsed_intent: dict[str, Any],
     orchestrator: GenericTaskOrchestrator,
@@ -828,6 +907,44 @@ class DeviceControllerRegistry:
             )
         return controller
 
+    def provisional_controller(
+        self,
+        device_id: str,
+        candidate_action: str,
+    ) -> RobotController:
+        """Create an unregistered controller for one evidence-bound trial.
+
+        The returned object is deliberately not stored in this registry.  It
+        cannot change the capabilities of the product controller that owns the
+        normal web path.
+        """
+
+        resolved_device = str(device_id or "").strip()
+        action = str(candidate_action or "").strip()
+        if action not in PROMOTABLE_ACTIONS:
+            raise CapabilityAcceptanceError(
+                f"动作 {action or 'missing'} 不能进入真机能力验收。"
+            )
+        try:
+            original = self._controllers[resolved_device]
+            descriptor = self._descriptors[resolved_device]
+        except KeyError as exc:
+            raise CapabilityAcceptanceError(
+                f"device_id 未登记或未启用：{resolved_device or 'missing'}。"
+            ) from exc
+        if action in original.verified_actions:
+            raise CapabilityAcceptanceError(
+                f"设备能力 {action} 已经通过真机验收。"
+            )
+        verified_actions = set(original.verified_actions) | {action}
+        if isinstance(original, MockRobotController):
+            return MockRobotController(verified_actions=verified_actions)
+        return RobotController(
+            descriptor["window_title"] or original.title,
+            calibration_path=Path(descriptor["calibration_path"]),
+            verified_actions=verified_actions,
+        )
+
     def descriptors(self) -> list[dict[str, Any]]:
         return [dict(self._descriptors[key]) for key in sorted(self._descriptors)]
 
@@ -866,6 +983,16 @@ class Runtime:
                 controller=UniversalActionController(),
             ),
             device_registry=self.device_task_registry,
+        )
+        self.capability_acceptance_manager = CapabilityAcceptanceManager(
+            provisional_controller_factory=(
+                self.device_controllers.provisional_controller
+            ),
+            orchestrator_factory=self.capability_trial_orchestrator,
+            device_registry=self.device_task_registry,
+            output_dir=WEB_OUTPUT_DIR,
+            registry_path=DEVICE_REGISTRY_PATH,
+            code_revision_provider=current_code_revision,
         )
         self.state_observer = DashScopePageObserver(self.vision_provider)
         self.state_runner = StateGraphRunner(
@@ -909,6 +1036,24 @@ class Runtime:
             # production registry remains strict.
             return self.controller
         return self.device_controllers.controller(device_id)
+
+    def capability_trial_orchestrator(
+        self,
+        provisional_controller: RobotController,
+    ) -> UniversalAgentOrchestrator:
+        """Build one isolated orchestrator that shares only the device lease."""
+
+        return UniversalAgentOrchestrator(
+            deepseek_planner=self.deepseek_task_graph_planner,
+            qwen_observer=self.qwen_visual_decision_observer,
+            adapter_factory=lambda _device_id: GenericSingleActionAdapter(
+                capture=provisional_controller.vision_capture,
+                observer=self.generic_scene_observer,
+                robot=provisional_controller,
+                controller=UniversalActionController(),
+            ),
+            device_registry=self.device_task_registry,
+        )
 
     def coordination_lock_for_device(self, device_id: str) -> threading.Lock:
         """Serialize observation/action work per device, not across devices."""
@@ -1524,6 +1669,343 @@ def _generic_supervised_failure(
         "session": session.snapshot() if session else None,
         "report": _write_generic_supervised_report(session) if session else None,
     }
+
+
+def _capability_trial_payload(trial: Any) -> dict[str, Any]:
+    snapshot = trial.snapshot()
+    session = snapshot.get("session")
+    if not isinstance(session, dict):
+        session = {}
+    action_scope = session.get("confirmation_scope")
+    risk_scope = session.get("risk_confirmation_scope")
+    snapshot["action_confirmation_scope"] = (
+        {
+            **dict(action_scope),
+            "trial_id": trial.trial_id,
+            "action": trial.candidate_action,
+        }
+        if isinstance(action_scope, dict)
+        else None
+    )
+    snapshot["risk_confirmation_scope"] = (
+        {
+            **dict(risk_scope),
+            "trial_id": trial.trial_id,
+            "action": trial.candidate_action,
+        }
+        if isinstance(risk_scope, dict)
+        else None
+    )
+    return snapshot
+
+
+def _capability_execution_payload(result: Any) -> dict[str, Any]:
+    if isinstance(result, dict):
+        return dict(result)
+    method = getattr(result, "to_dict", None)
+    if callable(method):
+        payload = method()
+        if isinstance(payload, dict):
+            return payload
+    raise CapabilityAcceptanceError("验收执行结果不是 JSON 对象。")
+
+
+def _capability_failure(
+    trial: Any | None,
+    exc: Exception,
+    *,
+    request_action_count: int = 0,
+) -> dict[str, Any]:
+    physical_actions = max(
+        0,
+        int(request_action_count),
+        int(getattr(exc, "physical_actions", 0) or 0),
+    )
+    return {
+        "success": False,
+        "physical_actions": physical_actions,
+        "error": str(exc),
+        "trial": _capability_trial_payload(trial) if trial is not None else None,
+        "evidence": [str(path) for path in getattr(exc, "evidence", ())],
+    }
+
+
+def _require_capability_trial_binding(
+    trial: Any,
+    *,
+    trial_id: str,
+    device_id: str,
+    action: str,
+) -> None:
+    if (
+        trial.trial_id != trial_id
+        or trial.device_id != device_id
+        or trial.candidate_action != action
+    ):
+        raise CapabilityAcceptanceError("真机验收确认范围与当前会话不匹配。")
+
+
+CAPABILITY_ACCEPTANCE_ERRORS = (
+    CapabilityAcceptanceError,
+    GenericActionAdapterError,
+    IntentProviderError,
+    TaskGraphError,
+    UniversalActionError,
+    UniversalAgentOrchestratorError,
+    VisionAgentError,
+)
+
+
+@app.post("/api/capability-acceptance/start")
+def start_capability_acceptance(
+    body: CapabilityAcceptanceStartRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Plan and observe one unverified generic action with zero execution."""
+
+    verify_local_request(request, x_control_token)
+    if body.action not in PROMOTABLE_ACTIONS:
+        exc = CapabilityAcceptanceError(
+            f"动作 {body.action} 不能进入真机能力验收。"
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=_capability_failure(None, exc),
+        )
+    active_session = runtime.device_task_registry.active_session(body.device_id)
+    if active_session is not None:
+        exc = CapabilityAcceptanceError(
+            f"设备 {body.device_id} 已有活动任务：{active_session}。"
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=_capability_failure(None, exc),
+        )
+    _require_supervised_device_ready(body.device_id)
+    try:
+        with _supervised_hardware_lock(body.device_id):
+            trial = runtime.capability_acceptance_manager.start(
+                device_id=body.device_id,
+                candidate_action=body.action,
+                text=body.text,
+            )
+        return {
+            "mode": "capability_acceptance_single_action",
+            "physical_actions": 0,
+            "automatic_loop_enabled": False,
+            "trial": _capability_trial_payload(trial),
+        }
+    except CAPABILITY_ACCEPTANCE_ERRORS as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_capability_failure(None, exc),
+        ) from exc
+
+
+@app.get("/api/capability-acceptance/{trial_id}")
+def get_capability_acceptance(
+    trial_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    try:
+        trial = runtime.capability_acceptance_manager.get(trial_id)
+    except CapabilityAcceptanceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "mode": "capability_acceptance_single_action",
+        "trial": _capability_trial_payload(trial),
+    }
+
+
+@app.post("/api/capability-acceptance/{trial_id}/approve-risk")
+def approve_capability_acceptance_risk(
+    trial_id: str,
+    body: CapabilityRiskApprovalRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    trial = None
+    try:
+        trial = runtime.capability_acceptance_manager.get(trial_id)
+        if body.confirmed is not True or body.confirmation is None:
+            raise CapabilityAcceptanceError("验收风险确认必须提交完整精确作用域。")
+        _require_capability_trial_binding(
+            trial,
+            trial_id=body.confirmation.trial_id,
+            device_id=body.confirmation.device_id,
+            action=body.confirmation.action,
+        )
+        _require_supervised_device_ready(trial.device_id)
+        before_actions = int(getattr(trial.session, "physical_actions", 0))
+        with _supervised_hardware_lock(trial.device_id):
+            runtime.capability_acceptance_manager.approve_risks(
+                trial_id,
+                body.confirmation.model_dump(exclude={"trial_id", "action"}),
+            )
+        request_actions = int(getattr(trial.session, "physical_actions", 0)) - before_actions
+        if request_actions != 0:
+            raise CapabilityAcceptanceError("验收风险确认错误地产生了物理动作。")
+        return {
+            "mode": "capability_acceptance_single_action",
+            "physical_actions": 0,
+            "trial": _capability_trial_payload(trial),
+        }
+    except CAPABILITY_ACCEPTANCE_ERRORS as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_capability_failure(trial, exc),
+        ) from exc
+
+
+@app.post("/api/capability-acceptance/{trial_id}/confirm")
+def confirm_capability_acceptance(
+    trial_id: str,
+    body: CapabilityActionConfirmationRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Consume one trial-bound action confirmation and execute exactly once."""
+
+    verify_local_request(request, x_control_token)
+    trial = None
+    before_actions = 0
+    try:
+        trial = runtime.capability_acceptance_manager.get(trial_id)
+        if body.confirmed is not True or body.confirmation is None:
+            raise CapabilityAcceptanceError("执行验收动作前必须提交完整精确作用域。")
+        _require_capability_trial_binding(
+            trial,
+            trial_id=body.confirmation.trial_id,
+            device_id=body.confirmation.device_id,
+            action=body.confirmation.action,
+        )
+        _require_supervised_device_ready(trial.device_id)
+        before_actions = int(getattr(trial.session, "physical_actions", 0))
+        with _supervised_hardware_lock(trial.device_id):
+            result = runtime.capability_acceptance_manager.confirm(
+                trial_id,
+                body.confirmation.model_dump(exclude={"trial_id", "action"}),
+            )
+        request_actions = int(getattr(trial.session, "physical_actions", 0)) - before_actions
+        if request_actions != 1:
+            raise CapabilityAcceptanceError(
+                f"验收动作确认必须恰好执行一次，实际为 {request_actions}。"
+            )
+        return {
+            "mode": "capability_acceptance_single_action",
+            "physical_actions": 1,
+            "execution": _capability_execution_payload(result),
+            "trial": _capability_trial_payload(trial),
+        }
+    except CAPABILITY_ACCEPTANCE_ERRORS as exc:
+        request_actions = (
+            max(
+                0,
+                int(getattr(trial.session, "physical_actions", 0)) - before_actions,
+            )
+            if trial is not None
+            else 0
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=_capability_failure(
+                trial,
+                exc,
+                request_action_count=request_actions,
+            ),
+        ) from exc
+
+
+@app.get("/api/capability-acceptance/{trial_id}/promotion-preview")
+def preview_capability_promotion(
+    trial_id: str,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    try:
+        scope = runtime.capability_acceptance_manager.promotion_scope(trial_id)
+        return {
+            "physical_actions": 0,
+            "promotion_scope": scope.to_dict(),
+            "requires_separate_confirmation": True,
+        }
+    except CapabilityAcceptanceError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_capability_failure(None, exc),
+        ) from exc
+
+
+@app.post("/api/capability-acceptance/{trial_id}/promote")
+def promote_capability_acceptance(
+    trial_id: str,
+    body: CapabilityPromotionRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    """Atomically update disk configuration; never touch camera or hardware."""
+
+    verify_local_request(request, x_control_token)
+    trial = None
+    try:
+        trial = runtime.capability_acceptance_manager.get(trial_id)
+        if body.confirmed is not True:
+            raise CapabilityAcceptanceError("能力晋级需要单独明确确认。")
+        _require_capability_trial_binding(
+            trial,
+            trial_id=body.trial_id,
+            device_id=body.device_id,
+            action=body.action,
+        )
+        confirmation = body.model_dump(exclude={"confirmed"})
+        result = runtime.capability_acceptance_manager.promote(
+            trial_id,
+            confirmation,
+        )
+        return {
+            "physical_actions": 0,
+            "promotion": result,
+            "trial": _capability_trial_payload(trial),
+        }
+    except CapabilityAcceptanceError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_capability_failure(trial, exc),
+        ) from exc
+
+
+@app.post("/api/capability-acceptance/{trial_id}/cancel")
+def cancel_capability_acceptance(
+    trial_id: str,
+    body: CapabilityCancelRequest,
+    request: Request,
+    x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
+) -> dict[str, Any]:
+    verify_local_request(request, x_control_token)
+    trial = None
+    try:
+        trial = runtime.capability_acceptance_manager.get(trial_id)
+        _require_capability_trial_binding(
+            trial,
+            trial_id=trial_id,
+            device_id=body.device_id,
+            action=body.action,
+        )
+        runtime.capability_acceptance_manager.cancel(trial_id)
+        return {
+            "physical_actions": 0,
+            "trial": _capability_trial_payload(trial),
+        }
+    except CAPABILITY_ACCEPTANCE_ERRORS as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_capability_failure(trial, exc),
+        ) from exc
 
 
 @app.post("/api/agent/generic-supervised/start")

@@ -1604,19 +1604,26 @@ class RobotController:
 class MockRobotController(RobotController):
     """No-hardware controller for API tests and UI demonstrations."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        verified_actions: set[str] | frozenset[str] | None = None,
+    ) -> None:
+        all_actions = {
+            "tap_semantic",
+            "dismiss_overlay",
+            "swipe",
+            "back",
+            "wait_for_change",
+            "input_verified_text",
+            "long_press",
+            "drag",
+        }
         super().__init__(
             title="MOCK",
-            verified_actions={
-                "tap_semantic",
-                "dismiss_overlay",
-                "swipe",
-                "back",
-                "wait_for_change",
-                "input_verified_text",
-                "long_press",
-                "drag",
-            },
+            verified_actions=(
+                all_actions if verified_actions is None else verified_actions
+            ),
         )
         self.executions: list[dict[str, Any]] = []
 

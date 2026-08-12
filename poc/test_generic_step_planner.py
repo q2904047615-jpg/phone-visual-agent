@@ -355,6 +355,8 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
 
         self.assertEqual(4, len(result.after_frames))
+        self.assertEqual(4, len(result.before_frames))
+        self.assertEqual(4, len(result.before_frame_paths))
         self.assertTrue(
             all(frame.getpixel((0, 0)) == (255, 255, 255) for frame in result.after_frames)
         )

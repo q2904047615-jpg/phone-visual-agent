@@ -59,6 +59,12 @@ class GenericActionExecutionResult:
     )
     after_frame_paths: tuple[str, ...] = ()
     observation_errors: tuple[str, ...] = ()
+    before_frames: tuple[Image.Image, ...] = field(
+        default_factory=tuple,
+        repr=False,
+        compare=False,
+    )
+    before_frame_paths: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +81,8 @@ class GenericActionExecutionResult:
             "after_frame_count": len(self.after_frames),
             "after_frame_paths": list(self.after_frame_paths),
             "observation_errors": list(self.observation_errors),
+            "before_frame_count": len(self.before_frames),
+            "before_frame_paths": list(self.before_frame_paths),
         }
 
 
@@ -371,7 +379,7 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError("必须明确确认当前这一个语义动作。")
         safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
         evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
-        before, _frames, before_paths = self.capture_scene(
+        before, before_frames, before_paths = self.capture_scene(
             goal,
             evidence_dir=evidence_dir,
             prefix=f"{evidence_prefix}_before",
@@ -524,6 +532,8 @@ class GenericSingleActionAdapter:
             after_frames=after_frames,
             after_frame_paths=after_frame_paths,
             observation_errors=observation_errors,
+            before_frames=before_frames,
+            before_frame_paths=before_paths,
         )
 
     def _rebind_action(

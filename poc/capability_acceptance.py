@@ -160,7 +160,11 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     )
     if action not in PROMOTABLE_ACTIONS:
         raise CapabilityAcceptanceError(f"动作类型不能进入真机验收：{action}。")
-    _required_text(report.get("code_revision"), field="code_revision", max_length=128)
+    code_revision = _required_text(
+        report.get("code_revision"), field="code_revision", max_length=128
+    )
+    if code_revision.endswith("+dirty"):
+        raise CapabilityAcceptanceError("验收报告来自未提交代码，不能晋级。")
     if report.get("status") != "passed":
         raise CapabilityAcceptanceError("验收报告结果不是 passed，不能晋级。")
     physical_actions = report.get("physical_actions")

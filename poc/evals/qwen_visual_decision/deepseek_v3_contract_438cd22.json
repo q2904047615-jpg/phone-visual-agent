@@ -1,0 +1,229 @@
+{
+  "fixture_protocol": "deepseek-to-qwen-contract-fixture-v1",
+  "source_commit": "438cd2258cdca681abe42da11b70c399df58063e",
+  "source_method": "DynamicTaskGraph.to_qwen_context",
+  "source_files": [
+    "poc/deepseek_task_graph.py",
+    "poc/test_deepseek_task_graph.py"
+  ],
+  "contexts": {
+    "navigation": {
+      "protocol_version": "2026-08-11-deepseek-task-graph-v3",
+      "task_id": "task-contract-navigation",
+      "device_id": "phone-01",
+      "revision": 1,
+      "task_status": "ready",
+      "goal": {
+        "objective": "在地图应用中找到图书馆并保存地点",
+        "target_apps": [
+          {
+            "app_id": "maps",
+            "app_name": "地图"
+          }
+        ],
+        "entities": {
+          "place": "图书馆"
+        }
+      },
+      "global_constraints": [
+        "不要发起导航"
+      ],
+      "goal_completion_conditions": [
+        {
+          "condition_id": "place_saved",
+          "description": "目标地点已保存",
+          "evidence_required": [
+            "页面显示已收藏状态"
+          ],
+          "satisfied": false,
+          "evidence": []
+        }
+      ],
+      "current_subgoal": {
+        "subgoal_id": "locate_target",
+        "objective": "目标地点详情可见",
+        "status": "active",
+        "depends_on": [],
+        "constraints": [
+          "地点名称必须匹配"
+        ],
+        "completion_conditions": [
+          "页面显示目标地点详情"
+        ],
+        "completion_evidence": [],
+        "risk_action_ids": [],
+        "external_impact": "navigation_only"
+      },
+      "current_external_impact": "navigation_only",
+      "risk_actions": [],
+      "confirmation_gate": {
+        "required": false,
+        "state": "not_required",
+        "risk_ids": [],
+        "scope": {
+          "task_id": "task-contract-navigation",
+          "device_id": "phone-01",
+          "revision": 1,
+          "subgoal_id": "locate_target"
+        },
+        "external_state_action_allowed": false
+      }
+    },
+    "external_awaiting_confirmation": {
+      "protocol_version": "2026-08-11-deepseek-task-graph-v3",
+      "task_id": "task-contract-external",
+      "device_id": "phone-01",
+      "revision": 1,
+      "task_status": "awaiting_confirmation",
+      "goal": {
+        "objective": "在地图应用中找到图书馆并保存地点",
+        "target_apps": [
+          {
+            "app_id": "maps",
+            "app_name": "地图"
+          }
+        ],
+        "entities": {
+          "place": "图书馆"
+        }
+      },
+      "global_constraints": [
+        "不要发起导航"
+      ],
+      "goal_completion_conditions": [
+        {
+          "condition_id": "place_saved",
+          "description": "目标地点已保存",
+          "evidence_required": [
+            "页面显示已收藏状态"
+          ],
+          "satisfied": false,
+          "evidence": []
+        }
+      ],
+      "current_subgoal": {
+        "subgoal_id": "save_target",
+        "objective": "目标地点进入已保存状态",
+        "status": "active",
+        "depends_on": [],
+        "constraints": [
+          "执行前等待用户确认"
+        ],
+        "completion_conditions": [
+          "页面显示已收藏状态"
+        ],
+        "completion_evidence": [],
+        "risk_action_ids": [
+          "save_place"
+        ],
+        "external_impact": "external_state"
+      },
+      "current_external_impact": "external_state",
+      "risk_actions": [
+        {
+          "risk_id": "save_place",
+          "description": "保存目标地点",
+          "external_effect": "更改账号收藏数据",
+          "risk_type": "data_mutation",
+          "risk_level": "medium",
+          "subgoal_ids": [
+            "save_target"
+          ],
+          "confirmation_required": true
+        }
+      ],
+      "confirmation_gate": {
+        "required": true,
+        "state": "awaiting_confirmation",
+        "risk_ids": [
+          "save_place"
+        ],
+        "scope": {
+          "task_id": "task-contract-external",
+          "device_id": "phone-01",
+          "revision": 1,
+          "subgoal_id": "save_target"
+        },
+        "external_state_action_allowed": false
+      }
+    },
+    "external_confirmed": {
+      "protocol_version": "2026-08-11-deepseek-task-graph-v3",
+      "task_id": "task-contract-external",
+      "device_id": "phone-01",
+      "revision": 1,
+      "task_status": "awaiting_confirmation",
+      "goal": {
+        "objective": "在地图应用中找到图书馆并保存地点",
+        "target_apps": [
+          {
+            "app_id": "maps",
+            "app_name": "地图"
+          }
+        ],
+        "entities": {
+          "place": "图书馆"
+        }
+      },
+      "global_constraints": [
+        "不要发起导航"
+      ],
+      "goal_completion_conditions": [
+        {
+          "condition_id": "place_saved",
+          "description": "目标地点已保存",
+          "evidence_required": [
+            "页面显示已收藏状态"
+          ],
+          "satisfied": false,
+          "evidence": []
+        }
+      ],
+      "current_subgoal": {
+        "subgoal_id": "save_target",
+        "objective": "目标地点进入已保存状态",
+        "status": "active",
+        "depends_on": [],
+        "constraints": [
+          "执行前等待用户确认"
+        ],
+        "completion_conditions": [
+          "页面显示已收藏状态"
+        ],
+        "completion_evidence": [],
+        "risk_action_ids": [
+          "save_place"
+        ],
+        "external_impact": "external_state"
+      },
+      "current_external_impact": "external_state",
+      "risk_actions": [
+        {
+          "risk_id": "save_place",
+          "description": "保存目标地点",
+          "external_effect": "更改账号收藏数据",
+          "risk_type": "data_mutation",
+          "risk_level": "medium",
+          "subgoal_ids": [
+            "save_target"
+          ],
+          "confirmation_required": true
+        }
+      ],
+      "confirmation_gate": {
+        "required": true,
+        "state": "confirmed",
+        "risk_ids": [
+          "save_place"
+        ],
+        "scope": {
+          "task_id": "task-contract-external",
+          "device_id": "phone-01",
+          "revision": 1,
+          "subgoal_id": "save_target"
+        },
+        "external_state_action_allowed": true
+      }
+    }
+  }
+}

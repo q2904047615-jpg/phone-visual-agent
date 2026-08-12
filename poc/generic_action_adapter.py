@@ -12,6 +12,7 @@ from PIL import Image
 from generic_intent import GenericIntentDraft
 from generic_scene_observer import GenericSceneObserver
 from observation_images import measure_local_stability
+from qwen_runtime_errors import FORMAT_ERROR_TYPES, classify_qwen_error
 from semantic_executor import SemanticAction
 from ui_scene import UIElement, UIScene, UISceneError
 from universal_action_controller import (
@@ -199,15 +200,15 @@ class GenericSingleActionAdapter:
         tuple[str, ...],
         tuple[str, ...],
     ]:
-        deadline = time.monotonic() + self.post_action_timeout
         if self.post_action_settle:
             time.sleep(min(self.post_action_settle, self.post_action_timeout))
 
         all_paths: tuple[str, ...] = ()
         last_error: Exception | None = None
         for attempt in range(1, self.post_action_max_observations + 1):
+            attempt_deadline = time.monotonic() + self.post_action_timeout
             frames, paths = self._capture_stable_post_action_frames(
-                deadline=deadline,
+                deadline=attempt_deadline,
                 evidence_dir=evidence_dir,
                 prefix=f"{evidence_prefix}_after_attempt_{attempt}",
             )
@@ -218,10 +219,16 @@ class GenericSingleActionAdapter:
                     goal_context=goal.to_dict(),
                 )
             except RuntimeError as exc:
-                raise GenericActionAdapterError(
-                    f"通用页面观察失败：{exc}",
-                    evidence=all_paths,
-                ) from exc
+                last_error = exc
+                if (
+                    attempt >= self.post_action_max_observations
+                    or not self._post_observation_retryable(exc)
+                ):
+                    raise GenericActionAdapterError(
+                        f"通用页面观察失败：{exc}",
+                        evidence=all_paths,
+                    ) from exc
+                continue
 
             try:
                 self.controller.verify_after_action(resolved, before, after)
@@ -231,25 +238,29 @@ class GenericSingleActionAdapter:
                 # A stable old page, a low-confidence transitional scene, or
                 # an expected destination that is still loading can all be a
                 # legitimate intermediate state.  Re-observe at most once,
-                # within the same hard deadline, without repeating the action.
-                if (
-                    attempt >= self.post_action_max_observations
-                    or time.monotonic() >= deadline
-                ):
+                # with a fresh bounded capture, without repeating the action.
+                if attempt >= self.post_action_max_observations:
                     break
                 if self.frame_interval:
-                    time.sleep(
-                        min(
-                            self.frame_interval,
-                            max(0.0, deadline - time.monotonic()),
-                        )
-                    )
+                    time.sleep(self.frame_interval)
 
         assert last_error is not None
         raise GenericActionAdapterError(
             f"动作后自适应观察仍未通过：{last_error}",
             evidence=all_paths,
         ) from last_error
+
+    def _post_observation_retryable(self, error: RuntimeError) -> bool:
+        diagnostics = getattr(self.observer, "last_diagnostics", {})
+        error_type = (
+            diagnostics.get("error_type")
+            if isinstance(diagnostics, dict)
+            else None
+        )
+        return (
+            error_type in FORMAT_ERROR_TYPES
+            or classify_qwen_error(error) in FORMAT_ERROR_TYPES
+        )
 
     def execute(
         self,

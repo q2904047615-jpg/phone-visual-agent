@@ -18,6 +18,7 @@ from generic_step_planner import (
 from generic_supervised_runtime import GenericSupervisedSession
 from semantic_executor import SemanticAction
 from ui_scene import UIElement, UIScene
+from vision_agent import VisionAgentError
 
 
 class FakeTextProvider:
@@ -40,7 +41,10 @@ class FakeSceneObserver:
 
     def observe(self, *, frames, goal_context=None):
         self.calls += 1
-        return self.scenes.pop(0)
+        result = self.scenes.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
 
 class FakeRobot:
@@ -594,6 +598,114 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(result.physical_actions, 1)
         self.assertEqual(robot.actions, [("tap", 300, 400)])
         self.assertEqual(observer.calls, 3)
+
+    def test_post_action_format_failure_recaptures_once_without_repeating_action(self):
+        planned = scene("planned")
+        fresh = scene("before", element_id="fresh")
+        after = scene("after", screen_id="app_home", element_id="after")
+        observer = FakeSceneObserver(
+            [fresh, VisionAgentError("模型返回的 JSON 无法解析"), after]
+        )
+        robot = FakeRobot()
+        capture = SequenceCapture(["gray"] * 12)
+        adapter = GenericSingleActionAdapter(
+            capture=capture,
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=1,
+        )
+        action = SemanticAction(
+            node_id="generic_step_1",
+            action="tap_semantic",
+            params={"element_id": "e1", "target": "app_icon"},
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            result = adapter.execute(
+                requested_action=action,
+                planned_scene=planned,
+                goal=goal(),
+                confirmed=True,
+                evidence_dir=Path(temp),
+            )
+
+        self.assertEqual(robot.actions, [("tap", 300, 400)])
+        self.assertEqual(result.physical_actions, 1)
+        self.assertEqual(observer.calls, 3)
+        self.assertEqual(capture.calls, 12)
+        self.assertEqual(len(result.evidence), 12)
+        self.assertEqual(len(result.after_frame_paths), 4)
+
+    def test_two_post_action_format_failures_stop_after_one_robot_action(self):
+        observer = FakeSceneObserver(
+            [
+                scene("before", element_id="fresh"),
+                VisionAgentError("模型返回的 JSON 无法解析"),
+                VisionAgentError("模型返回的 JSON 无法解析"),
+            ]
+        )
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 12),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=1,
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaises(GenericActionAdapterError) as caught:
+                adapter.execute(
+                    requested_action=SemanticAction(
+                        node_id="generic_step_1",
+                        action="tap_semantic",
+                        params={"element_id": "e1", "target": "app_icon"},
+                    ),
+                    planned_scene=scene("planned"),
+                    goal=goal(),
+                    confirmed=True,
+                    evidence_dir=Path(temp),
+                )
+
+        self.assertEqual(caught.exception.physical_actions, 1)
+        self.assertEqual(len(caught.exception.evidence), 12)
+        self.assertEqual(observer.calls, 3)
+        self.assertEqual(len(robot.actions), 1)
+
+    def test_post_action_non_format_failure_is_not_retried(self):
+        observer = FakeSceneObserver(
+            [scene("before", element_id="fresh"), VisionAgentError("请求超时")]
+        )
+        robot = FakeRobot()
+        capture = SequenceCapture(["gray"] * 8)
+        adapter = GenericSingleActionAdapter(
+            capture=capture,
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=1,
+        )
+
+        with self.assertRaises(GenericActionAdapterError) as caught:
+            adapter.execute(
+                requested_action=SemanticAction(
+                    node_id="generic_step_1",
+                    action="tap_semantic",
+                    params={"element_id": "e1", "target": "app_icon"},
+                ),
+                planned_scene=scene("planned"),
+                goal=goal(),
+                confirmed=True,
+            )
+
+        self.assertEqual(caught.exception.physical_actions, 1)
+        self.assertEqual(observer.calls, 2)
+        self.assertEqual(capture.calls, 8)
+        self.assertEqual(len(robot.actions), 1)
 
     def test_post_action_timeout_stops_without_calling_model_or_tapping_again(self):
         planned = scene("planned")

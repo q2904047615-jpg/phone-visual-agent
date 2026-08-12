@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from deepseek_task_graph import (
@@ -14,6 +17,8 @@ from generic_step_planner import GenericStepProposal
 from semantic_executor import SemanticAction
 from ui_scene import UIElement, UIScene
 from universal_agent_orchestrator import (
+    AgentEvidenceStore,
+    EvidenceStoreError,
     ObservationBridge,
     PhaseOneNavigationPolicy,
     UniversalAgentOrchestratorError,
@@ -376,6 +381,62 @@ class ObservationBridgeTests(unittest.TestCase):
                 action_outcome="not_applicable",
                 verification={},
             )
+
+
+class AgentEvidenceStoreTests(unittest.TestCase):
+    def test_writes_all_authoritative_json_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = AgentEvidenceStore(Path(temp))
+            graph = _graph()
+
+            store.write_session({"session_id": "session-1", "status": "observing"})
+            store.write_task_graph(graph)
+            store.write_risk_audit(graph)
+            store.write_trusted_observation(1, {"observation_id": "obs-1"})
+            store.write_qwen_decision(1, {"status": "action"})
+            store.write_controller_decision(1, {"allowed": True})
+            store.write_verification(1, {"matched": True})
+            store.write_report({"physical_actions": 0})
+
+            expected = {
+                "session.json",
+                "task_graph_revision_1.json",
+                "risk_audit_revision_1.json",
+                "trusted_observation_step_1.json",
+                "qwen_decision_step_1.json",
+                "controller_decision_step_1.json",
+                "verification_step_1.json",
+                "report.json",
+            }
+            self.assertTrue(expected.issubset({item.name for item in Path(temp).iterdir()}))
+            payload = json.loads((Path(temp) / "task_graph_revision_1.json").read_text("utf-8"))
+            self.assertEqual("task-1", payload["task_id"])
+
+    def test_json_write_uses_replace_and_never_leaves_partial_target(self) -> None:
+        def fail_replace(_source: Path, _target: Path) -> None:
+            raise OSError("simulated disk failure")
+
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "session.json"
+            target.write_text('{"status":"old"}', encoding="utf-8")
+            store = AgentEvidenceStore(Path(temp), replace_file=fail_replace)
+
+            with self.assertRaisesRegex(EvidenceStoreError, "原子写入失败"):
+                store.write_session({"status": "new"})
+
+            self.assertEqual('{"status":"old"}', target.read_text("utf-8"))
+            self.assertEqual([], list(Path(temp).glob(".session.json.*.tmp")))
+
+    def test_rejects_path_traversal_and_non_serializable_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = AgentEvidenceStore(Path(temp))
+
+            with self.assertRaises(EvidenceStoreError):
+                store.write_json("../outside.json", {})
+            with self.assertRaises(EvidenceStoreError):
+                store.write_json("bad.json", {"value": object()})
+
+            self.assertFalse((Path(temp).parent / "outside.json").exists())
 
 
 if __name__ == "__main__":

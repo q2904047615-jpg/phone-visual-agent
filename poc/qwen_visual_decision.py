@@ -1645,6 +1645,11 @@ def _parse_action(
             )
         value[canonical] = value.pop(alias)
     kind = str(value.get("kind") or "").strip().lower()
+    redundant_bounds = value.pop("bounds", None)
+    if redundant_bounds is not None and kind not in SINGLE_ELEMENT_ACTIONS:
+        raise GenericStepPlanningError(
+            "next_action.bounds 只允许逐项复用单元素可信候选区域。"
+        )
     if "distance" in value:
         distance = value.pop("distance")
         if kind != "swipe":
@@ -1709,6 +1714,28 @@ def _parse_action(
         if not element_id:
             raise GenericStepPlanningError("元素动作缺少可信候选 element_id。")
         element = observation.get_candidate(element_id)
+        if redundant_bounds is not None:
+            if (
+                not isinstance(redundant_bounds, (list, tuple))
+                or len(redundant_bounds) != 4
+                or any(
+                    isinstance(item, bool) or not isinstance(item, (int, float))
+                    for item in redundant_bounds
+                )
+            ):
+                raise GenericStepPlanningError(
+                    "next_action.bounds 必须包含4个0到1000数值。"
+                )
+            normalized_bounds = tuple(
+                float(item) / 1000.0 for item in redundant_bounds
+            )
+            if any(
+                abs(actual - trusted) > 0.0001
+                for actual, trusted in zip(normalized_bounds, element.bounds)
+            ):
+                raise GenericStepPlanningError(
+                    "next_action.bounds 没有逐项复用可信候选区域。"
+                )
         # element_id is Qwen's only semantic selection.  All descriptive
         # fields are authoritative local data and must never depend on the
         # model repeating strings exactly (or on model-authored synonyms).

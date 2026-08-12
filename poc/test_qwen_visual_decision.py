@@ -1036,6 +1036,43 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual("tap_semantic", decision.proposal.action.action)
         self.assertEqual("settings_icon", decision.target_region.element_id)
 
+    def test_redundant_action_bounds_must_match_trusted_candidate(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        payload["next_action"]["bounds"] = [680, 200, 860, 350]
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertNotIn("bounds", decision.proposal.action.params)
+        self.assertEqual(
+            self.observation.get_candidate("settings_icon").bounds,
+            decision.target_region.bounds,
+        )
+
+    def test_redundant_action_bounds_cannot_change_candidate_region(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad["next_action"]["bounds"] = [100, 100, 300, 300]
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("bounds", decision.reason)
+
+    def test_screen_action_cannot_carry_redundant_element_bounds(self) -> None:
+        bad = action_payload(self.context, self.observation)
+        bad["next_action"] = {
+            "kind": "swipe",
+            "direction": "up",
+            "bounds": [680, 200, 860, 350],
+        }
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("bounds", decision.reason)
+
     def test_nested_expected_result_is_promoted_and_verified(self) -> None:
         payload = action_payload(self.context, self.observation)
         expected = payload.pop("expected_result")

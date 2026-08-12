@@ -409,6 +409,9 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             "移动到裸坐标(120, 340)",
             "按下音量键",
             "在输入框输入文字abc",
+            "在输入框输入密码",
+            "输入关键词天气",
+            "输入abc",
             "运行 PowerShell 系统命令",
         )
         for objective in forbidden_objectives:
@@ -420,6 +423,21 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                         "目标",
                         device_id="phone-1",
                     )
+
+    def test_allows_input_as_observed_state_noun(self):
+        payload = base_payload()
+        payload["completion_conditions"][0]["evidence_required"] = [
+            "未出现搜索输入或搜索结果",
+            "输入框保持为空",
+        ]
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "仅查看页面",
+            device_id="phone-1",
+        )
+        self.assertEqual(
+            graph.completion_conditions[0].evidence_required,
+            ("未出现搜索输入或搜索结果", "输入框保持为空"),
+        )
 
     def test_rejects_low_level_instruction_in_completion_condition(self):
         payload = base_payload()

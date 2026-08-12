@@ -27,6 +27,7 @@ from generic_scene_observer import GenericSceneObserver
 from generic_step_planner import GenericStepPlanner, GenericStepPlanningError
 from deepseek_task_graph import DeepSeekTaskGraphPlanner, TaskGraphError
 from qwen_visual_decision import QwenVisualDecisionObserver
+from device_exclusivity import InterProcessLease, SHARED_DEVICE_LEASE_DIR
 from universal_agent_orchestrator import (
     DeviceTaskRegistry,
     UniversalAgentOrchestrator,
@@ -745,7 +746,9 @@ class Runtime:
         self.qwen_visual_decision_observer = QwenVisualDecisionObserver(
             self.vision_provider
         )
-        self.device_task_registry = DeviceTaskRegistry()
+        self.device_task_registry = DeviceTaskRegistry(
+            lease_directory=SHARED_DEVICE_LEASE_DIR
+        )
         self.universal_agent_orchestrator = UniversalAgentOrchestrator(
             deepseek_planner=self.deepseek_task_graph_planner,
             qwen_observer=self.qwen_visual_decision_observer,
@@ -830,16 +833,26 @@ class Runtime:
                     raise VisionAgentError(
                         "通用编排器当前仅完成计划编译与校验，实机执行尚未启用。"
                     )
-                if isinstance(self.controller, MockRobotController):
-                    result = self.controller.execute(
-                        task["operation"],
-                        task["params"].get("source_params", task["params"]),
-                    )
-                else:
-                    result = self.state_runner.execute(
-                        task["operation"],
-                        task["params"],
-                    )
+                process_lease = InterProcessLease(
+                    SHARED_DEVICE_LEASE_DIR / "physical_hardware_action.lease",
+                    owner_id=f"worker-{os.getpid()}-{task_id}",
+                    metadata={"purpose": "legacy_worker_task", "task_id": task_id},
+                )
+                if not process_lease.acquire():
+                    raise VisionAgentError("另一进程已占用机械臂物理控制权。")
+                try:
+                    if isinstance(self.controller, MockRobotController):
+                        result = self.controller.execute(
+                            task["operation"],
+                            task["params"].get("source_params", task["params"]),
+                        )
+                    else:
+                        result = self.state_runner.execute(
+                            task["operation"],
+                            task["params"],
+                        )
+                finally:
+                    process_lease.release()
                 self.store.transition(
                     task_id,
                     {"running"},
@@ -1118,7 +1131,11 @@ def device() -> dict[str, Any]:
         generic_sessions = [
             item.snapshot()
             for item in runtime.generic_supervised_sessions.values()
-            if item.status in {"awaiting_confirmation", "paused_after_action"}
+            if item.status in {
+                "awaiting_confirmation",
+                "paused_after_action",
+                "needs_reobservation",
+            }
         ]
     status["generic_supervised_execution"] = {
         "enabled": True,
@@ -1204,16 +1221,37 @@ def _require_supervised_device_ready() -> None:
 
 @contextmanager
 def _supervised_hardware_lock() -> Iterator[None]:
+    process_lease = InterProcessLease(
+        SHARED_DEVICE_LEASE_DIR / "physical_hardware_action.lease",
+        owner_id=f"web-{os.getpid()}-{threading.get_ident()}",
+        metadata={"purpose": "physical_hardware_action"},
+    )
+    if not process_lease.acquire():
+        raise HTTPException(status_code=409, detail="另一进程已占用机械臂物理控制权。")
     if not runtime.dry_run_lock.acquire(blocking=False):
+        process_lease.release()
         raise HTTPException(status_code=409, detail="已有语义观察或动作正在进行。")
     if not runtime.controller.operation_lock.acquire(blocking=False):
         runtime.dry_run_lock.release()
+        process_lease.release()
         raise HTTPException(status_code=409, detail="机械臂物理控制权已被占用。")
     try:
         yield
     finally:
         runtime.controller.operation_lock.release()
         runtime.dry_run_lock.release()
+        process_lease.release()
+
+
+def _acquire_compatibility_hardware_lease(purpose: str) -> InterProcessLease:
+    lease = InterProcessLease(
+        SHARED_DEVICE_LEASE_DIR / "physical_hardware_action.lease",
+        owner_id=f"compat-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex[:8]}",
+        metadata={"purpose": str(purpose)},
+    )
+    if not lease.acquire():
+        raise HTTPException(status_code=409, detail="另一进程已占用机械臂物理控制权。")
+    return lease
 
 
 def _require_generic_session_device(
@@ -1378,11 +1416,21 @@ def confirm_generic_supervised_session(
     """Consume one exact authority scope and execute at most one action."""
 
     verify_local_request(request, x_control_token)
-    _require_supervised_device_ready()
     with runtime.generic_supervised_session_lock:
         session = runtime.generic_supervised_sessions.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="通用单步会话不存在。")
+    try:
+        _require_supervised_device_ready()
+    except HTTPException:
+        try:
+            runtime.universal_agent_orchestrator.invalidate_confirmation(
+                session,
+                reason="device_readiness_failed",
+            )
+        except Exception:
+            pass
+        raise
     before_actions = session.physical_actions
     try:
         if body.confirmed is not True or body.confirmation is None:
@@ -1827,10 +1875,13 @@ def execute_ensure_app_step(
         raise HTTPException(status_code=409, detail="执行队列非空，拒绝并发动作。")
     if not runtime.vision_provider.status().get("configured"):
         raise HTTPException(status_code=409, detail="千问视觉尚未配置。")
+    process_lease = _acquire_compatibility_hardware_lease("execute_ensure_app_step")
     if not runtime.dry_run_lock.acquire(blocking=False):
+        process_lease.release()
         raise HTTPException(status_code=409, detail="已有一次语义观察或动作正在进行。")
     if not runtime.controller.operation_lock.acquire(blocking=False):
         runtime.dry_run_lock.release()
+        process_lease.release()
         raise HTTPException(status_code=409, detail="机械臂物理控制权已被占用。")
 
     run_dir = WEB_OUTPUT_DIR / (
@@ -1937,6 +1988,7 @@ def execute_ensure_app_step(
     finally:
         runtime.controller.operation_lock.release()
         runtime.dry_run_lock.release()
+        process_lease.release()
 
 
 @app.post("/api/agent/execute-observe-step")
@@ -1963,10 +2015,13 @@ def execute_observe_step(
         raise HTTPException(status_code=409, detail="执行队列非空，拒绝并发观察。")
     if not runtime.vision_provider.status().get("configured"):
         raise HTTPException(status_code=409, detail="千问视觉尚未配置。")
+    process_lease = _acquire_compatibility_hardware_lease("execute_observe_step")
     if not runtime.dry_run_lock.acquire(blocking=False):
+        process_lease.release()
         raise HTTPException(status_code=409, detail="已有一次语义观察正在进行。")
     if not runtime.controller.operation_lock.acquire(blocking=False):
         runtime.dry_run_lock.release()
+        process_lease.release()
         raise HTTPException(status_code=409, detail="机械臂物理控制权已被占用。")
 
     run_dir = WEB_OUTPUT_DIR / (
@@ -2096,6 +2151,7 @@ def execute_observe_step(
     finally:
         runtime.controller.operation_lock.release()
         runtime.dry_run_lock.release()
+        process_lease.release()
 
 
 @app.post("/api/agent/execute-tap-heart-step")
@@ -2122,10 +2178,13 @@ def execute_tap_heart_step(
         raise HTTPException(status_code=409, detail="执行队列非空，拒绝并发动作。")
     if not runtime.vision_provider.status().get("configured"):
         raise HTTPException(status_code=409, detail="千问视觉尚未配置。")
+    process_lease = _acquire_compatibility_hardware_lease("execute_tap_heart_step")
     if not runtime.dry_run_lock.acquire(blocking=False):
+        process_lease.release()
         raise HTTPException(status_code=409, detail="已有一次语义观察或动作正在进行。")
     if not runtime.controller.operation_lock.acquire(blocking=False):
         runtime.dry_run_lock.release()
+        process_lease.release()
         raise HTTPException(status_code=409, detail="机械臂物理控制权已被占用。")
 
     run_dir = WEB_OUTPUT_DIR / (
@@ -2339,6 +2398,7 @@ def execute_tap_heart_step(
     finally:
         runtime.controller.operation_lock.release()
         runtime.dry_run_lock.release()
+        process_lease.release()
 
 
 @app.post("/api/tasks")

@@ -177,7 +177,7 @@ class GenericActionAdapterTests(unittest.TestCase):
 
     def test_confirmed_tap_executes_exactly_once_and_reobserves(self):
         planned = scene("planned", bounds=(0.1, 0.2, 0.3, 0.4))
-        fresh = scene("before", element_id="fresh", bounds=(0.5, 0.6, 0.7, 0.8))
+        fresh = scene("before", element_id="fresh", bounds=(0.11, 0.21, 0.31, 0.41))
         after = scene("after", screen_id="app_home", element_id="after")
         observer = FakeSceneObserver([fresh, after])
         robot = FakeRobot()
@@ -199,7 +199,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 confirmed=True,
                 evidence_dir=Path(temp),
             )
-        self.assertEqual(robot.actions, [("tap", 600, 700)])
+        self.assertEqual(robot.actions, [("tap", 210, 310)])
         self.assertEqual(result.physical_actions, 1)
         self.assertEqual(observer.calls, 2)
 
@@ -278,7 +278,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         selected_fingerprint = _local_frame_fingerprint(result.after_frames[0])
         self.assertEqual(result.after_scene.fingerprint, selected_fingerprint)
 
-    def test_rebind_uses_unique_visible_label_when_meaning_wording_changes(self):
+    def test_rebind_rejects_same_label_when_meaning_changes(self):
         planned = UIScene(
             app_id="unknown",
             screen_id="android_home",
@@ -315,7 +315,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             ),
             stable=True,
             confidence=0.96,
-            fingerprint="fresh",
+            fingerprint="planned",
         )
         after = scene(
             "after",
@@ -336,15 +336,123 @@ class GenericActionAdapterTests(unittest.TestCase):
                 "states": {"goal_relevant": True},
             },
         )
-        result = self._adapter(observer, robot).execute(
-            requested_action=action,
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
+        with self.assertRaisesRegex(GenericActionAdapterError, "语义"):
+            self._adapter(observer, robot).execute(
+                requested_action=action,
+                planned_scene=planned,
+                goal=goal(),
+                confirmed=True,
+            )
+        self.assertEqual(robot.actions, [])
+
+    def test_changed_target_region_before_confirmation_stops_without_robot_action(self):
+        planned = scene("planned")
+        fresh = scene("fresh", bounds=(0.65, 0.65, 0.85, 0.85))
+        observer = FakeSceneObserver([fresh])
+        robot = FakeRobot()
+        action = SemanticAction(
+            node_id="generic_step_1",
+            action="tap_semantic",
+            params={"element_id": "e1", "target": "app_icon"},
         )
-        self.assertEqual(result.rebound_action.params["element_id"], "e1")
-        self.assertEqual(robot.actions, [("tap", 775, 705)])
-        self.assertEqual(result.physical_actions, 1)
+
+        with self.assertRaisesRegex(GenericActionAdapterError, "区域"):
+            self._adapter(observer, robot).execute(
+                requested_action=action,
+                planned_scene=planned,
+                goal=goal(),
+                confirmed=True,
+            )
+        self.assertEqual(robot.actions, [])
+
+    def test_changed_target_state_before_confirmation_stops_without_robot_action(self):
+        planned = UIScene(
+            app_id="unknown",
+            screen_id="android_home",
+            summary="主屏幕",
+            elements=(
+                UIElement(
+                    element_id="e1",
+                    role="icon",
+                    meaning="app_icon",
+                    label="设置",
+                    bounds=(0.2, 0.3, 0.4, 0.5),
+                    confidence=0.96,
+                    states={"enabled": True},
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = UIScene(
+            app_id="unknown",
+            screen_id="android_home",
+            summary="主屏幕",
+            elements=(
+                UIElement(
+                    element_id="fresh",
+                    role="icon",
+                    meaning="app_icon",
+                    label="设置",
+                    bounds=(0.2, 0.3, 0.4, 0.5),
+                    confidence=0.96,
+                    states={"enabled": False},
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        robot = FakeRobot()
+        with self.assertRaisesRegex(GenericActionAdapterError, "语义|状态"):
+            self._adapter(FakeSceneObserver([fresh]), robot).execute(
+                requested_action=SemanticAction(
+                    node_id="generic_step_1",
+                    action="tap_semantic",
+                    params={"element_id": "e1", "target": "app_icon"},
+                ),
+                planned_scene=planned,
+                goal=goal(),
+                confirmed=True,
+            )
+        self.assertEqual([], robot.actions)
+
+    def test_each_execution_uses_unique_evidence_paths(self):
+        action = SemanticAction(
+            node_id="generic_step_1",
+            action="tap_semantic",
+            params={"element_id": "e1", "target": "app_icon"},
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            evidence_dir = Path(temp)
+            first = self._adapter(
+                FakeSceneObserver(
+                    [scene("same", element_id="fresh-1"), scene("after-1", screen_id="app_home")]
+                ),
+                FakeRobot(),
+            ).execute(
+                requested_action=action,
+                planned_scene=scene("same"),
+                goal=goal(),
+                confirmed=True,
+                evidence_dir=evidence_dir,
+            )
+            first_bytes = {path: Path(path).read_bytes() for path in first.evidence}
+            second = self._adapter(
+                FakeSceneObserver(
+                    [scene("same", element_id="fresh-2"), scene("after-2", screen_id="app_home")]
+                ),
+                FakeRobot(),
+            ).execute(
+                requested_action=action,
+                planned_scene=scene("same"),
+                goal=goal(),
+                confirmed=True,
+                evidence_dir=evidence_dir,
+            )
+
+            self.assertTrue(set(first.evidence).isdisjoint(second.evidence))
+            self.assertEqual(
+                first_bytes,
+                {path: Path(path).read_bytes() for path in first.evidence},
+            )
 
     def test_changed_screen_before_confirmation_stops_without_robot_action(self):
         planned = scene("planned")

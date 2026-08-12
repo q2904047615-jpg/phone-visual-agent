@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping
 import uuid
 
 from deepseek_task_graph import DynamicTaskGraph, ObservedState
+from device_exclusivity import InterProcessLease
 from generic_action_adapter import GenericActionAdapterError
 from generic_intent import GenericIntentDraft
 from qwen_visual_decision import TrustedObservation
@@ -393,11 +394,23 @@ class DeviceTaskRegistry:
         {"succeeded", "blocked", "failed", "paused", "cancelled"}
     )
 
-    def __init__(self) -> None:
+    def __init__(self, *, lease_directory: Path | None = None) -> None:
         self._guard = threading.RLock()
         self._locks: dict[str, threading.RLock] = {}
         self._active: dict[str, str] = {}
         self._owners: dict[str, tuple[int, int]] = {}
+        self._lease_directory = (
+            Path(lease_directory) if lease_directory is not None else None
+        )
+        self._leases: dict[str, InterProcessLease] = {}
+
+    def _lease_path(self, device_id: str) -> Path | None:
+        if self._lease_directory is None:
+            return None
+        import hashlib
+
+        digest = hashlib.sha256(device_id.encode("utf-8")).hexdigest()[:24]
+        return self._lease_directory / f"device_{digest}.lease"
 
     @staticmethod
     def _id(value: str, field_name: str) -> str:
@@ -415,6 +428,20 @@ class DeviceTaskRegistry:
                 raise UniversalAgentOrchestratorError(
                     f"设备 {device} 已有活动任务：{active}。"
                 )
+            lease_path = self._lease_path(device)
+            if lease_path is not None and device not in self._leases:
+                lease = InterProcessLease(
+                    lease_path,
+                    owner_id=session,
+                    metadata={"device_id": device, "session_id": session},
+                )
+                if not lease.acquire():
+                    payload = InterProcessLease.active_payload(lease_path) or {}
+                    owner = str(payload.get("session_id") or "另一个进程")
+                    raise UniversalAgentOrchestratorError(
+                        f"设备 {device} 已有活动任务：{owner}。"
+                    )
+                self._leases[device] = lease
             self._active[device] = session
             self._locks.setdefault(device, threading.RLock())
 
@@ -424,11 +451,21 @@ class DeviceTaskRegistry:
         with self._guard:
             if self._active.get(device) == session:
                 self._active.pop(device, None)
+                lease = self._leases.pop(device, None)
+                if lease is not None:
+                    lease.release()
 
     def active_session(self, device_id: str) -> str | None:
         device = self._id(device_id, "device_id")
         with self._guard:
-            return self._active.get(device)
+            local = self._active.get(device)
+            if local is not None:
+                return local
+            lease_path = self._lease_path(device)
+            if lease_path is None:
+                return None
+            payload = InterProcessLease.active_payload(lease_path) or {}
+            return str(payload.get("session_id") or "").strip() or None
 
     @contextmanager
     def device_lock(self, device_id: str):
@@ -1327,6 +1364,28 @@ class UniversalAgentOrchestrator:
             self._write_terminal_snapshot(session)
         self.device_registry.release(session.device_id, session.session_id)
 
+    def invalidate_confirmation(
+        self,
+        session: UniversalAgentSessionState,
+        *,
+        reason: str,
+    ) -> None:
+        """Invalidate a pending scope while retaining the device for re-observation."""
+
+        if self.device_registry.active_session(session.device_id) != session.session_id:
+            return
+        with self.device_registry.device_lock(session.device_id):
+            authority = session.confirmation_authority
+            if authority is not None:
+                authority.consumed = True
+                authority.invalid_reason = str(reason or "invalidated")
+            session.confirmation_authority = None
+            session.status = "needs_reobservation"
+            session.failed_reason = (
+                "设备或摄像头状态变化；旧确认已失效，必须重新观察后再确认。"
+            )
+            self._write_terminal_snapshot(session)
+
     def cancel(self, session: UniversalAgentSessionState) -> None:
         with self.device_registry.device_lock(session.device_id):
             authority = session.confirmation_authority
@@ -1386,6 +1445,11 @@ class PhaseOneNavigationPolicy:
             "type",
             "drag",
             "longpress",
+            "confirm",
+            "approve",
+            "accept",
+            "agree",
+            "authorize",
         }
     )
     FORBIDDEN_CHINESE = (
@@ -1409,6 +1473,11 @@ class PhaseOneNavigationPolicy:
         "输入",
         "长按",
         "拖动",
+        "确认",
+        "确定",
+        "同意",
+        "批准",
+        "授权",
     )
     NAVIGATION_CLASSES = (
         ("back", frozenset({"back", "return", "previous"}), ("返回", "后退", "上一页")),

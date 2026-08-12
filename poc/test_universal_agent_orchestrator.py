@@ -511,6 +511,9 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             ("follow_creator", "关注"),
             ("open_payment", "打开支付"),
             ("view_and_send", "查看并发送"),
+            ("confirm_and_return", "确认并返回"),
+            ("approve_and_close", "同意并关闭"),
+            ("accept_and_back", "确定并返回"),
         ):
             with self.subTest(meaning=meaning):
                 scene = _scene(meaning=meaning, label=label)
@@ -1083,6 +1086,34 @@ class DeviceTaskRegistryTests(unittest.TestCase):
 
         self.assertEqual([], second_qwen.calls)
         self.assertEqual("session-first", registry.active_session("device-1"))
+
+    def test_shared_lease_rejects_a_second_process_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as lease_dir:
+            first = DeviceTaskRegistry(lease_directory=Path(lease_dir))
+            second = DeviceTaskRegistry(lease_directory=Path(lease_dir))
+            first.reserve("device-shared", "session-first")
+            try:
+                self.assertEqual(
+                    "session-first", second.active_session("device-shared")
+                )
+                with self.assertRaisesRegex(
+                    UniversalAgentOrchestratorError, "已有活动任务"
+                ):
+                    second.reserve("device-shared", "session-second")
+            finally:
+                first.release("device-shared", "session-first")
+
+    def test_unlocked_stale_lease_file_is_not_an_active_session(self) -> None:
+        with tempfile.TemporaryDirectory() as lease_dir:
+            registry = DeviceTaskRegistry(lease_directory=Path(lease_dir))
+            lease_path = registry._lease_path("device-stale")
+            assert lease_path is not None
+            lease_path.parent.mkdir(parents=True, exist_ok=True)
+            lease_path.write_text(" stale metadata", encoding="utf-8")
+
+            self.assertIsNone(registry.active_session("device-stale"))
+            registry.reserve("device-stale", "new-session")
+            registry.release("device-stale", "new-session")
 
     def test_terminal_session_releases_device(self) -> None:
         registry = DeviceTaskRegistry()

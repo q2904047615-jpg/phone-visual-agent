@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw
 
 import robot_gui_poc
 import web_app
+from device_exclusivity import InterProcessLease
 from generic_intent import GenericIntentDraft
 from generic_step_planner import GenericStepProposal
 from ocr_runtime import find_text
@@ -3931,6 +3932,111 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertEqual(replay.status_code, 409, replay.text)
         self.assertEqual(replay.json()["detail"]["physical_actions"], 0)
         self.assertEqual(adapter.execute_calls, 1)
+
+    def test_device_disconnect_invalidates_pending_confirmation(self) -> None:
+        orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
+        session = orchestrator.start(
+            session_id="api-disconnect-invalidates",
+            raw_goal="查看详情",
+            device_id="phone-01",
+            run_dir=web_app.WEB_OUTPUT_DIR / "api-disconnect-invalidates",
+        )
+        with web_app.runtime.generic_supervised_session_lock:
+            web_app.runtime.generic_supervised_sessions[session.session_id] = session
+        path = f"/api/agent/generic-supervised/{session.session_id}/confirm"
+        payload = {
+            "confirmed": True,
+            "confirmation": session.snapshot()["confirmation_scope"],
+        }
+
+        def offline() -> None:
+            raise web_app.HTTPException(status_code=409, detail="控制端或摄像头离线。")
+
+        with (
+            patch.object(web_app, "_require_supervised_device_ready", offline),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            disconnected = self.client.post(
+                path, headers=self.headers, json=payload
+            )
+
+        self.assertEqual(409, disconnected.status_code, disconnected.text)
+        self.assertIsNone(session.snapshot()["confirmation_scope"])
+        self.assertEqual("needs_reobservation", session.status)
+        self.assertEqual(0, adapter.execute_calls)
+
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
+            stale = self.client.post(path, headers=self.headers, json=payload)
+        self.assertEqual(409, stale.status_code, stale.text)
+        self.assertEqual(0, adapter.execute_calls)
+
+    def test_hardware_lock_rejects_another_process_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            lease_dir = Path(temp)
+            external = InterProcessLease(
+                lease_dir / "physical_hardware_action.lease",
+                owner_id="other-service",
+                metadata={"purpose": "physical_hardware_action"},
+            )
+            self.assertTrue(external.acquire())
+            try:
+                with (
+                    patch.object(web_app, "SHARED_DEVICE_LEASE_DIR", lease_dir),
+                    self.assertRaisesRegex(
+                        web_app.HTTPException, "另一进程已占用"
+                    ),
+                ):
+                    with web_app._supervised_hardware_lock():
+                        self.fail("cross-process lease must block the hardware lock")
+            finally:
+                external.release()
+
+    def test_compatibility_physical_endpoints_share_the_process_lease(self) -> None:
+        lease = InterProcessLease(
+            web_app.SHARED_DEVICE_LEASE_DIR / "physical_hardware_action.lease",
+            owner_id="other-worktree-service",
+            metadata={"purpose": "test_external_owner"},
+        )
+        self.assertTrue(lease.acquire())
+        try:
+            before_executions = list(web_app.runtime.controller.executions)
+            for endpoint, text in (
+                ("/api/agent/execute-ensure-app-step", "打开设置"),
+                ("/api/agent/execute-observe-step", "查看设置"),
+                ("/api/agent/execute-tap-heart-step", "点赞当前视频"),
+            ):
+                with self.subTest(endpoint=endpoint):
+                    response = self.client.post(
+                        endpoint,
+                        headers=self.headers,
+                        json={"confirmed": True, "text": text},
+                    )
+                    self.assertEqual(409, response.status_code, response.text)
+                    self.assertIn("另一进程已占用", response.text)
+            self.assertEqual(
+                before_executions, web_app.runtime.controller.executions
+            )
+        finally:
+            lease.release()
+
+    def test_legacy_worker_declares_the_same_cross_process_action_lease(self) -> None:
+        import inspect
+
+        source = inspect.getsource(web_app.Runtime._worker_loop)
+        self.assertIn("physical_hardware_action.lease", source)
+        self.assertIn("process_lease.acquire()", source)
+        self.assertIn("process_lease.release()", source)
 
     def test_v3_confirm_api_rejects_cross_device_scope(self) -> None:
         orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+import re
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -190,6 +192,7 @@ class GenericSingleActionAdapter:
         before: UIScene,
         resolved: ResolvedSemanticAction,
         evidence_dir: Path | None,
+        evidence_prefix: str,
     ) -> tuple[
         UIScene,
         tuple[Image.Image, ...],
@@ -206,7 +209,7 @@ class GenericSingleActionAdapter:
             frames, paths = self._capture_stable_post_action_frames(
                 deadline=deadline,
                 evidence_dir=evidence_dir,
-                prefix=f"after_confirmed_action_attempt_{attempt}",
+                prefix=f"{evidence_prefix}_after_attempt_{attempt}",
             )
             all_paths += paths
             try:
@@ -259,10 +262,12 @@ class GenericSingleActionAdapter:
     ) -> GenericActionExecutionResult:
         if confirmed is not True:
             raise GenericActionAdapterError("必须明确确认当前这一个语义动作。")
+        safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
+        evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
         before, _frames, before_paths = self.capture_scene(
             goal,
             evidence_dir=evidence_dir,
-            prefix="before_confirmed_action",
+            prefix=f"{evidence_prefix}_before",
         )
         rebound = self._rebind_action(requested_action, planned_scene, before)
         try:
@@ -326,6 +331,7 @@ class GenericSingleActionAdapter:
                 before=before,
                 resolved=resolved,
                 evidence_dir=evidence_dir,
+                evidence_prefix=evidence_prefix,
             )
         except (GenericActionAdapterError, UniversalActionError) as exc:
             evidence = before_paths + tuple(getattr(exc, "evidence", ()))
@@ -376,34 +382,43 @@ class GenericSingleActionAdapter:
             original = planned_scene.get_element(original_id)
         except UISceneError as exc:
             raise GenericActionAdapterError(f"原始场景目标无效：{exc}") from exc
-        # Model-generated ``meaning`` is descriptive rather than a durable ID.
-        # Across two observations the same labelled icon can legitimately be
-        # described as, for example, "Douyin app icon" and "Douyin launch
-        # entry".  Requiring both label and meaning to be byte-for-byte equal
-        # made a correctly re-observed target disappear at confirmation time.
-        #
-        # Prefer visible label + role + requested states when a label exists;
-        # this remains strict and must still resolve to exactly one element.
-        # Unlabelled controls keep the previous exact-meaning requirement.
         match_filters = {
             "role": original.role,
-            "states": dict(requested.params.get("states") or {}),
+            "states": dict(original.states),
         }
-        if original.label:
-            matches = fresh_scene.find_elements(
-                label=original.label,
-                **match_filters,
-            )
-        else:
-            matches = fresh_scene.find_elements(
-                meaning=original.meaning,
-                **match_filters,
-            )
+        matches = fresh_scene.find_elements(
+            label=original.label or None,
+            meaning=original.meaning,
+            **match_filters,
+        )
         if len(matches) != 1:
             raise GenericActionAdapterError(
-                f"确认时目标控件不再唯一：{original.meaning}，匹配{len(matches)}个"
+                f"确认时目标语义不再严格唯一：{original.meaning}，匹配{len(matches)}个"
             )
         current = matches[0]
+        if current.meaning.casefold() != original.meaning.casefold():
+            raise GenericActionAdapterError("确认时目标语义已经变化，旧确认失效。")
+        if current.label != original.label or current.states != original.states:
+            raise GenericActionAdapterError(
+                "确认时目标标签或状态已经变化，旧确认失效。"
+            )
+        left = max(original.bounds[0], current.bounds[0])
+        top = max(original.bounds[1], current.bounds[1])
+        right = min(original.bounds[2], current.bounds[2])
+        bottom = min(original.bounds[3], current.bounds[3])
+        intersection = max(0.0, right - left) * max(0.0, bottom - top)
+        original_area = max(0.0, original.bounds[2] - original.bounds[0]) * max(
+            0.0, original.bounds[3] - original.bounds[1]
+        )
+        current_area = max(0.0, current.bounds[2] - current.bounds[0]) * max(
+            0.0, current.bounds[3] - current.bounds[1]
+        )
+        union = original_area + current_area - intersection
+        overlap = intersection / union if union > 0 else 0.0
+        if overlap < 0.60:
+            raise GenericActionAdapterError(
+                "确认时目标区域已明显移动，旧确认失效。"
+            )
         return SemanticAction(
             node_id=requested.node_id,
             action=requested.action,

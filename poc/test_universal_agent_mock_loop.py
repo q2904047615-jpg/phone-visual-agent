@@ -271,6 +271,22 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
                 action_kind="tap_semantic",
             )
             result = orchestrator.confirm_one(session, _confirmation(session))
+            evidence_names = {item.name for item in Path(temp).iterdir()}
+            self.assertTrue(
+                {
+                    "task_graph_revision_1.json",
+                    "task_graph_revision_2.json",
+                    "risk_audit_revision_1.json",
+                    "trusted_observation_step_1.json",
+                    "trusted_observation_step_2.json",
+                    "qwen_decision_step_1.json",
+                    "qwen_decision_step_2.json",
+                    "controller_decision_step_1.json",
+                    "verification_step_1.json",
+                    "session.json",
+                    "report.json",
+                }.issubset(evidence_names)
+            )
 
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(["tap"], [item[0] for item in robot.calls])
@@ -305,6 +321,22 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
                 action_kind="tap_semantic",
                 unsafe=True,
             )
+            evidence_names = {item.name for item in Path(temp).iterdir()}
+            self.assertTrue(
+                {
+                    "task_graph_revision_1.json",
+                    "risk_audit_revision_1.json",
+                    "trusted_observation_step_1.json",
+                    "qwen_decision_step_1.json",
+                    "controller_decision_step_1.json",
+                    "session.json",
+                    "report.json",
+                }.issubset(evidence_names)
+            )
+            self.assertFalse(
+                any(name.startswith("verification_") for name in evidence_names)
+            )
+            self.assertFalse(any(name.startswith("after_") for name in evidence_names))
 
         self.assertEqual("blocked", session.status)
         self.assertEqual(0, session.physical_actions)

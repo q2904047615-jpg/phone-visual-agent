@@ -84,7 +84,7 @@ Qwen 的 `foreground_app_id/new_foreground_app_id/new_screen_id/screen_change`
 - 会话 `fbe331637189465c852fbdc77734f83b` 的确认在执行前重新观察时安全停止，原因是同一浏览器图标被 Qwen 用另一种同义措辞描述；机械臂动作数保持 0，旧确认已经失效。
 - 通用重绑定现只允许“未知页面信息变得更明确”和同一个低风险导航语义类别内的模型措辞变化，并继续逐项要求相同 label、role、states 与至少 0.60 IoU。`return -> save_and_return` 等风险语义变化仍以 0 动作拒绝。确认失败证据也会包含确认时重新采集的四帧。
 - 会话 `bbdcfc2253c24552be0f43104e77498a` 在发现预期结果别名尚未全部进入控制器验证后被主动取消，动作数为 0；会话 `ee065a20d1224b9782357cf00201cb3e` 因 Qwen 把候选 `bounds` 放进动作对象而安全阻止，动作数同样为 0。
-- 结果别名现归一到控制器协议；冗余 `next_action.bounds` 只有逐项等于可信候选区域时才会接受并丢弃，改动后的区域或屏幕动作携带元素区域仍拒绝。最新会话 `1565af53bbcb463cbf61952e05365f11` 已停在 `awaiting_confirmation`，物理动作数为 0，动作是绑定可信候选 `browser_app_icon` 的 `tap_semantic`；其 `expected_effect` 已是控制器直接验证的 `app_id=browser`、`screen_id=browser_home`，revision 为 1，observation 为 `obs_560060a8606d4e619fc9ea1ebfd228e2`，fingerprint 为 `d82edb72783b6a813cc3`。
+- 结果别名现归一到控制器协议；冗余 `next_action.bounds` 只有逐项等于可信候选区域时才会接受并丢弃，改动后的区域或屏幕动作携带元素区域仍拒绝。会话 `1565af53bbcb463cbf61952e05365f11` 曾在 `awaiting_confirmation`、物理动作数 0 时绑定可信候选 `browser_app_icon` 的 `tap_semantic`；其 `expected_effect` 是控制器直接验证的 `app_id=browser`、`screen_id=browser_home`，revision 为 1，observation 为 `obs_560060a8606d4e619fc9ea1ebfd228e2`，fingerprint 为 `d82edb72783b6a813cc3`。该确认随后已被消费，结果见下方新记录。
 - 网页只读实测已从运行服务恢复该会话，展示自然语言入口、动态任务图、当前真实观察、0 个物理动作、精确确认、重新观察、暂停和取消入口；未点击任何执行按钮。
 - `/api/device` 的产品主路径标识已改为 `universal_agent`。旧队列 worker、旧 generic orchestrator 和旧语义适配器只标记为 `compatibility_only/default_user_path=false`，不再把保留的 `legacy` worker 模式误报为网页主路径。
 - 多设备协调锁已从全局锁拆为按 `device_id` 隔离：不同设备可同时取得各自的进程租约、协调锁和控制器锁；同一设备的第二次占用仍失败关闭。两个不同设备也可同时保持独立活动会话和确认范围。
@@ -95,10 +95,26 @@ Qwen 的 `foreground_app_id/new_foreground_app_id/new_screen_id/screen_change`
   硬件协调锁之前，并继续保留编排器的原子设备预留作为竞态最终防线。API/设备注册表
   定向 42 项与全量 616 项通过；新快速拒绝测试还断言第二个请求不会新增目录、不会再次
   调用 DeepSeek/Qwen/相机适配器，也不会执行机械臂。
+- 用户对会话 `1565af53bbcb463cbf61952e05365f11` 的当前动作作出明确确认后，系统消费了
+  一次确认并执行一次 `tap_semantic`。确认时重新绑定坐标为 `[115, 90]`，前后证据仍显示
+  同一个主屏和浏览器图标；动作结果为 `mismatched`，`physical_actions=1`，没有第二次点击。
+- 真实失败暴露出重规划触发名不一致：编排器使用 `action_result_mismatch`，任务图协议只接受
+  `action_mismatch`。现已兼容二者，并为重规划增加一次有界 JSON/高层协议修复；改写目标、
+  删除风险、降低影响分类、伪造完成证据等安全错误仍立即失败且不重试。
+- 对真实失败报告进行在线 DeepSeek 零动作复放已返回 revision 2、`status=blocked`、
+  `active_subgoal_id=null` 和 `trigger=action_result_mismatch`。当模型连续请求“再次点击”时，
+  本地不会放行低层提问，而只保留“继续原目标还是停止任务”的高层澄清。
+- 更新后 DeepSeek/编排器/陌生命令定向 `137/137`、Python 全量 `620/620` 通过。
+- 机械执行诊断确认卖家窗口、摄像头、COM4/CH340 均在线，卖家叠层也记录了 `[115, 90]`；
+  但这些不能证明触控笔实际接触手机。需要在安全触点页完成一次物理回传探测后，才能决定
+  是重新校准 XY 还是调整落笔/触控笔。普通 GET 探测卖家 WCF 8082 会使其后台进程崩溃，
+  已停止使用；后台已自动恢复，网页再次复核控制端和摄像头在线。
 
 ## 尚需真实硬件完成的验收
 
-- 浏览器点击已有一次真实失败证据；最新会话已经重新形成合法确认门，仍需针对该新会话的精确确认、成功页面变化和 DeepSeek 新 revision 才算通过。更早确认不能复用。
+- 浏览器点击现有两次真实失败证据；最新确认已经消费且不能复用。先完成安全触点页的单点
+  回传探测并修复物理接触/标定问题，再创建全新会话，取得新画面绑定的精确确认、成功页面
+  变化和 DeepSeek 新 revision，才可把点击真机闭环标记为通过。
 - 真实输入和真实长按各一次；每次都要单独确认并保存前后证据。
 - 任意两点拖动代码路径已经接入，但尚未进行一次受监督真机动作和动作后画面验证；当前设备的 `verified_actions` 因此不含 `drag`，Qwen 不能提出该动作。
 - 至少三个真实 App 的陌生命令、多步路径变化和结果验证。

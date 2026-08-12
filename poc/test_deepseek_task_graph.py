@@ -1308,6 +1308,110 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         self.assertEqual(result.replan_history[-1].skipped_subgoal_ids, ("locate_target",))
 
+    def test_replan_accepts_verified_action_result_mismatch_trigger(self):
+        initial = base_payload()
+        revised = copy.deepcopy(initial)
+        revised["subgoals"][0]["status"] = "skipped"
+        revised["subgoals"][1]["depends_on"] = []
+        revised["subgoals"][1]["status"] = "active"
+        revised["active_subgoal_id"] = "save_target"
+        revised["status"] = "awaiting_confirmation"
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            "目标", device_id="phone-1"
+        )
+
+        result = DeepSeekTaskGraphPlanner(FakeProvider(revised)).replan(
+            graph,
+            observation(),
+            trigger="action_result_mismatch",
+            reason="物理动作已执行，但新画面未证明预期结果",
+        )
+
+        self.assertEqual(2, result.revision)
+        self.assertEqual(
+            "action_result_mismatch", result.replan_history[-1].trigger
+        )
+        self.assertEqual(
+            ("locate_target",), result.replan_history[-1].skipped_subgoal_ids
+        )
+
+    def test_replan_repairs_one_low_level_protocol_violation(self):
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(base_payload())).plan(
+            "目标", device_id="phone-1"
+        )
+        invalid = copy.deepcopy(base_payload())
+        invalid["clarification_questions"] = ["请点击浏览器图标后继续。"]
+        repaired = copy.deepcopy(base_payload())
+        provider = FakeProvider(invalid, repaired)
+
+        result = DeepSeekTaskGraphPlanner(provider).replan(
+            graph,
+            observation(),
+            trigger="action_result_mismatch",
+            reason="动作已执行但预期结果没有出现",
+        )
+
+        self.assertEqual(2, result.revision)
+        self.assertEqual("action_result_mismatch", result.replan_history[-1].trigger)
+        self.assertEqual(3, len(provider.messages))
+        self.assertIn("clarification_questions", provider.messages[1][0]["content"])
+        self.assertIn("唯一一次", provider.messages[1][0]["content"])
+
+    def test_replan_second_low_level_protocol_violation_stays_blocked(self):
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(base_payload())).plan(
+            "目标", device_id="phone-1"
+        )
+        first = copy.deepcopy(base_payload())
+        first["clarification_questions"] = ["请点击浏览器图标后继续。"]
+        second = copy.deepcopy(base_payload())
+        second["clarification_questions"] = ["请再次点击同一位置。"]
+        provider = FakeProvider(first, second)
+
+        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
+            DeepSeekTaskGraphPlanner(provider).replan(
+                graph,
+                observation(),
+                trigger="action_result_mismatch",
+                reason="动作已执行但预期结果没有出现",
+            )
+
+        self.assertEqual(2, len(provider.messages))
+
+    def test_replan_blocked_retry_request_becomes_high_level_clarification(self):
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(base_payload())).plan(
+            "目标", device_id="phone-1"
+        )
+
+        def blocked_retry_payload():
+            payload = copy.deepcopy(base_payload())
+            payload["status"] = "blocked"
+            payload["subgoals"][0]["status"] = "blocked"
+            payload["active_subgoal_id"] = None
+            payload["clarification_questions"] = [
+                "请确认是否允许再次点击同一图标？"
+            ]
+            return payload
+
+        provider = FakeProvider(blocked_retry_payload(), blocked_retry_payload())
+        result = DeepSeekTaskGraphPlanner(provider).replan(
+            graph,
+            observation(),
+            trigger="action_result_mismatch",
+            reason="动作已执行但预期结果没有出现",
+        )
+
+        self.assertEqual("blocked", result.status)
+        self.assertIsNone(result.active_subgoal_id)
+        self.assertEqual(2, result.revision)
+        self.assertEqual(
+            (
+                "动作后的新画面未证明预期结果，且当前没有可验证的安全替代路径；"
+                "请说明希望继续原目标还是停止任务。",
+            ),
+            result.clarification_questions,
+        )
+        self.assertEqual(3, len(provider.messages))
+
     def test_replan_cannot_mutate_goal(self):
         initial = base_payload()
         revised = copy.deepcopy(initial)

@@ -30,6 +30,7 @@ REPLAN_TRIGGERS = frozenset(
     {
         "observation_changed",
         "action_mismatch",
+        "action_result_mismatch",
         "subgoal_completed",
         "risk_detected",
         "constraint_discovered",
@@ -158,6 +159,19 @@ SAFE_NAVIGATION_SEMANTIC_PATTERN = re.compile(
 REPAIRABLE_INITIAL_GRAPH_ERRORS = (
     "任务图至少需要一个全局完成条件。",
     "可推进任务图必须且只能有一个活动子目标。",
+)
+REPAIRABLE_REPLAN_ERROR_FRAGMENTS = (
+    "文本模型没有返回有效 JSON",
+    "文本模型返回内容不是 JSON 对象",
+    "协议外字段",
+    "包含低层动作表达",
+    "任务图至少需要一个全局完成条件",
+    "可推进任务图必须且只能有一个活动子目标",
+    "active_subgoal_id",
+)
+MISMATCH_BLOCKED_CLARIFICATION = (
+    "动作后的新画面未证明预期结果，且当前没有可验证的安全替代路径；"
+    "请说明希望继续原目标还是停止任务。"
 )
 class JsonTaskGraphProvider(Protocol):
     configured: bool
@@ -779,19 +793,47 @@ class DeepSeekTaskGraphPlanner:
         _require_text(reason, "replan.reason")
         self._require_provider()
         prompt = _replan_prompt(graph, observation, trigger=trigger, reason=reason)
-        candidate = self._request_graph(
-            prompt,
-            task_id=graph.task_id,
-            device_id=graph.device_id,
-            revision=graph.revision + 1,
-            raw_user_goal=graph.raw_user_goal or graph.goal.objective,
-            validate=False,
-        )
-        _validate_external_impact_revision(graph, candidate)
-        _validate_preserved_risk_ids(graph, candidate)
-        candidate.validate()
-        self._audit_and_validate_graph(candidate)
-        _validate_revision(graph, candidate, observation)
+        try:
+            candidate = self._request_graph(
+                prompt,
+                task_id=graph.task_id,
+                device_id=graph.device_id,
+                revision=graph.revision + 1,
+                raw_user_goal=graph.raw_user_goal or graph.goal.objective,
+                validate=False,
+            )
+            self._validate_replan_candidate(graph, candidate, observation)
+        except TaskGraphError as exc:
+            if not _retryable_replan_output_error(exc):
+                raise
+            invalid_response = self.last_raw_response
+            candidate = self._request_graph(
+                _repair_replan_prompt(
+                    graph,
+                    observation,
+                    trigger=trigger,
+                    reason=reason,
+                    invalid_response=invalid_response,
+                    validation_error=str(exc),
+                ),
+                task_id=graph.task_id,
+                device_id=graph.device_id,
+                revision=graph.revision + 1,
+                raw_user_goal=graph.raw_user_goal or graph.goal.objective,
+                validate=False,
+            )
+            try:
+                self._validate_replan_candidate(graph, candidate, observation)
+            except TaskGraphError as repair_error:
+                normalized = _normalize_blocked_mismatch_clarification(
+                    candidate,
+                    trigger=trigger,
+                    error=repair_error,
+                )
+                if normalized is None:
+                    raise
+                candidate = normalized
+                self._validate_replan_candidate(graph, candidate, observation)
         previous_ids = {item.subgoal_id for item in graph.subgoals}
         completed_ids = tuple(
             item.subgoal_id for item in graph.subgoals if item.status == "completed"
@@ -822,6 +864,20 @@ class DeepSeekTaskGraphPlanner:
         revised = replace(candidate, replan_history=graph.replan_history + (record,))
         revised.validate()
         return revised
+
+    def _validate_replan_candidate(
+        self,
+        graph: DynamicTaskGraph,
+        candidate: DynamicTaskGraph,
+        observation: ObservedState,
+    ) -> None:
+        """Apply every safety and evidence check to one replan candidate."""
+
+        _validate_external_impact_revision(graph, candidate)
+        _validate_preserved_risk_ids(graph, candidate)
+        candidate.validate()
+        self._audit_and_validate_graph(candidate)
+        _validate_revision(graph, candidate, observation)
 
     def _request_graph(
         self,
@@ -962,6 +1018,44 @@ def _retryable_safe_initial_audit_conflict(
     )
 
 
+def _retryable_replan_output_error(error: TaskGraphError) -> bool:
+    text = str(error)
+    return any(fragment in text for fragment in REPAIRABLE_REPLAN_ERROR_FRAGMENTS)
+
+
+def _normalize_blocked_mismatch_clarification(
+    candidate: DynamicTaskGraph,
+    *,
+    trigger: str,
+    error: TaskGraphError,
+) -> DynamicTaskGraph | None:
+    """Replace only a blocked model request for another low-level action.
+
+    The result remains blocked and asks for a high-level user choice.  It never
+    grants confirmation, creates a visual action, or makes an invalid active
+    graph executable.
+    """
+
+    if trigger not in {"action_mismatch", "action_result_mismatch"}:
+        return None
+    if candidate.status != "blocked" or candidate.active_subgoal_id is not None:
+        return None
+    if "clarification_questions" not in str(error):
+        return None
+    if not candidate.clarification_questions:
+        return None
+    for question in candidate.clarification_questions:
+        try:
+            _reject_low_level_instruction(question, "clarification_questions")
+        except TaskGraphError:
+            continue
+        return None
+    return replace(
+        candidate,
+        clarification_questions=(MISMATCH_BLOCKED_CLARIFICATION,),
+    )
+
+
 def _replan_prompt(
     graph: DynamicTaskGraph,
     observation: ObservedState,
@@ -996,6 +1090,46 @@ def _replan_prompt(
    navigation_only；read_only/navigation_only 必须分别有纯观察或纯导航依据。
 8. 只返回 JSON 对象，不要 Markdown，也不要返回 task_id、device_id、revision、协议版本、
    current_subgoal 或历史记录；这些字段由本地协议层生成。
+"""
+
+
+def _repair_replan_prompt(
+    graph: DynamicTaskGraph,
+    observation: ObservedState,
+    *,
+    trigger: str,
+    reason: str,
+    invalid_response: str,
+    validation_error: str,
+) -> str:
+    return f"""
+你是通用手机视觉操作 Agent 的 DeepSeek 高层任务图重规划器。上一次修订 JSON 未通过
+本地协议、安全或证据校验。请根据原任务图、新观察和校验错误重新生成一份完整修订图。
+这只是唯一一次格式与高层协议修复机会；不要解释、不要局部补丁，也不要输出控件选择、
+点击、滑动、输入、坐标、Shell、系统命令或任何 App 专用固定流程。
+
+当前任务图：
+{json.dumps(graph.to_dict(), ensure_ascii=False)}
+
+重规划触发：{json.dumps(trigger, ensure_ascii=False)}
+重规划原因：{json.dumps(reason, ensure_ascii=False)}
+新的只读观察：
+{json.dumps(observation.to_dict(), ensure_ascii=False)}
+
+本地校验错误：{json.dumps(validation_error, ensure_ascii=False)}
+上一次无效 JSON：
+{invalid_response}
+
+{_schema_prompt()}
+
+修复规则：
+1. goal 必须逐字段保持不变；constraints 必须保留已有约束，可追加新发现的约束。
+2. 已 completed 的子目标和已满足的全局条件不得撤销；既有风险不得删除、降级或取消确认。
+3. 只能依据 visible_evidence 新增完成证据；动作结果不匹配时不得假称预期结果已完成。
+4. 可替换、跳过或新增尚未完成的高层子目标，但不能描述按钮、坐标或任何低层动作。
+5. external_state 或 unknown 必须关联风险；成为 active 时必须等待本地确认。
+6. 仍需通过全部本地校验；不要试图改写任务身份、设备、revision 或协议字段。
+7. 只返回符合结构的完整 JSON 对象，不要 Markdown。
 """
 
 

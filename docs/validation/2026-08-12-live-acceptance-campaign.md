@@ -164,6 +164,12 @@
   复用可信候选的 element/role/label/states/bounds，账号影响和确认语义仍优先禁止。Python全量
   `705/705`、前端协议 `17/17`、真实浏览器契约 `7/7` 通过；尚需重启服务后重新建立新的零动作
   会话，旧 blocked 会话不能复用。
+- 服务重启到 policy v3 后，同一句目标建立全新会话 `b74dc8693b604edebe192af2a8676621`。
+  Qwen从新的真实四帧识别唯一 `tap_semantic` 候选 `nav_forward`，语义为浏览器前进按钮、标签
+  `>`、置信度 `0.88`；本地策略返回 `allowed=true`、canonical class `forward`。确认作用域绑定
+  task `fbf74d7207794b6585fdaed44b8e8481`、revision `1`、subgoal `navigate_forward`、observation
+  `obs_d7f2e465960348e4814f076cb08a35eb`、fingerprint `f4819511ab76ccdffe59`，物理动作数为0。
+  未经用户对该精确当前动作的新确认，不执行前进，也不复用旧会话或旧确认。
 
 ## 完成判定
 

@@ -5706,8 +5706,46 @@ class ApiEndToEndTests(unittest.TestCase):
                 "params": {"goal": "打开微信", "allowed_text": None},
             },
         )
+
         self.assertEqual(created.status_code, 400)
         self.assertIn("自由 Agent", created.json()["detail"])
+
+    def test_device_status_identifies_each_active_generic_session_device(self) -> None:
+        def active_session(session_id: str, device_id: str):
+            payload = {
+                "session_id": session_id,
+                "device_id": device_id,
+                "status": "awaiting_confirmation",
+                "step_number": 1,
+                "proposal": {"status": "action"},
+            }
+            return SimpleNamespace(
+                status="awaiting_confirmation",
+                snapshot=lambda payload=payload: dict(payload),
+            )
+
+        with web_app.runtime.generic_supervised_session_lock:
+            web_app.runtime.generic_supervised_sessions.update(
+                {
+                    "session-phone-a": active_session("session-phone-a", "phone-a"),
+                    "session-phone-b": active_session("session-phone-b", "phone-b"),
+                }
+            )
+
+        active = self.client.get("/api/device").json()[
+            "generic_supervised_execution"
+        ]["active_sessions"]
+
+        self.assertEqual(
+            {
+                (item["session_id"], item["device_id"])
+                for item in active
+            },
+            {
+                ("session-phone-a", "phone-a"),
+                ("session-phone-b", "phone-b"),
+            },
+        )
 
     def test_worker_rejects_injected_legacy_task(self) -> None:
         task = web_app.runtime.store.create(

@@ -464,22 +464,27 @@ function render() {
   const view = sessionView();
   const deviceSelect = document.querySelector("#deviceId");
   const registeredDevices = Array.isArray(state.device?.devices) ? state.device.devices : [];
-  if (!view && registeredDevices.length) {
+  if (registeredDevices.length) {
     const enabledIds = registeredDevices.map(item => String(item.device_id || "")).filter(Boolean);
-    deviceSelect.replaceChildren(...enabledIds.map(deviceId => {
+    const lockedDeviceId = view && !view.isTerminal ? String(view.deviceId || "") : "";
+    const optionIds = [...enabledIds];
+    if (lockedDeviceId && !optionIds.includes(lockedDeviceId)) optionIds.push(lockedDeviceId);
+    deviceSelect.replaceChildren(...optionIds.map(deviceId => {
       const option = document.createElement("option");
       option.value = deviceId;
       option.textContent = deviceId;
       return option;
     }));
-    if (!enabledIds.includes(state.deviceId)) {
+    if (lockedDeviceId) {
+      state.deviceId = lockedDeviceId;
+    } else if (!enabledIds.includes(state.deviceId)) {
       state.deviceId = String(state.device.default_device_id || enabledIds[0]);
       localStorage.setItem("visual-agent-device-id", state.deviceId);
     }
   }
   deviceSelect.value = state.deviceId;
   const acceptance = capabilityView();
-  deviceSelect.disabled = (!!view && !view.isTerminal) || Boolean(acceptance && !acceptance.report);
+  deviceSelect.disabled = state.busy || Boolean(acceptance && !acceptance.report);
   document.querySelector("#startSupervisedAgent").disabled = state.busy
     || state.paused
     || Boolean(acceptance && !acceptance.report);
@@ -907,7 +912,10 @@ async function stopTasks() {
 }
 
 async function restoreActiveSession() {
-  const active = state.device.generic_supervised_execution?.active_sessions?.[0];
+  const activeSessions = state.device.generic_supervised_execution?.active_sessions;
+  const active = Array.isArray(activeSessions)
+    ? activeSessions.find(item => String(item.device_id || "") === state.deviceId)
+    : null;
   if (!active?.session_id) return;
   try {
     const response = await api(`/api/agent/generic-supervised/${active.session_id}`);
@@ -960,9 +968,27 @@ document.querySelector("#startSupervisedAgent").addEventListener("click", startS
 document.querySelector("#startCapabilityTrial").addEventListener("click", startCapabilityTrial);
 document.querySelector("#pauseButton").addEventListener("click", togglePause);
 document.querySelector("#stopButton").addEventListener("click", stopTasks);
-document.querySelector("#deviceId").addEventListener("change", event => {
-  state.deviceId = event.target.value;
+document.querySelector("#deviceId").addEventListener("change", async event => {
+  const requestedDeviceId = String(event.target.value || "");
+  const registeredDeviceIds = Array.isArray(state.device?.devices)
+    ? state.device.devices.map(item => String(item.device_id || "")).filter(Boolean)
+    : [];
+  if (!registeredDeviceIds.includes(requestedDeviceId)) {
+    event.target.value = lockedSessionDeviceId();
+    render();
+    return;
+  }
+  state.deviceId = requestedDeviceId;
   localStorage.setItem("visual-agent-device-id", state.deviceId);
+  state.supervisedSession = null;
+  state.sessionDeviceId = "";
+  state.pendingConfirmationGrant = null;
+  state.capabilityTrial = null;
+  state.capabilityDeviceId = "";
+  state.capabilityEvidence = [];
+  render();
+  await restoreActiveSession();
+  if (!state.supervisedSession) await restoreCapabilityTrial();
   render();
 });
 document.querySelector("#agentText").addEventListener("keydown", event => {

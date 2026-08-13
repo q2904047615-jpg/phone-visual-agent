@@ -11,6 +11,7 @@ const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v
 const requests = {
   start: [], approveRisk: [], confirm: [], next: [], auto: [], pause: [], cancel: [], stop: [],
   capabilityStart: [], capabilityConfirm: [], capabilityPromote: [], capabilityCancel: [],
+  restore: [],
 };
 
 function clone(value) {
@@ -137,6 +138,17 @@ function cancelledSession() {
   return session;
 }
 
+function safeActionSessionForDevice(deviceId, sessionId) {
+  const session = safeActionSession();
+  session.session_id = sessionId;
+  session.task_graph.device_id = deviceId;
+  session.qwen_decision.device_id = deviceId;
+  session.qwen_decision.trusted_observation.device_id = deviceId;
+  session.confirmation_scope.session_id = sessionId;
+  session.confirmation_scope.device_id = deviceId;
+  return session;
+}
+
 function capabilityTrial({ failed = false, completed = false, promoted = false } = {}) {
   const session = safeActionSession();
   session.session_id = "capability-session-browser";
@@ -206,7 +218,7 @@ function readBody(request) {
   });
 }
 
-function createServer() {
+function createServer({ devices = null, activeSessions = [], restoredSessions = {} } = {}) {
   let currentCapabilityTrial = null;
   let capabilityShouldFail = false;
   return http.createServer(async (request, response) => {
@@ -228,16 +240,17 @@ function createServer() {
       return;
     }
     if (url.pathname === "/api/device") {
+      const registeredDevices = devices || [{
+        device_id: "phone-01",
+        verified_actions: ["tap_semantic", "dismiss_overlay", "swipe", "back", "wait_for_change"],
+      }];
       json(response, 200, {
         controller_online: true,
         camera_online: true,
         busy: false,
         default_device_id: "phone-01",
-        devices: [{
-          device_id: "phone-01",
-          verified_actions: ["tap_semantic", "dismiss_overlay", "swipe", "back", "wait_for_change"],
-        }],
-        generic_supervised_execution: { active_sessions: [] },
+        devices: registeredDevices,
+        generic_supervised_execution: { active_sessions: activeSessions },
         execution_architecture: { universal_agent: { observer: { current_stage: "idle" } } },
       });
       return;
@@ -266,6 +279,15 @@ function createServer() {
       capabilityShouldFail = body.text.includes("失败");
       currentCapabilityTrial = capabilityTrial({ failed: capabilityShouldFail });
       json(response, 200, { physical_actions: 0, trial: currentCapabilityTrial });
+      return;
+    }
+    const restoredMatch = url.pathname.match(/^\/api\/agent\/generic-supervised\/([^/]+)$/);
+    if (request.method === "GET" && restoredMatch) {
+      const sessionId = decodeURIComponent(restoredMatch[1]);
+      requests.restore.push(sessionId);
+      const session = restoredSessions[sessionId];
+      if (!session) json(response, 404, { detail: "not found" });
+      else json(response, 200, { session });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/capability-acceptance") {
@@ -353,7 +375,7 @@ function createServer() {
   });
 }
 
-async function launchFixturePage(server) {
+async function launchFixturePage(server, { deviceId = "phone-01" } = {}) {
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   const launchOptions = { headless: true };
@@ -361,10 +383,50 @@ async function launchFixturePage(server) {
   else launchOptions.channel = "msedge";
   const browser = await chromium.launch(launchOptions);
   const page = await browser.newPage();
-  await page.addInitScript(() => localStorage.setItem("visual-agent-device-id", "phone-01"));
+  await page.addInitScript(value => localStorage.setItem("visual-agent-device-id", value), deviceId);
   await page.goto(`http://127.0.0.1:${address.port}/`);
   return { browser, page };
 }
+
+test("multi-device console restores only the selected device session", { timeout: 30000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const phoneA = safeActionSessionForDevice("phone-01", "session-phone-01");
+  const phoneB = safeActionSessionForDevice("phone-02", "session-phone-02");
+  const server = createServer({
+    devices: [
+      { device_id: "phone-01", verified_actions: ["tap_semantic"] },
+      { device_id: "phone-02", verified_actions: ["tap_semantic"] },
+    ],
+    activeSessions: [
+      { session_id: phoneA.session_id, device_id: "phone-01", status: phoneA.status },
+      { session_id: phoneB.session_id, device_id: "phone-02", status: phoneB.status },
+    ],
+    restoredSessions: {
+      [phoneA.session_id]: phoneA,
+      [phoneB.session_id]: phoneB,
+    },
+  });
+  const { browser, page } = await launchFixturePage(server);
+  try {
+    await page.locator("#goalSummary").getByText("会话 · session-phone-01", { exact: true }).waitFor({ timeout: 5000 });
+    assert.deepEqual(requests.restore, ["session-phone-01"]);
+
+    await page.locator("#deviceId").evaluate(select => {
+      select.disabled = false;
+      select.value = "phone-02";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    await page.waitForTimeout(500);
+    assert.deepEqual(requests.restore, ["session-phone-01", "session-phone-02"]);
+    assert.match(await page.locator("#goalSummary").innerText(), /会话 · session-phone-02/);
+    assert.equal(await page.locator("#deviceId").inputValue(), "phone-02");
+    assert.match(await page.locator("#goalSummary").innerText(), /phone-02/);
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
 
 test("browser renders controller evidence and confirms one exact observation", { timeout: 30000 }, async () => {
   Object.values(requests).forEach(items => { items.length = 0; });

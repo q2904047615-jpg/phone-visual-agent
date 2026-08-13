@@ -1475,6 +1475,7 @@ def device() -> dict[str, Any]:
         "active_sessions": [
             {
                 "session_id": item["session_id"],
+                "device_id": item["device_id"],
                 "status": item["status"],
                 "step_number": item["step_number"],
                 "proposal": item["proposal"],

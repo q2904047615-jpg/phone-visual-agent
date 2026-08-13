@@ -25,6 +25,17 @@ class SellerDpiScalingTests(unittest.TestCase):
         self.assertEqual(seller.seller_control_point(810, 1515, 176), (264, 1488))
         self.assertEqual(seller.seller_control_point(810, 1515, 520), (780, 1488))
 
+    def test_150_percent_landscape_uses_height_for_vertical_scale(self) -> None:
+        self.assertEqual(seller.seller_layout_scale(1440, 810), 1.5)
+        self.assertEqual(seller.seller_control_point(1440, 885, 520), (1387, 858))
+        self.assertEqual(seller.seller_required_client_height(1440, 810), 885)
+        self.assertFalse(seller.seller_layout_has_full_camera(1440, 810))
+        self.assertTrue(seller.seller_layout_has_full_camera(1440, 885))
+        self.assertEqual(seller.seller_camera_height(1440, 885), 810)
+
+    def test_small_landscape_dialog_is_not_a_camera(self) -> None:
+        self.assertFalse(seller.seller_layout_has_full_camera(540, 304))
+
     def test_150_percent_window_must_not_be_clipped_by_a_1440p_desktop(self) -> None:
         self.assertFalse(seller.seller_layout_has_full_camera(810, 1392))
         self.assertTrue(seller.seller_layout_has_full_camera(810, 1515))

@@ -35,11 +35,26 @@ MIN_CAMERA_CLIENT_HEIGHT = 500
 
 
 def controller_client_has_camera(width: int, height: int) -> bool:
-    return (
-        width >= MIN_CAMERA_CLIENT_WIDTH
-        and height >= MIN_CAMERA_CLIENT_HEIGHT
-        and height > width
-    )
+    if width < MIN_CAMERA_CLIENT_WIDTH or height < MIN_CAMERA_CLIENT_HEIGHT:
+        return False
+    if width > height:
+        return width >= 800 and height >= 450 and 1.45 <= width / height <= 2.0
+    return legacy.seller_layout_has_full_camera(width, height)
+
+
+def oriented_navigation_ratio(
+    x_ratio: float,
+    y_ratio: float,
+    *,
+    landscape: bool,
+) -> tuple[float, float]:
+    """Map portrait Android navigation coordinates into the observed layout."""
+
+    if landscape:
+        # The camera feed rotates counter-clockwise when the phone enters
+        # landscape: portrait (x, y) becomes landscape (y, 1 - x).
+        return y_ratio, 1.0 - x_ratio
+    return x_ratio, y_ratio
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "wechat": {
@@ -768,6 +783,11 @@ class RobotController:
     def _vision_nav_tap(self, x_ratio: float, y_ratio: float) -> tuple[int, int]:
         hwnd, _title = legacy.find_window(self.title)
         frame = self._capture_phone(hwnd)
+        x_ratio, y_ratio = oriented_navigation_ratio(
+            x_ratio,
+            y_ratio,
+            landscape=frame.width > frame.height,
+        )
         point = (
             min(frame.width - 1, max(0, int(round(frame.width * x_ratio)))),
             min(frame.height - 1, max(0, int(round(frame.height * y_ratio)))),
@@ -1244,6 +1264,7 @@ class RobotController:
 
         _set_clipboard_text(text)
         existing = _visible_owned_windows(hwnd)
+        legacy.ensure_window_fully_visible(hwnd)
         _left, _top, width, height = legacy.client_geometry(hwnd)
         control_x, control_y = legacy.seller_control_point(
             width,

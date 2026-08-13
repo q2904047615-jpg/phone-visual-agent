@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw, ImageGrab, ImageTk
 DEFAULT_WINDOW_TITLE = "智联新途"
 BASELINE_CLIENT_WIDTH = 540
 DEFAULT_CAMERA_HEIGHT = 960
+MIN_AUTO_LAYOUT_WIDTH = 300
 DEFAULT_THRESHOLD = 0.82
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "output"
@@ -82,6 +83,7 @@ ACTION_BUTTON_X = 130
 ACTION_DROPDOWN_X = 176
 CLICK_COUNT_INPUT_X = 308
 CONTROL_Y_FROM_BOTTOM = 18
+BASELINE_TOOLBAR_HEIGHT = 50
 DEFAULT_DOUYIN_TEMPLATE = TEMPLATE_DIR / "douyin_home.png"
 
 
@@ -161,6 +163,15 @@ class RECT(ctypes.Structure):
     ]
 
 
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", RECT),
+        ("rcWork", RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
 def ensure_dirs() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -204,6 +215,78 @@ def client_geometry(hwnd: int) -> tuple[int, int, int, int]:
     return top_left.x, top_left.y, width, height
 
 
+def ensure_window_fully_visible(hwnd: int) -> None:
+    """Resize/reposition the seller window so its camera and toolbar are usable."""
+
+    user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+    user32.MonitorFromWindow.restype = wintypes.HMONITOR
+    user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.c_void_p]
+    user32.GetMonitorInfoW.restype = wintypes.BOOL
+    window_rect = RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(window_rect)):
+        raise ctypes.WinError()
+    _left, _top, client_width, client_height = client_geometry(hwnd)
+    required_height = seller_required_client_height(client_width, client_height)
+
+    # Only auto-expand layouts that look like a real camera window.  Small
+    # startup/error dialogs must continue to fail closed.
+    landscape_candidate = (
+        client_width >= 800
+        and client_width > client_height
+        and 1.45 <= client_width / client_height <= 2.0
+    )
+    portrait_candidate = client_height > client_width >= MIN_AUTO_LAYOUT_WIDTH
+    desired_client_height = (
+        max(client_height, required_height)
+        if landscape_candidate or portrait_candidate
+        else client_height
+    )
+
+    outer_width = window_rect.right - window_rect.left
+    outer_height = window_rect.bottom - window_rect.top
+    desired_outer_height = outer_height + desired_client_height - client_height
+
+    MONITOR_DEFAULTTONEAREST = 2
+    monitor = user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(info)
+    if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        raise ctypes.WinError()
+    work_width = info.rcWork.right - info.rcWork.left
+    work_height = info.rcWork.bottom - info.rcWork.top
+    if outer_width > work_width or desired_outer_height > work_height:
+        raise RuntimeError(
+            "控制端完整摄像区和操作栏大于当前显示器工作区，已拒绝执行。"
+        )
+
+    target_left = min(
+        max(window_rect.left, info.rcWork.left),
+        info.rcWork.right - outer_width,
+    )
+    target_top = min(
+        max(window_rect.top, info.rcWork.top),
+        info.rcWork.bottom - desired_outer_height,
+    )
+    if (
+        target_left != window_rect.left
+        or target_top != window_rect.top
+        or desired_outer_height != outer_height
+    ):
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        if not user32.SetWindowPos(
+            hwnd,
+            0,
+            target_left,
+            target_top,
+            outer_width,
+            desired_outer_height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        ):
+            raise ctypes.WinError()
+        time.sleep(0.2)
+
+
 def window_dpi(hwnd: int) -> int:
     """Return the effective DPI for diagnostics without driving layout."""
 
@@ -232,6 +315,43 @@ def scale_seller_ui_value(value: int | float, client_width: int) -> int:
     return int(math.floor(scaled + 0.5))
 
 
+def seller_layout_scale(client_width: int, client_height: int) -> float:
+    """Infer the seller UI scale for either phone orientation."""
+
+    if isinstance(client_height, bool) or int(client_height) <= 0:
+        raise ValueError("控制端客户区高度必须大于0。")
+    if int(client_width) > int(client_height):
+        return int(client_width) / DEFAULT_CAMERA_HEIGHT
+    return seller_ui_scale(client_width)
+
+
+def scale_seller_vertical_value(
+    value: int | float,
+    client_width: int,
+    client_height: int,
+) -> int:
+    if isinstance(value, bool) or float(value) < 0:
+        raise ValueError("控制端基准坐标必须是非负数。")
+    scaled = float(value) * seller_layout_scale(client_width, client_height)
+    return int(math.floor(scaled + 0.5))
+
+
+def seller_required_client_height(
+    client_width: int,
+    client_height: int,
+    baseline_height: int = DEFAULT_CAMERA_HEIGHT,
+) -> int:
+    """Return the smallest client height containing camera and both tool rows."""
+
+    scale = seller_layout_scale(client_width, client_height)
+    camera_baseline = (
+        BASELINE_CLIENT_WIDTH if int(client_width) > int(client_height)
+        else baseline_height
+    )
+    required = (camera_baseline + BASELINE_TOOLBAR_HEIGHT) * scale
+    return int(math.floor(required + 0.5))
+
+
 def seller_camera_height(
     client_width: int,
     client_height: int,
@@ -241,8 +361,18 @@ def seller_camera_height(
 
     if isinstance(client_height, bool) or int(client_height) <= 0:
         raise ValueError("控制端客户区高度必须大于0。")
-    scaled = scale_seller_ui_value(baseline_height, client_width)
-    return min(int(client_height), max(1, scaled))
+    if int(client_height) > int(client_width):
+        scaled = scale_seller_ui_value(baseline_height, client_width)
+        return min(int(client_height), max(1, scaled))
+
+    return max(
+        1,
+        scale_seller_vertical_value(
+            BASELINE_CLIENT_WIDTH,
+            client_width,
+            client_height,
+        ),
+    )
 
 
 def seller_layout_has_full_camera(
@@ -252,8 +382,26 @@ def seller_layout_has_full_camera(
 ) -> bool:
     """The real controller must include the full camera plus a bottom toolbar."""
 
-    expected_camera_height = scale_seller_ui_value(baseline_height, client_width)
-    return int(client_height) > expected_camera_height
+    landscape = int(client_width) > int(client_height)
+    if not landscape:
+        return int(client_height) >= seller_required_client_height(
+            client_width,
+            client_height,
+            baseline_height,
+        )
+
+    # A rotated 540x960 phone becomes 960x540.  A small landscape startup
+    # dialog can share the title, so require a plausible physical camera size.
+    scale = seller_layout_scale(client_width, client_height)
+    expected_width = baseline_height * scale
+    ratio = int(client_width) / int(client_height)
+    return (
+        int(client_width) >= 800
+        and int(client_height)
+        >= seller_required_client_height(client_width, client_height, baseline_height)
+        and int(client_width) >= expected_width * 0.95
+        and 1.45 <= ratio <= 2.0
+    )
 
 
 def seller_control_point(
@@ -265,7 +413,11 @@ def seller_control_point(
     """Map one documented seller-toolbar point to the actual client pixels."""
 
     x = scale_seller_ui_value(baseline_x, client_width)
-    bottom = scale_seller_ui_value(baseline_y_from_bottom, client_width)
+    bottom = scale_seller_vertical_value(
+        baseline_y_from_bottom,
+        client_width,
+        client_height,
+    )
     y = int(client_height) - bottom
     if not (0 <= x < int(client_width) and 0 <= y < int(client_height)):
         raise ValueError(
@@ -297,6 +449,7 @@ def ensure_camera_region_unoccluded(
     """
 
     user32.ShowWindow(hwnd, SW_RESTORE)
+    ensure_window_fully_visible(hwnd)
     user32.BringWindowToTop(hwnd)
     user32.SetForegroundWindow(hwnd)
     time.sleep(0.12)
@@ -681,6 +834,7 @@ def configure_single_click_count(hwnd: int) -> None:
     Two clicks on the Douyin heart toggle like on and then off, so this is a
     required safety check for the like workflow.
     """
+    ensure_window_fully_visible(hwnd)
     _, _, width, height = client_geometry(hwnd)
     control_x, control_y = seller_control_point(
         width,
@@ -716,6 +870,7 @@ def configure_swipe(hwnd: int, direction: str) -> None:
         index = action_index[direction]
     except KeyError as exc:
         raise ValueError(f"Unsupported swipe direction: {direction}") from exc
+    ensure_window_fully_visible(hwnd)
     _, _, width, height = client_geometry(hwnd)
     control_x, control_y = seller_control_point(
         width,
@@ -738,6 +893,7 @@ def configure_up_swipe(hwnd: int) -> None:
 
 
 def trigger_selected_action(hwnd: int) -> None:
+    ensure_window_fully_visible(hwnd)
     _, _, width, height = client_geometry(hwnd)
     control_x, control_y = seller_control_point(width, height, ACTION_BUTTON_X)
     click_client_control(hwnd, control_x, control_y)

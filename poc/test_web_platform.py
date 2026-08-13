@@ -29,6 +29,7 @@ from robot_core import (
     classify_obscured_wechat_title,
     classify_wechat_page,
     controller_client_has_camera,
+    oriented_navigation_ratio,
     qwerty_keyboard_config_from_anchors,
     qwerty_key_point,
 )
@@ -88,6 +89,17 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         self.assertFalse(controller_client_has_camera(379, 169))
         self.assertFalse(controller_client_has_camera(540, 400))
         self.assertTrue(controller_client_has_camera(540, 1038))
+        self.assertTrue(controller_client_has_camera(1440, 810))
+        self.assertTrue(controller_client_has_camera(1440, 885))
+
+    def test_navigation_ratio_rotates_counter_clockwise_landscape_feed(self):
+        landscape = oriented_navigation_ratio(0.685, 0.976, landscape=True)
+        self.assertAlmostEqual(landscape[0], 0.976)
+        self.assertAlmostEqual(landscape[1], 0.315)
+        self.assertEqual(
+            oriented_navigation_ratio(0.685, 0.976, landscape=False),
+            (0.685, 0.976),
+        )
 
     def test_navigation_tap_forces_single_click_and_returns_exact_pixel(self):
         controller = RobotController.__new__(RobotController)

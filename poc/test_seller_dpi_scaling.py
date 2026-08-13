@@ -29,7 +29,7 @@ class SellerDpiScalingTests(unittest.TestCase):
         self.assertEqual(seller.seller_layout_scale(1440, 810), 1.5)
         self.assertEqual(seller.seller_control_point(1440, 885, 520), (1387, 858))
         self.assertEqual(seller.seller_required_client_height(1440, 810), 885)
-        self.assertFalse(seller.seller_layout_has_full_camera(1440, 810))
+        self.assertTrue(seller.seller_layout_has_full_camera(1440, 810))
         self.assertTrue(seller.seller_layout_has_full_camera(1440, 885))
         self.assertEqual(seller.seller_camera_height(1440, 885), 810)
 

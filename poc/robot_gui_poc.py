@@ -230,16 +230,9 @@ def ensure_window_fully_visible(hwnd: int) -> None:
 
     # Only auto-expand layouts that look like a real camera window.  Small
     # startup/error dialogs must continue to fail closed.
-    landscape_candidate = (
-        client_width >= 800
-        and client_width > client_height
-        and 1.45 <= client_width / client_height <= 2.0
-    )
     portrait_candidate = client_height > client_width >= MIN_AUTO_LAYOUT_WIDTH
     desired_client_height = (
-        max(client_height, required_height)
-        if landscape_candidate or portrait_candidate
-        else client_height
+        max(client_height, required_height) if portrait_candidate else client_height
     )
 
     outer_width = window_rect.right - window_rect.left
@@ -390,17 +383,18 @@ def seller_layout_has_full_camera(
             baseline_height,
         )
 
-    # A rotated 540x960 phone becomes 960x540.  A small landscape startup
-    # dialog can share the title, so require a plausible physical camera size.
+    # A rotated 540x960 phone becomes 960x540.  The vendor window clips its
+    # second toolbar row in this orientation; the camera and first-row controls
+    # remain usable for the verified Back recovery action.  Small landscape
+    # startup dialogs can share the title, so require a plausible camera size.
     scale = seller_layout_scale(client_width, client_height)
     expected_width = baseline_height * scale
     ratio = int(client_width) / int(client_height)
     return (
         int(client_width) >= 800
-        and int(client_height)
-        >= seller_required_client_height(client_width, client_height, baseline_height)
+        and int(client_height) >= BASELINE_CLIENT_WIDTH * scale
         and int(client_width) >= expected_width * 0.95
-        and 1.45 <= ratio <= 2.0
+        and 1.55 <= ratio <= 2.0
     )
 
 

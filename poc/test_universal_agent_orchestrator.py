@@ -925,6 +925,60 @@ class UniversalAgentStartTests(unittest.TestCase):
             trusted_observation_factory=_trusted_factory,
         )
 
+    @staticmethod
+    def _read_only_locate_graph() -> DynamicTaskGraph:
+        base = _graph()
+        graph = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="定位当前可见输入框并把内容替换为 Agent123",
+                entities={"input_text": "Agent123"},
+            ),
+            subgoals=(
+                replace(
+                    base.subgoals[0],
+                    subgoal_id="locate-input",
+                    objective="定位当前可见输入框",
+                    completion_conditions=("唯一目标输入框完整可见",),
+                    external_impact="read_only",
+                ),
+                Subgoal(
+                    subgoal_id="replace-input",
+                    objective="把当前输入框内容替换为 Agent123",
+                    status="pending",
+                    depends_on=("locate-input",),
+                    constraints=("不要提交、搜索或发送",),
+                    completion_conditions=("输入框显示 Agent123",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+            ),
+            active_subgoal_id="locate-input",
+            raw_user_goal="把当前输入框内容替换为 Agent123，不要搜索或提交",
+        )
+        graph.validate()
+        return graph
+
+    @staticmethod
+    def _advance_locate_graph(graph: DynamicTaskGraph) -> DynamicTaskGraph:
+        revised = replace(
+            graph,
+            revision=graph.revision + 1,
+            subgoals=(
+                replace(
+                    graph.subgoals[0],
+                    status="completed",
+                    completion_evidence=("唯一目标输入框完整可见",),
+                ),
+                replace(graph.subgoals[1], status="active"),
+            ),
+            active_subgoal_id="replace-input",
+        )
+        revised.validate()
+        return revised
+
     def test_start_plans_observes_and_decides_with_zero_physical_actions(self) -> None:
         graph = _graph()
         planner = FakeDeepSeekPlanner(graph)
@@ -966,6 +1020,160 @@ class UniversalAgentStartTests(unittest.TestCase):
             )
 
         self.assertEqual([4], seen)
+
+    def test_start_advances_one_presence_only_read_only_subgoal_without_action(self) -> None:
+        initial = self._read_only_locate_graph()
+        revised = self._advance_locate_graph(initial)
+        planner = FakeDeepSeekPlanner(initial, replan_result=revised)
+        scene = _scene(
+            meaning="当前可编辑输入框",
+            label="旧内容",
+            role="input",
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "focused": True,
+            },
+        )
+
+        class InputQwen(FakeQwenObserver):
+            def decide(self, **kwargs):
+                decision = super().decide(**kwargs)
+                input_decision = _decision(
+                    kwargs["trusted_observation"].scene,
+                    action_kind="input_verified_text",
+                )
+                decision.proposal = input_decision.proposal
+                decision.target_region = input_decision.target_region
+                return decision
+
+        qwen = InputQwen()
+        adapter = FakeAdapter(scene)
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(planner, qwen, adapter).start(
+                session_id="session-read-only-locate",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual("replace-input", session.task_graph.active_subgoal_id)
+        self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
+        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(2, qwen.calls[0][1]["revision"])
+        self.assertEqual(1, adapter.capture_calls)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_start_does_not_advance_presence_checkpoint_without_full_visibility(self) -> None:
+        initial = self._read_only_locate_graph()
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_result=self._advance_locate_graph(initial),
+        )
+        scene = _scene(
+            meaning="当前可编辑输入框",
+            label="旧内容",
+            role="input",
+            states={"goal_relevant": True, "fully_visible": False},
+        )
+        qwen = FakeQwenObserver()
+        adapter = FakeAdapter(scene)
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(planner, qwen, adapter).start(
+                session_id="session-clipped-locate",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("blocked", session.status)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual([], qwen.calls)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_start_does_not_use_presence_to_verify_element_value(self) -> None:
+        initial = self._read_only_locate_graph()
+        verify_value = replace(
+            initial,
+            subgoals=(
+                replace(
+                    initial.subgoals[0],
+                    objective="验证输入框文字内容是否为 Agent123",
+                    completion_conditions=("输入框文字等于 Agent123",),
+                ),
+                initial.subgoals[1],
+            ),
+        )
+        verify_value.validate()
+        planner = FakeDeepSeekPlanner(
+            verify_value,
+            replan_result=self._advance_locate_graph(verify_value),
+        )
+        scene = _scene(
+            meaning="当前可编辑输入框",
+            label="Agent123",
+            role="input",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        qwen = FakeQwenObserver()
+        adapter = FakeAdapter(scene)
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(planner, qwen, adapter).start(
+                session_id="session-verify-value",
+                raw_goal=verify_value.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("blocked", session.status)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual([], qwen.calls)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_start_rejects_read_only_replan_that_changes_future_semantics(self) -> None:
+        initial = self._read_only_locate_graph()
+        valid = self._advance_locate_graph(initial)
+        mutated = replace(
+            valid,
+            subgoals=(
+                valid.subgoals[0],
+                replace(
+                    valid.subgoals[1],
+                    completion_conditions=("目标状态清晰可见",),
+                ),
+            ),
+        )
+        mutated.validate()
+        planner = FakeDeepSeekPlanner(initial, replan_result=mutated)
+        scene = _scene(
+            meaning="当前可编辑输入框",
+            label="旧内容",
+            role="input",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        adapter = FakeAdapter(scene)
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError,
+                "只能改变子目标状态",
+            ):
+                self._orchestrator(
+                    planner,
+                    FakeQwenObserver(),
+                    adapter,
+                ).start(
+                    session_id="session-mutated-read-only",
+                    raw_goal=initial.raw_user_goal,
+                    device_id="device-1",
+                    run_dir=Path(temp),
+                )
+
+        self.assertEqual(0, adapter.execute_calls)
 
     def test_refresh_reobserves_and_redecides_without_physical_action(self) -> None:
         adapter = FakeAdapter(_scene())

@@ -622,6 +622,242 @@ class UniversalAgentOrchestrator:
             return self.qwen_observer.decide(**kwargs)
 
     @staticmethod
+    def _is_presence_only_read_only_subgoal(subgoal: Any) -> bool:
+        """Allow zero-action completion only for locating one visible object.
+
+        A visible element can prove that an object exists, but it cannot prove
+        its exact value, text, state, or a result produced elsewhere.  Keep the
+        lexical gate deliberately narrow so ambiguous read-only work fails
+        closed and can be retried with a fresh observation instead.
+        """
+
+        text = " ".join(
+            str(item or "").strip()
+            for item in (
+                getattr(subgoal, "objective", ""),
+                *tuple(getattr(subgoal, "completion_conditions", ()) or ()),
+            )
+            if str(item or "").strip()
+        ).casefold()
+        if not text:
+            return False
+        presence_markers = (
+            "定位",
+            "找到",
+            "寻找",
+            "识别",
+            "可见",
+            "存在",
+            "locate",
+            "find",
+            "identify",
+            "visible",
+            "present",
+            "exists",
+        )
+        value_verification_markers = (
+            "内容",
+            "文字",
+            "文本",
+            "数值",
+            "字段值",
+            "包含",
+            "等于",
+            "是否为",
+            "状态为",
+            "验证",
+            "核对",
+            "读取",
+            "content",
+            "text equals",
+            "contains",
+            "value",
+            "verify",
+            "read the",
+        )
+        return any(marker in text for marker in presence_markers) and not any(
+            marker in text for marker in value_verification_markers
+        )
+
+    @staticmethod
+    def _candidate_has_unresolved_conflict(
+        trusted_observation: Any,
+        element_id: str,
+    ) -> bool:
+        for conflict in getattr(trusted_observation, "candidate_conflicts", ()) or ():
+            if not isinstance(conflict, Mapping):
+                if element_id in str(conflict):
+                    return True
+                continue
+            conflict_ids = conflict.get("element_ids") or []
+            resolved_duplicate = (
+                conflict.get("kind") == "duplicate_visual_object_collapsed"
+                and conflict.get("canonical_element_id") == element_id
+                and element_id in conflict_ids
+            )
+            if not resolved_duplicate and (
+                element_id in conflict_ids or element_id in str(conflict)
+            ):
+                return True
+        return False
+
+    def _try_advance_read_only_presence_subgoal(
+        self,
+        session: UniversalAgentSessionState,
+        *,
+        graph: DynamicTaskGraph,
+        trusted_observation: Any,
+    ) -> DynamicTaskGraph | None:
+        """Use one exact visible candidate to advance one read-only checkpoint."""
+
+        current = graph.active_subgoal()
+        if (
+            current is None
+            or current.external_impact != "read_only"
+            or not self._is_presence_only_read_only_subgoal(current)
+        ):
+            return None
+        scene = getattr(trusted_observation, "scene", None)
+        if scene is None:
+            return None
+        candidate = scene.unique_trusted_goal_element(
+            min_confidence=MIN_TARGET_CONFIDENCE,
+        )
+        if (
+            candidate is None
+            or candidate.states.get("fully_visible") is not True
+            or self._candidate_has_unresolved_conflict(
+                trusted_observation,
+                candidate.element_id,
+            )
+        ):
+            return None
+
+        candidate_fact = (
+            "当前可信画面仅有一个完整可见的目标元素："
+            f"element_id={candidate.element_id}, role={candidate.role}, "
+            f"label={candidate.label or '[empty]'}, meaning={candidate.meaning}, "
+            f"confidence={float(candidate.confidence):.3f}, fully_visible=true。"
+        )
+        observed = self.bridge.observed_state(
+            graph=graph,
+            trusted_observation=trusted_observation,
+            action_outcome="not_applicable",
+            verification={"visible_evidence": [candidate_fact, *candidate.evidence]},
+        )
+        revised = self.deepseek_planner.replan(
+            graph,
+            observed,
+            trigger="subgoal_completed",
+            reason=(
+                "当前可信画面已经以唯一、高置信、完整可见的目标元素证明"
+                "定位类 read_only 子目标；只允许推进这一个子目标，不得推断"
+                "元素值、外部状态或执行动作。"
+            ),
+        )
+        self._validate_graph_identity(
+            revised,
+            device_id=session.device_id,
+            previous=graph,
+        )
+        if revised.revision != graph.revision + 1:
+            raise UniversalAgentOrchestratorError(
+                "只读证据推进必须且只能产生一个新 revision。"
+            )
+        old_ids = tuple(item.subgoal_id for item in graph.subgoals)
+        new_ids = tuple(item.subgoal_id for item in revised.subgoals)
+        if old_ids != new_ids:
+            raise UniversalAgentOrchestratorError(
+                "只读证据推进不得增加、删除或重排子目标。"
+            )
+        old_by_id = {item.subgoal_id: item for item in graph.subgoals}
+        new_by_id = {item.subgoal_id: item for item in revised.subgoals}
+        if (
+            revised.goal != graph.goal
+            or revised.constraints != graph.constraints
+            or revised.completion_conditions != graph.completion_conditions
+            or revised.risk_actions != graph.risk_actions
+        ):
+            raise UniversalAgentOrchestratorError(
+                "只读证据推进不得修改目标、约束、全局完成条件或风险定义。"
+            )
+        for subgoal_id in old_ids:
+            old_item = old_by_id[subgoal_id]
+            new_item = new_by_id[subgoal_id]
+            if (
+                new_item.objective != old_item.objective
+                or new_item.depends_on != old_item.depends_on
+                or new_item.constraints != old_item.constraints
+                or new_item.completion_conditions != old_item.completion_conditions
+                or new_item.risk_action_ids != old_item.risk_action_ids
+                or new_item.external_impact != old_item.external_impact
+            ):
+                raise UniversalAgentOrchestratorError(
+                    "只读证据推进只能改变子目标状态和完成证据。"
+                )
+        newly_completed = tuple(
+            subgoal_id
+            for subgoal_id in old_ids
+            if old_by_id[subgoal_id].status != "completed"
+            and new_by_id[subgoal_id].status == "completed"
+        )
+        completed_current = new_by_id[current.subgoal_id]
+        if (
+            newly_completed != (current.subgoal_id,)
+            or not completed_current.completion_evidence
+        ):
+            raise UniversalAgentOrchestratorError(
+                "只读证据只能完成当前定位子目标，且必须记录可见证据。"
+            )
+        for subgoal_id in old_ids:
+            old_status = old_by_id[subgoal_id].status
+            new_status = new_by_id[subgoal_id].status
+            if subgoal_id == current.subgoal_id:
+                continue
+            if old_status == "completed" and new_status != "completed":
+                raise UniversalAgentOrchestratorError(
+                    "只读证据推进不得回退已完成子目标。"
+                )
+            if old_status == "pending" and new_status not in {"pending", "active"}:
+                raise UniversalAgentOrchestratorError(
+                    "只读证据推进不得越过后续子目标。"
+                )
+        newly_active = tuple(
+            subgoal_id
+            for subgoal_id in old_ids
+            if old_by_id[subgoal_id].status == "pending"
+            and new_by_id[subgoal_id].status == "active"
+        )
+        if len(newly_active) > 1:
+            raise UniversalAgentOrchestratorError(
+                "只读证据推进最多只能激活一个后续子目标。"
+            )
+        if revised.status != "completed" and (
+            len(newly_active) != 1
+            or revised.active_subgoal_id != newly_active[0]
+        ):
+            raise UniversalAgentOrchestratorError(
+                "只读证据推进后必须精确激活一个后续子目标。"
+            )
+        return revised
+
+    def _store_revised_graph(
+        self,
+        session: UniversalAgentSessionState,
+        revised: DynamicTaskGraph,
+    ) -> None:
+        session.task_graph = revised
+        session.goal_draft = self.bridge.goal_draft(revised)
+        session.confirmation_authority = None
+        session.risk_confirmation_authority = None
+        session.confirmed_risk_ids = ()
+        self._remember(
+            session,
+            session.evidence_store.write_task_graph(revised),
+            session.evidence_store.write_risk_audit(revised),
+        )
+
+    @staticmethod
     def _policy_payload(decision: NavigationPolicyDecision) -> dict[str, Any]:
         return {
             "allowed": decision.allowed,
@@ -1751,6 +1987,49 @@ class UniversalAgentOrchestrator:
                 session,
                 store.write_trusted_observation(session.step_number, observation),
             )
+
+            if impact == "read_only":
+                revised = self._try_advance_read_only_presence_subgoal(
+                    session,
+                    graph=graph,
+                    trusted_observation=observation,
+                )
+                if revised is None:
+                    session.status = "blocked"
+                    session.failed_reason = (
+                        "当前 read_only 子目标不是可由唯一完整可见元素证明的"
+                        "定位目标，或当前画面证据不唯一；未请求物理动作。"
+                    )
+                    self._write_terminal_snapshot(session)
+                    return session
+                self._store_revised_graph(session, revised)
+                graph = revised
+                if revised.status == "completed":
+                    session.status = "succeeded"
+                    session.failed_reason = ""
+                    self._write_terminal_snapshot(session)
+                    return session
+                current = revised.active_subgoal()
+                impact = current.external_impact if current is not None else "unknown"
+                if current is None:
+                    session.status = "blocked"
+                    session.failed_reason = "只读证据推进后没有活动子目标。"
+                    self._write_terminal_snapshot(session)
+                    return session
+                if impact in {"external_state", "unknown"}:
+                    session.status = "awaiting_risk_confirmation"
+                    session.failed_reason = ""
+                    self._bind_risk_confirmation(session)
+                    self._write_terminal_snapshot(session)
+                    return session
+                if impact == "read_only":
+                    session.status = "blocked"
+                    session.failed_reason = (
+                        "同一可信画面最多推进一个 read_only 子目标；"
+                        "必须重新观察后再继续。"
+                    )
+                    self._write_terminal_snapshot(session)
+                    return session
 
             task_context = graph.to_qwen_context()
             decision = self._decide_next_action(

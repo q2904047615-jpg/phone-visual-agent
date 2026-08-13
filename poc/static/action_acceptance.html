@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>通用动作真机验收页</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: #07111f; color: #e8f7ff; font-family: sans-serif; }
+    body { padding: 18px; overscroll-behavior: none; }
+    h1 { margin: 0 0 8px; font-size: 25px; }
+    p { line-height: 1.55; }
+    .muted { color: #9fc0d4; }
+    .card { margin: 14px 0; padding: 18px; border: 2px solid #36d9ff; border-radius: 18px; background: #0d2034; }
+    .mode-link { display: block; margin: 12px 0; padding: 16px; border-radius: 14px; background: #173853; color: #fff; text-decoration: none; font-weight: 700; }
+    .pass { border-color: #5cff9d; background: #103b2a; color: #baffd1; }
+    .fail { border-color: #ff6f91; background: #481827; color: #ffd1dc; }
+    #result { position: sticky; top: 8px; z-index: 4; }
+    #swipe-track { height: 145vh; position: relative; border-left: 5px solid #36d9ff; margin: 20px 30px; }
+    #swipe-start, #swipe-end { position: absolute; left: -24px; width: calc(100vw - 72px); padding: 16px; border-radius: 14px; text-align: center; font-weight: 800; }
+    #swipe-start { top: 0; background: #384c6b; }
+    #swipe-end { bottom: 12vh; background: #1565ff; }
+    input { width: 100%; padding: 18px; border: 3px solid #36d9ff; border-radius: 14px; background: #06101c; color: #fff; font-size: 22px; }
+    #hold-target { height: 170px; display: grid; place-items: center; border: 4px dashed #ffbe3d; border-radius: 22px; background: #3d2c0d; font-size: 24px; font-weight: 800; touch-action: none; }
+    #drag-stage { position: relative; height: 420px; border: 3px solid #36d9ff; border-radius: 22px; overflow: hidden; touch-action: none; }
+    #drag-source { position: absolute; left: 28px; top: 160px; width: 92px; height: 92px; display: grid; place-items: center; border-radius: 18px; background: #ff4fe1; color: #18051a; font-weight: 900; z-index: 2; }
+    #drop-zone { position: absolute; right: 24px; top: 130px; width: 130px; height: 150px; display: grid; place-items: center; border: 5px dashed #5cff9d; border-radius: 22px; color: #baffd1; text-align: center; }
+    #back-detail { min-height: 75vh; display: grid; place-items: center; text-align: center; border: 3px solid #36d9ff; border-radius: 22px; padding: 26px; }
+  </style>
+</head>
+<body>
+  <h1>通用动作真机验收页</h1>
+  <p class="muted">仅验证一个底层动作，不提交、发送、删除或修改账号数据。</p>
+  <div id="result" class="card">等待动作</div>
+  <main id="content"></main>
+  <script>
+    const content = document.querySelector('#content');
+    const result = document.querySelector('#result');
+    const params = new URLSearchParams(location.search);
+    const mode = params.get('mode') || 'index';
+    let reported = false;
+
+    function eventId(kind) {
+      return `${kind}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    async function report(kind, status, details = {}) {
+      if (reported && status === 'passed') return;
+      if (status === 'passed') reported = true;
+      result.className = `card ${status === 'passed' ? 'pass' : 'fail'}`;
+      result.textContent = status === 'passed' ? `${kind} 验收通过` : `${kind} 验收失败`;
+      try {
+        await fetch('/api/action-event', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({kind, status, client_event_id: eventId(kind), details})
+        });
+      } catch (_error) {
+        result.textContent += '（回传失败）';
+      }
+    }
+
+    function showIndex() {
+      content.innerHTML = `<div class="card"><strong>选择单一验收模式</strong>
+        <a class="mode-link" href="/actions?mode=swipe">向上滑动</a>
+        <a class="mode-link" href="/actions?mode=back">系统返回</a>
+        <a class="mode-link" href="/actions?mode=input">输入并核对文字</a>
+        <a class="mode-link" href="/actions?mode=long_press">长按目标</a>
+        <a class="mode-link" href="/actions?mode=drag">拖动目标</a></div>`;
+    }
+
+    function showSwipe() {
+      content.innerHTML = `<div class="card"><strong>动作：向上滑动一次</strong><p>让蓝色终点进入画面。</p></div>
+        <div id="swipe-track"><div id="swipe-start">灰色起点</div><div id="swipe-end">蓝色终点 · 滑动通过</div></div>`;
+      const endpoint = document.querySelector('#swipe-end');
+      const observer = new IntersectionObserver(entries => {
+        if (entries.some(entry => entry.isIntersecting)) {
+          report('swipe', 'passed', {direction: 'up', endpoint_visible: true});
+          observer.disconnect();
+        }
+      }, {threshold: 0.75});
+      observer.observe(endpoint);
+    }
+
+    function showInput() {
+      content.innerHTML = `<div class="card"><strong>动作：输入并核对文字</strong><p>目标文字：Agent123</p>
+        <input id="text-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="在这里输入 Agent123">
+        <p id="input-state" class="muted">尚未匹配</p></div>`;
+      const input = document.querySelector('#text-input');
+      input.addEventListener('input', () => {
+        document.querySelector('#input-state').textContent = `当前：${input.value}`;
+        if (input.value === 'Agent123') report('input_verified_text', 'passed', {value: input.value});
+      });
+    }
+
+    function showLongPress() {
+      content.innerHTML = `<div class="card"><strong>动作：长按黄色区域 800 毫秒</strong></div>
+        <div id="hold-target">长按我 · 不要移动</div>`;
+      const target = document.querySelector('#hold-target');
+      let timer = null;
+      let start = null;
+      const cancel = () => { if (timer) clearTimeout(timer); timer = null; start = null; };
+      target.addEventListener('pointerdown', event => {
+        start = [event.clientX, event.clientY];
+        target.setPointerCapture(event.pointerId);
+        timer = setTimeout(() => report('long_press', 'passed', {duration_ms: 800}), 800);
+      });
+      target.addEventListener('pointermove', event => {
+        if (start && Math.hypot(event.clientX - start[0], event.clientY - start[1]) > 22) cancel();
+      });
+      target.addEventListener('pointerup', cancel);
+      target.addEventListener('pointercancel', cancel);
+    }
+
+    function showDrag() {
+      content.innerHTML = `<div class="card"><strong>动作：把紫色方块拖到绿色终点</strong></div>
+        <div id="drag-stage"><div id="drag-source">起点</div><div id="drop-zone">绿色<br>终点</div></div>`;
+      const stage = document.querySelector('#drag-stage');
+      const source = document.querySelector('#drag-source');
+      const zone = document.querySelector('#drop-zone');
+      let offset = null;
+      source.addEventListener('pointerdown', event => {
+        const rect = source.getBoundingClientRect();
+        offset = [event.clientX - rect.left, event.clientY - rect.top];
+        source.setPointerCapture(event.pointerId);
+      });
+      source.addEventListener('pointermove', event => {
+        if (!offset) return;
+        const rect = stage.getBoundingClientRect();
+        source.style.left = `${event.clientX - rect.left - offset[0]}px`;
+        source.style.top = `${event.clientY - rect.top - offset[1]}px`;
+      });
+      source.addEventListener('pointerup', () => {
+        if (!offset) return;
+        offset = null;
+        const a = source.getBoundingClientRect();
+        const b = zone.getBoundingClientRect();
+        const center = [a.left + a.width / 2, a.top + a.height / 2];
+        const inside = center[0] >= b.left && center[0] <= b.right && center[1] >= b.top && center[1] <= b.bottom;
+        if (inside) report('drag', 'passed', {source_in_destination: true});
+        else report('drag', 'failed', {source_in_destination: false});
+      });
+    }
+
+    function showBack() {
+      history.replaceState({view: 'list'}, '', '/actions?mode=back-list');
+      history.pushState({view: 'detail'}, '', '/actions?mode=back-detail');
+      content.innerHTML = `<div id="back-detail"><div><h2>只读详情页</h2><p>请执行一次系统返回。</p></div></div>`;
+      addEventListener('popstate', () => {
+        content.innerHTML = `<div class="card pass"><h2>已返回上一层</h2><p>未修改任何数据。</p></div>`;
+        report('back', 'passed', {returned_to_previous_view: true});
+      }, {once: true});
+    }
+
+    ({index: showIndex, swipe: showSwipe, input: showInput, long_press: showLongPress, drag: showDrag, back: showBack}[mode] || showIndex)();
+  </script>
+</body>
+</html>

@@ -26,6 +26,10 @@
     #drag-source { position: absolute; left: 28px; top: 160px; width: 92px; height: 92px; display: grid; place-items: center; border-radius: 18px; background: #ff4fe1; color: #18051a; font-weight: 900; z-index: 2; }
     #drop-zone { position: absolute; right: 24px; top: 130px; width: 130px; height: 150px; display: grid; place-items: center; border: 5px dashed #5cff9d; border-radius: 22px; color: #baffd1; text-align: center; }
     #back-detail { min-height: 75vh; display: grid; place-items: center; text-align: center; border: 3px solid #36d9ff; border-radius: 22px; padding: 26px; }
+    #tap-target, #sequence-target { width: 100%; padding: 22px; border: 0; border-radius: 18px; background: #ffcf33; color: #172033; font-size: 22px; font-weight: 900; }
+    #sequence-track { min-height: 135vh; position: relative; border-left: 5px solid #36d9ff; margin: 20px 30px; }
+    #sequence-target { position: absolute; left: -24px; bottom: 10vh; width: calc(100vw - 72px); }
+    .sequence-complete { min-height: 70vh; display: grid; place-items: center; text-align: center; border: 4px solid #5cff9d; border-radius: 22px; background: #103b2a; }
   </style>
 </head>
 <body>
@@ -38,15 +42,15 @@
     const result = document.querySelector('#result');
     const params = new URLSearchParams(location.search);
     const mode = params.get('mode') || 'index';
-    let reported = false;
+    const reportedKeys = new Set();
 
     function eventId(kind) {
       return `${kind}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     }
 
-    async function report(kind, status, details = {}) {
-      if (reported && status === 'passed') return;
-      if (status === 'passed') reported = true;
+    async function report(kind, status, details = {}, dedupeKey = kind) {
+      if (status === 'passed' && reportedKeys.has(dedupeKey)) return;
+      if (status === 'passed') reportedKeys.add(dedupeKey);
       result.className = `card ${status === 'passed' ? 'pass' : 'fail'}`;
       result.textContent = status === 'passed' ? `${kind} 验收通过` : `${kind} 验收失败`;
       try {
@@ -63,10 +67,21 @@
     function showIndex() {
       content.innerHTML = `<div class="card"><strong>选择单一验收模式</strong>
         <a class="mode-link" href="/actions?mode=swipe">向上滑动</a>
+        <a class="mode-link" href="/actions?mode=tap">语义点击</a>
         <a class="mode-link" href="/actions?mode=back">系统返回</a>
         <a class="mode-link" href="/actions?mode=input">输入并核对文字</a>
         <a class="mode-link" href="/actions?mode=long_press">长按目标</a>
-        <a class="mode-link" href="/actions?mode=drag">拖动目标</a></div>`;
+        <a class="mode-link" href="/actions?mode=drag">拖动目标</a>
+        <a class="mode-link" href="/actions?mode=sequence">连续闭环：滑动→点击→返回</a></div>`;
+    }
+
+    function showTap() {
+      content.innerHTML = `<div class="card"><strong>动作：点击唯一黄色按钮</strong><p>只打开本页的只读测试卡片。</p></div>
+        <button id="tap-target" type="button">打开只读测试卡片</button>`;
+      document.querySelector('#tap-target').addEventListener('click', () => {
+        content.innerHTML = `<div class="card pass"><h2>语义点击验收通过</h2><p>只读卡片已打开，未修改任何数据。</p></div>`;
+        report('tap_semantic', 'passed', {readonly_card_visible: true});
+      }, {once: true});
     }
 
     function showSwipe() {
@@ -152,7 +167,46 @@
       }, {once: true});
     }
 
-    ({index: showIndex, swipe: showSwipe, input: showInput, long_press: showLongPress, drag: showDrag, back: showBack}[mode] || showIndex)();
+    function showSequence() {
+      history.replaceState({view: 'sequence-list'}, '', '/actions?mode=sequence-list');
+      const finish = () => {
+        content.innerHTML = `<div class="sequence-complete"><div><h2>连续闭环验收通过</h2>
+          <p>已按顺序完成向上滑动、语义点击和系统返回。</p></div></div>`;
+        report('back', 'passed', {sequence_step: 3, returned_to_sequence: true}, 'sequence-3');
+      };
+      addEventListener('popstate', event => {
+        if (event.state?.view === 'sequence-list') finish();
+      });
+      content.innerHTML = `<div class="card"><strong>连续闭环第1步</strong><p>向上移动页面，让黄色按钮进入画面。</p></div>
+        <div id="sequence-track"><button id="sequence-target" type="button">第2步 · 打开只读详情</button></div>`;
+      const target = document.querySelector('#sequence-target');
+      let targetVisible = false;
+      const markTargetVisible = () => {
+        if (targetVisible) return;
+        const rect = target.getBoundingClientRect();
+        const visibleHeight = Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0));
+        if (visibleHeight / rect.height < 0.75) return;
+        targetVisible = true;
+        removeEventListener('scroll', markTargetVisible);
+        report('swipe', 'passed', {direction: 'up', sequence_step: 1, target_visible: true}, 'sequence-1');
+      };
+      const observer = new IntersectionObserver(entries => {
+        if (entries.some(entry => entry.isIntersecting)) {
+          markTargetVisible();
+          observer.disconnect();
+        }
+      }, {threshold: 0.75});
+      observer.observe(target);
+      addEventListener('scroll', markTargetVisible, {passive: true});
+      target.addEventListener('click', () => {
+        report('tap_semantic', 'passed', {sequence_step: 2, readonly_detail_visible: true}, 'sequence-2');
+        history.pushState({view: 'sequence-detail'}, '', '/actions?mode=sequence-detail');
+        content.innerHTML = `<div id="back-detail"><div><h2>连续闭环第3步</h2>
+          <p>只读详情已打开。请执行一次系统返回。</p></div></div>`;
+      }, {once: true});
+    }
+
+    ({index: showIndex, swipe: showSwipe, tap: showTap, input: showInput, long_press: showLongPress, drag: showDrag, back: showBack, sequence: showSequence}[mode] || showIndex)();
   </script>
 </body>
 </html>

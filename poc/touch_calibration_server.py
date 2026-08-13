@@ -56,7 +56,14 @@ STORE = SampleStore()
 
 class ActionEventStore:
     ALLOWED_KINDS = frozenset(
-        {"swipe", "back", "input_verified_text", "long_press", "drag"}
+        {
+            "swipe",
+            "tap_semantic",
+            "back",
+            "input_verified_text",
+            "long_press",
+            "drag",
+        }
     )
     ALLOWED_STATUSES = frozenset({"passed", "failed"})
 

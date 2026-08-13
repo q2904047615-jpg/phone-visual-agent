@@ -405,6 +405,9 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 5. meaning用lower_snake_case。与目标直接相关的控件在states中写goal_relevant:true。
 6. evidence只抄画面短文字或明确外观。看不清就降低confidence或省略元素。
 7. 禁止action、plan、step、tap、swipe、command、coordinates等动作字段。
+8. 场景confidence只评价当前画面本身是否清楚、稳定、可描述，不评价目标是否已完成或目标控件
+   是否存在。清晰稳定的页面即使没有目标控件，也应保持与画面质量一致的高confidence并返回空
+   elements；只有模糊、遮挡、过渡或无法判断页面事实时才降低confidence。
 
 只返回下列完整JSON，不要Markdown：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
@@ -423,6 +426,7 @@ def _compact_retry_prompt(context: dict[str, Any], error: Exception) -> str:
 只返回一个最小、完整、可解析JSON；不要转义成字符串，不要输出reasoning或说明文字。
 summary最多40字，elements最多2个，evidence每个元素最多1条且最多30字；禁止罗列非目标内容。
 没有把握就写unknown和空elements，禁止猜。务必在token耗尽前闭合全部括号。
+画面清晰稳定但目标控件不存在时，空elements不等于低置信；confidence仍只按画面质量填写。
 格式必须是：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"短描述","elements":[],"overlays":[],
@@ -474,6 +478,8 @@ def _targeted_prompt(
 并降低场景confidence。坐标0..1000，只框元素自身。禁止任何动作、计划或建议字段。
 置信度只评价当前画面观察本身是否可靠，不能因为目标尚未完成而降低；例如清晰桌面上唯一目标
 应用入口可形成高可信观察，即使应用尚未打开。模糊、遮挡或不唯一时仍必须降低，禁止虚增。
+目标相关控件确实不存在时返回空elements，但只要页面事实清楚稳定，场景confidence仍应保持高值；
+不得因为系统级动作没有屏内按钮、或因为未找到目标控件，就把清晰页面写成低置信。
 只返回完整JSON：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"目标精查后的当前画面","elements":[],"overlays":[],

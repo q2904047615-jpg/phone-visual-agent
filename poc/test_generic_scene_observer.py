@@ -417,6 +417,8 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
         targeted_text = provider.messages_seen[1][1]["content"][0]["text"]
         self.assertIn("置信度只评价当前画面观察本身是否可靠", targeted_text)
+        self.assertIn("系统级动作没有屏内按钮", targeted_text)
+        self.assertIn("目标相关控件确实不存在时返回空elements", targeted_text)
         self.assertIn("不能因为目标尚未完成而降低", targeted_text)
         self.assertIn("模糊、遮挡或不唯一时仍必须降低", targeted_text)
 

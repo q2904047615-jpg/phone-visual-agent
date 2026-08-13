@@ -142,14 +142,14 @@ ACCOUNT_PERMISSION_EFFECT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 DIRECT_EFFECT_NEGATION_PATTERN = re.compile(
-    r"(?:不|未|勿|不要|不得|禁止|不能|避免|无需|无须|"
+    r"(?:不|未|没有|未曾|勿|不要|不得|禁止|不能|避免|无需|无须|"
     r"do\s+not|don't|never|without)\s*"
     r"(?:(?:进行|执行|发生|出现)\s*)?"
     r"(?:(?:任何|任意|一切|all|any)\s*)?$",
     re.IGNORECASE,
 )
 COORDINATED_EFFECT_NEGATION_PATTERN = re.compile(
-    r"(?:不|未|勿|不要|不得|禁止|不能|避免|无需|无须|"
+    r"(?:不|未|没有|未曾|勿|不要|不得|禁止|不能|避免|无需|无须|"
     r"do\s+not|don't|never|without)\s*"
     r"(?:(?:进行|执行|发生|出现)\s*)?"
     r"(?:(?:任何|任意|一切|all|any)\s*)?"

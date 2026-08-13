@@ -7,6 +7,7 @@ from deepseek_task_graph import (
     DeepSeekTaskGraphPlanner,
     ObservedState,
     TaskGraphError,
+    _infer_external_risk_types,
 )
 
 
@@ -1380,6 +1381,11 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 objective,
                 device_id="phone-1",
             )
+
+    def test_no_trigger_coordinated_effects_are_all_treated_as_negated(self):
+        text = "没有触发搜索、提交、发送、保存或发布等操作"
+
+        self.assertEqual(frozenset(), _infer_external_risk_types(text))
 
     def test_unsubmitted_input_exception_never_hides_send_or_save_effect(self):
         for effect in ("消息已发送给联系人", "草稿已保存", "内容已发布"):

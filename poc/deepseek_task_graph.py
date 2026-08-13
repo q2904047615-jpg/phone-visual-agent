@@ -173,7 +173,7 @@ LOCAL_TRANSIENT_NAVIGATION_PATTERN = re.compile(
 )
 LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN = re.compile(
     r"(?:(?:输入框|文本框|搜索框).{0,28}(?:文字|文本|内容|值|字符).{0,20}"
-    r"(?:为|是|变为|改为|替换为|显示|保持)|"
+    r"(?:为|是|变为|改为|修改为|替换为|显示|保持)|"
     r"(?:填写|输入|替换|改为|修改).{0,28}(?:输入框|文本框|搜索框)|"
     r"\b(?:input|text|query)\s*(?:field|box).{0,28}(?:contains?|shows?|value|text)\b)",
     re.IGNORECASE,
@@ -361,7 +361,17 @@ class Subgoal:
             *self.constraints,
             *self.completion_conditions,
         )
-        if inferred_risk_types and self.external_impact in {
+        local_input_text = _input_text_from_state_descriptions(
+            self.objective,
+            *self.completion_conditions,
+        )
+        proven_local_input = _is_explicitly_unsubmitted_local_input(
+            self.objective,
+            *self.constraints,
+            *self.completion_conditions,
+            input_text=local_input_text,
+        )
+        if inferred_risk_types and not proven_local_input and self.external_impact in {
             "read_only",
             "navigation_only",
         }:
@@ -529,6 +539,13 @@ class DynamicTaskGraph:
                 *subgoal.constraints,
                 *subgoal.completion_conditions,
             )
+            if _is_explicitly_unsubmitted_local_input(
+                subgoal.objective,
+                *subgoal.constraints,
+                *subgoal.completion_conditions,
+                input_text=self.goal.entities.get("input_text"),
+            ):
+                inferred_types = inferred_types - {"unknown_external_effect"}
             linked_types = {
                 risks[risk_id].risk_type for risk_id in subgoal.risk_action_ids
             }
@@ -541,6 +558,12 @@ class DynamicTaskGraph:
         if (
             self.status != "blocked"
             and _describes_external_state_change(self.goal.objective)
+            and not _is_explicitly_unsubmitted_local_input(
+                self.raw_user_goal,
+                self.goal.objective,
+                *self.constraints,
+                input_text=self.goal.entities.get("input_text"),
+            )
             and not risks
         ):
             raise TaskGraphError("外部状态目标必须声明风险动作并等待确认。")
@@ -1315,11 +1338,31 @@ def _is_explicitly_unsubmitted_local_input(
         return False
     texts = tuple(str(value or "") for value in values if str(value or "").strip())
     combined = "；".join(texts)
+    inferred = frozenset().union(
+        *(_infer_external_risk_types(value) for value in texts)
+    )
     return bool(
         LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(combined)
         and LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN.search(combined)
-        and not any(_infer_external_risk_types(value) for value in texts)
+        # Generic wording such as "修改输入框文字" currently produces only
+        # unknown_external_effect.  The explicit unsubmitted-input boundary is
+        # enough to resolve that ambiguity, but never suppress a concrete
+        # communication, publication, account, data, or transaction effect.
+        and inferred <= {"unknown_external_effect"}
     )
+
+
+def _input_text_from_state_descriptions(*values: str) -> str:
+    for value in values:
+        match = re.search(
+            r"(?:为|是|改为|替换为|修改为|显示为)\s*"
+            r"([A-Za-z0-9][A-Za-z0-9_.-]{0,63})",
+            str(value or ""),
+            re.IGNORECASE,
+        )
+        if match:
+            return match.group(1)
+    return ""
 
 
 def _retryable_replan_output_error(error: TaskGraphError) -> bool:
@@ -2055,6 +2098,9 @@ def _apply_local_risk_supplements(
     assessments = []
     for assessment in report.assessments:
         source = source_map[assessment.source_id]
+        scope_is_local_input = assessment.subgoal_id in local_input_scopes
+        if assessment.subgoal_id is None and None in local_input_scopes:
+            scope_is_local_input = True
         is_negated_constraint = source.source_kind in {
             "goal_constraint",
             "subgoal_constraint",
@@ -2090,8 +2136,8 @@ def _apply_local_risk_supplements(
             )
         if (
             assessment.external_impact in {"external_state", "unknown"}
-            and not inferred
-            and assessment.subgoal_id in local_input_scopes
+            and inferred <= {"unknown_external_effect"}
+            and scope_is_local_input
         ):
             assessment = replace(
                 assessment,
@@ -2118,7 +2164,14 @@ def _apply_local_risk_supplements(
                     + "；本地校验确认只涉及临时界面层级或标签页导航"
                 ),
             )
-        if inferred and assessment.external_impact != "unknown":
+        if (
+            inferred
+            and not (
+                scope_is_local_input
+                and inferred <= {"unknown_external_effect"}
+            )
+            and assessment.external_impact != "unknown"
+        ):
             assessment = replace(
                 assessment,
                 external_impact="external_state",
@@ -2141,15 +2194,7 @@ def _input_text_for_audit_scope(
     # in that prose is sufficient here; graph normalization separately requires
     # the canonical input_text entity.
     group = [item.text for item in sources if item.subgoal_id == scope_id]
-    for text in group:
-        match = re.search(
-            r"(?:为|是|改为|替换为|显示为)\s*([A-Za-z0-9][A-Za-z0-9_.-]{0,63})",
-            text,
-            re.IGNORECASE,
-        )
-        if match:
-            return match.group(1)
-    return ""
+    return _input_text_from_state_descriptions(*group)
 
 
 def _validate_graph_against_risk_audit(

@@ -679,8 +679,8 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertFalse(result.allowed)
         self.assertIn("冲突", result.reason)
 
-    def test_rejects_toggle_input_and_keyboard_roles(self) -> None:
-        for role in ("toggle", "input", "keyboard_key"):
+    def test_rejects_toggle_and_keyboard_roles(self) -> None:
+        for role in ("toggle", "keyboard_key"):
             with self.subTest(role=role):
                 scene = _scene(role=role)
                 decision = _decision(scene)
@@ -693,6 +693,42 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
                 self.assertFalse(result.allowed)
                 self.assertIn("角色", result.reason)
+
+    def test_allows_exact_input_candidate_tap_only_as_local_focus(self) -> None:
+        scene = _scene(
+            meaning="顶部搜索输入框",
+            label="旧文字",
+            role="input",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(impact="navigation_only"),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("focus_input", result.canonical_class)
+
+    def test_read_only_subgoal_cannot_focus_input(self) -> None:
+        scene = _scene(
+            meaning="顶部搜索输入框",
+            label="旧文字",
+            role="input",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(impact="read_only"),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("read_only", result.reason)
 
     def test_rejects_external_state_even_when_confirmed(self) -> None:
         scene = _scene()

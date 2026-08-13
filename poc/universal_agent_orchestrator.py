@@ -2423,6 +2423,15 @@ class PhaseOneNavigationPolicy:
                 or "\r" in text
             ):
                 return self._deny("输入文字格式无效。")
+        elif (
+            action_kind == "tap_semantic"
+            and element.role == "input"
+            and impact == "navigation_only"
+        ):
+            # Focusing one exact visible input changes only the local UI state.
+            # Text entry remains a separate, newly observed and confirmed
+            # input_verified_text action.
+            pass
         elif element.role not in self.NAVIGATION_ROLES and not (
             impact == "external_state" and external_allowed and element.role == "toggle"
         ):
@@ -2463,6 +2472,12 @@ class PhaseOneNavigationPolicy:
             if element.element_id in conflict_ids or element.element_id in str(conflict):
                 return self._deny("当前候选存在语义冲突或不唯一。")
 
+        if action_kind == "tap_semantic" and element.role == "input":
+            return NavigationPolicyDecision(
+                True,
+                "允许对一个精确可信输入候选执行本地聚焦。",
+                "focus_input",
+            )
         canonical = self._semantic_class(
             element.meaning,
             element.label,

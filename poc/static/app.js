@@ -504,6 +504,13 @@ async function refreshDevice() {
   renderStatus();
 }
 
+function refreshPreview() {
+  const preview = document.querySelector("#phonePreview");
+  if (preview && state.deviceId) {
+    preview.src = `/api/preview.jpg?device_id=${encodeURIComponent(state.deviceId)}&t=${Date.now()}`;
+  }
+}
+
 async function pollVisionStage() {
   try {
     state.device = await api("/api/device");
@@ -954,10 +961,8 @@ async function init() {
     await restoreActiveSession();
     if (!state.supervisedSession) await restoreCapabilityTrial();
     render();
-    setInterval(() => {
-      const preview = document.querySelector("#phonePreview");
-      if (preview) preview.src = `/api/preview.jpg?t=${Date.now()}`;
-    }, 700);
+    refreshPreview();
+    setInterval(refreshPreview, 700);
     setInterval(() => refreshDevice().catch(() => {}), 3000);
   } catch (error) {
     toast(`连接本地服务失败：${error.message}`, true);
@@ -990,6 +995,7 @@ document.querySelector("#deviceId").addEventListener("change", async event => {
   await restoreActiveSession();
   if (!state.supervisedSession) await restoreCapabilityTrial();
   render();
+  refreshPreview();
 });
 document.querySelector("#agentText").addEventListener("keydown", event => {
   if ((event.ctrlKey || event.metaKey) && event.key === "Enter") startSupervisedAgent();

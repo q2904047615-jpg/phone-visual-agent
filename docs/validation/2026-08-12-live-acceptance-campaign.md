@@ -169,7 +169,13 @@
   `>`、置信度 `0.88`；本地策略返回 `allowed=true`、canonical class `forward`。确认作用域绑定
   task `fbf74d7207794b6585fdaed44b8e8481`、revision `1`、subgoal `navigate_forward`、observation
   `obs_d7f2e465960348e4814f076cb08a35eb`、fingerprint `f4819511ab76ccdffe59`，物理动作数为0。
-  未经用户对该精确当前动作的新确认，不执行前进，也不复用旧会话或旧确认。
+  用户随后只确认该精确作用域，服务器重新采集并绑定同一 `nav_forward`
+  候选后，机械臂只执行1次物理点击。
+- 动作后前后指纹从 `3455d2bdf572836997da` 变为 `65669c0ac5c55b7cd89e`；
+  `verification_step_1.json` 记录 `matched=true`、`physical_actions=1`。新四帧画面显示
+  “swipe 验收通过”和“蓝色终点 · 滑动通过”；Qwen 返回 `finished`，DeepSeek revision 3
+  将完成条件标记为已满足，会话终态 `succeeded`。证据目录为
+  `poc/output/web/generic_supervised_20260813_150610_b74dc869/`。未执行第二次点击。
 
 ## 完成判定
 

@@ -11,7 +11,7 @@ const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v
 const requests = {
   start: [], approveRisk: [], confirm: [], next: [], auto: [], pause: [], cancel: [], stop: [],
   capabilityStart: [], capabilityConfirm: [], capabilityPromote: [], capabilityCancel: [],
-  restore: [],
+  restore: [], previewDevices: [],
 };
 
 function clone(value) {
@@ -256,6 +256,7 @@ function createServer({ devices = null, activeSessions = [], restoredSessions = 
       return;
     }
     if (url.pathname === "/api/preview.jpg") {
+      requests.previewDevices.push(url.searchParams.get("device_id"));
       response.writeHead(200, { "Content-Type": "image/png" });
       response.end(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
       return;
@@ -410,18 +411,26 @@ test("multi-device console restores only the selected device session", { timeout
   try {
     await page.locator("#goalSummary").getByText("会话 · session-phone-01", { exact: true }).waitFor({ timeout: 5000 });
     assert.deepEqual(requests.restore, ["session-phone-01"]);
+    await page.waitForFunction(() => document.querySelector("#phonePreview")?.complete);
+    assert.equal(requests.previewDevices.at(-1), "phone-01");
 
+    const phoneTwoPreview = page.waitForRequest(
+      request => new URL(request.url()).pathname === "/api/preview.jpg"
+        && new URL(request.url()).searchParams.get("device_id") === "phone-02",
+    );
     await page.locator("#deviceId").evaluate(select => {
       select.disabled = false;
       select.value = "phone-02";
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
+    await phoneTwoPreview;
 
     await page.waitForTimeout(500);
     assert.deepEqual(requests.restore, ["session-phone-01", "session-phone-02"]);
     assert.match(await page.locator("#goalSummary").innerText(), /会话 · session-phone-02/);
     assert.equal(await page.locator("#deviceId").inputValue(), "phone-02");
     assert.match(await page.locator("#goalSummary").innerText(), /phone-02/);
+    assert.equal(requests.previewDevices.at(-1), "phone-02");
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));

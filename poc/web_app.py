@@ -3409,20 +3409,29 @@ def stop_all(
 
 
 @app.get("/api/preview.jpg")
-def preview_jpg() -> Response:
+def preview_jpg(device_id: str) -> Response:
     try:
-        content = runtime.controller.capture_preview()
+        controller = runtime.controller_for_device(device_id)
+    except UniversalAgentOrchestratorError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        content = controller.capture_preview()
     except Exception:
         content = MockRobotController().capture_preview()
     return Response(content, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/preview.mjpg")
-def preview_mjpg() -> StreamingResponse:
+def preview_mjpg(device_id: str) -> StreamingResponse:
+    try:
+        controller = runtime.controller_for_device(device_id)
+    except UniversalAgentOrchestratorError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     def generate() -> Iterator[bytes]:
         while True:
             try:
-                frame = runtime.controller.capture_preview(quality=68)
+                frame = controller.capture_preview(quality=68)
             except Exception:
                 frame = MockRobotController().capture_preview(quality=68)
             yield (

@@ -5631,6 +5631,7 @@ class ApiEndToEndTests(unittest.TestCase):
                 "params": {},
             },
         )
+
         self.assertEqual(created.status_code, 201, created.text)
         task = created.json()
         device_id = web_app.runtime.device_controllers.default_device_id
@@ -5655,6 +5656,44 @@ class ApiEndToEndTests(unittest.TestCase):
             web_app.runtime.store.get(task["id"])["status"],
             "awaiting_confirmation",
         )
+
+    def test_preview_requires_and_uses_exact_registered_device(self) -> None:
+        class PreviewController:
+            def __init__(self, marker: bytes):
+                self.marker = marker
+                self.calls = []
+
+            def capture_preview(self, quality=76):
+                self.calls.append(quality)
+                return b"jpeg-" + self.marker
+
+        phone_a = PreviewController(b"phone-a")
+        phone_b = PreviewController(b"phone-b")
+
+        def controller_for_device(device_id):
+            controllers = {"phone-a": phone_a, "phone-b": phone_b}
+            if device_id not in controllers:
+                raise web_app.UniversalAgentOrchestratorError(
+                    f"device_id 未登记或未启用：{device_id}。"
+                )
+            return controllers[device_id]
+
+        with patch.object(
+            web_app.runtime,
+            "controller_for_device",
+            side_effect=controller_for_device,
+        ):
+            missing = self.client.get("/api/preview.jpg")
+            unknown = self.client.get("/api/preview.jpg?device_id=phone-x")
+            first = self.client.get("/api/preview.jpg?device_id=phone-a")
+            second = self.client.get("/api/preview.jpg?device_id=phone-b")
+
+        self.assertEqual(422, missing.status_code)
+        self.assertEqual(404, unknown.status_code)
+        self.assertEqual(b"jpeg-phone-a", first.content)
+        self.assertEqual(b"jpeg-phone-b", second.content)
+        self.assertEqual([76], phone_a.calls)
+        self.assertEqual([76], phone_b.calls)
 
     def test_capability_trial_blocks_already_queued_legacy_worker_task(self) -> None:
         from universal_agent_orchestrator import DeviceTaskRegistry

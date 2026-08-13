@@ -477,7 +477,16 @@ class TrustedObservation:
             )
         fingerprint = _local_frame_fingerprint(frames[selected].convert("RGB"))
         scene.validate()
-        if not scene.stable or float(scene.confidence) < MIN_TARGET_CONFIDENCE:
+        canonical_scene, aliases, conflicts = _canonicalize_trusted_scene(scene)
+        target_local_candidate = _trusted_target_local_candidate(
+            canonical_scene,
+            conflicts,
+        )
+        if not scene.stable or (
+            float(scene.confidence) < MIN_TARGET_CONFIDENCE
+            and target_local_candidate is None
+            and not canonical_scene.trusted_completion_evidence()
+        ):
             raise VisionAgentError("页面不稳定或整体置信度不足，不能建立可信候选。")
         if scene.fingerprint != fingerprint:
             raise VisionAgentError(
@@ -486,7 +495,6 @@ class TrustedObservation:
         resolved_id = observation_id or f"obs_{uuid.uuid4().hex}"
         if not OBSERVATION_ID_PATTERN.fullmatch(resolved_id):
             raise VisionAgentError(f"observation_id 格式无效：{resolved_id!r}")
-        canonical_scene, aliases, conflicts = _canonicalize_trusted_scene(scene)
         result = cls(
             observation_id=resolved_id,
             device_id=str(device_id).strip(),
@@ -529,6 +537,14 @@ class TrustedObservation:
 
     def get_candidate(self, element_id: str) -> UIElement:
         return self.scene.get_element(element_id)
+
+    def target_local_candidate(self) -> UIElement | None:
+        """Return the sole conflict-free goal element usable on a dynamic page."""
+
+        return _trusted_target_local_candidate(
+            self.scene,
+            self.candidate_conflicts,
+        )
 
     def prompt_dict(self) -> dict[str, Any]:
         candidates: list[dict[str, Any]] = []
@@ -844,6 +860,20 @@ class QwenVisualDecision:
                 self.completion_evidence_element_ids,
                 self.trusted_observation,
             )
+            if float(self.trusted_observation.scene.confidence) < MIN_TARGET_CONFIDENCE:
+                allowed_evidence = {
+                    item.element_id
+                    for item in self.trusted_observation.scene.trusted_completion_evidence()
+                }
+                if (
+                    "scene" in self.completion_evidence_element_ids
+                    or not set(self.completion_evidence_element_ids).issubset(
+                        allowed_evidence
+                    )
+                ):
+                    raise GenericStepPlanningError(
+                        "低整页置信度的finished只能引用高置信只读目标证据，不能引用scene。"
+                    )
 
     def validate_fresh(
         self,
@@ -1263,6 +1293,13 @@ def _decision_prompt(
 }}
 
 严格规则：
+0. 必须先做完成判定，再考虑动作：逐项比较current_subgoal.completion_conditions与可信scene摘要、
+   overlays和候选证据。若当前scene已语义证明目标状态/界面已经存在，必须finished；此时即使还有
+   meaning含open/enter/start/launch或label像入口的候选，也禁止再点击它。只有当前证据尚未完成目标
+   才能考虑action；不要把当前界面的标题、数量指示或已选中tab误判为“打开当前界面”的按钮。
+   role=container/dialog的候选是只读完成证据，任何情况下都禁止写进next_action；它们只能被
+   completion_evidence_element_ids引用。一个数量指示加一个可见卡片/列表容器足以证明列表已打开时，
+   应finished并引用这些候选ID。
 1. 每轮最多一个next_action，禁止actions、steps、plan、后续动作或裸坐标。
 2. page_state只是语义描述，禁止elements、bounds或任何可执行候选字段。
 3. tap_semantic/dismiss_overlay/input_verified_text/long_press只能引用可信观察中现有且置信度>=0.72的唯一element_id；
@@ -1273,7 +1310,8 @@ def _decision_prompt(
    swipe只返回direction=up|down|left|right，绝对不要返回distance；距离由本地已校准控制器决定。
 7. 找不到可靠候选、文字不完全一致、候选不唯一、画面模糊或置信度不足时必须blocked。
 8. finished只能用completion_evidence_element_ids引用可信候选ID，或用scene引用可信scene摘要；
-   禁止自由编写完成证据。
+   禁止自由编写完成证据。若scene_confidence<0.72，只能引用goal_relevant=true且role为
+   container/dialog的高置信候选ID，禁止引用scene；这些只读证据不能用于任何动作。
 9. confirmation_gate没有允许外部状态动作时必须blocked；你不能自行改写或批准确认门。
 10. task_id/device_id/revision/observation_id/fingerprint必须逐字复制；任何旧值都会被拒绝。
 11. expected_result只描述一个动作后可由新画面验证的变化，且只能按需使用：
@@ -1310,6 +1348,9 @@ def _decision_retry_prompt(
 - 必须逐字复制task_id={context.task_id}、device_id={context.device_id}、revision={context.revision}、
   observation_id={observation.observation_id}、fingerprint={observation.fingerprint}。
 - page_state只能包含foreground_app_id、screen_id、summary、overlays，禁止elements。
+- 先比较current_subgoal.completion_conditions与可信scene；当前摘要或候选证据已经语义证明目标界面/
+  状态存在时必须finished，禁止再选open/enter/start/launch类动作，也禁止把标题、计数或已选tab当入口。
+- role=container/dialog只能作为finished的completion_evidence_element_ids，绝不能写进next_action。
 - action只能选择可信候选已有element_id并复制原始字段与bounds；不能新建元素。
 - 找不到逐字匹配且唯一的可信候选就blocked；finished只引用可信证据ID或scene。
 - confirmation_gate未允许外部动作时blocked；每轮只允许一个动作，不要计划后续步骤。
@@ -1332,15 +1373,37 @@ def _decision_retry_prompt(
 - 如果你能从当前可信观察选择一个动作，必须使用A并明确写status="action"；绝不能保留B/C的status。
 - 如果使用B或C，绝不能携带任何next_action或target_region。不要混合三种形状。
 
-必须返回这个形状，并逐字保留身份字段：
+下面是三种互斥形状的完整骨架。身份字段必须逐字保留；只能选择其中一个，不能混合：
+
+A. 当前可信观察明确支持一个元素动作时：
+{{"protocol_version":"{QWEN_VISUAL_DECISION_PROTOCOL_VERSION}",
+"task_id":"{context.task_id}","device_id":"{context.device_id}","revision":{context.revision},
+"observation_id":"{observation.observation_id}","fingerprint":"{observation.fingerprint}",
+"page_state":{{"foreground_app_id":"unknown","screen_id":"unknown","summary":"短描述","overlays":[]}},
+"status":"action","next_action":{{"kind":"从允许动作中选择","element_id":"逐字复制可信候选ID"}},
+"target_region":{{"kind":"element","element_id":"逐字复制可信候选ID","bounds":[0,0,0,0],"description":"逐字复制可信候选meaning"}},
+"expected_result":{{"scene_changed":true}},"confidence":0.0,"reason":"当前画面依据",
+"completion_evidence_element_ids":[]}}
+其中两个element_id必须相同且来自本轮可信观察，bounds必须逐项复制该候选；
+next_action还必须按动作类型补齐主提示要求的text/duration_ms/source/destination/direction字段。
+
+B. 无可靠动作时：
 {{"protocol_version":"{QWEN_VISUAL_DECISION_PROTOCOL_VERSION}",
 "task_id":"{context.task_id}","device_id":"{context.device_id}","revision":{context.revision},
 "observation_id":"{observation.observation_id}","fingerprint":"{observation.fingerprint}",
 "page_state":{{"foreground_app_id":"unknown","screen_id":"unknown","summary":"短描述","overlays":[]}},
 "status":"blocked","next_action":null,"target_region":null,"expected_result":{{}},
 "confidence":0.0,"reason":"安全停止原因","completion_evidence_element_ids":[]}}
-上方JSON只是B形状示例。若画面明确支持动作，不要复制其blocked状态，必须改成完整A形状；
-若已经满足目标才使用完整C形状。仍不得增加任何键。
+
+C. 当前可信画面已经证明目标完成时：
+{{"protocol_version":"{QWEN_VISUAL_DECISION_PROTOCOL_VERSION}",
+"task_id":"{context.task_id}","device_id":"{context.device_id}","revision":{context.revision},
+"observation_id":"{observation.observation_id}","fingerprint":"{observation.fingerprint}",
+"page_state":{{"foreground_app_id":"unknown","screen_id":"unknown","summary":"短描述","overlays":[]}},
+"status":"finished","next_action":null,"target_region":null,"expected_result":{{}},
+"confidence":0.0,"reason":"当前可信证据","completion_evidence_element_ids":["scene"]}}
+
+这些只是结构骨架。不得复制不存在的候选、不得使用骨架中的占位文字或零bounds，仍不得增加任何键。
 """
 
 
@@ -1472,13 +1535,22 @@ def _parse_decision(
             raise GenericStepPlanningError("confidence 不能是布尔值。")
         confidence = min(float(raw_confidence), float(observation.scene.confidence))
         if action and action.action in SINGLE_ELEMENT_ACTIONS:
+            element = observation.get_candidate(
+                str(action.params.get("element_id") or "")
+            )
+            local_candidate = observation.target_local_candidate()
+            confidence_ceiling = (
+                float(element.confidence)
+                if local_candidate is not None
+                and local_candidate.element_id == element.element_id
+                else min(
+                    float(observation.scene.confidence),
+                    float(element.confidence),
+                )
+            )
             confidence = min(
-                confidence,
-                float(
-                    observation.get_candidate(
-                        str(action.params.get("element_id") or "")
-                    ).confidence
-                ),
+                float(raw_confidence),
+                confidence_ceiling,
             )
         elif action and action.action == "drag":
             confidence = min(
@@ -2051,6 +2123,28 @@ def _canonicalize_trusted_scene(
         tuple(sorted(aliases)),
         tuple(conflicts),
     )
+
+
+def _trusted_target_local_candidate(
+    scene: UIScene,
+    conflicts: tuple[dict[str, Any], ...],
+) -> UIElement | None:
+    """Resolve one strong goal element and fail closed on unresolved overlap."""
+
+    candidate = scene.unique_trusted_goal_element()
+    if candidate is None:
+        return None
+    for conflict in conflicts:
+        conflict_ids = tuple(str(item) for item in conflict.get("element_ids") or ())
+        if candidate.element_id not in conflict_ids:
+            continue
+        if (
+            conflict.get("kind") == "duplicate_visual_object_collapsed"
+            and conflict.get("canonical_element_id") == candidate.element_id
+        ):
+            continue
+        return None
+    return candidate
 
 
 def _canonical_element_rank(element: UIElement) -> tuple[int, float, float]:

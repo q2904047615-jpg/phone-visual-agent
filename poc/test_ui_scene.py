@@ -34,13 +34,19 @@ def element(
     )
 
 
-def scene(*elements: UIElement, app_id="calculator", screen_id="home", fingerprint="a"):
+def scene(
+    *elements: UIElement,
+    app_id="calculator",
+    screen_id="home",
+    fingerprint="a",
+    confidence=0.95,
+):
     return UIScene(
         app_id=app_id,
         screen_id=screen_id,
         summary="test",
         elements=tuple(elements),
-        confidence=0.95,
+        confidence=confidence,
         stable=True,
         fingerprint=fingerprint,
     )
@@ -128,6 +134,69 @@ class UISceneTests(unittest.TestCase):
         resolved = UniversalActionController().resolve_one(action, current)
         self.assertEqual(resolved.target_element_id, "five")
         self.assertEqual(resolved.normalized_point, (0.30000000000000004, 0.4))
+
+    def test_low_scene_confidence_allows_exact_unique_goal_element_only(self) -> None:
+        target = element(
+            "tab-list",
+            "open_tab_list",
+            states={"goal_relevant": True},
+        )
+        current = scene(target, confidence=0.6)
+        action = SemanticAction(
+            node_id="open-tabs",
+            action="tap_semantic",
+            params={"element_id": "tab-list", "target": "open_tab_list"},
+        )
+
+        resolved = UniversalActionController().resolve_one(action, current)
+
+        self.assertEqual("tab-list", resolved.target_element_id)
+
+    def test_low_scene_confidence_rejects_screen_wide_action(self) -> None:
+        current = scene(
+            element("tab-list", "open_tab_list", states={"goal_relevant": True}),
+            confidence=0.6,
+        )
+        action = SemanticAction(
+            node_id="scroll",
+            action="swipe",
+            params={"direction": "up"},
+        )
+
+        with self.assertRaisesRegex(UniversalActionError, "局部证据"):
+            UniversalActionController().resolve_one(action, current)
+
+    def test_target_local_candidate_rejects_overlapping_strong_element(self) -> None:
+        target = element(
+            "tab-list",
+            "open_tab_list",
+            states={"goal_relevant": True},
+        )
+        conflicting = element("other", "close_tab")
+
+        self.assertIsNone(
+            scene(target, conflicting, confidence=0.6).unique_trusted_goal_element()
+        )
+
+    def test_completion_evidence_never_makes_screen_action_executable(self) -> None:
+        evidence = element(
+            "visible-count",
+            "four_tabs_visible",
+            role="container",
+            states={"goal_relevant": True},
+        )
+        current = scene(evidence, confidence=0.6)
+        self.assertEqual((evidence,), current.trusted_completion_evidence())
+
+        with self.assertRaisesRegex(UniversalActionError, "局部证据"):
+            UniversalActionController().resolve_one(
+                SemanticAction(
+                    node_id="scroll",
+                    action="swipe",
+                    params={"direction": "up"},
+                ),
+                current,
+            )
 
     def test_container_is_valid_scene_structure_but_not_clickable(self) -> None:
         content = element("content", "video_content", role="container")

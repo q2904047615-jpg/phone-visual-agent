@@ -2046,8 +2046,22 @@ class PhaseOneNavigationPolicy:
             scene.validate()
         except (AttributeError, UISceneError) as exc:
             return self._deny(f"可信页面场景无效：{exc}")
-        if not scene.stable or float(scene.confidence) < self.min_confidence:
+        if not scene.stable:
             return self._deny("页面不稳定或整体置信度不足。")
+        if float(scene.confidence) < self.min_confidence:
+            local_candidate = trusted_observation.target_local_candidate()
+            action_element_id = str(action.params.get("element_id") or "").strip()
+            if (
+                action_kind not in {
+                    "tap_semantic",
+                    "dismiss_overlay",
+                    "input_verified_text",
+                    "long_press",
+                }
+                or local_candidate is None
+                or local_candidate.element_id != action_element_id
+            ):
+                return self._deny("页面整体置信度不足，且没有唯一可信的目标局部证据。")
         if scene.fingerprint != observation_fingerprint:
             return self._deny("页面 fingerprint 与可信观察不一致。")
         if float(self._value(decision, "confidence", 0.0)) < self.min_confidence:

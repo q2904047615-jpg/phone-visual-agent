@@ -138,6 +138,67 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(2, provider.calls)
         self.assertEqual(provider.call_options["max_attempts"], 2)
 
+    def test_low_scene_confidence_accepts_one_strong_goal_element_only(self) -> None:
+        payload = scene_payload()
+        payload["confidence"] = 0.6
+        payload["elements"][0]["states"]["goal_relevant"] = True
+        provider = FakeProvider(payload)
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "点击唯一清晰目标"},
+        )
+
+        self.assertEqual("e1", scene.unique_trusted_goal_element().element_id)
+        self.assertEqual("unique_goal_element", observer.last_diagnostics["confidence_basis"])
+
+    def test_low_scene_confidence_rejects_multiple_strong_goal_elements(self) -> None:
+        payload = scene_payload()
+        payload["confidence"] = 0.6
+        payload["elements"][0]["states"]["goal_relevant"] = True
+        second = dict(payload["elements"][0])
+        second.update({"element_id": "e2", "bounds": [300, 600, 460, 760]})
+        payload["elements"].append(second)
+
+        with self.assertRaisesRegex(VisionAgentError, "整体置信度不足"):
+            GenericSceneObserver(FakeProvider(payload)).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "点击目标"},
+            )
+
+    def test_low_scene_confidence_rejects_low_confidence_goal_element(self) -> None:
+        payload = scene_payload()
+        payload["confidence"] = 0.6
+        payload["elements"][0]["confidence"] = 0.7
+        payload["elements"][0]["states"]["goal_relevant"] = True
+
+        with self.assertRaisesRegex(VisionAgentError, "整体置信度不足"):
+            GenericSceneObserver(FakeProvider(payload)).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "点击目标"},
+            )
+
+    def test_low_scene_confidence_accepts_read_only_completion_evidence(self) -> None:
+        payload = scene_payload()
+        payload["confidence"] = 0.6
+        payload["elements"][0].update(
+            {
+                "role": "container",
+                "meaning": "visible_result_count",
+                "states": {"goal_relevant": True},
+            }
+        )
+        observer = GenericSceneObserver(FakeProvider(payload))
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "确认结果已显示"},
+        )
+
+        self.assertEqual(("e1",), tuple(x.element_id for x in scene.trusted_completion_evidence()))
+        self.assertEqual("completion_evidence_only", observer.last_diagnostics["confidence_basis"])
+
     def test_unstable_frames_do_not_call_model(self) -> None:
         provider = FakeProvider(scene_payload())
         frames = stable_frames()
@@ -197,7 +258,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         scene = observer.observe(frames=stable_frames())
         self.assertEqual(scene.foreground_app_id, "calculator")
         self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [800, 600])
+        self.assertEqual(provider.max_tokens_seen, [800, 800])
         self.assertTrue(observer.last_diagnostics["compact_retry_used"])
         self.assertEqual(observer.last_diagnostics["model_calls"], 2)
         self.assertEqual(
@@ -265,7 +326,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 goal_context={"objective": "查找目标按钮"},
             )
         self.assertEqual(provider.calls, 3)
-        self.assertEqual(provider.max_tokens_seen, [800, 600, 1200])
+        self.assertEqual(provider.max_tokens_seen, [800, 800, 1200])
         self.assertTrue(observer.last_diagnostics["format_retry_used"])
         self.assertFalse(observer.last_diagnostics["repair_retry_success"])
 

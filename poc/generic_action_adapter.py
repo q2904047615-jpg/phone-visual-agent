@@ -196,6 +196,28 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError("摄像头返回残缺画面，停止单步动作。")
         return frame
 
+    def _capture_confirmation_frames(
+        self,
+        *,
+        evidence_dir: Path | None,
+        prefix: str,
+    ) -> tuple[list[Image.Image], tuple[str, ...]]:
+        """Capture four fresh local frames without re-interpreting the scene."""
+
+        frames: list[Image.Image] = []
+        for index in range(4):
+            frames.append(self._capture_frame())
+            if index < 3 and self.frame_interval:
+                time.sleep(self.frame_interval)
+        stability = measure_local_stability(frames)
+        paths = self._save_frames(frames, evidence_dir, prefix)
+        if not stability.stable:
+            raise GenericActionAdapterError(
+                f"确认前本地多帧稳定性检查未通过：{stability.reason}",
+                evidence=paths,
+            )
+        return frames, paths
+
     def _capture_scene_once(
         self,
         goal: GenericIntentDraft,
@@ -448,13 +470,12 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError("必须明确确认当前这一个语义动作。")
         safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
         evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
-        before, before_frames, before_paths = self.capture_scene(
-            goal,
-            evidence_dir=evidence_dir,
-            prefix=f"{evidence_prefix}_before",
-        )
         local_frame_identity_verified = False
         if planned_frames:
+            before_frames, before_paths = self._capture_confirmation_frames(
+                evidence_dir=evidence_dir,
+                prefix=f"{evidence_prefix}_before",
+            )
             frame_delta = self._confirmation_frame_delta(planned_frames, before_frames)
             if frame_delta > self.confirmation_frame_delta_max:
                 raise GenericActionAdapterError(
@@ -463,6 +484,13 @@ class GenericSingleActionAdapter:
                     evidence=before_paths,
                 )
             local_frame_identity_verified = True
+            before = planned_scene
+        else:
+            before, before_frames, before_paths = self.capture_scene(
+                goal,
+                evidence_dir=evidence_dir,
+                prefix=f"{evidence_prefix}_before",
+            )
         try:
             rebound = self._rebind_action(
                 requested_action,

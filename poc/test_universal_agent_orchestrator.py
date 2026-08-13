@@ -45,6 +45,7 @@ def _scene(
     role: str = "button",
     bounds: tuple[float, float, float, float] = (0.1, 0.2, 0.5, 0.3),
     confidence: float = 0.96,
+    scene_confidence: float = 0.95,
     states: dict | None = None,
 ) -> UIScene:
     return UIScene(
@@ -64,7 +65,7 @@ def _scene(
             ),
         ),
         stable=True,
-        confidence=0.95,
+        confidence=scene_confidence,
         fingerprint=fingerprint,
     )
 
@@ -104,6 +105,7 @@ def _decision(
         scene=scene,
         candidate_conflicts=(),
     )
+    observation.target_local_candidate = scene.unique_trusted_goal_element
     return SimpleNamespace(
         task_id="task-1",
         device_id="device-1",
@@ -549,6 +551,40 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         self.assertTrue(result.allowed)
         self.assertEqual("open", result.canonical_class)
+
+    def test_low_scene_confidence_allows_exact_unique_goal_element_tap(self) -> None:
+        scene = _scene(
+            meaning="open_tab_list",
+            label="窗口",
+            role="button",
+            states={"goal_relevant": True},
+            scene_confidence=0.6,
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+
+    def test_low_scene_confidence_still_rejects_screen_action(self) -> None:
+        scene = _scene(
+            states={"goal_relevant": True},
+            scene_confidence=0.6,
+        )
+        decision = _decision(scene, action_kind="swipe")
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("局部证据", result.reason)
 
     def test_allows_generic_forward_navigation_tap(self) -> None:
         scene = _scene(

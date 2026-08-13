@@ -720,9 +720,8 @@ class GenericActionAdapterTests(unittest.TestCase):
 
     def test_matching_local_frames_override_model_screen_id_wording_drift(self):
         planned = scene("planned", screen_id="generic_action_verification_page")
-        fresh = scene("before", screen_id="universal_action_verification_page")
         after = scene("after", screen_id="blue_endpoint_visible")
-        observer = FakeSceneObserver([fresh, after])
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
         capture = SequenceCapture(["gray"] * 4 + ["white"] * 4)
         adapter = GenericSingleActionAdapter(
@@ -748,6 +747,38 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual([("swipe", "up")], robot.actions)
         self.assertEqual(1, result.physical_actions)
+        self.assertEqual(1, observer.calls)
+
+    def test_matching_planned_frames_do_not_require_second_model_interpretation(self):
+        planned = scene("planned")
+        after = scene("after", screen_id="app_home", element_id="after")
+        observer = FakeSceneObserver([after])
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="generic_step_1",
+                action="tap_semantic",
+                params={"element_id": "e1", "target": "app_icon"},
+            ),
+            planned_scene=planned,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("tap", 300, 400)], robot.actions)
+        self.assertEqual(1, observer.calls)
 
     def test_changed_local_frames_stop_even_when_model_screen_id_matches(self):
         planned = scene("planned", screen_id="same_screen")

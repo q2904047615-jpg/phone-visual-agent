@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from PIL import Image
@@ -486,6 +487,41 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIs(decision.trusted_observation, self.observation)
         self.assertNotIn("elements", decision.page_state.to_dict())
 
+    def test_low_scene_confidence_allows_only_unique_strong_goal_element(self) -> None:
+        low_scene = replace(
+            scene_for(self.frames),
+            confidence=0.6,
+        )
+        observation = trusted_observation(self.frames, scene=low_scene)
+        payload = action_payload(self.context, observation)
+
+        _observer, decision = self.decide(
+            FakeProvider(payload),
+            observation=observation,
+        )
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual(0.92, decision.confidence)
+        self.assertEqual(
+            "settings_icon",
+            observation.target_local_candidate().element_id,
+        )
+
+    def test_low_scene_confidence_rejects_multiple_goal_elements(self) -> None:
+        second = replace(
+            launcher_elements()[1],
+            element_id="other_goal",
+            states={"goal_relevant": True},
+        )
+        low_scene = replace(
+            scene_for(self.frames),
+            elements=(launcher_elements()[0], second),
+            confidence=0.6,
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "整体置信度不足"):
+            trusted_observation(self.frames, scene=low_scene)
+
     def test_action_semantic_fields_are_canonicalized_from_trusted_candidate(self) -> None:
         payload = action_payload(self.context, self.observation)
         payload["next_action"].update(
@@ -541,6 +577,20 @@ class QwenVisualDecisionTests(unittest.TestCase):
             "confirmation_gate",
         ):
             self.assertIn(field, parsed.to_dict())
+
+    def test_prompt_requires_completion_check_before_any_action(self) -> None:
+        from qwen_visual_decision import _decision_prompt
+
+        prompt = _decision_prompt(
+            QwenTaskContext.from_dict(self.context),
+            self.observation,
+            decision_number=1,
+            available_action_kinds=frozenset({"tap_semantic"}),
+        )
+
+        self.assertIn("必须先做完成判定", prompt)
+        self.assertIn("禁止再点击", prompt)
+        self.assertIn("已选中tab", prompt)
 
     def test_forged_mars_element_and_self_authored_page_state_are_rejected(self) -> None:
         forged = action_payload(self.context, self.observation)
@@ -1276,6 +1326,12 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn('status="finished"', prompt)
         self.assertIn("不要混合三种形状", prompt)
         self.assertIn("绝不能保留B/C的status", prompt)
+        self.assertIn('"status":"action"', prompt)
+        self.assertIn('"element_id":"逐字复制可信候选ID"', prompt)
+        self.assertIn('"target_region":{"kind":"element"', prompt)
+        self.assertIn('"expected_result":{"scene_changed":true}', prompt)
+        self.assertIn('"status":"blocked","next_action":null', prompt)
+        self.assertIn('"status":"finished","next_action":null', prompt)
 
     def test_unstable_real_page_sequence_does_not_call_qwen(self) -> None:
         overlay = load_replay_image("douyin_digit_local_input_com.jpg")

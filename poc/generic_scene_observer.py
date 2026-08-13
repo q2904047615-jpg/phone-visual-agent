@@ -27,7 +27,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 GENERIC_SCENE_OBSERVER_VERSION = "2026-08-10-generic-scene-observer-v5"
 COMPACT_OUTPUT_TOKENS = 800
-COMPACT_RETRY_TOKENS = 600
+COMPACT_RETRY_TOKENS = 800
 TARGETED_OUTPUT_TOKENS = 1200
 OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 12
@@ -261,7 +261,34 @@ class GenericSceneObserver:
                     self._set_stage("parsing_compact_retry")
                     scene = _parse_scene(raw, fingerprint=fingerprint)
 
-            if not scene.stable or float(scene.confidence) < MIN_TARGET_CONFIDENCE:
+            target_local_candidate = scene.unique_trusted_goal_element()
+            completion_evidence = scene.trusted_completion_evidence()
+            if not scene.stable or (
+                float(scene.confidence) < MIN_TARGET_CONFIDENCE
+                and target_local_candidate is None
+                and not completion_evidence
+            ):
+                self.last_diagnostics = {
+                    "observer_version": GENERIC_SCENE_OBSERVER_VERSION,
+                    "strategy": "compact_then_targeted_on_demand",
+                    "model_calls": model_calls,
+                    "compact_retry_used": compact_retry_used,
+                    "format_retry_used": format_retry_used,
+                    "targeted_refinement_used": targeted_refinement_used,
+                    "local_stability": stability.to_dict(),
+                    "scene_confidence": float(scene.confidence),
+                    "candidate_summary": [
+                        {
+                            "element_id": item.element_id,
+                            "role": item.role,
+                            "meaning": item.meaning,
+                            "label": item.label,
+                            "confidence": float(item.confidence),
+                            "goal_relevant": item.states.get("goal_relevant") is True,
+                        }
+                        for item in scene.elements
+                    ],
+                }
                 raise VisionAgentError(
                     "页面不稳定或整体置信度不足，不能建立可信候选。"
                 )
@@ -280,6 +307,13 @@ class GenericSceneObserver:
                 "elapsed_seconds": round(time.perf_counter() - started, 3),
                 "local_stability": stability.to_dict(),
                 "selected_frame_index": selected_frame_index,
+                "confidence_basis": (
+                    "scene"
+                    if float(scene.confidence) >= MIN_TARGET_CONFIDENCE
+                    else "unique_goal_element"
+                    if target_local_candidate is not None
+                    else "completion_evidence_only"
+                ),
                 "frame_sharpness_scores": [
                     round(value, 3) for value in sharpness_scores
                 ],
@@ -387,7 +421,8 @@ def _compact_retry_prompt(context: dict[str, Any], error: Exception) -> str:
 上一次快速观察超时或JSON不完整，控制器没有执行任何动作。请重新独立观察同一张图。
 目标上下文：{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
 只返回一个最小、完整、可解析JSON；不要转义成字符串，不要输出reasoning或说明文字。
-elements最多6个。没有把握就写unknown和空elements，禁止猜。
+summary最多40字，elements最多2个，evidence每个元素最多1条且最多30字；禁止罗列非目标内容。
+没有把握就写unknown和空elements，禁止猜。务必在token耗尽前闭合全部括号。
 格式必须是：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"短描述","elements":[],"overlays":[],

@@ -7,6 +7,14 @@ from typing import Any, Iterable
 UI_SCENE_PROTOCOL_VERSION = "2026-08-10-ui-scene-v2"
 MIN_TARGET_CONFIDENCE = 0.72
 
+# A low-confidence dynamic background must never authorize a screen-wide action.
+# It may only expose one locally trustworthy, goal-relevant element for the
+# downstream exact-element gates.
+TARGET_LOCAL_ACTION_ROLES = frozenset(
+    {"button", "icon", "input", "text", "tab", "toggle", "image", "list_item"}
+)
+COMPLETION_EVIDENCE_ROLES = frozenset({"container", "dialog"})
+
 ALLOWED_ROLES = {
     "button",
     "icon",
@@ -227,6 +235,64 @@ class UIScene:
             return element
         raise UISceneError(f"当前场景不存在元素：{expected}")
 
+    def unique_trusted_goal_element(
+        self,
+        *,
+        min_confidence: float = MIN_TARGET_CONFIDENCE,
+    ) -> UIElement | None:
+        """Return the sole strong goal element without trusting the whole scene.
+
+        This is deliberately narrower than ``resolve_unique``: it only supports
+        exact element-bound actions.  Screen actions still require trustworthy
+        scene-level confidence in the controller policy.
+        """
+
+        self.validate()
+        matches = tuple(
+            element
+            for element in self.elements
+            if element.role in TARGET_LOCAL_ACTION_ROLES
+            and element.states.get("goal_relevant") is True
+            and element.states.get("enabled") is not False
+            and element.states.get("visible") is not False
+            and float(element.confidence) >= min_confidence
+        )
+        if len(matches) != 1:
+            return None
+        candidate = matches[0]
+        for other in self.elements:
+            if other.element_id == candidate.element_id:
+                continue
+            if (
+                other.states.get("goal_relevant") is True
+                and float(other.confidence) >= min_confidence
+            ):
+                return None
+            if (
+                other.role in TARGET_LOCAL_ACTION_ROLES
+                and float(other.confidence) >= min_confidence
+                and _bounds_iou(candidate.bounds, other.bounds) >= 0.5
+            ):
+                return None
+        return candidate
+
+    def trusted_completion_evidence(
+        self,
+        *,
+        min_confidence: float = MIN_TARGET_CONFIDENCE,
+    ) -> tuple[UIElement, ...]:
+        """Return strong read-only facts; these never authorize an action."""
+
+        self.validate()
+        return tuple(
+            element
+            for element in self.elements
+            if element.role in COMPLETION_EVIDENCE_ROLES
+            and element.states.get("goal_relevant") is True
+            and element.states.get("visible") is not False
+            and float(element.confidence) >= min_confidence
+        )
+
     def resolve_unique(
         self,
         *,
@@ -427,6 +493,25 @@ def _normalize_foreground_app_id(app_id: str, screen_id: str) -> str:
         return "launcher"
     normalized_app = app_id.strip().lower()
     return normalized_app or "unknown"
+
+
+def _bounds_iou(
+    left_bounds: tuple[float, float, float, float],
+    right_bounds: tuple[float, float, float, float],
+) -> float:
+    left = max(left_bounds[0], right_bounds[0])
+    top = max(left_bounds[1], right_bounds[1])
+    right = min(left_bounds[2], right_bounds[2])
+    bottom = min(left_bounds[3], right_bounds[3])
+    intersection = max(0.0, right - left) * max(0.0, bottom - top)
+    left_area = (left_bounds[2] - left_bounds[0]) * (
+        left_bounds[3] - left_bounds[1]
+    )
+    right_area = (right_bounds[2] - right_bounds[0]) * (
+        right_bounds[3] - right_bounds[1]
+    )
+    union = left_area + right_area - intersection
+    return intersection / union if union > 0.0 else 0.0
 
 
 def _reject_action_data(value: Any, path: str) -> None:

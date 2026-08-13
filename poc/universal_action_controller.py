@@ -260,7 +260,24 @@ class UniversalActionController:
         if not scene.stable:
             raise UniversalActionError("页面仍在变化，不能执行动作。")
         if float(scene.confidence) < self.min_confidence:
-            raise UniversalActionError("页面整体置信度不足，不能执行动作。")
+            target_local_candidate = scene.unique_trusted_goal_element(
+                min_confidence=self.min_confidence
+            )
+            action_element_id = str(action.params.get("element_id") or "").strip()
+            if (
+                action.action
+                not in {
+                    "tap_semantic",
+                    "dismiss_overlay",
+                    "input_verified_text",
+                    "long_press",
+                }
+                or target_local_candidate is None
+                or target_local_candidate.element_id != action_element_id
+            ):
+                raise UniversalActionError(
+                    "页面整体置信度不足，且没有唯一可信的目标局部证据。"
+                )
         self.safety_policy.check(action, confirmed=confirmed)
         expected_effect = dict(action.params.get("expected_effect") or {})
 

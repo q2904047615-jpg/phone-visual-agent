@@ -1245,10 +1245,16 @@ class RobotController:
         _set_clipboard_text(text)
         existing = _visible_owned_windows(hwnd)
         _left, _top, width, height = legacy.client_geometry(hwnd)
+        control_x, control_y = legacy.seller_control_point(
+            width,
+            height,
+            legacy.BASELINE_CLIENT_WIDTH - INPUT_BUTTON_X_FROM_RIGHT,
+            CONTROL_Y_FROM_BOTTOM,
+        )
         legacy.click_client_control(
             hwnd,
-            width - INPUT_BUTTON_X_FROM_RIGHT,
-            height - CONTROL_Y_FROM_BOTTOM,
+            control_x,
+            control_y,
         )
 
         deadline = time.monotonic() + 3.0

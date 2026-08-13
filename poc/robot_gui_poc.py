@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw, ImageGrab, ImageTk
 # 新旧版本标题分别包含“智联新途机械臂控制端”和
 # “智联新途AI机械臂控制端”，只匹配稳定前缀。
 DEFAULT_WINDOW_TITLE = "智联新途"
+BASELINE_CLIENT_WIDTH = 540
 DEFAULT_CAMERA_HEIGHT = 960
 DEFAULT_THRESHOLD = 0.82
 ROOT = Path(__file__).resolve().parent
@@ -30,7 +31,27 @@ if sys.platform != "win32":
 
 
 user32 = ctypes.windll.user32
-user32.SetProcessDPIAware()
+
+
+def _enable_per_monitor_dpi_awareness() -> None:
+    """Use physical pixels even when the seller window moves across monitors."""
+
+    try:
+        setter = user32.SetProcessDpiAwarenessContext
+        setter.argtypes = [ctypes.c_void_p]
+        setter.restype = wintypes.BOOL
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        if setter(ctypes.c_void_p(-4)):
+            return
+    except (AttributeError, OSError, ValueError):
+        pass
+    try:
+        user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
+
+_enable_per_monitor_dpi_awareness()
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(
     wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
@@ -183,6 +204,77 @@ def client_geometry(hwnd: int) -> tuple[int, int, int, int]:
     return top_left.x, top_left.y, width, height
 
 
+def window_dpi(hwnd: int) -> int:
+    """Return the effective DPI for diagnostics without driving layout."""
+
+    try:
+        getter = user32.GetDpiForWindow
+        getter.argtypes = [wintypes.HWND]
+        getter.restype = wintypes.UINT
+        value = int(getter(hwnd))
+    except (AttributeError, OSError, ValueError):
+        value = 96
+    return value if value > 0 else 96
+
+
+def seller_ui_scale(client_width: int) -> float:
+    """Scale seller-control coordinates from its documented 540 px baseline."""
+
+    if isinstance(client_width, bool) or int(client_width) <= 0:
+        raise ValueError("控制端客户区宽度必须大于0。")
+    return int(client_width) / BASELINE_CLIENT_WIDTH
+
+
+def scale_seller_ui_value(value: int | float, client_width: int) -> int:
+    if isinstance(value, bool) or float(value) < 0:
+        raise ValueError("控制端基准坐标必须是非负数。")
+    scaled = float(value) * seller_ui_scale(client_width)
+    return int(math.floor(scaled + 0.5))
+
+
+def seller_camera_height(
+    client_width: int,
+    client_height: int,
+    baseline_height: int = DEFAULT_CAMERA_HEIGHT,
+) -> int:
+    """Map the 540x960 camera viewport to the current physical client size."""
+
+    if isinstance(client_height, bool) or int(client_height) <= 0:
+        raise ValueError("控制端客户区高度必须大于0。")
+    scaled = scale_seller_ui_value(baseline_height, client_width)
+    return min(int(client_height), max(1, scaled))
+
+
+def seller_layout_has_full_camera(
+    client_width: int,
+    client_height: int,
+    baseline_height: int = DEFAULT_CAMERA_HEIGHT,
+) -> bool:
+    """The real controller must include the full camera plus a bottom toolbar."""
+
+    expected_camera_height = scale_seller_ui_value(baseline_height, client_width)
+    return int(client_height) > expected_camera_height
+
+
+def seller_control_point(
+    client_width: int,
+    client_height: int,
+    baseline_x: int | float,
+    baseline_y_from_bottom: int | float = CONTROL_Y_FROM_BOTTOM,
+) -> tuple[int, int]:
+    """Map one documented seller-toolbar point to the actual client pixels."""
+
+    x = scale_seller_ui_value(baseline_x, client_width)
+    bottom = scale_seller_ui_value(baseline_y_from_bottom, client_width)
+    y = int(client_height) - bottom
+    if not (0 <= x < int(client_width) and 0 <= y < int(client_height)):
+        raise ValueError(
+            f"缩放后的控制点 ({x}, {y}) 超出窗口客户区 "
+            f"{client_width}×{client_height}。"
+        )
+    return x, y
+
+
 def _root_window_at(screen_x: int, screen_y: int) -> int:
     candidate = user32.WindowFromPoint(POINT(screen_x, screen_y))
     if not candidate:
@@ -210,7 +302,12 @@ def ensure_camera_region_unoccluded(
     time.sleep(0.12)
 
     left, top, width, height = client_geometry(hwnd)
-    visible_height = min(camera_height, height)
+    if not seller_layout_has_full_camera(width, height, camera_height):
+        raise RuntimeError(
+            "控制端窗口没有完整显示摄像区和底部操作栏，已拒绝执行；"
+            "请恢复完整窗口或为卖家软件启用独立 DPI 兼容设置。"
+        )
+    visible_height = seller_camera_height(width, height, camera_height)
     if width <= 0 or visible_height <= 0:
         raise RuntimeError("控制端相机区域没有有效大小。")
 
@@ -257,7 +354,7 @@ def capture_client(hwnd: int) -> Image.Image:
 
 
 def camera_crop(image: Image.Image, camera_height: int) -> Image.Image:
-    height = min(camera_height, image.height)
+    height = seller_camera_height(image.width, image.height, camera_height)
     return image.crop((0, 0, image.width, height))
 
 
@@ -461,11 +558,12 @@ def drag_client_path(
     """Drive the seller UI's right-button touch-down/move/touch-up path."""
 
     _, _, width, height = client_geometry(hwnd)
+    camera_height = seller_camera_height(width, height)
     for name, (x, y) in (("起点", start), ("终点", end)):
-        if not (0 <= x < width and 0 <= y < min(height, DEFAULT_CAMERA_HEIGHT)):
+        if not (0 <= x < width and 0 <= y < camera_height):
             raise ValueError(
                 f"拖动{name} ({x}, {y}) 超出摄像头客户区 "
-                f"{width}×{min(height, DEFAULT_CAMERA_HEIGHT)}。"
+                f"{width}×{camera_height}。"
             )
     if start == end:
         raise ValueError("拖动起点和终点不能相同。")
@@ -583,9 +681,13 @@ def configure_single_click_count(hwnd: int) -> None:
     Two clicks on the Douyin heart toggle like on and then off, so this is a
     required safety check for the like workflow.
     """
-    _, _, _, height = client_geometry(hwnd)
-    control_y = height - CONTROL_Y_FROM_BOTTOM
-    click_client_control(hwnd, CLICK_COUNT_INPUT_X, control_y)
+    _, _, width, height = client_geometry(hwnd)
+    control_x, control_y = seller_control_point(
+        width,
+        height,
+        CLICK_COUNT_INPUT_X,
+    )
+    click_client_control(hwnd, control_x, control_y)
     user32.keybd_event(VK_CONTROL, 0, 0, 0)
     press_virtual_key(VK_A)
     user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
@@ -597,7 +699,7 @@ def configure_single_click_count(hwnd: int) -> None:
 def move_cursor_outside_camera(hwnd: int) -> None:
     """Move the pointer to the title bar so it cannot tint the heart icon."""
     left, top, width, _height = client_geometry(hwnd)
-    title_y = max(0, top - 12)
+    title_y = max(0, top - scale_seller_ui_value(12, width))
     user32.SetCursorPos(left + width // 2, title_y)
     time.sleep(0.12)
 
@@ -614,9 +716,13 @@ def configure_swipe(hwnd: int, direction: str) -> None:
         index = action_index[direction]
     except KeyError as exc:
         raise ValueError(f"Unsupported swipe direction: {direction}") from exc
-    _, _, _, height = client_geometry(hwnd)
-    control_y = height - CONTROL_Y_FROM_BOTTOM
-    click_client_control(hwnd, ACTION_DROPDOWN_X, control_y)
+    _, _, width, height = client_geometry(hwnd)
+    control_x, control_y = seller_control_point(
+        width,
+        height,
+        ACTION_DROPDOWN_X,
+    )
+    click_client_control(hwnd, control_x, control_y)
     # 下拉选项顺序由卖家文档和实机确认：
     # 上划、下划、左划、右划、下拉、起点。
     press_virtual_key(VK_HOME)
@@ -632,8 +738,9 @@ def configure_up_swipe(hwnd: int) -> None:
 
 
 def trigger_selected_action(hwnd: int) -> None:
-    _, _, _, height = client_geometry(hwnd)
-    click_client_control(hwnd, ACTION_BUTTON_X, height - CONTROL_Y_FROM_BOTTOM)
+    _, _, width, height = client_geometry(hwnd)
+    control_x, control_y = seller_control_point(width, height, ACTION_BUTTON_X)
+    click_client_control(hwnd, control_x, control_y)
 
 
 def image_change_score(before: Image.Image, after: Image.Image) -> float:
@@ -1366,9 +1473,11 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"找到窗口：{title}")
     print(f"窗口客户区：{image.width}×{image.height}")
     print(f"按摄像区处理：{camera.width}×{camera.height}")
+    print(f"窗口 DPI：{window_dpi(hwnd)}")
+    print(f"卖家界面尺度：{seller_ui_scale(image.width) * 100:.0f}%")
     print(f"诊断截图：{output}")
-    if image.width != 540:
-        print("提醒：该软件教程要求 Windows 缩放为 100%，当前宽度不是常见的 540 像素。")
+    if image.height <= camera.height:
+        print("提醒：控制端底部操作栏不可见；请恢复完整窗口后再执行动作。")
     return 0
 
 

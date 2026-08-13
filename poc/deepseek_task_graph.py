@@ -124,7 +124,9 @@ DATA_DELETION_EFFECT_PATTERN = re.compile(
 )
 DATA_MUTATION_EFFECT_PATTERN = re.compile(
     r"(?:(?:保存|创建|新增|修改|编辑|提交|上传).{0,10}"
-    r"(?:数据|文件|记录|内容|项目|地点|文档|表单)|进入已保存|"
+    r"(?:数据|文件|记录|内容|项目|地点|文档|表单|草稿)|进入已保存|"
+    r"(?:数据|文件|记录|内容|项目|地点|文档|表单|草稿).{0,4}"
+    r"(?:已保存|已创建|已新增|已修改|已编辑|已提交|已上传)|"
     r"\b(?:save|create|modify|edit|submit|upload)\b.{0,16}"
     r"\b(?:data|file|record|content|item|form)\b)",
     re.IGNORECASE,
@@ -167,6 +169,21 @@ REPAIRABLE_INITIAL_GRAPH_ERRORS = (
 LOCAL_TRANSIENT_NAVIGATION_PATTERN = re.compile(
     r"(?:(?:新建|打开|进入|关闭|切换|显示).{0,10}(?:空白)?(?:标签页|页签|窗口|弹层|浮层)|"
     r"(?:前台|后台|上一级|下一页|当前页面|空白页面))",
+    re.IGNORECASE,
+)
+LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN = re.compile(
+    r"(?:(?:输入框|文本框|搜索框).{0,28}(?:文字|文本|内容|值|字符).{0,20}"
+    r"(?:为|是|变为|改为|替换为|显示|保持)|"
+    r"(?:填写|输入|替换|改为|修改).{0,28}(?:输入框|文本框|搜索框)|"
+    r"\b(?:input|text|query)\s*(?:field|box).{0,28}(?:contains?|shows?|value|text)\b)",
+    re.IGNORECASE,
+)
+LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN = re.compile(
+    r"(?:不|未|勿|不要|不得|禁止|不能|避免|无需|无须|"
+    r"do\s+not|don't|never|without)"
+    r"[^，。；;]{0,28}"
+    r"(?:搜索|提交|发送|保存|发布|上传|分享|评论|回复|"
+    r"search|submit|send|save|publish|post|upload|share|comment|reply)",
     re.IGNORECASE,
 )
 REPAIRABLE_INITIAL_GRAPH_ERROR_FRAGMENTS = (
@@ -1042,6 +1059,10 @@ def _initial_prompt(raw_goal: str) -> str:
 6. read_only 只能描述查看、读取、检查等纯观察结果；navigation_only 只能描述打开或进入页面等
    导航结果。仅改变本机临时界面层级、前后台页面或临时标签页也属于 navigation_only，不得为它
    虚构 risk_actions；但登录/退出账号、修改账号数据或云端同步状态仍属于 external_state。
+   只改变当前可见输入框中的未提交临时文字，也可归入 navigation_only，但必须同时满足：目标文字
+   明确非空；用户直接禁止了该上下文中的搜索、提交、发送、保存或发布等效果；句中没有任何未被
+   否定的外部效果。输入并搜索/发送/保存、未明确禁止提交效果、或含义不清时仍必须标为
+   external_state 或 unknown。
    不能证明属于这些安全类别时必须标为 unknown，不能为了免确认而猜成安全类别。
 7. 风险类型只用通信、内容发布、账号关系、成员关系、权限角色、数据修改/删除、交易支付、
    账号权限或未知外部影响等跨 App 语义，不得描述 App 页面路径。
@@ -1076,6 +1097,8 @@ def _repair_initial_prompt(
 4. external_state 或 unknown 必须声明并关联风险；成为 active 时必须等待本地用户确认。
    read_only 或 navigation_only 不得关联 risk_actions。仅改变本机临时界面层级、前后台页面或
    临时标签页属于 navigation_only；登录/退出账号、账号数据或云端同步状态不属于此例外。
+   只改变当前可见输入框中的未提交临时文字仅在目标文字非空、用户直接禁止相关提交效果、且没有
+   任何未否定外部效果时属于 navigation_only；否则仍按 external_state 或 unknown 失败关闭。
 5. 如果用户原始目标含有点击、滑动、输入等低层动作措辞，goal、subgoals 和
    completion_conditions 只保留动作希望达到的可见结果状态，不得复述低层动作；具体下一动作
    由 Qwen 根据真实画面决定。例如把“滑动页面找到目标内容”改写为“目标内容在当前页面可见”。
@@ -1144,23 +1167,51 @@ def _initial_repair_error_category(error: TaskGraphError) -> str:
 def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskGraph:
     """Remove only self-contradictory low-risk markers from proven local navigation."""
 
-    if graph.status not in {"ready", "running"}:
+    if graph.status not in {"ready", "running", "awaiting_confirmation"}:
         return graph
     subgoals = {item.subgoal_id: item for item in graph.subgoals}
+    local_unsubmitted_input_ids = {
+        item.subgoal_id
+        for item in graph.subgoals
+        if _is_explicitly_unsubmitted_local_input(
+            graph.raw_user_goal or graph.goal.objective,
+            graph.goal.objective,
+            item.objective,
+            *graph.constraints,
+            *item.constraints,
+            *item.completion_conditions,
+            input_text=graph.goal.entities.get("input_text"),
+        )
+    }
     removable_ids: set[str] = set()
     for risk in graph.risk_actions:
         linked = tuple(subgoals.get(item) for item in risk.subgoal_ids)
         if (
-            risk.risk_type not in {"unknown_external_effect", "data_mutation"}
+            risk.risk_type not in {
+                "unknown_external_effect",
+                "data_mutation",
+                "message_or_communication",
+                "content_publication",
+            }
             or risk.risk_level != "low"
             or not linked
             or any(item is None for item in linked)
-            or not _explicitly_denies_external_effect(risk.external_effect)
+        ):
+            continue
+        local_input_only = all(
+            item is not None and item.subgoal_id in local_unsubmitted_input_ids
+            for item in linked
+        )
+        if not local_input_only and not _explicitly_denies_external_effect(
+            risk.external_effect
         ):
             continue
         if all(
             item.external_impact in {"read_only", "navigation_only", "external_state"}
-            and LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
+            and (
+                LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
+                or item.subgoal_id in local_unsubmitted_input_ids
+            )
             and not _infer_external_risk_types(
                 item.objective,
                 *item.constraints,
@@ -1177,7 +1228,10 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
                 "navigation_only"
                 if item.risk_action_ids
                 and set(item.risk_action_ids) <= removable_ids
-                and LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
+                and (
+                    LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
+                    or item.subgoal_id in local_unsubmitted_input_ids
+                )
                 else item.external_impact
             ),
             risk_action_ids=tuple(
@@ -1225,8 +1279,14 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
                 for item in normalized_subgoals
             )
             active_subgoal_id = selected_id
+    normalized_status = graph.status
+    if graph.status == "awaiting_confirmation" and not any(
+        item.risk_action_ids for item in normalized_subgoals if item.status == "active"
+    ):
+        normalized_status = "ready"
     return replace(
         graph,
+        status=normalized_status,
         risk_actions=tuple(
             risk for risk in graph.risk_actions if risk.risk_id not in removable_ids
         ),
@@ -1243,6 +1303,22 @@ def _explicitly_denies_external_effect(value: str) -> bool:
             r"(?:影响|变更|变化)|不影响(?:账号数据|外部系统|外部状态))",
             normalized,
         )
+    )
+
+
+def _is_explicitly_unsubmitted_local_input(
+    *values: str,
+    input_text: Any,
+) -> bool:
+    target_text = input_text if isinstance(input_text, str) else ""
+    if not target_text or not target_text.strip():
+        return False
+    texts = tuple(str(value or "") for value in values if str(value or "").strip())
+    combined = "；".join(texts)
+    return bool(
+        LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(combined)
+        and LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN.search(combined)
+        and not any(_infer_external_risk_types(value) for value in texts)
     )
 
 
@@ -1968,6 +2044,14 @@ def _apply_local_risk_supplements(
         if any(LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.text) for item in group)
         and not any(_infer_external_risk_types(item.text) for item in group)
     }
+    local_input_scopes = {
+        scope_id
+        for scope_id, group in source_groups.items()
+        if _is_explicitly_unsubmitted_local_input(
+            *(item.text for item in group),
+            input_text=_input_text_for_audit_scope(scope_id, sources),
+        )
+    }
     assessments = []
     for assessment in report.assessments:
         source = source_map[assessment.source_id]
@@ -2005,6 +2089,27 @@ def _apply_local_risk_supplements(
                 ),
             )
         if (
+            assessment.external_impact in {"external_state", "unknown"}
+            and model_types
+            <= {
+                "unknown_external_effect",
+                "data_mutation",
+                "message_or_communication",
+                "content_publication",
+            }
+            and not inferred
+            and assessment.subgoal_id in local_input_scopes
+        ):
+            assessment = replace(
+                assessment,
+                external_impact="navigation_only",
+                risk_types=(),
+                reason=(
+                    assessment.reason
+                    + "；本地校验确认只改变未提交输入框临时文字且相关提交效果被直接禁止"
+                ),
+            )
+        if (
             assessment.external_impact == "external_state"
             and model_types
             and model_types <= {"unknown_external_effect", "data_mutation"}
@@ -2032,6 +2137,26 @@ def _apply_local_risk_supplements(
             )
         assessments.append(assessment)
     return replace(report, assessments=tuple(assessments))
+
+
+def _input_text_for_audit_scope(
+    scope_id: str | None,
+    sources: tuple[AuditSource, ...],
+) -> str:
+    # The task graph keeps the literal value in goal entities, while audit
+    # sources deliberately contain only prose. A non-empty visible target value
+    # in that prose is sufficient here; graph normalization separately requires
+    # the canonical input_text entity.
+    group = [item.text for item in sources if item.subgoal_id == scope_id]
+    for text in group:
+        match = re.search(
+            r"(?:为|是|改为|替换为|显示为)\s*([A-Za-z0-9][A-Za-z0-9_.-]{0,63})",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            return match.group(1)
+    return ""
 
 
 def _validate_graph_against_risk_audit(

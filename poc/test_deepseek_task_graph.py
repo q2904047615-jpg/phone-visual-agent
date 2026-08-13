@@ -1175,6 +1175,149 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
 
+    def test_false_positive_audit_cannot_turn_explicit_unsubmitted_input_external(self):
+        raw_goal = (
+            "把顶部搜索输入框中的现有文字替换为 Agent123，"
+            "不要搜索、提交、发送、保存或发布。"
+        )
+        objective = (
+            "顶部搜索输入框中的文字为 Agent123，且未发生搜索、提交、发送、保存或发布。"
+        )
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        payload["goal"]["entities"]["input_text"] = "Agent123"
+        payload["constraints"] = ["不要搜索、提交、发送、保存或发布。"]
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        audit = audit_payload_for_graph(
+            payload,
+            overrides={
+                "raw_goal": {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
+                },
+                "goal.objective": {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
+                },
+                "completion_conditions.result_visible.description": {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
+                },
+                "subgoals.target_state.objective": {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
+                },
+                "subgoals.target_state.completion_conditions.0": {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
+                },
+            },
+        )
+        provider = FakeProvider(payload, audit_payloads=[audit])
+        planner = DeepSeekTaskGraphPlanner(provider)
+
+        graph = planner.plan(raw_goal, device_id="phone-1")
+
+        self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+        self.assertEqual((), graph.active_subgoal().risk_action_ids)
+        corrected = {
+            item.source_id: item
+            for item in planner.last_risk_audit.assessments
+            if item.source_id
+            in {
+                "raw_goal",
+                "goal.objective",
+                "subgoals.target_state.objective",
+            }
+        }
+        self.assertTrue(
+            all(item.external_impact == "navigation_only" for item in corrected.values())
+        )
+
+    def test_unsubmitted_input_without_explicit_effect_boundary_stays_external(self):
+        objective = "顶部搜索输入框中的文字为 Agent123"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        payload["goal"]["entities"]["input_text"] = "Agent123"
+        audit = audit_payload_for_graph(
+            payload,
+            overrides={
+                "raw_goal": {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
+                },
+                "goal.objective": {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
+                },
+                "subgoals.target_state.objective": {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
+                },
+            },
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "任务图分类冲突"):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(payload, audit_payloads=[audit])
+            ).plan(objective, device_id="phone-1")
+
+    def test_unsubmitted_input_exception_never_hides_send_or_save_effect(self):
+        for effect in ("消息已发送给联系人", "草稿已保存", "内容已发布"):
+            with self.subTest(effect=effect):
+                objective = (
+                    "顶部搜索输入框中的文字为 Agent123，不触发搜索；" + effect
+                )
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="navigation_only",
+                )
+                payload["goal"]["entities"]["input_text"] = "Agent123"
+
+                with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                        objective,
+                        device_id="phone-1",
+                    )
+
+    def test_external_result_state_words_are_detected_as_data_mutation(self):
+        for result_state in (
+            "草稿已保存",
+            "表单已提交",
+            "文件已上传",
+            "记录已修改",
+        ):
+            with self.subTest(result_state=result_state):
+                payload = single_subgoal_payload(
+                    result_state,
+                    external_impact="navigation_only",
+                )
+                with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                        result_state,
+                        device_id="phone-1",
+                    )
+
+    def test_semantic_risk_prompt_documents_unsubmitted_input_boundary(self):
+        objective = "查看页面"
+        payload = single_subgoal_payload(objective, external_impact="read_only")
+        provider = FakeProvider(payload)
+
+        DeepSeekTaskGraphPlanner(provider).plan(objective, device_id="phone-1")
+
+        audit_prompts = [
+            call[0]["content"]
+            for call in provider.messages
+            if "semantic-risk-audit-v1" in call[0]["content"]
+        ]
+        self.assertEqual(1, len(audit_prompts))
+        self.assertIn("未提交临时文字", audit_prompts[0])
+        self.assertIn("输入并搜索/发送/保存", audit_prompts[0])
+
     def test_local_navigation_exception_never_hides_explicit_external_effect(self):
         objective = "新建空白标签页后登录当前账号"
         payload = single_subgoal_payload(

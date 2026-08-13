@@ -140,6 +140,10 @@ account_or_permission_change | unknown_external_effect
     包含正向外部效果，必须按 external_state 判断。
 12. “确认/核验/检查某内容、页面或状态是否可见/存在/符合条件”且句中没有发送、修改、删除、
     交易、关系或权限变化等正向外部效果时，属于 read_only；不得仅因“确认”一词返回 unknown。
+13. 只改变当前可见输入框中的未提交临时文字，仅当目标文字明确非空、用户直接禁止了该上下文中
+    的搜索/提交/发送/保存/发布等效果，且句中不存在任何未被否定的外部效果时，归为
+    navigation_only。输入并搜索/发送/保存、未明确禁止提交效果、或含义不清时仍归为
+    external_state 或 unknown。
 
 输入 sources：
 {source_json}

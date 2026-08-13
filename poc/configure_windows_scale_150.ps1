@@ -16,9 +16,10 @@ New-Item -Path $compatKey -Force | Out-Null
 Set-ItemProperty -Path $desktopKey -Name Win8DpiScaling -Type DWord -Value 1
 Set-ItemProperty -Path $desktopKey -Name LogPixels -Type DWord -Value 144
 
-# Keep the tall seller controller at its original physical size on a 1440p
-# desktop while the rest of Windows uses 150% text/UI scaling.
-Set-ItemProperty -Path $compatKey -Name $SellerExe -Type String -Value '~ HIGHDPIAWARE'
+# The seller executable hard-exits when its own DPI probe is not 96. Force
+# system DPI virtualization for this executable while Windows stays at 150%.
+# The local controller reads the resulting physical 810x1440 camera geometry.
+Set-ItemProperty -Path $compatKey -Name $SellerExe -Type String -Value '~ DPIUNAWARE'
 
 $desktop = Get-ItemProperty -Path $desktopKey
 $compat = Get-ItemProperty -Path $compatKey

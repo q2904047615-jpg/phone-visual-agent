@@ -550,6 +550,23 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual("open", result.canonical_class)
 
+    def test_allows_generic_forward_navigation_tap(self) -> None:
+        scene = _scene(
+            meaning="浏览器前进按钮",
+            label=">",
+            role="button",
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(impact="navigation_only"),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("forward", result.canonical_class)
+
     def test_allows_generic_app_and_page_entry_navigation(self) -> None:
         for meaning, label in (
             ("浏览器应用入口", "浏览器"),

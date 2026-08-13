@@ -48,7 +48,7 @@ function externalActionSession() {
     allowed: true,
     reason: "当前外部状态动作已通过作用域确认。",
     canonical_class: "external",
-    policy_version: "2026-08-12-universal-action-policy-v2",
+    policy_version: "2026-08-13-universal-action-policy-v3",
   };
   session.confirmation_scope = {
     ...session.risk_confirmation_scope,
@@ -677,6 +677,7 @@ test("capability panel performs one confirmed action then a separate zero-action
     assert.equal(requests.capabilityConfirm[0].confirmation.trial_id, "capability-trial-browser");
     assert.equal(requests.capabilityConfirm[0].confirmation.action, "drag");
     assert.equal(requests.capabilityConfirm[0].confirmation.observation_id, "obs_0123456789abcdef0123456789abcdef");
+    await page.locator("#capabilityEvidence figure").nth(7).waitFor({ timeout: 5000 });
     assert.equal(await page.locator("#capabilityEvidence figure").count(), 8);
 
     await page.locator("#reviewCapabilityPromotion").click();
@@ -723,6 +724,7 @@ test("failed capability evidence never exposes a promotion button or retries", {
     assert.equal(requests.capabilityConfirm.length, 1);
     assert.equal(requests.capabilityPromote.length, 0);
     assert.equal(await page.locator("#reviewCapabilityPromotion").count(), 0);
+    await page.locator("#capabilityEvidence figure").nth(7).waitFor({ timeout: 5000 });
     assert.equal(await page.locator("#capabilityEvidence figure").count(), 8);
     assert.match(await page.locator("#capabilityStatus").innerText(), /动作后验证未通过/);
   } finally {

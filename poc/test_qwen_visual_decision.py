@@ -766,6 +766,33 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual(decision.proposal.status, "finished")
         self.assertEqual(decision.proposal.completion_evidence, ("input_value:.com",))
 
+    def test_read_only_physical_action_repairs_to_visible_completion(self) -> None:
+        context = task_context()
+        context["current_external_impact"] = "read_only"
+        context["current_subgoal"]["external_impact"] = "read_only"
+        invalid = action_payload(context, self.observation)
+        finished = copy.deepcopy(invalid)
+        finished.update(
+            {
+                "status": "finished",
+                "next_action": None,
+                "target_region": None,
+                "expected_result": {},
+                "completion_evidence_element_ids": ["scene"],
+                "reason": "当前可信场景摘要已经证明只读结果。",
+            }
+        )
+        provider = SequenceProvider([invalid, finished])
+
+        _observer, decision = self.decide(provider, context=context)
+
+        self.assertEqual("finished", decision.proposal.status)
+        self.assertEqual(
+            (f"scene:{self.observation.scene.summary}",),
+            decision.proposal.completion_evidence,
+        )
+        self.assertEqual(2, provider.calls)
+
     def test_same_visual_object_duplicates_collapse_without_changing_bounds(self) -> None:
         elements = (
             UIElement(

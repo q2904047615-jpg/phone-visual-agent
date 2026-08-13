@@ -415,6 +415,46 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual(len(provider.messages), 3)
         self.assertIn("goal 缺少字段：entities", provider.messages[1][0]["content"])
 
+    def test_read_only_completion_review_repairs_unchanged_active_node(self):
+        initial = single_subgoal_payload(
+            "确认目标结果可见",
+            external_impact="read_only",
+        )
+        unchanged = copy.deepcopy(initial)
+        unchanged["status"] = "running"
+        completed = copy.deepcopy(initial)
+        completed["status"] = "completed"
+        completed["completion_conditions"][0]["satisfied"] = True
+        completed["completion_conditions"][0]["evidence"] = ["页面显示目标结果"]
+        completed["subgoals"][0]["status"] = "completed"
+        completed["subgoals"][0]["completion_evidence"] = ["页面显示目标结果"]
+        completed["active_subgoal_id"] = None
+        provider = FakeProvider(initial, unchanged, completed)
+        planner = DeepSeekTaskGraphPlanner(provider)
+        graph = planner.plan("确认目标结果可见", device_id="phone-1")
+
+        result = planner.replan(
+            graph,
+            ObservedState(
+                scene_id="scene-read-only",
+                summary="目标结果已经显示",
+                visible_evidence=("页面显示目标结果",),
+                last_action_outcome="matched",
+            ),
+            trigger="subgoal_completed",
+            reason="当前可信画面用于只读完成复核。",
+        )
+
+        self.assertEqual("completed", result.status)
+        self.assertEqual(2, result.revision)
+        graph_prompts = [
+            call[0]["content"]
+            for call in provider.messages
+            if "semantic-risk-audit-v1" not in call[0]["content"]
+        ]
+        self.assertEqual(3, len(graph_prompts))
+        self.assertIn("read_only 完成复核不能继续保留", graph_prompts[-1])
+
     def test_current_page_goal_repairs_missing_app_to_foreground_context(self):
         invalid = base_payload()
         invalid["goal"]["target_apps"] = []
@@ -815,6 +855,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         self.assertIn("不登录", audit_prompt)
         self.assertIn("不要忘记登录", audit_prompt)
+        self.assertIn("确认某内容可见", audit_prompt)
+        self.assertIn("不得仅因“确认”一词返回 unknown", audit_prompt)
 
     def test_semantic_audit_allows_disagreement_between_safe_impacts(self):
         cases = (

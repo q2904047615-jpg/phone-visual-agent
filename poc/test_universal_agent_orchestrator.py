@@ -1189,6 +1189,140 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertEqual(2, session.step_number)
         self.assertEqual(2, session.task_graph.revision)
 
+    def test_action_then_read_only_completion_gets_new_deepseek_revision(self) -> None:
+        initial = _graph()
+        read_only = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    initial.subgoals[0],
+                    status="completed",
+                    completion_evidence=("上一页可见",),
+                ),
+                Subgoal(
+                    subgoal_id="confirm-visible",
+                    objective="确认上一页可见",
+                    status="active",
+                    depends_on=("subgoal-1",),
+                    constraints=("不得执行物理动作",),
+                    completion_conditions=("当前画面显示上一页",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="read_only",
+                ),
+            ),
+            active_subgoal_id="confirm-visible",
+        )
+        read_only.validate()
+        completed = _completed_graph(read_only)
+
+        class SequentialPlanner(FakeDeepSeekPlanner):
+            def replan(self, graph, observation, *, trigger, reason):
+                self.replan_calls.append((graph, observation, trigger, reason))
+                return read_only if graph.revision == 1 else completed
+
+        planner = SequentialPlanner(initial)
+        qwen = FakeQwenObserver()
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, adapter = self._started(
+                temp,
+                planner=planner,
+                qwen=qwen,
+            )
+
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual(3, session.task_graph.revision)
+        self.assertEqual("completed", session.task_graph.status)
+        self.assertEqual(
+            ["observation_changed", "subgoal_completed"],
+            [call[2] for call in planner.replan_calls],
+        )
+        self.assertEqual(1, len(qwen.calls))
+
+    def test_read_only_checkpoint_can_advance_to_later_navigation(self) -> None:
+        initial = _graph()
+        read_only = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    initial.subgoals[0],
+                    status="completed",
+                    completion_evidence=("上一页可见",),
+                ),
+                Subgoal(
+                    subgoal_id="confirm-visible",
+                    objective="确认上一页可见",
+                    status="active",
+                    depends_on=("subgoal-1",),
+                    constraints=("不得执行物理动作",),
+                    completion_conditions=("当前画面显示上一页",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="read_only",
+                ),
+                Subgoal(
+                    subgoal_id="continue-navigation",
+                    objective="继续查看下一项公开信息",
+                    status="pending",
+                    depends_on=("confirm-visible",),
+                    constraints=("不得改变任何账号状态",),
+                    completion_conditions=("下一项公开信息可见",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+            ),
+            active_subgoal_id="confirm-visible",
+        )
+        read_only.validate()
+        navigation = replace(
+            read_only,
+            revision=3,
+            subgoals=(
+                read_only.subgoals[0],
+                replace(
+                    read_only.subgoals[1],
+                    status="completed",
+                    completion_evidence=("上一页可见",),
+                ),
+                replace(read_only.subgoals[2], status="active"),
+            ),
+            active_subgoal_id="continue-navigation",
+        )
+        navigation.validate()
+
+        class SequentialPlanner(FakeDeepSeekPlanner):
+            def replan(self, graph, observation, *, trigger, reason):
+                self.replan_calls.append((graph, observation, trigger, reason))
+                return read_only if graph.revision == 1 else navigation
+
+        planner = SequentialPlanner(initial)
+        qwen = FakeQwenObserver()
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, adapter = self._started(
+                temp,
+                planner=planner,
+                qwen=qwen,
+            )
+
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual(3, session.task_graph.revision)
+        self.assertEqual("continue-navigation", session.task_graph.active_subgoal_id)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual(3, qwen.calls[-1][1]["revision"])
+
     def test_safe_loop_executes_one_confirmed_action_then_pauses_for_new_confirmation(self) -> None:
         initial = _graph()
 

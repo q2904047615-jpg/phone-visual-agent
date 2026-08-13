@@ -177,6 +177,7 @@ REPAIRABLE_REPLAN_ERROR_FRAGMENTS = (
     "任务图至少需要一个全局完成条件",
     "可推进任务图必须且只能有一个活动子目标",
     "active_subgoal_id",
+    "read_only 完成复核",
 )
 MISMATCH_BLOCKED_CLARIFICATION = (
     "动作后的新画面未证明预期结果，且当前没有可验证的安全替代路径；"
@@ -811,7 +812,12 @@ class DeepSeekTaskGraphPlanner:
                 raw_user_goal=graph.raw_user_goal or graph.goal.objective,
                 validate=False,
             )
-            self._validate_replan_candidate(graph, candidate, observation)
+            self._validate_replan_candidate(
+                graph,
+                candidate,
+                observation,
+                trigger=trigger,
+            )
         except TaskGraphError as exc:
             if not _retryable_replan_output_error(exc):
                 raise
@@ -832,7 +838,12 @@ class DeepSeekTaskGraphPlanner:
                 validate=False,
             )
             try:
-                self._validate_replan_candidate(graph, candidate, observation)
+                self._validate_replan_candidate(
+                    graph,
+                    candidate,
+                    observation,
+                    trigger=trigger,
+                )
             except TaskGraphError as repair_error:
                 normalized = _normalize_blocked_mismatch_clarification(
                     candidate,
@@ -842,7 +853,12 @@ class DeepSeekTaskGraphPlanner:
                 if normalized is None:
                     raise
                 candidate = normalized
-                self._validate_replan_candidate(graph, candidate, observation)
+                self._validate_replan_candidate(
+                    graph,
+                    candidate,
+                    observation,
+                    trigger=trigger,
+                )
         previous_ids = {item.subgoal_id for item in graph.subgoals}
         completed_ids = tuple(
             item.subgoal_id for item in graph.subgoals if item.status == "completed"
@@ -879,12 +895,27 @@ class DeepSeekTaskGraphPlanner:
         graph: DynamicTaskGraph,
         candidate: DynamicTaskGraph,
         observation: ObservedState,
+        *,
+        trigger: str,
     ) -> None:
         """Apply every safety and evidence check to one replan candidate."""
 
         _validate_external_impact_revision(graph, candidate)
         _validate_preserved_risk_ids(graph, candidate)
         candidate.validate()
+        previous_current = graph.active_subgoal()
+        candidate_current = candidate.active_subgoal()
+        if (
+            trigger == "subgoal_completed"
+            and previous_current is not None
+            and previous_current.external_impact == "read_only"
+            and candidate_current is not None
+            and candidate_current.external_impact == "read_only"
+        ):
+            raise TaskGraphError(
+                "read_only 完成复核不能继续保留 read_only 活动子目标；"
+                "当前证据足够时应完成，证据不足时应阻塞，或推进到后续非只读子目标。"
+            )
         self._audit_and_validate_graph(candidate)
         _validate_revision(graph, candidate, observation)
 
@@ -1132,7 +1163,10 @@ def _replan_prompt(
 7. 既有 external_state 不能降级，unknown 没有新的可靠证据时不能改成 read_only 或
    navigation_only；read_only/navigation_only 必须分别有纯观察或纯导航依据。
 8. 只返回 JSON 对象，不要 Markdown，也不要返回 task_id、device_id、revision、协议版本、
-   current_subgoal 或历史记录；这些字段由本地协议层生成。
+    current_subgoal 或历史记录；这些字段由本地协议层生成。
+9. 当 trigger=subgoal_completed 且当前子目标是 read_only 时，本轮必须用 visible_evidence 完成
+   该只读子目标及匹配的全局条件，或明确阻塞，或推进到后续非只读子目标；不得继续保留任何
+   read_only 活动子目标，避免只读复核再次请求视觉动作或形成循环。
 """
 
 
@@ -1173,6 +1207,8 @@ def _repair_replan_prompt(
 5. external_state 或 unknown 必须关联风险；成为 active 时必须等待本地确认。
 6. 仍需通过全部本地校验；不要试图改写任务身份、设备、revision 或协议字段。
 7. 只返回符合结构的完整 JSON 对象，不要 Markdown。
+8. 当 trigger=subgoal_completed 且原活动子目标是 read_only 时，不得继续返回 read_only 活动
+   子目标；只能依据 visible_evidence 完成、阻塞，或推进到后续非只读子目标。
 """
 
 

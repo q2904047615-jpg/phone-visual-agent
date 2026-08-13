@@ -954,6 +954,63 @@ class UniversalAgentOrchestrator:
             session.failed_reason = ""
             self._bind_risk_confirmation(session)
             return
+        if impact == "read_only":
+            try:
+                reviewed = self.deepseek_planner.replan(
+                    revised,
+                    observed,
+                    trigger="subgoal_completed",
+                    reason=(
+                        "当前 read_only 子目标只能用已经采集的当前可信画面"
+                        "完成或阻塞；不得请求任何新的物理动作。"
+                    ),
+                )
+                self._validate_graph_identity(
+                    reviewed,
+                    device_id=session.device_id,
+                    previous=revised,
+                )
+                session.task_graph = reviewed
+                session.goal_draft = self.bridge.goal_draft(reviewed)
+                self._remember(
+                    session,
+                    session.evidence_store.write_task_graph(reviewed),
+                    session.evidence_store.write_risk_audit(reviewed),
+                )
+            except Exception as exc:
+                session.status = "blocked"
+                session.failed_reason = f"只读完成复核失败：{exc}"
+                return
+            if reviewed.status == "completed":
+                session.status = "succeeded"
+                session.failed_reason = ""
+                return
+            reviewed_current = reviewed.active_subgoal()
+            reviewed_impact = (
+                reviewed_current.external_impact
+                if reviewed_current is not None
+                else "unknown"
+            )
+            if reviewed_current is None:
+                session.status = "blocked"
+                session.failed_reason = "只读复核后的任务图没有活动子目标。"
+                return
+            if reviewed_impact in {"external_state", "unknown"}:
+                session.status = "awaiting_risk_confirmation"
+                session.failed_reason = ""
+                self._bind_risk_confirmation(session)
+                return
+            if reviewed_impact == "read_only":
+                session.status = "blocked"
+                session.failed_reason = (
+                    "当前可信画面没有让 DeepSeek 完成 read_only 子目标；"
+                    "禁止为只读验证请求物理动作。"
+                )
+                return
+            # A read-only checkpoint may be completed while the overall task still
+            # has a later navigation-only subgoal. Reuse the same trusted frames;
+            # do not capture again and do not execute anything without a new scope.
+            revised = reviewed
 
         frames = list(result.after_frames)
         context = revised.to_qwen_context()
@@ -972,6 +1029,63 @@ class UniversalAgentOrchestrator:
                 decision,
             ),
         )
+        if decision.proposal.status == "finished":
+            completion_observed = self.bridge.observed_state(
+                graph=revised,
+                trusted_observation=new_observation,
+                action_outcome="not_applicable",
+                verification={
+                    "completion_evidence": list(
+                        decision.proposal.completion_evidence
+                    ),
+                    "visible_evidence": list(
+                        decision.proposal.completion_evidence
+                    ),
+                },
+            )
+            try:
+                completed = self.deepseek_planner.replan(
+                    revised,
+                    completion_observed,
+                    trigger="subgoal_completed",
+                    reason=(
+                        "Qwen 在动作后的当前可信画面中提出完成候选，"
+                        "要求 DeepSeek 复核整个任务。"
+                    ),
+                )
+                self._validate_graph_identity(
+                    completed,
+                    device_id=session.device_id,
+                    previous=revised,
+                )
+                session.task_graph = completed
+                session.goal_draft = self.bridge.goal_draft(completed)
+                self._remember(
+                    session,
+                    session.evidence_store.write_task_graph(completed),
+                    session.evidence_store.write_risk_audit(completed),
+                )
+            except Exception as exc:
+                session.status = "blocked"
+                session.failed_reason = f"完成候选复核失败：{exc}"
+                session.controller_decision = NavigationPolicyDecision(
+                    allowed=False,
+                    reason=session.failed_reason,
+                )
+                return
+            if completed.status == "completed":
+                session.status = "succeeded"
+                session.failed_reason = ""
+            else:
+                session.status = "blocked"
+                session.failed_reason = (
+                    "Qwen 的完成候选没有被 DeepSeek 新 revision 确认为完成。"
+                )
+                session.controller_decision = NavigationPolicyDecision(
+                    allowed=False,
+                    reason=session.failed_reason,
+                )
+            return
         if decision.proposal.status != "action":
             session.status = "blocked"
             session.failed_reason = (

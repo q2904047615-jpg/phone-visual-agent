@@ -137,6 +137,25 @@
   revision `1`、subgoal `navigate_back`、observation
   `obs_9697dae47a764949981761d98a3c7d1d`、fingerprint `02eb87945cdc7d76250e`。未经用户对
   这个当前动作的新确认，不执行系统返回，也不把它记为真机能力通过。
+- 用户随后明确确认上述精确作用域。机械臂只执行一次 `back`，动作前后本地 fingerprint 从
+  `70caa5136db145631c8c` 变为 `3004326d69ec5e920a98`；动作后四帧稳定画面显示百度搜索结果页、
+  “未找到相关结果”和热搜列表。控制器验证 `matched=true`、`physical_actions=1`，没有第二次
+  机械臂动作。真机证据位于
+  `poc/output/web/generic_supervised_20260813_142247_12e7ab11/`。
+- 原始运行的 DeepSeek revision 2 已把 `navigate_back` 标为 completed，但又新增一个
+  `read_only` 的 `confirm_previous_page`；旧逻辑继续请求 Qwen，Qwen 错误提出第二个 `back`，
+  本地控制器因“物理动作不能用于 read_only 子目标”拒绝，因此原始报告真实保持 `blocked`。
+  不得把后续修复倒写成该原始会话已经 succeeded。
+- 通用修复规定：`read_only` 子目标只能使用现有可信观察完成、阻塞或推进到后续非只读子目标；
+  Qwen 对 read_only 提出的物理动作会在解析层触发一次有界修复；DeepSeek 的只读完成复核若仍
+  保留 read_only 活动节点，也会触发一次有界协议修复，禁止形成重复视觉动作循环。该规则不含
+  App 名称、固定坐标或固定业务步骤。
+- 使用同一份真实动作后观察进行零机械动作在线复验，DeepSeek 生成 revision 3，状态为
+  `completed`，`previous_page_visible`、`navigate_back` 和 `confirm_previous_page` 均绑定到上述
+  百度结果页可见证据；语义风险审计无 unknown 来源。复验不重新拍摄、不连接执行器、不改写
+  原始报告，累计真实机械臂动作仍为1。
+- 修改后的生产虚拟环境核心定向测试 `202/202`、全量自动测试 `703/703` 通过。该测试和在线
+  零动作复验共同证明修复路径；真机返回能力本身仍以原始目录中的一次动作和前后画面为证据。
 
 ## 完成判定
 

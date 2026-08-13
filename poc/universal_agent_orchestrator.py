@@ -327,6 +327,7 @@ class UniversalAgentSessionState:
     task_graph: DynamicTaskGraph | None = None
     goal_draft: GenericIntentDraft | None = None
     trusted_observation: Any = None
+    trusted_frames: tuple[Any, ...] = field(default_factory=tuple, repr=False)
     qwen_decision: Any = None
     controller_decision: NavigationPolicyDecision | None = None
     confirmation_authority: Any = field(default=None, repr=False)
@@ -1069,6 +1070,7 @@ class UniversalAgentOrchestrator:
                 observation_id=observation_id,
             )
             session.trusted_observation = observation
+            session.trusted_frames = tuple(frames)
             self._remember(
                 session,
                 session.evidence_store.write_trusted_observation(
@@ -1235,6 +1237,7 @@ class UniversalAgentOrchestrator:
                 goal=session.goal_draft,
                 confirmed=True,
                 evidence_dir=session.run_dir,
+                planned_frames=session.trusted_frames,
             )
         except GenericActionAdapterError as exc:
             session.physical_actions += max(0, int(exc.physical_actions))
@@ -1295,6 +1298,7 @@ class UniversalAgentOrchestrator:
             session.failed_reason = "动作后可信观察 observation/fingerprint 未更新。"
             raise UniversalAgentOrchestratorError(session.failed_reason)
         session.trusted_observation = new_observation
+        session.trusted_frames = tuple(result.after_frames)
         session.step_number += 1
         self._remember(
             session,
@@ -1481,6 +1485,7 @@ class UniversalAgentOrchestrator:
             scene=scene,
         )
         session.trusted_observation = observation
+        session.trusted_frames = tuple(frames)
         self._remember(
             session,
             session.evidence_store.write_trusted_observation(
@@ -1627,6 +1632,7 @@ class UniversalAgentOrchestrator:
                 scene=scene,
             )
             session.trusted_observation = observation
+            session.trusted_frames = tuple(frames)
             self._remember(
                 session,
                 store.write_trusted_observation(session.step_number, observation),

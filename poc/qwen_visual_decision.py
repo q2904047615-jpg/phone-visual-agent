@@ -26,7 +26,7 @@ from qwen_runtime_errors import classify_qwen_error, failure_diagnostics
 from semantic_executor import SemanticAction
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 from universal_action_controller import UniversalActionController, UniversalActionError
-from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
+from vision_agent import VisionAgentError, _image_data_url
 
 
 QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-12-qwen-visual-decision-v3"
@@ -1254,7 +1254,7 @@ def _decision_prompt(
   "fingerprint":"逐字复制输入",
   "page_state":{{"foreground_app_id":"语义描述","screen_id":"语义描述","summary":"短描述","overlays":[]}},
   "status":"action|finished|blocked",
-  "next_action":{{"kind":"{available_actions}","element_id":"单元素动作的可信候选ID","target":"复制meaning","role":"复制role","label":"复制label","states":{{}},"text":"输入时逐字复制goal.entities.input_text","duration_ms":"长按500到2000；默认800","source_element_id":"拖动起点候选","destination_element_id":"拖动终点候选","direction":"仅swipe使用"}},
+   "next_action":{{"kind":"{available_actions}","element_id":"单元素动作的可信候选ID","target":"复制meaning","role":"复制role","label":"复制label","states":{{}},"text":"输入时逐字复制goal.entities.input_text","duration_ms":"长按500到2000；默认800","source_element_id":"拖动起点候选","destination_element_id":"拖动终点候选","direction":"仅swipe使用；不要返回distance"}},
   "target_region":{{"kind":"element|element_path|screen|system_navigation","element_id":"单元素或拖动起点候选ID","bounds":[0,0,1000,1000],"destination_element_id":"仅拖动终点","destination_bounds":[0,0,1000,1000],"description":"语义区域"}},
   "expected_result":{{"scene_changed":true}},
   "confidence":0.0,
@@ -1270,6 +1270,7 @@ def _decision_prompt(
 4. input_verified_text只能绑定role=input的候选，text必须逐字复制goal.entities.input_text；不能改写、补全或推断。
 5. drag必须绑定两个不同可信候选并逐字复制两端字段和bounds；long_press时长限制500到2000毫秒。
 6. swipe/wait使用整屏[0,0,1000,1000]和kind=screen；back使用整屏和kind=system_navigation。
+   swipe只返回direction=up|down|left|right，绝对不要返回distance；距离由本地已校准控制器决定。
 7. 找不到可靠候选、文字不完全一致、候选不唯一、画面模糊或置信度不足时必须blocked。
 8. finished只能用completion_evidence_element_ids引用可信候选ID，或用scene引用可信scene摘要；
    禁止自由编写完成证据。
@@ -1314,6 +1315,7 @@ def _decision_retry_prompt(
   element_state；不得使用new_*别名、自然语言条件或其他键。
 - 这是第{decision_number}轮。不要Markdown，不要解释，不要把JSON转义成字符串。
 - 当前设备只允许动作：{available_actions}；不得返回集合外动作，无法继续就blocked。
+- swipe只允许direction=up|down|left|right，绝对不要返回distance；距离由本地控制器决定。
 - status是互斥判别字段，必须先选择且只选择下面一种完整形状：
   A. 执行动作：status="action"，next_action为一个对象，target_region为一个对象，
      expected_result为非空对象，completion_evidence_element_ids=[]。
@@ -1344,7 +1346,7 @@ def _parse_decision(
     available_action_kinds: frozenset[str] | None = None,
 ) -> QwenVisualDecision:
     try:
-        payload = _extract_json_object(raw)
+        payload = _extract_qwen_json_object(raw)
         allowed = {
             "protocol_version",
             "task_id",
@@ -1426,19 +1428,19 @@ def _parse_decision(
             raise GenericStepPlanningError(
                 f"当前设备没有本地验证动作能力：{action.action}"
             )
-        evidence_ids = _text_tuple(
-            payload.get("completion_evidence_element_ids") or [],
-            "completion_evidence_element_ids",
+        evidence_ids = (
+            _text_tuple(
+                payload.get("completion_evidence_element_ids") or [],
+                "completion_evidence_element_ids",
+            )
+            if status == "finished"
+            else ()
         )
         completion_evidence = (
             _resolve_completion_evidence(evidence_ids, observation)
             if status == "finished"
             else ()
         )
-        if status != "finished" and evidence_ids:
-            raise GenericStepPlanningError(
-                "只有finished可以携带completion_evidence_element_ids。"
-            )
         proposal = GenericStepProposal(
             status=status,
             action=action,
@@ -1494,6 +1496,37 @@ def _parse_decision(
         return decision
     except (UISceneError, GenericStepPlanningError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"Qwen视觉单步决策不符合协议：{exc}") from exc
+
+
+def _extract_qwen_json_object(raw: str) -> dict[str, Any]:
+    """Accept one JSON object, or exact duplicate copies of that object only."""
+
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text).strip()
+    decoder = json.JSONDecoder()
+    values: list[Any] = []
+    index = 0
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        try:
+            value, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError as exc:
+            raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
+        values.append(value)
+        index = end
+    if not values:
+        raise VisionAgentError("模型没有返回 JSON 对象。")
+    if any(not isinstance(value, dict) for value in values):
+        raise VisionAgentError("模型返回值必须是 JSON 对象。")
+    first = values[0]
+    if any(value != first for value in values[1:]):
+        raise VisionAgentError("模型返回了多个互相冲突的 JSON 对象。")
+    return dict(first)
 
 
 def _normalize_expected_result(value: Any) -> dict[str, Any]:
@@ -1651,21 +1684,15 @@ def _parse_action(
             "next_action.bounds 只允许逐项复用单元素可信候选区域。"
         )
     if "distance" in value:
-        distance = value.pop("distance")
+        value.pop("distance")
         if kind != "swipe":
             raise GenericStepPlanningError(
                 "next_action.distance 只允许作为swipe的非权威提示。"
             )
-        if (
-            isinstance(distance, bool)
-            or not isinstance(distance, (int, float))
-            or not 0 < float(distance) <= 1000
-        ):
-            raise GenericStepPlanningError(
-                "next_action.distance 必须是1到1000的数值提示。"
-            )
         # The device exposes only a calibrated fixed swipe.  Model-authored
-        # distance never reaches the controller or hardware.
+        # distance never reaches the controller or hardware.  Discard legacy
+        # numeric or descriptive hints instead of treating display-only data
+        # as an executable protocol failure.
     allowed = {
         "kind", "element_id", "target", "role", "label", "states", "direction",
         "text", "duration_ms",

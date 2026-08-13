@@ -355,7 +355,16 @@ class FakeExecutingAdapter(FakeAdapter):
         self.action_outcome = action_outcome
         self.verification_errors = verification_errors
 
-    def execute(self, *, requested_action, planned_scene, goal, confirmed, evidence_dir):
+    def execute(
+        self,
+        *,
+        requested_action,
+        planned_scene,
+        planned_frames=None,
+        goal,
+        confirmed,
+        evidence_dir,
+    ):
         self.execute_calls += 1
         if self.execute_error is not None:
             raise self.execute_error

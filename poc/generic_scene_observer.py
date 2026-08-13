@@ -15,7 +15,13 @@ from qwen_runtime_errors import (
     classify_qwen_error,
     failure_diagnostics,
 )
-from ui_scene import ALLOWED_ROLES, UI_SCENE_PROTOCOL_VERSION, UIScene, UISceneError
+from ui_scene import (
+    ALLOWED_ROLES,
+    MIN_TARGET_CONFIDENCE,
+    UI_SCENE_PROTOCOL_VERSION,
+    UIScene,
+    UISceneError,
+)
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
@@ -254,6 +260,11 @@ class GenericSceneObserver:
                     self.last_raw_response = raw
                     self._set_stage("parsing_compact_retry")
                     scene = _parse_scene(raw, fingerprint=fingerprint)
+
+            if not scene.stable or float(scene.confidence) < MIN_TARGET_CONFIDENCE:
+                raise VisionAgentError(
+                    "页面不稳定或整体置信度不足，不能建立可信候选。"
+                )
 
             self.last_diagnostics = {
                 "observer_version": GENERIC_SCENE_OBSERVER_VERSION,
@@ -511,10 +522,12 @@ def _compact_retry_allowed(error: VisionAgentError) -> bool:
 def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
     if not context:
         return False
-    if scene.confidence < 0.72 or scene.screen_id == "unknown":
+    if scene.confidence < 0.72:
         return True
     if any(element.states.get("goal_relevant") is True for element in scene.elements):
         return False
+    if scene.screen_id == "unknown":
+        return True
 
     target_app = str(context.get("app_id") or "").strip().casefold()
     objective = str(context.get("objective") or "").strip()

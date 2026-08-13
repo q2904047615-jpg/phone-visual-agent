@@ -415,6 +415,24 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual(len(provider.messages), 3)
         self.assertIn("goal 缺少字段：entities", provider.messages[1][0]["content"])
 
+    def test_current_page_goal_repairs_missing_app_to_foreground_context(self):
+        invalid = base_payload()
+        invalid["goal"]["target_apps"] = []
+        repaired = base_payload()
+        repaired["goal"]["target_apps"] = [
+            {"app_id": "current_foreground", "app_name": "当前前台应用"}
+        ]
+        provider = FakeProvider(invalid, repaired)
+
+        graph = DeepSeekTaskGraphPlanner(provider).plan(
+            "让当前页面显示目标内容",
+            device_id="phone-1",
+        )
+
+        self.assertEqual("current_foreground", graph.goal.target_apps[0].app_id)
+        self.assertEqual(3, len(provider.messages))
+        self.assertIn("current_foreground", provider.messages[1][0]["content"])
+
     def test_protocol_field_named_like_a_repairable_error_is_still_rejected(self):
         invalid = base_payload()
         invalid["goal"]["缺少字段"] = "不能利用字段名触发修复"
@@ -428,6 +446,47 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual(len(provider.messages), 1)
 
+    def test_initial_plan_repairs_one_low_level_protocol_violation(self):
+        invalid = base_payload()
+        invalid["goal"]["objective"] = "向上滑动一次，让蓝色终点进入画面"
+        repaired = base_payload()
+        repaired["constraints"] = [
+            "不要点击其他控件",
+            "页面内容只允许向上移动一次",
+        ]
+        provider = FakeProvider(invalid, repaired)
+
+        graph = DeepSeekTaskGraphPlanner(provider).plan(
+            "向上滑动一次，让蓝色终点进入画面",
+            device_id="phone-1",
+        )
+
+        self.assertEqual(repaired["goal"]["objective"], graph.goal.objective)
+        self.assertEqual(3, len(provider.messages))
+        self.assertIn("goal.objective", provider.messages[1][0]["content"])
+        self.assertIn("不要输出点击、滑动、输入", provider.messages[1][0]["content"])
+        self.assertIn("只保留动作希望达到的可见结果状态", provider.messages[1][0]["content"])
+        self.assertIn("逐字保留“不要点击其他控件”", provider.messages[1][0]["content"])
+        self.assertIn("页面内容只允许向上移动一次", provider.messages[1][0]["content"])
+        self.assertEqual(
+            ("不要点击其他控件", "页面内容只允许向上移动一次"),
+            graph.constraints,
+        )
+
+    def test_initial_plan_second_low_level_protocol_violation_stays_blocked(self):
+        first = base_payload()
+        first["goal"]["objective"] = "向上滑动一次，让蓝色终点进入画面"
+        second = copy.deepcopy(first)
+        provider = FakeProvider(first, second)
+
+        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
+            DeepSeekTaskGraphPlanner(provider).plan(
+                "向上滑动一次，让蓝色终点进入画面",
+                device_id="phone-1",
+            )
+
+        self.assertEqual(2, len(provider.messages))
+
     def test_rejects_low_level_action_fields(self):
         payload = base_payload()
         payload["subgoals"][0]["steps"] = [{"tap": [10, 20]}]
@@ -438,7 +497,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         payload = base_payload()
         payload["subgoals"][0]["objective"] = "点击搜索结果中的图书馆"
         with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            DeepSeekTaskGraphPlanner(FakeProvider(payload, copy.deepcopy(payload))).plan(
                 "目标",
                 device_id="phone-1",
             )
@@ -461,7 +520,9 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 payload = base_payload()
                 payload["subgoals"][0]["objective"] = objective
                 with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    DeepSeekTaskGraphPlanner(
+                        FakeProvider(payload, copy.deepcopy(payload))
+                    ).plan(
                         "目标",
                         device_id="phone-1",
                     )
@@ -485,7 +546,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         payload = base_payload()
         payload["subgoals"][0]["completion_conditions"] = ["点击收藏按钮后完成"]
         with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            DeepSeekTaskGraphPlanner(FakeProvider(payload, copy.deepcopy(payload))).plan(
                 "目标",
                 device_id="phone-1",
             )
@@ -494,7 +555,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         payload = base_payload()
         payload["subgoals"][0]["constraints"] = ["点击第一个搜索结果"]
         with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            DeepSeekTaskGraphPlanner(FakeProvider(payload, copy.deepcopy(payload))).plan(
                 "目标",
                 device_id="phone-1",
             )
@@ -996,7 +1057,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             )
         )
 
-    def test_semantic_audit_reason_cannot_contain_low_level_actions(self):
+    def test_semantic_audit_low_level_reason_is_isolated_from_control_data(self):
         payload = single_subgoal_payload("查看资料", external_impact="read_only")
         audit = audit_payload_for_graph(payload)
         audit["assessments"][0]["reason"] = "需要点击右上角按钮"
@@ -1004,8 +1065,14 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             FakeProvider(payload, audit_payloads=[audit])
         )
 
-        with self.assertRaisesRegex(TaskGraphError, "风险审计.*低层动作"):
-            planner.plan("查看资料", device_id="phone-1")
+        graph = planner.plan("查看资料", device_id="phone-1")
+
+        self.assertEqual("ready", graph.status)
+        self.assertEqual(1, planner.risk_audit_call_count)
+        assessment = planner.last_risk_audit.assessments[0]
+        self.assertNotIn("点击", assessment.reason)
+        self.assertIn("已隔离", assessment.reason)
+        self.assertEqual("read_only", assessment.external_impact)
 
     def test_replan_runs_a_fresh_semantic_risk_audit(self):
         initial = base_payload()

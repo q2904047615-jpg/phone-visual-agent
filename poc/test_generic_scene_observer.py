@@ -123,6 +123,19 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         self.assertEqual(provider.max_tokens, 800)
         self.assertEqual(provider.call_options["timeout"], 60.0)
+
+    def test_low_confidence_scene_is_rejected_before_trusted_observation(self) -> None:
+        payload = scene_payload()
+        payload["confidence"] = 0.6
+        provider = FakeProvider(payload)
+
+        with self.assertRaisesRegex(VisionAgentError, "整体置信度不足"):
+            GenericSceneObserver(provider).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "目标内容可见"},
+            )
+
+        self.assertEqual(2, provider.calls)
         self.assertEqual(provider.call_options["max_attempts"], 2)
 
     def test_unstable_frames_do_not_call_model(self) -> None:
@@ -361,6 +374,26 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         )
         self.assertEqual(provider.calls, 1)
+        self.assertFalse(observer.last_diagnostics["targeted_refinement_used"])
+
+    def test_high_confidence_goal_element_does_not_refine_only_for_unknown_screen(self) -> None:
+        payload = scene_payload()
+        payload["foreground_app_id"] = "unknown"
+        payload["screen_id"] = "unknown"
+        payload["elements"][0]["states"] = {"goal_relevant": True}
+        provider = SequenceProvider([payload])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={
+                "app_id": "current_foreground",
+                "objective": "让目标进入当前画面",
+            },
+        )
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual("unknown", scene.screen_id)
         self.assertFalse(observer.last_diagnostics["targeted_refinement_used"])
 
     def test_status_exposes_observation_policy(self) -> None:

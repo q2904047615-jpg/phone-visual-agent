@@ -59,6 +59,19 @@ class SequenceProvider(FakeProvider):
         return json.dumps(value, ensure_ascii=False)
 
 
+class RawSequenceProvider(FakeProvider):
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__({})
+        self.responses = list(responses)
+
+    def _chat(self, messages, max_tokens, **kwargs) -> str:
+        self.calls += 1
+        self.messages = messages
+        if not self.responses:
+            raise AssertionError("模型被调用超过一次初始请求和一次修复重试")
+        return self.responses.pop(0)
+
+
 def load_sequence(name: str) -> list[Image.Image]:
     paths = sorted((ASSET_ROOT / name).glob("frame_*.jpg"))
     if len(paths) != 4:
@@ -957,7 +970,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         payload = action_payload(self.context, self.observation)
         payload["next_action"] = {
             "type": "swipe",
-            "params": {"direction": "up", "distance": 300},
+            "params": {"direction": "up", "distance": "medium"},
         }
         payload["target_region"] = {
             "element_id": "settings_icon",
@@ -1295,6 +1308,43 @@ class QwenVisualDecisionTests(unittest.TestCase):
             decision.proposal.completion_evidence,
             ("settings_icon:设置",),
         )
+
+    def test_exact_duplicate_json_response_is_accepted(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        raw = json.dumps(payload, ensure_ascii=False)
+
+        provider = RawSequenceProvider([raw + "\n" + raw])
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual(1, provider.calls)
+
+    def test_conflicting_duplicate_json_response_is_safely_blocked(self) -> None:
+        first = action_payload(self.context, self.observation)
+        second = copy.deepcopy(first)
+        second["confidence"] = 0.81
+        raw = (
+            json.dumps(first, ensure_ascii=False)
+            + "\n"
+            + json.dumps(second, ensure_ascii=False)
+        )
+
+        provider = RawSequenceProvider([raw, raw])
+        _observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("多个互相冲突", decision.reason)
+        self.assertEqual(2, provider.calls)
+
+    def test_action_discards_model_authored_completion_evidence(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        payload["completion_evidence_element_ids"] = ["settings_icon"]
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual((), decision.completion_evidence_element_ids)
+        self.assertEqual((), decision.proposal.completion_evidence)
 
     def test_finished_with_forged_evidence_id_is_rejected(self) -> None:
         bad = action_payload(self.context, self.observation)

@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 
 from generic_intent import GenericIntentDraft
 from generic_scene_observer import GenericSceneObserver
@@ -149,6 +149,7 @@ class GenericSingleActionAdapter:
         post_action_settle: float = 1.5,
         post_action_timeout: float = 10.0,
         post_action_max_observations: int = 2,
+        confirmation_frame_delta_max: float = 6.0,
     ) -> None:
         self.capture = capture
         self.observer = observer
@@ -161,6 +162,33 @@ class GenericSingleActionAdapter:
             2,
             max(1, int(post_action_max_observations)),
         )
+        self.confirmation_frame_delta_max = max(
+            0.0,
+            float(confirmation_frame_delta_max),
+        )
+
+    @staticmethod
+    def _confirmation_frame_delta(
+        planned_frames: tuple[Image.Image, ...] | list[Image.Image],
+        fresh_frames: list[Image.Image],
+    ) -> float:
+        if not planned_frames or not fresh_frames:
+            raise GenericActionAdapterError("确认前缺少本地真实帧，不能验证画面身份。")
+        planned_sizes = {frame.size for frame in planned_frames}
+        fresh_sizes = {frame.size for frame in fresh_frames}
+        if len(planned_sizes) != 1 or len(fresh_sizes) != 1 or planned_sizes != fresh_sizes:
+            raise GenericActionAdapterError("确认前真实画面尺寸发生变化。")
+
+        def compact(frame: Image.Image) -> Image.Image:
+            return frame.convert("L").resize((96, 160), Image.Resampling.BILINEAR)
+
+        planned = [compact(frame) for frame in planned_frames]
+        fresh = [compact(frame) for frame in fresh_frames]
+        return min(
+            float(ImageStat.Stat(ImageChops.difference(first, second)).mean[0])
+            for first in planned
+            for second in fresh
+        )
 
     def _capture_frame(self) -> Image.Image:
         frame = self.capture().convert("RGB")
@@ -168,7 +196,7 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError("摄像头返回残缺画面，停止单步动作。")
         return frame
 
-    def capture_scene(
+    def _capture_scene_once(
         self,
         goal: GenericIntentDraft,
         *,
@@ -192,6 +220,46 @@ class GenericSingleActionAdapter:
                 evidence=paths,
             ) from exc
         return scene, frames, paths
+
+    def capture_scene(
+        self,
+        goal: GenericIntentDraft,
+        *,
+        evidence_dir: Path | None,
+        prefix: str,
+    ) -> tuple[UIScene, list[Image.Image], tuple[str, ...]]:
+        all_paths: tuple[str, ...] = ()
+        errors: list[str] = []
+        for attempt in range(1, 3):
+            try:
+                scene, frames, paths = self._capture_scene_once(
+                    goal,
+                    evidence_dir=evidence_dir,
+                    prefix=f"{prefix}_attempt_{attempt}",
+                )
+                return scene, frames, all_paths + paths
+            except GenericActionAdapterError as exc:
+                all_paths += tuple(exc.evidence)
+                errors.append(f"第{attempt}轮动作前观察失败：{exc}")
+                if attempt >= 2 or not self._pre_action_observation_retryable(exc):
+                    raise GenericActionAdapterError(
+                        "动作前通用页面观察失败：" + "；".join(errors),
+                        evidence=all_paths,
+                        observation_errors=tuple(errors),
+                    ) from exc
+        raise AssertionError("unreachable")
+
+    def _pre_action_observation_retryable(self, error: Exception) -> bool:
+        text = str(error)
+        return self._post_observation_retryable(error) or any(
+            marker in text
+            for marker in (
+                "页面不稳定",
+                "画面不稳定",
+                "整体置信度不足",
+                "不能建立可信候选",
+            )
+        )
 
     def _capture_stable_post_action_frames(
         self,
@@ -354,7 +422,7 @@ class GenericSingleActionAdapter:
             tuple(verification_errors),
         )
 
-    def _post_observation_retryable(self, error: RuntimeError) -> bool:
+    def _post_observation_retryable(self, error: Exception) -> bool:
         diagnostics = getattr(self.observer, "last_diagnostics", {})
         error_type = (
             diagnostics.get("error_type")
@@ -374,6 +442,7 @@ class GenericSingleActionAdapter:
         goal: GenericIntentDraft,
         confirmed: bool,
         evidence_dir: Path | None = None,
+        planned_frames: tuple[Image.Image, ...] | list[Image.Image] = (),
     ) -> GenericActionExecutionResult:
         if confirmed is not True:
             raise GenericActionAdapterError("必须明确确认当前这一个语义动作。")
@@ -384,8 +453,23 @@ class GenericSingleActionAdapter:
             evidence_dir=evidence_dir,
             prefix=f"{evidence_prefix}_before",
         )
+        local_frame_identity_verified = False
+        if planned_frames:
+            frame_delta = self._confirmation_frame_delta(planned_frames, before_frames)
+            if frame_delta > self.confirmation_frame_delta_max:
+                raise GenericActionAdapterError(
+                    "确认时本地真实画面已变化："
+                    f"差异{frame_delta:.2f}超过阈值{self.confirmation_frame_delta_max:.2f}",
+                    evidence=before_paths,
+                )
+            local_frame_identity_verified = True
         try:
-            rebound = self._rebind_action(requested_action, planned_scene, before)
+            rebound = self._rebind_action(
+                requested_action,
+                planned_scene,
+                before,
+                local_frame_identity_verified=local_frame_identity_verified,
+            )
         except GenericActionAdapterError as exc:
             raise GenericActionAdapterError(
                 str(exc),
@@ -541,10 +625,14 @@ class GenericSingleActionAdapter:
         requested: SemanticAction,
         planned_scene: UIScene,
         fresh_scene: UIScene,
+        *,
+        local_frame_identity_verified: bool = False,
     ) -> SemanticAction:
         planned_app = planned_scene.foreground_app_id
         fresh_app = fresh_scene.foreground_app_id
         if (
+            not local_frame_identity_verified
+            and
             planned_app != "unknown"
             and fresh_app != "unknown"
             and planned_app != fresh_app
@@ -553,6 +641,8 @@ class GenericSingleActionAdapter:
                 f"确认时前台 App 已变化：{planned_app} -> {fresh_app}"
             )
         if (
+            not local_frame_identity_verified
+            and
             planned_scene.screen_id != "unknown"
             and planned_scene.screen_id != fresh_scene.screen_id
         ):

@@ -159,6 +159,7 @@ SAFE_NAVIGATION_SEMANTIC_PATTERN = re.compile(
 REPAIRABLE_INITIAL_GRAPH_ERRORS = (
     "任务图至少需要一个全局完成条件。",
     "可推进任务图必须且只能有一个活动子目标。",
+    "可推进的任务图至少需要一个目标 App。",
 )
 REPAIRABLE_INITIAL_GRAPH_ERROR_FRAGMENTS = (
     "文本模型没有返回有效 JSON",
@@ -166,6 +167,7 @@ REPAIRABLE_INITIAL_GRAPH_ERROR_FRAGMENTS = (
     "缺少字段",
     "必须是对象",
     "必须是数组",
+    "包含低层动作表达",
 )
 REPAIRABLE_REPLAN_ERROR_FRAGMENTS = (
     "文本模型没有返回有效 JSON",
@@ -919,16 +921,23 @@ class DeepSeekTaskGraphPlanner:
     def _audit_and_validate_graph(self, graph: DynamicTaskGraph) -> None:
         sources = _risk_audit_sources(graph)
         report = self.risk_auditor.audit(sources)
+        sanitized_assessments = []
         for assessment in report.assessments:
             try:
                 _reject_low_level_instruction(
                     assessment.reason,
                     "risk_audit.reason",
                 )
-            except TaskGraphError as exc:
-                raise TaskGraphError(
-                    "语义风险审计理由包含低层动作表达，拒绝任务图。"
-                ) from exc
+            except TaskGraphError:
+                assessment = replace(
+                    assessment,
+                    reason=(
+                        f"语义风险审计分类为 {assessment.external_impact}；"
+                        "原始展示理由因包含低层操作表达已隔离"
+                    ),
+                )
+            sanitized_assessments.append(assessment)
+        report = replace(report, assessments=tuple(sanitized_assessments))
         report = _apply_local_risk_supplements(report, sources)
         self.last_risk_audit = report
         _validate_graph_against_risk_audit(graph, report)
@@ -950,6 +959,15 @@ def _initial_prompt(raw_goal: str) -> str:
 初始规划规则：
 1. 适用于任意 App 和跨 App 目标，不得生成任何 App 专用固定流程。
 2. 子目标描述“应达到什么状态”，不能描述具体按钮、坐标或动作序列。
+   用户原始目标可以直接包含点击、滑动、输入等自然语言动作；不要拒绝，也不要把这些动作词
+   复制进任务图。应提取该动作希望达到的可见结果状态，例如把“滑动页面找到目标内容”抽象为
+   “目标内容在当前页面可见”，具体下一动作仍由 Qwen 根据真实画面决定。
+   但用户用“不要、不得、禁止、不能、避免”明确否定的低层动作属于安全约束，必须以同样的
+   明确否定形式保留在 constraints 中；不得删除，也不得改写成含糊或双重否定的表达。
+   用户对方向或次数的限制也要保留，但必须改写成动作后的状态变化，不得复述动作词。例如把
+   “只能向上滑动一次”改写为“页面内容只允许向上移动一次”。
+   如果用户明确指“当前页面”“当前应用”或“当前前台”但没有说 App 名称，target_apps 使用
+   [{{"app_id":"current_foreground","app_name":"当前前台应用"}}]；不能只因未重复 App 名称而阻塞。
 3. 只能有一个 active 子目标；其依赖必须已经 completed（初始图通常无依赖）。
 4. 初始规划没有画面证据，所有完成条件 satisfied=false，任何子目标都不能 completed。
 5. 每个子目标必须用 external_impact 标为 read_only、navigation_only、external_state 或 unknown。
@@ -989,7 +1007,16 @@ def _repair_initial_prompt(
 2. blocked 或 completed 时 active_subgoal_id=null，且不能有 active 子目标。
 3. 至少返回一个全局 completion_conditions；初始规划不得宣称任何条件或子目标已完成。
 4. external_state 或 unknown 必须声明并关联风险；成为 active 时必须等待本地用户确认。
-5. 只返回符合结构的完整 JSON 对象，不要 Markdown。
+5. 如果用户原始目标含有点击、滑动、输入等低层动作措辞，goal、subgoals 和
+   completion_conditions 只保留动作希望达到的可见结果状态，不得复述低层动作；具体下一动作
+   由 Qwen 根据真实画面决定。例如把“滑动页面找到目标内容”改写为“目标内容在当前页面可见”。
+   用户以“不要、不得、禁止、不能、避免”明确否定的动作是例外：必须用同样的明确否定形式
+   保留在 constraints 中，例如逐字保留“不要点击其他控件”，不得删除或改成“不点击”。
+   对方向或次数的限制必须改写成动作后的状态变化，例如把“只能向上滑动一次”改写为
+   “页面内容只允许向上移动一次”，不得把正向低层动作词放入 constraints。
+6. 如果用户明确指“当前页面”“当前应用”或“当前前台”但未说 App 名称，target_apps 必须使用
+   [{{"app_id":"current_foreground","app_name":"当前前台应用"}}]，不得只因缺少 App 名称而阻塞。
+7. 只返回符合结构的完整 JSON 对象，不要 Markdown。
 """
 
 

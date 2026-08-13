@@ -128,7 +128,9 @@ account_or_permission_change | unknown_external_effect
 5. 含义不清或无法可靠判断时返回 unknown，不能猜成安全类别。
 6. external_state 必须返回至少一个匹配的通用风险类型；unknown 使用 unknown_external_effect。
 7. read_only/navigation_only 的 risk_types 必须为空数组。
-8. 只输出结构化风险判断。禁止输出点击、坐标、输入内容、Shell、系统命令或任何操作步骤。
+8. 只输出结构化风险判断。reason 只能说明是否改变账号、数据、通信或其他外部状态及其语义
+   依据，不得复述 source 原文，不得包含点击、滑动、长按、拖动、输入、坐标、Shell、
+   系统命令或任何操作步骤。
 9. 不得返回确认结果；确认只能来自本地控制器。
 10. 明确否定或禁止的效果词只是安全约束，不会因为出现效果词就变成 external_state。例如
     “不登录”“不要发送”“禁止删除”“不搜索、不登录”应判断句中剩余的正向目标；并列否定

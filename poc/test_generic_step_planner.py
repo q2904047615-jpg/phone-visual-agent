@@ -718,6 +718,122 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
         self.assertEqual(robot.actions, [])
 
+    def test_matching_local_frames_override_model_screen_id_wording_drift(self):
+        planned = scene("planned", screen_id="generic_action_verification_page")
+        fresh = scene("before", screen_id="universal_action_verification_page")
+        after = scene("after", screen_id="blue_endpoint_visible")
+        observer = FakeSceneObserver([fresh, after])
+        robot = FakeRobot()
+        capture = SequenceCapture(["gray"] * 4 + ["white"] * 4)
+        adapter = GenericSingleActionAdapter(
+            capture=capture,
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+        action = SemanticAction(
+            node_id="generic_step_1",
+            action="swipe",
+            params={"direction": "up", "expected_effect": {"scene_changed": True}},
+        )
+
+        result = adapter.execute(
+            requested_action=action,
+            planned_scene=planned,
+            planned_frames=tuple(Image.new("RGB", (540, 960), "gray") for _ in range(4)),
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("swipe", "up")], robot.actions)
+        self.assertEqual(1, result.physical_actions)
+
+    def test_changed_local_frames_stop_even_when_model_screen_id_matches(self):
+        planned = scene("planned", screen_id="same_screen")
+        fresh = scene("before", screen_id="same_screen")
+        observer = FakeSceneObserver([fresh])
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["white"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+        action = SemanticAction(
+            node_id="generic_step_1",
+            action="swipe",
+            params={"direction": "up", "expected_effect": {"scene_changed": True}},
+        )
+
+        with self.assertRaisesRegex(GenericActionAdapterError, "本地真实画面已变化"):
+            adapter.execute(
+                requested_action=action,
+                planned_scene=planned,
+                planned_frames=tuple(
+                    Image.new("RGB", (540, 960), "black") for _ in range(4)
+                ),
+                goal=goal(),
+                confirmed=True,
+            )
+
+        self.assertEqual([], robot.actions)
+
+    def test_confirmation_low_confidence_observation_retries_once_before_action(self):
+        planned = scene("planned")
+        fresh = scene("before", element_id="fresh")
+        after = scene("after", screen_id="app_home", element_id="after")
+        observer = FakeSceneObserver(
+            [
+                RuntimeError("页面不稳定或整体置信度不足，不能建立可信候选。"),
+                fresh,
+                after,
+            ]
+        )
+        robot = FakeRobot()
+        action = SemanticAction(
+            node_id="generic_step_1",
+            action="tap_semantic",
+            params={"element_id": "e1", "target": "app_icon"},
+        )
+
+        result = self._adapter(observer, robot).execute(
+            requested_action=action,
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual(3, observer.calls)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(1, len(robot.actions))
+
+    def test_confirmation_second_low_confidence_failure_stops_without_action(self):
+        observer = FakeSceneObserver(
+            [
+                RuntimeError("页面不稳定或整体置信度不足，不能建立可信候选。"),
+                RuntimeError("页面不稳定或整体置信度不足，不能建立可信候选。"),
+            ]
+        )
+        robot = FakeRobot()
+        action = SemanticAction(
+            node_id="generic_step_1",
+            action="tap_semantic",
+            params={"element_id": "e1", "target": "app_icon"},
+        )
+
+        with self.assertRaisesRegex(GenericActionAdapterError, "第2轮动作前观察失败"):
+            self._adapter(observer, robot).execute(
+                requested_action=action,
+                planned_scene=scene("planned"),
+                goal=goal(),
+                confirmed=True,
+            )
+
+        self.assertEqual(2, observer.calls)
+        self.assertEqual([], robot.actions)
+
     def test_goal_polluted_home_app_is_normalized_before_confirmation(self):
         planned = scene("planned", app_id="douyin")
         fresh = scene("before", element_id="fresh", app_id="unknown")

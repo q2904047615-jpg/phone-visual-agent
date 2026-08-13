@@ -1151,7 +1151,7 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
     for risk in graph.risk_actions:
         linked = tuple(subgoals.get(item) for item in risk.subgoal_ids)
         if (
-            risk.risk_type != "unknown_external_effect"
+            risk.risk_type not in {"unknown_external_effect", "data_mutation"}
             or risk.risk_level != "low"
             or not linked
             or any(item is None for item in linked)
@@ -1159,7 +1159,7 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
         ):
             continue
         if all(
-            item.external_impact in {"read_only", "navigation_only"}
+            item.external_impact in {"read_only", "navigation_only", "external_state"}
             and LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
             and not _infer_external_risk_types(
                 item.objective,
@@ -1173,6 +1173,13 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
     normalized_subgoals = tuple(
         replace(
             item,
+            external_impact=(
+                "navigation_only"
+                if item.risk_action_ids
+                and set(item.risk_action_ids) <= removable_ids
+                and LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
+                else item.external_impact
+            ),
             risk_action_ids=tuple(
                 risk_id
                 for risk_id in item.risk_action_ids
@@ -1232,7 +1239,8 @@ def _explicitly_denies_external_effect(value: str) -> bool:
     normalized = "".join(str(value or "").strip().lower().split())
     return bool(
         re.search(
-            r"(?:无|没有|不涉及|不会产生|不改变)(?:任何)?(?:外部)?(?:状态)?(?:影响|变更|变化)",
+            r"(?:(?:无|没有|不涉及|不会产生|不改变)(?:任何)?(?:外部)?(?:状态)?"
+            r"(?:影响|变更|变化)|不影响(?:账号数据|外部系统|外部状态))",
             normalized,
         )
     )
@@ -1951,6 +1959,15 @@ def _apply_local_risk_supplements(
     sources: tuple[AuditSource, ...],
 ) -> SemanticRiskAuditReport:
     source_map = {item.source_id: item for item in sources}
+    source_groups: dict[str | None, list[AuditSource]] = {}
+    for source in sources:
+        source_groups.setdefault(source.subgoal_id, []).append(source)
+    transient_navigation_scopes = {
+        scope_id
+        for scope_id, group in source_groups.items()
+        if any(LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.text) for item in group)
+        and not any(_infer_external_risk_types(item.text) for item in group)
+    }
     assessments = []
     for assessment in report.assessments:
         source = source_map[assessment.source_id]
@@ -1989,9 +2006,10 @@ def _apply_local_risk_supplements(
             )
         if (
             assessment.external_impact == "external_state"
-            and model_types == {"unknown_external_effect"}
+            and model_types
+            and model_types <= {"unknown_external_effect", "data_mutation"}
             and not inferred
-            and LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(source.text)
+            and assessment.subgoal_id in transient_navigation_scopes
         ):
             assessment = replace(
                 assessment,

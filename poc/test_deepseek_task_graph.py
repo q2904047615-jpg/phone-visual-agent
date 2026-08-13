@@ -454,6 +454,35 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual("target_state", graph.active_subgoal_id)
         self.assertEqual("active", graph.active_subgoal().status)
 
+    def test_initial_plan_normalizes_transient_tab_mislabeled_as_data_mutation(self):
+        payload = single_subgoal_payload(
+            "在当前浏览器打开空白标签页",
+            external_impact="external_state",
+        )
+        payload["subgoals"][0]["status"] = "pending"
+        payload["active_subgoal_id"] = None
+        payload["risk_actions"] = [
+            {
+                "risk_id": "tab_mutation",
+                "description": "临时标签页集合变化",
+                "external_effect": "仅改变浏览器内部标签页，不影响账号数据或外部系统",
+                "risk_type": "data_mutation",
+                "risk_level": "low",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["risk_action_ids"] = ["tab_mutation"]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "新建一个空白标签页",
+            device_id="phone-1",
+        )
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+        self.assertEqual("active", graph.active_subgoal().status)
+
     def test_initial_plan_aligns_explicit_safe_active_id_with_pending_status(self):
         payload = single_subgoal_payload(
             "空白标签页在当前浏览器中可见",
@@ -1106,6 +1135,36 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 "subgoals.target_state.objective": {
                     "external_impact": "external_state",
                     "risk_types": ["unknown_external_effect"],
+                },
+            },
+        )
+
+        graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(payload, audit_payloads=[audit])
+        ).plan(objective, device_id="phone-1")
+
+        self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+
+    def test_false_positive_data_mutation_audit_cannot_turn_transient_tab_external(self):
+        objective = "打开一个空白标签页"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        audit = audit_payload_for_graph(
+            payload,
+            overrides={
+                "raw_goal": {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
+                },
+                "goal.objective": {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
+                },
+                "subgoals.target_state.objective": {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
                 },
             },
         )

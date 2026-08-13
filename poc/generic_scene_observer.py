@@ -29,6 +29,7 @@ GENERIC_SCENE_OBSERVER_VERSION = "2026-08-10-generic-scene-observer-v5"
 COMPACT_OUTPUT_TOKENS = 800
 COMPACT_RETRY_TOKENS = 800
 TARGETED_OUTPUT_TOKENS = 1200
+INPUT_STRUCTURE_AUDIT_TOKENS = 700
 OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 12
 
@@ -41,6 +42,8 @@ STAGE_LABELS = {
     "parsing_compact_retry": "解析修正结果",
     "waiting_targeted_refinement": "等待千问目标精查",
     "parsing_targeted_refinement": "解析目标精查结果",
+    "waiting_input_structure_audit": "等待输入结构只读审计",
+    "parsing_input_structure_audit": "解析输入结构只读审计",
     "completed": "观察完成",
     "failed": "观察安全停止",
 }
@@ -100,6 +103,8 @@ class GenericSceneObserver:
         compact_retry_used = False
         format_retry_used = False
         targeted_refinement_used = False
+        input_structure_audit_used = False
+        targeted_roi_bounds: tuple[int, int, int, int] | None = None
         model_call_elapsed_seconds: list[float] = []
         model_call_token_budgets: list[int] = []
 
@@ -142,6 +147,7 @@ class GenericSceneObserver:
                 "type": "image_url",
                 "image_url": {"url": _image_data_url(frame)},
             }
+            detail_image_part = image_part
             first_messages = [
                 _json_only_system_message(),
                 {
@@ -161,7 +167,11 @@ class GenericSceneObserver:
                 )
                 self.last_raw_response = raw
                 self._set_stage("parsing_compact_observation")
-                scene = _parse_scene(raw, fingerprint=fingerprint)
+                scene = _parse_scene(
+                    raw,
+                    fingerprint=fingerprint,
+                    goal_context=context,
+                )
             except VisionAgentError as first_error:
                 first_error_type = classify_qwen_error(
                     first_error,
@@ -194,25 +204,41 @@ class GenericSceneObserver:
                 )
                 self.last_raw_response = raw
                 self._set_stage("parsing_compact_retry")
-                scene = _parse_scene(raw, fingerprint=fingerprint)
+                scene = _parse_scene(
+                    raw,
+                    fingerprint=fingerprint,
+                    goal_context=context,
+                )
 
             if _needs_targeted_refinement(scene, context):
                 targeted_refinement_used = True
+                targeted_roi_bounds = _goal_directed_roi_bounds(context)
+                detail_image_part = image_part
+                if targeted_roi_bounds is not None:
+                    detail_frame = _crop_normalized(frame, targeted_roi_bounds)
+                    detail_image_part = {
+                        "type": "image_url",
+                        "image_url": {"url": _image_data_url(detail_frame)},
+                    }
                 self._set_stage("waiting_targeted_refinement")
                 detail_messages = [
                     _json_only_system_message(),
                     {
                         "role": "user",
-                        "content": [
-                            {
+                        "content": (
+                            [
+                                {
                                 "type": "text",
                                 "text": _targeted_prompt(
                                     context,
                                     first_scene=scene.to_dict(),
+                                    roi_bounds=targeted_roi_bounds,
                                 ),
-                            },
-                            image_part,
-                        ],
+                                },
+                                image_part,
+                            ]
+                            + ([detail_image_part] if targeted_roi_bounds is not None else [])
+                        ),
                     }
                 ]
                 try:
@@ -224,7 +250,12 @@ class GenericSceneObserver:
                     self._set_stage("parsing_targeted_refinement")
                     # A failed refinement must stop the controller. Returning the
                     # earlier ambiguous scene would allow action on stale evidence.
-                    scene = _parse_scene(raw, fingerprint=fingerprint)
+                    scene = _parse_scene(
+                        raw,
+                        fingerprint=fingerprint,
+                        goal_context=context,
+                    )
+
                 except VisionAgentError as targeted_error:
                     targeted_error_type = classify_qwen_error(
                         targeted_error,
@@ -241,16 +272,20 @@ class GenericSceneObserver:
                         _json_only_system_message(),
                         {
                             "role": "user",
-                            "content": [
-                                {
+                            "content": (
+                                [
+                                    {
                                     "type": "text",
                                     "text": _targeted_retry_prompt(
                                         context,
                                         targeted_error,
+                                        roi_bounds=targeted_roi_bounds,
                                     ),
-                                },
-                                image_part,
-                            ],
+                                    },
+                                    image_part,
+                                ]
+                                + ([detail_image_part] if targeted_roi_bounds is not None else [])
+                            ),
                         }
                     ]
                     raw = model_chat(
@@ -259,7 +294,41 @@ class GenericSceneObserver:
                     )
                     self.last_raw_response = raw
                     self._set_stage("parsing_compact_retry")
-                    scene = _parse_scene(raw, fingerprint=fingerprint)
+                    scene = _parse_scene(
+                        raw,
+                        fingerprint=fingerprint,
+                        goal_context=context,
+                    )
+
+            if _should_audit_prefilled_input(scene, context):
+                input_structure_audit_used = True
+                self._set_stage("waiting_input_structure_audit")
+                audit_content: list[dict[str, Any]] = [
+                    {
+                        "type": "text",
+                        "text": _input_structure_audit_prompt(
+                            context,
+                            roi_bounds=targeted_roi_bounds,
+                        ),
+                    },
+                    image_part,
+                ]
+                if targeted_roi_bounds is not None:
+                    audit_content.append(detail_image_part)
+                raw = model_chat(
+                    [
+                        _json_only_system_message(),
+                        {"role": "user", "content": audit_content},
+                    ],
+                    max_tokens=INPUT_STRUCTURE_AUDIT_TOKENS,
+                )
+                self.last_raw_response = raw
+                self._set_stage("parsing_input_structure_audit")
+                scene = _apply_input_structure_audit(
+                    scene,
+                    raw,
+                    fingerprint=fingerprint,
+                )
 
             target_local_candidate = scene.unique_trusted_goal_element()
             completion_evidence = scene.trusted_completion_evidence()
@@ -302,6 +371,16 @@ class GenericSceneObserver:
                 "first_pass_success": not format_retry_used,
                 "repair_retry_success": format_retry_used,
                 "targeted_refinement_used": targeted_refinement_used,
+                "input_structure_audit_used": input_structure_audit_used,
+                "targeted_roi_bounds": (
+                    list(targeted_roi_bounds)
+                    if targeted_roi_bounds is not None
+                    else None
+                ),
+                "prefilled_input_structure_inferred": any(
+                    item.element_id.startswith("local_structured_input_")
+                    for item in scene.elements
+                ),
                 "model_call_elapsed_seconds": model_call_elapsed_seconds,
                 "model_call_token_budgets": model_call_token_budgets,
                 "elapsed_seconds": round(time.perf_counter() - started, 3),
@@ -337,6 +416,7 @@ class GenericSceneObserver:
                     "first_pass_success": False,
                     "repair_retry_success": False,
                     "targeted_refinement_used": targeted_refinement_used,
+                    "input_structure_audit_used": input_structure_audit_used,
                     "model_call_elapsed_seconds": model_call_elapsed_seconds,
                     "model_call_token_budgets": model_call_token_budgets,
                 }
@@ -390,6 +470,16 @@ def _json_only_system_message() -> dict[str, str]:
     }
 
 
+PREFILLED_INPUT_OBSERVATION_RULE = (
+    "输入框可能为空，也可能已经含有文字；预填充且未聚焦时可以没有光标或占位提示。"
+    "当一个有清晰独立边界的矩形内含查询/表单文字，并紧邻一个边界独立的提交类按钮时，"
+    "这组结构本身就是role=input的可靠视觉证据，不得仅因没有光标而降级成text或container；"
+    "相邻按钮必须作为另一个控件观察，不能把输入框和按钮合成横幅。这个判断只报告页面事实，"
+    "绝不表示可以激活相邻按钮。框内文字的内容或主题不能改变控件角色；其他没有上述成组结构的"
+    "带文字区域仍不得仅因含有文字就被认作输入框。"
+)
+
+
 def _compact_prompt(context: dict[str, Any]) -> str:
     return f"""
 你是通用手机页面观察器，只报告画面事实，不规划也不执行动作。
@@ -408,6 +498,7 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 8. 场景confidence只评价当前画面本身是否清楚、稳定、可描述，不评价目标是否已完成或目标控件
    是否存在。清晰稳定的页面即使没有目标控件，也应保持与画面质量一致的高confidence并返回空
    elements；只有模糊、遮挡、过渡或无法判断页面事实时才降低confidence。
+9. {PREFILLED_INPUT_OBSERVATION_RULE}
 
 只返回下列完整JSON，不要Markdown：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
@@ -437,14 +528,21 @@ bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能�
 role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
 container仅表示与目标有关的页面内容区域；tab_group、tab_bar、navigation_bar、toolbar等其他非点击结构只写进summary，不要放入elements。
 与目标直接相关的元素写states.goal_relevant=true。禁止任何动作或计划字段。不要Markdown。
+输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
 """
 
 
-def _targeted_retry_prompt(context: dict[str, Any], error: Exception) -> str:
+def _targeted_retry_prompt(
+    context: dict[str, Any],
+    error: Exception,
+    *,
+    roi_bounds: tuple[int, int, int, int] | None = None,
+) -> str:
     return f"""
 上一次目标精查输出不是完整、合法的页面观察JSON，控制器没有产生任何候选动作。
 错误摘要：{str(error)[:300]}
 目标上下文：{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
+{_roi_observation_note(roi_bounds)}
 这是本轮观察唯一一次格式修复。请重新独立观察原图，只返回最小完整JSON；没有可靠目标就返回空elements并降低confidence。
 格式：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
@@ -452,6 +550,7 @@ def _targeted_retry_prompt(context: dict[str, Any], error: Exception) -> str:
 "stable":true,"confidence":0.0,"fingerprint":""}}
 元素仅允许element_id、role、meaning、label、bounds、confidence、states、evidence；禁止动作、计划和裸坐标。不要Markdown。
 bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能是x/y/width/height对象、两个点或嵌套数组。
+输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
 """
 
 
@@ -459,6 +558,7 @@ def _targeted_prompt(
     context: dict[str, Any],
     *,
     first_scene: dict[str, Any],
+    roi_bounds: tuple[int, int, int, int] | None = None,
 ) -> str:
     # Keep the first scene short to avoid anchoring the model with many labels.
     compact_scene = {
@@ -472,6 +572,7 @@ def _targeted_prompt(
 你是通用手机页面观察器。快速观察没有找到足够明确的目标相关控件，现在只做目标精查，仍然不能规划或执行动作。
 用户目标：{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
 快速观察摘要：{json.dumps(compact_scene, ensure_ascii=False, separators=(',', ':'))}
+{_roi_observation_note(roi_bounds)}
 
 重新检查原图中与目标直接相关的文字、图标、输入框、列表项和最上层弹层。
 只保留最多4个最相关元素；目标元素必须states.goal_relevant=true。看不清或不唯一就不要输出，
@@ -480,6 +581,13 @@ def _targeted_prompt(
 应用入口可形成高可信观察，即使应用尚未打开。模糊、遮挡或不唯一时仍必须降低，禁止虚增。
 目标相关控件确实不存在时返回空elements，但只要页面事实清楚稳定，场景confidence仍应保持高值；
 不得因为系统级动作没有屏内按钮、或因为未找到目标控件，就把清晰页面写成低置信。
+输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
+如果能清楚看见相关横向边框、框内文字和右侧独立搜索/提交按钮，但仍无法判断边框是否可编辑，
+不得因此返回空elements：请分别报告container、其内部text和右侧button的真实边界与证据；
+这三个元素都必须在states中明确写fully_visible:true或false。若画面边缘还有被裁切的相似结构，
+只能在summary说明，不能把它标成目标；优先报告四边完整可见的结构。完整container和text写
+goal_relevant:true，相邻button写goal_relevant:false。本地只会在三者都fully_visible:true且严格
+几何关系成立时把这组只读事实归一化，绝不会因此激活按钮。
 只返回完整JSON：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"目标精查后的当前画面","elements":[],"overlays":[],
@@ -490,10 +598,47 @@ container仅表示与目标有关的页面内容区域；tab_group、tab_bar、n
 """
 
 
-def _parse_scene(raw: str, *, fingerprint: str) -> UIScene:
+def _input_structure_audit_prompt(
+    context: dict[str, Any],
+    *,
+    roi_bounds: tuple[int, int, int, int] | None,
+) -> str:
+    return f"""
+You are a read-only generic UI structure auditor. The normal scene observer did not establish an input target.
+Goal context (evidence selection only): {json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
+Image 1 is always the complete phone frame. {_input_audit_detail_note(roi_bounds)}
+Enumerate every horizontal search/form-like structure relevant to the goal, including structures clipped by an image edge.
+Do not plan, suggest, authorize, or perform any action. All bounds MUST use Image 1 full-frame normalized coordinates 0..1000.
+For each structure report whether all four outer edges are fully visible, its current text, confidence, and its separate right-side submit/search button.
+Return exactly this JSON schema and no other fields:
+{{"structures":[{{"structure_id":"s1","bounds":[0,0,1000,1000],"fully_visible":true,
+"text":"current visible text","confidence":0.0,"right_button":{{"label":"button text",
+"bounds":[0,0,1000,1000],"confidence":0.0}}}}]}}
+Return an empty structures array when the geometry is not visible. Never merge a clipped structure with a complete structure.
+"""
+
+
+def _input_audit_detail_note(
+    roi_bounds: tuple[int, int, int, int] | None,
+) -> str:
+    if roi_bounds is None:
+        return "No detail crop is provided."
+    return (
+        f"Image 2 is only a magnified read-only crop of Image 1 at {list(roi_bounds)}. "
+        "Use it to read details, but never use Image 2 as a coordinate system."
+    )
+
+
+def _parse_scene(
+    raw: str,
+    *,
+    fingerprint: str,
+    goal_context: dict[str, Any] | None = None,
+) -> UIScene:
     try:
         payload = _extract_json_object(raw)
         _normalize_compact_scene_payload(payload)
+        _normalize_prefilled_input_structure(payload, goal_context or {})
         return UIScene.from_dict(
             payload,
             coordinate_scale=1000.0,
@@ -502,6 +647,377 @@ def _parse_scene(raw: str, *, fingerprint: str) -> UIScene:
         )
     except (UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"通用页面观察结果不符合协议：{exc}") from exc
+
+
+def _goal_directed_roi_bounds(
+    context: dict[str, Any],
+) -> tuple[int, int, int, int] | None:
+    """Select at most one coarse ROI from explicit spatial words in the goal."""
+
+    visible = json.dumps(context, ensure_ascii=False).casefold()
+    top = any(term in visible for term in ("顶部", "上方", "顶端", "top"))
+    bottom = any(term in visible for term in ("底部", "下方", "底端", "bottom"))
+    left = any(term in visible for term in ("左侧", "左边", "left"))
+    right = any(term in visible for term in ("右侧", "右边", "right"))
+    if top and bottom:
+        top = bottom = False
+    if left and right:
+        left = right = False
+    horizontal = (0, 1000)
+    vertical = (0, 1000)
+    if left:
+        horizontal = (0, 560)
+    elif right:
+        horizontal = (440, 1000)
+    if top:
+        vertical = (0, 420)
+    elif bottom:
+        vertical = (580, 1000)
+    if horizontal == (0, 1000) and vertical == (0, 1000):
+        return None
+    return horizontal[0], vertical[0], horizontal[1], vertical[1]
+
+
+def _crop_normalized(
+    image: Image.Image,
+    bounds: tuple[int, int, int, int],
+) -> Image.Image:
+    left, top, right, bottom = bounds
+    x0 = round(left * image.width / 1000)
+    y0 = round(top * image.height / 1000)
+    x1 = round(right * image.width / 1000)
+    y1 = round(bottom * image.height / 1000)
+    return image.crop((x0, y0, x1, y1))
+
+
+def _roi_observation_note(
+    bounds: tuple[int, int, int, int] | None,
+) -> str:
+    if bounds is None:
+        return "本次仍提供完整手机画面；bounds相对于完整画面。"
+    return (
+        f"本次依次提供完整手机画面和根据目标明确方位词裁出的高清局部，局部在原图范围为{list(bounds)}。"
+        "第一张只用于理解页面上下文；必须在第二张高清局部中重新辨认目标。"
+        "第二张只提供放大细节，绝不能作为坐标系；所有bounds必须回到第一张完整手机画面，"
+        "相对于第一张使用0..1000坐标。"
+        "局部图只用于看清事实，不增加任何动作权限。"
+    )
+
+
+def _normalize_prefilled_input_structure(
+    payload: dict[str, Any],
+    goal_context: dict[str, Any],
+) -> None:
+    """Infer an input only from a strict model-reported field/button structure."""
+
+    if not _goal_requests_input(goal_context):
+        return
+    elements = payload.get("elements")
+    if not isinstance(elements, list) or any(
+        isinstance(item, dict) and str(item.get("role") or "").strip() == "input"
+        for item in elements
+    ):
+        return
+
+    def trusted(item: Any, role: str) -> bool:
+        return (
+            isinstance(item, dict)
+            and str(item.get("role") or "").strip() == role
+            and isinstance(item.get("confidence"), (int, float))
+            and not isinstance(item.get("confidence"), bool)
+            and float(item["confidence"]) >= 0.9
+            and _valid_1000_bounds(item.get("bounds"))
+            and isinstance(item.get("states"), dict)
+            and item["states"].get("fully_visible") is True
+        )
+
+    containers = [
+        item
+        for item in elements
+        if trusted(item, "container")
+        and isinstance(item.get("states"), dict)
+        and item["states"].get("goal_relevant") is True
+        and _has_any_semantic_term(item, ("search", "query", "input", "form", "搜索", "查询", "输入"))
+    ]
+    texts = [
+        item
+        for item in elements
+        if trusted(item, "text")
+        and isinstance(item.get("states"), dict)
+        and item["states"].get("goal_relevant") is True
+    ]
+    buttons = [
+        item
+        for item in elements
+        if trusted(item, "button")
+        and isinstance(item.get("states"), dict)
+        and item["states"].get("goal_relevant") is False
+        and _has_any_semantic_term(item, ("search", "submit", "go", "搜索", "提交", "查找"))
+    ]
+    matches: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+    for container in containers:
+        cb = tuple(float(value) for value in container["bounds"])
+        if cb[2] - cb[0] < 240 or cb[3] - cb[1] > 300:
+            continue
+        for button in buttons:
+            bb = tuple(float(value) for value in button["bounds"])
+            button_inside_group = (
+                _bounds_inside(bb, cb, tolerance=35)
+                and bb[0] > cb[0] + 0.45 * (cb[2] - cb[0])
+            )
+            button_adjacent_right = (
+                bb[0] >= cb[2] - 0.15 * (cb[2] - cb[0])
+                and bb[0] <= cb[2] + 80
+                and bb[2] > cb[2]
+            )
+            if not (button_inside_group or button_adjacent_right):
+                continue
+            if _vertical_overlap_ratio(bb, cb) < 0.65:
+                continue
+            for text in texts:
+                tb = tuple(float(value) for value in text["bounds"])
+                if not _bounds_inside(tb, cb, tolerance=35) or tb[2] > bb[0] + 20:
+                    continue
+                if _vertical_overlap_ratio(tb, cb) < 0.45:
+                    continue
+                matches.append((container, text, button))
+    if len(matches) != 1:
+        return
+    container, text, button = matches[0]
+    cb = tuple(float(value) for value in container["bounds"])
+    bb = tuple(float(value) for value in button["bounds"])
+    input_bounds = [round(cb[0]), round(cb[1]), round(min(cb[2], bb[0])), round(cb[3])]
+    if input_bounds[2] - input_bounds[0] < 120:
+        return
+    normalized_input_box = tuple(float(value) for value in input_bounds)
+    for item in elements:
+        if not isinstance(item, dict) or item is button:
+            continue
+        raw_item_bounds = item.get("bounds")
+        if item in (container, text) or (
+            _valid_1000_bounds(raw_item_bounds)
+            and _bounds_inside(
+                tuple(float(value) for value in raw_item_bounds),
+                normalized_input_box,
+                tolerance=20,
+            )
+        ):
+            item["states"] = dict(item.get("states") or {})
+            item["states"]["goal_relevant"] = False
+    label = str(text.get("label") or "").strip()[:200]
+    evidence = []
+    for source in (container, text, button):
+        for value in source.get("evidence") or []:
+            value = str(value).strip()
+            if value and value not in evidence:
+                evidence.append(value[:200])
+    elements.append(
+        {
+            "element_id": "local_structured_input_1",
+            "role": "input",
+            "meaning": "prefilled_text_input",
+            "label": label,
+            "bounds": input_bounds,
+            "confidence": min(
+                float(container["confidence"]),
+                float(text["confidence"]),
+                float(button["confidence"]),
+            ),
+            "states": {"goal_relevant": True},
+            "evidence": evidence[:6],
+        }
+    )
+
+
+def _valid_1000_bounds(value: Any) -> bool:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return False
+    if not all(
+        isinstance(part, (int, float)) and not isinstance(part, bool)
+        for part in value
+    ):
+        return False
+    left, top, right, bottom = (float(part) for part in value)
+    return 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
+
+
+def _goal_requests_input(context: dict[str, Any]) -> bool:
+    visible = json.dumps(context, ensure_ascii=False).casefold()
+    return any(
+        term in visible
+        for term in ("输入框", "搜索框", "input field", "search box", "textbox")
+    )
+
+
+def _should_audit_prefilled_input(scene: UIScene, context: dict[str, Any]) -> bool:
+    if not _goal_requests_input(context):
+        return False
+    return not any(
+        item.role == "input"
+        and item.states.get("goal_relevant") is True
+        and float(item.confidence) >= 0.9
+        for item in scene.elements
+    )
+
+
+def _apply_input_structure_audit(
+    scene: UIScene,
+    raw: str,
+    *,
+    fingerprint: str,
+) -> UIScene:
+    try:
+        payload = _extract_json_object(raw)
+        if set(payload) != {"structures"}:
+            raise UISceneError("输入结构审计包含协议外字段。")
+        structures = payload.get("structures")
+        if not isinstance(structures, list) or len(structures) > 4:
+            raise UISceneError("输入结构审计 structures 必须是最多4项的数组。")
+        matches: list[dict[str, Any]] = []
+        for item in structures:
+            if not isinstance(item, dict) or set(item) != {
+                "structure_id",
+                "bounds",
+                "fully_visible",
+                "text",
+                "confidence",
+                "right_button",
+            }:
+                raise UISceneError("输入结构审计结构字段不符合协议。")
+            button = item.get("right_button")
+            if not isinstance(button, dict) or set(button) != {
+                "label",
+                "bounds",
+                "confidence",
+            }:
+                raise UISceneError("输入结构审计按钮字段不符合协议。")
+            if not isinstance(item.get("fully_visible"), bool):
+                raise UISceneError("输入结构审计 fully_visible 必须是布尔值。")
+            if not _valid_1000_bounds(item.get("bounds")) or not _valid_1000_bounds(
+                button.get("bounds")
+            ):
+                raise UISceneError("输入结构审计 bounds 不符合0..1000协议。")
+            if any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                for value in (item.get("confidence"), button.get("confidence"))
+            ):
+                raise UISceneError("输入结构审计 confidence 格式无效。")
+            confidence = float(item["confidence"])
+            button_confidence = float(button["confidence"])
+            if not 0.0 <= confidence <= 1.0 or not 0.0 <= button_confidence <= 1.0:
+                raise UISceneError("输入结构审计 confidence 超出0..1。")
+            if not item["fully_visible"] or confidence < 0.9 or button_confidence < 0.9:
+                continue
+            text = str(item.get("text") or "").strip()
+            label = str(button.get("label") or "").strip()
+            if not text or not label:
+                continue
+            bounds = tuple(float(value) for value in item["bounds"])
+            button_bounds = tuple(float(value) for value in button["bounds"])
+            width = bounds[2] - bounds[0]
+            height = bounds[3] - bounds[1]
+            if (
+                bounds[1] <= 10
+                or bounds[3] >= 990
+                or width < 240
+                or not 20 <= height <= 180
+                or not _bounds_inside(button_bounds, bounds, tolerance=20)
+                or button_bounds[0] <= bounds[0] + 0.55 * width
+                or _vertical_overlap_ratio(button_bounds, bounds) < 0.8
+            ):
+                continue
+            input_bounds = [
+                round(bounds[0]),
+                round(bounds[1]),
+                round(button_bounds[0]),
+                round(bounds[3]),
+            ]
+            if input_bounds[2] - input_bounds[0] < 120:
+                continue
+            matches.append(
+                {
+                    "text": text,
+                    "button_label": label,
+                    "input_bounds": input_bounds,
+                    "button_bounds": [round(value) for value in button_bounds],
+                    "confidence": min(confidence, button_confidence),
+                }
+            )
+        if len(matches) != 1:
+            return scene
+        match = matches[0]
+        value = scene.to_dict()
+        elements = list(value.get("elements") or [])
+        for element in elements:
+            if isinstance(element, dict):
+                element["states"] = dict(element.get("states") or {})
+                element["states"]["goal_relevant"] = False
+        elements.extend(
+            [
+                {
+                    "element_id": "local_audited_input_1",
+                    "role": "input",
+                    "meaning": "prefilled_text_input",
+                    "label": match["text"],
+                    "bounds": [value / 1000.0 for value in match["input_bounds"]],
+                    "confidence": match["confidence"],
+                    "states": {"goal_relevant": True, "fully_visible": True},
+                    "evidence": [
+                        f"完整横向输入结构，当前文字：{match['text']}",
+                        f"右侧独立按钮：{match['button_label']}",
+                    ],
+                },
+                {
+                    "element_id": "local_audited_adjacent_button_1",
+                    "role": "button",
+                    "meaning": "adjacent_submit_button",
+                    "label": match["button_label"],
+                    "bounds": [value / 1000.0 for value in match["button_bounds"]],
+                    "confidence": match["confidence"],
+                    "states": {"goal_relevant": False, "fully_visible": True},
+                    "evidence": ["输入结构审计中的相邻独立按钮；不具备目标权限"],
+                },
+            ]
+        )
+        value["elements"] = elements
+        return UIScene.from_dict(
+            value,
+            coordinate_scale=1.0,
+            stable_override=True,
+            fingerprint_override=fingerprint,
+        )
+    except (UISceneError, ValueError, TypeError) as exc:
+        raise VisionAgentError(f"输入结构只读审计结果不符合协议：{exc}") from exc
+
+
+def _has_any_semantic_term(item: dict[str, Any], terms: tuple[str, ...]) -> bool:
+    visible = " ".join(
+        str(item.get(key) or "") for key in ("meaning", "label")
+    ).casefold()
+    return any(term in visible for term in terms)
+
+
+def _bounds_inside(
+    inner: tuple[float, float, float, float],
+    outer: tuple[float, float, float, float],
+    *,
+    tolerance: float,
+) -> bool:
+    return (
+        inner[0] >= outer[0] - tolerance
+        and inner[1] >= outer[1] - tolerance
+        and inner[2] <= outer[2] + tolerance
+        and inner[3] <= outer[3] + tolerance
+    )
+
+
+def _vertical_overlap_ratio(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+) -> float:
+    overlap = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
+    smaller = min(first[3] - first[1], second[3] - second[1])
+    return overlap / smaller if smaller > 0 else 0.0
 
 
 def _normalize_compact_scene_payload(payload: dict[str, Any]) -> None:

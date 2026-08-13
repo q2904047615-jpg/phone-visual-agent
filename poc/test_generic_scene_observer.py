@@ -186,7 +186,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             {
                 "role": "container",
                 "meaning": "visible_result_count",
-                "states": {"goal_relevant": True},
+                "states": {"goal_relevant": True, "fully_visible": True},
             }
         )
         observer = GenericSceneObserver(FakeProvider(payload))
@@ -421,6 +421,387 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn("目标相关控件确实不存在时返回空elements", targeted_text)
         self.assertIn("不能因为目标尚未完成而降低", targeted_text)
         self.assertIn("模糊、遮挡或不唯一时仍必须降低", targeted_text)
+
+    def test_all_observation_prompts_recognize_prefilled_inputs_without_authorizing_submit(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        provider = SequenceProvider([empty, empty, {"structures": []}])
+        observer = GenericSceneObserver(provider)
+
+        observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "把当前输入框的文字改为Agent123"},
+        )
+
+        compact_text = provider.messages_seen[0][1]["content"][0]["text"]
+        targeted_text = provider.messages_seen[1][1]["content"][0]["text"]
+        for prompt in (compact_text, targeted_text):
+            self.assertIn("输入框可能为空，也可能已经含有文字", prompt)
+            self.assertIn("预填充且未聚焦时可以没有光标", prompt)
+            self.assertIn("role=input", prompt)
+            self.assertIn("不得仅因没有光标而降级成text或container", prompt)
+            self.assertIn("相邻按钮必须作为另一个控件观察", prompt)
+            self.assertIn("绝不表示可以激活相邻按钮", prompt)
+            self.assertIn("框内文字的内容或主题不能改变控件角色", prompt)
+
+    def test_targeted_refinement_uses_goal_directed_roi_but_keeps_full_frame_bounds(self) -> None:
+        first = scene_payload()
+        first["elements"] = []
+        refined = scene_payload()
+        refined["elements"] = [
+            {
+                "element_id": "input1",
+                "role": "input",
+                "meaning": "search_query_input",
+                "label": "已有查询文字",
+                "bounds": [100, 100, 900, 300],
+                "confidence": 0.97,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["已有查询文字"],
+            }
+        ]
+        provider = SequenceProvider([first, refined, {"structures": []}])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "修改顶部已有文字的输入框"},
+        )
+
+        self.assertEqual(scene.elements[0].bounds, (0.1, 0.1, 0.9, 0.3))
+        self.assertEqual(observer.last_diagnostics["targeted_roi_bounds"], [0, 0, 1000, 420])
+        compact_image = provider.messages_seen[0][1]["content"][1]["image_url"]["url"]
+        targeted_overview = provider.messages_seen[1][1]["content"][1]["image_url"]["url"]
+        targeted_image = provider.messages_seen[1][1]["content"][2]["image_url"]["url"]
+        self.assertEqual(compact_image, targeted_overview)
+        self.assertNotEqual(compact_image, targeted_image)
+        targeted_text = provider.messages_seen[1][1]["content"][0]["text"]
+        self.assertIn("局部图只用于看清事实，不增加任何动作权限", targeted_text)
+        self.assertIn("所有bounds必须回到第一张完整手机画面", targeted_text)
+        self.assertIn("必须在第二张高清局部中重新辨认目标", targeted_text)
+        self.assertIn("第二张只提供放大细节，绝不能作为坐标系", targeted_text)
+
+    def test_no_spatial_goal_keeps_full_frame_for_targeted_refinement(self) -> None:
+        first = scene_payload()
+        first["elements"] = []
+        refined = scene_payload()
+        provider = SequenceProvider([first, refined, {"structures": []}])
+        observer = GenericSceneObserver(provider)
+
+        observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "查找已有文字的输入框"},
+        )
+
+        compact_image = provider.messages_seen[0][1]["content"][1]["image_url"]["url"]
+        targeted_image = provider.messages_seen[1][1]["content"][1]["image_url"]["url"]
+        self.assertEqual(compact_image, targeted_image)
+        self.assertEqual(2, len(provider.messages_seen[1][1]["content"]))
+        self.assertIsNone(observer.last_diagnostics["targeted_roi_bounds"])
+
+    def test_strict_field_text_submit_structure_normalizes_to_one_input(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "bar",
+                "role": "container",
+                "meaning": "search_bar_container",
+                "label": "搜索栏",
+                "bounds": [100, 80, 900, 180],
+                "confidence": 0.96,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["横向边框"],
+            },
+            {
+                "element_id": "query",
+                "role": "text",
+                "meaning": "current_query_text",
+                "label": "已有文字",
+                "bounds": [180, 105, 560, 155],
+                "confidence": 0.98,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["已有文字"],
+            },
+            {
+                "element_id": "submit",
+                "role": "button",
+                "meaning": "search_submit_button",
+                "label": "搜索",
+                "bounds": [700, 80, 900, 180],
+                "confidence": 0.97,
+                "states": {"goal_relevant": False, "fully_visible": True},
+                "evidence": ["独立按钮"],
+            },
+        ]
+        observer = GenericSceneObserver(FakeProvider(payload))
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "修改顶部搜索输入框中的文字"},
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(candidate)
+        self.assertEqual("input", candidate.role)
+        self.assertEqual("已有文字", candidate.label)
+        self.assertEqual((0.1, 0.08, 0.7, 0.18), candidate.bounds)
+        self.assertTrue(observer.last_diagnostics["prefilled_input_structure_inferred"])
+        self.assertFalse(scene.get_element("submit").states["goal_relevant"])
+
+    def test_input_structure_is_not_inferred_without_explicit_input_goal(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "bar",
+                "role": "container",
+                "meaning": "search_bar_container",
+                "label": "搜索栏",
+                "bounds": [100, 80, 900, 180],
+                "confidence": 0.96,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["横向边框"],
+            },
+            {
+                "element_id": "query",
+                "role": "text",
+                "meaning": "current_query_text",
+                "label": "已有文字",
+                "bounds": [180, 105, 560, 155],
+                "confidence": 0.98,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["已有文字"],
+            },
+            {
+                "element_id": "submit",
+                "role": "button",
+                "meaning": "search_submit_button",
+                "label": "搜索",
+                "bounds": [700, 80, 900, 180],
+                "confidence": 0.97,
+                "states": {"goal_relevant": False, "fully_visible": True},
+                "evidence": ["独立按钮"],
+            },
+        ]
+        observer = GenericSceneObserver(FakeProvider(payload))
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "查看顶部区域"},
+        )
+
+        self.assertFalse(any(item.role == "input" for item in scene.elements))
+        self.assertFalse(observer.last_diagnostics["prefilled_input_structure_inferred"])
+
+    def test_clipped_structure_is_never_normalized_to_input(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "field",
+                "role": "container",
+                "meaning": "query_input_container",
+                "label": "裁切查询区域",
+                "bounds": [110, 1, 740, 70],
+                "confidence": 0.99,
+                "states": {"goal_relevant": True, "fully_visible": False},
+                "evidence": ["上边缘被画面裁切"],
+            },
+            {
+                "element_id": "query",
+                "role": "text",
+                "meaning": "current_query_text",
+                "label": "已有文字",
+                "bounds": [200, 5, 475, 50],
+                "confidence": 0.99,
+                "states": {"goal_relevant": True, "fully_visible": False},
+                "evidence": ["文字贴近上边缘"],
+            },
+            {
+                "element_id": "submit",
+                "role": "button",
+                "meaning": "search_action_button",
+                "label": "搜索",
+                "bounds": [700, 1, 830, 70],
+                "confidence": 0.99,
+                "states": {"goal_relevant": False, "fully_visible": False},
+                "evidence": ["按钮上边缘被裁切"],
+            },
+        ]
+        audit = {
+            "structures": [
+                {
+                    "structure_id": "clipped",
+                    "bounds": [110, 1, 830, 70],
+                    "fully_visible": False,
+                    "text": "已有文字",
+                    "confidence": 0.99,
+                    "right_button": {
+                        "label": "搜索",
+                        "bounds": [700, 1, 830, 70],
+                        "confidence": 0.99,
+                    },
+                }
+            ]
+        }
+        observer = GenericSceneObserver(SequenceProvider([payload, audit]))
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "修改顶部搜索输入框中的文字"},
+        )
+
+        self.assertFalse(any(item.role == "input" for item in scene.elements))
+        self.assertFalse(observer.last_diagnostics["prefilled_input_structure_inferred"])
+
+    def test_input_audit_selects_only_complete_unique_structure_in_full_frame_coordinates(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = {
+            "structures": [
+                {
+                    "structure_id": "complete",
+                    "bounds": [108, 78, 836, 129],
+                    "fully_visible": True,
+                    "text": "已有查询文字",
+                    "confidence": 0.98,
+                    "right_button": {
+                        "label": "搜索",
+                        "bounds": [704, 78, 836, 129],
+                        "confidence": 0.97,
+                    },
+                },
+                {
+                    "structure_id": "clipped",
+                    "bounds": [108, 1, 836, 45],
+                    "fully_visible": False,
+                    "text": "已有查询文字",
+                    "confidence": 0.99,
+                    "right_button": {
+                        "label": "搜索",
+                        "bounds": [750, 1, 836, 45],
+                        "confidence": 0.99,
+                    },
+                },
+            ]
+        }
+        provider = SequenceProvider([empty, empty, audit])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "修改顶部搜索输入框中的文字"},
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(candidate)
+        self.assertEqual("local_audited_input_1", candidate.element_id)
+        self.assertEqual((0.108, 0.078, 0.704, 0.129), candidate.bounds)
+        button = scene.get_element("local_audited_adjacent_button_1")
+        self.assertEqual((0.704, 0.078, 0.836, 0.129), button.bounds)
+        self.assertFalse(button.states["goal_relevant"])
+        self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
+        self.assertEqual([800, 1200, 700], provider.max_tokens_seen)
+
+    def test_input_audit_refuses_multiple_complete_structures(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        structure = {
+            "structure_id": "one",
+            "bounds": [100, 100, 900, 180],
+            "fully_visible": True,
+            "text": "已有文字",
+            "confidence": 0.98,
+            "right_button": {
+                "label": "搜索",
+                "bounds": [720, 100, 900, 180],
+                "confidence": 0.98,
+            },
+        }
+        second = json.loads(json.dumps(structure, ensure_ascii=False))
+        second["structure_id"] = "two"
+        second["bounds"] = [100, 240, 900, 320]
+        second["right_button"]["bounds"] = [720, 240, 900, 320]
+        observer = GenericSceneObserver(
+            SequenceProvider([empty, empty, {"structures": [structure, second]}])
+        )
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "修改顶部搜索输入框中的文字"},
+        )
+
+        self.assertIsNone(scene.unique_trusted_goal_element())
+        self.assertFalse(any(item.role == "input" for item in scene.elements))
+
+    def test_input_audit_rejects_protocol_external_fields(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        provider = SequenceProvider(
+            [empty, empty, {"structures": [], "next_action": "tap"}]
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "协议外字段"):
+            GenericSceneObserver(provider).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "修改顶部搜索输入框中的文字"},
+            )
+
+    def test_adjacent_submit_and_internal_icon_still_yield_only_input_candidate(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "field",
+                "role": "container",
+                "meaning": "query_input_container",
+                "label": "查询区域",
+                "bounds": [110, 80, 740, 180],
+                "confidence": 0.98,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["横向边框"],
+            },
+            {
+                "element_id": "query",
+                "role": "text",
+                "meaning": "current_query_text",
+                "label": "已有文字",
+                "bounds": [200, 105, 475, 155],
+                "confidence": 0.99,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["已有文字"],
+            },
+            {
+                "element_id": "decoration",
+                "role": "icon",
+                "meaning": "field_leading_icon",
+                "label": "装饰图标",
+                "bounds": [130, 105, 180, 155],
+                "confidence": 0.99,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["输入区内图标"],
+            },
+            {
+                "element_id": "submit",
+                "role": "button",
+                "meaning": "search_action_button",
+                "label": "搜索",
+                "bounds": [700, 80, 830, 180],
+                "confidence": 0.97,
+                "states": {"goal_relevant": False, "fully_visible": True},
+                "evidence": ["右侧独立按钮"],
+            },
+        ]
+        observer = GenericSceneObserver(FakeProvider(payload))
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "修改顶部搜索输入框中的文字"},
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(candidate)
+        self.assertEqual("local_structured_input_1", candidate.element_id)
+        self.assertEqual((0.11, 0.08, 0.7, 0.18), candidate.bounds)
+        self.assertFalse(scene.get_element("decoration").states["goal_relevant"])
+        self.assertFalse(scene.get_element("submit").states["goal_relevant"])
 
     def test_target_app_already_open_does_not_refine_open_goal(self) -> None:
         payload = scene_payload()

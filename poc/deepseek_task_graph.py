@@ -164,6 +164,11 @@ REPAIRABLE_INITIAL_GRAPH_ERRORS = (
     "可推进任务图必须且只能有一个活动子目标。",
     "可推进的任务图至少需要一个目标 App。",
 )
+LOCAL_TRANSIENT_NAVIGATION_PATTERN = re.compile(
+    r"(?:(?:新建|打开|进入|关闭|切换|显示).{0,10}(?:空白)?(?:标签页|页签|窗口|弹层|浮层)|"
+    r"(?:前台|后台|上一级|下一页|当前页面|空白页面))",
+    re.IGNORECASE,
+)
 REPAIRABLE_INITIAL_GRAPH_ERROR_FRAGMENTS = (
     "文本模型没有返回有效 JSON",
     "文本模型返回内容不是 JSON 对象",
@@ -171,6 +176,7 @@ REPAIRABLE_INITIAL_GRAPH_ERROR_FRAGMENTS = (
     "必须是对象",
     "必须是数组",
     "包含低层动作表达",
+    "关联风险的子目标影响分类必须为",
 )
 REPAIRABLE_REPLAN_ERROR_FRAGMENTS = (
     "文本模型没有返回有效 JSON",
@@ -750,15 +756,16 @@ class DeepSeekTaskGraphPlanner:
                 raw_user_goal=text,
                 validate=False,
             )
+            graph = _normalize_initial_local_navigation(graph)
             graph.validate()
         except TaskGraphError as exc:
             if not _retryable_initial_output_error(exc):
                 raise
-            invalid_response = self.last_raw_response
+            initial_error = exc
             graph = self._request_graph(
                 _repair_initial_prompt(
                     text,
-                    invalid_response=invalid_response,
+                    invalid_response=self.last_raw_response,
                     validation_error=str(exc),
                 ),
                 task_id=resolved_task_id,
@@ -767,7 +774,30 @@ class DeepSeekTaskGraphPlanner:
                 raw_user_goal=text,
                 validate=False,
             )
-            graph.validate()
+            graph = _normalize_initial_local_navigation(graph)
+            try:
+                graph.validate()
+            except TaskGraphError as repair_error:
+                if (
+                    not _retryable_initial_output_error(repair_error)
+                    or _initial_repair_error_category(repair_error)
+                    == _initial_repair_error_category(initial_error)
+                ):
+                    raise
+                graph = self._request_graph(
+                    _repair_initial_prompt(
+                        text,
+                        invalid_response=self.last_raw_response,
+                        validation_error=str(repair_error),
+                    ),
+                    task_id=resolved_task_id,
+                    device_id=device_id,
+                    revision=1,
+                    raw_user_goal=text,
+                    validate=False,
+                )
+                graph = _normalize_initial_local_navigation(graph)
+                graph.validate()
         try:
             self._audit_and_validate_graph(graph)
         except TaskGraphError as exc:
@@ -781,6 +811,7 @@ class DeepSeekTaskGraphPlanner:
                 raw_user_goal=text,
                 validate=False,
             )
+            graph = _normalize_initial_local_navigation(graph)
             graph.validate()
             self._audit_and_validate_graph(graph)
         if (
@@ -1009,7 +1040,9 @@ def _initial_prompt(raw_goal: str) -> str:
    risk_actions；无法确定影响时标为 unknown。两者都必须关联风险，confirmation_required=true；
    如果成为 active，status 必须为 awaiting_confirmation。
 6. read_only 只能描述查看、读取、检查等纯观察结果；navigation_only 只能描述打开或进入页面等
-   导航结果。不能证明属于这两类时必须标为 unknown，不能为了免确认而猜成安全类别。
+   导航结果。仅改变本机临时界面层级、前后台页面或临时标签页也属于 navigation_only，不得为它
+   虚构 risk_actions；但登录/退出账号、修改账号数据或云端同步状态仍属于 external_state。
+   不能证明属于这些安全类别时必须标为 unknown，不能为了免确认而猜成安全类别。
 7. 风险类型只用通信、内容发布、账号关系、成员关系、权限角色、数据修改/删除、交易支付、
    账号权限或未知外部影响等跨 App 语义，不得描述 App 页面路径。
 8. 信息不足时 status=blocked、active_subgoal_id=null，并填写 clarification_questions。
@@ -1041,6 +1074,8 @@ def _repair_initial_prompt(
 2. blocked 或 completed 时 active_subgoal_id=null，且不能有 active 子目标。
 3. 至少返回一个全局 completion_conditions；初始规划不得宣称任何条件或子目标已完成。
 4. external_state 或 unknown 必须声明并关联风险；成为 active 时必须等待本地用户确认。
+   read_only 或 navigation_only 不得关联 risk_actions。仅改变本机临时界面层级、前后台页面或
+   临时标签页属于 navigation_only；登录/退出账号、账号数据或云端同步状态不属于此例外。
 5. 如果用户原始目标含有点击、滑动、输入等低层动作措辞，goal、subgoals 和
    completion_conditions 只保留动作希望达到的可见结果状态，不得复述低层动作；具体下一动作
    由 Qwen 根据真实画面决定。例如把“滑动页面找到目标内容”改写为“目标内容在当前页面可见”。
@@ -1092,6 +1127,114 @@ def _retryable_initial_output_error(error: TaskGraphError) -> bool:
         return False
     return text in REPAIRABLE_INITIAL_GRAPH_ERRORS or any(
         fragment in text for fragment in REPAIRABLE_INITIAL_GRAPH_ERROR_FRAGMENTS
+    )
+
+
+def _initial_repair_error_category(error: TaskGraphError) -> str:
+    text = str(error)
+    if "包含低层动作表达" in text:
+        return "low_level_instruction"
+    if "关联风险的子目标影响分类必须为" in text:
+        return "safe_impact_with_risk"
+    if text in REPAIRABLE_INITIAL_GRAPH_ERRORS:
+        return "graph_structure"
+    return text
+
+
+def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskGraph:
+    """Remove only self-contradictory low-risk markers from proven local navigation."""
+
+    if graph.status not in {"ready", "running"}:
+        return graph
+    subgoals = {item.subgoal_id: item for item in graph.subgoals}
+    removable_ids: set[str] = set()
+    for risk in graph.risk_actions:
+        linked = tuple(subgoals.get(item) for item in risk.subgoal_ids)
+        if (
+            risk.risk_type != "unknown_external_effect"
+            or risk.risk_level != "low"
+            or not linked
+            or any(item is None for item in linked)
+            or not _explicitly_denies_external_effect(risk.external_effect)
+        ):
+            continue
+        if all(
+            item.external_impact in {"read_only", "navigation_only"}
+            and LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
+            and not _infer_external_risk_types(
+                item.objective,
+                *item.constraints,
+                *item.completion_conditions,
+            )
+            for item in linked
+            if item is not None
+        ):
+            removable_ids.add(risk.risk_id)
+    normalized_subgoals = tuple(
+        replace(
+            item,
+            risk_action_ids=tuple(
+                risk_id
+                for risk_id in item.risk_action_ids
+                if risk_id not in removable_ids
+            ),
+        )
+        for item in graph.subgoals
+    )
+    active_ids = [item.subgoal_id for item in normalized_subgoals if item.status == "active"]
+    active_subgoal_id = graph.active_subgoal_id
+    if not active_ids and active_subgoal_id is not None:
+        selected = next(
+            (item for item in normalized_subgoals if item.subgoal_id == active_subgoal_id),
+            None,
+        )
+        if (
+            selected is not None
+            and selected.status == "pending"
+            and not selected.depends_on
+            and selected.external_impact in {"read_only", "navigation_only"}
+            and not selected.risk_action_ids
+        ):
+            normalized_subgoals = tuple(
+                replace(item, status="active")
+                if item.subgoal_id == active_subgoal_id
+                else item
+                for item in normalized_subgoals
+            )
+            active_ids = [active_subgoal_id]
+    if not active_ids and active_subgoal_id is None:
+        candidates = [
+            item
+            for item in normalized_subgoals
+            if item.status == "pending"
+            and not item.depends_on
+            and item.external_impact in {"read_only", "navigation_only"}
+            and not item.risk_action_ids
+        ]
+        if len(candidates) == 1:
+            selected_id = candidates[0].subgoal_id
+            normalized_subgoals = tuple(
+                replace(item, status="active") if item.subgoal_id == selected_id else item
+                for item in normalized_subgoals
+            )
+            active_subgoal_id = selected_id
+    return replace(
+        graph,
+        risk_actions=tuple(
+            risk for risk in graph.risk_actions if risk.risk_id not in removable_ids
+        ),
+        subgoals=normalized_subgoals,
+        active_subgoal_id=active_subgoal_id,
+    )
+
+
+def _explicitly_denies_external_effect(value: str) -> bool:
+    normalized = "".join(str(value or "").strip().lower().split())
+    return bool(
+        re.search(
+            r"(?:无|没有|不涉及|不会产生|不改变)(?:任何)?(?:外部)?(?:状态)?(?:影响|变更|变化)",
+            normalized,
+        )
     )
 
 
@@ -1842,6 +1985,21 @@ def _apply_local_risk_supplements(
                 reason=(
                     assessment.reason
                     + "；本地逐匹配否定校验确认该风险类型仅以直接否定形式出现"
+                ),
+            )
+        if (
+            assessment.external_impact == "external_state"
+            and model_types == {"unknown_external_effect"}
+            and not inferred
+            and LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(source.text)
+        ):
+            assessment = replace(
+                assessment,
+                external_impact="navigation_only",
+                risk_types=(),
+                reason=(
+                    assessment.reason
+                    + "；本地校验确认只涉及临时界面层级或标签页导航"
                 ),
             )
         if inferred and assessment.external_impact != "unknown":

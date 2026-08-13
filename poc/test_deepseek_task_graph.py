@@ -386,7 +386,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskGraphError, "初始规划没有观察证据"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan("目标", device_id="phone-1")
 
-    def test_initial_plan_repairs_one_structural_status_error(self):
+    def test_initial_plan_aligns_one_explicit_safe_status_error_locally(self):
         invalid = base_payload()
         invalid["subgoals"][0]["status"] = "pending"
         repaired = base_payload()
@@ -397,8 +397,125 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         self.assertEqual(graph.active_subgoal_id, "locate_target")
         self.assertEqual(graph.active_subgoal().status, "active")
-        self.assertEqual(len(provider.messages), 3)
-        self.assertIn("可推进任务图必须且只能有一个活动子目标", provider.messages[1][0]["content"])
+        self.assertEqual(len(provider.messages), 2)
+        self.assertIn("临时标签页也属于 navigation_only", provider.messages[0][0]["content"])
+
+    def test_initial_plan_allows_one_bounded_repair_for_a_different_error_category(self):
+        first = base_payload()
+        first["subgoals"][1]["status"] = "active"
+        second = base_payload()
+        second["risk_actions"][0]["subgoal_ids"] = ["locate_target", "save_target"]
+        second["subgoals"][0]["risk_action_ids"] = ["save_place"]
+        repaired = base_payload()
+        provider = FakeProvider(first, second, repaired)
+
+        graph = DeepSeekTaskGraphPlanner(provider).plan(
+            "打开一个本机临时页面",
+            device_id="phone-1",
+        )
+
+        self.assertEqual("locate_target", graph.active_subgoal_id)
+        graph_prompts = [
+            call for call in provider.messages
+            if "semantic-risk-audit-v1" not in call[0]["content"]
+        ]
+        self.assertEqual(3, len(graph_prompts))
+        self.assertIn(
+            "关联风险的子目标影响分类必须为",
+            graph_prompts[-1][0]["content"],
+        )
+
+    def test_initial_plan_normalizes_self_contradictory_local_navigation_risk(self):
+        payload = single_subgoal_payload(
+            "当前浏览器显示空白标签页",
+            external_impact="navigation_only",
+        )
+        payload["subgoals"][0]["status"] = "pending"
+        payload["active_subgoal_id"] = None
+        payload["risk_actions"] = [
+            {
+                "risk_id": "local_tab_state",
+                "description": "临时标签页状态变化",
+                "external_effect": "无外部状态影响",
+                "risk_type": "unknown_external_effect",
+                "risk_level": "low",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["risk_action_ids"] = ["local_tab_state"]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "新建一个空白标签页",
+            device_id="phone-1",
+        )
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertEqual("target_state", graph.active_subgoal_id)
+        self.assertEqual("active", graph.active_subgoal().status)
+
+    def test_initial_plan_aligns_explicit_safe_active_id_with_pending_status(self):
+        payload = single_subgoal_payload(
+            "空白标签页在当前浏览器中可见",
+            external_impact="navigation_only",
+        )
+        payload["subgoals"][0]["status"] = "pending"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "新建一个空白标签页",
+            device_id="phone-1",
+        )
+
+        self.assertEqual("target_state", graph.active_subgoal_id)
+        self.assertEqual("active", graph.active_subgoal().status)
+
+    def test_initial_plan_never_normalizes_real_external_effect_risk(self):
+        payload = single_subgoal_payload(
+            "退出当前账号",
+            external_impact="navigation_only",
+        )
+        payload["risk_actions"] = [
+            {
+                "risk_id": "logout",
+                "description": "退出当前账号",
+                "external_effect": "改变当前账号登录状态",
+                "risk_type": "unknown_external_effect",
+                "risk_level": "low",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["risk_action_ids"] = ["logout"]
+
+        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                "退出当前账号",
+                device_id="phone-1",
+            )
+
+    def test_initial_plan_does_not_trust_no_effect_text_for_non_navigation_goal(self):
+        payload = single_subgoal_payload(
+            "把此人纳入小组",
+            external_impact="navigation_only",
+        )
+        payload["risk_actions"] = [
+            {
+                "risk_id": "claimed_safe",
+                "description": "改变小组成员",
+                "external_effect": "无外部状态影响",
+                "risk_type": "unknown_external_effect",
+                "risk_level": "low",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["risk_action_ids"] = ["claimed_safe"]
+
+        with self.assertRaises(TaskGraphError):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload, copy.deepcopy(payload))).plan(
+                "把此人纳入小组",
+                device_id="phone-1",
+            )
 
     def test_initial_plan_repairs_one_missing_required_field_error(self):
         invalid = base_payload()
@@ -968,6 +1085,49 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertTrue(
             all(item.external_impact == "navigation_only" for item in corrected.values())
         )
+
+    def test_false_positive_audit_cannot_turn_transient_tab_into_external_state(self):
+        objective = "新建一个空白标签页"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        audit = audit_payload_for_graph(
+            payload,
+            overrides={
+                "raw_goal": {
+                    "external_impact": "external_state",
+                    "risk_types": ["unknown_external_effect"],
+                },
+                "goal.objective": {
+                    "external_impact": "external_state",
+                    "risk_types": ["unknown_external_effect"],
+                },
+                "subgoals.target_state.objective": {
+                    "external_impact": "external_state",
+                    "risk_types": ["unknown_external_effect"],
+                },
+            },
+        )
+
+        graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(payload, audit_payloads=[audit])
+        ).plan(objective, device_id="phone-1")
+
+        self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+
+    def test_local_navigation_exception_never_hides_explicit_external_effect(self):
+        objective = "新建空白标签页后登录当前账号"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                objective,
+                device_id="phone-1",
+            )
 
     def test_safe_negated_goal_replans_once_after_mixed_false_positive_audit(self):
         objective = "打开浏览器首页，仅查看，不搜索、不登录"

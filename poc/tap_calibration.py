@@ -182,9 +182,23 @@ def load_active_calibration(
         stored_size = payload.get("frame_size")
         if not isinstance(stored_size, list) or len(stored_size) != 2:
             return None
-        width_delta = abs(float(stored_size[0]) - frame_size[0]) / max(frame_size[0], 1)
-        height_delta = abs(float(stored_size[1]) - frame_size[1]) / max(frame_size[1], 1)
-        if width_delta > 0.02 or height_delta > 0.02:
+        stored_width = float(stored_size[0])
+        stored_height = float(stored_size[1])
+        current_width = float(frame_size[0])
+        current_height = float(frame_size[1])
+        if min(stored_width, stored_height, current_width, current_height) <= 0:
+            return None
+        # The affine transform is stored in normalized image coordinates, so
+        # an isotropic DPI/display resize (for example 540x960 -> 810x1440)
+        # must not disable a previously validated physical calibration.  A
+        # non-uniform resize changes camera geometry and remains fail-closed.
+        width_scale = current_width / stored_width
+        height_scale = current_height / stored_height
+        scale_delta = abs(width_scale - height_scale) / max(
+            width_scale,
+            height_scale,
+        )
+        if scale_delta > 0.02:
             return None
         return Affine2D.from_json(payload["target_to_command"])
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, TapCalibrationError):

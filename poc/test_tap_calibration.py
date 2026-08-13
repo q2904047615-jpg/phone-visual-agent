@@ -84,6 +84,50 @@ class TapCalibrationMathTests(unittest.TestCase):
             )
             self.assertEqual(corrected_grid_point(500, 500, (540, 960), path), (490, 520))
 
+    def test_validated_normalized_correction_survives_isotropic_dpi_resize(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tap.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "enabled": True,
+                        "validated": True,
+                        "frame_size": [540, 960],
+                        "target_to_command": [
+                            [1.0, 0.0, -0.01],
+                            [0.0, 1.0, 0.02],
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                corrected_grid_point(500, 500, (810, 1440), path),
+                (490, 520),
+            )
+
+    def test_validated_correction_rejects_non_uniform_resize(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tap.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "enabled": True,
+                        "validated": True,
+                        "frame_size": [540, 960],
+                        "target_to_command": [
+                            [1.0, 0.0, -0.01],
+                            [0.0, 1.0, 0.02],
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                corrected_grid_point(500, 500, (810, 1300), path),
+                (500, 500),
+            )
+
     def test_build_calibration_recovers_translation(self):
         width, height = 501, 901
         points = [(0.15, 0.15), (0.5, 0.15), (0.85, 0.15), (0.15, 0.5), (0.5, 0.5), (0.85, 0.5), (0.15, 0.85), (0.5, 0.85), (0.85, 0.85)]

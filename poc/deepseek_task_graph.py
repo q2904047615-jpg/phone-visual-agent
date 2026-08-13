@@ -62,7 +62,8 @@ EXTERNAL_STATE_CHANGE_PATTERN = re.compile(
     r"(?<!已)(?:执行|进行|完成)?保存(?:到|该|这个|目标|地点|内容|记录|文件)|进入已保存|"
     r"发表评论|发布评论|进行评论|添加评论|"
     r"删除|移除|购买|下单|付款|支付|"
-    r"转账|授权|授予|修改|创建|新增|上传|分享|加入|退出(?:账号|群|组织)?|"
+    r"转账|授权|授予|修改|创建|新增|上传|分享|加入|"
+    r"退出(?:当前|该|这个|目标)?(?:账号|账户|登录|群|群组|团队|组织)|"
     r"订阅|举报|预约|提交|注册|登录|登出|"
     r"\b(?:send|publish|post|comment|like|follow|favorite|save|delete|remove|"
     r"purchase|pay|transfer|grant|modify|create|upload|share|join|leave|"
@@ -141,13 +142,15 @@ ACCOUNT_PERMISSION_EFFECT_PATTERN = re.compile(
 DIRECT_EFFECT_NEGATION_PATTERN = re.compile(
     r"(?:不|未|勿|不要|不得|禁止|不能|避免|无需|无须|"
     r"do\s+not|don't|never|without)\s*"
-    r"(?:(?:进行|执行|发生|出现)\s*)?$",
+    r"(?:(?:进行|执行|发生|出现)\s*)?"
+    r"(?:(?:任何|任意|一切|all|any)\s*)?$",
     re.IGNORECASE,
 )
 COORDINATED_EFFECT_NEGATION_PATTERN = re.compile(
     r"(?:不|未|勿|不要|不得|禁止|不能|避免|无需|无须|"
     r"do\s+not|don't|never|without)\s*"
     r"(?:(?:进行|执行|发生|出现)\s*)?"
+    r"(?:(?:任何|任意|一切|all|any)\s*)?"
     r"[^，。；;]{1,24}(?:或|和|及|以及|、|or|and)\s*$",
     re.IGNORECASE,
 )

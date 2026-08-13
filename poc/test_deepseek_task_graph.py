@@ -715,6 +715,50 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         self.assertEqual(graph.subgoals[0].external_impact, "navigation_only")
 
+    def test_universal_quantifier_inside_negation_remains_a_safety_constraint(self):
+        objective = "执行系统返回"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        payload["subgoals"][0]["constraints"] = [
+            "不得进行任何输入、提交或账号数据操作"
+        ]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            objective,
+            device_id="phone-1",
+        )
+
+        self.assertEqual(graph.subgoals[0].external_impact, "navigation_only")
+
+    def test_exiting_current_app_is_navigation_not_account_state_change(self):
+        objective = "执行系统返回，回到上一级页面或退出当前应用"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            objective,
+            device_id="phone-1",
+        )
+
+        self.assertEqual(graph.subgoals[0].external_impact, "navigation_only")
+
+    def test_exiting_account_still_requires_external_state_risk(self):
+        objective = "退出当前账号"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                objective,
+                device_id="phone-1",
+            )
+
     def test_negation_word_does_not_hide_a_positive_external_effect(self):
         objective = "不要忘记登录并同步数据"
         payload = single_subgoal_payload(

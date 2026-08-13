@@ -639,6 +639,7 @@ def _parse_scene(
         payload = _extract_json_object(raw)
         _normalize_compact_scene_payload(payload)
         _normalize_prefilled_input_structure(payload, goal_context or {})
+        _normalize_unique_input_focus(payload)
         return UIScene.from_dict(
             payload,
             coordinate_scale=1000.0,
@@ -647,6 +648,59 @@ def _parse_scene(
         )
     except (UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"通用页面观察结果不符合协议：{exc}") from exc
+
+
+def _normalize_unique_input_focus(payload: dict[str, Any]) -> None:
+    """Derive focus only from one target input plus visible soft keyboard facts."""
+
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return
+    candidates = [
+        item
+        for item in elements
+        if isinstance(item, dict)
+        and str(item.get("role") or "").strip() == "input"
+        and isinstance(item.get("states"), dict)
+        and item["states"].get("goal_relevant") is True
+        and float(item.get("confidence") or 0.0) >= MIN_TARGET_CONFIDENCE
+    ]
+    if len(candidates) != 1:
+        return
+    visible_text = " ".join(
+        [
+            str(payload.get("summary") or ""),
+            *(
+                str(value)
+                for value in (payload.get("overlays") or [])
+                if isinstance(value, str)
+            ),
+            *(
+                " ".join(
+                    str(item.get(key) or "")
+                    for key in ("role", "meaning", "label")
+                )
+                for item in elements
+                if isinstance(item, dict)
+            ),
+        ]
+    ).casefold()
+    keyboard_visible = bool(
+        re.search(
+            r"(?:软键盘|输入法|键盘|keyboard|ime)",
+            visible_text,
+            re.IGNORECASE,
+        )
+    )
+    if not keyboard_visible:
+        return
+    candidate = candidates[0]
+    states = dict(candidate.get("states") or {})
+    if states.get("focused") is False:
+        # An explicit contradictory visual fact always wins.
+        return
+    states["focused"] = True
+    candidate["states"] = states
 
 
 def _goal_directed_roi_bounds(

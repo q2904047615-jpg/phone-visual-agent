@@ -6,6 +6,7 @@ import unittest
 from PIL import Image, ImageFilter
 
 from generic_scene_observer import GenericSceneObserver
+from generic_scene_observer import _parse_scene
 from ui_scene import UISceneError
 from vision_agent import VisionAgentError
 
@@ -109,6 +110,80 @@ def scene_payload() -> dict:
 
 
 class GenericSceneObserverTests(unittest.TestCase):
+    def test_visible_keyboard_marks_one_goal_input_focused(self) -> None:
+        payload = scene_payload()
+        payload["summary"] = "顶部搜索输入框可见，下方显示软键盘"
+        payload["elements"] = [
+            {
+                "element_id": "search-input",
+                "role": "input",
+                "meaning": "search_query_input",
+                "label": "旧文字",
+                "bounds": [100, 80, 700, 150],
+                "confidence": 0.95,
+                "states": {"goal_relevant": True},
+                "evidence": ["输入框与键盘同时可见"],
+            }
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-focused",
+            goal_context={"objective": "修改顶部搜索输入框中的文字"},
+        )
+
+        self.assertTrue(scene.elements[0].states["focused"])
+
+    def test_keyboard_does_not_infer_focus_for_multiple_goal_inputs(self) -> None:
+        payload = scene_payload()
+        payload["summary"] = "表单有两个输入框，下方显示键盘"
+        first = {
+            "element_id": "input-a",
+            "role": "input",
+            "meaning": "first_input",
+            "label": "A",
+            "bounds": [100, 80, 700, 150],
+            "confidence": 0.95,
+            "states": {"goal_relevant": True},
+            "evidence": ["输入框A"],
+        }
+        second = dict(first)
+        second.update(
+            {"element_id": "input-b", "meaning": "second_input", "label": "B", "bounds": [100, 180, 700, 250]}
+        )
+        payload["elements"] = [first, second]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-ambiguous",
+            goal_context={"objective": "修改输入框文字"},
+        )
+
+        self.assertTrue(all("focused" not in item.states for item in scene.elements))
+
+    def test_unique_input_without_keyboard_is_not_assumed_focused(self) -> None:
+        payload = scene_payload()
+        payload["summary"] = "顶部搜索输入框可见"
+        payload["elements"] = [
+            {
+                "element_id": "search-input",
+                "role": "input",
+                "meaning": "search_query_input",
+                "label": "旧文字",
+                "bounds": [100, 80, 700, 150],
+                "confidence": 0.95,
+                "states": {"goal_relevant": True},
+                "evidence": ["输入框可见"],
+            }
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-not-focused",
+            goal_context={"objective": "修改顶部搜索输入框中的文字"},
+        )
+
+        self.assertNotIn("focused", scene.elements[0].states)
     def test_observes_arbitrary_app_and_normalizes_bounds(self) -> None:
         provider = FakeProvider(scene_payload())
         observer = GenericSceneObserver(provider)

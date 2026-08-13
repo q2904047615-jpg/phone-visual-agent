@@ -1266,6 +1266,56 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 FakeProvider(payload, audit_payloads=[audit])
             ).plan(objective, device_id="phone-1")
 
+    def test_explicit_unsubmitted_input_correction_does_not_depend_on_model_risk_label(self):
+        raw_goal = (
+            "把顶部搜索输入框中的现有文字替换为 Agent123，"
+            "不要搜索、提交、发送、保存或发布。"
+        )
+        objective = (
+            "顶部搜索输入框中的文字为 Agent123，且未发生搜索、提交、发送、保存或发布。"
+        )
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        payload["goal"]["entities"]["input_text"] = "Agent123"
+        payload["constraints"] = ["不要搜索、提交、发送、保存或发布。"]
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        audit = audit_payload_for_graph(
+            payload,
+            overrides={
+                "raw_goal": {
+                    "external_impact": "external_state",
+                    "risk_types": ["transaction_or_payment"],
+                },
+                "goal.objective": {
+                    "external_impact": "external_state",
+                    "risk_types": ["account_relationship_change"],
+                },
+                "subgoals.target_state.objective": {
+                    "external_impact": "unknown",
+                    "risk_types": ["unknown_external_effect"],
+                },
+            },
+        )
+
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(payload, audit_payloads=[audit])
+        )
+        graph = planner.plan(raw_goal, device_id="phone-1")
+
+        self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+        corrected = {
+            item.source_id: item
+            for item in planner.last_risk_audit.assessments
+            if item.source_id
+            in {"raw_goal", "goal.objective", "subgoals.target_state.objective"}
+        }
+        self.assertTrue(
+            all(item.external_impact == "navigation_only" for item in corrected.values())
+        )
+        self.assertTrue(all(not item.risk_types for item in corrected.values()))
+
     def test_unsubmitted_input_exception_never_hides_send_or_save_effect(self):
         for effect in ("消息已发送给联系人", "草稿已保存", "内容已发布"):
             with self.subTest(effect=effect):

@@ -2090,13 +2090,6 @@ def _apply_local_risk_supplements(
             )
         if (
             assessment.external_impact in {"external_state", "unknown"}
-            and model_types
-            <= {
-                "unknown_external_effect",
-                "data_mutation",
-                "message_or_communication",
-                "content_publication",
-            }
             and not inferred
             and assessment.subgoal_id in local_input_scopes
         ):

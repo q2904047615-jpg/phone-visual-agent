@@ -277,6 +277,64 @@ class UISceneTests(unittest.TestCase):
         changed = scene(element("result", "result_page"), fingerprint="after")
         controller.verify_after_action(resolved, before, changed)
 
+    def test_labeled_element_meaning_wording_drift_is_not_semantic_change(self) -> None:
+        controller = UniversalActionController()
+        before_element = UIElement(
+            element_id="home",
+            role="tab",
+            meaning="当前激活标签页",
+            label="主页",
+            bounds=(0.2, 0.3, 0.4, 0.5),
+            confidence=0.95,
+        )
+        after_element = UIElement(
+            element_id="home",
+            role="tab",
+            meaning="当前活跃标签页",
+            label="主页",
+            bounds=(0.2, 0.3, 0.4, 0.5),
+            confidence=0.95,
+        )
+        before = scene(before_element, fingerprint="before")
+        after = scene(after_element, fingerprint="after")
+        resolved = controller.resolve_one(
+            SemanticAction(
+                node_id="switch-tab",
+                action="tap_semantic",
+                params={"element_id": "home", "target": "当前激活标签页"},
+            ),
+            before,
+        )
+
+        with self.assertRaisesRegex(UniversalActionError, "没有可验证的语义变化"):
+            controller.verify_after_action(resolved, before, after)
+
+    def test_unlabeled_element_meaning_change_remains_semantic_change(self) -> None:
+        controller = UniversalActionController()
+        before_icon = UIElement(
+            element_id="icon",
+            role="icon",
+            meaning="open_menu",
+            label="",
+            bounds=(0.2, 0.3, 0.4, 0.5),
+            confidence=0.95,
+        )
+        after_icon = UIElement(
+            element_id="icon",
+            role="icon",
+            meaning="close_menu",
+            label="",
+            bounds=(0.2, 0.3, 0.4, 0.5),
+            confidence=0.95,
+        )
+
+        self.assertFalse(
+            controller.scenes_semantically_equivalent(
+                scene(before_icon, fingerprint="before"),
+                scene(after_icon, fingerprint="after"),
+            )
+        )
+
     def test_verified_input_requires_focused_input_and_preserves_exact_text(self) -> None:
         current = scene(
             element(

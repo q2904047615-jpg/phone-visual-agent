@@ -459,8 +459,15 @@ class UniversalActionController:
                 sorted(
                     (
                         element.role.casefold(),
-                        element.meaning.casefold(),
                         element.label.casefold(),
+                        # Visible text plus role/states is stronger cross-frame
+                        # identity than model-authored meaning wording.  For an
+                        # unlabeled icon we still need meaning to identify it.
+                        (
+                            ""
+                            if element.label.strip()
+                            else element.meaning.casefold()
+                        ),
                         freeze(element.states),
                     )
                     for element in scene.elements

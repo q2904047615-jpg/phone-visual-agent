@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from PIL import Image
 
+import run_xy_calibration
+from device_exclusivity import InterProcessLease
 from tap_calibration import (
     Affine2D,
     TapCalibrationError,
@@ -18,11 +21,82 @@ from tap_calibration import (
 )
 from run_xy_calibration import (
     calibration_page_ready,
-    ensure_fullscreen_calibration_page,
     locate_magenta_target,
     probe_single_touch,
+    run_calibration_step,
     wait_for_page_state,
 )
+from universal_agent_orchestrator import DeviceTaskRegistry
+
+
+def fresh_page_state(
+    phase: str,
+    *,
+    sequence: int,
+    offset_seconds: float = 0,
+) -> dict[str, object]:
+    timestamp = datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
+    return {
+        "phase": phase,
+        "sequence": sequence,
+        "fullscreen": phase != "fullscreen_setup",
+        "calibration_mode": (
+            "setup" if phase == "fullscreen_setup" else "fullscreen"
+        ),
+        "fullscreen_attempted": phase != "fullscreen_setup",
+        "viewport_coverage": {},
+        "updated_at": timestamp.isoformat(),
+    }
+
+
+def ready_device_payload(*, busy: bool = False) -> dict[str, object]:
+    return {
+        "default_device_id": "device-local-01",
+        "devices": [
+            {
+                "device_id": "device-local-01",
+                "controller_online": True,
+                "camera_online": True,
+                "busy": busy,
+            }
+        ],
+    }
+
+
+def complete_nine_samples() -> list[dict[str, object]]:
+    width, height = 501, 901
+    points = [
+        (0.05, 0.05),
+        (0.50, 0.05),
+        (0.95, 0.05),
+        (0.05, 0.50),
+        (0.50, 0.50),
+        (0.95, 0.50),
+        (0.05, 0.95),
+        (0.50, 0.95),
+        (0.95, 0.95),
+    ]
+    return [
+        {
+            "sequence": index,
+            "desired_frame": [x * (width - 1), y * (height - 1)],
+            "command_frame": [x * (width - 1), y * (height - 1)],
+            "target_dom": [x, y],
+            "actual_dom": [x, y],
+            "viewport_size": [width, height],
+        }
+        for index, (x, y) in enumerate(points)
+    ]
+
+
+@contextmanager
+def fake_device_reservation(**_kwargs):
+    yield "device-local-01", "device-local-01", "calibration-test-session"
+
+
+@contextmanager
+def fake_physical_lease(**_kwargs):
+    yield
 
 
 class FakeProbeRobot:
@@ -303,102 +377,512 @@ class TapCalibrationMathTests(unittest.TestCase):
         self.assertEqual(0, result["physical_actions"])
         self.assertEqual([], robot.tap_calls)
 
-    def test_fullscreen_setup_failure_keeps_one_action_evidence(self):
+    def test_fullscreen_setup_executes_only_one_action_and_stops(self):
         frame = Image.new("RGB", (540, 960), "black")
         robot = FakeFullscreenRobot(frame)
-        states = [
-            {
-                "phase": "fullscreen_setup",
-                "fullscreen": False,
-                "calibration_mode": "setup",
-            },
-            {
-                "phase": "blocked",
-                "fullscreen": False,
-                "calibration_mode": "blocked",
-                "fullscreen_attempted": True,
-                "error": "fullscreen refused",
-            },
-        ]
-
-        def page_state(*_args, **_kwargs):
-            value = states.pop(0)
-            if isinstance(value, Exception):
-                raise value
-            return value
-
-        with tempfile.TemporaryDirectory() as directory, patch(
-            "run_xy_calibration.wait_for_page_state",
-            side_effect=page_state,
+        before = fresh_page_state("fullscreen_setup", sequence=0, offset_seconds=-2)
+        locked = fresh_page_state("fullscreen_setup", sequence=0, offset_seconds=-1)
+        after = fresh_page_state("calibration", sequence=0)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = temporary.name
+        with patch(
+            "run_xy_calibration._calibration_device_reservation",
+            new=fake_device_reservation,
         ), patch(
-            "run_xy_calibration.wait_for_stable_target",
-            return_value=(frame, (270, 480, (250, 460, 290, 500))),
+            "run_xy_calibration._calibration_physical_lease",
+            new=fake_physical_lease,
         ), patch(
-            "run_xy_calibration.click_raw_pixel",
-        ) as click, patch(
             "run_xy_calibration.request_json",
-            return_value={"phase": "fullscreen_setup", "fullscreen": False},
-        ):
-            output = Path(directory)
-            with self.assertRaisesRegex(TapCalibrationError, "fullscreen refused"):
-                ensure_fullscreen_calibration_page(
-                    base_url="http://127.0.0.1:8770",
-                    robot=robot,
-                    output_dir=output,
-                )
-            report = json.loads(
-                (output / "00_fullscreen_setup.json").read_text(encoding="utf-8")
-            )
-
-        click.assert_called_once()
-        self.assertEqual(1, report["physical_actions"])
-        self.assertFalse(report["passed"])
-
-    def test_viewport_fallback_keeps_one_setup_action_and_continues(self):
-        frame = Image.new("RGB", (540, 960), "black")
-        robot = FakeFullscreenRobot(frame)
-        ready = {
-            "phase": "calibration",
-            "fullscreen": False,
-            "calibration_mode": "viewport_coverage",
-            "fullscreen_attempted": True,
-            "viewport_coverage": {
-                "eligible": True,
-                "width_ratio": 0.95,
-                "height_ratio": 0.94,
-            },
-        }
-        with tempfile.TemporaryDirectory() as directory, patch(
+            return_value={"session_id": "page-setup", "samples": []},
+        ), patch(
             "run_xy_calibration.wait_for_page_state",
-            side_effect=[
-                {
-                    "phase": "fullscreen_setup",
-                    "fullscreen": False,
-                    "calibration_mode": "setup",
-                },
-                ready,
-            ],
+            side_effect=[before, locked, after],
         ), patch(
             "run_xy_calibration.wait_for_stable_target",
             return_value=(frame, (270, 480, (250, 460, 290, 500))),
         ), patch(
             "run_xy_calibration.click_raw_pixel",
         ) as click:
-            output = Path(directory)
-            actions = ensure_fullscreen_calibration_page(
+            output_root = Path(directory)
+            result = run_calibration_step(
+                mode="collect",
                 base_url="http://127.0.0.1:8770",
                 robot=robot,
-                output_dir=output,
+                execute=True,
+                output_root=output_root,
             )
-            report = json.loads(
-                (output / "00_fullscreen_setup.json").read_text(encoding="utf-8")
+            progress = json.loads(
+                (
+                    output_root / "collect_page-setup" / "progress.json"
+                ).read_text(encoding="utf-8")
             )
 
         click.assert_called_once()
-        self.assertEqual(1, actions)
-        self.assertTrue(report["passed"])
-        self.assertTrue(report["safe_viewport_fallback"])
-        self.assertFalse(report["fullscreen_entered"])
+        self.assertEqual(1, result["physical_actions"])
+        self.assertEqual("fullscreen_setup", result["executed_action"])
+        self.assertEqual(1, len(progress["attempts"]))
+        self.assertEqual([], progress["samples"])
+
+    def test_edge_point_persists_and_next_call_only_previews_next_sequence(self):
+        frame = Image.new("RGB", (540, 960), "black")
+        robot = FakeFullscreenRobot(frame)
+        record = {
+            "sequence": 0,
+            "target_x": 20.0,
+            "target_y": 30.0,
+            "actual_x": 21.0,
+            "actual_y": 31.0,
+            "viewport_width": 400,
+            "viewport_height": 800,
+        }
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = temporary.name
+        with patch(
+            "run_xy_calibration._calibration_device_reservation",
+            new=fake_device_reservation,
+        ), patch(
+            "run_xy_calibration._calibration_physical_lease",
+            new=fake_physical_lease,
+        ), patch(
+            "run_xy_calibration.request_json",
+            return_value={"session_id": "page-points", "samples": []},
+        ), patch(
+            "run_xy_calibration.wait_for_page_state",
+            side_effect=[
+                fresh_page_state("calibration", sequence=0, offset_seconds=-2),
+                fresh_page_state("calibration", sequence=0, offset_seconds=-1),
+                fresh_page_state("calibration", sequence=1),
+            ],
+        ), patch(
+            "run_xy_calibration.wait_for_stable_target",
+            return_value=(frame, (30, 50, (20, 40, 40, 60))),
+        ), patch(
+            "run_xy_calibration.click_raw_pixel",
+        ) as first_click, patch(
+            "run_xy_calibration.wait_for_new_sample",
+            return_value=record,
+        ):
+            output_root = Path(directory)
+            first = run_calibration_step(
+                mode="collect",
+                base_url="http://127.0.0.1:8770",
+                robot=robot,
+                execute=True,
+                output_root=output_root,
+            )
+        with patch(
+            "run_xy_calibration.request_json",
+            return_value={"session_id": "page-points", "samples": [record]},
+        ), patch(
+            "run_xy_calibration.wait_for_page_state",
+            return_value=fresh_page_state("calibration", sequence=1),
+        ), patch(
+            "run_xy_calibration.wait_for_stable_target",
+            return_value=(frame, (270, 480, (250, 460, 290, 500))),
+        ), patch(
+            "run_xy_calibration.click_raw_pixel",
+        ) as second_click:
+            second = run_calibration_step(
+                mode="collect",
+                base_url="http://127.0.0.1:8770",
+                robot=robot,
+                execute=False,
+                output_root=output_root,
+            )
+
+        first_click.assert_called_once()
+        second_click.assert_not_called()
+        self.assertEqual(1, first["sample_count"])
+        self.assertEqual(0, second["physical_actions"])
+        self.assertEqual(1, second["sequence"])
+
+    def test_interrupted_point_is_recovered_without_second_action(self):
+        frame = Image.new("RGB", (540, 960), "black")
+        robot = FakeFullscreenRobot(frame)
+        record = {
+            "sequence": 0,
+            "target_x": 20.0,
+            "target_y": 30.0,
+            "actual_x": 21.0,
+            "actual_y": 31.0,
+            "viewport_width": 400,
+            "viewport_height": 800,
+        }
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = temporary.name
+        with patch(
+            "run_xy_calibration._calibration_device_reservation",
+            new=fake_device_reservation,
+        ), patch(
+            "run_xy_calibration._calibration_physical_lease",
+            new=fake_physical_lease,
+        ), patch(
+            "run_xy_calibration.request_json",
+            return_value={"session_id": "page-recover", "samples": []},
+        ), patch(
+            "run_xy_calibration.wait_for_page_state",
+            side_effect=[
+                fresh_page_state("calibration", sequence=0, offset_seconds=-2),
+                fresh_page_state("calibration", sequence=0, offset_seconds=-1),
+            ],
+        ), patch(
+            "run_xy_calibration.wait_for_stable_target",
+            return_value=(frame, (30, 50, (20, 40, 40, 60))),
+        ), patch(
+            "run_xy_calibration.click_raw_pixel",
+        ) as first_click, patch(
+            "run_xy_calibration.wait_for_new_sample",
+            side_effect=TapCalibrationError("sample timeout"),
+        ):
+            output_root = Path(directory)
+            with self.assertRaisesRegex(TapCalibrationError, "sample timeout"):
+                run_calibration_step(
+                    mode="collect",
+                    base_url="http://127.0.0.1:8770",
+                    robot=robot,
+                    execute=True,
+                    output_root=output_root,
+                )
+        with patch(
+            "run_xy_calibration.request_json",
+            return_value={"session_id": "page-recover", "samples": [record]},
+        ), patch(
+            "run_xy_calibration.wait_for_page_state",
+            return_value=fresh_page_state("calibration", sequence=1),
+        ), patch(
+            "run_xy_calibration.click_raw_pixel",
+        ) as recovery_click:
+            recovered = run_calibration_step(
+                mode="collect",
+                base_url="http://127.0.0.1:8770",
+                robot=robot,
+                execute=False,
+                output_root=output_root,
+            )
+
+        first_click.assert_called_once()
+        recovery_click.assert_not_called()
+        self.assertEqual("recovered", recovered["status"])
+        self.assertEqual(0, recovered["physical_actions"])
+        self.assertEqual(1, recovered["sample_count"])
+
+    def test_execute_holds_registry_and_calibration_physical_lease_during_click(self):
+        frame = Image.new("RGB", (540, 960), "black")
+        robot = FakeFullscreenRobot(frame)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lease_dir = root / "leases"
+
+            def request(url, *_args, **_kwargs):
+                if url == "http://device.test/api/device":
+                    return ready_device_payload()
+                if url.endswith("/api/samples"):
+                    return {"session_id": "page-positive-lock", "samples": []}
+                raise AssertionError(url)
+
+            observed: dict[str, object] = {}
+
+            def inspect_locks(*_args, **_kwargs):
+                observed["physical"] = InterProcessLease.active_payload(
+                    lease_dir / "physical_hardware_action.lease"
+                )
+                observed["device_session"] = DeviceTaskRegistry(
+                    lease_directory=lease_dir
+                ).active_session("device-local-01")
+
+            with patch.object(
+                run_xy_calibration,
+                "SHARED_DEVICE_LEASE_DIR",
+                lease_dir,
+            ), patch(
+                "run_xy_calibration.request_json",
+                side_effect=request,
+            ), patch(
+                "run_xy_calibration.wait_for_page_state",
+                side_effect=[
+                    fresh_page_state(
+                        "fullscreen_setup", sequence=0, offset_seconds=-2
+                    ),
+                    fresh_page_state(
+                        "fullscreen_setup", sequence=0, offset_seconds=-1
+                    ),
+                    fresh_page_state("calibration", sequence=0),
+                ],
+            ), patch(
+                "run_xy_calibration.wait_for_stable_target",
+                return_value=(frame, (270, 480, (250, 460, 290, 500))),
+            ), patch(
+                "run_xy_calibration.click_raw_pixel",
+                side_effect=inspect_locks,
+            ) as click:
+                result = run_calibration_step(
+                    mode="collect",
+                    base_url="http://127.0.0.1:8770",
+                    robot=robot,
+                    execute=True,
+                    device_status_url="http://device.test/api/device",
+                    output_root=root / "output",
+                )
+
+            active_after = DeviceTaskRegistry(
+                lease_directory=lease_dir
+            ).active_session("device-local-01")
+            physical_after = InterProcessLease.active_payload(
+                lease_dir / "physical_hardware_action.lease"
+            )
+
+        click.assert_called_once()
+        self.assertEqual(1, result["physical_actions"])
+        self.assertTrue(observed["physical"]["calibration_step"])
+        self.assertEqual("calibration_step", observed["physical"]["purpose"])
+        self.assertTrue(str(observed["device_session"]).startswith("calibration-step-"))
+        self.assertIsNone(active_after)
+        self.assertIsNone(physical_after)
+
+    def test_busy_device_rejects_zero_actions_and_releases_registry(self):
+        frame = Image.new("RGB", (540, 960), "black")
+        robot = FakeFullscreenRobot(frame)
+        with tempfile.TemporaryDirectory() as directory:
+            lease_dir = Path(directory) / "leases"
+            device_states = iter(
+                [ready_device_payload(), ready_device_payload(busy=True)]
+            )
+            with patch.object(
+                run_xy_calibration,
+                "SHARED_DEVICE_LEASE_DIR",
+                lease_dir,
+            ), patch(
+                "run_xy_calibration.request_json",
+                side_effect=lambda *_args, **_kwargs: next(device_states),
+            ), patch(
+                "run_xy_calibration.wait_for_stable_target",
+            ) as visual, patch(
+                "run_xy_calibration.click_raw_pixel",
+            ) as click, self.assertRaisesRegex(TapCalibrationError, "非空闲"):
+                run_calibration_step(
+                    mode="collect",
+                    base_url="http://127.0.0.1:8770",
+                    robot=robot,
+                    execute=True,
+                    device_status_url="http://device.test/api/device",
+                    output_root=Path(directory) / "output",
+                )
+            registry = DeviceTaskRegistry(lease_directory=lease_dir)
+            registry.reserve("device-local-01", "after-busy-rejection")
+            registry.release("device-local-01", "after-busy-rejection")
+
+        visual.assert_not_called()
+        click.assert_not_called()
+
+    def test_device_registry_occupancy_rejects_before_visual_or_action(self):
+        frame = Image.new("RGB", (540, 960), "black")
+        robot = FakeFullscreenRobot(frame)
+        with tempfile.TemporaryDirectory() as directory:
+            lease_dir = Path(directory) / "leases"
+            competitor = DeviceTaskRegistry(lease_directory=lease_dir)
+            competitor.reserve("device-local-01", "generic-awaiting-confirmation")
+            try:
+                with patch.object(
+                    run_xy_calibration,
+                    "SHARED_DEVICE_LEASE_DIR",
+                    lease_dir,
+                ), patch(
+                    "run_xy_calibration.request_json",
+                    return_value=ready_device_payload(),
+                ), patch(
+                    "run_xy_calibration.wait_for_stable_target",
+                ) as visual, patch(
+                    "run_xy_calibration.click_raw_pixel",
+                ) as click, self.assertRaisesRegex(
+                    TapCalibrationError, "已有活动任务"
+                ):
+                    run_calibration_step(
+                        mode="collect",
+                        base_url="http://127.0.0.1:8770",
+                        robot=robot,
+                        execute=True,
+                        device_status_url="http://device.test/api/device",
+                        output_root=Path(directory) / "output",
+                    )
+            finally:
+                competitor.release(
+                    "device-local-01", "generic-awaiting-confirmation"
+                )
+
+        visual.assert_not_called()
+        click.assert_not_called()
+
+    def test_physical_lease_occupancy_rejects_zero_actions_and_releases_registry(self):
+        frame = Image.new("RGB", (540, 960), "black")
+        robot = FakeFullscreenRobot(frame)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lease_dir = root / "leases"
+            occupied = InterProcessLease(
+                lease_dir / "physical_hardware_action.lease",
+                owner_id="legacy-worker",
+                metadata={"purpose": "legacy-action"},
+            )
+            self.assertTrue(occupied.acquire())
+
+            def request(url, *_args, **_kwargs):
+                if url == "http://device.test/api/device":
+                    return ready_device_payload()
+                if url.endswith("/api/samples"):
+                    return {"session_id": "page-locked", "samples": []}
+                raise AssertionError(url)
+
+            try:
+                with patch.object(
+                    run_xy_calibration,
+                    "SHARED_DEVICE_LEASE_DIR",
+                    lease_dir,
+                ), patch(
+                    "run_xy_calibration.request_json",
+                    side_effect=request,
+                ), patch(
+                    "run_xy_calibration.wait_for_page_state",
+                    return_value=fresh_page_state(
+                        "fullscreen_setup", sequence=0
+                    ),
+                ), patch(
+                    "run_xy_calibration.wait_for_stable_target",
+                    return_value=(frame, (270, 480, (250, 460, 290, 500))),
+                ), patch(
+                    "run_xy_calibration.click_raw_pixel",
+                ) as click, self.assertRaisesRegex(
+                    TapCalibrationError, "物理控制权"
+                ):
+                    run_calibration_step(
+                        mode="collect",
+                        base_url="http://127.0.0.1:8770",
+                        robot=robot,
+                        execute=True,
+                        device_status_url="http://device.test/api/device",
+                        output_root=root / "output",
+                    )
+            finally:
+                occupied.release()
+
+            progress = json.loads(
+                (
+                    root / "output" / "collect_page-locked" / "progress.json"
+                ).read_text(encoding="utf-8")
+            )
+            registry = DeviceTaskRegistry(lease_directory=lease_dir)
+            registry.reserve("device-local-01", "after-calibration-failure")
+            registry.release("device-local-01", "after-calibration-failure")
+
+        click.assert_not_called()
+        self.assertEqual([], progress["attempts"])
+
+    def test_fit_and_validation_finalize_only_after_nine_persisted_points(self):
+        frame = Image.new("RGB", (501, 901), "black")
+        robot = FakeFullscreenRobot(frame)
+        samples = complete_nine_samples()
+        server_samples = [{"sequence": index} for index in range(9)]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calibration_path = root / "tap.json"
+            for mode, session_id in (
+                ("collect", "collect-complete"),
+                ("validate", "validate-complete"),
+            ):
+                output_dir = root / f"{mode}_{session_id}"
+                progress = {
+                    "version": 1,
+                    "mode": mode,
+                    "page_session_id": session_id,
+                    "base_url": "http://127.0.0.1:8770",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "frame_size": [501, 901],
+                    "samples": samples,
+                    "attempts": [],
+                }
+                run_xy_calibration._write_json(
+                    output_dir / "progress.json", progress
+                )
+                with patch(
+                    "run_xy_calibration.request_json",
+                    return_value={
+                        "session_id": session_id,
+                        "samples": server_samples,
+                    },
+                ), patch(
+                    "run_xy_calibration.wait_for_page_state",
+                    return_value=fresh_page_state("complete", sequence=9),
+                ), patch(
+                    "run_xy_calibration.click_raw_pixel",
+                ) as click:
+                    result = run_calibration_step(
+                        mode=mode,
+                        base_url="http://127.0.0.1:8770",
+                        robot=robot,
+                        execute=False,
+                        output_root=root,
+                        calibration_path=calibration_path,
+                    )
+                click.assert_not_called()
+                self.assertEqual(0, result["physical_actions"])
+
+            payload = json.loads(calibration_path.read_text(encoding="utf-8"))
+
+        self.assertEqual("validation_complete", result["status"])
+        self.assertTrue(payload["enabled"])
+        self.assertTrue(payload["validated"])
+
+    def test_eight_points_cannot_finalize_fit(self):
+        frame = Image.new("RGB", (501, 901), "black")
+        robot = FakeFullscreenRobot(frame)
+        samples = complete_nine_samples()[:8]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_dir = root / "collect_collect-eight"
+            run_xy_calibration._write_json(
+                output_dir / "progress.json",
+                {
+                    "version": 1,
+                    "mode": "collect",
+                    "page_session_id": "collect-eight",
+                    "base_url": "http://127.0.0.1:8770",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "frame_size": [501, 901],
+                    "samples": samples,
+                    "attempts": [],
+                },
+            )
+            with patch(
+                "run_xy_calibration.request_json",
+                return_value={
+                    "session_id": "collect-eight",
+                    "samples": [{"sequence": index} for index in range(8)],
+                },
+            ), patch(
+                "run_xy_calibration.wait_for_page_state",
+                return_value=fresh_page_state("calibration", sequence=8),
+            ), patch(
+                "run_xy_calibration.wait_for_stable_target",
+                return_value=(frame, (475, 855, (465, 845, 485, 865))),
+            ), patch(
+                "run_xy_calibration.click_raw_pixel",
+            ) as click:
+                result = run_calibration_step(
+                    mode="collect",
+                    base_url="http://127.0.0.1:8770",
+                    robot=robot,
+                    execute=False,
+                    output_root=root,
+                    calibration_path=root / "tap.json",
+                )
+            calibration_created = (root / "tap.json").exists()
+
+        click.assert_not_called()
+        self.assertEqual("awaiting_explicit_execution", result["status"])
+        self.assertEqual(8, result["sequence"])
+        self.assertFalse(calibration_created)
 
     def test_page_state_wait_rejects_stale_calibration_heartbeat(self):
         stale = (datetime.now(timezone.utc) - timedelta(seconds=20)).isoformat()
@@ -416,6 +900,23 @@ class TapCalibrationMathTests(unittest.TestCase):
                 timeout=0.01,
             )
 
+    def test_page_state_wait_requires_heartbeat_newer_than_action_input(self):
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with patch(
+            "run_xy_calibration.request_json",
+            return_value={
+                "phase": "calibration",
+                "fullscreen": True,
+                "updated_at": timestamp,
+            },
+        ), self.assertRaisesRegex(TapCalibrationError, "没有进入预期阶段"):
+            wait_for_page_state(
+                "http://127.0.0.1:8770",
+                phases={"calibration"},
+                timeout=0.01,
+                newer_than=timestamp,
+            )
+
     def test_single_touch_probe_records_one_verified_contact(self):
         frame = Image.new("RGB", (540, 960), "black")
         robot = FakeProbeRobot(frame)
@@ -429,11 +930,17 @@ class TapCalibrationMathTests(unittest.TestCase):
             "viewport_height": 800,
         }
         with tempfile.TemporaryDirectory() as directory, patch(
+            "run_xy_calibration._calibration_device_reservation",
+            new=fake_device_reservation,
+        ), patch(
+            "run_xy_calibration._calibration_physical_lease",
+            new=fake_physical_lease,
+        ), patch(
             "run_xy_calibration.wait_for_stable_target",
             return_value=(frame, (120, 240, (100, 220, 140, 260))),
         ), patch(
             "run_xy_calibration.request_json",
-            return_value={"samples": []},
+            return_value={"session_id": "probe-success", "samples": []},
         ), patch(
             "run_xy_calibration.wait_for_new_sample",
             return_value=record,
@@ -458,11 +965,17 @@ class TapCalibrationMathTests(unittest.TestCase):
         frame = Image.new("RGB", (540, 960), "black")
         robot = FakeProbeRobot(frame)
         with tempfile.TemporaryDirectory() as directory, patch(
+            "run_xy_calibration._calibration_device_reservation",
+            new=fake_device_reservation,
+        ), patch(
+            "run_xy_calibration._calibration_physical_lease",
+            new=fake_physical_lease,
+        ), patch(
             "run_xy_calibration.wait_for_stable_target",
             return_value=(frame, (120, 240, (100, 220, 140, 260))),
         ), patch(
             "run_xy_calibration.request_json",
-            return_value={"samples": []},
+            return_value={"session_id": "probe-failure", "samples": []},
         ), patch(
             "run_xy_calibration.wait_for_new_sample",
             side_effect=TapCalibrationError("手机没有回传触点"),
@@ -480,6 +993,38 @@ class TapCalibrationMathTests(unittest.TestCase):
         self.assertEqual(1, result["physical_actions"])
         self.assertFalse(result["contact_detected"])
         self.assertEqual(1, len(robot.tap_calls))
+
+    def test_single_touch_probe_reobserves_under_physical_lease_before_action(self):
+        frame = Image.new("RGB", (540, 960), "black")
+        robot = FakeProbeRobot(frame)
+        preview = (frame, (120, 240, (100, 220, 140, 260)))
+        moved = (frame, (140, 240, (120, 220, 160, 260)))
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "run_xy_calibration._calibration_device_reservation",
+            new=fake_device_reservation,
+        ), patch(
+            "run_xy_calibration._calibration_physical_lease",
+            new=fake_physical_lease,
+        ), patch(
+            "run_xy_calibration.wait_for_stable_target",
+            side_effect=[preview, moved],
+        ) as stable_target, patch(
+            "run_xy_calibration.request_json",
+            return_value={"session_id": "probe-moved", "samples": []},
+        ):
+            with self.assertRaisesRegex(
+                TapCalibrationError,
+                "物理锁内探测靶点与预检观察不一致",
+            ):
+                probe_single_touch(
+                    base_url="http://127.0.0.1:8770",
+                    robot=robot,
+                    execute=True,
+                    output_dir=Path(directory) / "probe",
+                )
+
+        self.assertEqual(2, stable_target.call_count)
+        self.assertEqual([], robot.tap_calls)
 
 
 if __name__ == "__main__":

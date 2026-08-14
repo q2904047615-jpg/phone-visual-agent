@@ -90,6 +90,49 @@ cd .\poc
 
 `probe` 不会修改 `tap_calibration.json`，也不会自动重试第二次点击。
 
+### 边缘九点单步校准
+
+`collect` 和 `validate` 已改为可恢复的单步命令。一次 CLI 调用最多执行一个物理动作：
+中央全屏准备或当前 `sequence` 的一个边缘触点。省略 `--execute` 时只做零动作预检；
+真实执行会先占用目标设备的共享任务 registry，再占用与网页 worker 相同的 physical lease，
+并在锁内重新检查 `/api/device`、页面 heartbeat 和稳定靶点。任一门禁失败均保持 0 动作。
+
+每一步先运行预检：
+
+```powershell
+cd .\poc
+.\.venv\Scripts\python.exe run_xy_calibration.py collect --device-id device-local-01
+```
+
+核对输出中的 `page_session_id`、`next_action`、`sequence`、`target_frame` 和
+`physical_actions: 0`，针对该新鲜状态取得一次明确确认后，只执行当前一步：
+
+```powershell
+.\.venv\Scripts\python.exe run_xy_calibration.py collect --device-id device-local-01 --execute
+```
+
+命令结束后必须退出并重新运行零动作预检；不得在一次确认内连续采集下一点。样本、动作意图、
+前后截图和恢复状态保存在
+`poc\output\xy_calibration\collect_页面session_id\`。若进程在动作后中断，下次调用只会恢复
+上一步结果，不会自动重试或继续下一点。九个边缘触点齐全后，再运行一次不带 `--execute` 的
+`collect` 完成零动作拟合。
+
+拟合通过后，重置安全校准页形成新的页面 session：
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8770/api/reset
+```
+
+随后按同样方式逐步独立验证：
+
+```powershell
+.\.venv\Scripts\python.exe run_xy_calibration.py validate --device-id device-local-01
+.\.venv\Scripts\python.exe run_xy_calibration.py validate --device-id device-local-01 --execute
+```
+
+九个验证触点齐全后，再运行一次不带 `--execute` 的 `validate`。只有该零动作最终化返回
+`validation_complete`，标定才会设为 `validated=true`、`enabled=true`。
+
 `tap_calibration.json` 中的仿射纠偏使用归一化画面坐标。经过独立验证的标定可以在
 摄像画面做严格等比缩放时继续使用，例如 Windows 缩放使画面从 `540×960` 变为
 `810×1440`；宽高缩放比例不一致时仍会安全停用纠偏，避免把裁切或变形画面误认为单纯

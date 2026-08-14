@@ -632,6 +632,14 @@ INPUT_VALUE_OBSERVATION_RULE = (
     "退出控件，不是本地清空图标；必须meaning=cancel且goal_relevant:false，绝不能标成clear_local_text。"
 )
 
+SYSTEM_UI_OBSERVATION_RULE = (
+    "system_ui必须始终存在，且只允许immersive_or_fullscreen和"
+    "navigation_bar_visible两个字段。每个值只能是true、false或字符串unknown："
+    "只有画面明确证明时才写布尔值，裁切、遮挡、模糊或无法排除时必须写unknown。"
+    "这是系统UI的只读事实，不是完成判断。navigation_bar、system_navigation_bar或"
+    "system_nav_bar绝不得写入elements，即使它部分可见或与目标相关。"
+)
+
 
 def _compact_prompt(context: dict[str, Any]) -> str:
     return f"""
@@ -655,10 +663,12 @@ def _compact_prompt(context: dict[str, Any]) -> str:
    elements；只有模糊、遮挡、过渡或无法判断页面事实时才降低confidence。
 9. {PREFILLED_INPUT_OBSERVATION_RULE}
 10. {INPUT_VALUE_OBSERVATION_RULE}
+11. {SYSTEM_UI_OBSERVATION_RULE}
 
 只返回下列完整JSON，不要Markdown：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
-"screen_id":"unknown","summary":"当前画面短描述","elements":[],"overlays":[],
+"screen_id":"unknown","summary":"当前画面短描述","system_ui":{{"immersive_or_fullscreen":"unknown",
+"navigation_bar_visible":"unknown"}},"elements":[],"overlays":[],
 "stable":true,"confidence":0.0,"fingerprint":""}}
 每个element只允许：
 {{"element_id":"e1","role":"button","meaning":"open_search","label":"搜索",
@@ -678,13 +688,15 @@ summary最多40字，elements最多2个，evidence每个元素最多1条且最�
 尚未出现，也必须在elements中报告该入口；只有重新观察后仍无法确认时才返回空elements。
 格式必须是：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
-"screen_id":"unknown","summary":"短描述","elements":[],"overlays":[],
+"screen_id":"unknown","summary":"短描述","system_ui":{{"immersive_or_fullscreen":"unknown",
+"navigation_bar_visible":"unknown"}},"elements":[],"overlays":[],
 "stable":true,"confidence":0.0,"fingerprint":""}}
 元素格式仅允许element_id、role、meaning、label、bounds、confidence、states、evidence。
 bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能是x/y/width/height对象、
 两个点或嵌套数组。
 role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
-container仅表示与目标有关的页面内容区域；tab_group、tab_bar、navigation_bar、toolbar等其他非点击结构只写进summary，不要放入elements。
+container仅表示与目标有关的页面内容区域；tab_group、tab_bar和toolbar等非点击结构只写进summary。
+{SYSTEM_UI_OBSERVATION_RULE}
 overlays只能是字符串数组；带bounds、role、element_id或overlay_id的对象必须改写成elements，
 并使用element_id。禁止把对象序列化成字符串塞入overlays。
 与目标直接相关的元素写states.goal_relevant=true。禁止任何动作或计划字段。不要Markdown。
@@ -709,11 +721,13 @@ def _targeted_retry_prompt(
 即使目标最终结果尚未出现。只有重新观察后仍无法确认时才返回空elements。
 格式：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
-"screen_id":"unknown","summary":"短描述","elements":[],"overlays":[],
+"screen_id":"unknown","summary":"短描述","system_ui":{{"immersive_or_fullscreen":"unknown",
+"navigation_bar_visible":"unknown"}},"elements":[],"overlays":[],
 "stable":true,"confidence":0.0,"fingerprint":""}}
 元素仅允许element_id、role、meaning、label、bounds、confidence、states、evidence；禁止动作、计划和裸坐标。不要Markdown。
 bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能是x/y/width/height对象、两个点或嵌套数组。
 overlays只能是字符串数组；可交互候选必须放入elements并使用element_id，不能把对象放入overlays。
+{SYSTEM_UI_OBSERVATION_RULE}
 输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
 输入框文字与键盘规则：{INPUT_VALUE_OBSERVATION_RULE}
 """
@@ -730,6 +744,7 @@ def _targeted_prompt(
         "foreground_app_id": first_scene.get("foreground_app_id"),
         "screen_id": first_scene.get("screen_id"),
         "summary": first_scene.get("summary"),
+        "system_ui": first_scene.get("system_ui"),
         "overlays": first_scene.get("overlays"),
         "confidence": first_scene.get("confidence"),
     }
@@ -758,11 +773,13 @@ goal_relevant:true，相邻button写goal_relevant:false。本地只会在三者�
 几何关系成立时把这组只读事实归一化，绝不会因此激活按钮。
 只返回完整JSON：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
-"screen_id":"unknown","summary":"目标精查后的当前画面","elements":[],"overlays":[],
+"screen_id":"unknown","summary":"目标精查后的当前画面","system_ui":{{"immersive_or_fullscreen":"unknown",
+"navigation_bar_visible":"unknown"}},"elements":[],"overlays":[],
 "stable":true,"confidence":0.0,"fingerprint":""}}
 元素仅允许element_id、role、meaning、label、bounds、confidence、states、evidence。不要Markdown。
 role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
-container仅表示与目标有关的页面内容区域；tab_group、tab_bar、navigation_bar、toolbar等其他非点击结构只写进summary，不要放入elements。
+container仅表示与目标有关的页面内容区域；tab_group、tab_bar和toolbar等其他非点击结构只写进summary。
+{SYSTEM_UI_OBSERVATION_RULE}
 overlays只能是字符串数组；任何可交互候选都必须放入elements并使用element_id，
 不得把带bounds、role或ID的对象放入overlays。
 """
@@ -818,6 +835,10 @@ def _parse_scene(
 ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
+        if "system_ui" not in payload:
+            raise UISceneError(
+                "新观察必须显式返回 scene.system_ui；无法判断时两项都写 unknown。"
+            )
         _normalize_compact_scene_payload(payload)
         _normalize_known_scene_enums(payload)
         _normalize_prefilled_input_structure(payload, goal_context or {})

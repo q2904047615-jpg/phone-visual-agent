@@ -7,7 +7,13 @@ from task_orchestrator import (
     PlanNode,
     TaskPlanError,
 )
-from ui_scene import UI_SCENE_PROTOCOL_VERSION, UIElement, UIScene, UISceneError
+from ui_scene import (
+    UI_SCENE_PROTOCOL_VERSION,
+    SystemUIFacts,
+    UIElement,
+    UIScene,
+    UISceneError,
+)
 from universal_action_controller import (
     UniversalActionController,
     UniversalActionError,
@@ -53,6 +59,78 @@ def scene(
 
 
 class UISceneTests(unittest.TestCase):
+    def test_system_ui_boolean_facts_round_trip(self) -> None:
+        current = UIScene.from_dict(
+            {
+                "foreground_app_id": "browser",
+                "screen_id": "page",
+                "summary": "导航栏清晰可见",
+                "system_ui": {
+                    "immersive_or_fullscreen": False,
+                    "navigation_bar_visible": True,
+                },
+                "elements": [],
+                "stable": True,
+                "confidence": 0.95,
+            }
+        )
+
+        self.assertIs(False, current.system_ui.immersive_or_fullscreen)
+        self.assertIs(True, current.system_ui.navigation_bar_visible)
+        self.assertEqual(
+            {
+                "immersive_or_fullscreen": False,
+                "navigation_bar_visible": True,
+            },
+            current.to_dict()["system_ui"],
+        )
+
+    def test_legacy_scene_without_system_ui_fails_closed_to_unknown(self) -> None:
+        current = UIScene.from_dict(
+            {
+                "foreground_app_id": "unknown",
+                "screen_id": "unknown",
+                "summary": "旧观察",
+                "elements": [],
+                "stable": True,
+                "confidence": 0.8,
+            }
+        )
+
+        self.assertEqual(SystemUIFacts(), current.system_ui)
+        self.assertEqual(
+            {
+                "immersive_or_fullscreen": "unknown",
+                "navigation_bar_visible": "unknown",
+            },
+            current.to_dict()["system_ui"],
+        )
+
+    def test_system_ui_rejects_missing_extra_or_ambiguous_values(self) -> None:
+        cases = (
+            {"immersive_or_fullscreen": True},
+            {
+                "immersive_or_fullscreen": True,
+                "navigation_bar_visible": False,
+                "status_bar_visible": True,
+            },
+            {
+                "immersive_or_fullscreen": "yes",
+                "navigation_bar_visible": False,
+            },
+            {
+                "immersive_or_fullscreen": False,
+                "navigation_bar_visible": None,
+            },
+        )
+        for system_ui in cases:
+            with self.subTest(system_ui=system_ui), self.assertRaises(UISceneError):
+                SystemUIFacts.from_dict(system_ui)
+
+    def test_navigation_bar_is_not_a_scene_element(self) -> None:
+        with self.assertRaisesRegex(UISceneError, "只能写入 scene.system_ui"):
+            element("system-bar", "system_navigation_bar", role="container").validate()
+
     def test_overlay_objects_are_rejected_instead_of_stringified(self) -> None:
         with self.assertRaisesRegex(
             UISceneError,

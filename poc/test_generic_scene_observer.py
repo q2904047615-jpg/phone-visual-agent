@@ -107,6 +107,10 @@ def scene_payload() -> dict:
         "foreground_app_id": "calculator",
         "screen_id": "app_home",
         "summary": "计算器首页",
+        "system_ui": {
+            "immersive_or_fullscreen": False,
+            "navigation_bar_visible": True,
+        },
         "elements": [
             {
                 "element_id": "e1",
@@ -170,6 +174,55 @@ def audited_application_input(
 
 
 class GenericSceneObserverTests(unittest.TestCase):
+    def test_scene_parser_requires_explicit_structured_system_ui(self) -> None:
+        payload = scene_payload()
+        payload.pop("system_ui")
+
+        with self.assertRaisesRegex(VisionAgentError, "必须显式返回 scene.system_ui"):
+            _parse_scene(json.dumps(payload), fingerprint="missing-system-ui")
+
+    def test_summary_cannot_override_unknown_system_ui(self) -> None:
+        payload = scene_payload()
+        payload["summary"] = "系统导航栏清晰可见"
+        payload["system_ui"] = {
+            "immersive_or_fullscreen": "unknown",
+            "navigation_bar_visible": "unknown",
+        }
+
+        scene = _parse_scene(json.dumps(payload), fingerprint="unknown-system-ui")
+
+        self.assertEqual("unknown", scene.system_ui.immersive_or_fullscreen)
+        self.assertEqual("unknown", scene.system_ui.navigation_bar_visible)
+
+    def test_navigation_bar_fact_cannot_enter_scene_elements(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "system-bar",
+                "role": "container",
+                "meaning": "system_nav_bar_stub",
+                "label": "系统导航栏区域",
+                "bounds": [0, 970, 1000, 1000],
+                "confidence": 0.9,
+                "states": {"goal_relevant": True},
+                "evidence": ["底部导航栏轮廓"],
+            }
+        ]
+
+        with self.assertRaisesRegex(VisionAgentError, "只能写入 scene.system_ui"):
+            _parse_scene(json.dumps(payload, ensure_ascii=False), fingerprint="bar-element")
+
+    def test_observation_prompt_requires_system_ui_without_elements(self) -> None:
+        provider = FakeProvider(scene_payload())
+
+        GenericSceneObserver(provider).observe(frames=stable_frames())
+
+        prompt = provider.messages[1]["content"][0]["text"]
+        self.assertIn('"system_ui"', prompt)
+        self.assertIn('"immersive_or_fullscreen":"unknown"', prompt)
+        self.assertIn('"navigation_bar_visible":"unknown"', prompt)
+        self.assertIn("绝不得写入elements", prompt)
+
     def test_visible_keyboard_marks_one_goal_input_focused(self) -> None:
         payload = scene_payload()
         payload["summary"] = "顶部搜索输入框可见，下方显示软键盘"

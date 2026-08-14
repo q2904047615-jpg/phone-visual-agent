@@ -35,6 +35,58 @@ class UISceneError(ValueError):
     pass
 
 
+SYSTEM_UI_UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class SystemUIFacts:
+    """Read-only system UI facts; unknown never satisfies a visual gate."""
+
+    immersive_or_fullscreen: bool | str = SYSTEM_UI_UNKNOWN
+    navigation_bar_visible: bool | str = SYSTEM_UI_UNKNOWN
+
+    def validate(self) -> None:
+        for field_name, value in (
+            ("immersive_or_fullscreen", self.immersive_or_fullscreen),
+            ("navigation_bar_visible", self.navigation_bar_visible),
+        ):
+            if isinstance(value, bool) or value == SYSTEM_UI_UNKNOWN:
+                continue
+            raise UISceneError(
+                f"system_ui.{field_name} 必须是布尔值或明确的 unknown。"
+            )
+
+    def to_dict(self) -> dict[str, bool | str]:
+        self.validate()
+        return {
+            "immersive_or_fullscreen": self.immersive_or_fullscreen,
+            "navigation_bar_visible": self.navigation_bar_visible,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "SystemUIFacts":
+        if not isinstance(value, dict):
+            raise UISceneError("scene.system_ui 必须是 JSON 对象。")
+        required = {"immersive_or_fullscreen", "navigation_bar_visible"}
+        missing = required - set(value)
+        unexpected = set(value) - required
+        if missing:
+            raise UISceneError(
+                "scene.system_ui 缺少字段：" + ", ".join(sorted(missing))
+            )
+        if unexpected:
+            raise UISceneError(
+                "scene.system_ui 包含协议外字段："
+                + ", ".join(sorted(map(str, unexpected)))
+            )
+        facts = cls(
+            immersive_or_fullscreen=value["immersive_or_fullscreen"],
+            navigation_bar_visible=value["navigation_bar_visible"],
+        )
+        facts.validate()
+        return facts
+
+
 @dataclass(frozen=True)
 class UIElement:
     """A perceived semantic element. It contains evidence, never an action."""
@@ -55,6 +107,10 @@ class UIElement:
             raise UISceneError(f"不支持的元素角色：{self.role}")
         if not self.meaning.strip():
             raise UISceneError("元素缺少语义 meaning。")
+        if _is_system_navigation_bar_fact(self.meaning):
+            raise UISceneError(
+                "系统导航栏只能写入 scene.system_ui，不得进入 elements。"
+            )
         if len(self.bounds) != 4:
             raise UISceneError("元素 bounds 必须包含4个归一化数值。")
         left, top, right, bottom = self.bounds
@@ -214,6 +270,7 @@ class UIScene:
     confidence: float = 1.0
     fingerprint: str = ""
     protocol_version: str = UI_SCENE_PROTOCOL_VERSION
+    system_ui: SystemUIFacts = field(default_factory=SystemUIFacts)
 
     @property
     def foreground_app_id(self) -> str:
@@ -228,6 +285,9 @@ class UIScene:
             )
         if not self.screen_id.strip():
             raise UISceneError("场景缺少 screen_id。")
+        if not isinstance(self.system_ui, SystemUIFacts):
+            raise UISceneError("scene.system_ui 必须是 SystemUIFacts。")
+        self.system_ui.validate()
         if isinstance(self.confidence, bool) or not isinstance(
             self.confidence, (int, float)
         ):
@@ -387,6 +447,7 @@ class UIScene:
             "app_id": self.foreground_app_id,
             "screen_id": self.screen_id,
             "summary": self.summary,
+            "system_ui": self.system_ui.to_dict(),
             "elements": [element.to_dict() for element in self.elements],
             "overlays": list(self.overlays),
             "stable": self.stable,
@@ -412,6 +473,7 @@ class UIScene:
             "app_id",
             "screen_id",
             "summary",
+            "system_ui",
             "elements",
             "overlays",
             "stable",
@@ -461,6 +523,11 @@ class UIScene:
             app_id=_normalize_foreground_app_id(raw_foreground_app_id, screen_id),
             screen_id=screen_id,
             summary=str(value.get("summary") or "").strip()[:500],
+            system_ui=(
+                SystemUIFacts.from_dict(value["system_ui"])
+                if "system_ui" in value
+                else SystemUIFacts()
+            ),
             elements=elements,
             overlays=tuple(item.strip()[:120] for item in overlays if item.strip()),
             stable=(
@@ -541,6 +608,17 @@ def _infer_app_id(screen_id: str) -> str:
         return "launcher"
     prefix = screen_id.split("_", 1)[0].strip().lower()
     return prefix if prefix and prefix not in {"android", "unknown"} else "unknown"
+
+
+def _is_system_navigation_bar_fact(meaning: str) -> bool:
+    normalized = meaning.strip().casefold().replace("-", "_").replace(" ", "_")
+    return normalized in {
+        "navigation_bar",
+        "system_navigation_bar",
+        "system_nav_bar",
+        "system_nav_bar_stub",
+        "android_navigation_bar",
+    }
 
 
 def _normalize_foreground_app_id(app_id: str, screen_id: str) -> str:

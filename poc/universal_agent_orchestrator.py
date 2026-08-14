@@ -2246,7 +2246,7 @@ class PhaseOneNavigationPolicy:
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
-    VERSION = "2026-08-14-universal-action-policy-v9"
+    VERSION = "2026-08-14-universal-action-policy-v10"
     ALLOWED_ACTIONS = frozenset(
         {
             "swipe",
@@ -2264,6 +2264,38 @@ class PhaseOneNavigationPolicy:
     NAVIGATION_ROLES = frozenset(
         {"button", "icon", "text", "tab", "image", "list_item"}
     )
+    GOAL_BOUND_TAP_ROLES = frozenset(
+        {"button", "icon", "tab", "image", "list_item"}
+    )
+    GENERIC_BINDING_TERMS = frozenset(
+        {
+            "action",
+            "button",
+            "control",
+            "current",
+            "element",
+            "icon",
+            "image",
+            "item",
+            "page",
+            "screen",
+            "setup",
+            "target",
+            "view",
+            "元素",
+            "图标",
+            "当前",
+            "按钮",
+            "控件",
+            "入口",
+            "操作",
+            "目标",
+            "画面",
+            "视图",
+            "页面",
+        }
+    )
+
     def __init__(self, *, min_confidence: float = MIN_TARGET_CONFIDENCE) -> None:
         self.min_confidence = float(min_confidence)
 
@@ -2309,6 +2341,172 @@ class PhaseOneNavigationPolicy:
             if element_id in conflict_ids or element_id in str(conflict):
                 return True
         return False
+
+    @classmethod
+    def _structured_strings(cls, value: Any) -> tuple[str, ...]:
+        if isinstance(value, str):
+            text = value.strip()
+            return (text,) if text else ()
+        if isinstance(value, Mapping):
+            result: list[str] = []
+            for item in value.values():
+                result.extend(cls._structured_strings(item))
+            return tuple(result)
+        if isinstance(value, (list, tuple)):
+            result = []
+            for item in value:
+                result.extend(cls._structured_strings(item))
+            return tuple(result)
+        return ()
+
+    @classmethod
+    def _binding_terms(cls, values: Any) -> set[str]:
+        terms: set[str] = set()
+        chinese_generic_terms = tuple(
+            term
+            for term in cls.GENERIC_BINDING_TERMS
+            if re.fullmatch(r"[\u3400-\u9fff]+", term)
+        )
+        for value in cls._structured_strings(values):
+            normalized = value.casefold()
+            terms.update(
+                token
+                for token in re.findall(r"[a-z0-9]+", normalized)
+                if len(token) >= 2 and token not in cls.GENERIC_BINDING_TERMS
+            )
+            for sequence in re.findall(r"[\u3400-\u9fff]+", normalized):
+                for generic in chinese_generic_terms:
+                    sequence = sequence.replace(generic, "")
+                terms.update(
+                    sequence[index : index + 2]
+                    for index in range(len(sequence) - 1)
+                    if sequence[index : index + 2]
+                    not in cls.GENERIC_BINDING_TERMS
+                )
+        return terms
+
+    @staticmethod
+    def _has_structured_postcondition(expected: Any, scene: Any) -> bool:
+        if not isinstance(expected, Mapping) or expected.get("allow_unchanged") is True:
+            return False
+        if any(
+            expected.get(key) is True
+            for key in ("scene_changed", "content_changed", "current_video_changed")
+        ):
+            return True
+        expected_app = str(expected.get("app_id") or "").strip()
+        if expected_app and expected_app != scene.foreground_app_id:
+            return True
+        expected_screen = str(expected.get("screen_id") or "").strip()
+        if expected_screen and expected_screen != scene.screen_id:
+            return True
+        element_state = expected.get("element_state")
+        return bool(
+            isinstance(element_state, Mapping)
+            and str(element_state.get("meaning") or "").strip()
+            and isinstance(element_state.get("states"), Mapping)
+            and element_state["states"]
+        )
+
+    def _goal_bound_navigation_fallback_error(
+        self,
+        *,
+        task_context: Any,
+        trusted_observation: Any,
+        action: Any,
+        element: Any,
+        scene: Any,
+    ) -> str:
+        if str(self._value(task_context, "current_external_impact", "")) != "navigation_only":
+            return "通用目标绑定回退只允许 navigation_only 子目标。"
+        if element.role not in self.GOAL_BOUND_TAP_ROLES:
+            return "通用目标绑定回退要求候选具有明确可点击角色。"
+        if element.states.get("goal_relevant") is not True:
+            return "通用目标绑定回退要求候选明确 goal_relevant=true。"
+        requested_states = action.params.get("states")
+        if not isinstance(requested_states, dict) or requested_states != element.states:
+            return "通用目标绑定回退要求动作逐项复用候选 states。"
+
+        conflicts = self._value(trusted_observation, "candidate_conflicts", None)
+        if not isinstance(conflicts, (list, tuple)):
+            return "通用目标绑定回退缺少候选冲突证据。"
+        if self._has_unresolved_candidate_conflict(conflicts, element.element_id):
+            return "通用目标绑定回退候选存在语义冲突或不唯一。"
+        eligible = tuple(
+            candidate
+            for candidate in scene.elements
+            if float(candidate.confidence) >= self.min_confidence
+            and candidate.states.get("visible") is not False
+            and candidate.states.get("goal_relevant") is True
+        )
+        if len(eligible) != 1 or eligible[0].element_id != element.element_id:
+            return "通用目标绑定回退要求唯一高置信目标相关候选。"
+
+        current_subgoal = self._value(task_context, "current_subgoal", None)
+        goal = self._value(task_context, "goal", None)
+        if not isinstance(current_subgoal, Mapping) or not isinstance(goal, Mapping):
+            return "通用目标绑定回退缺少结构化目标或当前子目标。"
+        if (
+            str(current_subgoal.get("external_impact") or "") != "navigation_only"
+            or str(current_subgoal.get("status") or "") != "active"
+        ):
+            return "通用目标绑定回退的当前子目标状态或影响类型无效。"
+        risk_actions = self._value(task_context, "risk_actions", None)
+        risk_ids = current_subgoal.get("risk_action_ids")
+        if (
+            bool(self._value(task_context, "external_action_allowed", False))
+            or not isinstance(risk_actions, (list, tuple))
+            or risk_actions
+            or not isinstance(risk_ids, (list, tuple))
+            or risk_ids
+        ):
+            return "通用目标绑定回退要求任务与当前子目标均无风险动作。"
+
+        entities = goal.get("entities")
+        objective = str(current_subgoal.get("objective") or "").strip()
+        completion_conditions = current_subgoal.get("completion_conditions")
+        if (
+            not isinstance(entities, Mapping)
+            or not entities
+            or not objective
+            or not isinstance(completion_conditions, (list, tuple))
+            or not completion_conditions
+        ):
+            return "通用目标绑定回退缺少结构化目标实体、子目标或完成条件。"
+        candidate_values = (
+            element.meaning,
+            element.label,
+            *element.evidence,
+        )
+        candidate_terms = self._binding_terms(candidate_values)
+        entity_terms = self._binding_terms(entities)
+        subgoal_values = (
+            objective,
+            current_subgoal.get("constraints") or (),
+            completion_conditions,
+        )
+        subgoal_terms = self._binding_terms(subgoal_values)
+        if (
+            not candidate_terms
+            or not candidate_terms.intersection(entity_terms)
+            or not candidate_terms.intersection(subgoal_terms)
+        ):
+            return "通用目标绑定回退无法证明候选同时绑定目标实体与当前子目标。"
+        safety_values = (
+            candidate_values,
+            entities,
+            subgoal_values,
+        )
+        if self._semantic_class(*self._structured_strings(safety_values)) == "forbidden":
+            return "通用目标绑定回退检测到外部状态、破坏、账号或交易语义。"
+        if action_has_account_effect(action):
+            return "通用目标绑定回退检测到账号或外部状态动作。"
+        if not self._has_structured_postcondition(
+            action.params.get("expected_effect"),
+            scene,
+        ):
+            return "通用目标绑定回退缺少可由新画面验证的结构化动作后预期。"
+        return ""
 
     def _matches_target_app(self, task_context: Any, element: Any) -> bool:
         """Bind a visible App entry to the formal task target without App rules."""
@@ -2727,6 +2925,20 @@ class PhaseOneNavigationPolicy:
                 and self._matches_target_app(task_context, element)
             ):
                 canonical = "open"
+            elif action_kind == "tap_semantic":
+                fallback_error = self._goal_bound_navigation_fallback_error(
+                    task_context=task_context,
+                    trusted_observation=trusted_observation,
+                    action=action,
+                    element=element,
+                    scene=scene,
+                )
+                if fallback_error:
+                    return self._deny(
+                        "本地策略无法证明候选属于通用导航语义或动作语义："
+                        + fallback_error
+                    )
+                canonical = "goal_bound_tap"
             elif impact == "external_state" and external_allowed:
                 canonical = "external"
             else:

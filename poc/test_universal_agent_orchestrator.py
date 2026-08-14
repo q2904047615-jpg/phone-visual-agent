@@ -86,6 +86,8 @@ def _decision(
         "label": element.label,
         "expected_effect": {"scene_changed": True},
     }
+    if element.states:
+        params["states"] = dict(element.states)
     if action_kind == "swipe":
         params = {
             "direction": direction,
@@ -148,6 +150,12 @@ def _context(
     impact: str = "navigation_only",
     external_action_allowed: bool = False,
     target_apps: tuple[dict, ...] = (),
+    entities: dict | None = None,
+    subgoal_objective: str = "打开目标详情",
+    subgoal_constraints: tuple[str, ...] = (),
+    subgoal_completion_conditions: tuple[str, ...] = ("目标详情可见",),
+    risk_actions: tuple[dict, ...] = (),
+    risk_action_ids: tuple[str, ...] = (),
 ) -> SimpleNamespace:
     return SimpleNamespace(
         task_id="task-1",
@@ -155,7 +163,20 @@ def _context(
         revision=1,
         current_external_impact=impact,
         external_action_allowed=external_action_allowed,
-        goal={"target_apps": list(target_apps)},
+        goal={
+            "target_apps": list(target_apps),
+            "entities": dict(entities if entities is not None else {"target": "目标详情"}),
+        },
+        current_subgoal={
+            "subgoal_id": "subgoal-1",
+            "objective": subgoal_objective,
+            "status": "active",
+            "constraints": list(subgoal_constraints),
+            "completion_conditions": list(subgoal_completion_conditions),
+            "risk_action_ids": list(risk_action_ids),
+            "external_impact": impact,
+        },
+        risk_actions=tuple(risk_actions),
     )
 
 
@@ -1224,6 +1245,187 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         self.assertFalse(result.allowed)
         self.assertIn("导航语义", result.reason)
+
+    def test_allows_unique_structurally_goal_bound_unknown_navigation_tap(self) -> None:
+        scene = _scene(
+            meaning="purple_diamond_choice",
+            label="紫色菱形",
+            role="button",
+            states={"goal_relevant": True},
+        )
+        element = replace(
+            scene.elements[0],
+            evidence=("紫色菱形入口与结构化目标实体一致",),
+        )
+        scene = replace(scene, elements=(element,))
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_object": "紫色菱形入口"},
+                subgoal_objective="激活紫色菱形入口以显示后续内容",
+                subgoal_completion_conditions=("后续内容已经可见",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("goal_bound_tap", result.canonical_class)
+
+    def test_goal_bound_unknown_tap_fails_closed_without_every_gate(self) -> None:
+        base_scene = _scene(
+            meaning="purple_diamond_choice",
+            label="紫色菱形",
+            role="button",
+            states={"goal_relevant": True},
+        )
+        base_element = replace(
+            base_scene.elements[0],
+            evidence=("紫色菱形入口与结构化目标实体一致",),
+        )
+        base_scene = replace(base_scene, elements=(base_element,))
+        safe_context = _context(
+            entities={"target_object": "紫色菱形入口"},
+            subgoal_objective="激活紫色菱形入口以显示后续内容",
+            subgoal_completion_conditions=("后续内容已经可见",),
+        )
+
+        cases = []
+
+        unrelated_decision = _decision(base_scene)
+        cases.append(
+            (
+                "目标实体",
+                _context(
+                    entities={"target_object": "绿色圆形入口"},
+                    subgoal_objective="激活绿色圆形入口以显示后续内容",
+                    subgoal_completion_conditions=("后续内容已经可见",),
+                ),
+                unrelated_decision,
+            )
+        )
+
+        no_binding_scene = replace(
+            base_scene,
+            elements=(replace(base_element, states={}),),
+        )
+        cases.append(("goal_relevant", safe_context, _decision(no_binding_scene)))
+
+        missing_state_binding = _decision(base_scene)
+        missing_state_binding.proposal.action.params.pop("states")
+        cases.append(("逐项复用候选 states", safe_context, missing_state_binding))
+
+        conflicted = _decision(base_scene)
+        conflicted.trusted_observation.candidate_conflicts = (
+            {
+                "kind": "overlapping_semantic_conflict",
+                "element_ids": [base_element.element_id, "candidate-alias"],
+            },
+        )
+        cases.append(("冲突", safe_context, conflicted))
+
+        second = replace(
+            base_element,
+            element_id="second-choice",
+            meaning="second_unknown_choice",
+            label="另一个紫色菱形",
+            bounds=(0.55, 0.2, 0.85, 0.3),
+        )
+        multiple_scene = replace(base_scene, elements=(base_element, second))
+        cases.append(("唯一高置信", safe_context, _decision(multiple_scene)))
+
+        no_postcondition = _decision(base_scene)
+        no_postcondition.proposal.action.params["expected_effect"] = {}
+        cases.append(("结构化动作后预期", safe_context, no_postcondition))
+
+        risky_context = _context(
+            entities={"target_object": "紫色菱形入口"},
+            subgoal_objective="激活紫色菱形入口以显示后续内容",
+            subgoal_completion_conditions=("后续内容已经可见",),
+            risk_actions=({"risk_id": "risk-1"},),
+            risk_action_ids=("risk-1",),
+        )
+        cases.append(("无风险动作", risky_context, _decision(base_scene)))
+
+        external_context = _context(
+            impact="external_state",
+            entities={"target_object": "紫色菱形入口"},
+            subgoal_objective="激活紫色菱形入口以显示后续内容",
+            subgoal_completion_conditions=("后续内容已经可见",),
+        )
+        cases.append(("external_state", external_context, _decision(base_scene)))
+
+        unknown_context = _context(
+            impact="unknown",
+            entities={"target_object": "紫色菱形入口"},
+            subgoal_objective="激活紫色菱形入口以显示后续内容",
+            subgoal_completion_conditions=("后续内容已经可见",),
+        )
+        cases.append(("unknown", unknown_context, _decision(base_scene)))
+
+        text_scene = replace(
+            base_scene,
+            elements=(replace(base_element, role="text"),),
+        )
+        cases.append(("可点击角色", safe_context, _decision(text_scene)))
+
+        for message, context, decision in cases:
+            with self.subTest(message=message):
+                result = self.policy.evaluate(
+                    task_context=context,
+                    trusted_observation=decision.trusted_observation,
+                    decision=decision,
+                )
+                self.assertFalse(result.allowed)
+                self.assertIn(message, result.reason)
+
+    def test_goal_bound_unknown_tap_rejects_destructive_or_transaction_semantics(self) -> None:
+        destructive_scene = _scene(
+            meaning="erase_record",
+            label="Delete",
+            role="button",
+            states={"goal_relevant": True},
+        )
+        destructive_decision = _decision(destructive_scene)
+        destructive = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_object": "delete record"},
+                subgoal_objective="delete the selected record",
+                subgoal_completion_conditions=("record is deleted",),
+            ),
+            trusted_observation=destructive_decision.trusted_observation,
+            decision=destructive_decision,
+        )
+        self.assertFalse(destructive.allowed)
+        self.assertIn("账号或外部状态", destructive.reason)
+
+        transaction_scene = _scene(
+            meaning="membership_plan",
+            label="Membership plan",
+            role="button",
+            states={"goal_relevant": True},
+        )
+        transaction_element = replace(
+            transaction_scene.elements[0],
+            evidence=("membership plan matches the structured target",),
+        )
+        transaction_scene = replace(
+            transaction_scene,
+            elements=(transaction_element,),
+        )
+        transaction_decision = _decision(transaction_scene)
+        transaction = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_object": "purchase membership plan"},
+                subgoal_objective="purchase the membership plan",
+                subgoal_completion_conditions=("membership purchase is complete",),
+            ),
+            trusted_observation=transaction_decision.trusted_observation,
+            decision=transaction_decision,
+        )
+        self.assertFalse(transaction.allowed)
+        self.assertIn("交易语义", transaction.reason)
 
     def test_rejects_out_of_bounds_or_stale_candidate(self) -> None:
         scene = _scene()

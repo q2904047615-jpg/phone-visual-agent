@@ -1312,6 +1312,11 @@ def _decision_prompt(
    input和states.local_text_clear=true的独立button/icon，只能选择该独立清空控件，不能选择输入框本体
    或键盘退格键。
 4. input_verified_text只能绑定role=input的候选，text必须逐字复制goal.entities.input_text；不能改写、补全或推断。
+   对小写英文字母精确输入，候选还必须同时提供states.value=""、keyboard_layout="qwerty"和
+   keyboard_input_mode="direct_latin"。QWERTY但keyboard_input_mode="chinese_pinyin"时禁止直接输入；
+   若可信观察另有meaning=switch_keyboard_input_mode、keyboard_input_mode_switch=true且明确从
+   chinese_pinyin切到direct_latin的独立button，可先选择一次tap_semantic，随后必须重新观察，禁止在
+   同一轮继续输入。
 5. drag必须绑定两个不同可信候选并逐字复制两端字段和bounds；long_press时长限制500到2000毫秒。
 6. swipe/wait使用整屏[0,0,1000,1000]和kind=screen；back/home使用整屏和kind=system_navigation。
    home只表示按下Android系统Home键、回到系统Launcher；绝不能用它表示浏览器或任何App里的“首页”。

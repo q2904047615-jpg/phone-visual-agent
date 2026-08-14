@@ -26,6 +26,21 @@ class SellerDpiScalingTests(unittest.TestCase):
         self.assertEqual(seller.seller_control_point(810, 1515, 520), (780, 1488))
         self.assertEqual(seller.cursor_parking_client_point(810, 1515), (405, 1477))
 
+    def test_cursor_parking_prefers_a_desktop_corner_outside_seller_window(self) -> None:
+        point = seller.cursor_parking_screen_point(
+            (0, 0, 830, 1600),
+            (0, 0, 2560, 1600),
+        )
+        self.assertEqual((2557, 2), point)
+
+    def test_cursor_parking_returns_none_when_window_covers_virtual_desktop(self) -> None:
+        self.assertIsNone(
+            seller.cursor_parking_screen_point(
+                (0, 0, 1920, 1080),
+                (0, 0, 1920, 1080),
+            )
+        )
+
     def test_150_percent_landscape_uses_height_for_vertical_scale(self) -> None:
         self.assertEqual(seller.seller_layout_scale(1440, 810), 1.5)
         self.assertEqual(seller.seller_control_point(1440, 885, 520), (1387, 858))
@@ -53,6 +68,8 @@ class SellerDpiScalingTests(unittest.TestCase):
             seller.seller_control_point(100, 20, 540)
         with self.assertRaisesRegex(ValueError, "相机外控制条"):
             seller.cursor_parking_client_point(540, 960)
+        with self.assertRaisesRegex(ValueError, "虚拟桌面"):
+            seller.cursor_parking_screen_point((0, 0, 10, 10), (0, 0, 0, 0))
 
 
 if __name__ == "__main__":

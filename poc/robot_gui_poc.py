@@ -880,20 +880,80 @@ def cursor_parking_client_point(width: int, height: int) -> tuple[int, int]:
     return width // 2, camera_height + (height - camera_height) // 2
 
 
+def cursor_parking_screen_point(
+    window_rect: tuple[int, int, int, int],
+    virtual_screen_rect: tuple[int, int, int, int],
+) -> tuple[int, int] | None:
+    """Choose a visible desktop corner that is definitely outside the seller window."""
+
+    window_left, window_top, window_right, window_bottom = window_rect
+    screen_left, screen_top, screen_right, screen_bottom = virtual_screen_rect
+    if screen_right <= screen_left or screen_bottom <= screen_top:
+        raise ValueError("虚拟桌面范围无效。")
+    candidates = (
+        (screen_left + 2, screen_top + 2),
+        (screen_right - 3, screen_top + 2),
+        (screen_left + 2, screen_bottom - 3),
+        (screen_right - 3, screen_bottom - 3),
+    )
+    window_center = (
+        (window_left + window_right) / 2,
+        (window_top + window_bottom) / 2,
+    )
+    outside = [
+        point
+        for point in candidates
+        if not (
+            window_left <= point[0] < window_right
+            and window_top <= point[1] < window_bottom
+        )
+    ]
+    if not outside:
+        return None
+    return max(
+        outside,
+        key=lambda point: (point[0] - window_center[0]) ** 2
+        + (point[1] - window_center[1]) ** 2,
+    )
+
+
 def move_cursor_outside_camera(hwnd: int) -> None:
-    """Move the pointer into the seller toolbar, outside the camera preview.
+    """Move the pointer outside the seller preview without clicking anything.
 
     The old title-bar parking point is still interpreted by seller v1.0.1018
     as a preview coordinate near y=30, leaving its opaque PX/MM tooltip over
-    the top of the phone.  The documented bottom control strip is inside the
-    same window but outside the camera crop, so moving there clears the tooltip
-    without clicking or operating the phone.
+    the top of the phone.  Prefer a point outside the whole seller window so a
+    real mouse-leave event clears a tooltip left by physical key taps.  The
+    documented bottom control strip remains a fallback when the seller window
+    covers the complete virtual desktop.
     """
 
     left, top, width, height = client_geometry(hwnd)
-    client_x, client_y = cursor_parking_client_point(width, height)
-    user32.SetCursorPos(left + client_x, top + client_y)
-    time.sleep(0.18)
+    window = RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(window)):
+        raise ctypes.WinError()
+    SM_XVIRTUALSCREEN = 76
+    SM_YVIRTUALSCREEN = 77
+    SM_CXVIRTUALSCREEN = 78
+    SM_CYVIRTUALSCREEN = 79
+    screen_left = int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
+    screen_top = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
+    screen_width = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
+    screen_height = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+    screen_point = cursor_parking_screen_point(
+        (window.left, window.top, window.right, window.bottom),
+        (
+            screen_left,
+            screen_top,
+            screen_left + screen_width,
+            screen_top + screen_height,
+        ),
+    )
+    if screen_point is None:
+        client_x, client_y = cursor_parking_client_point(width, height)
+        screen_point = (left + client_x, top + client_y)
+    user32.SetCursorPos(*screen_point)
+    time.sleep(0.25)
 
 
 def configure_swipe(hwnd: int, direction: str) -> None:

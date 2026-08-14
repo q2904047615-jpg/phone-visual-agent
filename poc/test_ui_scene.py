@@ -366,7 +366,12 @@ class UISceneTests(unittest.TestCase):
                 "search-field",
                 "搜索输入框",
                 role="input",
-                states={"focused": True},
+                states={
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                },
             )
         )
         action = SemanticAction(
@@ -377,7 +382,12 @@ class UISceneTests(unittest.TestCase):
                 "target": "搜索输入框",
                 "role": "input",
                 "label": "搜索输入框",
-                "states": {"focused": True},
+                "states": {
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                },
                 "text": "蓝牙设置",
             },
         )
@@ -405,7 +415,12 @@ class UISceneTests(unittest.TestCase):
                 "search-field",
                 "搜索输入框",
                 role="input",
-                states={"focused": True, "value": ""},
+                states={
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                },
             ),
             fingerprint="before",
         )
@@ -443,6 +458,34 @@ class UISceneTests(unittest.TestCase):
                         fingerprint="after",
                     ),
                 )
+
+    def test_verified_input_rejects_chinese_pinyin_qwerty_before_resolution(self) -> None:
+        current = scene(
+            element(
+                "search-field",
+                "搜索输入框",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "chinese_pinyin",
+                },
+            ),
+            fingerprint="before",
+        )
+        action = SemanticAction(
+            node_id="type-query",
+            action="input_verified_text",
+            params={
+                "element_id": "search-field",
+                "target": "搜索输入框",
+                "text": "agent",
+            },
+        )
+
+        with self.assertRaisesRegex(UniversalActionError, "direct_latin"):
+            UniversalActionController().resolve_one(action, current)
 
     def test_input_state_value_and_keyboard_layout_are_typed(self) -> None:
         parsed = UIElement.from_dict(

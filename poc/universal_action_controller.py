@@ -8,7 +8,7 @@ from semantic_executor import SemanticAction
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v5"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v6"
 
 
 class UniversalActionError(RuntimeError):
@@ -312,6 +312,15 @@ class UniversalActionController:
             element = self._resolve_target(action, scene, required_role="input")
             if element.states.get("focused") is not True:
                 raise UniversalActionError("文字输入前必须有当前画面证明输入框已聚焦。")
+            if element.states.get("value") != "":
+                raise UniversalActionError("精确文字输入只允许从当前画面确认的空输入框开始。")
+            if element.states.get("keyboard_layout") != "qwerty":
+                raise UniversalActionError("精确文字输入要求当前画面确认 QWERTY 键盘。")
+            if element.states.get("keyboard_input_mode") != "direct_latin":
+                raise UniversalActionError(
+                    "精确英文输入要求当前画面确认 direct_latin 直输模式；"
+                    "QWERTY 与英文直输不是同一事实。"
+                )
             return ResolvedSemanticAction(
                 node_id=action.node_id,
                 kind="input_verified_text",

@@ -554,7 +554,12 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             meaning="搜索输入框",
             label="搜索",
             role="input",
-            states={"focused": True},
+            states={
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+            },
         )
         decision = _decision(scene, action_kind="input_verified_text")
 
@@ -566,6 +571,127 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         self.assertTrue(result.allowed)
         self.assertEqual("input", result.canonical_class)
+
+        chinese_scene = _scene(
+            meaning="搜索输入框",
+            label="搜索",
+            role="input",
+            states={
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "chinese_pinyin",
+            },
+        )
+        chinese_decision = _decision(
+            chinese_scene,
+            action_kind="input_verified_text",
+        )
+        denied = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=chinese_decision.trusted_observation,
+            decision=chinese_decision,
+        )
+        self.assertFalse(denied.allowed)
+        self.assertIn("direct_latin", denied.reason)
+
+    def test_allows_only_observed_chinese_to_direct_latin_mode_switch(self) -> None:
+        input_element = UIElement(
+            element_id="field",
+            role="input",
+            meaning="search_input",
+            label="搜索",
+            bounds=(0.08, 0.02, 0.60, 0.08),
+            confidence=0.96,
+            states={
+                "goal_relevant": True,
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "chinese_pinyin",
+            },
+        )
+        switch = UIElement(
+            element_id="mode-switch",
+            role="button",
+            meaning="switch_keyboard_input_mode",
+            label="中",
+            bounds=(0.68, 0.88, 0.78, 0.95),
+            confidence=0.96,
+            states={
+                "keyboard_input_mode_switch": True,
+                "current_mode": "chinese_pinyin",
+                "target_mode": "direct_latin",
+            },
+            evidence=("键面显示中",),
+        )
+        scene = UIScene(
+            app_id="sample.app",
+            screen_id="search",
+            summary="空白搜索框已聚焦，中文拼音 QWERTY 可见",
+            elements=(input_element, switch),
+            stable=True,
+            confidence=0.95,
+            fingerprint="frame-mode-switch",
+        )
+        decision = _decision(scene)
+        decision.proposal = GenericStepProposal(
+            status="action",
+            action=SemanticAction(
+                node_id="switch-mode",
+                action="tap_semantic",
+                params={
+                    "element_id": switch.element_id,
+                    "target": switch.meaning,
+                    "meaning": switch.meaning,
+                    "role": switch.role,
+                    "label": switch.label,
+                    "states": dict(switch.states),
+                    "expected_effect": {"scene_changed": True},
+                },
+            ),
+        )
+        decision.target_region = SimpleNamespace(
+            kind="element",
+            element_id=switch.element_id,
+            bounds=switch.bounds,
+        )
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+        self.assertTrue(result.allowed)
+        self.assertEqual("switch_keyboard_input_mode", result.canonical_class)
+
+        unsafe_switch = replace(
+            switch,
+            states={**switch.states, "target_mode": "unknown"},
+        )
+        unsafe_scene = replace(scene, elements=(input_element, unsafe_switch))
+        unsafe_decision = _decision(unsafe_scene)
+        unsafe_decision.proposal = replace(
+            decision.proposal,
+            action=replace(
+                decision.proposal.action,
+                params={
+                    **decision.proposal.action.params,
+                    "states": dict(unsafe_switch.states),
+                },
+            ),
+        )
+        unsafe_decision.target_region = SimpleNamespace(
+            kind="element",
+            element_id=unsafe_switch.element_id,
+            bounds=unsafe_switch.bounds,
+        )
+        denied = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=unsafe_decision.trusted_observation,
+            decision=unsafe_decision,
+        )
+        self.assertFalse(denied.allowed)
 
     def test_allows_external_effect_only_with_scope_confirmation(self) -> None:
         scene = _scene(meaning="send_message", label="发送", role="button")
@@ -1246,6 +1372,9 @@ class UniversalAgentStartTests(unittest.TestCase):
                 "goal_relevant": True,
                 "fully_visible": True,
                 "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
             },
         )
 

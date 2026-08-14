@@ -185,6 +185,58 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         self.assertNotIn("focused", scene.elements[0].states)
 
+    def test_preserves_keyboard_input_mode_separately_from_qwerty_layout(self) -> None:
+        payload = scene_payload()
+        payload["summary"] = "顶部空输入框已聚焦，中文拼音 QWERTY 键盘可见"
+        payload["elements"] = [
+            {
+                "element_id": "input-top",
+                "role": "input",
+                "meaning": "search_input",
+                "label": "搜索",
+                "bounds": [80, 20, 600, 80],
+                "confidence": 0.96,
+                "states": {
+                    "goal_relevant": True,
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "chinese_pinyin",
+                },
+                "evidence": ["键盘显示中文模式"],
+            },
+            {
+                "element_id": "mode-switch",
+                "role": "button",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "中",
+                "bounds": [680, 880, 780, 950],
+                "confidence": 0.95,
+                "states": {
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+                "evidence": ["键面显示中"],
+            },
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-input-mode",
+            goal_context={"objective": "在空输入框输入agent"},
+        )
+
+        self.assertEqual("qwerty", scene.elements[0].states["keyboard_layout"])
+        self.assertEqual(
+            "chinese_pinyin",
+            scene.elements[0].states["keyboard_input_mode"],
+        )
+        self.assertEqual(
+            "direct_latin",
+            scene.elements[1].states["target_mode"],
+        )
+
     def test_clear_goal_binds_unique_nonempty_input_before_focus_inference(self) -> None:
         payload = scene_payload()
         payload["summary"] = '输入框含文字"yi"，右侧有清空图标；软键盘可见'

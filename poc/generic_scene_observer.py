@@ -25,7 +25,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v8"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v9"
 COMPACT_OUTPUT_TOKENS = 800
 COMPACT_RETRY_TOKENS = 800
 TARGETED_OUTPUT_TOKENS = 1200
@@ -483,7 +483,13 @@ PREFILLED_INPUT_OBSERVATION_RULE = (
 INPUT_VALUE_OBSERVATION_RULE = (
     "role=input且框内文字清晰可读时，必须在states.value中逐字填写当前可见文字；空框写空字符串，"
     "看不清才省略value，禁止根据目标补写。软键盘可见时还必须在states.keyboard_layout写"
-    "qwerty、numeric、symbol或unknown；这只是画面事实，不授权输入。"
+    "qwerty、numeric、symbol或unknown，并在states.keyboard_input_mode写direct_latin、"
+    "chinese_pinyin或unknown。QWERTY只描述按键排列，绝不等于英文直输：画面出现中文候选、"
+    "拼音分词撇号或明确中文模式时必须写chinese_pinyin；只有明确显示英文/Latin直输模式时才能写"
+    "direct_latin；看不清写unknown。这些都只是画面事实，不授权输入。若键盘底部清楚可见独立的"
+    "中/英模式切换键，必须另建role=button元素，meaning写switch_keyboard_input_mode，label逐字抄"
+    "可见键面文字，states写keyboard_input_mode_switch:true、current_mode和target_mode；不确定当前"
+    "模式或切换方向时不得编造该元素。字母、数字、退格、回车等普通键仍必须role=keyboard_key。"
     "若非空输入框内部或紧邻右侧清楚可见独立的圆形×/清空图标，必须另建role=button或icon元素，"
     "meaning写clear_local_text，states写local_text_clear:true；只框该图标自身，不能与输入框合并，"
     "也绝不能把键盘退格键/删除键标成local_text_clear。页面右侧的文字‘取消’/cancel是取消编辑或"

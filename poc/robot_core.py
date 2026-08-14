@@ -885,6 +885,11 @@ class RobotController:
             raise WorkflowNotReady("当前安全文字输入只允许从视觉确认的空输入框开始。")
         if input_states.get("keyboard_layout") != "qwerty":
             raise WorkflowNotReady("当前安全文字输入要求画面确认标准 QWERTY 键盘。")
+        if input_states.get("keyboard_input_mode") != "direct_latin":
+            raise WorkflowNotReady(
+                "当前安全文字输入要求画面确认 direct_latin 英文直输模式；"
+                "中文拼音 QWERTY 会产生组合文本。"
+            )
 
     def vision_type_pinyin(
         self,

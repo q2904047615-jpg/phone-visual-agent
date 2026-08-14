@@ -243,11 +243,18 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             title="test",
             verified_actions={"input_verified_text"},
         )
-        valid = {"focused": True, "value": "", "keyboard_layout": "qwerty"}
+        valid = {
+            "focused": True,
+            "value": "",
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+        }
         controller.validate_verified_text("agent", valid)
         cases = (
             ({**valid, "value": "old"}, "空输入框"),
             ({**valid, "keyboard_layout": "symbol"}, "QWERTY"),
+            ({**valid, "keyboard_input_mode": "chinese_pinyin"}, "direct_latin"),
+            ({key: value for key, value in valid.items() if key != "keyboard_input_mode"}, "direct_latin"),
             ({**valid, "focused": False}, "聚焦"),
         )
         for states, message in cases:
@@ -4138,7 +4145,7 @@ class ApiEndToEndTests(unittest.TestCase):
         observer = universal.pop("observer")
         self.assertEqual(
             observer["observer_version"],
-            "2026-08-14-generic-scene-observer-v8",
+            "2026-08-14-generic-scene-observer-v9",
         )
         self.assertEqual(observer["supported_app_scope"], "dynamic")
         architecture["universal_agent"] = universal
@@ -4157,7 +4164,7 @@ class ApiEndToEndTests(unittest.TestCase):
                 "universal_agent": {
                     "goal_protocol": "2026-08-10-generic-intent-v1",
                     "scene_protocol": "2026-08-10-ui-scene-v2",
-                    "action_protocol": "2026-08-14-universal-action-v5",
+                    "action_protocol": "2026-08-14-universal-action-v6",
                     "goal_preview_enabled": True,
                     "scene_preview_enabled": True,
                     "hardware_execution_enabled": True,

@@ -2212,7 +2212,7 @@ class PhaseOneNavigationPolicy:
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
-    VERSION = "2026-08-14-universal-action-policy-v4"
+    VERSION = "2026-08-14-universal-action-policy-v5"
     ALLOWED_ACTIONS = frozenset(
         {
             "swipe",
@@ -2454,6 +2454,15 @@ class PhaseOneNavigationPolicy:
         if action_kind == "input_verified_text":
             if element.role != "input" or element.states.get("focused") is not True:
                 return self._deny("输入动作要求最新画面证明 input 候选已聚焦。")
+            if element.states.get("value") != "":
+                return self._deny("精确文字输入只允许从最新画面确认的空输入框开始。")
+            if element.states.get("keyboard_layout") != "qwerty":
+                return self._deny("精确文字输入要求最新画面确认 QWERTY 键盘。")
+            if element.states.get("keyboard_input_mode") != "direct_latin":
+                return self._deny(
+                    "精确英文输入要求最新画面确认 direct_latin 直输模式；"
+                    "中文拼音 QWERTY 必须先切换模式并重新观察。"
+                )
             text = action.params.get("text")
             if (
                 not isinstance(text, str)
@@ -2517,6 +2526,53 @@ class PhaseOneNavigationPolicy:
                 True,
                 "允许对一个精确可信输入候选执行本地聚焦。",
                 "focus_input",
+            )
+        if (
+            action_kind == "tap_semantic"
+            and element.meaning == "switch_keyboard_input_mode"
+        ):
+            states = element.states
+            if (
+                impact != "navigation_only"
+                or element.role not in {"button", "icon"}
+                or states.get("keyboard_input_mode_switch") is not True
+                or states.get("current_mode") != "chinese_pinyin"
+                or states.get("target_mode") != "direct_latin"
+            ):
+                return self._deny("键盘模式切换候选缺少从中文拼音到英文直输的可信状态。")
+            focused_inputs = tuple(
+                candidate
+                for candidate in scene.elements
+                if candidate.role == "input"
+                and float(candidate.confidence) >= self.min_confidence
+                and candidate.states.get("focused") is True
+                and candidate.states.get("goal_relevant") is True
+                and candidate.states.get("value") == ""
+                and candidate.states.get("keyboard_layout") == "qwerty"
+                and candidate.states.get("keyboard_input_mode") == "chinese_pinyin"
+            )
+            if len(focused_inputs) != 1:
+                return self._deny("键盘模式切换要求唯一空白、已聚焦的中文拼音 QWERTY 输入框。")
+            left, top, right, bottom = element.bounds
+            if (
+                top < 0.72
+                or right - left > 0.2
+                or bottom - top > 0.12
+                or right <= left
+                or bottom <= top
+            ):
+                return self._deny("键盘模式切换候选不在可信的底部紧凑按键区域。")
+            visible = " ".join(
+                [element.label, *element.evidence]
+            ).strip().casefold()
+            if not visible or not (
+                "中" in visible or "chinese" in visible or "中文" in visible
+            ):
+                return self._deny("键盘模式切换候选缺少可见中文模式证据。")
+            return NavigationPolicyDecision(
+                True,
+                "允许把唯一空白目标输入框从中文拼音切换到英文直输；动作后必须重新观察。",
+                "switch_keyboard_input_mode",
             )
         clear_claimed = (
             element.meaning == "clear_local_text"

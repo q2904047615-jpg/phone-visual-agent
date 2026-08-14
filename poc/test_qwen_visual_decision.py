@@ -384,7 +384,12 @@ class QwenVisualDecisionTests(unittest.TestCase):
             label="搜索",
             bounds=(0.08, 0.12, 0.92, 0.22),
             confidence=0.97,
-            states={"focused": True},
+            states={
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+            },
             evidence=("输入光标可见",),
         )
         observation = trusted_observation(self.frames, elements=(field,))
@@ -413,7 +418,12 @@ class QwenVisualDecisionTests(unittest.TestCase):
             label="搜索",
             bounds=(0.08, 0.12, 0.92, 0.22),
             confidence=0.97,
-            states={"focused": True},
+            states={
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+            },
             evidence=("输入光标可见",),
         )
         observation = trusted_observation(self.frames, elements=(field,))

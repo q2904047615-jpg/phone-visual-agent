@@ -88,6 +88,11 @@ class UIElement:
                 raise UISceneError(
                     "input 元素的 states.keyboard_layout 必须是 qwerty、numeric、symbol 或 unknown。"
                 )
+        if "local_text_clear" in self.states:
+            if self.role not in {"button", "icon"} or self.states["local_text_clear"] is not True:
+                raise UISceneError(
+                    "states.local_text_clear=true 只允许标记独立的 button 或 icon。"
+                )
         _reject_action_data(self.states, "states")
 
     @property

@@ -762,6 +762,88 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual("focus_input", result.canonical_class)
 
+    def test_allows_only_geometrically_bound_local_text_clear_control(self) -> None:
+        input_element = UIElement(
+            element_id="field",
+            role="input",
+            meaning="settings_search_input",
+            label="搜索框",
+            bounds=(0.08, 0.05, 0.72, 0.12),
+            confidence=0.96,
+            states={
+                "goal_relevant": True,
+                "focused": True,
+                "value": "agent.com",
+                "keyboard_layout": "qwerty",
+            },
+        )
+        clear_element = UIElement(
+            element_id="clear",
+            role="icon",
+            meaning="clear_local_text",
+            label="×",
+            bounds=(0.64, 0.065, 0.70, 0.105),
+            confidence=0.94,
+            states={"local_text_clear": True},
+        )
+        scene = UIScene(
+            app_id="sample.app",
+            screen_id="search",
+            summary="非空输入框和独立清空图标可见",
+            elements=(input_element, clear_element),
+            stable=True,
+            confidence=0.95,
+            fingerprint="frame-a",
+        )
+        decision = _decision(scene)
+        decision.proposal = GenericStepProposal(
+            status="action",
+            action=SemanticAction(
+                node_id="clear-local",
+                action="tap_semantic",
+                params={
+                    "element_id": "clear",
+                    "target": "clear_local_text",
+                    "meaning": "clear_local_text",
+                    "role": "icon",
+                    "label": "×",
+                    "states": {"local_text_clear": True},
+                    "expected_effect": {"scene_changed": True},
+                },
+            ),
+        )
+        decision.target_region = SimpleNamespace(
+            kind="element",
+            element_id="clear",
+            bounds=clear_element.bounds,
+        )
+
+        result = self.policy.evaluate(
+            task_context=_context(impact="navigation_only"),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("clear_local_text", result.canonical_class)
+
+        far_clear = replace(clear_element, bounds=(0.7, 0.7, 0.76, 0.76))
+        far_scene = replace(scene, elements=(input_element, far_clear))
+        far_decision = _decision(far_scene)
+        far_decision.proposal = decision.proposal
+        far_decision.target_region = SimpleNamespace(
+            kind="element",
+            element_id="clear",
+            bounds=far_clear.bounds,
+        )
+        denied = self.policy.evaluate(
+            task_context=_context(impact="navigation_only"),
+            trusted_observation=far_decision.trusted_observation,
+            decision=far_decision,
+        )
+        self.assertFalse(denied.allowed)
+        self.assertIn("几何绑定", denied.reason)
+
     def test_read_only_subgoal_cannot_focus_input(self) -> None:
         scene = _scene(
             meaning="顶部搜索输入框",

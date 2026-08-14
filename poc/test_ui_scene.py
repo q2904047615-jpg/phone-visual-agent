@@ -470,6 +470,31 @@ class UISceneTests(unittest.TestCase):
                 coordinate_scale=1000,
             )
 
+        clear = UIElement.from_dict(
+            {
+                "element_id": "clear",
+                "role": "icon",
+                "meaning": "clear_local_text",
+                "bounds": [760, 110, 820, 170],
+                "confidence": 0.95,
+                "states": {"local_text_clear": True},
+            },
+            coordinate_scale=1000,
+        )
+        self.assertTrue(clear.states["local_text_clear"])
+        with self.assertRaisesRegex(UISceneError, "local_text_clear"):
+            UIElement.from_dict(
+                {
+                    "element_id": "bad-clear",
+                    "role": "keyboard_key",
+                    "meaning": "delete",
+                    "bounds": [760, 700, 820, 760],
+                    "confidence": 0.95,
+                    "states": {"local_text_clear": True},
+                },
+                coordinate_scale=1000,
+            )
+
     def test_android_home_resolves_as_independent_system_action(self) -> None:
         current = scene(element("title", "设置", role="text"), app_id="settings")
         action = SemanticAction(

@@ -2212,7 +2212,7 @@ class PhaseOneNavigationPolicy:
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
-    VERSION = "2026-08-13-universal-action-policy-v3"
+    VERSION = "2026-08-14-universal-action-policy-v4"
     ALLOWED_ACTIONS = frozenset(
         {
             "swipe",
@@ -2517,6 +2517,39 @@ class PhaseOneNavigationPolicy:
                 True,
                 "允许对一个精确可信输入候选执行本地聚焦。",
                 "focus_input",
+            )
+        if action_kind == "tap_semantic" and element.states.get("local_text_clear") is True:
+            if impact != "navigation_only" or element.role not in {"button", "icon"}:
+                return self._deny("本地文字清空控件只允许用于 navigation_only 的独立按钮或图标。")
+            focused_inputs = tuple(
+                candidate
+                for candidate in scene.elements
+                if candidate.role == "input"
+                and float(candidate.confidence) >= self.min_confidence
+                and candidate.states.get("focused") is True
+                and candidate.states.get("goal_relevant") is True
+                and isinstance(candidate.states.get("value"), str)
+                and bool(candidate.states.get("value"))
+                and candidate.states.get("visible") is not False
+            )
+            if len(focused_inputs) != 1:
+                return self._deny("本地文字清空要求唯一非空、已聚焦的目标输入框。")
+            input_element = focused_inputs[0]
+            il, it, ir, ib = input_element.bounds
+            el, et, er, eb = element.bounds
+            vertical_overlap = max(0.0, min(ib, eb) - max(it, et))
+            element_height = max(1e-9, eb - et)
+            geometrically_bound = (
+                vertical_overlap / element_height >= 0.6
+                and el >= il + 0.4 * (ir - il)
+                and er <= min(1.0, ir + 0.2)
+            )
+            if not geometrically_bound:
+                return self._deny("本地文字清空控件没有与唯一目标输入框形成可信几何绑定。")
+            return NavigationPolicyDecision(
+                True,
+                "允许清空唯一已聚焦输入框中的本地临时文字。",
+                "clear_local_text",
             )
         canonical = self._semantic_class(
             element.meaning,

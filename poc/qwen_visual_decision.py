@@ -1308,6 +1308,9 @@ def _decision_prompt(
 2. page_state只是语义描述，禁止elements、bounds或任何可执行候选字段。
 3. tap_semantic/dismiss_overlay/input_verified_text/long_press只能引用可信观察中现有且置信度>=0.72的唯一element_id；
    target/role/label/states必须逐字复制，target_region.bounds必须逐项复制候选原始bounds。
+   role=keyboard_key绝不能作为动作目标。若目标要求本地临时输入值为空，且观察同时提供非空、已聚焦
+   input和states.local_text_clear=true的独立button/icon，只能选择该独立清空控件，不能选择输入框本体
+   或键盘退格键。
 4. input_verified_text只能绑定role=input的候选，text必须逐字复制goal.entities.input_text；不能改写、补全或推断。
 5. drag必须绑定两个不同可信候选并逐字复制两端字段和bounds；long_press时长限制500到2000毫秒。
 6. swipe/wait使用整屏[0,0,1000,1000]和kind=screen；back/home使用整屏和kind=system_navigation。

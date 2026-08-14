@@ -25,7 +25,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-10-generic-scene-observer-v5"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v6"
 COMPACT_OUTPUT_TOKENS = 800
 COMPACT_RETRY_TOKENS = 800
 TARGETED_OUTPUT_TOKENS = 1200
@@ -484,6 +484,9 @@ INPUT_VALUE_OBSERVATION_RULE = (
     "role=input且框内文字清晰可读时，必须在states.value中逐字填写当前可见文字；空框写空字符串，"
     "看不清才省略value，禁止根据目标补写。软键盘可见时还必须在states.keyboard_layout写"
     "qwerty、numeric、symbol或unknown；这只是画面事实，不授权输入。"
+    "若非空输入框内部或紧邻右侧清楚可见独立的圆形×/清空图标，必须另建role=button或icon元素，"
+    "meaning写clear_local_text，states写local_text_clear:true；只框该图标自身，不能与输入框合并，"
+    "也绝不能把键盘退格键/删除键标成local_text_clear。"
 )
 
 

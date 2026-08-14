@@ -10,8 +10,12 @@ from generic_scene_observer import (
     INPUT_STRUCTURE_AUDIT_VERSION,
     SYSTEM_UI_AUDIT_VERSION,
 )
-from generic_scene_observer import _parse_scene, _scene_enum_values
-from ui_scene import UISceneError
+from generic_scene_observer import (
+    _camera_layout_orientation,
+    _parse_scene,
+    _scene_enum_values,
+)
+from ui_scene import UI_SCENE_PROTOCOL_VERSION, UISceneError
 from vision_agent import VisionAgentError
 
 
@@ -107,13 +111,19 @@ def frames_with_top_obstruction() -> list[Image.Image]:
 
 def scene_payload() -> dict:
     return {
-        "protocol_version": "2026-08-10-ui-scene-v2",
+        "protocol_version": UI_SCENE_PROTOCOL_VERSION,
         "foreground_app_id": "calculator",
         "screen_id": "app_home",
         "summary": "计算器首页",
         "system_ui": {
             "immersive_or_fullscreen": False,
             "navigation_bar_visible": True,
+        },
+        "camera_alignment": {
+            "camera_layout_orientation": "portrait",
+            "phone_content_rotation": "upright",
+            "confidence": 0.95,
+            "evidence": ["手机界面文字在原始相机画布中正向显示"],
         },
         "elements": [
             {
@@ -194,6 +204,16 @@ def audited_application_input(
 
 
 class GenericSceneObserverTests(unittest.TestCase):
+    def test_saved_controller_canvas_shapes_have_distinct_local_orientations(self) -> None:
+        self.assertEqual(
+            "portrait",
+            _camera_layout_orientation(Image.new("RGB", (810, 1440))),
+        )
+        self.assertEqual(
+            "landscape",
+            _camera_layout_orientation(Image.new("RGB", (1440, 810))),
+        )
+
     def test_system_ui_goal_uses_independent_three_orientation_audit(self) -> None:
         compact = scene_payload()
         compact["elements"] = []
@@ -351,6 +371,53 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn('"immersive_or_fullscreen":"unknown"', prompt)
         self.assertIn('"navigation_bar_visible":"unknown"', prompt)
         self.assertIn("绝不得写入elements", prompt)
+
+    def test_compact_observation_uses_three_orientations_for_alignment(self) -> None:
+        provider = FakeProvider(scene_payload())
+
+        scene = GenericSceneObserver(provider).observe(frames=stable_frames())
+
+        content = provider.messages[1]["content"]
+        self.assertEqual(
+            3,
+            sum(item.get("type") == "image_url" for item in content),
+        )
+        self.assertEqual("portrait", scene.camera_alignment.camera_layout_orientation)
+        self.assertEqual("upright", scene.camera_alignment.phone_content_rotation)
+
+    def test_local_frame_geometry_rejects_model_layout_orientation(self) -> None:
+        payload = scene_payload()
+        payload["camera_alignment"]["camera_layout_orientation"] = "landscape"
+
+        with self.assertRaisesRegex(VisionAgentError, "本地稳定帧尺寸不一致"):
+            _parse_scene(
+                json.dumps(payload, ensure_ascii=False),
+                fingerprint="layout-mismatch",
+                camera_layout_orientation="portrait",
+            )
+
+    def test_camera_alignment_requires_strict_non_control_evidence(self) -> None:
+        for mutation, error in (
+            ({"phone_content_rotation": "unknownish"}, "phone_content_rotation"),
+            ({"confidence": "high"}, "confidence"),
+            ({"evidence": ["点击坐标(500,900)"]}, "坐标或控制指令"),
+            ({"evidence": ["PX/MM 控制端读数方向正常"]}, "坐标或控制指令"),
+        ):
+            with self.subTest(mutation=mutation):
+                payload = scene_payload()
+                payload["camera_alignment"].update(mutation)
+                with self.assertRaisesRegex(VisionAgentError, error):
+                    _parse_scene(
+                        json.dumps(payload, ensure_ascii=False),
+                        fingerprint="bad-alignment",
+                    )
+
+    def test_scene_parser_requires_explicit_camera_alignment(self) -> None:
+        payload = scene_payload()
+        payload.pop("camera_alignment")
+
+        with self.assertRaisesRegex(VisionAgentError, "camera_alignment"):
+            _parse_scene(json.dumps(payload), fingerprint="missing-alignment")
 
     def test_visible_keyboard_marks_one_goal_input_focused(self) -> None:
         payload = scene_payload()

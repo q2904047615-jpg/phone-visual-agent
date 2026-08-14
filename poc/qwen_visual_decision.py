@@ -2319,10 +2319,9 @@ def _canonicalize_trusted_scene(
             confidence=scene.confidence,
             fingerprint=scene.fingerprint,
             protocol_version=scene.protocol_version,
+            system_ui=scene.system_ui,
+            camera_alignment=scene.camera_alignment,
         )
-    system_ui = getattr(scene, "system_ui", None)
-    if system_ui is not None:
-        object.__setattr__(canonical_scene, "system_ui", system_ui)
     return (
         canonical_scene,
         tuple(sorted(aliases)),

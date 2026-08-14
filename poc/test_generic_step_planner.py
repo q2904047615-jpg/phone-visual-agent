@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +19,7 @@ from generic_step_planner import (
 )
 from generic_supervised_runtime import GenericSupervisedSession
 from semantic_executor import SemanticAction
-from ui_scene import SystemUIFacts, UIElement, UIScene
+from ui_scene import CameraAlignmentFacts, SystemUIFacts, UIElement, UIScene
 from universal_action_controller import UniversalActionController, UniversalActionError
 from vision_agent import VisionAgentError
 
@@ -46,6 +47,11 @@ class FakeSceneObserver:
         result = self.scenes.pop(0)
         if isinstance(result, BaseException):
             raise result
+        if result.camera_alignment.phone_content_rotation == "unknown":
+            result = replace(
+                result,
+                camera_alignment=aligned_camera_facts(),
+            )
         return result
 
 
@@ -123,6 +129,15 @@ def goal():
     )
 
 
+def aligned_camera_facts() -> CameraAlignmentFacts:
+    return CameraAlignmentFacts(
+        camera_layout_orientation="portrait",
+        phone_content_rotation="upright",
+        confidence=0.96,
+        evidence=("手机界面轴线与相机画布正向一致",),
+    )
+
+
 def scene(
     fingerprint,
     *,
@@ -131,6 +146,7 @@ def scene(
     bounds=(0.2, 0.3, 0.4, 0.5),
     app_id=None,
     system_ui=None,
+    camera_alignment=None,
 ):
     current = UIScene(
         app_id=(
@@ -154,6 +170,7 @@ def scene(
         confidence=0.95,
         fingerprint=fingerprint,
         system_ui=system_ui or SystemUIFacts(),
+        camera_alignment=camera_alignment or aligned_camera_facts(),
     )
     return current
 
@@ -357,6 +374,156 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertIn("home", supported)
         self.assertIn("wait_for_change", supported)
         self.assertIn("swipe", supported)
+
+    def test_orientation_mismatch_blocks_tap_back_home_and_drag_before_robot(self):
+        mismatch = CameraAlignmentFacts(
+            camera_layout_orientation="portrait",
+            phone_content_rotation="rotated_90",
+            confidence=0.95,
+            evidence=("手机界面文字需旋转九十度才正向",),
+        )
+        ordinary_scene = scene("planned", camera_alignment=mismatch)
+        drag_scene = UIScene(
+            app_id="settings",
+            screen_id="arrange",
+            summary="两个可拖动对象",
+            elements=(
+                UIElement(
+                    element_id="source",
+                    role="icon",
+                    meaning="source_item",
+                    label="源",
+                    bounds=(0.15, 0.25, 0.25, 0.35),
+                    confidence=0.96,
+                ),
+                UIElement(
+                    element_id="destination",
+                    role="icon",
+                    meaning="destination_slot",
+                    label="目标",
+                    bounds=(0.60, 0.25, 0.70, 0.35),
+                    confidence=0.96,
+                ),
+            ),
+            confidence=0.96,
+            fingerprint="planned",
+            camera_alignment=mismatch,
+        )
+        cases = (
+            (
+                "tap_semantic",
+                ordinary_scene,
+                SemanticAction(
+                    node_id="blocked-tap",
+                    action="tap_semantic",
+                    params={"element_id": "e1", "target": "app_icon"},
+                ),
+            ),
+            (
+                "back",
+                ordinary_scene,
+                SemanticAction(node_id="blocked-back", action="back", params={}),
+            ),
+            (
+                "home",
+                ordinary_scene,
+                SemanticAction(node_id="blocked-home", action="home", params={}),
+            ),
+            (
+                "drag",
+                drag_scene,
+                SemanticAction(
+                    node_id="blocked-drag",
+                    action="drag",
+                    params={
+                        "source_element_id": "source",
+                        "destination_element_id": "destination",
+                        "expected_effect": {"scene_changed": True},
+                    },
+                ),
+            ),
+        )
+        frames = tuple(Image.new("RGB", (540, 960), "gray") for _ in range(4))
+        for kind, planned, action in cases:
+            with self.subTest(kind=kind):
+                robot = FakeRobot()
+                adapter = GenericSingleActionAdapter(
+                    capture=SequenceCapture(["gray"] * 4),
+                    observer=FakeSceneObserver([]),
+                    robot=robot,
+                    frame_interval=0,
+                    post_action_settle=0,
+                )
+                with self.assertRaisesRegex(
+                    GenericActionAdapterError,
+                    "方向不一致或未知",
+                ) as caught:
+                    adapter.execute(
+                        requested_action=action,
+                        planned_scene=planned,
+                        planned_frames=frames,
+                        goal=goal(),
+                        confirmed=True,
+                    )
+                self.assertEqual(0, caught.exception.physical_actions)
+                self.assertEqual([], robot.actions)
+
+    def test_orientation_gate_rejects_unknown_low_confidence_or_local_mismatch(self):
+        cases = (
+            (
+                CameraAlignmentFacts(
+                    camera_layout_orientation="portrait",
+                    phone_content_rotation="unknown",
+                    confidence=0.95,
+                ),
+                "方向不一致或未知",
+            ),
+            (
+                CameraAlignmentFacts(
+                    camera_layout_orientation="portrait",
+                    phone_content_rotation="upright",
+                    confidence=0.4,
+                    evidence=("界面轴线看似正向",),
+                ),
+                "置信度不足",
+            ),
+            (
+                CameraAlignmentFacts(
+                    camera_layout_orientation="landscape",
+                    phone_content_rotation="upright",
+                    confidence=0.95,
+                    evidence=("界面轴线正向",),
+                ),
+                "本地稳定帧不一致",
+            ),
+        )
+        frames = tuple(Image.new("RGB", (540, 960), "gray") for _ in range(4))
+        for facts, error in cases:
+            with self.subTest(facts=facts):
+                robot = FakeRobot()
+                adapter = GenericSingleActionAdapter(
+                    capture=SequenceCapture(["gray"] * 4),
+                    observer=FakeSceneObserver([]),
+                    robot=robot,
+                    frame_interval=0,
+                    post_action_settle=0,
+                )
+                with self.assertRaisesRegex(GenericActionAdapterError, error):
+                    adapter.execute(
+                        requested_action=SemanticAction(
+                            node_id="blocked-back",
+                            action="back",
+                            params={},
+                        ),
+                        planned_scene=scene(
+                            "planned",
+                            camera_alignment=facts,
+                        ),
+                        planned_frames=frames,
+                        goal=goal(),
+                        confirmed=True,
+                    )
+                self.assertEqual([], robot.actions)
 
     def test_reveal_system_navigation_calls_one_dedicated_robot_action(self):
         hidden = SystemUIFacts(

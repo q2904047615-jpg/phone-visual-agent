@@ -12,7 +12,7 @@ from deepseek_task_graph import TargetApp
 from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
 from generic_step_planner import GenericStepProposal
 from semantic_executor import SemanticAction
-from ui_scene import UIElement, UIScene
+from ui_scene import CameraAlignmentFacts, UIElement, UIScene
 from universal_agent_orchestrator import UniversalAgentOrchestrator
 
 from test_universal_agent_orchestrator import (
@@ -79,6 +79,12 @@ def scene(
         stable=True,
         confidence=0.98,
         fingerprint=fingerprint,
+        camera_alignment=CameraAlignmentFacts(
+            camera_layout_orientation="portrait",
+            phone_content_rotation="upright",
+            confidence=0.98,
+            evidence=("合成手机界面与相机画布正向一致",),
+        ),
     )
 
 

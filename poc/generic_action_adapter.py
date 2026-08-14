@@ -14,7 +14,12 @@ from generic_scene_observer import GenericSceneObserver
 from observation_images import measure_local_stability
 from qwen_runtime_errors import FORMAT_ERROR_TYPES, classify_qwen_error
 from semantic_executor import SemanticAction
-from ui_scene import UIElement, UIScene, UISceneError
+from ui_scene import (
+    MIN_CAMERA_ALIGNMENT_CONFIDENCE,
+    UIElement,
+    UIScene,
+    UISceneError,
+)
 from universal_action_controller import (
     ResolvedSemanticAction,
     UniversalActionController,
@@ -204,6 +209,52 @@ class GenericSingleActionAdapter:
         if frame.width < 400 or frame.height < 700:
             raise GenericActionAdapterError("摄像头返回残缺画面，停止单步动作。")
         return frame
+
+    @staticmethod
+    def _assert_camera_alignment(
+        scene: UIScene,
+        frames: list[Image.Image],
+        *,
+        evidence: tuple[str, ...],
+    ) -> None:
+        """Fail closed before hardware when phone axes do not match the canvas."""
+
+        if not frames:
+            raise GenericActionAdapterError(
+                "动作前缺少相机方向验证帧。",
+                evidence=evidence,
+            )
+        sizes = {frame.size for frame in frames}
+        if len(sizes) != 1:
+            raise GenericActionAdapterError(
+                "动作前稳定帧的相机画布尺寸不一致。",
+                evidence=evidence,
+            )
+        width, height = next(iter(sizes))
+        local_orientation = "square"
+        if width > height:
+            local_orientation = "landscape"
+        elif height > width:
+            local_orientation = "portrait"
+        facts = scene.camera_alignment
+        facts.validate()
+        if facts.camera_layout_orientation != local_orientation:
+            raise GenericActionAdapterError(
+                "场景中的相机画布方向与本地稳定帧不一致，已在动作前停止。",
+                evidence=evidence,
+            )
+        if facts.phone_content_rotation != "upright":
+            raise GenericActionAdapterError(
+                "卖家控制端相机画布与手机内容/系统方向不一致或未知，"
+                "已在动作前停止。",
+                evidence=evidence,
+            )
+        if float(facts.confidence) < MIN_CAMERA_ALIGNMENT_CONFIDENCE:
+            raise GenericActionAdapterError(
+                "相机画布与手机内容方向一致性的视觉置信度不足，"
+                "已在动作前停止。",
+                evidence=evidence,
+            )
 
     def _capture_confirmation_frames(
         self,
@@ -527,6 +578,13 @@ class GenericSingleActionAdapter:
         if resolved.kind not in self.PHYSICAL_KINDS and resolved.kind != "wait_for_change":
             raise GenericActionAdapterError(
                 f"当前通用硬件适配器尚未开放：{resolved.kind}",
+                evidence=before_paths,
+            )
+
+        if resolved.kind in self.PHYSICAL_KINDS:
+            self._assert_camera_alignment(
+                before,
+                before_frames,
                 evidence=before_paths,
             )
 

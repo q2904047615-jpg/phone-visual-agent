@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
 
-UI_SCENE_PROTOCOL_VERSION = "2026-08-10-ui-scene-v2"
+UI_SCENE_PROTOCOL_VERSION = "2026-08-14-ui-scene-v3"
 MIN_TARGET_CONFIDENCE = 0.72
+MIN_CAMERA_ALIGNMENT_CONFIDENCE = 0.80
 
 # A low-confidence dynamic background must never authorize a screen-wide action.
 # It may only expose one locally trustworthy, goal-relevant element for the
@@ -36,6 +38,19 @@ class UISceneError(ValueError):
 
 
 SYSTEM_UI_UNKNOWN = "unknown"
+CAMERA_ALIGNMENT_UNKNOWN = "unknown"
+CAMERA_LAYOUT_ORIENTATIONS = frozenset(
+    {"portrait", "landscape", "square", CAMERA_ALIGNMENT_UNKNOWN}
+)
+PHONE_CONTENT_ROTATIONS = frozenset(
+    {
+        "upright",
+        "rotated_90",
+        "rotated_180",
+        "rotated_270",
+        CAMERA_ALIGNMENT_UNKNOWN,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -82,6 +97,108 @@ class SystemUIFacts:
         facts = cls(
             immersive_or_fullscreen=value["immersive_or_fullscreen"],
             navigation_bar_visible=value["navigation_bar_visible"],
+        )
+        facts.validate()
+        return facts
+
+
+@dataclass(frozen=True)
+class CameraAlignmentFacts:
+    """Read-only relation between the camera canvas and the phone's UI axes."""
+
+    camera_layout_orientation: str = CAMERA_ALIGNMENT_UNKNOWN
+    phone_content_rotation: str = CAMERA_ALIGNMENT_UNKNOWN
+    confidence: float = 0.0
+    evidence: tuple[str, ...] = ()
+
+    def validate(self) -> None:
+        if (
+            not isinstance(self.camera_layout_orientation, str)
+            or self.camera_layout_orientation not in CAMERA_LAYOUT_ORIENTATIONS
+        ):
+            raise UISceneError(
+                "camera_alignment.camera_layout_orientation 必须是 "
+                "portrait、landscape、square 或 unknown。"
+            )
+        if (
+            not isinstance(self.phone_content_rotation, str)
+            or self.phone_content_rotation not in PHONE_CONTENT_ROTATIONS
+        ):
+            raise UISceneError(
+                "camera_alignment.phone_content_rotation 必须是 upright、"
+                "rotated_90、rotated_180、rotated_270 或 unknown。"
+            )
+        if isinstance(self.confidence, bool) or not isinstance(
+            self.confidence, (int, float)
+        ):
+            raise UISceneError("camera_alignment.confidence 格式无效。")
+        if not 0.0 <= float(self.confidence) <= 1.0:
+            raise UISceneError("camera_alignment.confidence 必须在0到1之间。")
+        if not isinstance(self.evidence, tuple) or len(self.evidence) > 2:
+            raise UISceneError("camera_alignment.evidence 最多包含两个短字符串。")
+        forbidden = re.compile(
+            r"(?:coordinates?|coords?|bounds?|\bx\s*[=:]|\by\s*[=:]|"
+            r"\bpx\s*(?::|/\s*mm\b)|\bmm\s*:|"
+            r"\b(?:robot[-_ ]?controller|controller|calibration)\b|"
+            r"机械臂|控制端|校准|底部(?:按钮|控件)|"
+            r"\(\s*\d+\s*,\s*\d+\s*\)|"
+            r"\b(?:tap|click|press|swipe|drag|execute|suggest)\b|"
+            r"点击|滑动|拖动|按下|坐标|执行|建议)",
+            re.IGNORECASE,
+        )
+        for item in self.evidence:
+            if not isinstance(item, str) or not item.strip() or len(item) > 160:
+                raise UISceneError(
+                    "camera_alignment.evidence 只允许非空短字符串。"
+                )
+            if forbidden.search(item):
+                raise UISceneError(
+                    "camera_alignment.evidence 包含坐标或控制指令。"
+                )
+        if (
+            self.phone_content_rotation != CAMERA_ALIGNMENT_UNKNOWN
+            and not self.evidence
+        ):
+            raise UISceneError("明确的手机内容方向必须附带只读视觉证据。")
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "camera_layout_orientation": self.camera_layout_orientation,
+            "phone_content_rotation": self.phone_content_rotation,
+            "confidence": float(self.confidence),
+            "evidence": list(self.evidence),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "CameraAlignmentFacts":
+        if not isinstance(value, dict):
+            raise UISceneError("scene.camera_alignment 必须是 JSON 对象。")
+        required = {
+            "camera_layout_orientation",
+            "phone_content_rotation",
+            "confidence",
+            "evidence",
+        }
+        missing = required - set(value)
+        unexpected = set(value) - required
+        if missing:
+            raise UISceneError(
+                "scene.camera_alignment 缺少字段：" + ", ".join(sorted(missing))
+            )
+        if unexpected:
+            raise UISceneError(
+                "scene.camera_alignment 包含协议外字段："
+                + ", ".join(sorted(map(str, unexpected)))
+            )
+        evidence = value["evidence"]
+        if not isinstance(evidence, list):
+            raise UISceneError("scene.camera_alignment.evidence 必须是数组。")
+        facts = cls(
+            camera_layout_orientation=value["camera_layout_orientation"],
+            phone_content_rotation=value["phone_content_rotation"],
+            confidence=value["confidence"],
+            evidence=tuple(evidence),
         )
         facts.validate()
         return facts
@@ -271,6 +388,9 @@ class UIScene:
     fingerprint: str = ""
     protocol_version: str = UI_SCENE_PROTOCOL_VERSION
     system_ui: SystemUIFacts = field(default_factory=SystemUIFacts)
+    camera_alignment: CameraAlignmentFacts = field(
+        default_factory=CameraAlignmentFacts
+    )
 
     @property
     def foreground_app_id(self) -> str:
@@ -288,6 +408,11 @@ class UIScene:
         if not isinstance(self.system_ui, SystemUIFacts):
             raise UISceneError("scene.system_ui 必须是 SystemUIFacts。")
         self.system_ui.validate()
+        if not isinstance(self.camera_alignment, CameraAlignmentFacts):
+            raise UISceneError(
+                "scene.camera_alignment 必须是 CameraAlignmentFacts。"
+            )
+        self.camera_alignment.validate()
         if isinstance(self.confidence, bool) or not isinstance(
             self.confidence, (int, float)
         ):
@@ -448,6 +573,7 @@ class UIScene:
             "screen_id": self.screen_id,
             "summary": self.summary,
             "system_ui": self.system_ui.to_dict(),
+            "camera_alignment": self.camera_alignment.to_dict(),
             "elements": [element.to_dict() for element in self.elements],
             "overlays": list(self.overlays),
             "stable": self.stable,
@@ -474,6 +600,7 @@ class UIScene:
             "screen_id",
             "summary",
             "system_ui",
+            "camera_alignment",
             "elements",
             "overlays",
             "stable",
@@ -527,6 +654,11 @@ class UIScene:
                 SystemUIFacts.from_dict(value["system_ui"])
                 if "system_ui" in value
                 else SystemUIFacts()
+            ),
+            camera_alignment=(
+                CameraAlignmentFacts.from_dict(value["camera_alignment"])
+                if "camera_alignment" in value
+                else CameraAlignmentFacts()
             ),
             elements=elements,
             overlays=tuple(item.strip()[:120] for item in overlays if item.strip()),

@@ -23,6 +23,7 @@ from qwen_runtime_errors import (
 )
 from ui_scene import (
     ALLOWED_ROLES,
+    CameraAlignmentFacts,
     MIN_TARGET_CONFIDENCE,
     SystemUIFacts,
     UI_SCENE_PROTOCOL_VERSION,
@@ -32,7 +33,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v13"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v14"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 800
@@ -178,10 +179,24 @@ class GenericSceneObserver:
             fingerprint = _local_frame_fingerprint(frame)
             context = _safe_goal_context(goal_context or {})
             system_ui_audit_required = _goal_requests_system_ui_audit(context)
+            camera_layout_orientation = _camera_layout_orientation(frame)
             image_part = {
                 "type": "image_url",
                 "image_url": {"url": _image_data_url(frame)},
             }
+            rotated_90 = frame.transpose(Image.Transpose.ROTATE_90)
+            rotated_270 = frame.transpose(Image.Transpose.ROTATE_270)
+            orientation_image_parts = [
+                image_part,
+                {
+                    "type": "image_url",
+                    "image_url": {"url": _image_data_url(rotated_90)},
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": _image_data_url(rotated_270)},
+                },
+            ]
             detail_image_part = image_part
             first_messages = [
                 _json_only_system_message(),
@@ -189,7 +204,7 @@ class GenericSceneObserver:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": _compact_prompt(context)},
-                        image_part,
+                        *orientation_image_parts,
                     ],
                 }
             ]
@@ -208,6 +223,7 @@ class GenericSceneObserver:
                         fingerprint=fingerprint,
                         goal_context=context,
                         allow_invalid_system_ui_unknown=system_ui_audit_required,
+                        camera_layout_orientation=camera_layout_orientation,
                     ),
                     visual_obstructions,
                     fingerprint=fingerprint,
@@ -234,7 +250,7 @@ class GenericSceneObserver:
                                 "type": "text",
                                 "text": _compact_retry_prompt(context, first_error),
                             },
-                            image_part,
+                            *orientation_image_parts,
                         ],
                     }
                 ]
@@ -250,6 +266,7 @@ class GenericSceneObserver:
                         fingerprint=fingerprint,
                         goal_context=context,
                         allow_invalid_system_ui_unknown=system_ui_audit_required,
+                        camera_layout_orientation=camera_layout_orientation,
                     ),
                     visual_obstructions,
                     fingerprint=fingerprint,
@@ -304,6 +321,7 @@ class GenericSceneObserver:
                             fingerprint=fingerprint,
                             goal_context=context,
                             allow_invalid_system_ui_unknown=False,
+                            camera_alignment_override=scene.camera_alignment,
                         ),
                         visual_obstructions,
                         fingerprint=fingerprint,
@@ -353,6 +371,7 @@ class GenericSceneObserver:
                             fingerprint=fingerprint,
                             goal_context=context,
                             allow_invalid_system_ui_unknown=False,
+                            camera_alignment_override=scene.camera_alignment,
                         ),
                         visual_obstructions,
                         fingerprint=fingerprint,
@@ -360,19 +379,7 @@ class GenericSceneObserver:
 
             if system_ui_audit_required:
                 system_ui_audit_used = True
-                rotated_90 = frame.transpose(Image.Transpose.ROTATE_90)
-                rotated_270 = frame.transpose(Image.Transpose.ROTATE_270)
-                system_ui_images = [
-                    image_part,
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": _image_data_url(rotated_90)},
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": _image_data_url(rotated_270)},
-                    },
-                ]
+                system_ui_images = orientation_image_parts
                 self._set_stage("waiting_system_ui_audit")
                 audit_messages = [
                     _json_only_system_message(),
@@ -742,6 +749,21 @@ SYSTEM_UI_OBSERVATION_RULE = (
     "system_nav_bar绝不得写入elements，即使它部分可见或与目标相关。"
 )
 
+CAMERA_ALIGNMENT_OBSERVATION_RULE = (
+    "Images 1, 2, and 3 are the same stable camera frame at original, ROTATE_90, "
+    "and ROTATE_270 orientations; they are not a temporal sequence. "
+    "camera_alignment.camera_layout_orientation describes Image 1 canvas only "
+    "and must be portrait, landscape, or square. phone_content_rotation describes "
+    "how the phone App/system axes appear in Image 1: upright, rotated_90, "
+    "rotated_180, rotated_270, or unknown. Inspect only the physical phone display; "
+    "seller-controller PX/MM readouts, colored borders, and bottom action/orientation "
+    "buttons are external chrome and never phone evidence. Use the rotated views only "
+    "to decide which direction makes the phone UI upright; all element bounds still "
+    "belong to Image 1. Black or sparse App content does not lower alignment confidence "
+    "when visible phone text or system structure establishes its axes. Evidence must "
+    "contain one or two short non-control strings and no coordinates, actions, or bounds."
+)
+
 
 def _system_ui_audit_prompt(context: dict[str, Any]) -> str:
     return f"""
@@ -820,11 +842,13 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 9. {PREFILLED_INPUT_OBSERVATION_RULE}
 10. {INPUT_VALUE_OBSERVATION_RULE}
 11. {SYSTEM_UI_OBSERVATION_RULE}
+12. {CAMERA_ALIGNMENT_OBSERVATION_RULE}
 
 只返回下列完整JSON，不要Markdown：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"当前画面短描述","system_ui":{{"immersive_or_fullscreen":"unknown",
-"navigation_bar_visible":"unknown"}},"elements":[],"overlays":[],
+"navigation_bar_visible":"unknown"}},"camera_alignment":{{"camera_layout_orientation":"portrait",
+"phone_content_rotation":"unknown","confidence":0.0,"evidence":[]}},"elements":[],"overlays":[],
 "stable":true,"confidence":0.0,"fingerprint":""}}
 每个element只允许：
 {{"element_id":"e1","role":"button","meaning":"open_search","label":"搜索",
@@ -845,7 +869,8 @@ summary最多40字，elements最多2个，evidence每个元素最多1条且最�
 格式必须是：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"短描述","system_ui":{{"immersive_or_fullscreen":"unknown",
-"navigation_bar_visible":"unknown"}},"elements":[],"overlays":[],
+"navigation_bar_visible":"unknown"}},"camera_alignment":{{"camera_layout_orientation":"portrait",
+"phone_content_rotation":"unknown","confidence":0.0,"evidence":[]}},"elements":[],"overlays":[],
 "stable":true,"confidence":0.0,"fingerprint":""}}
 元素格式仅允许element_id、role、meaning、label、bounds、confidence、states、evidence。
 bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能是x/y/width/height对象、
@@ -853,6 +878,7 @@ bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能�
 role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
 container仅表示与目标有关的页面内容区域；tab_group、tab_bar和toolbar等非点击结构只写进summary。
 {SYSTEM_UI_OBSERVATION_RULE}
+{CAMERA_ALIGNMENT_OBSERVATION_RULE}
 overlays只能是字符串数组；带bounds、role、element_id或overlay_id的对象必须改写成elements，
 并使用element_id。禁止把对象序列化成字符串塞入overlays。
 与目标直接相关的元素写states.goal_relevant=true。禁止任何动作或计划字段。不要Markdown。
@@ -989,6 +1015,8 @@ def _parse_scene(
     fingerprint: str,
     goal_context: dict[str, Any] | None = None,
     allow_invalid_system_ui_unknown: bool = False,
+    camera_layout_orientation: str | None = None,
+    camera_alignment_override: CameraAlignmentFacts | None = None,
 ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
@@ -998,6 +1026,25 @@ def _parse_scene(
             )
         if allow_invalid_system_ui_unknown:
             _fail_closed_invalid_system_ui(payload)
+        if camera_alignment_override is None:
+            if "camera_alignment" not in payload:
+                raise UISceneError(
+                    "新观察必须显式返回 scene.camera_alignment。"
+                )
+            alignment = CameraAlignmentFacts.from_dict(
+                payload["camera_alignment"]
+            )
+            if (
+                camera_layout_orientation is not None
+                and alignment.camera_layout_orientation
+                != camera_layout_orientation
+            ):
+                raise UISceneError(
+                    "模型报告的相机画布方向与本地稳定帧尺寸不一致。"
+                )
+        else:
+            camera_alignment_override.validate()
+            payload["camera_alignment"] = camera_alignment_override.to_dict()
         _normalize_compact_scene_payload(payload)
         _normalize_known_scene_enums(payload)
         _normalize_prefilled_input_structure(payload, goal_context or {})
@@ -1011,6 +1058,14 @@ def _parse_scene(
         )
     except (UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"通用页面观察结果不符合协议：{exc}") from exc
+
+
+def _camera_layout_orientation(frame: Image.Image) -> str:
+    if frame.width > frame.height:
+        return "landscape"
+    if frame.height > frame.width:
+        return "portrait"
+    return "square"
 
 
 def _fail_closed_invalid_system_ui(payload: dict[str, Any]) -> None:

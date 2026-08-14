@@ -25,7 +25,8 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v10"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v11"
+INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 COMPACT_OUTPUT_TOKENS = 800
 COMPACT_RETRY_TOKENS = 800
 TARGETED_OUTPUT_TOKENS = 1200
@@ -123,7 +124,10 @@ class GenericSceneObserver:
         try:
             if len(frames) < 4:
                 raise VisionAgentError("通用页面观察至少需要4帧。")
-            stability = measure_local_stability(frames)
+            stability = measure_local_stability(
+                frames,
+                allow_leading_outlier=True,
+            )
             if not stability.stable:
                 self.last_diagnostics = {
                     "observer_version": GENERIC_SCENE_OBSERVER_VERSION,
@@ -328,6 +332,7 @@ class GenericSceneObserver:
                     scene,
                     raw,
                     fingerprint=fingerprint,
+                    goal_context=context,
                 )
 
             target_local_candidate = scene.unique_trusted_goal_element()
@@ -639,17 +644,28 @@ def _input_structure_audit_prompt(
     roi_bounds: tuple[int, int, int, int] | None,
 ) -> str:
     return f"""
-You are a read-only generic UI structure auditor. The normal scene observer did not establish an input target.
+You are a read-only, app-independent UI structure auditor. The normal scene observer did not establish an input target.
 Goal context (evidence selection only): {json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
 Image 1 is always the complete phone frame. {_input_audit_detail_note(roi_bounds)}
-Enumerate every horizontal search/address/form-like editable structure relevant to the goal, including structures clipped by an image edge.
+Distinguish three different visual structures; never merge them:
+1. application_inputs: editable search/address/form fields in the App content area. Include an empty field only when a complete border plus a visible placeholder, caret, focus highlight, or other literal editable cue is visible.
+2. ime_preedit_regions: the input method's composition/candidate strip. It is never an application input, even when it contains composed text and a trailing icon.
+3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 Do not plan, suggest, authorize, or perform any action. All bounds MUST use Image 1 full-frame normalized coordinates 0..1000.
-For each structure report whether all four outer edges are fully visible, its current text, confidence, and its separate trailing utility control (for example search, submit, clear, voice, or scan). A trailing control is structural evidence only and is never authorized for activation.
+Use text="" for a visibly empty application field. Copy placeholders and visible_editable_cues literally; do not infer them from the goal. right_button describes a trailing utility control; it is structural evidence only and is never authorized for activation. Set it to null when no separate trailing control is visible.
 Return exactly this JSON schema and no other fields:
-{{"structures":[{{"structure_id":"s1","bounds":[0,0,1000,1000],"fully_visible":true,
-"text":"current visible text","confidence":0.0,"right_button":{{"label":"button text",
-"bounds":[0,0,1000,1000],"confidence":0.0}}}}]}}
-Return an empty structures array when the geometry is not visible. Never merge a clipped structure with a complete structure.
+{{"protocol_version":"{INPUT_STRUCTURE_AUDIT_VERSION}",
+"application_inputs":[{{"structure_id":"app-input-1","bounds":[0,0,1000,1000],
+"fully_visible":true,"text":"","placeholder":"visible placeholder or empty",
+"visible_editable_cues":["literal visible cue"],"confidence":0.0,
+"right_button":null}}],
+"ime_preedit_regions":[{{"region_id":"ime-preedit-1","bounds":[0,0,1000,1000],
+"text":"visible composition text or empty","confidence":0.0}}],
+"keyboard":{{"visible":true,"bounds":[0,0,1000,1000],"layout":"qwerty",
+"input_mode":"chinese_pinyin","mode_switch":{{"label":"中","bounds":[0,0,1000,1000],
+"confidence":0.0,"current_mode":"chinese_pinyin","target_mode":"direct_latin"}}}}}}
+When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","mode_switch":null}}.
+Return empty arrays when their geometry is not visible. Never merge a clipped structure with a complete structure, and never copy an IME pre-edit region into application_inputs.
 """
 
 
@@ -1065,6 +1081,31 @@ def _goal_requests_input(context: dict[str, Any]) -> bool:
             "editable field",
             "address bar",
             "textbox",
+            "输入模式",
+            "直输模式",
+            "键盘模式",
+            "input mode",
+            "keyboard mode",
+            "direct_latin",
+            "chinese_pinyin",
+        )
+    )
+
+
+def _goal_requests_keyboard_mode_switch(context: dict[str, Any]) -> bool:
+    visible = json.dumps(context, ensure_ascii=False).casefold()
+    return any(
+        term in visible
+        for term in (
+            "切换输入模式",
+            "切换到英文",
+            "切到英文",
+            "切换到中文",
+            "切到中文",
+            "切换直输模式",
+            "切换为直输模式",
+            "switch input mode",
+            "switch keyboard mode",
         )
     )
 
@@ -1106,55 +1147,116 @@ def _apply_input_structure_audit(
     raw: str,
     *,
     fingerprint: str,
+    goal_context: dict[str, Any],
 ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
-        if set(payload) != {"structures"}:
+        if set(payload) != {
+            "protocol_version",
+            "application_inputs",
+            "ime_preedit_regions",
+            "keyboard",
+        }:
             raise UISceneError("输入结构审计包含协议外字段。")
-        structures = payload.get("structures")
-        if not isinstance(structures, list) or len(structures) > 4:
-            raise UISceneError("输入结构审计 structures 必须是最多4项的数组。")
+        if payload.get("protocol_version") != INPUT_STRUCTURE_AUDIT_VERSION:
+            raise UISceneError("输入结构审计协议版本不匹配。")
+        application_inputs = payload.get("application_inputs")
+        ime_preedit_regions = payload.get("ime_preedit_regions")
+        keyboard = payload.get("keyboard")
+        if not isinstance(application_inputs, list) or len(application_inputs) > 4:
+            raise UISceneError("输入结构审计 application_inputs 必须是最多4项的数组。")
+        if not isinstance(ime_preedit_regions, list) or len(ime_preedit_regions) > 4:
+            raise UISceneError("输入结构审计 ime_preedit_regions 必须是最多4项的数组。")
+        if not isinstance(keyboard, dict) or set(keyboard) != {
+            "visible",
+            "bounds",
+            "layout",
+            "input_mode",
+            "mode_switch",
+        }:
+            raise UISceneError("输入结构审计 keyboard 字段不符合协议。")
+
+        keyboard_visible = keyboard.get("visible")
+        keyboard_layout = keyboard.get("layout")
+        keyboard_input_mode = keyboard.get("input_mode")
+        if not isinstance(keyboard_visible, bool):
+            raise UISceneError("输入结构审计 keyboard.visible 必须是布尔值。")
+        if keyboard_layout not in {"qwerty", "numeric", "symbol", "unknown"}:
+            raise UISceneError("输入结构审计 keyboard.layout 无效。")
+        if keyboard_input_mode not in {
+            "direct_latin",
+            "chinese_pinyin",
+            "unknown",
+        }:
+            raise UISceneError("输入结构审计 keyboard.input_mode 无效。")
+        keyboard_bounds: tuple[float, float, float, float] | None = None
+        if keyboard_visible:
+            if not _valid_1000_bounds(keyboard.get("bounds")):
+                raise UISceneError("可见键盘必须提供有效 bounds。")
+            keyboard_bounds = tuple(float(value) for value in keyboard["bounds"])
+            if (
+                keyboard_bounds[2] - keyboard_bounds[0] < 300
+                or keyboard_bounds[3] - keyboard_bounds[1] < 180
+            ):
+                raise UISceneError("可见键盘 bounds 过小，不能建立键盘区域。")
+        elif keyboard.get("bounds") is not None or keyboard.get("mode_switch") is not None:
+            raise UISceneError("不可见键盘不能包含 bounds 或 mode_switch。")
+
+        preedit_bounds: list[tuple[float, float, float, float]] = []
+        for item in ime_preedit_regions:
+            if not isinstance(item, dict) or set(item) != {
+                "region_id",
+                "bounds",
+                "text",
+                "confidence",
+            }:
+                raise UISceneError("IME预编辑区字段不符合协议。")
+            if not _valid_1000_bounds(item.get("bounds")):
+                raise UISceneError("IME预编辑区 bounds 不符合0..1000协议。")
+            confidence = _audit_confidence(item.get("confidence"), "IME预编辑区")
+            bounds = tuple(float(value) for value in item["bounds"])
+            if confidence >= 0.9:
+                preedit_bounds.append(bounds)
+
         matches: list[dict[str, Any]] = []
-        for item in structures:
+        for item in application_inputs:
             if not isinstance(item, dict) or set(item) != {
                 "structure_id",
                 "bounds",
                 "fully_visible",
                 "text",
+                "placeholder",
+                "visible_editable_cues",
                 "confidence",
                 "right_button",
             }:
-                raise UISceneError("输入结构审计结构字段不符合协议。")
+                raise UISceneError("应用输入结构字段不符合协议。")
             button = item.get("right_button")
-            if not isinstance(button, dict) or set(button) != {
-                "label",
-                "bounds",
-                "confidence",
-            }:
-                raise UISceneError("输入结构审计按钮字段不符合协议。")
+            if button is not None and (
+                not isinstance(button, dict)
+                or set(button) != {"label", "bounds", "confidence"}
+            ):
+                raise UISceneError("输入结构审计 right_button 字段不符合协议。")
             if not isinstance(item.get("fully_visible"), bool):
                 raise UISceneError("输入结构审计 fully_visible 必须是布尔值。")
-            if not _valid_1000_bounds(item.get("bounds")) or not _valid_1000_bounds(
-                button.get("bounds")
-            ):
+            if not _valid_1000_bounds(item.get("bounds")):
                 raise UISceneError("输入结构审计 bounds 不符合0..1000协议。")
-            if any(
-                isinstance(value, bool) or not isinstance(value, (int, float))
-                for value in (item.get("confidence"), button.get("confidence"))
+            confidence = _audit_confidence(item.get("confidence"), "应用输入结构")
+            cues = item.get("visible_editable_cues")
+            if (
+                not isinstance(cues, list)
+                or len(cues) > 4
+                or any(not isinstance(value, str) for value in cues)
             ):
-                raise UISceneError("输入结构审计 confidence 格式无效。")
-            confidence = float(item["confidence"])
-            button_confidence = float(button["confidence"])
-            if not 0.0 <= confidence <= 1.0 or not 0.0 <= button_confidence <= 1.0:
-                raise UISceneError("输入结构审计 confidence 超出0..1。")
-            if not item["fully_visible"] or confidence < 0.9 or button_confidence < 0.9:
+                raise UISceneError("visible_editable_cues 必须是最多4项的字符串数组。")
+            cues = [value.strip()[:120] for value in cues if value.strip()]
+            if not item["fully_visible"] or confidence < 0.9:
                 continue
             text = str(item.get("text") or "").strip()
-            label = str(button.get("label") or "").strip()
-            if not text or not label:
+            placeholder = str(item.get("placeholder") or "").strip()
+            if not text and not placeholder and not cues:
                 continue
             bounds = tuple(float(value) for value in item["bounds"])
-            button_bounds = tuple(float(value) for value in button["bounds"])
             width = bounds[2] - bounds[0]
             height = bounds[3] - bounds[1]
             if (
@@ -1162,64 +1264,146 @@ def _apply_input_structure_audit(
                 or bounds[3] >= 990
                 or width < 240
                 or not 20 <= height <= 180
-                or not _bounds_inside(button_bounds, bounds, tolerance=20)
-                or button_bounds[0] <= bounds[0] + 0.55 * width
-                or _vertical_overlap_ratio(button_bounds, bounds) < 0.8
+                or (
+                    keyboard_bounds is not None
+                    and _bounds_overlap_ratio(bounds, keyboard_bounds) >= 0.25
+                )
+                or any(
+                    _bounds_overlap_ratio(bounds, preedit) >= 0.35
+                    or _bounds_overlap_ratio(preedit, bounds) >= 0.35
+                    for preedit in preedit_bounds
+                )
             ):
                 continue
-            input_bounds = [
-                round(bounds[0]),
-                round(bounds[1]),
-                round(button_bounds[0]),
-                round(bounds[3]),
-            ]
+            input_bounds = [round(value) for value in bounds]
+            button_match: dict[str, Any] | None = None
+            if button is not None:
+                if not _valid_1000_bounds(button.get("bounds")):
+                    raise UISceneError("输入结构审计 right_button bounds 无效。")
+                button_confidence = _audit_confidence(
+                    button.get("confidence"), "输入结构审计 right_button"
+                )
+                button_label = str(button.get("label") or "").strip()
+                button_bounds = tuple(float(value) for value in button["bounds"])
+                if (
+                    button_confidence < 0.9
+                    or not button_label
+                    or not _bounds_inside(button_bounds, bounds, tolerance=20)
+                    or button_bounds[0] <= bounds[0] + 0.55 * width
+                    or _vertical_overlap_ratio(button_bounds, bounds) < 0.8
+                ):
+                    continue
+                input_bounds[2] = round(button_bounds[0])
+                button_match = {
+                    "label": button_label,
+                    "bounds": [round(value) for value in button_bounds],
+                    "confidence": button_confidence,
+                }
             if input_bounds[2] - input_bounds[0] < 120:
                 continue
             matches.append(
                 {
                     "text": text,
-                    "button_label": label,
+                    "placeholder": placeholder,
+                    "visible_editable_cues": cues,
                     "input_bounds": input_bounds,
-                    "button_bounds": [round(value) for value in button_bounds],
-                    "confidence": min(confidence, button_confidence),
+                    "right_button": button_match,
+                    "confidence": min(
+                        confidence,
+                        float(button_match["confidence"])
+                        if button_match is not None
+                        else confidence,
+                    ),
                 }
             )
-        if len(matches) != 1:
+
+        mode_switch = _validated_keyboard_mode_switch(
+            keyboard.get("mode_switch"),
+            keyboard_bounds=keyboard_bounds,
+        )
+        if (
+            mode_switch is not None
+            and keyboard_input_mode != "unknown"
+            and mode_switch["current_mode"] != keyboard_input_mode
+        ):
+            raise UISceneError("模式切换键 current_mode 与键盘 input_mode 冲突。")
+        switch_is_goal = _goal_requests_keyboard_mode_switch(goal_context)
+        trusted_input = matches[0] if len(matches) == 1 else None
+        if trusted_input is None and (mode_switch is None or not switch_is_goal):
             return scene
-        match = matches[0]
+
         value = scene.to_dict()
         elements = list(value.get("elements") or [])
         for element in elements:
             if isinstance(element, dict):
                 element["states"] = dict(element.get("states") or {})
                 element["states"]["goal_relevant"] = False
-        elements.extend(
-            [
+        if trusted_input is not None:
+            states: dict[str, Any] = {
+                "goal_relevant": not switch_is_goal,
+                "fully_visible": True,
+                "value": trusted_input["text"],
+            }
+            if trusted_input["placeholder"]:
+                states["placeholder"] = trusted_input["placeholder"]
+            if keyboard_bounds is not None:
+                states.update(
+                    {
+                        "focused": True,
+                        "keyboard_layout": keyboard_layout,
+                        "keyboard_input_mode": keyboard_input_mode,
+                    }
+                )
+            input_label = trusted_input["text"] or trusted_input["placeholder"]
+            input_evidence = list(trusted_input["visible_editable_cues"])
+            if trusted_input["text"]:
+                input_evidence.insert(0, f"应用输入框当前文字：{trusted_input['text']}")
+            elif trusted_input["placeholder"]:
+                input_evidence.insert(0, f"应用输入框为空，占位提示：{trusted_input['placeholder']}")
+            elements.append(
                 {
                     "element_id": "local_audited_input_1",
                     "role": "input",
-                    "meaning": "prefilled_text_input",
-                    "label": match["text"],
-                    "bounds": [value / 1000.0 for value in match["input_bounds"]],
-                    "confidence": match["confidence"],
-                    "states": {"goal_relevant": True, "fully_visible": True},
-                    "evidence": [
-                        f"完整横向输入结构，当前文字：{match['text']}",
-                        f"右侧独立按钮：{match['button_label']}",
-                    ],
-                },
+                    "meaning": "application_text_input",
+                    "label": input_label,
+                    "bounds": [part / 1000.0 for part in trusted_input["input_bounds"]],
+                    "confidence": trusted_input["confidence"],
+                    "states": states,
+                    "evidence": input_evidence[:6],
+                }
+            )
+            right_button = trusted_input["right_button"]
+            if right_button is not None:
+                elements.append(
+                    {
+                        "element_id": "local_audited_adjacent_button_1",
+                        "role": "button",
+                        "meaning": "adjacent_input_utility",
+                        "label": right_button["label"],
+                        "bounds": [part / 1000.0 for part in right_button["bounds"]],
+                        "confidence": right_button["confidence"],
+                        "states": {"goal_relevant": False, "fully_visible": True},
+                        "evidence": ["应用输入结构的相邻独立控件；不具备目标权限"],
+                    }
+                )
+        if mode_switch is not None:
+            elements.append(
                 {
-                    "element_id": "local_audited_adjacent_button_1",
+                    "element_id": "local_audited_keyboard_mode_switch_1",
                     "role": "button",
-                    "meaning": "adjacent_submit_button",
-                    "label": match["button_label"],
-                    "bounds": [value / 1000.0 for value in match["button_bounds"]],
-                    "confidence": match["confidence"],
-                    "states": {"goal_relevant": False, "fully_visible": True},
-                    "evidence": ["输入结构审计中的相邻独立按钮；不具备目标权限"],
-                },
-            ]
-        )
+                    "meaning": "switch_keyboard_input_mode",
+                    "label": mode_switch["label"],
+                    "bounds": [part / 1000.0 for part in mode_switch["bounds"]],
+                    "confidence": mode_switch["confidence"],
+                    "states": {
+                        "goal_relevant": switch_is_goal,
+                        "keyboard_input_mode_switch": True,
+                        "current_mode": mode_switch["current_mode"],
+                        "target_mode": mode_switch["target_mode"],
+                    },
+                    "evidence": ["键盘区域内方向明确的独立输入模式切换键"],
+                }
+            )
         value["elements"] = elements
         return UIScene.from_dict(
             value,
@@ -1229,6 +1413,80 @@ def _apply_input_structure_audit(
         )
     except (UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"输入结构只读审计结果不符合协议：{exc}") from exc
+
+
+def _audit_confidence(value: Any, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise UISceneError(f"{field_name} confidence 格式无效。")
+    confidence = float(value)
+    if not 0.0 <= confidence <= 1.0:
+        raise UISceneError(f"{field_name} confidence 超出0..1。")
+    return confidence
+
+
+def _validated_keyboard_mode_switch(
+    value: Any,
+    *,
+    keyboard_bounds: tuple[float, float, float, float] | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if keyboard_bounds is None:
+        raise UISceneError("模式切换键必须绑定可见键盘区域。")
+    if not isinstance(value, dict) or set(value) != {
+        "label",
+        "bounds",
+        "confidence",
+        "current_mode",
+        "target_mode",
+    }:
+        raise UISceneError("输入结构审计 mode_switch 字段不符合协议。")
+    if not _valid_1000_bounds(value.get("bounds")):
+        raise UISceneError("输入结构审计 mode_switch bounds 无效。")
+    confidence = _audit_confidence(value.get("confidence"), "mode_switch")
+    current_mode = value.get("current_mode")
+    target_mode = value.get("target_mode")
+    modes = {"direct_latin", "chinese_pinyin"}
+    if current_mode not in modes or target_mode not in modes or current_mode == target_mode:
+        raise UISceneError("mode_switch 必须给出方向明确且不同的输入模式。")
+    label = str(value.get("label") or "").strip()
+    bounds = tuple(float(part) for part in value["bounds"])
+    keyboard_width = keyboard_bounds[2] - keyboard_bounds[0]
+    keyboard_height = keyboard_bounds[3] - keyboard_bounds[1]
+    if (
+        confidence < 0.9
+        or not label
+        or not _is_explicit_keyboard_mode_label(label)
+        or not _bounds_inside(bounds, keyboard_bounds, tolerance=20)
+        or bounds[2] - bounds[0] > 0.35 * keyboard_width
+        or bounds[3] - bounds[1] > 0.30 * keyboard_height
+    ):
+        return None
+    return {
+        "label": label,
+        "bounds": [round(part) for part in bounds],
+        "confidence": confidence,
+        "current_mode": current_mode,
+        "target_mode": target_mode,
+    }
+
+
+def _is_explicit_keyboard_mode_label(label: str) -> bool:
+    visible = re.sub(r"[\s_\-/]+", "", str(label or "").strip().casefold())
+    if not visible:
+        return False
+    if "中" in visible or "英" in visible:
+        return True
+    return visible in {
+        "en",
+        "eng",
+        "english",
+        "中文",
+        "chinese",
+        "abc",
+        "latin",
+        "pinyin",
+    }
 
 
 def _has_any_semantic_term(item: dict[str, Any], terms: tuple[str, ...]) -> bool:
@@ -1259,6 +1517,18 @@ def _vertical_overlap_ratio(
     overlap = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
     smaller = min(first[3] - first[1], second[3] - second[1])
     return overlap / smaller if smaller > 0 else 0.0
+
+
+def _bounds_overlap_ratio(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+) -> float:
+    """Return how much of ``first`` is covered by ``second``."""
+
+    width = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
+    height = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
+    first_area = max(0.0, first[2] - first[0]) * max(0.0, first[3] - first[1])
+    return width * height / first_area if first_area > 0 else 0.0
 
 
 def _normalize_compact_scene_payload(payload: dict[str, Any]) -> None:

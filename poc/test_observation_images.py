@@ -67,7 +67,7 @@ class ObservationImageTests(unittest.TestCase):
             (664, 306, 916, 634),
         )
 
-    def test_local_stability_uses_all_four_original_frames(self) -> None:
+    def test_local_stability_rejects_oscillating_recent_frames(self) -> None:
         frame = patterned_frame()
         stable = measure_local_stability([frame.copy() for _ in range(4)])
         self.assertTrue(stable.stable)
@@ -76,6 +76,41 @@ class ObservationImageTests(unittest.TestCase):
         changed = Image.new("RGB", frame.size, "white")
         unstable = measure_local_stability([frame, changed, frame, changed])
         self.assertFalse(unstable.stable)
+
+    def test_local_stability_accepts_one_stale_leading_frame_after_three_converge(self) -> None:
+        settled = patterned_frame()
+        stale = Image.new("RGB", settled.size, "white")
+
+        stability = measure_local_stability(
+            [stale, settled.copy(), settled.copy(), settled.copy()],
+            allow_leading_outlier=True,
+        )
+
+        self.assertTrue(stability.stable)
+        self.assertIn("末尾3帧", stability.reason)
+
+    def test_local_stability_keeps_strict_full_window_default_for_actions(self) -> None:
+        settled = patterned_frame()
+        stale = Image.new("RGB", settled.size, "white")
+
+        stability = measure_local_stability(
+            [stale, settled.copy(), settled.copy(), settled.copy()]
+        )
+
+        self.assertFalse(stability.stable)
+        self.assertIn("完整采样窗口", stability.reason)
+
+    def test_local_stability_rejects_change_with_only_two_new_frames(self) -> None:
+        old = patterned_frame()
+        new = Image.new("RGB", old.size, "white")
+
+        stability = measure_local_stability(
+            [old.copy(), old.copy(), new, new.copy()],
+            allow_leading_outlier=True,
+        )
+
+        self.assertFalse(stability.stable)
+        self.assertIn("末尾3帧", stability.reason)
 
     def test_overview_only_when_required_evidence_is_present(self) -> None:
         provider = FakeProvider(

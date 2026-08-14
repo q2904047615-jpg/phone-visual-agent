@@ -218,6 +218,7 @@ def measure_local_stability(
     frames: list[Image.Image],
     *,
     threshold: float | None = None,
+    allow_leading_outlier: bool = False,
 ) -> LocalFrameStability:
     """Measure camera/UI stability locally; no frame leaves the machine."""
 
@@ -243,8 +244,15 @@ def measure_local_stability(
     for first, second in zip(sheets, sheets[1:]):
         value = ImageStat.Stat(ImageChops.difference(first, second)).mean[0]
         deltas.append(float(value))
-    mean_delta = sum(deltas) / len(deltas)
-    max_delta = max(deltas)
+
+    # A read-only camera observation can include one leading frame from the
+    # previous UI state even though the newest three frames have converged.
+    # Callers must opt into ignoring that leading sample.  Action execution and
+    # post-action verification keep the stricter full-window default.
+    required_pairs = min(2, len(deltas)) if allow_leading_outlier else len(deltas)
+    evaluated_deltas = deltas[-required_pairs:]
+    mean_delta = sum(evaluated_deltas) / len(evaluated_deltas)
+    max_delta = max(evaluated_deltas)
     stable = max_delta <= limit
     return LocalFrameStability(
         stable=stable,
@@ -253,9 +261,20 @@ def measure_local_stability(
         frame_count=len(frames),
         threshold=limit,
         reason=(
-            "外圈静态UI多帧一致"
+            (
+                f"末尾{required_pairs + 1}帧外圈静态UI一致"
+                if allow_leading_outlier
+                else "完整采样窗口外圈静态UI一致"
+            )
             if stable
-            else f"外圈静态UI变化{max_delta:.1f}超过阈值{limit:.1f}"
+            else (
+                (
+                    f"末尾{required_pairs + 1}帧外圈静态UI变化"
+                    if allow_leading_outlier
+                    else "完整采样窗口外圈静态UI变化"
+                )
+                + f"{max_delta:.1f}超过阈值{limit:.1f}"
+            )
         ),
     )
 

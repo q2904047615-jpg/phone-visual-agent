@@ -5,7 +5,7 @@ import unittest
 
 from PIL import Image, ImageFilter
 
-from generic_scene_observer import GenericSceneObserver
+from generic_scene_observer import GenericSceneObserver, INPUT_STRUCTURE_AUDIT_VERSION
 from generic_scene_observer import _parse_scene
 from ui_scene import UISceneError
 from vision_agent import VisionAgentError
@@ -106,6 +106,49 @@ def scene_payload() -> dict:
         "stable": True,
         "confidence": 0.96,
         "fingerprint": "model-value-must-not-be-trusted",
+    }
+
+
+def input_audit_payload(
+    *,
+    application_inputs: list[dict] | None = None,
+    ime_preedit_regions: list[dict] | None = None,
+    keyboard: dict | None = None,
+) -> dict:
+    return {
+        "protocol_version": INPUT_STRUCTURE_AUDIT_VERSION,
+        "application_inputs": list(application_inputs or []),
+        "ime_preedit_regions": list(ime_preedit_regions or []),
+        "keyboard": keyboard
+        or {
+            "visible": False,
+            "bounds": None,
+            "layout": "unknown",
+            "input_mode": "unknown",
+            "mode_switch": None,
+        },
+    }
+
+
+def audited_application_input(
+    *,
+    structure_id: str = "field",
+    bounds: list[int] | None = None,
+    fully_visible: bool = True,
+    text: str = "已有文字",
+    placeholder: str = "",
+    confidence: float = 0.98,
+    right_button: dict | None = None,
+) -> dict:
+    return {
+        "structure_id": structure_id,
+        "bounds": bounds or [110, 40, 850, 110],
+        "fully_visible": fully_visible,
+        "text": text,
+        "placeholder": placeholder,
+        "visible_editable_cues": ["完整横向输入边框"],
+        "confidence": confidence,
+        "right_button": right_button,
     }
 
 
@@ -470,6 +513,19 @@ class GenericSceneObserverTests(unittest.TestCase):
             GenericSceneObserver(provider).observe(frames=frames)
         self.assertEqual(provider.calls, 0)
 
+    def test_read_only_observation_accepts_one_stale_leading_frame_after_convergence(self) -> None:
+        provider = FakeProvider(scene_payload())
+        settled = Image.new("RGB", (540, 960), (30, 40, 50))
+        stale = Image.new("RGB", settled.size, (255, 255, 255))
+
+        observer = GenericSceneObserver(provider)
+        observer.observe(
+            frames=[stale, settled.copy(), settled.copy(), settled.copy()]
+        )
+
+        self.assertEqual(1, provider.calls)
+        self.assertTrue(observer.last_diagnostics["local_stability"]["stable"])
+
     def test_stable_group_uses_sharpest_frame_instead_of_last_frame(self) -> None:
         observer = GenericSceneObserver(FakeProvider(scene_payload()))
         observer.observe(frames=stable_frames_with_one_sharp_center())
@@ -726,7 +782,7 @@ class GenericSceneObserverTests(unittest.TestCase):
     def test_all_observation_prompts_recognize_prefilled_inputs_without_authorizing_submit(self) -> None:
         empty = scene_payload()
         empty["elements"] = []
-        provider = SequenceProvider([empty, empty, {"structures": []}])
+        provider = SequenceProvider([empty, empty, input_audit_payload()])
         observer = GenericSceneObserver(provider)
 
         observer.observe(
@@ -748,22 +804,18 @@ class GenericSceneObserverTests(unittest.TestCase):
     def test_editable_field_wording_triggers_generic_input_structure_audit(self) -> None:
         empty = scene_payload()
         empty["elements"] = []
-        audit = {
-            "structures": [
-                {
-                    "structure_id": "field-with-scan",
-                    "bounds": [110, 40, 850, 110],
-                    "fully_visible": True,
-                    "text": "已有文字",
-                    "confidence": 0.98,
-                    "right_button": {
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="field-with-scan",
+                    right_button={
                         "label": "扫描",
                         "bounds": [780, 40, 850, 110],
                         "confidence": 0.97,
                     },
-                }
+                )
             ]
-        }
+        )
         provider = SequenceProvider([empty, empty, audit])
         observer = GenericSceneObserver(provider)
 
@@ -782,6 +834,252 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn("trailing utility control", audit_text)
         self.assertIn("is never authorized for activation", audit_text)
 
+    def test_input_audit_recovers_empty_top_application_input_and_keyboard_facts(self) -> None:
+        empty = scene_payload()
+        empty["summary"] = "顶部区域和软键盘清楚，但快速观察没有建立控件"
+        empty["elements"] = []
+        keyboard = {
+            "visible": True,
+            "bounds": [0, 360, 1000, 1000],
+            "layout": "qwerty",
+            "input_mode": "chinese_pinyin",
+            "mode_switch": {
+                "label": "中",
+                "bounds": [650, 900, 760, 970],
+                "confidence": 0.97,
+                "current_mode": "chinese_pinyin",
+                "target_mode": "direct_latin",
+            },
+        }
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="empty-top-input",
+                    bounds=[80, 35, 820, 115],
+                    text="",
+                    placeholder="搜索",
+                    right_button=None,
+                )
+            ],
+            keyboard=keyboard,
+        )
+        provider = SequenceProvider([empty, empty, audit])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "读取顶部空输入框及当前键盘输入模式"},
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(candidate)
+        self.assertEqual("input", candidate.role)
+        self.assertEqual("", candidate.states["value"])
+        self.assertEqual("搜索", candidate.states["placeholder"])
+        self.assertTrue(candidate.states["focused"])
+        self.assertEqual("qwerty", candidate.states["keyboard_layout"])
+        self.assertEqual("chinese_pinyin", candidate.states["keyboard_input_mode"])
+        mode_switch = scene.get_element("local_audited_keyboard_mode_switch_1")
+        self.assertFalse(mode_switch.states["goal_relevant"])
+        self.assertEqual("direct_latin", mode_switch.states["target_mode"])
+
+    def test_input_audit_never_promotes_ime_preedit_region_to_application_input(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            ime_preedit_regions=[
+                {
+                    "region_id": "composition-strip",
+                    "bounds": [80, 420, 920, 500],
+                    "text": "a'gen't",
+                    "confidence": 0.98,
+                }
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 400, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "mode_switch": None,
+            },
+        )
+        scene = GenericSceneObserver(
+            SequenceProvider([empty, empty, audit])
+        ).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "读取当前应用输入框中的文字"},
+        )
+
+        self.assertFalse(any(item.role == "input" for item in scene.elements))
+        self.assertIsNone(scene.unique_trusted_goal_element())
+
+    def test_input_audit_rejects_application_claim_overlapping_ime_preedit(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        claimed_input = audited_application_input(
+            structure_id="misclassified-preedit",
+            bounds=[80, 420, 920, 500],
+            text="a'gen't",
+        )
+        audit = input_audit_payload(
+            application_inputs=[claimed_input],
+            ime_preedit_regions=[
+                {
+                    "region_id": "same-region",
+                    "bounds": [80, 420, 920, 500],
+                    "text": "a'gen't",
+                    "confidence": 0.98,
+                }
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 400, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "mode_switch": None,
+            },
+        )
+        scene = GenericSceneObserver(
+            SequenceProvider([empty, empty, audit])
+        ).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "读取当前应用输入框中的文字"},
+        )
+
+        self.assertFalse(any(item.role == "input" for item in scene.elements))
+
+    def test_input_audit_with_no_trusted_structure_keeps_low_confidence_fail_closed(self) -> None:
+        empty = scene_payload()
+        empty["confidence"] = 0.6
+        empty["elements"] = []
+        provider = SequenceProvider([empty, empty, input_audit_payload()])
+
+        with self.assertRaisesRegex(VisionAgentError, "整体置信度不足"):
+            GenericSceneObserver(provider).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "读取顶部空输入框"},
+            )
+
+        self.assertEqual(3, provider.calls)
+
+    def test_empty_rectangle_without_literal_editable_cue_is_not_promoted(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        unproven = audited_application_input(text="", placeholder="")
+        unproven["visible_editable_cues"] = []
+        audit = input_audit_payload(application_inputs=[unproven])
+
+        scene = GenericSceneObserver(
+            SequenceProvider([empty, empty, audit])
+        ).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "读取顶部空输入框"},
+        )
+
+        self.assertFalse(any(item.role == "input" for item in scene.elements))
+
+    def test_input_mode_goal_selects_only_compact_switch_inside_keyboard(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[80, 35, 820, 115],
+                    text="",
+                    placeholder="搜索",
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "mode_switch": {
+                    "label": "中",
+                    "bounds": [650, 900, 760, 970],
+                    "confidence": 0.97,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+            },
+        )
+        scene = GenericSceneObserver(
+            SequenceProvider([empty, empty, audit])
+        ).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "切换到英文直输模式 direct_latin"},
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(candidate)
+        self.assertEqual("switch_keyboard_input_mode", candidate.meaning)
+        input_element = scene.get_element("local_audited_input_1")
+        self.assertFalse(input_element.states["goal_relevant"])
+
+    def test_keyboard_mode_switch_conflicting_with_keyboard_mode_fails_closed(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "mode_switch": {
+                    "label": "中",
+                    "bounds": [650, 900, 760, 970],
+                    "confidence": 0.97,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "current_mode.*冲突"):
+            GenericSceneObserver(
+                SequenceProvider([empty, empty, audit])
+            ).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "切换到英文直输模式"},
+            )
+
+    def test_ordinary_letter_key_cannot_become_keyboard_mode_switch(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[80, 35, 820, 115],
+                    text="",
+                    placeholder="搜索",
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "mode_switch": {
+                    "label": "A",
+                    "bounds": [650, 900, 760, 970],
+                    "confidence": 0.97,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+            },
+        )
+        scene = GenericSceneObserver(
+            SequenceProvider([empty, empty, audit])
+        ).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "切换到英文直输模式"},
+        )
+
+        self.assertIsNone(scene.unique_trusted_goal_element())
+        self.assertFalse(
+            any(item.meaning == "switch_keyboard_input_mode" for item in scene.elements)
+        )
+
     def test_targeted_refinement_uses_goal_directed_roi_but_keeps_full_frame_bounds(self) -> None:
         first = scene_payload()
         first["elements"] = []
@@ -798,7 +1096,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "evidence": ["已有查询文字"],
             }
         ]
-        provider = SequenceProvider([first, refined, {"structures": []}])
+        provider = SequenceProvider([first, refined, input_audit_payload()])
         observer = GenericSceneObserver(provider)
 
         scene = observer.observe(
@@ -823,7 +1121,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         first = scene_payload()
         first["elements"] = []
         refined = scene_payload()
-        provider = SequenceProvider([first, refined, {"structures": []}])
+        provider = SequenceProvider([first, refined, input_audit_payload()])
         observer = GenericSceneObserver(provider)
 
         observer.observe(
@@ -964,22 +1262,21 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "evidence": ["按钮上边缘被裁切"],
             },
         ]
-        audit = {
-            "structures": [
-                {
-                    "structure_id": "clipped",
-                    "bounds": [110, 1, 830, 70],
-                    "fully_visible": False,
-                    "text": "已有文字",
-                    "confidence": 0.99,
-                    "right_button": {
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="clipped",
+                    bounds=[110, 1, 830, 70],
+                    fully_visible=False,
+                    confidence=0.99,
+                    right_button={
                         "label": "搜索",
                         "bounds": [700, 1, 830, 70],
                         "confidence": 0.99,
                     },
-                }
+                )
             ]
-        }
+        )
         observer = GenericSceneObserver(SequenceProvider([payload, audit]))
 
         scene = observer.observe(
@@ -993,34 +1290,32 @@ class GenericSceneObserverTests(unittest.TestCase):
     def test_input_audit_selects_only_complete_unique_structure_in_full_frame_coordinates(self) -> None:
         empty = scene_payload()
         empty["elements"] = []
-        audit = {
-            "structures": [
-                {
-                    "structure_id": "complete",
-                    "bounds": [108, 78, 836, 129],
-                    "fully_visible": True,
-                    "text": "已有查询文字",
-                    "confidence": 0.98,
-                    "right_button": {
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="complete",
+                    bounds=[108, 78, 836, 129],
+                    text="已有查询文字",
+                    right_button={
                         "label": "搜索",
                         "bounds": [704, 78, 836, 129],
                         "confidence": 0.97,
                     },
-                },
-                {
-                    "structure_id": "clipped",
-                    "bounds": [108, 1, 836, 45],
-                    "fully_visible": False,
-                    "text": "已有查询文字",
-                    "confidence": 0.99,
-                    "right_button": {
+                ),
+                audited_application_input(
+                    structure_id="clipped",
+                    bounds=[108, 1, 836, 45],
+                    fully_visible=False,
+                    text="已有查询文字",
+                    confidence=0.99,
+                    right_button={
                         "label": "搜索",
                         "bounds": [750, 1, 836, 45],
                         "confidence": 0.99,
                     },
-                },
+                ),
             ]
-        }
+        )
         provider = SequenceProvider([empty, empty, audit])
         observer = GenericSceneObserver(provider)
 
@@ -1042,24 +1337,27 @@ class GenericSceneObserverTests(unittest.TestCase):
     def test_input_audit_refuses_multiple_complete_structures(self) -> None:
         empty = scene_payload()
         empty["elements"] = []
-        structure = {
-            "structure_id": "one",
-            "bounds": [100, 100, 900, 180],
-            "fully_visible": True,
-            "text": "已有文字",
-            "confidence": 0.98,
-            "right_button": {
+        structure = audited_application_input(
+            structure_id="one",
+            bounds=[100, 100, 900, 180],
+            right_button={
                 "label": "搜索",
                 "bounds": [720, 100, 900, 180],
                 "confidence": 0.98,
             },
-        }
+        )
         second = json.loads(json.dumps(structure, ensure_ascii=False))
         second["structure_id"] = "two"
         second["bounds"] = [100, 240, 900, 320]
         second["right_button"]["bounds"] = [720, 240, 900, 320]
         observer = GenericSceneObserver(
-            SequenceProvider([empty, empty, {"structures": [structure, second]}])
+            SequenceProvider(
+                [
+                    empty,
+                    empty,
+                    input_audit_payload(application_inputs=[structure, second]),
+                ]
+            )
         )
 
         scene = observer.observe(
@@ -1074,7 +1372,11 @@ class GenericSceneObserverTests(unittest.TestCase):
         empty = scene_payload()
         empty["elements"] = []
         provider = SequenceProvider(
-            [empty, empty, {"structures": [], "next_action": "tap"}]
+            [
+                empty,
+                empty,
+                {**input_audit_payload(), "next_action": "tap"},
+            ]
         )
 
         with self.assertRaisesRegex(VisionAgentError, "协议外字段"):

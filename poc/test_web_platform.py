@@ -354,6 +354,109 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         drag.assert_called_once_with(123, (54, 192), (377, 767))
         move_out.assert_called_once_with(123)
 
+    def test_system_navigation_reveal_is_independent_and_default_disabled(self):
+        controller = RobotController(title="test")
+        self.assertFalse(
+            controller.hardware_capabilities()["reveal_system_navigation"]
+        )
+        controller = RobotController(
+            title="test",
+            verified_actions={"swipe", "drag"},
+        )
+        with (
+            patch("robot_core.legacy.find_window") as find_window,
+            patch("robot_core.legacy.drag_client_path") as drag,
+        ):
+            with self.assertRaisesRegex(Exception, "系统边缘唤出导航栏.*真机验收"):
+                controller.vision_reveal_system_navigation()
+        find_window.assert_not_called()
+        drag.assert_not_called()
+
+    def test_verified_system_navigation_reveal_uses_one_local_path(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"reveal_system_navigation"},
+        )
+        frame = Image.new("RGB", (810, 1440), "white")
+        derived = {
+            "action": "reveal_system_navigation",
+            "edge": "bottom",
+            "frame_size": [810, 1440],
+            "dom_path": [[0.504, 0.986], [0.505, 0.700]],
+            "requested_grid": [[118, 500], [350, 500]],
+            "corrected_grid": [[92, 495], [333, 495]],
+        }
+        with (
+            patch("robot_core.legacy.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch.object(controller, "_checkpoint"),
+            patch(
+                "tap_calibration.reveal_system_navigation_path",
+                return_value=derived,
+            ) as derive,
+            patch("robot_core.legacy.drag_client_path") as drag,
+            patch("robot_core.legacy.move_cursor_outside_camera") as move_out,
+        ):
+            result = controller.vision_reveal_system_navigation()
+
+        derive.assert_called_once_with((810, 1440), controller.calibration_path)
+        drag.assert_called_once_with(123, (74, 712), (269, 712))
+        move_out.assert_called_once_with(123)
+        self.assertEqual([[74, 712], [269, 712]], result["client_path"])
+        self.assertEqual(derived["dom_path"], result["dom_path"])
+
+    def test_system_navigation_reveal_never_retries_failed_drag(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"reveal_system_navigation"},
+        )
+        frame = Image.new("RGB", (810, 1440), "white")
+        with (
+            patch("robot_core.legacy.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch.object(controller, "_checkpoint"),
+            patch(
+                "tap_calibration.reveal_system_navigation_path",
+                return_value={"corrected_grid": [[92, 495], [333, 495]]},
+            ),
+            patch(
+                "robot_core.legacy.drag_client_path",
+                side_effect=RuntimeError("drag failed"),
+            ) as drag,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "drag failed"):
+                controller.vision_reveal_system_navigation()
+        drag.assert_called_once()
+
+    def test_system_navigation_reveal_calibration_failure_is_zero_action(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"reveal_system_navigation"},
+        )
+        frame = Image.new("RGB", (810, 1440), "white")
+        with (
+            patch("robot_core.legacy.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch(
+                "tap_calibration.reveal_system_navigation_path",
+                side_effect=RuntimeError("invalid calibration"),
+            ),
+            patch("robot_core.legacy.drag_client_path") as drag,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "invalid calibration"):
+                controller.vision_reveal_system_navigation()
+        drag.assert_not_called()
+
+    def test_mock_system_navigation_reveal_records_semantic_evidence(self):
+        controller = MockRobotController(
+            verified_actions={"reveal_system_navigation"}
+        )
+        result = controller.vision_reveal_system_navigation()
+
+        self.assertEqual("reveal_system_navigation", result["action"])
+        self.assertEqual("bottom", result["edge"])
+        self.assertEqual(1, len(controller.executions))
+
 TEST_NUMERIC_GRID_LAYOUT = {
     "type": "numeric_grid",
     "anchors": {
@@ -4178,6 +4281,7 @@ class ApiEndToEndTests(unittest.TestCase):
                         "home",
                         "input_verified_text",
                         "long_press",
+                        "reveal_system_navigation",
                         "swipe",
                         "tap_semantic",
                     ],
@@ -4201,6 +4305,7 @@ class ApiEndToEndTests(unittest.TestCase):
                         "input_verified_text": True,
                         "long_press": True,
                         "drag": True,
+                        "reveal_system_navigation": True,
                     },
                     "supported_app_scope": "dynamic",
                 },

@@ -18,6 +18,7 @@ from tap_calibration import (
     build_calibration,
     corrected_grid_point,
     fit_affine,
+    reveal_system_navigation_path,
 )
 from run_xy_calibration import (
     calibration_page_ready,
@@ -375,6 +376,50 @@ class TapCalibrationMathTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(TapCalibrationError, "必须重新标定"):
                 corrected_grid_point(500, 500, (540, 960), path)
+
+    def test_reveal_system_navigation_path_is_local_calibrated_and_inward(self):
+        path = Path(__file__).with_name("tap_calibration.json")
+        result = reveal_system_navigation_path((810, 1440), path)
+
+        start, end = result["dom_path"]
+        self.assertEqual("bottom", result["edge"])
+        self.assertAlmostEqual(0.5, start[0], delta=0.02)
+        self.assertAlmostEqual(0.5, end[0], delta=0.02)
+        self.assertGreaterEqual(start[1], 0.90)
+        self.assertGreaterEqual(start[1] - end[1], 0.20)
+        self.assertEqual(2, len(result["requested_grid"]))
+        self.assertEqual(2, len(result["corrected_grid"]))
+
+    def test_reveal_system_navigation_path_fails_closed_on_invalid_or_drifted_fit(self):
+        source = json.loads(
+            Path(__file__).with_name("tap_calibration.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        out_of_bounds_hull = json.loads(json.dumps(source))
+        out_of_bounds_hull["coverage"]["normalized_hull"][0][0] = -0.001
+        cases = (
+            ("disabled", {**source, "enabled": False}, (810, 1440)),
+            (
+                "unvalidated",
+                {**source, "validation": {**source["validation"], "passed": False}},
+                (810, 1440),
+            ),
+            (
+                "frame_to_dom_drift",
+                {**source, "frame_to_dom": [[1, 0, 0], [0, 1, 0]]},
+                (810, 1440),
+            ),
+            ("non_uniform_frame", source, (810, 1515)),
+            ("out_of_bounds_hull", out_of_bounds_hull, (810, 1440)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tap.json"
+            for label, payload, frame_size in cases:
+                with self.subTest(label=label):
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaises(TapCalibrationError):
+                        reveal_system_navigation_path(frame_size, path)
 
     def test_single_touch_probe_dry_run_never_calls_robot(self):
         frame = Image.new("RGB", (540, 960), "black")

@@ -551,6 +551,7 @@ class RobotController:
             "input_verified_text",
             "long_press",
             "drag",
+            "reveal_system_navigation",
         }
         unexpected = self.verified_actions - allowed_actions
         if unexpected:
@@ -571,6 +572,7 @@ class RobotController:
                 "input_verified_text",
                 "long_press",
                 "drag",
+                "reveal_system_navigation",
             )
         }
 
@@ -746,6 +748,40 @@ class RobotController:
         legacy.drag_client_path(hwnd, start, end)
         legacy.move_cursor_outside_camera(hwnd)
         return start, end
+
+    def vision_reveal_system_navigation(self) -> dict[str, Any]:
+        """Reveal transient system navigation with one locally derived edge path."""
+
+        self._require_verified_action(
+            "reveal_system_navigation",
+            "系统边缘唤出导航栏",
+        )
+        hwnd, _title = legacy.find_window(self.title)
+        frame = self._capture_phone(hwnd)
+        from tap_calibration import reveal_system_navigation_path
+
+        evidence = reveal_system_navigation_path(
+            (frame.width, frame.height),
+            self.calibration_path,
+        )
+        corrected = evidence["corrected_grid"]
+
+        def to_pixel(point: list[int]) -> tuple[int, int]:
+            return (
+                int(round(point[0] * (frame.width - 1) / 1000)),
+                int(round(point[1] * (frame.height - 1) / 1000)),
+            )
+
+        start, end = (to_pixel(point) for point in corrected)
+        if start == end:
+            raise ValueError("系统边缘轨迹纠偏后起终点重合。")
+        self._checkpoint()
+        legacy.drag_client_path(hwnd, start, end)
+        legacy.move_cursor_outside_camera(hwnd)
+        return {
+            **evidence,
+            "client_path": [list(start), list(end)],
+        }
 
     def _vision_press_relative(
         self,
@@ -1682,6 +1718,7 @@ class MockRobotController(RobotController):
             "input_verified_text",
             "long_press",
             "drag",
+            "reveal_system_navigation",
         }
         super().__init__(
             title="MOCK",
@@ -1761,6 +1798,24 @@ class MockRobotController(RobotController):
             }
         )
         return (start_x, start_y), (end_x, end_y)
+
+    def vision_reveal_system_navigation(self) -> dict[str, Any]:
+        self._require_verified_action(
+            "reveal_system_navigation",
+            "系统边缘唤出导航栏",
+        )
+        evidence = {
+            "action": "reveal_system_navigation",
+            "edge": "bottom",
+            "frame_size": [540, 960],
+            "dom_path": [[0.5, 0.95], [0.5, 0.70]],
+            "requested_grid": [[100, 500], [350, 500]],
+            "corrected_grid": [[100, 500], [350, 500]],
+            "client_path": [[54, 480], [189, 480]],
+            "mock": True,
+        }
+        self.executions.append(dict(evidence))
+        return evidence
 
     def vision_android_home(self) -> tuple[int, int]:
         self.executions.append({"action": "android_home"})

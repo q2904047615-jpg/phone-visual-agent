@@ -31,6 +31,7 @@ class ActionAcceptancePageTests(unittest.TestCase):
             self.assertIn(marker, page)
         for app_name in ("微信", "抖音", "支付宝"):
             self.assertNotIn(app_name, page)
+        self.assertNotIn("placeholder=", page)
 
     def test_action_event_store_records_one_supported_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

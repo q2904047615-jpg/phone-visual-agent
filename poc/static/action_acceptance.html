@@ -99,7 +99,7 @@
 
     function showInput() {
       content.innerHTML = `<div class="card"><strong>动作：输入并核对文字</strong><p>目标文字：agent</p>
-        <input id="text-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="在这里输入 agent">
+        <input id="text-input" autocomplete="off" autocapitalize="off" spellcheck="false">
         <p id="input-state" class="muted">尚未匹配</p></div>`;
       const input = document.querySelector('#text-input');
       input.addEventListener('input', () => {

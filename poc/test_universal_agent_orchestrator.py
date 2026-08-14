@@ -1256,6 +1256,10 @@ class ObservationBridgeTests(unittest.TestCase):
 
         self.assertIn("页面标题已变化", observed.visible_evidence)
         self.assertTrue(any("查看详情" in item for item in observed.visible_evidence))
+        self.assertTrue(observed.grounded_visual_facts)
+        self.assertTrue(
+            any("查看详情" in item for item in observed.grounded_visual_facts)
+        )
         self.assertNotIn("不得进入证据", observed.visible_evidence)
         observed.validate()
 

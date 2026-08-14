@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 from dataclasses import asdict, dataclass, field, replace
+from difflib import SequenceMatcher
 from typing import Any, Protocol
 
 from deepseek_semantic_risk_audit import (
@@ -412,6 +413,7 @@ class ObservedState:
     scene_id: str
     summary: str
     visible_evidence: tuple[str, ...]
+    grounded_visual_facts: tuple[str, ...] = ()
     last_action_outcome: str = "not_applicable"
     blocked_reasons: tuple[str, ...] = ()
 
@@ -422,6 +424,11 @@ class ObservedState:
             self.visible_evidence,
             "observation.visible_evidence",
             required=True,
+        )
+        _validate_text_list(
+            self.grounded_visual_facts,
+            "observation.grounded_visual_facts",
+            required=False,
         )
         if self.last_action_outcome not in {
             "not_applicable",
@@ -444,6 +451,7 @@ class ObservedState:
             "scene_id": self.scene_id,
             "summary": self.summary,
             "visible_evidence": list(self.visible_evidence),
+            "grounded_visual_facts": list(self.grounded_visual_facts),
             "last_action_outcome": self.last_action_outcome,
             "blocked_reasons": list(self.blocked_reasons),
         }
@@ -1689,6 +1697,111 @@ def _subgoal_from_payload(value: Any) -> Subgoal:
     )
 
 
+_VISUAL_IDENTITY_CONTAINER_PATTERN = re.compile(
+    r"页面|界面|屏幕|视图|面板|卡片|(?:^|\b)(?:page|screen|view|panel|card)(?:\b|$)",
+    re.IGNORECASE,
+)
+_VISUAL_IDENTITY_GENERIC_TOKENS = (
+    "原来的",
+    "原有的",
+    "当前的",
+    "指定的",
+    "目标的",
+    "已经",
+    "清晰",
+    "完整",
+    "当前",
+    "原来",
+    "原有",
+    "指定",
+    "目标",
+    "页面",
+    "界面",
+    "屏幕",
+    "视图",
+    "面板",
+    "卡片",
+    "显示",
+    "出现",
+    "可见",
+    "打开",
+    "进入",
+    "返回",
+    "回到",
+    "page",
+    "screen",
+    "view",
+    "panel",
+    "card",
+    "visible",
+    "shown",
+    "displayed",
+    "open",
+    "opened",
+    "current",
+    "target",
+    "original",
+    "the",
+    "is",
+)
+
+
+def _compact_identity_text(value: str) -> str:
+    return "".join(re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", value.casefold()))
+
+
+def _named_visual_identity_anchor(texts: tuple[str, ...]) -> str:
+    anchors: list[str] = []
+    for item in texts:
+        value = str(item or "").strip()
+        if not value or not _VISUAL_IDENTITY_CONTAINER_PATTERN.search(value):
+            continue
+        cleaned = value.casefold()
+        for token in _VISUAL_IDENTITY_GENERIC_TOKENS:
+            cleaned = cleaned.replace(token, " ")
+        anchor = _compact_identity_text(cleaned)
+        if len(anchor) >= 4 and anchor not in anchors:
+            anchors.append(anchor)
+    # Short referential phrases such as "上一页" or "详情页" are not stable
+    # page identities. Longer names must be grounded in structured scene facts.
+    return min(anchors, key=len) if anchors else ""
+
+
+def _identity_anchor_is_grounded(anchor: str, facts: tuple[str, ...]) -> bool:
+    for fact in facts:
+        compact = _compact_identity_text(fact)
+        if not compact:
+            continue
+        if anchor in compact:
+            return True
+        longest = SequenceMatcher(
+            None,
+            anchor,
+            compact,
+            autojunk=False,
+        ).find_longest_match()
+        if longest.size / len(anchor) >= 0.5:
+            return True
+    return False
+
+
+def _require_named_visual_identity_grounding(
+    texts: tuple[str, ...],
+    observation: ObservedState,
+    *,
+    field: str,
+) -> None:
+    anchor = _named_visual_identity_anchor(texts)
+    if not anchor:
+        return
+    if not observation.grounded_visual_facts:
+        return
+    if not _identity_anchor_is_grounded(anchor, observation.grounded_visual_facts):
+        raise TaskGraphError(
+            f"命名页面完成声明缺少结构化画面身份锚点：{field}"
+        )
+
+
 def _validate_revision(
     previous: DynamicTaskGraph,
     candidate: DynamicTaskGraph,
@@ -1718,10 +1831,22 @@ def _validate_revision(
             raise TaskGraphError(f"重规划不能撤销已满足完成条件：{condition_id}")
         if not old.satisfied and new.satisfied and not set(new.evidence).issubset(evidence):
             raise TaskGraphError(f"完成条件使用了当前观察之外的证据：{condition_id}")
+        if not old.satisfied and new.satisfied:
+            _require_named_visual_identity_grounding(
+                (new.description, *new.evidence_required),
+                observation,
+                field=f"completion_conditions.{condition_id}",
+            )
     for condition_id in set(new_conditions) - set(old_conditions):
         condition = new_conditions[condition_id]
         if condition.satisfied and not set(condition.evidence).issubset(evidence):
             raise TaskGraphError(f"新增完成条件使用了当前观察之外的证据：{condition_id}")
+        if condition.satisfied:
+            _require_named_visual_identity_grounding(
+                (condition.description, *condition.evidence_required),
+                observation,
+                field=f"completion_conditions.{condition_id}",
+            )
 
     old_risks = {item.risk_id: item for item in previous.risk_actions}
     new_risks = {item.risk_id: item for item in candidate.risk_actions}
@@ -1773,6 +1898,12 @@ def _validate_revision(
         )
         if newly_completed and not set(new.completion_evidence).issubset(evidence):
             raise TaskGraphError(f"子目标使用了当前观察之外的完成证据：{subgoal_id}")
+        if newly_completed:
+            _require_named_visual_identity_grounding(
+                (new.objective, *new.completion_conditions),
+                observation,
+                field=f"subgoals.{subgoal_id}",
+            )
 
 
 def _validate_external_impact_revision(

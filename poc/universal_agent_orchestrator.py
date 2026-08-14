@@ -238,15 +238,34 @@ class ObservationBridge:
             raise UniversalAgentOrchestratorError("控制器验证结果必须是对象。")
 
         evidence: list[str] = []
+        grounded_visual_facts: list[str] = []
 
         def add(items: Any) -> None:
             for item in self._text_items(items):
                 if item not in evidence:
                     evidence.append(item)
 
+        def add_grounded(item: str) -> None:
+            value = str(item or "").strip()
+            if value and value not in grounded_visual_facts:
+                grounded_visual_facts.append(value)
+
         if scene.summary.strip():
             add((scene.summary.strip(),))
         add(scene.overlays)
+        add_grounded(
+            json.dumps(
+                {
+                    "app_id": scene.app_id,
+                    "screen_id": scene.screen_id,
+                    "overlays": list(scene.overlays),
+                    "stable": scene.stable,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
         for element in scene.elements:
             add(element.evidence)
             visible = " / ".join(
@@ -254,6 +273,20 @@ class ObservationBridge:
             )
             if visible:
                 add((visible,))
+            add_grounded(
+                json.dumps(
+                    {
+                        "element_id": element.element_id,
+                        "role": element.role,
+                        "label": element.label,
+                        "meaning": element.meaning,
+                        "states": dict(element.states),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
         add(verification.get("visible_evidence"))
         if action_outcome == "matched":
             add(verification.get("completion_evidence"))
@@ -269,6 +302,7 @@ class ObservationBridge:
             scene_id=scene_id,
             summary=scene.summary.strip() or "当前可信页面观察",
             visible_evidence=tuple(evidence),
+            grounded_visual_facts=tuple(grounded_visual_facts),
             last_action_outcome=str(action_outcome or "not_applicable"),
             blocked_reasons=self._text_items(verification.get("blocked_reasons")),
         )

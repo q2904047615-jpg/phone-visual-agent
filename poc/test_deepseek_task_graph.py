@@ -602,6 +602,87 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual(3, len(graph_prompts))
         self.assertIn("read_only 完成复核不能继续保留", graph_prompts[-1])
 
+    def test_replan_rejects_named_page_completion_without_grounded_identity(self):
+        objective = "原来的只读通用动作验收页面可见"
+        initial = single_subgoal_payload(objective, external_impact="read_only")
+        initial["completion_conditions"][0].update(
+            description=objective,
+            evidence_required=["画面显示原来的只读通用动作验收页面"],
+        )
+        initial["subgoals"][0]["completion_conditions"] = [objective]
+        claimed = "当前设置列表构成原来的只读通用动作验收页面的可见证据"
+        completed = copy.deepcopy(initial)
+        completed["status"] = "completed"
+        completed["completion_conditions"][0].update(
+            satisfied=True,
+            evidence=[claimed],
+        )
+        completed["subgoals"][0].update(
+            status="completed",
+            completion_evidence=[claimed],
+        )
+        completed["active_subgoal_id"] = None
+        provider = FakeProvider(initial, completed, copy.deepcopy(completed))
+        planner = DeepSeekTaskGraphPlanner(provider)
+        graph = planner.plan(objective, device_id="phone-1")
+
+        with self.assertRaisesRegex(TaskGraphError, "身份锚点"):
+            planner.replan(
+                graph,
+                ObservedState(
+                    scene_id="scene-settings",
+                    summary="设置页面，包含多个设置入口",
+                    visible_evidence=(claimed,),
+                    grounded_visual_facts=(
+                        '{"label":"设置列表","meaning":"settings_list","role":"container"}',
+                    ),
+                    last_action_outcome="matched",
+                ),
+                trigger="observation_changed",
+                reason="动作后重新观察。",
+            )
+
+    def test_replan_accepts_named_page_completion_with_grounded_identity(self):
+        objective = "原来的只读通用动作验收页面可见"
+        initial = single_subgoal_payload(objective, external_impact="read_only")
+        initial["completion_conditions"][0].update(
+            description=objective,
+            evidence_required=["画面显示原来的只读通用动作验收页面"],
+        )
+        initial["subgoals"][0]["completion_conditions"] = [objective]
+        evidence = "通用动作真机验收页标题清晰可见"
+        completed = copy.deepcopy(initial)
+        completed["status"] = "completed"
+        completed["completion_conditions"][0].update(
+            satisfied=True,
+            evidence=[evidence],
+        )
+        completed["subgoals"][0].update(
+            status="completed",
+            completion_evidence=[evidence],
+        )
+        completed["active_subgoal_id"] = None
+        provider = FakeProvider(initial, completed)
+        planner = DeepSeekTaskGraphPlanner(provider)
+        graph = planner.plan(objective, device_id="phone-1")
+
+        revised = planner.replan(
+            graph,
+            ObservedState(
+                scene_id="scene-acceptance",
+                summary=evidence,
+                visible_evidence=(evidence,),
+                grounded_visual_facts=(
+                    '{"label":"通用动作真机验收页","role":"text"}',
+                ),
+                last_action_outcome="matched",
+            ),
+            trigger="observation_changed",
+            reason="动作后重新观察。",
+        )
+
+        self.assertEqual("completed", revised.status)
+
     def test_current_page_goal_repairs_missing_app_to_foreground_context(self):
         invalid = base_payload()
         invalid["goal"]["target_apps"] = []

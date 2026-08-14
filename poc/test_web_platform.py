@@ -349,16 +349,16 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         self.assertEqual(point, (270, 480))
         press.assert_called_once()
 
-    def test_legacy_text_workflows_fail_before_hardware_when_input_is_unverified(self):
+    def test_deprecated_text_workflows_fail_before_hardware(self):
         controller = RobotController(
             title="test",
             verified_actions={"tap_semantic"},
         )
 
         with patch("robot_core.legacy.find_window") as find_window:
-            with self.assertRaisesRegex(Exception, "输入.*真机验收"):
+            with self.assertRaisesRegex(Exception, "已废弃的 App 多步流程入口已禁用"):
                 controller.comment_current_douyin({"text": "草稿"})
-            with self.assertRaisesRegex(Exception, "输入.*真机验收"):
+            with self.assertRaisesRegex(Exception, "已废弃的 App 多步流程入口已禁用"):
                 controller.send_wechat_text({"text": "草稿"})
 
         find_window.assert_not_called()
@@ -4299,7 +4299,7 @@ class ApiEndToEndTests(unittest.TestCase):
                 },
                 "universal_agent": {
                     "goal_protocol": "2026-08-10-generic-intent-v1",
-                    "scene_protocol": "2026-08-10-ui-scene-v2",
+                    "scene_protocol": "2026-08-14-ui-scene-v3",
                     "action_protocol": "2026-08-14-universal-action-v10",
                     "goal_preview_enabled": True,
                     "scene_preview_enabled": True,
@@ -5849,7 +5849,7 @@ class ApiEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 403)
 
-    def test_confirmed_task_runs_to_success(self) -> None:
+    def test_confirmed_deprecated_task_fails_closed(self) -> None:
         created = self.client.post(
             "/api/tasks",
             headers=self.headers,
@@ -5873,11 +5873,11 @@ class ApiEndToEndTests(unittest.TestCase):
         final = None
         while time.monotonic() < deadline:
             final = self.client.get(f"/api/tasks/{task['id']}").json()
-            if final["status"] == "succeeded":
+            if final["status"] in {"succeeded", "failed", "cancelled"}:
                 break
             time.sleep(0.05)
-        self.assertEqual(final["status"], "succeeded")
-        self.assertTrue(final["result"]["mock"])
+        self.assertEqual(final["status"], "failed")
+        self.assertRegex(final["error"], "旧多步 workflow")
 
     def test_capability_trial_blocks_legacy_task_confirmation_before_queue(self) -> None:
         from universal_agent_orchestrator import DeviceTaskRegistry

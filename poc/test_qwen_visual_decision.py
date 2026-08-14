@@ -1434,6 +1434,140 @@ class QwenVisualDecisionTests(unittest.TestCase):
             ("settings_icon:设置",),
         )
 
+    def test_refresh_event_cannot_finish_from_static_single_frame_evidence(self) -> None:
+        cases = (
+            ("refresh", "当前页面内容已刷新，以获取最新版本", "当前页面内容已刷新"),
+            ("navigation", "已经导航进入目标页面", "导航已经完成"),
+            ("retrieval", "已经重新获取服务器内容", "重新获取已经完成"),
+        )
+        for suffix, objective, condition in cases:
+            with self.subTest(suffix=suffix):
+                context = task_context(task_id=f"task_{suffix}_static")
+                context["current_subgoal"]["objective"] = objective
+                context["current_subgoal"]["completion_conditions"] = [condition]
+                invalid = action_payload(context, self.observation)
+                invalid.update(
+                    {
+                        "status": "finished",
+                        "next_action": None,
+                        "target_region": None,
+                        "expected_result": {},
+                        "completion_evidence_element_ids": ["settings_icon"],
+                        "reason": "当前静态页面包含目标内容，所以动作已经发生。",
+                    }
+                )
+                provider = SequenceProvider(
+                    [invalid, blocked_payload(context, self.observation)]
+                )
+
+                _observer, decision = self.decide(provider, context=context)
+
+                self.assertEqual("blocked", decision.proposal.status)
+                self.assertEqual(2, provider.calls)
+                retry_prompt = provider.messages[-1]["content"][0]["text"]
+                self.assertIn("发生型完成条件", retry_prompt)
+
+    def test_refresh_event_accepts_literal_dynamic_success_evidence(self) -> None:
+        context = task_context(task_id="task_refresh_dynamic")
+        context["current_subgoal"]["objective"] = "当前页面内容已刷新"
+        context["current_subgoal"]["completion_conditions"] = ["刷新已经完成"]
+        refreshed = UIElement(
+            element_id="refresh-result",
+            role="text",
+            meaning="refresh_status",
+            label="刷新成功",
+            bounds=(0.2, 0.1, 0.8, 0.16),
+            confidence=0.97,
+            states={"goal_relevant": True},
+            evidence=("页面逐字显示刷新成功",),
+        )
+        observation = trusted_observation(self.frames, elements=(refreshed,))
+        payload = action_payload(
+            context,
+            observation,
+            element_id="refresh-result",
+        )
+        payload.update(
+            {
+                "status": "finished",
+                "next_action": None,
+                "target_region": None,
+                "expected_result": {},
+                "completion_evidence_element_ids": ["refresh-result"],
+            }
+        )
+
+        _observer, decision = self.decide(
+            FakeProvider(payload),
+            context=context,
+            observation=observation,
+        )
+
+        self.assertEqual("finished", decision.proposal.status)
+        self.assertEqual(("refresh-result:刷新成功",), decision.proposal.completion_evidence)
+
+    def test_static_update_or_version_label_cannot_prove_refresh_event(self) -> None:
+        cases = (
+            ("latest-version", "latest version"),
+            ("last-updated", "last updated: 2026-08-01"),
+            ("last-updated-zh", "最后更新：2026-08-01"),
+            ("update-time-zh", "更新时间：2026-08-01"),
+        )
+        for suffix, label in cases:
+            with self.subTest(label=label):
+                context = task_context(task_id=f"task_refresh_{suffix}")
+                context["current_subgoal"]["objective"] = "当前页面内容已刷新"
+                context["current_subgoal"]["completion_conditions"] = [
+                    "刷新已经完成"
+                ]
+                static_label = UIElement(
+                    element_id="static-update-label",
+                    role="text",
+                    meaning="update_metadata",
+                    label=label,
+                    bounds=(0.2, 0.1, 0.8, 0.16),
+                    confidence=0.97,
+                    states={"goal_relevant": True},
+                    evidence=(f"页面逐字显示 {label}",),
+                )
+                observation = trusted_observation(
+                    self.frames,
+                    elements=(static_label,),
+                )
+                invalid = action_payload(
+                    context,
+                    observation,
+                    element_id="static-update-label",
+                )
+                invalid.update(
+                    {
+                        "status": "finished",
+                        "next_action": None,
+                        "target_region": None,
+                        "expected_result": {},
+                        "completion_evidence_element_ids": ["static-update-label"],
+                    }
+                )
+                blocked = copy.deepcopy(invalid)
+                blocked.update(
+                    {
+                        "status": "blocked",
+                        "completion_evidence_element_ids": [],
+                        "confidence": 0.4,
+                        "reason": "单帧静态更新标签不能证明本次刷新发生。",
+                    }
+                )
+                provider = SequenceProvider([invalid, blocked])
+
+                _observer, decision = self.decide(
+                    provider,
+                    context=context,
+                    observation=observation,
+                )
+
+                self.assertEqual("blocked", decision.proposal.status)
+                self.assertEqual(2, provider.calls)
+
     def test_exact_duplicate_json_response_is_accepted(self) -> None:
         payload = action_payload(self.context, self.observation)
         raw = json.dumps(payload, ensure_ascii=False)

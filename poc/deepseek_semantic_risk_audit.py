@@ -144,6 +144,10 @@ account_or_permission_change | unknown_external_effect
     的搜索/提交/发送/保存/发布等效果，且句中不存在任何未被否定的外部效果时，归为
     navigation_only。输入并搜索/发送/保存、未明确禁止提交效果、或含义不清时仍归为
     external_state 或 unknown。
+14. activate/trigger/激活/触发只是命令包装词，不能单独证明会改变外部状态；必须按其实际语义
+    效果分类。刷新、重新加载、重新获取、返回、切换或导航当前可见资源，若只改变查看位置或
+    当前会话中的可见表示，且不含发送、保存、发布、账号、权限、关系或交易效果时，属于
+    navigation_only。不得因为动词语气强就猜成 data_mutation 或 unknown_external_effect。
 
 输入 sources：
 {source_json}

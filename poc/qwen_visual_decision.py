@@ -80,6 +80,79 @@ ROLE_PRIORITY = {
     "unknown": 0,
 }
 
+TRANSITION_COMPLETION_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"(?:已经|已|完成|成功|重新)(?:刷新|重新加载|加载|更新|同步|导航|跳转|进入|返回|切换|打开|启动|重新获取|重新读取|重新连接)",
+        r"(?:刷新|重新加载|更新|同步|导航|跳转|进入|返回|切换|打开|启动|重新获取|重新读取|重新连接)(?:已经|已|完成|成功)",
+        r"\b(?:has|have|was|were|is)\s+(?:been\s+)?(?:refreshed|reloaded|updated|synchronized|navigated|redirected|entered|returned|switched|opened|launched|retrieved|refetched|reacquired)\b",
+        r"\b(?:refresh|reload|update|sync|navigation|redirect|retrieval|refetch|reacquisition)\s+(?:completed|complete|succeeded|occurred)\b",
+        r"\b(?:re)?fetch(?:ed|es|ing)?\s+(?:the\s+)?latest\b",
+    )
+)
+EXPLICIT_TRANSITION_EVIDENCE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"动作(?:回执|结果|已执行|执行成功)",
+        r"(?:刷新|重新加载|加载|更新|同步|导航|跳转|进入|返回|切换|打开|启动|重新获取|重新读取|重新连接)(?:已经|已)?(?:成功|完成)",
+        r"(?:页面|内容|画面|fingerprint|observation)(?:已经|已)?(?:发生变化|变化|改变|更新)",
+        r"前后(?:画面|观察|fingerprint|observation)",
+        r"刚刚更新",
+        r"\b(?:action receipt|action result|fingerprint changed|observation changed|scene changed|content changed)\b",
+        r"\b(?:refresh|reload|update|sync|navigation|redirect|retrieval|refetch)\s+(?:completed|complete|succeeded|successful)\b",
+        r"\bupdated just now\b",
+        r"\bbefore\b.{0,80}\bafter\b",
+    )
+)
+
+
+def _current_subgoal_requires_transition_evidence(context: "QwenTaskContext") -> bool:
+    completion_conditions = _text_tuple(
+        context.current_subgoal.get("completion_conditions") or [],
+        "current_subgoal.completion_conditions",
+    )
+    texts = completion_conditions or (
+        str(context.current_subgoal.get("objective") or ""),
+    )
+    return any(
+        pattern.search(text)
+        for text in texts
+        for pattern in TRANSITION_COMPLETION_PATTERNS
+    )
+
+
+def _contains_explicit_transition_evidence(texts: Iterable[str]) -> bool:
+    return any(
+        pattern.search(str(text))
+        for text in texts
+        for pattern in EXPLICIT_TRANSITION_EVIDENCE_PATTERNS
+    )
+
+
+def _finished_has_transition_evidence(
+    context: "QwenTaskContext",
+    observation: "TrustedObservation",
+    evidence_ids: tuple[str, ...],
+) -> bool:
+    prior_evidence = _text_tuple(
+        context.current_subgoal.get("completion_evidence") or [],
+        "current_subgoal.completion_evidence",
+    )
+    if _contains_explicit_transition_evidence(prior_evidence):
+        return True
+    visible_evidence: list[str] = []
+    for evidence_id in evidence_ids:
+        if evidence_id == "scene":
+            visible_evidence.extend(
+                [observation.scene.summary, *observation.scene.overlays]
+            )
+            continue
+        element = observation.get_candidate(evidence_id)
+        visible_evidence.extend(
+            [element.meaning, element.label, *element.evidence]
+        )
+    return _contains_explicit_transition_evidence(visible_evidence)
+
 
 @dataclass(frozen=True)
 class QwenTaskContext:
@@ -854,6 +927,18 @@ class QwenVisualDecision:
         if self.proposal.status == "finished":
             if not self.completion_evidence_element_ids:
                 raise GenericStepPlanningError("finished 缺少可信完成证据ID。")
+            if (
+                _current_subgoal_requires_transition_evidence(context)
+                and not _finished_has_transition_evidence(
+                    context,
+                    self.trusted_observation,
+                    self.completion_evidence_element_ids,
+                )
+            ):
+                raise GenericStepPlanningError(
+                    "发生型完成条件不能由单帧静态视觉内容单独满足；"
+                    "必须提供前后变化、动作回执或明确动态证据。"
+                )
             if exact_candidate_ids and not exact_candidate_ids.issubset(
                 set(self.completion_evidence_element_ids)
             ):
@@ -1326,6 +1411,10 @@ def _decision_prompt(
 8. finished只能用completion_evidence_element_ids引用可信候选ID，或用scene引用可信scene摘要；
    禁止自由编写完成证据。若scene_confidence<0.72，只能引用goal_relevant=true且role为
    container/dialog的高置信候选ID，禁止引用scene；这些只读证据不能用于任何动作。
+   若current_subgoal的完成条件声称“已刷新/已重新加载/已导航/已重新获取/已同步”等变化已经发生，
+   单张当前画面的静态元素或目标结果外观不能单独证明该事件。只有上下文已有前后变化或动作回执，
+   或被引用候选逐字显示“刷新成功/加载完成/刚刚更新”等明确动态证据时才可finished；否则选择
+   一个当前可信动作，找不到就blocked。禁止用刷新图标、页面标题或目标内容的静态存在冒充事件证据。
 9. confirmation_gate没有允许外部状态动作时必须blocked；你不能自行改写或批准确认门。
 10. task_id/device_id/revision/observation_id/fingerprint必须逐字复制；任何旧值都会被拒绝。
 11. expected_result只描述一个动作后可由新画面验证的变化，且只能按需使用：
@@ -1367,6 +1456,8 @@ def _decision_retry_prompt(
 - role=container/dialog只能作为finished的completion_evidence_element_ids，绝不能写进next_action。
 - action只能选择可信候选已有element_id并复制原始字段与bounds；不能新建元素。
 - 找不到逐字匹配且唯一的可信候选就blocked；finished只引用可信证据ID或scene。
+- “已刷新/已重新加载/已导航/已重新获取/已同步”等发生型完成条件必须有前后变化、动作回执或被引用
+  候选中的明确动态成功文字；单帧静态页面内容、标题或图标不能证明事件已经发生。
 - confirmation_gate未允许外部动作时blocked；每轮只允许一个动作，不要计划后续步骤。
 - 顶层只允许下方JSON中的字段；绝对不要action、actions、reasoning、analysis、plan或额外字段。
 - expected_result只能按需使用scene_changed、content_changed、current_video_changed、app_id、screen_id、

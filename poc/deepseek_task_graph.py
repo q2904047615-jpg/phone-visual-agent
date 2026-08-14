@@ -172,6 +172,14 @@ LOCAL_TRANSIENT_NAVIGATION_PATTERN = re.compile(
     r"(?:前台|后台|上一级|下一页|当前页面|空白页面))",
     re.IGNORECASE,
 )
+REVERSIBLE_NAVIGATION_EFFECT_PATTERN = re.compile(
+    r"(?:刷新|重新加载|重载|重新获取|重新读取|重新导航|返回|后退|"
+    r"切换.{0,10}(?:页面|页签|视图|窗口)|打开.{0,10}(?:页面|视图|详情)|"
+    r"\b(?:refresh|reload|re\s*load|re\s*fetch|re\s*retrieve|reacquire|"
+    r"navigate|return|back|switch\s+(?:page|tab|view|window)|"
+    r"open\s+(?:page|view|details?))\b)",
+    re.IGNORECASE,
+)
 LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN = re.compile(
     r"(?:(?:输入框|文本框|搜索框).{0,28}(?:文字|文本|内容|值|字符).{0,20}"
     r"(?:为|是|变为|改为|修改为|替换为|显示|保持)|"
@@ -1051,7 +1059,7 @@ class DeepSeekTaskGraphPlanner:
                 )
             sanitized_assessments.append(assessment)
         report = replace(report, assessments=tuple(sanitized_assessments))
-        report = _apply_local_risk_supplements(report, sources)
+        report = _apply_local_risk_supplements(report, sources, graph=graph)
         self.last_risk_audit = report
         _validate_graph_against_risk_audit(graph, report)
 
@@ -2207,6 +2215,8 @@ def _risk_audit_sources(graph: DynamicTaskGraph) -> tuple[AuditSource, ...]:
 def _apply_local_risk_supplements(
     report: SemanticRiskAuditReport,
     sources: tuple[AuditSource, ...],
+    *,
+    graph: DynamicTaskGraph | None = None,
 ) -> SemanticRiskAuditReport:
     source_map = {item.source_id: item for item in sources}
     source_groups: dict[str | None, list[AuditSource]] = {}
@@ -2218,6 +2228,11 @@ def _apply_local_risk_supplements(
         if any(LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.text) for item in group)
         and not any(_infer_external_risk_types(item.text) for item in group)
     }
+    structured_navigation_scopes = (
+        _structured_reversible_navigation_scopes(graph, source_groups)
+        if graph is not None
+        else frozenset()
+    )
     local_input_scopes = {
         scope_id
         for scope_id, group in source_groups.items()
@@ -2284,15 +2299,26 @@ def _apply_local_risk_supplements(
             and model_types
             and model_types <= {"unknown_external_effect", "data_mutation"}
             and not inferred
-            and assessment.subgoal_id in transient_navigation_scopes
+            and (
+                assessment.subgoal_id in transient_navigation_scopes
+                or assessment.subgoal_id in structured_navigation_scopes
+            )
         ):
+            structured_reconciliation = (
+                assessment.subgoal_id in structured_navigation_scopes
+            )
             assessment = replace(
                 assessment,
                 external_impact="navigation_only",
                 risk_types=(),
                 reason=(
                     assessment.reason
-                    + "；本地校验确认只涉及临时界面层级或标签页导航"
+                    + (
+                        "；本地一致性校验确认结构化影响为无风险的可逆导航，"
+                        "实体和整组语义均不含外部效果"
+                        if structured_reconciliation
+                        else "；本地校验确认只涉及临时界面层级或标签页导航"
+                    )
                 ),
             )
         if (
@@ -2314,6 +2340,57 @@ def _apply_local_risk_supplements(
             )
         assessments.append(assessment)
     return replace(report, assessments=tuple(assessments))
+
+
+def _structured_reversible_navigation_scopes(
+    graph: DynamicTaskGraph,
+    source_groups: dict[str | None, list[AuditSource]],
+) -> frozenset[str | None]:
+    """Reconcile only navigation scopes whose structure and semantics agree."""
+
+    entity_text = json.dumps(
+        graph.goal.entities,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    if _infer_external_risk_types(entity_text):
+        return frozenset()
+    subgoals = {item.subgoal_id: item for item in graph.subgoals}
+    safe_scopes: set[str | None] = set()
+    for scope_id, group in source_groups.items():
+        scoped_subgoals = (
+            tuple(graph.subgoals)
+            if scope_id is None
+            else ((subgoals[scope_id],) if scope_id in subgoals else ())
+        )
+        if not scoped_subgoals:
+            continue
+        if any(
+            item.external_impact != "navigation_only" or item.risk_action_ids
+            for item in scoped_subgoals
+        ):
+            continue
+        if scope_id is None and graph.risk_actions:
+            continue
+        texts = tuple(item.text for item in group)
+        if any(_infer_external_risk_types(text) for text in texts):
+            continue
+        if not any(
+            _has_reversible_navigation_semantics(text)
+            for text in (*texts, entity_text)
+        ):
+            continue
+        safe_scopes.add(scope_id)
+    return frozenset(safe_scopes)
+
+
+def _has_reversible_navigation_semantics(value: str) -> bool:
+    normalized = re.sub(r"[_-]+", " ", value)
+    return bool(
+        LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(normalized)
+        or REVERSIBLE_NAVIGATION_EFFECT_PATTERN.search(normalized)
+    )
 
 
 def _input_text_for_audit_scope(

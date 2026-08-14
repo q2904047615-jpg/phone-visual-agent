@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 from generic_scene_observer import GenericSceneObserver, INPUT_STRUCTURE_AUDIT_VERSION
 from generic_scene_observer import _parse_scene, _scene_enum_values
@@ -82,6 +82,23 @@ def stable_frames_with_one_sharp_center() -> list[Image.Image]:
     soft = base.copy()
     soft.paste(soft_center, (130, 270))
     return [soft.copy(), sharp, soft.copy(), soft.copy()]
+
+
+def converged_frames_with_sharp_stale_leader() -> list[Image.Image]:
+    settled = Image.new("RGB", (540, 960), (30, 40, 50))
+    stale = settled.copy()
+    draw = ImageDraw.Draw(stale)
+    for y in range(0, 960, 8):
+        draw.line((0, y, 539, y), fill="white" if (y // 8) % 2 else "black", width=4)
+    return [stale, settled.copy(), settled.copy(), settled.copy()]
+
+
+def frames_with_top_obstruction() -> list[Image.Image]:
+    image = Image.new("RGB", (540, 960), "#dddddd")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 300, 44), fill="black")
+    draw.rectangle((14, 12, 175, 21), fill="white")
+    return [image.copy() for _ in range(4)]
 
 
 def scene_payload() -> dict:
@@ -718,6 +735,19 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         self.assertEqual(1, provider.calls)
         self.assertTrue(observer.last_diagnostics["local_stability"]["stable"])
+
+    def test_read_only_observation_never_reselects_ignored_sharp_leading_frame(self) -> None:
+        observer = GenericSceneObserver(FakeProvider(scene_payload()))
+
+        observer.observe(frames=converged_frames_with_sharp_stale_leader())
+
+        diagnostics = observer.last_diagnostics
+        self.assertEqual(1, diagnostics["stable_tail_start_index"])
+        self.assertNotEqual(0, diagnostics["selected_frame_index"])
+        self.assertGreater(
+            diagnostics["frame_sharpness_scores"][0],
+            max(diagnostics["frame_sharpness_scores"][1:]),
+        )
 
     def test_stable_group_uses_sharpest_frame_instead_of_last_frame(self) -> None:
         observer = GenericSceneObserver(FakeProvider(scene_payload()))
@@ -1592,6 +1622,50 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertFalse(button.states["goal_relevant"])
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
         self.assertEqual([800, 1200, 700], provider.max_tokens_seen)
+
+    def test_top_obstruction_prevents_audit_crop_from_promoting_hidden_input(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[80, 12, 760, 86],
+                    text="",
+                    placeholder="搜索",
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [40, 560, 960, 980],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "mode_switch": {
+                    "label": "中",
+                    "bounds": [700, 890, 770, 940],
+                    "confidence": 0.97,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+            },
+        )
+        observer = GenericSceneObserver(SequenceProvider([empty, empty, audit]))
+
+        scene = observer.observe(
+            frames=frames_with_top_obstruction(),
+            goal_context={"objective": "切换顶部输入框的输入模式"},
+        )
+
+        inputs = [item for item in scene.elements if item.role == "input"]
+        self.assertEqual(1, len(inputs))
+        self.assertFalse(inputs[0].states["fully_visible"])
+        self.assertFalse(inputs[0].states["goal_relevant"])
+        self.assertNotIn("focused", inputs[0].states)
+        self.assertIsNone(scene.unique_trusted_goal_element())
+        self.assertEqual(
+            "top_edge_opaque_band",
+            observer.last_diagnostics["visual_obstructions"][0]["kind"],
+        )
+        self.assertTrue(any("顶部不透明视觉遮挡" in item for item in scene.overlays))
 
     def test_input_audit_refuses_multiple_complete_structures(self) -> None:
         empty = scene_payload()

@@ -1257,6 +1257,92 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
 
+    def test_false_positive_audit_cannot_turn_reversible_navigation_external(self):
+        objective = "activate browser page reload"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        payload["goal"]["entities"] = {
+            "navigation_effect": "trigger_reload",
+            "resource_scope": "current visible page",
+        }
+        payload["subgoals"][0]["completion_conditions"] = [
+            "current visible page has been reloaded"
+        ]
+        audit = audit_payload_for_graph(
+            payload,
+            overrides={
+                source_id: {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
+                }
+                for source_id in {
+                    "raw_goal",
+                    "goal.objective",
+                    "completion_conditions.result_visible.description",
+                    "completion_conditions.result_visible.evidence_required.0",
+                    "subgoals.target_state.objective",
+                    "subgoals.target_state.completion_conditions.0",
+                }
+            },
+        )
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(payload, audit_payloads=[audit])
+        )
+
+        graph = planner.plan(objective, device_id="phone-1")
+
+        self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+        self.assertEqual((), graph.active_subgoal().risk_action_ids)
+        self.assertEqual((), graph.risk_actions)
+        self.assertTrue(
+            all(
+                item.external_impact == "navigation_only" and not item.risk_types
+                for item in planner.last_risk_audit.assessments
+            )
+        )
+
+    def test_reversible_navigation_reconciliation_fails_closed_for_risky_entities(self):
+        objective = "activate current page reload"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        payload["goal"]["entities"] = {
+            "navigation_effect": "trigger_reload",
+            "follow_up_effect": "save content",
+        }
+        audit = audit_payload_for_graph(
+            payload,
+            overrides={
+                "raw_goal": {
+                    "external_impact": "external_state",
+                    "risk_types": ["data_mutation"],
+                }
+            },
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(payload, audit_payloads=[audit])
+            ).plan(objective, device_id="phone-1")
+
+    def test_semantic_audit_prompt_classifies_command_wrappers_by_effect(self):
+        objective = "activate the visible control to reload the current view"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        provider = FakeProvider(payload)
+
+        DeepSeekTaskGraphPlanner(provider).plan(objective, device_id="phone-1")
+
+        audit_prompt = provider.messages[1][0]["content"]
+        self.assertIn("activate/trigger/激活/触发", audit_prompt)
+        self.assertIn("必须按其实际语义", audit_prompt)
+        self.assertIn("navigation_only", audit_prompt)
+
     def test_false_positive_audit_cannot_turn_explicit_unsubmitted_input_external(self):
         raw_goal = (
             "把顶部搜索输入框中的现有文字替换为 Agent123，"

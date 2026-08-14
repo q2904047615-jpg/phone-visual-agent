@@ -9,7 +9,12 @@ from typing import Any
 
 from PIL import Image
 
-from observation_images import measure_frame_sharpness, measure_local_stability
+from observation_images import (
+    VisualObstruction,
+    consensus_top_edge_obstructions,
+    measure_frame_sharpness,
+    measure_local_stability,
+)
 from qwen_runtime_errors import (
     FORMAT_ERROR_TYPES,
     classify_qwen_error,
@@ -25,7 +30,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v11"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v12"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 COMPACT_OUTPUT_TOKENS = 800
 COMPACT_RETRY_TOKENS = 800
@@ -109,6 +114,8 @@ class GenericSceneObserver:
         targeted_refinement_used = False
         input_structure_audit_used = False
         targeted_roi_bounds: tuple[int, int, int, int] | None = None
+        stable_tail_start = 0
+        visual_obstructions: tuple[VisualObstruction, ...] = ()
         model_call_elapsed_seconds: list[float] = []
         model_call_token_budgets: list[int] = []
 
@@ -143,11 +150,19 @@ class GenericSceneObserver:
                 )
 
             sharpness_scores = [measure_frame_sharpness(item) for item in frames]
+            # Stability intentionally permits one stale leading frame, so that
+            # frame cannot be selected again merely because a transient vendor
+            # overlay makes it look artificially sharp.  Only the converged
+            # tail is eligible to become the trusted observation.
+            stable_tail_start = max(0, len(frames) - min(3, len(frames)))
             selected_frame_index = max(
-                range(len(frames)),
+                range(stable_tail_start, len(frames)),
                 key=sharpness_scores.__getitem__,
             )
             frame = frames[selected_frame_index].convert("RGB")
+            visual_obstructions = consensus_top_edge_obstructions(
+                frames[stable_tail_start:]
+            )
             fingerprint = _local_frame_fingerprint(frame)
             context = _safe_goal_context(goal_context or {})
             image_part = {
@@ -174,10 +189,14 @@ class GenericSceneObserver:
                 )
                 self.last_raw_response = raw
                 self._set_stage("parsing_compact_observation")
-                scene = _parse_scene(
-                    raw,
+                scene = _suppress_obscured_input_evidence(
+                    _parse_scene(
+                        raw,
+                        fingerprint=fingerprint,
+                        goal_context=context,
+                    ),
+                    visual_obstructions,
                     fingerprint=fingerprint,
-                    goal_context=context,
                 )
             except VisionAgentError as first_error:
                 first_error_type = classify_qwen_error(
@@ -211,10 +230,14 @@ class GenericSceneObserver:
                 )
                 self.last_raw_response = raw
                 self._set_stage("parsing_compact_retry")
-                scene = _parse_scene(
-                    raw,
+                scene = _suppress_obscured_input_evidence(
+                    _parse_scene(
+                        raw,
+                        fingerprint=fingerprint,
+                        goal_context=context,
+                    ),
+                    visual_obstructions,
                     fingerprint=fingerprint,
-                    goal_context=context,
                 )
 
             if _needs_targeted_refinement(scene, context):
@@ -257,10 +280,14 @@ class GenericSceneObserver:
                     self._set_stage("parsing_targeted_refinement")
                     # A failed refinement must stop the controller. Returning the
                     # earlier ambiguous scene would allow action on stale evidence.
-                    scene = _parse_scene(
-                        raw,
+                    scene = _suppress_obscured_input_evidence(
+                        _parse_scene(
+                            raw,
+                            fingerprint=fingerprint,
+                            goal_context=context,
+                        ),
+                        visual_obstructions,
                         fingerprint=fingerprint,
-                        goal_context=context,
                     )
 
                 except VisionAgentError as targeted_error:
@@ -301,10 +328,14 @@ class GenericSceneObserver:
                     )
                     self.last_raw_response = raw
                     self._set_stage("parsing_compact_retry")
-                    scene = _parse_scene(
-                        raw,
+                    scene = _suppress_obscured_input_evidence(
+                        _parse_scene(
+                            raw,
+                            fingerprint=fingerprint,
+                            goal_context=context,
+                        ),
+                        visual_obstructions,
                         fingerprint=fingerprint,
-                        goal_context=context,
                     )
 
             if _should_audit_prefilled_input(scene, context):
@@ -331,11 +362,15 @@ class GenericSceneObserver:
                 )
                 self.last_raw_response = raw
                 self._set_stage("parsing_input_structure_audit")
-                scene = _apply_input_structure_audit(
-                    scene,
-                    raw,
+                scene = _suppress_obscured_input_evidence(
+                    _apply_input_structure_audit(
+                        scene,
+                        raw,
+                        fingerprint=fingerprint,
+                        goal_context=context,
+                    ),
+                    visual_obstructions,
                     fingerprint=fingerprint,
-                    goal_context=context,
                 )
 
             target_local_candidate = scene.unique_trusted_goal_element()
@@ -353,6 +388,11 @@ class GenericSceneObserver:
                     "format_retry_used": format_retry_used,
                     "targeted_refinement_used": targeted_refinement_used,
                     "local_stability": stability.to_dict(),
+                    "selected_frame_index": selected_frame_index,
+                    "stable_tail_start_index": stable_tail_start,
+                    "visual_obstructions": [
+                        item.to_dict() for item in visual_obstructions
+                    ],
                     "scene_confidence": float(scene.confidence),
                     "candidate_summary": [
                         {
@@ -394,6 +434,10 @@ class GenericSceneObserver:
                 "elapsed_seconds": round(time.perf_counter() - started, 3),
                 "local_stability": stability.to_dict(),
                 "selected_frame_index": selected_frame_index,
+                "stable_tail_start_index": stable_tail_start,
+                "visual_obstructions": [
+                    item.to_dict() for item in visual_obstructions
+                ],
                 "confidence_basis": (
                     "scene"
                     if float(scene.confidence) >= MIN_TARGET_CONFIDENCE
@@ -425,6 +469,10 @@ class GenericSceneObserver:
                     "repair_retry_success": False,
                     "targeted_refinement_used": targeted_refinement_used,
                     "input_structure_audit_used": input_structure_audit_used,
+                    "stable_tail_start_index": stable_tail_start,
+                    "visual_obstructions": [
+                        item.to_dict() for item in visual_obstructions
+                    ],
                     "model_call_elapsed_seconds": model_call_elapsed_seconds,
                     "model_call_token_budgets": model_call_token_budgets,
                 }
@@ -469,6 +517,82 @@ class GenericSceneObserver:
             if "unexpected keyword" not in text and "keyword argument" not in text:
                 raise
             return self.provider._chat(messages, max_tokens=max_tokens)
+
+
+def _horizontal_overlap_ratio(
+    first: tuple[float, float, float, float],
+    second: tuple[int, int, int, int],
+) -> float:
+    overlap = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
+    return overlap / max(1.0, first[2] - first[0])
+
+
+def _input_evidence_is_obscured(
+    bounds: tuple[float, float, float, float],
+    obstruction: VisualObstruction,
+) -> bool:
+    if obstruction.kind != "top_edge_opaque_band":
+        return False
+    horizontal_overlap = _horizontal_overlap_ratio(bounds, obstruction.bounds)
+    vertical_gap = bounds[1] - obstruction.bounds[3]
+    obstruction_height = obstruction.bounds[3] - obstruction.bounds[1]
+    return horizontal_overlap >= 0.15 and vertical_gap <= max(
+        20.0,
+        obstruction_height * 0.5,
+    )
+
+
+def _suppress_obscured_input_evidence(
+    scene: UIScene,
+    obstructions: tuple[VisualObstruction, ...],
+    *,
+    fingerprint: str,
+) -> UIScene:
+    """Prevent a crop/model claim from restoring pixels hidden in the full frame."""
+
+    if not obstructions:
+        return scene
+    value = scene.to_dict()
+    changed = False
+    for element in value.get("elements") or []:
+        if not isinstance(element, dict) or element.get("role") != "input":
+            continue
+        raw_bounds = element.get("bounds")
+        if not isinstance(raw_bounds, list) or len(raw_bounds) != 4:
+            continue
+        bounds = tuple(float(part) * 1000 for part in raw_bounds)
+        matched = next(
+            (
+                obstruction
+                for obstruction in obstructions
+                if _input_evidence_is_obscured(bounds, obstruction)
+            ),
+            None,
+        )
+        if matched is None:
+            continue
+        states = dict(element.get("states") or {})
+        states["fully_visible"] = False
+        states["goal_relevant"] = False
+        states.pop("focused", None)
+        element["states"] = states
+        evidence = [str(item) for item in (element.get("evidence") or [])]
+        evidence.append("本地检测到顶部不透明遮挡，输入框完整边界不可审计")
+        element["evidence"] = evidence[:6]
+        changed = True
+    if not changed:
+        return scene
+    overlays = [str(item) for item in (value.get("overlays") or [])]
+    note = "本地检测到顶部不透明视觉遮挡；交叠输入证据已失败关闭"
+    if note not in overlays:
+        overlays.append(note)
+    value["overlays"] = overlays
+    return UIScene.from_dict(
+        value,
+        coordinate_scale=1.0,
+        stable_override=True,
+        fingerprint_override=fingerprint,
+    )
 
 
 def _json_only_system_message() -> dict[str, str]:

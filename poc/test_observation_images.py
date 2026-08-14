@@ -9,6 +9,8 @@ from observation_images import (
     ObservationRoi,
     build_overview,
     build_roi,
+    consensus_top_edge_obstructions,
+    detect_top_edge_opaque_bands,
     map_roi_bounds_to_full,
     map_roi_point_to_full,
     measure_local_stability,
@@ -43,6 +45,60 @@ class FakeProvider:
 
 
 class ObservationImageTests(unittest.TestCase):
+    def test_detects_scaled_partial_width_top_obstruction_without_fixed_pixels(self) -> None:
+        for size in ((540, 960), (810, 1440), (675, 1200)):
+            image = Image.new("RGB", size, "#dedede")
+            draw = ImageDraw.Draw(image)
+            width, height = size
+            band_right = round(width * 0.56)
+            band_bottom = round(height * 0.045)
+            draw.rectangle((0, 0, band_right, band_bottom), fill="black")
+            draw.rectangle(
+                (
+                    round(width * 0.025),
+                    round(height * 0.012),
+                    round(width * 0.32),
+                    round(height * 0.022),
+                ),
+                fill="white",
+            )
+
+            detected = detect_top_edge_opaque_bands(image)
+
+            self.assertEqual(1, len(detected))
+            self.assertEqual("top_edge_opaque_band", detected[0].kind)
+            self.assertLessEqual(abs(detected[0].bounds[2] - 560), 35)
+            self.assertLessEqual(abs(detected[0].bounds[3] - 45), 20)
+
+    def test_top_obstruction_detector_ignores_status_bars_and_letterboxing(self) -> None:
+        full_status = Image.new("RGB", (540, 960), "#dddddd")
+        ImageDraw.Draw(full_status).rectangle((0, 0, 539, 45), fill="black")
+        letterboxed = Image.new("RGB", (540, 960), "#dddddd")
+        ImageDraw.Draw(letterboxed).rectangle((0, 0, 35, 959), fill="black")
+
+        self.assertEqual((), detect_top_edge_opaque_bands(full_status))
+        self.assertEqual((), detect_top_edge_opaque_bands(letterboxed))
+
+    def test_top_obstruction_requires_stable_frame_consensus(self) -> None:
+        clear = Image.new("RGB", (540, 960), "#dddddd")
+        obstructed = clear.copy()
+        ImageDraw.Draw(obstructed).rectangle((0, 0, 300, 44), fill="black")
+
+        self.assertEqual(
+            (),
+            consensus_top_edge_obstructions(
+                [obstructed, clear.copy(), clear.copy()]
+            ),
+        )
+        self.assertEqual(
+            1,
+            len(
+                consensus_top_edge_obstructions(
+                    [clear.copy(), obstructed, obstructed.copy()]
+                )
+            ),
+        )
+
     def test_overview_and_roi_stay_inside_payload_budget(self) -> None:
         image = patterned_frame()
         overview = build_overview(image)

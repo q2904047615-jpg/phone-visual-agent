@@ -5,10 +5,51 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from touch_calibration_server import ACTION_PAGE_PATH, ActionEventStore
+from touch_calibration_server import (
+    ACTION_PAGE_PATH,
+    PAGE_PATH,
+    ActionEventStore,
+    PageStateStore,
+)
 
 
 class ActionAcceptancePageTests(unittest.TestCase):
+    def test_touch_calibration_page_requires_fullscreen_edge_grid(self) -> None:
+        page = PAGE_PATH.read_text(encoding="utf-8")
+        self.assertIn("requestFullscreen", page)
+        self.assertIn("webkitRequestFullscreen", page)
+        self.assertIn("navigationUI: 'hide'", page)
+        self.assertIn("[.05,.05]", page)
+        self.assertIn("[.95,.95]", page)
+        self.assertIn("/api/page-state", page)
+
+    def test_page_state_store_rejects_unknown_phase(self) -> None:
+        store = PageStateStore()
+        with self.assertRaisesRegex(ValueError, "不支持"):
+            store.update(
+                {
+                    "phase": "unknown",
+                    "fullscreen": False,
+                    "viewport_width": 393,
+                    "viewport_height": 685,
+                    "sequence": 0,
+                }
+            )
+
+    def test_page_state_store_records_fullscreen_calibration(self) -> None:
+        store = PageStateStore()
+        state = store.update(
+            {
+                "phase": "calibration",
+                "fullscreen": True,
+                "viewport_width": 810,
+                "viewport_height": 1440,
+                "sequence": 2,
+            }
+        )
+        self.assertTrue(state["fullscreen"])
+        self.assertEqual("calibration", store.snapshot()["phase"])
+
     def test_page_exposes_only_generic_safe_action_modes(self) -> None:
         page = ACTION_PAGE_PATH.read_text(encoding="utf-8")
         for marker in (

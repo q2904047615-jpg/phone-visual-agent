@@ -11,6 +11,9 @@ import numpy as np
 
 
 CALIBRATION_PATH = Path(__file__).with_name("tap_calibration.json")
+CALIBRATION_VERSION = 2
+MIN_COVERAGE_SPAN_X = 0.68
+MIN_COVERAGE_SPAN_Y = 0.82
 
 
 class TapCalibrationError(RuntimeError):
@@ -93,6 +96,83 @@ def fit_affine(
     return transform, errors
 
 
+def _convex_hull(points: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Return the counter-clockwise convex hull without repeating its first point."""
+
+    ordered = sorted(set(points))
+    if len(ordered) < 3:
+        raise TapCalibrationError("校准覆盖点不足，无法形成安全区域。")
+
+    def cross(
+        origin: tuple[float, float],
+        first: tuple[float, float],
+        second: tuple[float, float],
+    ) -> float:
+        return (first[0] - origin[0]) * (second[1] - origin[1]) - (
+            first[1] - origin[1]
+        ) * (second[0] - origin[0])
+
+    lower: list[tuple[float, float]] = []
+    for point in ordered:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper: list[tuple[float, float]] = []
+    for point in reversed(ordered):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    hull = lower[:-1] + upper[:-1]
+    if len(hull) < 3:
+        raise TapCalibrationError("校准覆盖点共线，无法形成安全区域。")
+    return hull
+
+
+def build_coverage(
+    normalized_points: Sequence[tuple[float, float]],
+) -> dict[str, object]:
+    hull = _convex_hull(normalized_points)
+    xs = [point[0] for point in hull]
+    ys = [point[1] for point in hull]
+    bounds = [min(xs), min(ys), max(xs), max(ys)]
+    span_x = bounds[2] - bounds[0]
+    span_y = bounds[3] - bounds[1]
+    sufficient = bool(
+        span_x >= MIN_COVERAGE_SPAN_X and span_y >= MIN_COVERAGE_SPAN_Y
+    )
+    return {
+        "kind": "convex_hull",
+        "normalized_hull": [[float(x), float(y)] for x, y in hull],
+        "normalized_bounds": [float(value) for value in bounds],
+        "span": [round(float(span_x), 6), round(float(span_y), 6)],
+        "sufficient": sufficient,
+    }
+
+
+def _point_in_convex_hull(
+    point: tuple[float, float],
+    hull: Sequence[Sequence[float]],
+    *,
+    tolerance: float = 0.003,
+) -> bool:
+    if len(hull) < 3:
+        return False
+    direction = 0
+    x, y = point
+    for index, first in enumerate(hull):
+        second = hull[(index + 1) % len(hull)]
+        cross = (float(second[0]) - float(first[0])) * (y - float(first[1])) - (
+            float(second[1]) - float(first[1])
+        ) * (x - float(first[0]))
+        if abs(cross) <= tolerance:
+            continue
+        current = 1 if cross > 0 else -1
+        if direction and current != direction:
+            return False
+        direction = current
+    return True
+
+
 def build_calibration(
     samples: Sequence[dict[str, object]], frame_size: tuple[int, int]
 ) -> dict[str, object]:
@@ -110,7 +190,7 @@ def build_calibration(
     if width < 2 or height < 2:
         raise TapCalibrationError("相机画面尺寸无效。")
 
-    desired_frame = []
+    desired_frame: list[tuple[float, float]] = []
     command_frame = []
     target_dom = []
     actual_dom = []
@@ -142,11 +222,16 @@ def build_calibration(
     projection_distances = np.linalg.norm(projection_errors * projection_scale, axis=1)
     rms = float(math.sqrt(float(np.mean(distances**2))))
     maximum = float(np.max(distances))
+    coverage = build_coverage(desired_frame)
 
     # A noisy/unstable page must never silently become an active correction.
-    accepted = bool(rms <= 12.0 and maximum <= 25.0)
+    # A precise fit over only the middle of the screen is also unsafe because
+    # small edge controls would otherwise rely on unmeasured extrapolation.
+    accepted = bool(
+        rms <= 12.0 and maximum <= 25.0 and coverage["sufficient"]
+    )
     return {
-        "version": 1,
+        "version": CALIBRATION_VERSION,
         "enabled": False,
         "accepted_fit": accepted,
         "validated": False,
@@ -162,6 +247,7 @@ def build_calibration(
                 float(math.sqrt(float(np.mean(projection_distances**2)))), 4
             ),
         },
+        "coverage": coverage,
         "samples": list(samples),
     }
 
@@ -214,6 +300,25 @@ def corrected_grid_point(
     calibration = load_active_calibration(frame_size, path)
     if calibration is None:
         return x, y
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if int(payload.get("version", 0)) < CALIBRATION_VERSION:
+            raise TapCalibrationError("当前触控标定缺少屏幕覆盖边界，必须重新标定。")
+        coverage = payload.get("coverage")
+        if not isinstance(coverage, dict) or not coverage.get("sufficient"):
+            raise TapCalibrationError("当前触控标定未覆盖足够屏幕区域，已拒绝点击。")
+        hull = coverage.get("normalized_hull")
+        if not isinstance(hull, list) or not _point_in_convex_hull(
+            (x / 1000.0, y / 1000.0), hull
+        ):
+            bounds = coverage.get("normalized_bounds", [])
+            raise TapCalibrationError(
+                f"目标点({x}, {y})位于实测标定区域之外{bounds}，已拒绝外推点击。"
+            )
+    except TapCalibrationError:
+        raise
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise TapCalibrationError("无法验证触控标定覆盖边界，已拒绝点击。") from exc
     corrected_x, corrected_y = calibration.apply(x / 1000.0, y / 1000.0)
     if not (-0.08 <= corrected_x <= 1.08 and -0.08 <= corrected_y <= 1.08):
         raise TapCalibrationError("纠偏结果超出安全边界，已拒绝点击。")

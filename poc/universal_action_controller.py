@@ -117,6 +117,7 @@ FORBIDDEN_SEMANTIC_CHINESE = (
 NAVIGATION_SEMANTIC_CLASSES = (
     ("back", frozenset({"back", "return", "previous"}), ("返回", "后退", "上一页")),
     ("forward", frozenset({"forward", "next"}), ("前进", "下一页")),
+    ("refresh", frozenset({"refresh", "reload"}), ("刷新", "重新加载")),
     ("close", frozenset({"close", "cancel", "dismiss"}), ("关闭", "取消", "收起")),
     ("tab", frozenset({"tab", "switch"}), ("标签", "切换")),
     ("menu", frozenset({"menu", "more"}), ("菜单", "更多")),

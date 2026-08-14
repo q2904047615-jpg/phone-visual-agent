@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,8 +17,10 @@ from tap_calibration import (
     fit_affine,
 )
 from run_xy_calibration import (
+    ensure_fullscreen_calibration_page,
     locate_magenta_target,
     probe_single_touch,
+    wait_for_page_state,
 )
 
 
@@ -29,6 +32,14 @@ class FakeProbeRobot:
     def vision_tap_relative(self, x: int, y: int) -> tuple[int, int]:
         self.tap_calls.append((x, y))
         return (111, 222)
+
+    def vision_capture(self) -> Image.Image:
+        return self.frame.copy()
+
+
+class FakeFullscreenRobot:
+    def __init__(self, frame: Image.Image) -> None:
+        self.frame = frame
 
     def vision_capture(self) -> Image.Image:
         return self.frame.copy()
@@ -76,8 +87,14 @@ class TapCalibrationMathTests(unittest.TestCase):
                     {
                         "enabled": True,
                         "validated": True,
+                        "version": 2,
                         "frame_size": [540, 960],
                         "target_to_command": [[1.0, 0.0, -0.01], [0.0, 1.0, 0.02]],
+                        "coverage": {
+                            "sufficient": True,
+                            "normalized_hull": [[0.05, 0.05], [0.95, 0.05], [0.95, 0.95], [0.05, 0.95]],
+                            "normalized_bounds": [0.05, 0.05, 0.95, 0.95],
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -92,11 +109,17 @@ class TapCalibrationMathTests(unittest.TestCase):
                     {
                         "enabled": True,
                         "validated": True,
+                        "version": 2,
                         "frame_size": [540, 960],
                         "target_to_command": [
                             [1.0, 0.0, -0.01],
                             [0.0, 1.0, 0.02],
                         ],
+                        "coverage": {
+                            "sufficient": True,
+                            "normalized_hull": [[0.05, 0.05], [0.95, 0.05], [0.95, 0.95], [0.05, 0.95]],
+                            "normalized_bounds": [0.05, 0.05, 0.95, 0.95],
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -114,11 +137,17 @@ class TapCalibrationMathTests(unittest.TestCase):
                     {
                         "enabled": True,
                         "validated": True,
+                        "version": 2,
                         "frame_size": [540, 960],
                         "target_to_command": [
                             [1.0, 0.0, -0.01],
                             [0.0, 1.0, 0.02],
                         ],
+                        "coverage": {
+                            "sufficient": True,
+                            "normalized_hull": [[0.05, 0.05], [0.95, 0.05], [0.95, 0.95], [0.05, 0.95]],
+                            "normalized_bounds": [0.05, 0.05, 0.95, 0.95],
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -130,7 +159,7 @@ class TapCalibrationMathTests(unittest.TestCase):
 
     def test_build_calibration_recovers_translation(self):
         width, height = 501, 901
-        points = [(0.15, 0.15), (0.5, 0.15), (0.85, 0.15), (0.15, 0.5), (0.5, 0.5), (0.85, 0.5), (0.15, 0.85), (0.5, 0.85), (0.85, 0.85)]
+        points = [(0.05, 0.05), (0.5, 0.05), (0.95, 0.05), (0.05, 0.5), (0.5, 0.5), (0.95, 0.5), (0.05, 0.95), (0.5, 0.95), (0.95, 0.95)]
         samples = []
         for index, (x, y) in enumerate(points):
             samples.append(
@@ -148,7 +177,66 @@ class TapCalibrationMathTests(unittest.TestCase):
         self.assertAlmostEqual(corrected[0], 0.48, places=6)
         self.assertAlmostEqual(corrected[1], 0.51, places=6)
         self.assertTrue(payload["accepted_fit"])
+        self.assertTrue(payload["coverage"]["sufficient"])
         self.assertFalse(payload["enabled"])
+
+    def test_middle_only_fit_is_rejected_even_when_residual_is_zero(self):
+        width, height = 501, 901
+        points = [(0.25, 0.25), (0.5, 0.25), (0.75, 0.25), (0.25, 0.5), (0.5, 0.5), (0.75, 0.5), (0.25, 0.75), (0.5, 0.75), (0.75, 0.75)]
+        samples = [
+            {
+                "sequence": index,
+                "desired_frame": [x * (width - 1), y * (height - 1)],
+                "command_frame": [x * (width - 1), y * (height - 1)],
+                "target_dom": [x, y],
+                "actual_dom": [x, y],
+            }
+            for index, (x, y) in enumerate(points)
+        ]
+        payload = build_calibration(samples, (width, height))
+        self.assertFalse(payload["coverage"]["sufficient"])
+        self.assertFalse(payload["accepted_fit"])
+
+    def test_active_correction_rejects_target_outside_measured_hull(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tap.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "enabled": True,
+                        "validated": True,
+                        "frame_size": [540, 960],
+                        "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                        "coverage": {
+                            "sufficient": True,
+                            "normalized_hull": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.8], [0.1, 0.8]],
+                            "normalized_bounds": [0.1, 0.1, 0.9, 0.8],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(TapCalibrationError, "实测标定区域之外"):
+                corrected_grid_point(735, 910, (540, 960), path)
+
+    def test_legacy_active_calibration_without_coverage_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tap.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "enabled": True,
+                        "validated": True,
+                        "frame_size": [540, 960],
+                        "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(TapCalibrationError, "必须重新标定"):
+                corrected_grid_point(500, 500, (540, 960), path)
 
     def test_single_touch_probe_dry_run_never_calls_robot(self):
         frame = Image.new("RGB", (540, 960), "black")
@@ -166,6 +254,63 @@ class TapCalibrationMathTests(unittest.TestCase):
         self.assertEqual("awaiting_explicit_execution", result["status"])
         self.assertEqual(0, result["physical_actions"])
         self.assertEqual([], robot.tap_calls)
+
+    def test_fullscreen_setup_failure_keeps_one_action_evidence(self):
+        frame = Image.new("RGB", (540, 960), "black")
+        robot = FakeFullscreenRobot(frame)
+        states = [
+            {"phase": "fullscreen_setup", "fullscreen": False},
+            TapCalibrationError("fullscreen refused"),
+        ]
+
+        def page_state(*_args, **_kwargs):
+            value = states.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "run_xy_calibration.wait_for_page_state",
+            side_effect=page_state,
+        ), patch(
+            "run_xy_calibration.wait_for_stable_target",
+            return_value=(frame, (270, 480, (250, 460, 290, 500))),
+        ), patch(
+            "run_xy_calibration.click_raw_pixel",
+        ) as click, patch(
+            "run_xy_calibration.request_json",
+            return_value={"phase": "fullscreen_setup", "fullscreen": False},
+        ):
+            output = Path(directory)
+            with self.assertRaisesRegex(TapCalibrationError, "fullscreen refused"):
+                ensure_fullscreen_calibration_page(
+                    base_url="http://127.0.0.1:8770",
+                    robot=robot,
+                    output_dir=output,
+                )
+            report = json.loads(
+                (output / "00_fullscreen_setup.json").read_text(encoding="utf-8")
+            )
+
+        click.assert_called_once()
+        self.assertEqual(1, report["physical_actions"])
+        self.assertFalse(report["passed"])
+
+    def test_page_state_wait_rejects_stale_calibration_heartbeat(self):
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=20)).isoformat()
+        with patch(
+            "run_xy_calibration.request_json",
+            return_value={
+                "phase": "calibration",
+                "fullscreen": True,
+                "updated_at": stale,
+            },
+        ), self.assertRaisesRegex(TapCalibrationError, "没有进入预期阶段"):
+            wait_for_page_state(
+                "http://127.0.0.1:8770",
+                phases={"calibration"},
+                timeout=0.01,
+            )
 
     def test_single_touch_probe_records_one_verified_contact(self):
         frame = Image.new("RGB", (540, 960), "black")

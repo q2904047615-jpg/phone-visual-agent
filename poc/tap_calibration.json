@@ -1,61 +1,62 @@
 {
   "version": 1,
-  "enabled": true,
-  "accepted_fit": true,
-  "validated": true,
-  "created_at": "2026-08-05T09:31:59.714128+00:00",
+  "enabled": false,
+  "accepted_fit": false,
+  "validated": false,
+  "disabled_reason": "legacy middle-only coverage reached about 74% frame height; bottom-edge targets require calibration v2",
+  "created_at": "2026-08-14T08:20:00.992093+00:00",
   "frame_size": [
-    540,
-    960
+    810,
+    1440
   ],
   "sample_count": 9,
   "target_to_command": [
     [
-      1.0296809546496843,
-      -0.008716757978225216,
-      -0.01942865785412678
+      1.0392826616688413,
+      -0.006271192037812504,
+      -0.02628094496832855
     ],
     [
-      0.0033150669448832096,
-      0.996201407087019,
-      -0.0013735999113757798
+      0.004523773204936359,
+      0.9849995975293684,
+      0.0017206236614908982
     ]
   ],
   "frame_to_dom": [
     [
-      1.1734779580936088,
-      -0.0014641253936566179,
-      -0.0870024488812871
+      1.1746720802352517,
+      0.0038321724875139684,
+      -0.09013318324173862
     ],
     [
-      0.0015843192739796311,
-      1.2015647909657214,
-      -0.0725561698507271
+      0.0036628443001750642,
+      1.1917253056812338,
+      -0.07111353289027345
     ]
   ],
   "fit": {
-    "rms_error_px": 0.8719,
-    "max_error_px": 1.9835,
-    "projection_rms_px": 1.0893
+    "rms_error_px": 1.7691,
+    "max_error_px": 2.8423,
+    "projection_rms_px": 2.0953
   },
   "samples": [
     {
       "sequence": 0,
       "desired_frame": [
-        128,
-        226
+        195,
+        343
       ],
       "command_frame": [
-        128,
-        226
+        195,
+        343
       ],
       "target_dom": [
         0.19204401690844664,
         0.21118696449446853
       ],
       "actual_dom": [
-        0.20633819813036736,
-        0.21287327230411723
+        0.2146657696207061,
+        0.21446582209454837
       ],
       "viewport_size": [
         393,
@@ -65,20 +66,20 @@
     {
       "sequence": 1,
       "desired_frame": [
-        269,
-        225
+        405,
+        338
       ],
       "command_frame": [
-        269,
-        225
+        405,
+        338
       ],
       "target_dom": [
         0.5001156833638976,
         0.21118696449446853
       ],
       "actual_dom": [
-        0.5061300729067271,
-        0.21048441420506386
+        0.5107564368017454,
+        0.2101127011932596
       ],
       "viewport_size": [
         393,
@@ -88,20 +89,20 @@
     {
       "sequence": 2,
       "desired_frame": [
-        412,
-        225
+        619,
+        337
       ],
       "command_frame": [
-        412,
-        225
+        619,
+        337
       ],
       "target_dom": [
         0.8081873498193483,
         0.21118696449446853
       ],
       "actual_dom": [
-        0.8086976495407919,
-        0.20968812817204607
+        0.8059218700302163,
+        0.20745842926693658
       ],
       "viewport_size": [
         393,
@@ -111,20 +112,20 @@
     {
       "sequence": 3,
       "desired_frame": [
-        129,
-        466
+        192,
+        699
       ],
       "command_frame": [
-        129,
-        466
+        192,
+        699
       ],
       "target_dom": [
         0.19204401690844664,
         0.5104346505046761
       ],
       "actual_dom": [
-        0.2118898930440422,
-        0.5139214954236998
+        0.2091140552938136,
+        0.514452412180657
       ],
       "viewport_size": [
         393,
@@ -134,20 +135,20 @@
     {
       "sequence": 4,
       "desired_frame": [
-        270,
-        466
+        404,
+        699
       ],
       "command_frame": [
-        270,
-        466
+        404,
+        699
       ],
       "target_dom": [
         0.5001156833638976,
         0.5104346505046761
       ],
       "actual_dom": [
-        0.5135322939651916,
-        0.5155140674897354
+        0.5089058524173028,
+        0.51562036667427
       ],
       "viewport_size": [
         393,
@@ -157,20 +158,20 @@
     {
       "sequence": 5,
       "desired_frame": [
-        412,
-        465
+        617,
+        698
       ],
       "command_frame": [
-        412,
-        465
+        617,
+        698
       ],
       "target_dom": [
         0.8081873498193483,
         0.5104346505046761
       ],
       "actual_dom": [
-        0.8086976495407919,
-        0.5128069132783987
+        0.8077724932410941,
+        0.5128597955634124
       ],
       "viewport_size": [
         393,
@@ -180,20 +181,20 @@
     {
       "sequence": 6,
       "desired_frame": [
-        129,
-        703
+        193,
+        1062
       ],
       "command_frame": [
-        129,
-        703
+        193,
+        1062
       ],
       "target_dom": [
         0.19204401690844664,
         0.8096823365148836
       ],
       "actual_dom": [
-        0.2146657696207061,
-        0.8125814396099452
+        0.2202174451211633,
+        0.8181020472171533
       ],
       "viewport_size": [
         393,
@@ -203,20 +204,20 @@
     {
       "sequence": 7,
       "desired_frame": [
-        270,
-        703
+        405,
+        1062
       ],
       "command_frame": [
-        270,
-        703
+        405,
+        1062
       ],
       "target_dom": [
         0.5001156833638976,
         0.8096823365148836
       ],
       "actual_dom": [
-        0.5107564368017454,
-        0.8120505674041971
+        0.5135322939651916,
+        0.8186328303204836
       ],
       "viewport_size": [
         393,
@@ -226,20 +227,20 @@
     {
       "sequence": 8,
       "desired_frame": [
-        411,
-        703
+        617,
+        1062
       ],
       "command_frame": [
-        411,
-        703
+        617,
+        1062
       ],
       "target_dom": [
         0.8081873498193483,
         0.8096823365148836
       ],
       "actual_dom": [
-        0.8105482727516699,
-        0.8106700145415145
+        0.8086976495407919,
+        0.8181020472171533
       ],
       "viewport_size": [
         393,
@@ -247,12 +248,12 @@
       ]
     }
   ],
-  "collection_dir": "C:\\Users\\Administrator\\Documents\\Claude\\Projects\\手机自动点击器\\poc\\output\\xy_calibration\\collect_20260805_173133",
+  "collection_dir": "C:\\Users\\Administrator\\Documents\\Claude\\Projects\\手机自动点击器\\poc\\output\\xy_calibration\\collect_20260814_161928",
   "validation": {
-    "rms_error_css_px": 1.6326,
-    "max_error_css_px": 2.7946,
+    "rms_error_css_px": 1.7499,
+    "max_error_css_px": 3.8046,
     "passed": true
   },
-  "validation_dir": "C:\\Users\\Administrator\\Documents\\Claude\\Projects\\手机自动点击器\\poc\\output\\xy_calibration\\validate_20260805_173744",
-  "validated_at": "2026-08-05T09:38:11.219304+00:00"
+  "validation_dir": "C:\\Users\\Administrator\\Documents\\Claude\\Projects\\手机自动点击器\\poc\\output\\xy_calibration\\validate_20260814_162429",
+  "validated_at": "2026-08-14T08:25:02.344054+00:00"
 }

@@ -54,6 +54,45 @@ class SampleStore:
 STORE = SampleStore()
 
 
+class PageStateStore:
+    ALLOWED_PHASES = frozenset({"fullscreen_setup", "calibration", "complete"})
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.state: dict[str, object] = {
+            "phase": "unknown",
+            "fullscreen": False,
+        }
+
+    def update(self, payload: dict[str, object]) -> dict[str, object]:
+        phase = str(payload.get("phase") or "")
+        if phase not in self.ALLOWED_PHASES:
+            raise ValueError(f"不支持的校准页阶段: {phase or 'missing'}")
+        width = int(payload.get("viewport_width") or 0)
+        height = int(payload.get("viewport_height") or 0)
+        sequence = int(payload.get("sequence") or 0)
+        if width < 1 or height < 1 or not 0 <= sequence <= 9:
+            raise ValueError("校准页状态尺寸或序号无效")
+        with self.lock:
+            self.state = {
+                "phase": phase,
+                "fullscreen": bool(payload.get("fullscreen")),
+                "error": str(payload.get("error") or "")[:240],
+                "viewport_width": width,
+                "viewport_height": height,
+                "sequence": sequence,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            return dict(self.state)
+
+    def snapshot(self) -> dict[str, object]:
+        with self.lock:
+            return dict(self.state)
+
+
+PAGE_STATE = PageStateStore()
+
+
 class ActionEventStore:
     ALLOWED_KINDS = frozenset(
         {
@@ -161,6 +200,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/samples":
             self._send_json(STORE.snapshot())
             return
+        if path == "/api/page-state":
+            self._send_json(PAGE_STATE.snapshot())
+            return
         if path == "/api/action-events":
             self._send_json(ACTION_STORE.snapshot())
             return
@@ -188,6 +230,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/reset":
                 STORE.reset()
                 self._send_json({"ok": True, **STORE.snapshot()})
+                return
+            if path == "/api/page-state":
+                self._send_json({"ok": True, **PAGE_STATE.update(payload)})
                 return
             if path == "/api/action-event":
                 self._send_json(

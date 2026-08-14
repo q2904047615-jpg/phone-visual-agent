@@ -2246,7 +2246,7 @@ class PhaseOneNavigationPolicy:
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
-    VERSION = "2026-08-14-universal-action-policy-v7"
+    VERSION = "2026-08-14-universal-action-policy-v8"
     ALLOWED_ACTIONS = frozenset(
         {
             "swipe",

@@ -568,6 +568,19 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual("home", result.canonical_class)
 
+    def test_allows_observed_refresh_icon_as_generic_navigation(self) -> None:
+        scene = _scene(meaning="refresh_page", label="刷新", role="icon")
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("refresh", result.canonical_class)
+
     def test_allows_exact_formal_target_app_entry_without_open_word(self) -> None:
         scene = _scene(meaning="settings_app", label="设置", role="icon")
         decision = _decision(scene)

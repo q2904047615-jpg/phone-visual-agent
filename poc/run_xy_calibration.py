@@ -18,6 +18,7 @@ from tap_calibration import (
     Affine2D,
     TapCalibrationError,
     build_calibration,
+    build_coverage,
     save_calibration,
 )
 
@@ -125,6 +126,89 @@ def normalized_dom(record: dict[str, object], prefix: str) -> list[float]:
     return [float(record[f"{prefix}_x"]) / width, float(record[f"{prefix}_y"]) / height]
 
 
+def wait_for_page_state(
+    base_url: str,
+    *,
+    phases: set[str],
+    timeout: float = 6.0,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout
+    latest: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        latest = request_json(f"{base_url}/api/page-state")
+        updated_at = str(latest.get("updated_at") or "")
+        try:
+            timestamp = datetime.fromisoformat(updated_at)
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - timestamp).total_seconds()
+        except ValueError:
+            age = float("inf")
+        if str(latest.get("phase") or "") in phases and 0 <= age <= 3.0:
+            return latest
+        time.sleep(0.2)
+    raise TapCalibrationError(
+        f"手机校准页没有进入预期阶段{sorted(phases)}；当前状态：{latest}"
+    )
+
+
+def ensure_fullscreen_calibration_page(
+    *,
+    base_url: str,
+    robot: RobotController,
+    output_dir: Path,
+) -> int:
+    """Enter fullscreen with one harmless, freshly observed physical tap."""
+
+    state = wait_for_page_state(
+        base_url,
+        phases={"fullscreen_setup", "calibration", "complete"},
+    )
+    if state.get("phase") == "calibration" and state.get("fullscreen") is True:
+        return 0
+    if state.get("phase") == "complete" and state.get("fullscreen") is True:
+        # A just-reset page can need one polling interval to show point 1 again.
+        state = wait_for_page_state(base_url, phases={"calibration"}, timeout=3.0)
+        if state.get("fullscreen") is True:
+            return 0
+    if state.get("phase") != "fullscreen_setup":
+        raise TapCalibrationError(f"校准页状态不允许进入全屏：{state}")
+
+    frame, detected = wait_for_stable_target(robot)
+    target_x, target_y, box = detected
+    annotated = frame.copy()
+    draw = ImageDraw.Draw(annotated)
+    draw.rectangle(box, outline="#00ff66", width=3)
+    annotated.save(output_dir / "00_fullscreen_setup_before.jpg", quality=94)
+    result: dict[str, object] = {
+        "mode": "fullscreen_setup",
+        "physical_actions": 1,
+        "target_frame": [target_x, target_y],
+        "before": str(output_dir / "00_fullscreen_setup_before.jpg"),
+        "passed": False,
+    }
+    click_raw_pixel(robot, frame, (target_x, target_y))
+    try:
+        state = wait_for_page_state(base_url, phases={"calibration"}, timeout=8.0)
+        result["page_state"] = state
+        result["passed"] = bool(state.get("fullscreen") is True)
+    except Exception as exc:
+        result["error"] = str(exc)
+        result["page_state"] = request_json(f"{base_url}/api/page-state")
+        raise
+    finally:
+        after_path = output_dir / "00_fullscreen_setup_after.jpg"
+        robot.vision_capture().convert("RGB").save(after_path, quality=94)
+        result["after"] = str(after_path)
+        (output_dir / "00_fullscreen_setup.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    if state.get("fullscreen") is not True:
+        raise TapCalibrationError("手机浏览器拒绝进入全屏，禁止继续边缘标定。")
+    return 1
+
+
 def collect_points(
     *,
     base_url: str,
@@ -135,6 +219,11 @@ def collect_points(
     output_dir.mkdir(parents=True, exist_ok=True)
     collected: list[dict[str, object]] = []
     frame_size: tuple[int, int] | None = None
+    setup_actions = ensure_fullscreen_calibration_page(
+        base_url=base_url,
+        robot=robot,
+        output_dir=output_dir,
+    )
 
     for sequence in range(9):
         time.sleep(0.75 if sequence else 0.2)
@@ -181,6 +270,18 @@ def collect_points(
             json.dumps(collected, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     assert frame_size is not None
+    (output_dir / "execution.json").write_text(
+        json.dumps(
+            {
+                "fullscreen_setup_actions": setup_actions,
+                "calibration_point_actions": len(collected),
+                "physical_actions": setup_actions + len(collected),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     return collected, frame_size
 
 
@@ -352,7 +453,7 @@ def main() -> int:
         save_calibration(payload)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         if not payload["accepted_fit"]:
-            raise TapCalibrationError("九点拟合残差过大，校准未启用。")
+            raise TapCalibrationError("九点拟合质量或屏幕覆盖范围未通过，校准未启用。")
         print("拟合完成但尚未启用。请在手机刷新校准页后运行 validate。")
         return 0
 
@@ -367,6 +468,20 @@ def main() -> int:
     if list(frame_size) != payload.get("frame_size"):
         raise TapCalibrationError("验证时相机尺寸与采集时不一致。")
     validation = validate_samples(samples)
+    validation_coverage = build_coverage(
+        [
+            (
+                float(sample["desired_frame"][0]) / (frame_size[0] - 1),
+                float(sample["desired_frame"][1]) / (frame_size[1] - 1),
+            )
+            for sample in samples
+        ]
+    )
+    validation["coverage_passed"] = bool(validation_coverage["sufficient"])
+    validation["passed"] = bool(
+        validation["passed"] and validation["coverage_passed"]
+    )
+    validation["coverage"] = validation_coverage
     payload["validation"] = validation
     payload["validation_dir"] = str(output)
     payload["validated_at"] = datetime.now(timezone.utc).isoformat()

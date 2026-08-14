@@ -24,8 +24,13 @@ from universal_action_controller import (
 DEEPSEEK_TASK_GRAPH_V3 = "2026-08-11-deepseek-task-graph-v3"
 QWEN_VISUAL_DECISION_V3 = "2026-08-12-qwen-visual-decision-v3"
 QWEN_VISUAL_DECISION_V4 = "2026-08-14-qwen-visual-decision-v4"
+QWEN_VISUAL_DECISION_V5 = "2026-08-14-qwen-visual-decision-v5"
 SUPPORTED_QWEN_VISUAL_DECISION_PROTOCOLS = frozenset(
-    {QWEN_VISUAL_DECISION_V3, QWEN_VISUAL_DECISION_V4}
+    {
+        QWEN_VISUAL_DECISION_V3,
+        QWEN_VISUAL_DECISION_V4,
+        QWEN_VISUAL_DECISION_V5,
+    }
 )
 _SCOPED_CONFIRMATION_CAPABILITY = object()
 

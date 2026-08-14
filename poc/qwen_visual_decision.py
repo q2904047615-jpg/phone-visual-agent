@@ -5,6 +5,7 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -29,7 +30,7 @@ from universal_action_controller import UniversalActionController, UniversalActi
 from vision_agent import VisionAgentError, _image_data_url
 
 
-QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-14-qwen-visual-decision-v4"
+QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-14-qwen-visual-decision-v5"
 SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v3"
 MIGRATION_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v2"
 SUPPORTED_TASK_CONTEXT_PROTOCOLS = frozenset(
@@ -79,6 +80,23 @@ ROLE_PRIORITY = {
     "container": 10,
     "unknown": 0,
 }
+
+
+def _structured_system_ui(scene: UIScene) -> dict[str, Any] | None:
+    facts = getattr(scene, "system_ui", None)
+    if facts is None:
+        return None
+    immersive = getattr(facts, "immersive_or_fullscreen", None)
+    navigation_visible = getattr(facts, "navigation_bar_visible", None)
+    if isinstance(facts, Mapping):
+        if immersive is None:
+            immersive = facts.get("immersive_or_fullscreen")
+        if navigation_visible is None:
+            navigation_visible = facts.get("navigation_bar_visible")
+    return {
+        "immersive_or_fullscreen": immersive,
+        "navigation_bar_visible": navigation_visible,
+    }
 
 TRANSITION_COMPLETION_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
@@ -649,7 +667,7 @@ class TrustedObservation:
             value = item.to_dict()
             value["bounds"] = [round(part * 1000) for part in item.bounds]
             candidates.append(value)
-        return {
+        value = {
             "observation_id": self.observation_id,
             "device_id": self.device_id,
             "fingerprint": self.fingerprint,
@@ -663,13 +681,21 @@ class TrustedObservation:
             "candidate_aliases": dict(self.candidate_aliases),
             "candidate_conflicts": [dict(item) for item in self.candidate_conflicts],
         }
+        system_ui = _structured_system_ui(self.scene)
+        if system_ui is not None:
+            value["system_ui"] = system_ui
+        return value
 
     def to_dict(self) -> dict[str, Any]:
+        scene = self.scene.to_dict()
+        system_ui = _structured_system_ui(self.scene)
+        if system_ui is not None:
+            scene["system_ui"] = system_ui
         return {
             "observation_id": self.observation_id,
             "device_id": self.device_id,
             "fingerprint": self.fingerprint,
-            "scene": self.scene.to_dict(),
+            "scene": scene,
             "local_stability": self.local_stability.to_dict(),
             "selected_frame_index": self.selected_frame_index,
             "frame_sharpness_scores": [
@@ -790,7 +816,7 @@ class VisualTargetRegion:
                 raise GenericStepPlanningError("屏幕/系统动作只能描述整屏区域。")
             expected_kind = (
                 "system_navigation"
-                if action.action in {"back", "home"}
+                if action.action in {"back", "home", "reveal_system_navigation"}
                 else "screen"
             )
             if self.kind != expected_kind:
@@ -1435,9 +1461,13 @@ def _decision_prompt(
    chinese_pinyin切到direct_latin的独立button，可先选择一次tap_semantic，随后必须重新观察，禁止在
    同一轮继续输入。
 5. drag必须绑定两个不同可信候选并逐字复制两端字段和bounds；long_press时长限制500到2000毫秒。
-6. swipe/wait使用整屏[0,0,1000,1000]和kind=screen；back/home使用整屏和kind=system_navigation。
+6. swipe/wait使用整屏[0,0,1000,1000]和kind=screen；back/home/reveal_system_navigation
+   使用整屏和kind=system_navigation。
    home只表示按下Android系统Home键、回到系统Launcher；绝不能用它表示浏览器或任何App里的“首页”。
    swipe只返回direction=up|down|left|right，绝对不要返回distance；距离由本地已校准控制器决定。
+   reveal_system_navigation 只在可信观察 system_ui 明确 immersive_or_fullscreen=true 且
+   navigation_bar_visible=false时使用；动作本身不得返回坐标、方向或距离，expected_result必须精确为
+   {{"system_ui":{{"navigation_bar_visible":true}}}}。
 7. 找不到可靠候选、文字不完全一致、候选不唯一、画面模糊或置信度不足时必须blocked。
 8. finished只能用completion_evidence_element_ids引用可信候选ID，或用scene引用可信scene摘要；
    禁止自由编写完成证据。若scene_confidence<0.72，只能引用goal_relevant=true且role为
@@ -1449,7 +1479,7 @@ def _decision_prompt(
 9. confirmation_gate没有允许外部状态动作时必须blocked；你不能自行改写或批准确认门。
 10. task_id/device_id/revision/observation_id/fingerprint必须逐字复制；任何旧值都会被拒绝。
 11. expected_result只描述一个动作后可由新画面验证的变化，且只能按需使用：
-    scene_changed、content_changed、current_video_changed、app_id、screen_id、
+    scene_changed、content_changed、current_video_changed、app_id、screen_id、system_ui、
     element_state={{"meaning":"逐字语义","states":{{"状态":true}}}}；不得编写自然语言条件或其他键。
 12. 这是第{decision_number}轮，只根据本轮上下文与本轮观察作答。不要Markdown。
 13. next_action.kind只能来自当前设备可用动作集合；缺少所需动作能力时必须blocked。
@@ -1492,7 +1522,7 @@ def _decision_retry_prompt(
 - confirmation_gate未允许外部动作时blocked；每轮只允许一个动作，不要计划后续步骤。
 - 顶层只允许下方JSON中的字段；绝对不要action、actions、reasoning、analysis、plan或额外字段。
 - expected_result只能按需使用scene_changed、content_changed、current_video_changed、app_id、screen_id、
-  element_state；不得使用new_*别名、自然语言条件或其他键。
+  element_state、system_ui；reveal_system_navigation 的 system_ui 必须精确证明导航栏可见。
 - 这是第{decision_number}轮。不要Markdown，不要解释，不要把JSON转义成字符串。
 - 当前设备只允许动作：{available_actions}；不得返回集合外动作，无法继续就blocked。
 - current_external_impact=read_only 时禁止点击、滑动、返回、输入、长按和拖动；画面已证明结果就
@@ -1631,7 +1661,7 @@ def _parse_decision(
             and action.action != "wait_for_change"
         ):
             raise GenericStepPlanningError(
-                "read_only 子目标禁止点击、滑动、返回、输入、长按或拖动；"
+                "read_only 子目标禁止点击、滑动、系统导航、返回、输入、长按或拖动；"
                 "当前画面已证明结果时必须 finished，否则 blocked。"
             )
         if (
@@ -1776,6 +1806,7 @@ def _normalize_expected_result(value: Any) -> dict[str, Any]:
         "app_id",
         "screen_id",
         "element_state",
+        "system_ui",
         "allow_unchanged",
         "goal_complete_on_success",
     }
@@ -1834,6 +1865,23 @@ def _normalize_expected_result(value: Any) -> dict[str, Any]:
             "meaning": meaning.strip(),
             "states": dict(states),
         }
+    if "system_ui" in normalized:
+        system_ui = normalized["system_ui"]
+        if not isinstance(system_ui, dict):
+            raise GenericStepPlanningError(
+                "expected_result.system_ui 必须是JSON对象。"
+            )
+        unexpected = set(system_ui) - {"navigation_bar_visible"}
+        if unexpected:
+            raise GenericStepPlanningError(
+                "expected_result.system_ui 包含协议外字段："
+                + ", ".join(sorted(unexpected))
+            )
+        if system_ui.get("navigation_bar_visible") is not True:
+            raise GenericStepPlanningError(
+                "expected_result.system_ui.navigation_bar_visible 必须为true。"
+            )
+        normalized["system_ui"] = {"navigation_bar_visible": True}
     return normalized
 
 
@@ -1945,6 +1993,7 @@ def _parse_action(
             "destination_role", "destination_label", "destination_states",
         },
         "swipe": {"direction"},
+        "reveal_system_navigation": set(),
         "back": set(),
         "home": set(),
         "wait_for_change": set(),
@@ -1956,6 +2005,15 @@ def _parse_action(
         if key in value and value[key] not in (None, "", {}, [])
     }
     params["expected_effect"] = dict(expected_result)
+    if kind == "reveal_system_navigation":
+        if expected_result != {"system_ui": {"navigation_bar_visible": True}}:
+            raise GenericStepPlanningError(
+                "reveal_system_navigation 必须精确声明结构化导航栏可见后置条件。"
+            )
+    elif "system_ui" in expected_result:
+        raise GenericStepPlanningError(
+            "结构化 system_ui 后置条件只允许用于 reveal_system_navigation。"
+        )
     for field in ("states", "source_states", "destination_states"):
         if not isinstance(params.get(field, {}), dict):
             raise GenericStepPlanningError(f"next_action.{field} 必须是对象。")
@@ -2082,13 +2140,15 @@ def _parse_target_region(
                     f"{destination.label or destination.meaning}"
                 ),
             }
-        elif action.action in {"back", "home"}:
+        elif action.action in {"back", "home", "reveal_system_navigation"}:
             defaults = {
                 "kind": "system_navigation",
                 "bounds": [0.0, 0.0, 1000.0, 1000.0],
                 "description": (
                     "Android系统Home键"
                     if action.action == "home"
+                    else "Android系统导航栏"
+                    if action.action == "reveal_system_navigation"
                     else "系统返回区域"
                 ),
             }
@@ -2249,8 +2309,7 @@ def _canonicalize_trusted_scene(
     canonical.sort(key=lambda item: elements.index(item))
     if len(canonical) == len(elements):
         return scene, tuple(sorted(aliases)), tuple(conflicts)
-    return (
-        UIScene(
+    canonical_scene = UIScene(
             app_id=scene.app_id,
             screen_id=scene.screen_id,
             summary=scene.summary,
@@ -2260,7 +2319,12 @@ def _canonicalize_trusted_scene(
             confidence=scene.confidence,
             fingerprint=scene.fingerprint,
             protocol_version=scene.protocol_version,
-        ),
+        )
+    system_ui = getattr(scene, "system_ui", None)
+    if system_ui is not None:
+        object.__setattr__(canonical_scene, "system_ui", system_ui)
+    return (
+        canonical_scene,
         tuple(sorted(aliases)),
         tuple(conflicts),
     )

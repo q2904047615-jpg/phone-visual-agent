@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
@@ -9,12 +10,13 @@ from semantic_executor import SemanticAction
 from ui_scene import UIScene
 
 
-GENERIC_STEP_PROTOCOL_VERSION = "2026-08-14-generic-step-v3"
+GENERIC_STEP_PROTOCOL_VERSION = "2026-08-14-generic-step-v4"
 ALLOWED_STEP_ACTIONS = frozenset(
     {
         "tap_semantic",
         "dismiss_overlay",
         "swipe",
+        "reveal_system_navigation",
         "back",
         "home",
         "wait_for_change",
@@ -93,6 +95,41 @@ class GenericStepProposal:
                 direction = str(self.action.params.get("direction") or "").strip()
                 if direction not in {"up", "down", "left", "right"}:
                     raise GenericStepPlanningError("滑动动作方向无效。")
+            if self.action.action == "reveal_system_navigation":
+                unexpected = set(self.action.params) - {"expected_effect"}
+                if unexpected:
+                    raise GenericStepPlanningError(
+                        "系统导航栏唤出动作不能携带坐标、方向、距离或其他参数。"
+                    )
+                system_ui = getattr(scene, "system_ui", None)
+                if system_ui is None:
+                    raise GenericStepPlanningError(
+                        "系统导航栏唤出动作缺少结构化 scene.system_ui。"
+                    )
+                immersive = getattr(system_ui, "immersive_or_fullscreen", None)
+                navigation_visible = getattr(
+                    system_ui,
+                    "navigation_bar_visible",
+                    None,
+                )
+                if isinstance(system_ui, Mapping):
+                    if immersive is None:
+                        immersive = system_ui.get("immersive_or_fullscreen")
+                    if navigation_visible is None:
+                        navigation_visible = system_ui.get("navigation_bar_visible")
+                if (
+                    immersive is not True
+                    or navigation_visible is not False
+                ):
+                    raise GenericStepPlanningError(
+                        "系统导航栏唤出动作要求当前画面明确处于沉浸态且导航栏隐藏。"
+                    )
+                if self.action.params.get("expected_effect") != {
+                    "system_ui": {"navigation_bar_visible": True}
+                }:
+                    raise GenericStepPlanningError(
+                        "系统导航栏唤出动作必须精确声明结构化导航栏可见后置条件。"
+                    )
         elif self.action is not None:
             raise GenericStepPlanningError("finished/blocked 状态不能携带动作。")
         if self.status == "finished" and not self.completion_evidence:
@@ -142,7 +179,7 @@ class GenericStepPlanner:
 {{
   "status":"action|finished|blocked",
   "action":{{
-    "kind":"tap_semantic|dismiss_overlay|swipe|back|home|wait_for_change",
+    "kind":"tap_semantic|dismiss_overlay|swipe|reveal_system_navigation|back|home|wait_for_change",
     "element_id":"点击时必须是当前场景已有的 element_id",
     "target":"元素 meaning",
     "role":"元素 role",
@@ -175,6 +212,9 @@ class GenericStepPlanner:
 9. expected_effect 只能描述动作后可由画面验证的事实。若本动作的效果一旦被验证就会直接
    满足整个用户目标，设置 goal_complete_on_success=true；中间步骤必须为 false。
 10. 内容切换使用 scene_changed=true，不要创造 current_video_changed 等 App 专用字段。
+11. reveal_system_navigation 仅在 scene.system_ui 明确 immersive_or_fullscreen=true 且
+    navigation_bar_visible=false 时使用；它不能携带坐标、方向或距离，expected_effect 必须精确为
+    {{"system_ui":{{"navigation_bar_visible":true}}}}。
 """
         raw = self.provider.chat_json(
             [{"role": "user", "content": prompt}],

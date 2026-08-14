@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -2246,10 +2247,11 @@ class PhaseOneNavigationPolicy:
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
-    VERSION = "2026-08-14-universal-action-policy-v10"
+    VERSION = "2026-08-14-universal-action-policy-v11"
     ALLOWED_ACTIONS = frozenset(
         {
             "swipe",
+            "reveal_system_navigation",
             "back",
             "home",
             "wait_for_change",
@@ -2637,6 +2639,64 @@ class PhaseOneNavigationPolicy:
         if action_has_account_effect(action) and not external_allowed:
             return self._deny("动作语义可能改变账号或外部状态。")
 
+        if action_kind == "reveal_system_navigation":
+            if impact != "navigation_only":
+                return self._deny(
+                    "系统导航栏唤出动作只允许 navigation_only 子目标。"
+                )
+            current_subgoal = self._value(task_context, "current_subgoal", {})
+            risk_ids = self._value(current_subgoal, "risk_action_ids", ()) or ()
+            if not isinstance(risk_ids, (list, tuple)) or risk_ids:
+                return self._deny("系统导航栏唤出动作要求当前子目标没有风险动作。")
+            if set(action.params) - {"expected_effect"}:
+                return self._deny(
+                    "系统导航栏唤出动作不能携带坐标、方向、距离或其他参数。"
+                )
+            if action.params.get("expected_effect") != {
+                "system_ui": {"navigation_bar_visible": True}
+            }:
+                return self._deny(
+                    "系统导航栏唤出动作缺少精确的结构化导航栏可见后置条件。"
+                )
+            system_ui = getattr(scene, "system_ui", None)
+            if system_ui is None:
+                return self._deny(
+                    "系统导航栏唤出动作缺少结构化 scene.system_ui。"
+                )
+            immersive = getattr(system_ui, "immersive_or_fullscreen", None)
+            navigation_visible = getattr(
+                system_ui,
+                "navigation_bar_visible",
+                None,
+            )
+            if isinstance(system_ui, Mapping):
+                if immersive is None:
+                    immersive = system_ui.get("immersive_or_fullscreen")
+                if navigation_visible is None:
+                    navigation_visible = system_ui.get("navigation_bar_visible")
+            if (
+                immersive is not True
+                or navigation_visible is not False
+            ):
+                return self._deny(
+                    "系统导航栏唤出动作要求当前画面明确处于沉浸态且导航栏隐藏。"
+                )
+            region = self._value(decision, "target_region", None)
+            if (
+                region is None
+                or str(self._value(region, "kind", "")) != "system_navigation"
+                or str(self._value(region, "element_id", ""))
+                or tuple(self._value(region, "bounds", ()))
+                != (0.0, 0.0, 1.0, 1.0)
+            ):
+                return self._deny(
+                    "系统导航栏唤出动作必须绑定整屏 system_navigation 区域。"
+                )
+            return NavigationPolicyDecision(
+                True,
+                "允许一次无坐标的Android系统导航栏唤出动作。",
+                "reveal_system_navigation",
+            )
         if action_kind == "swipe":
             direction = str(action.params.get("direction") or "").strip()
             if direction not in {"up", "down", "left", "right"}:

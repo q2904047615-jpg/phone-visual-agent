@@ -5,6 +5,7 @@ import json
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image, ImageDraw
 
@@ -1122,6 +1123,73 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual("system_navigation", decision.target_region.kind)
         self.assertEqual("", decision.target_region.element_id)
         self.assertEqual((0.0, 0.0, 1.0, 1.0), decision.target_region.bounds)
+
+    def _reveal_system_navigation_payload(self) -> tuple[dict, TrustedObservation]:
+        current_scene = scene_for(self.frames)
+        object.__setattr__(
+            current_scene,
+            "system_ui",
+            SimpleNamespace(
+                immersive_or_fullscreen=True,
+                navigation_bar_visible=False,
+            ),
+        )
+        observation = trusted_observation(self.frames, scene=current_scene)
+        payload = action_payload(self.context, observation)
+        payload["next_action"] = {"kind": "reveal_system_navigation"}
+        payload["target_region"] = {
+            "kind": "system_navigation",
+            "bounds": [0, 0, 1000, 1000],
+            "description": "Android系统导航栏",
+        }
+        payload["expected_result"] = {
+            "system_ui": {"navigation_bar_visible": True}
+        }
+        return payload, observation
+
+    def test_reveal_system_navigation_is_coordinate_free_system_action(self) -> None:
+        payload, observation = self._reveal_system_navigation_payload()
+
+        _observer, decision = self.decide(
+            FakeProvider(payload),
+            observation=observation,
+        )
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual(
+            "reveal_system_navigation",
+            decision.proposal.action.action,
+        )
+        self.assertEqual(
+            {"expected_effect": {"system_ui": {"navigation_bar_visible": True}}},
+            decision.proposal.action.params,
+        )
+        self.assertEqual("system_navigation", decision.target_region.kind)
+        self.assertEqual(
+            True,
+            observation.prompt_dict()["system_ui"]["immersive_or_fullscreen"],
+        )
+
+    def test_reveal_system_navigation_rejects_model_coordinates(self) -> None:
+        bad, observation = self._reveal_system_navigation_payload()
+        bad["next_action"]["x"] = 500
+        bad["next_action"]["y"] = 990
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider, observation=observation)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("协议外字段", decision.reason)
+
+    def test_reveal_system_navigation_rejects_model_distance(self) -> None:
+        bad, observation = self._reveal_system_navigation_payload()
+        bad["next_action"]["distance"] = "short"
+        provider = SequenceProvider([bad, bad])
+
+        _observer, decision = self.decide(provider, observation=observation)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("distance", decision.reason)
 
     def test_conflicting_nested_action_param_is_rejected(self) -> None:
         bad = action_payload(self.context, self.observation)

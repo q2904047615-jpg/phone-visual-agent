@@ -94,6 +94,7 @@ class GenericSingleActionAdapter:
             "tap_semantic",
             "dismiss_overlay",
             "swipe",
+            "reveal_system_navigation",
             "back",
             "home",
             "input_verified_text",
@@ -129,6 +130,11 @@ class GenericSingleActionAdapter:
             for direction in ("up", "down", "left", "right")
         ):
             supported.add("swipe")
+        if available(
+            "reveal_system_navigation",
+            "vision_reveal_system_navigation",
+        ):
+            supported.add("reveal_system_navigation")
         if available("back", "vision_android_back"):
             supported.add("back")
         if available("home", "vision_android_home"):
@@ -537,6 +543,18 @@ class GenericSingleActionAdapter:
                     robot_result = self.robot.vision_dismiss_overlay_relative(x, y)
                 else:
                     robot_result = self.robot.vision_tap_relative(x, y)
+            elif resolved.kind == "reveal_system_navigation":
+                method = getattr(
+                    self.robot,
+                    "vision_reveal_system_navigation",
+                    None,
+                )
+                if not callable(method):
+                    raise GenericActionAdapterError(
+                        "机械臂不支持经过验证的系统导航栏唤出动作。"
+                    )
+                physical_actions = 1
+                robot_result = method()
             elif resolved.kind == "swipe":
                 method = getattr(self.robot, f"vision_swipe_{resolved.direction}", None)
                 if not callable(method):

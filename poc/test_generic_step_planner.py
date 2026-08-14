@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image
 
@@ -18,6 +19,7 @@ from generic_step_planner import (
 from generic_supervised_runtime import GenericSupervisedSession
 from semantic_executor import SemanticAction
 from ui_scene import UIElement, UIScene
+from universal_action_controller import UniversalActionController, UniversalActionError
 from vision_agent import VisionAgentError
 
 
@@ -61,6 +63,10 @@ class FakeRobot:
 
     def vision_swipe_up(self):
         self.actions.append(("swipe", "up"))
+
+    def vision_reveal_system_navigation(self):
+        self.actions.append(("reveal_system_navigation",))
+        return (500, 950)
 
     def vision_android_back(self):
         self.actions.append(("back",))
@@ -124,8 +130,9 @@ def scene(
     element_id="e1",
     bounds=(0.2, 0.3, 0.4, 0.5),
     app_id=None,
+    system_ui=None,
 ):
-    return UIScene(
+    current = UIScene(
         app_id=(
             app_id
             if app_id is not None
@@ -147,9 +154,68 @@ def scene(
         confidence=0.95,
         fingerprint=fingerprint,
     )
+    if system_ui is not None:
+        object.__setattr__(current, "system_ui", system_ui)
+    return current
 
 
 class GenericStepPlannerTests(unittest.TestCase):
+    def test_reveal_system_navigation_has_no_geometry_parameters(self):
+        provider = FakeTextProvider(
+            {
+                "status": "action",
+                "action": {
+                    "kind": "reveal_system_navigation",
+                    "expected_effect": {
+                        "system_ui": {"navigation_bar_visible": True}
+                    },
+                },
+                "reason": "当前处于沉浸态且系统导航栏隐藏",
+                "completion_evidence": [],
+            }
+        )
+        current = scene(
+            "a",
+            system_ui=SimpleNamespace(
+                immersive_or_fullscreen=True,
+                navigation_bar_visible=False,
+            ),
+        )
+
+        proposal = GenericStepPlanner(provider).propose(goal(), current)
+
+        self.assertEqual("reveal_system_navigation", proposal.action.action)
+        self.assertEqual(
+            {"expected_effect": {"system_ui": {"navigation_bar_visible": True}}},
+            proposal.action.params,
+        )
+
+    def test_reveal_system_navigation_rejects_direction(self):
+        provider = FakeTextProvider(
+            {
+                "status": "action",
+                "action": {
+                    "kind": "reveal_system_navigation",
+                    "direction": "up",
+                    "expected_effect": {
+                        "system_ui": {"navigation_bar_visible": True}
+                    },
+                },
+                "reason": "bad",
+                "completion_evidence": [],
+            }
+        )
+        current = scene(
+            "a",
+            system_ui=SimpleNamespace(
+                immersive_or_fullscreen=True,
+                navigation_bar_visible=False,
+            ),
+        )
+
+        with self.assertRaisesRegex(GenericStepPlanningError, "不能携带"):
+            GenericStepPlanner(provider).propose(goal(), current)
+
     def test_proposes_only_one_existing_element(self):
         provider = FakeTextProvider(
             {
@@ -202,6 +268,72 @@ class GenericStepPlannerTests(unittest.TestCase):
             GenericStepPlanner(provider).propose(goal(), scene("a"))
 
 
+class RevealSystemNavigationControllerTests(unittest.TestCase):
+    @staticmethod
+    def action() -> SemanticAction:
+        return SemanticAction(
+            node_id="reveal-navigation",
+            action="reveal_system_navigation",
+            params={
+                "expected_effect": {
+                    "system_ui": {"navigation_bar_visible": True}
+                }
+            },
+        )
+
+    def test_requires_structured_system_ui_pre_and_post_facts(self):
+        controller = UniversalActionController()
+        before = scene(
+            "same",
+            system_ui=SimpleNamespace(
+                immersive_or_fullscreen=True,
+                navigation_bar_visible=False,
+            ),
+        )
+        resolved = controller.resolve_one(self.action(), before, confirmed=True)
+
+        controller.verify_after_action(
+            resolved,
+            before,
+            scene(
+                "same",
+                system_ui=SimpleNamespace(
+                    immersive_or_fullscreen=True,
+                    navigation_bar_visible=True,
+                ),
+            ),
+        )
+
+        with self.assertRaisesRegex(UniversalActionError, "结构化导航栏可见证据"):
+            controller.verify_after_action(
+                resolved,
+                before,
+                scene("different", screen_id="navigation_bar_visible_summary_only"),
+            )
+
+    def test_rejects_unknown_or_already_visible_system_ui_precondition(self):
+        controller = UniversalActionController()
+        for facts in (
+            SimpleNamespace(
+                immersive_or_fullscreen="unknown",
+                navigation_bar_visible="unknown",
+            ),
+            SimpleNamespace(
+                immersive_or_fullscreen=True,
+                navigation_bar_visible=True,
+            ),
+        ):
+            with self.subTest(facts=facts), self.assertRaisesRegex(
+                UniversalActionError,
+                "沉浸态且导航栏隐藏",
+            ):
+                controller.resolve_one(
+                    self.action(),
+                    scene("before", system_ui=facts),
+                    confirmed=True,
+                )
+
+
 class GenericActionAdapterTests(unittest.TestCase):
     def _adapter(self, observer, robot):
         return GenericSingleActionAdapter(
@@ -218,6 +350,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         supported = adapter.supported_action_kinds()
 
         self.assertIn("tap_semantic", supported)
+        self.assertIn("reveal_system_navigation", supported)
         self.assertIn("input_verified_text", supported)
         self.assertIn("long_press", supported)
         self.assertIn("drag", supported)
@@ -225,6 +358,89 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertIn("home", supported)
         self.assertIn("wait_for_change", supported)
         self.assertIn("swipe", supported)
+
+    def test_reveal_system_navigation_calls_one_dedicated_robot_action(self):
+        hidden = SimpleNamespace(
+            immersive_or_fullscreen=True,
+            navigation_bar_visible=False,
+        )
+        visible = SimpleNamespace(
+            immersive_or_fullscreen=True,
+            navigation_bar_visible=True,
+        )
+        planned = scene("planned", system_ui=hidden)
+        after = scene("planned", system_ui=visible)
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=FakeSceneObserver([after]),
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="generic_step_1",
+                action="reveal_system_navigation",
+                params={
+                    "expected_effect": {
+                        "system_ui": {"navigation_bar_visible": True}
+                    }
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("reveal_system_navigation",)], robot.actions)
+        self.assertEqual(1, result.physical_actions)
+
+    def test_reveal_system_navigation_failure_does_not_fallback_to_swipe(self):
+        hidden = SimpleNamespace(
+            immersive_or_fullscreen=True,
+            navigation_bar_visible=False,
+        )
+        planned = scene("planned", system_ui=hidden)
+        invalid_after = scene(
+            "after",
+            screen_id="navigation_bar_visible_summary_only",
+        )
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 8),
+            observer=FakeSceneObserver([invalid_after, invalid_after]),
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="generic_step_1",
+                action="reveal_system_navigation",
+                params={
+                    "expected_effect": {
+                        "system_ui": {"navigation_bar_visible": True}
+                    }
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("mismatched", result.action_outcome)
+        self.assertTrue(result.verification_errors)
+        self.assertEqual([("reveal_system_navigation",)], robot.actions)
 
     def test_confirmed_home_executes_exactly_once_and_reobserves(self):
         planned = scene(

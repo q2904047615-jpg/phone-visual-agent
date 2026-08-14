@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 import math
 import re
@@ -9,7 +10,11 @@ from semantic_executor import SemanticAction
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v9"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v10"
+
+REVEAL_SYSTEM_NAVIGATION_EFFECT = {
+    "system_ui": {"navigation_bar_visible": True}
+}
 
 SAFE_VERIFIED_TEXT_RE = re.compile(r"[a-z]{1,30}\Z")
 GESTURE_EDGE_MARGIN = 0.02
@@ -290,6 +295,10 @@ class UniversalActionController:
                 )
         self.safety_policy.check(action, confirmed=confirmed)
         expected_effect = dict(action.params.get("expected_effect") or {})
+        if "system_ui" in expected_effect and action.action != "reveal_system_navigation":
+            raise UniversalActionError(
+                "结构化 system_ui 后置条件只允许用于系统导航栏唤出动作。"
+            )
 
         if action.action == "tap_semantic":
             element = self._resolve_target(action, scene)
@@ -415,6 +424,23 @@ class UniversalActionController:
                 before_fingerprint=scene.fingerprint,
                 expected_effect=expected_effect,
             )
+        if action.action == "reveal_system_navigation":
+            unexpected = set(action.params) - {"expected_effect"}
+            if unexpected:
+                raise UniversalActionError(
+                    "系统导航栏唤出动作不能携带坐标、方向、距离或其他参数。"
+                )
+            self._require_hidden_immersive_navigation(scene)
+            if expected_effect != REVEAL_SYSTEM_NAVIGATION_EFFECT:
+                raise UniversalActionError(
+                    "系统导航栏唤出动作必须精确声明导航栏可见后置条件。"
+                )
+            return ResolvedSemanticAction(
+                node_id=action.node_id,
+                kind="reveal_system_navigation",
+                before_fingerprint=scene.fingerprint,
+                expected_effect=expected_effect,
+            )
         if action.action == "swipe":
             direction = str(action.params.get("direction") or "").strip().lower()
             if direction not in {"up", "down", "left", "right"}:
@@ -516,6 +542,7 @@ class UniversalActionController:
             raise UniversalActionError("动作后的页面不稳定或置信度不足。")
         if (
             resolved.kind not in {"observe", "verify", "finish", "wait_for_change"}
+            and resolved.kind != "reveal_system_navigation"
             and resolved.expected_effect.get("allow_unchanged") is not True
             and (
                 (
@@ -562,6 +589,53 @@ class UniversalActionController:
             self._verify_long_press_result(resolved, before, after)
         if resolved.kind == "drag":
             self._verify_drag_result(resolved, before, after)
+        if resolved.kind == "reveal_system_navigation":
+            self._verify_revealed_system_navigation(resolved, before, after)
+
+    @staticmethod
+    def _require_hidden_immersive_navigation(scene: UIScene) -> Any:
+        system_ui = getattr(scene, "system_ui", None)
+        if system_ui is None:
+            raise UniversalActionError(
+                "系统导航栏唤出动作缺少结构化 scene.system_ui。"
+            )
+        immersive = getattr(system_ui, "immersive_or_fullscreen", None)
+        navigation_visible = getattr(system_ui, "navigation_bar_visible", None)
+        if isinstance(system_ui, Mapping):
+            if immersive is None:
+                immersive = system_ui.get("immersive_or_fullscreen")
+            if navigation_visible is None:
+                navigation_visible = system_ui.get("navigation_bar_visible")
+        if (
+            immersive is not True
+            or navigation_visible is not False
+        ):
+            raise UniversalActionError(
+                "系统导航栏唤出动作要求当前画面明确处于沉浸态且导航栏隐藏。"
+            )
+        return system_ui
+
+    def _verify_revealed_system_navigation(
+        self,
+        resolved: ResolvedSemanticAction,
+        before: UIScene,
+        after: UIScene,
+    ) -> None:
+        self._require_hidden_immersive_navigation(before)
+        if resolved.expected_effect != REVEAL_SYSTEM_NAVIGATION_EFFECT:
+            raise UniversalActionError("系统导航栏唤出动作的结构化后置条件无效。")
+        system_ui = getattr(after, "system_ui", None)
+        navigation_visible = (
+            getattr(system_ui, "navigation_bar_visible", None)
+            if system_ui is not None
+            else None
+        )
+        if isinstance(system_ui, Mapping) and navigation_visible is None:
+            navigation_visible = system_ui.get("navigation_bar_visible")
+        if navigation_visible is not True:
+            raise UniversalActionError(
+                "动作后缺少结构化导航栏可见证据。"
+            )
 
     @staticmethod
     def _validate_gesture_point(point: tuple[float, float], *, label: str) -> None:

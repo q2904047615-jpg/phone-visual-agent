@@ -47,8 +47,9 @@ def _scene(
     confidence: float = 0.96,
     scene_confidence: float = 0.95,
     states: dict | None = None,
+    system_ui=None,
 ) -> UIScene:
-    return UIScene(
+    current = UIScene(
         app_id="sample.app",
         screen_id="home",
         summary="显示一个可进入的详情入口",
@@ -68,6 +69,9 @@ def _scene(
         confidence=scene_confidence,
         fingerprint=fingerprint,
     )
+    if system_ui is not None:
+        object.__setattr__(current, "system_ui", system_ui)
+    return current
 
 
 def _decision(
@@ -92,6 +96,12 @@ def _decision(
         params = {
             "direction": direction,
             "expected_effect": {"scene_changed": True},
+        }
+    elif action_kind == "reveal_system_navigation":
+        params = {
+            "expected_effect": {
+                "system_ui": {"navigation_bar_visible": True}
+            }
         }
     elif action_kind in {"back", "home", "wait_for_change"}:
         params = {
@@ -126,7 +136,7 @@ def _decision(
                 if action_kind
                 in {"tap_semantic", "dismiss_overlay", "input_verified_text", "long_press"}
                 else "system_navigation"
-                if action_kind in {"back", "home"}
+                if action_kind in {"back", "home", "reveal_system_navigation"}
                 else "screen"
             ),
             element_id=(
@@ -561,6 +571,67 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         self.assertTrue(result.allowed)
         self.assertEqual("swipe", result.canonical_class)
+
+    def test_allows_structured_system_navigation_reveal(self) -> None:
+        scene = _scene(
+            system_ui=SimpleNamespace(
+                immersive_or_fullscreen=True,
+                navigation_bar_visible=False,
+            )
+        )
+        decision = _decision(scene, action_kind="reveal_system_navigation")
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+            available_action_kinds=frozenset({"reveal_system_navigation"}),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("reveal_system_navigation", result.canonical_class)
+
+    def test_rejects_system_navigation_reveal_for_read_only_or_risk(self) -> None:
+        scene = _scene(
+            system_ui=SimpleNamespace(
+                immersive_or_fullscreen=True,
+                navigation_bar_visible=False,
+            )
+        )
+        decision = _decision(scene, action_kind="reveal_system_navigation")
+        for context, message in (
+            (_context(impact="read_only"), "read_only"),
+            (_context(risk_action_ids=("risk-1",)), "风险动作"),
+        ):
+            with self.subTest(message=message):
+                result = self.policy.evaluate(
+                    task_context=context,
+                    trusted_observation=decision.trusted_observation,
+                    decision=decision,
+                )
+                self.assertFalse(result.allowed)
+                self.assertIn(message, result.reason)
+
+    def test_rejects_system_navigation_reveal_for_unknown_or_visible_bar(self) -> None:
+        for facts in (
+            SimpleNamespace(
+                immersive_or_fullscreen="unknown",
+                navigation_bar_visible="unknown",
+            ),
+            SimpleNamespace(
+                immersive_or_fullscreen=True,
+                navigation_bar_visible=True,
+            ),
+        ):
+            scene = _scene(system_ui=facts)
+            decision = _decision(scene, action_kind="reveal_system_navigation")
+            result = self.policy.evaluate(
+                task_context=_context(),
+                trusted_observation=decision.trusted_observation,
+                decision=decision,
+            )
+            self.assertFalse(result.allowed)
+            self.assertIn("沉浸态且导航栏隐藏", result.reason)
 
     def test_allows_back_for_navigation_only_subgoal(self) -> None:
         scene = _scene()

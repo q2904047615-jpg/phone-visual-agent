@@ -18,7 +18,13 @@ class ActionAcceptancePageTests(unittest.TestCase):
         page = PAGE_PATH.read_text(encoding="utf-8")
         self.assertIn("requestFullscreen", page)
         self.assertIn("webkitRequestFullscreen", page)
-        self.assertIn("navigationUI: 'hide'", page)
+        self.assertIn("webkitRequestFullScreen", page)
+        self.assertIn("webkitCurrentFullScreenElement", page)
+        self.assertIn("request.call(root)", page)
+        self.assertNotIn("navigationUI: 'hide'", page)
+        self.assertIn("viewport_coverage", page)
+        self.assertIn("ratio >= 0.92 && ratio <= 1.08", page)
+        self.assertIn("fullscreen_lost_during_calibration", page)
         self.assertIn("[.05,.05]", page)
         self.assertIn("[.95,.95]", page)
         self.assertIn("/api/page-state", page)
@@ -30,6 +36,8 @@ class ActionAcceptancePageTests(unittest.TestCase):
                 {
                     "phase": "unknown",
                     "fullscreen": False,
+                    "calibration_mode": "setup",
+                    "viewport_coverage": {},
                     "viewport_width": 393,
                     "viewport_height": 685,
                     "sequence": 0,
@@ -42,6 +50,9 @@ class ActionAcceptancePageTests(unittest.TestCase):
             {
                 "phase": "calibration",
                 "fullscreen": True,
+                "calibration_mode": "fullscreen",
+                "fullscreen_attempted": True,
+                "viewport_coverage": {},
                 "viewport_width": 810,
                 "viewport_height": 1440,
                 "sequence": 2,
@@ -49,6 +60,80 @@ class ActionAcceptancePageTests(unittest.TestCase):
         )
         self.assertTrue(state["fullscreen"])
         self.assertEqual("calibration", store.snapshot()["phase"])
+
+    def test_page_state_store_accepts_only_measured_viewport_fallback(self) -> None:
+        store = PageStateStore()
+        state = store.update(
+            {
+                "phase": "calibration",
+                "fullscreen": False,
+                "calibration_mode": "viewport_coverage",
+                "fullscreen_attempted": True,
+                "viewport_coverage": {
+                    "eligible": True,
+                    "width_ratio": 0.95,
+                    "height_ratio": 0.93,
+                },
+                "viewport_width": 393,
+                "viewport_height": 806,
+                "sequence": 0,
+            }
+        )
+        self.assertEqual("viewport_coverage", state["calibration_mode"])
+        with self.assertRaisesRegex(ValueError, "缺少可信"):
+            store.update(
+                {
+                    "phase": "calibration",
+                    "fullscreen": False,
+                    "calibration_mode": "viewport_coverage",
+                    "fullscreen_attempted": True,
+                    "viewport_coverage": {
+                        "eligible": True,
+                        "width_ratio": 0.95,
+                        "height_ratio": 0.90,
+                    },
+                    "viewport_width": 393,
+                    "viewport_height": 780,
+                    "sequence": 0,
+                }
+            )
+
+    def test_page_state_store_rejects_string_viewport_claims(self) -> None:
+        store = PageStateStore()
+        with self.assertRaisesRegex(ValueError, "缺少可信"):
+            store.update(
+                {
+                    "phase": "calibration",
+                    "fullscreen": "false",
+                    "calibration_mode": "viewport_coverage",
+                    "fullscreen_attempted": "true",
+                    "viewport_coverage": {
+                        "eligible": "true",
+                        "width_ratio": 0.95,
+                        "height_ratio": 0.95,
+                    },
+                    "viewport_width": 393,
+                    "viewport_height": 806,
+                    "sequence": 0,
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "必须是数值"):
+            store.update(
+                {
+                    "phase": "calibration",
+                    "fullscreen": False,
+                    "calibration_mode": "viewport_coverage",
+                    "fullscreen_attempted": True,
+                    "viewport_coverage": {
+                        "eligible": True,
+                        "width_ratio": "0.95",
+                        "height_ratio": 0.95,
+                    },
+                    "viewport_width": 393,
+                    "viewport_height": 806,
+                    "sequence": 0,
+                }
+            )
 
     def test_page_exposes_only_generic_safe_action_modes(self) -> None:
         page = ACTION_PAGE_PATH.read_text(encoding="utf-8")

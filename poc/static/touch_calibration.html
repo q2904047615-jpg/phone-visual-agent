@@ -28,14 +28,37 @@
     let sessionId = null;
     let locked = false;
     let fullscreenError = '';
-    const fullscreenElement = () => document.fullscreenElement || document.webkitFullscreenElement;
-    let setup = !fullscreenElement();
+    let fullscreenAttempted = false;
+    let fullscreenMethod = '';
+    let viewportCoverage = {eligible: false, width_ratio: 0, height_ratio: 0};
+    const fullscreenElement = () => document.fullscreenElement
+      || document.webkitFullscreenElement
+      || document.webkitCurrentFullScreenElement
+      || document.mozFullScreenElement
+      || document.msFullscreenElement
+      || null;
+    const fullscreenActive = () => Boolean(
+      fullscreenElement()
+      || document.fullscreen
+      || document.webkitIsFullScreen
+      || document.mozFullScreen
+    );
+    let calibrationMode = fullscreenActive() ? 'fullscreen' : 'setup';
+    let setup = calibrationMode === 'setup';
     const pad = document.querySelector('#pad');
     const target = document.querySelector('#target');
     const touch = document.querySelector('#touch');
     const detail = document.querySelector('#detail');
 
     function placeTarget() {
+      if (calibrationMode === 'blocked') {
+        target.style.display = 'none';
+        locked = true;
+        document.querySelector('#status').textContent = '全屏不可用且视口覆盖不足 · 标定已安全停止';
+        detail.textContent = fullscreenError || '请调整浏览器显示方式并刷新页面后重试';
+        publishState();
+        return;
+      }
       if (setup) {
         target.style.display = 'block';
         target.style.left = '50%';
@@ -55,20 +78,27 @@
         document.querySelector('#status').textContent = '九点采集完成 · 等待电脑验证';
       } else {
         target.style.display = 'block';
-        document.querySelector('#status').textContent = `全屏边缘九点校准 · 第 ${sequence + 1}/9 点 · 请勿手动触摸`;
+        const modeLabel = calibrationMode === 'fullscreen' ? '全屏' : '高覆盖视口';
+        document.querySelector('#status').textContent = `${modeLabel}边缘九点校准 · 第 ${sequence + 1}/9 点 · 请勿手动触摸`;
       }
       publishState();
     }
 
     async function publishState() {
-      const phase = setup ? 'fullscreen_setup' : (sequence >= positions.length ? 'complete' : 'calibration');
+      const phase = calibrationMode === 'blocked'
+        ? 'blocked'
+        : (setup ? 'fullscreen_setup' : (sequence >= positions.length ? 'complete' : 'calibration'));
       try {
         await fetch('/api/page-state', {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
           body: JSON.stringify({
             phase,
-            fullscreen: Boolean(fullscreenElement()),
+            fullscreen: fullscreenActive(),
+            calibration_mode: calibrationMode,
+            fullscreen_attempted: fullscreenAttempted,
+            fullscreen_method: fullscreenMethod,
+            viewport_coverage: viewportCoverage,
             error: fullscreenError,
             viewport_width: window.innerWidth,
             viewport_height: window.innerHeight,
@@ -80,24 +110,96 @@
       }
     }
 
+    function measureViewportCoverage() {
+      const viewport = window.visualViewport;
+      const viewportWidth = Math.min(window.innerWidth, viewport?.width || window.innerWidth);
+      const viewportHeight = Math.min(window.innerHeight, viewport?.height || window.innerHeight);
+      const screenWidth = Number(window.screen?.width || 0);
+      const screenHeight = Number(window.screen?.height || 0);
+      if (![viewportWidth, viewportHeight, screenWidth, screenHeight].every(Number.isFinite)
+          || Math.min(viewportWidth, viewportHeight, screenWidth, screenHeight) < 1) {
+        return {eligible: false, width_ratio: 0, height_ratio: 0};
+      }
+      const direct = [viewportWidth / screenWidth, viewportHeight / screenHeight];
+      const rotated = [viewportWidth / screenHeight, viewportHeight / screenWidth];
+      const ratios = Math.min(...direct) >= Math.min(...rotated) ? direct : rotated;
+      return {
+        eligible: ratios.every(ratio => ratio >= 0.92 && ratio <= 1.08),
+        width_ratio: Math.round(ratios[0] * 10000) / 10000,
+        height_ratio: Math.round(ratios[1] * 10000) / 10000
+      };
+    }
+
+    async function waitForFullscreen(timeoutMs = 700) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (fullscreenActive()) return true;
+        await new Promise(resolve => setTimeout(resolve, 40));
+      }
+      return fullscreenActive();
+    }
+
+    async function tryFullscreenMethods() {
+      const root = document.documentElement;
+      const names = [
+        'webkitRequestFullscreen',
+        'webkitRequestFullScreen',
+        'requestFullscreen',
+        'mozRequestFullScreen',
+        'msRequestFullscreen'
+      ];
+      const attemptedFunctions = new Set();
+      const errors = [];
+      for (const name of names) {
+        const request = root[name];
+        if (typeof request !== 'function' || attemptedFunctions.has(request)) continue;
+        attemptedFunctions.add(request);
+        try {
+          // Prefer WebKit's own entry point when the engine exposes it. Old
+          // implementations reject the modern navigationUI options object; a
+          // no-argument call is valid for both the vendor and standard APIs.
+          const result = request.call(root);
+          if (result && typeof result.then === 'function') await result;
+          if (await waitForFullscreen()) {
+            fullscreenMethod = name;
+            return true;
+          }
+          errors.push(`${name}:not_active`);
+        } catch (error) {
+          errors.push(`${name}:${String(error?.message || error)}`);
+        }
+      }
+      fullscreenError = errors.length ? errors.join(' | ') : 'browser_fullscreen_api_unavailable';
+      return false;
+    }
+
     async function enterFullscreen(event) {
       event.preventDefault();
       if (locked) return;
       locked = true;
+      fullscreenAttempted = true;
       try {
-        const request = document.documentElement.requestFullscreen
-          || document.documentElement.webkitRequestFullscreen;
-        if (!request) throw new Error('browser_fullscreen_api_unavailable');
-        const result = request.call(document.documentElement, {navigationUI: 'hide'});
-        if (result && typeof result.then === 'function') await result;
-        fullscreenError = '';
+        const entered = await tryFullscreenMethods();
+        viewportCoverage = measureViewportCoverage();
+        if (!entered && !viewportCoverage.eligible) {
+          calibrationMode = 'blocked';
+          setup = false;
+          detail.textContent = `进入全屏失败且视口覆盖不足：${fullscreenError}`;
+          return;
+        }
+        calibrationMode = entered ? 'fullscreen' : 'viewport_coverage';
+        if (entered) fullscreenError = '';
         setup = false;
         sequence = 0;
         sessionId = null;
-        detail.textContent = '已进入全屏，开始九点采集';
+        detail.textContent = entered
+          ? `已通过 ${fullscreenMethod} 进入全屏，开始九点采集`
+          : '全屏 API 不可用；视口覆盖达到安全阈值，继续受限九点采集';
       } catch (error) {
         fullscreenError = String(error?.message || error);
-        detail.textContent = `进入全屏失败：${error.message}`;
+        calibrationMode = 'blocked';
+        setup = false;
+        detail.textContent = `全屏准备异常，标定已停止：${fullscreenError}`;
       } finally {
         locked = false;
         placeTarget();
@@ -110,7 +212,7 @@
         await enterFullscreen(event);
         return;
       }
-      if (locked) return;
+      if (locked || calibrationMode === 'blocked') return;
       locked = true;
       const point = event.touches ? event.touches[0] : event;
       const rect = pad.getBoundingClientRect();
@@ -150,7 +252,9 @@
           touch.style.display = 'none';
           locked = false;
           placeTarget();
-          detail.textContent = sequence ? `已同步 ${sequence} 个触点` : '等待机械臂落笔';
+          if (calibrationMode !== 'blocked') {
+            detail.textContent = sequence ? `已同步 ${sequence} 个触点` : '等待机械臂落笔';
+          }
         }
         publishState();
       } catch (_error) {
@@ -159,16 +263,21 @@
     }
 
     pad.addEventListener('pointerdown', record, {passive:false});
-    document.addEventListener('fullscreenchange', () => {
-      setup = !fullscreenElement();
-      if (!setup) sequence = Math.min(sequence, positions.length);
+    function handleFullscreenChange() {
+      if (fullscreenActive()) {
+        calibrationMode = 'fullscreen';
+        setup = false;
+        sequence = Math.min(sequence, positions.length);
+      } else if (calibrationMode === 'fullscreen' && fullscreenAttempted) {
+        calibrationMode = 'blocked';
+        setup = false;
+        fullscreenError = 'fullscreen_lost_during_calibration';
+      }
       placeTarget();
-    });
-    document.addEventListener('webkitfullscreenchange', () => {
-      setup = !fullscreenElement();
-      if (!setup) sequence = Math.min(sequence, positions.length);
-      placeTarget();
-    });
+    }
+    for (const eventName of ['fullscreenchange', 'webkitfullscreenchange', 'mozfullscreenchange', 'MSFullscreenChange']) {
+      document.addEventListener(eventName, handleFullscreenChange);
+    }
     syncFromServer();
     placeTarget();
     setInterval(syncFromServer, 700);

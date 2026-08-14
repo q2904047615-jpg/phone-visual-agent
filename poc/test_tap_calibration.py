@@ -17,6 +17,7 @@ from tap_calibration import (
     fit_affine,
 )
 from run_xy_calibration import (
+    calibration_page_ready,
     ensure_fullscreen_calibration_page,
     locate_magenta_target,
     probe_single_touch,
@@ -46,6 +47,53 @@ class FakeFullscreenRobot:
 
 
 class TapCalibrationMathTests(unittest.TestCase):
+    def test_calibration_page_ready_accepts_only_bounded_modes(self):
+        self.assertTrue(
+            calibration_page_ready(
+                {"calibration_mode": "fullscreen", "fullscreen": True}
+            )
+        )
+        fallback = {
+            "calibration_mode": "viewport_coverage",
+            "fullscreen": False,
+            "fullscreen_attempted": True,
+            "viewport_coverage": {
+                "eligible": True,
+                "width_ratio": 0.94,
+                "height_ratio": 0.93,
+            },
+        }
+        self.assertTrue(calibration_page_ready(fallback))
+        self.assertFalse(
+            calibration_page_ready(
+                {
+                    **fallback,
+                    "viewport_coverage": {
+                        "eligible": True,
+                        "width_ratio": 0.94,
+                        "height_ratio": 0.91,
+                    },
+                }
+            )
+        )
+        self.assertFalse(
+            calibration_page_ready(
+                {"calibration_mode": "blocked", "fullscreen": False}
+            )
+        )
+        self.assertFalse(
+            calibration_page_ready(
+                {
+                    **fallback,
+                    "viewport_coverage": {
+                        "eligible": True,
+                        "width_ratio": "invalid",
+                        "height_ratio": 0.94,
+                    },
+                }
+            )
+        )
+
     def test_magenta_target_is_located(self):
         from PIL import Image, ImageDraw
 
@@ -259,8 +307,18 @@ class TapCalibrationMathTests(unittest.TestCase):
         frame = Image.new("RGB", (540, 960), "black")
         robot = FakeFullscreenRobot(frame)
         states = [
-            {"phase": "fullscreen_setup", "fullscreen": False},
-            TapCalibrationError("fullscreen refused"),
+            {
+                "phase": "fullscreen_setup",
+                "fullscreen": False,
+                "calibration_mode": "setup",
+            },
+            {
+                "phase": "blocked",
+                "fullscreen": False,
+                "calibration_mode": "blocked",
+                "fullscreen_attempted": True,
+                "error": "fullscreen refused",
+            },
         ]
 
         def page_state(*_args, **_kwargs):
@@ -295,6 +353,52 @@ class TapCalibrationMathTests(unittest.TestCase):
         click.assert_called_once()
         self.assertEqual(1, report["physical_actions"])
         self.assertFalse(report["passed"])
+
+    def test_viewport_fallback_keeps_one_setup_action_and_continues(self):
+        frame = Image.new("RGB", (540, 960), "black")
+        robot = FakeFullscreenRobot(frame)
+        ready = {
+            "phase": "calibration",
+            "fullscreen": False,
+            "calibration_mode": "viewport_coverage",
+            "fullscreen_attempted": True,
+            "viewport_coverage": {
+                "eligible": True,
+                "width_ratio": 0.95,
+                "height_ratio": 0.94,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "run_xy_calibration.wait_for_page_state",
+            side_effect=[
+                {
+                    "phase": "fullscreen_setup",
+                    "fullscreen": False,
+                    "calibration_mode": "setup",
+                },
+                ready,
+            ],
+        ), patch(
+            "run_xy_calibration.wait_for_stable_target",
+            return_value=(frame, (270, 480, (250, 460, 290, 500))),
+        ), patch(
+            "run_xy_calibration.click_raw_pixel",
+        ) as click:
+            output = Path(directory)
+            actions = ensure_fullscreen_calibration_page(
+                base_url="http://127.0.0.1:8770",
+                robot=robot,
+                output_dir=output,
+            )
+            report = json.loads(
+                (output / "00_fullscreen_setup.json").read_text(encoding="utf-8")
+            )
+
+        click.assert_called_once()
+        self.assertEqual(1, actions)
+        self.assertTrue(report["passed"])
+        self.assertTrue(report["safe_viewport_fallback"])
+        self.assertFalse(report["fullscreen_entered"])
 
     def test_page_state_wait_rejects_stale_calibration_heartbeat(self):
         stale = (datetime.now(timezone.utc) - timedelta(seconds=20)).isoformat()

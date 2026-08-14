@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import threading
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -55,7 +56,12 @@ STORE = SampleStore()
 
 
 class PageStateStore:
-    ALLOWED_PHASES = frozenset({"fullscreen_setup", "calibration", "complete"})
+    ALLOWED_PHASES = frozenset(
+        {"fullscreen_setup", "calibration", "complete", "blocked"}
+    )
+    ALLOWED_MODES = frozenset(
+        {"setup", "fullscreen", "viewport_coverage", "blocked"}
+    )
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -73,10 +79,55 @@ class PageStateStore:
         sequence = int(payload.get("sequence") or 0)
         if width < 1 or height < 1 or not 0 <= sequence <= 9:
             raise ValueError("校准页状态尺寸或序号无效")
+        fullscreen = payload.get("fullscreen") is True
+        mode = str(payload.get("calibration_mode") or "")
+        attempted = payload.get("fullscreen_attempted") is True
+        coverage = payload.get("viewport_coverage")
+        if mode not in self.ALLOWED_MODES:
+            raise ValueError(f"不支持的校准模式: {mode or 'missing'}")
+        if not isinstance(coverage, dict):
+            raise ValueError("缺少视口覆盖证据")
+        width_ratio = coverage.get("width_ratio", 0)
+        height_ratio = coverage.get("height_ratio", 0)
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in (width_ratio, height_ratio)
+        ):
+            raise ValueError("视口覆盖比例必须是数值")
+        coverage_evidence = {
+            "eligible": coverage.get("eligible") is True,
+            "width_ratio": float(width_ratio),
+            "height_ratio": float(height_ratio),
+        }
+        if not all(
+            math.isfinite(coverage_evidence[name])
+            for name in ("width_ratio", "height_ratio")
+        ):
+            raise ValueError("视口覆盖比例无效")
+        if phase == "fullscreen_setup" and (mode != "setup" or fullscreen):
+            raise ValueError("全屏准备阶段状态不一致")
+        if phase in {"calibration", "complete"}:
+            fullscreen_ready = mode == "fullscreen" and fullscreen
+            viewport_ready = (
+                mode == "viewport_coverage"
+                and not fullscreen
+                and attempted
+                and coverage_evidence["eligible"]
+                and 0.92 <= coverage_evidence["width_ratio"] <= 1.08
+                and 0.92 <= coverage_evidence["height_ratio"] <= 1.08
+            )
+            if not (fullscreen_ready or viewport_ready):
+                raise ValueError("校准阶段缺少可信全屏或高覆盖视口证据")
+        if phase == "blocked" and (mode != "blocked" or fullscreen or not attempted):
+            raise ValueError("阻断阶段状态不一致")
         with self.lock:
             self.state = {
                 "phase": phase,
-                "fullscreen": bool(payload.get("fullscreen")),
+                "fullscreen": fullscreen,
+                "calibration_mode": mode,
+                "fullscreen_attempted": attempted,
+                "fullscreen_method": str(payload.get("fullscreen_method") or "")[:80],
+                "viewport_coverage": coverage_evidence,
                 "error": str(payload.get("error") or "")[:240],
                 "viewport_width": width,
                 "viewport_height": height,

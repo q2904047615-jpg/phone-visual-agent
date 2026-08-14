@@ -152,24 +152,52 @@ def wait_for_page_state(
     )
 
 
+def calibration_page_ready(state: dict[str, object]) -> bool:
+    """Accept only measured fullscreen or the explicitly bounded viewport fallback."""
+
+    mode = str(state.get("calibration_mode") or "")
+    if mode == "fullscreen":
+        return state.get("fullscreen") is True
+    coverage = state.get("viewport_coverage")
+    try:
+        return bool(
+            mode == "viewport_coverage"
+            and state.get("fullscreen") is False
+            and state.get("fullscreen_attempted") is True
+            and isinstance(coverage, dict)
+            and coverage.get("eligible") is True
+            and math.isfinite(float(coverage.get("width_ratio") or 0))
+            and math.isfinite(float(coverage.get("height_ratio") or 0))
+            and 0.92 <= float(coverage.get("width_ratio") or 0) <= 1.08
+            and 0.92 <= float(coverage.get("height_ratio") or 0) <= 1.08
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def ensure_fullscreen_calibration_page(
     *,
     base_url: str,
     robot: RobotController,
     output_dir: Path,
 ) -> int:
-    """Enter fullscreen with one harmless, freshly observed physical tap."""
+    """Prepare a bounded calibration viewport with one freshly observed tap.
+
+    Real fullscreen is preferred. A viewport-only fallback is accepted only
+    when both CSS screen ratios are tightly bounded; the later camera-space
+    convex-hull gate remains authoritative before a calibration can activate.
+    """
 
     state = wait_for_page_state(
         base_url,
         phases={"fullscreen_setup", "calibration", "complete"},
     )
-    if state.get("phase") == "calibration" and state.get("fullscreen") is True:
+    if state.get("phase") == "calibration" and calibration_page_ready(state):
         return 0
-    if state.get("phase") == "complete" and state.get("fullscreen") is True:
+    if state.get("phase") == "complete" and calibration_page_ready(state):
         # A just-reset page can need one polling interval to show point 1 again.
         state = wait_for_page_state(base_url, phases={"calibration"}, timeout=3.0)
-        if state.get("fullscreen") is True:
+        if calibration_page_ready(state):
             return 0
     if state.get("phase") != "fullscreen_setup":
         raise TapCalibrationError(f"校准页状态不允许进入全屏：{state}")
@@ -189,9 +217,17 @@ def ensure_fullscreen_calibration_page(
     }
     click_raw_pixel(robot, frame, (target_x, target_y))
     try:
-        state = wait_for_page_state(base_url, phases={"calibration"}, timeout=8.0)
+        state = wait_for_page_state(
+            base_url,
+            phases={"calibration", "blocked"},
+            timeout=8.0,
+        )
         result["page_state"] = state
-        result["passed"] = bool(state.get("fullscreen") is True)
+        result["passed"] = calibration_page_ready(state)
+        result["fullscreen_entered"] = state.get("fullscreen") is True
+        result["safe_viewport_fallback"] = (
+            state.get("calibration_mode") == "viewport_coverage"
+        )
     except Exception as exc:
         result["error"] = str(exc)
         result["page_state"] = request_json(f"{base_url}/api/page-state")
@@ -204,8 +240,11 @@ def ensure_fullscreen_calibration_page(
             json.dumps(result, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-    if state.get("fullscreen") is not True:
-        raise TapCalibrationError("手机浏览器拒绝进入全屏，禁止继续边缘标定。")
+    if not calibration_page_ready(state):
+        reason = str(state.get("error") or "browser_fullscreen_api_unavailable")
+        raise TapCalibrationError(
+            f"手机浏览器未提供可信全屏，且视口覆盖不足，禁止继续边缘标定：{reason}"
+        )
     return 1
 
 

@@ -25,6 +25,8 @@ class ActionAcceptancePageTests(unittest.TestCase):
             "系统返回",
             "长按目标",
             "拖动目标",
+            "目标文字：agent",
+            "input.value === 'agent'",
         ):
             self.assertIn(marker, page)
         for app_name in ("微信", "抖音", "支付宝"):

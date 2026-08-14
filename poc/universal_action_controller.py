@@ -8,7 +8,7 @@ from semantic_executor import SemanticAction
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v6"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v7"
 
 
 class UniversalActionError(RuntimeError):
@@ -283,6 +283,8 @@ class UniversalActionController:
 
         if action.action == "tap_semantic":
             element = self._resolve_target(action, scene)
+            if element.states.get("local_text_clear") is True:
+                self._validate_local_text_clear(element, scene)
             return self._point_action(
                 action,
                 element,
@@ -402,6 +404,45 @@ class UniversalActionController:
                 expected_effect={"app_id": app_id, **expected_effect},
             )
         raise UniversalActionError(f"通用动作控制器尚不支持：{action.action}")
+
+    def _validate_local_text_clear(self, element: UIElement, scene: UIScene) -> None:
+        if (
+            element.meaning != "clear_local_text"
+            or element.role not in {"button", "icon"}
+            or element.label.strip().casefold() not in {"×", "✕", "✖", "x"}
+        ):
+            raise UniversalActionError("本地文字清空必须绑定真实可见的独立 × 图形。")
+        inputs = tuple(
+            candidate
+            for candidate in scene.elements
+            if candidate.role == "input"
+            and float(candidate.confidence) >= self.min_confidence
+            and candidate.states.get("goal_relevant") is True
+            and candidate.states.get("focused") is True
+            and isinstance(candidate.states.get("value"), str)
+            and bool(candidate.states.get("value"))
+            and candidate.states.get("keyboard_layout")
+            in {"qwerty", "numeric", "symbol", "unknown"}
+        )
+        if len(inputs) != 1:
+            raise UniversalActionError(
+                "本地文字清空要求唯一非空、已聚焦且带软键盘事实的目标输入框。"
+            )
+        input_element = inputs[0]
+        il, it, ir, ib = input_element.bounds
+        el, et, er, eb = element.bounds
+        element_height = max(1e-9, eb - et)
+        input_height = max(1e-9, ib - it)
+        vertical_overlap = max(0.0, min(ib, eb) - max(it, et))
+        if not (
+            vertical_overlap / element_height >= 0.6
+            and el >= il + 0.4 * (ir - il)
+            and er <= min(1.0, ir + 0.2)
+            and max(0.0, el - ir) <= max(0.04, input_height)
+            and er - el <= 2.0 * input_height
+            and element_height <= 1.5 * input_height
+        ):
+            raise UniversalActionError("本地文字清空控件没有与唯一目标输入框形成可信几何绑定。")
 
     def verify_after_action(
         self,

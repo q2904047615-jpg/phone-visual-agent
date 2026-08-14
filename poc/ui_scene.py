@@ -88,10 +88,44 @@ class UIElement:
                 raise UISceneError(
                     "input 元素的 states.keyboard_layout 必须是 qwerty、numeric、symbol 或 unknown。"
                 )
+        if "keyboard_input_mode" in self.states:
+            input_mode = self.states["keyboard_input_mode"]
+            if self.role != "input" or input_mode not in {
+                "direct_latin",
+                "chinese_pinyin",
+                "unknown",
+            }:
+                raise UISceneError(
+                    "input 元素的 states.keyboard_input_mode 必须是 direct_latin、"
+                    "chinese_pinyin 或 unknown。"
+                )
         if "local_text_clear" in self.states:
             if self.role not in {"button", "icon"} or self.states["local_text_clear"] is not True:
                 raise UISceneError(
                     "states.local_text_clear=true 只允许标记独立的 button 或 icon。"
+                )
+            if self.meaning != "clear_local_text":
+                raise UISceneError(
+                    "states.local_text_clear=true 的 meaning 必须是 clear_local_text。"
+                )
+            if self.label.strip().casefold() not in {"×", "✕", "✖", "x"}:
+                raise UISceneError(
+                    "clear_local_text 必须在 label 逐字保存真实可见的 ×/✕/✖/x 图形。"
+                )
+        if "keyboard_input_mode_switch" in self.states:
+            modes = {"direct_latin", "chinese_pinyin"}
+            current_mode = self.states.get("current_mode")
+            target_mode = self.states.get("target_mode")
+            if (
+                self.role not in {"button", "icon"}
+                or self.meaning != "switch_keyboard_input_mode"
+                or self.states["keyboard_input_mode_switch"] is not True
+                or current_mode not in modes
+                or target_mode not in modes
+                or current_mode == target_mode
+            ):
+                raise UISceneError(
+                    "keyboard_input_mode_switch 必须是方向明确的独立模式切换按钮。"
                 )
         _reject_action_data(self.states, "states")
 

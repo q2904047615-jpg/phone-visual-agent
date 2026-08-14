@@ -518,6 +518,7 @@ class UISceneTests(unittest.TestCase):
                 "element_id": "clear",
                 "role": "icon",
                 "meaning": "clear_local_text",
+                "label": "×",
                 "bounds": [760, 110, 820, 170],
                 "confidence": 0.95,
                 "states": {"local_text_clear": True},
@@ -531,9 +532,25 @@ class UISceneTests(unittest.TestCase):
                     "element_id": "bad-clear",
                     "role": "keyboard_key",
                     "meaning": "delete",
+                    "label": "×",
                     "bounds": [760, 700, 820, 760],
                     "confidence": 0.95,
                     "states": {"local_text_clear": True},
+                },
+                coordinate_scale=1000,
+            )
+
+        with self.assertRaisesRegex(UISceneError, "真实可见"):
+            UIElement.from_dict(
+                {
+                    "element_id": "hallucinated-clear",
+                    "role": "icon",
+                    "meaning": "clear_local_text",
+                    "label": "",
+                    "bounds": [760, 110, 820, 170],
+                    "confidence": 0.95,
+                    "states": {"local_text_clear": True},
+                    "evidence": ["模型自由描述为圆形叉号"],
                 },
                 coordinate_scale=1000,
             )

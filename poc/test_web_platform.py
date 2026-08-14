@@ -4145,7 +4145,7 @@ class ApiEndToEndTests(unittest.TestCase):
         observer = universal.pop("observer")
         self.assertEqual(
             observer["observer_version"],
-            "2026-08-14-generic-scene-observer-v9",
+            "2026-08-14-generic-scene-observer-v10",
         )
         self.assertEqual(observer["supported_app_scope"], "dynamic")
         architecture["universal_agent"] = universal
@@ -4164,7 +4164,7 @@ class ApiEndToEndTests(unittest.TestCase):
                 "universal_agent": {
                     "goal_protocol": "2026-08-10-generic-intent-v1",
                     "scene_protocol": "2026-08-10-ui-scene-v2",
-                    "action_protocol": "2026-08-14-universal-action-v6",
+                    "action_protocol": "2026-08-14-universal-action-v7",
                     "goal_preview_enabled": True,
                     "scene_preview_enabled": True,
                     "hardware_execution_enabled": True,

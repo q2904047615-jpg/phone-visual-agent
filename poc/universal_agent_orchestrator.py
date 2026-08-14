@@ -2212,7 +2212,7 @@ class PhaseOneNavigationPolicy:
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
-    VERSION = "2026-08-14-universal-action-policy-v5"
+    VERSION = "2026-08-14-universal-action-policy-v6"
     ALLOWED_ACTIONS = frozenset(
         {
             "swipe",
@@ -2583,6 +2583,8 @@ class PhaseOneNavigationPolicy:
         if action_kind == "tap_semantic" and element.states.get("local_text_clear") is True:
             if impact != "navigation_only" or element.role not in {"button", "icon"}:
                 return self._deny("本地文字清空控件只允许用于 navigation_only 的独立按钮或图标。")
+            if element.label.strip().casefold() not in {"×", "✕", "✖", "x"}:
+                return self._deny("本地文字清空候选缺少逐字可见的 × 图形。")
             visible_semantics = " ".join(
                 [element.meaning, element.label, *element.evidence]
             ).casefold()
@@ -2599,6 +2601,8 @@ class PhaseOneNavigationPolicy:
                 and candidate.states.get("goal_relevant") is True
                 and isinstance(candidate.states.get("value"), str)
                 and bool(candidate.states.get("value"))
+                and candidate.states.get("keyboard_layout")
+                in {"qwerty", "numeric", "symbol", "unknown"}
                 and candidate.states.get("visible") is not False
             )
             if len(focused_inputs) != 1:

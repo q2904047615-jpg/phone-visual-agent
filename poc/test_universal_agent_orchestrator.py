@@ -901,6 +901,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
                 "focused": True,
                 "value": "agent.com",
                 "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "chinese_pinyin",
             },
         )
         clear_element = UIElement(
@@ -972,7 +973,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         cancel_element = replace(
             clear_element,
-            label="清除按钮",
+            label="×",
             bounds=(0.77, 0.014, 0.88, 0.048),
             evidence=("右侧‘取消’按钮",),
         )
@@ -988,7 +989,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
                     "target": "clear_local_text",
                     "meaning": "clear_local_text",
                     "role": "icon",
-                    "label": "清除按钮",
+                    "label": "×",
                     "states": {"local_text_clear": True},
                     "expected_effect": {"scene_changed": True},
                 },
@@ -1005,6 +1006,42 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             decision=cancel_decision,
         )
         self.assertFalse(denied_cancel.allowed)
+
+        robot_icon = replace(
+            clear_element,
+            label="",
+            evidence=("蓝色输入法机器人图标",),
+        )
+        robot_scene = replace(scene, elements=(input_element, robot_icon))
+        robot_decision = _decision(robot_scene)
+        robot_decision.proposal = GenericStepProposal(
+            status="action",
+            action=SemanticAction(
+                node_id="robot-not-clear",
+                action="tap_semantic",
+                params={
+                    "element_id": "clear",
+                    "target": "clear_local_text",
+                    "meaning": "clear_local_text",
+                    "role": "icon",
+                    "label": "",
+                    "states": {"local_text_clear": True},
+                    "expected_effect": {"scene_changed": True},
+                },
+            ),
+        )
+        robot_decision.target_region = SimpleNamespace(
+            kind="element",
+            element_id="clear",
+            bounds=robot_icon.bounds,
+        )
+        denied_robot = self.policy.evaluate(
+            task_context=_context(impact="navigation_only"),
+            trusted_observation=robot_decision.trusted_observation,
+            decision=robot_decision,
+        )
+        self.assertFalse(denied_robot.allowed)
+        self.assertIn("×", denied_robot.reason)
         self.assertIn("取消", denied_cancel.reason)
 
     def test_read_only_subgoal_cannot_focus_input(self) -> None:

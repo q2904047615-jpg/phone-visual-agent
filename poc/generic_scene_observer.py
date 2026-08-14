@@ -25,7 +25,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v9"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v10"
 COMPACT_OUTPUT_TOKENS = 800
 COMPACT_RETRY_TOKENS = 800
 TARGETED_OUTPUT_TOKENS = 1200
@@ -491,7 +491,8 @@ INPUT_VALUE_OBSERVATION_RULE = (
     "可见键面文字，states写keyboard_input_mode_switch:true、current_mode和target_mode；不确定当前"
     "模式或切换方向时不得编造该元素。字母、数字、退格、回车等普通键仍必须role=keyboard_key。"
     "若非空输入框内部或紧邻右侧清楚可见独立的圆形×/清空图标，必须另建role=button或icon元素，"
-    "meaning写clear_local_text，states写local_text_clear:true；只框该图标自身，不能与输入框合并，"
+    "meaning写clear_local_text，states写local_text_clear:true，label必须逐字写图标本身的×/✕/✖/x；"
+    "若看不清真实叉号图形或只能自由描述为叉号，就不得标记local_text_clear。只框该图标自身，不能与输入框合并，"
     "也绝不能把键盘退格键/删除键标成local_text_clear。页面右侧的文字‘取消’/cancel是取消编辑或"
     "退出控件，不是本地清空图标；必须meaning=cancel且goal_relevant:false，绝不能标成clear_local_text。"
 )
@@ -796,6 +797,7 @@ def _normalize_local_text_clear_structure(
         and float(item["confidence"]) >= 0.9
         and _valid_1000_bounds(item.get("bounds"))
         and not _has_cancel_semantics(item)
+        and _has_exact_clear_glyph(item)
     ]
     matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for input_element in inputs:
@@ -847,6 +849,10 @@ def _has_cancel_semantics(item: dict[str, Any]) -> bool:
         ]
     ).casefold()
     return "取消" in visible or bool(re.search(r"\bcancel(?:led|ing)?\b", visible))
+
+
+def _has_exact_clear_glyph(item: dict[str, Any]) -> bool:
+    return str(item.get("label") or "").strip().casefold() in {"×", "✕", "✖", "x"}
 
 
 def _goal_directed_roi_bounds(

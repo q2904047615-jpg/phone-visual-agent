@@ -86,6 +86,9 @@ class GenericSceneObserver:
                 "compact_output_tokens": COMPACT_OUTPUT_TOKENS,
                 "observation_timeout_seconds": OBSERVATION_TIMEOUT_SECONDS,
                 "max_compact_elements": MAX_COMPACT_ELEMENTS,
+                "last_scene_enum_values": dict(
+                    self.last_diagnostics.get("scene_enum_values") or {}
+                ),
             }
         )
         return value
@@ -438,6 +441,9 @@ class GenericSceneObserver:
             )
             base["raw_response_length"] = len(self.last_raw_response)
             base["raw_response_excerpt"] = self.last_raw_response[:1000]
+            base["scene_enum_values"] = _scene_enum_values(
+                self.last_raw_response
+            )
             self.last_diagnostics = base
             raise
         finally:
@@ -1608,6 +1614,50 @@ def _normalize_known_scene_enums(payload: dict[str, Any]) -> None:
             normalized = value.strip().casefold()
             if normalized in allowed:
                 states[field] = normalized
+
+
+def _scene_enum_values(raw: str) -> dict[str, list[str]]:
+    """Return only keyboard enum tokens for safe local failure diagnostics."""
+
+    try:
+        payload = _extract_json_object(raw)
+    except Exception:
+        return {}
+    collected: dict[str, set[str]] = {
+        "keyboard_layout": set(),
+        "keyboard_input_mode": set(),
+        "current_mode": set(),
+        "target_mode": set(),
+    }
+
+    def remember(container: Any, source_key: str, target_key: str) -> None:
+        if not isinstance(container, dict) or source_key not in container:
+            return
+        value = container.get(source_key)
+        rendered = str(value).strip()[:80]
+        if rendered:
+            collected[target_key].add(rendered)
+
+    elements = payload.get("elements")
+    if isinstance(elements, list):
+        for item in elements:
+            if not isinstance(item, dict):
+                continue
+            states = item.get("states")
+            for key in tuple(collected):
+                remember(states, key, key)
+
+    keyboard = payload.get("keyboard")
+    remember(keyboard, "layout", "keyboard_layout")
+    remember(keyboard, "input_mode", "keyboard_input_mode")
+    mode_switch = keyboard.get("mode_switch") if isinstance(keyboard, dict) else None
+    remember(mode_switch, "current_mode", "current_mode")
+    remember(mode_switch, "target_mode", "target_mode")
+    return {
+        key: sorted(values)
+        for key, values in collected.items()
+        if values
+    }
 
 
 def _compact_retry_allowed(error: VisionAgentError) -> bool:

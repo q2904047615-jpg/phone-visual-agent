@@ -6,7 +6,7 @@ import unittest
 from PIL import Image, ImageFilter
 
 from generic_scene_observer import GenericSceneObserver, INPUT_STRUCTURE_AUDIT_VERSION
-from generic_scene_observer import _parse_scene
+from generic_scene_observer import _parse_scene, _scene_enum_values
 from ui_scene import UISceneError
 from vision_agent import VisionAgentError
 
@@ -357,6 +357,50 @@ class GenericSceneObserverTests(unittest.TestCase):
                 fingerprint="frame-invalid-enum",
                 goal_context={"objective": "在空输入框输入agent"},
             )
+
+    def test_scene_enum_diagnostics_expose_only_keyboard_tokens(self) -> None:
+        payload = scene_payload()
+        payload["summary"] = "不应出现在枚举诊断中的页面文字"
+        payload["elements"] = [
+            {
+                "element_id": "input-top",
+                "role": "input",
+                "meaning": "search_input",
+                "label": "敏感输入文字不应出现在诊断中",
+                "bounds": [80, 20, 600, 80],
+                "confidence": 0.96,
+                "states": {
+                    "goal_relevant": True,
+                    "keyboard_layout": "26-key",
+                    "keyboard_input_mode": "Pinyin",
+                },
+                "evidence": ["不应输出"],
+            },
+            {
+                "element_id": "mode-switch",
+                "role": "button",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "中",
+                "bounds": [680, 880, 780, 950],
+                "confidence": 0.95,
+                "states": {
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "Pinyin",
+                    "target_mode": "English",
+                },
+                "evidence": ["不应输出"],
+            },
+        ]
+
+        diagnostics = _scene_enum_values(
+            json.dumps(payload, ensure_ascii=False)
+        )
+
+        self.assertEqual(["26-key"], diagnostics["keyboard_layout"])
+        self.assertEqual(["Pinyin"], diagnostics["keyboard_input_mode"])
+        self.assertEqual(["Pinyin"], diagnostics["current_mode"])
+        self.assertEqual(["English"], diagnostics["target_mode"])
+        self.assertNotIn("敏感输入文字", json.dumps(diagnostics, ensure_ascii=False))
 
     def test_clear_goal_binds_unique_nonempty_input_before_focus_inference(self) -> None:
         payload = scene_payload()

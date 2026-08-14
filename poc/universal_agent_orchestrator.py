@@ -865,6 +865,57 @@ class UniversalAgentOrchestrator:
             session.evidence_store.write_risk_audit(revised),
         )
 
+    def _review_completion_candidate(
+        self,
+        session: UniversalAgentSessionState,
+        *,
+        graph: DynamicTaskGraph,
+        trusted_observation: Any,
+        decision: Any,
+        reason: str,
+    ) -> DynamicTaskGraph:
+        """Require DeepSeek to approve a Qwen-only visible completion claim."""
+
+        proposal = decision.proposal
+        if proposal.status != "finished":
+            raise UniversalAgentOrchestratorError(
+                "只有 Qwen finished 决策可以进入完成复核。"
+            )
+        observed = self.bridge.observed_state(
+            graph=graph,
+            trusted_observation=trusted_observation,
+            action_outcome="not_applicable",
+            verification={
+                "completion_evidence": list(proposal.completion_evidence),
+                "visible_evidence": list(proposal.completion_evidence),
+            },
+        )
+        revised = self.deepseek_planner.replan(
+            graph,
+            observed,
+            trigger="subgoal_completed",
+            reason=reason,
+        )
+        self._validate_graph_identity(
+            revised,
+            device_id=session.device_id,
+            previous=graph,
+        )
+        self._store_revised_graph(session, revised)
+        if revised.status == "completed":
+            session.status = "succeeded"
+            session.failed_reason = ""
+        else:
+            session.status = "blocked"
+            session.failed_reason = (
+                "Qwen 的完成候选没有被 DeepSeek 新 revision 确认为完成。"
+            )
+            session.controller_decision = NavigationPolicyDecision(
+                allowed=False,
+                reason=session.failed_reason,
+            )
+        return revised
+
     @staticmethod
     def _policy_payload(decision: NavigationPolicyDecision) -> dict[str, Any]:
         return {
@@ -1274,40 +1325,16 @@ class UniversalAgentOrchestrator:
             ),
         )
         if decision.proposal.status == "finished":
-            completion_observed = self.bridge.observed_state(
-                graph=revised,
-                trusted_observation=new_observation,
-                action_outcome="not_applicable",
-                verification={
-                    "completion_evidence": list(
-                        decision.proposal.completion_evidence
-                    ),
-                    "visible_evidence": list(
-                        decision.proposal.completion_evidence
-                    ),
-                },
-            )
             try:
-                completed = self.deepseek_planner.replan(
-                    revised,
-                    completion_observed,
-                    trigger="subgoal_completed",
+                self._review_completion_candidate(
+                    session,
+                    graph=revised,
+                    trusted_observation=new_observation,
+                    decision=decision,
                     reason=(
                         "Qwen 在动作后的当前可信画面中提出完成候选，"
                         "要求 DeepSeek 复核整个任务。"
                     ),
-                )
-                self._validate_graph_identity(
-                    completed,
-                    device_id=session.device_id,
-                    previous=revised,
-                )
-                session.task_graph = completed
-                session.goal_draft = self.bridge.goal_draft(completed)
-                self._remember(
-                    session,
-                    session.evidence_store.write_task_graph(completed),
-                    session.evidence_store.write_risk_audit(completed),
                 )
             except Exception as exc:
                 session.status = "blocked"
@@ -1317,18 +1344,6 @@ class UniversalAgentOrchestrator:
                     reason=session.failed_reason,
                 )
                 return
-            if completed.status == "completed":
-                session.status = "succeeded"
-                session.failed_reason = ""
-            else:
-                session.status = "blocked"
-                session.failed_reason = (
-                    "Qwen 的完成候选没有被 DeepSeek 新 revision 确认为完成。"
-                )
-                session.controller_decision = NavigationPolicyDecision(
-                    allowed=False,
-                    reason=session.failed_reason,
-                )
             return
         if decision.proposal.status != "action":
             session.status = "blocked"
@@ -1485,12 +1500,23 @@ class UniversalAgentOrchestrator:
                 else:
                     session.status = "blocked"
                     session.failed_reason = policy_decision.reason
+            elif decision.proposal.status == "finished":
+                self._review_completion_candidate(
+                    session,
+                    graph=graph,
+                    trusted_observation=observation,
+                    decision=decision,
+                    reason=(
+                        "Qwen 在重新观察后的当前可信画面中提出完成候选，"
+                        "要求 DeepSeek 复核整个任务。"
+                    ),
+                )
             else:
                 session.status = "blocked"
                 session.failed_reason = (
                     decision.proposal.reason
                     if decision.proposal.status == "blocked"
-                    else "重新观察后的完成候选必须由 DeepSeek 新 revision 复核。"
+                    else f"不支持的 Qwen 状态：{decision.proposal.status}"
                 )
                 session.controller_decision = NavigationPolicyDecision(
                     allowed=False,
@@ -2083,39 +2109,13 @@ class UniversalAgentOrchestrator:
                     reason=proposal.reason,
                 )
             elif proposal.status == "finished":
-                observed = self.bridge.observed_state(
+                self._review_completion_candidate(
+                    session,
                     graph=graph,
                     trusted_observation=observation,
-                    action_outcome="not_applicable",
-                    verification={
-                        "completion_evidence": list(proposal.completion_evidence),
-                        "visible_evidence": list(proposal.completion_evidence),
-                    },
-                )
-                revised = self.deepseek_planner.replan(
-                    graph,
-                    observed,
-                    trigger="subgoal_completed",
+                    decision=decision,
                     reason="Qwen 在当前可信画面中提出完成候选，要求 DeepSeek 复核。",
                 )
-                self._validate_graph_identity(
-                    revised,
-                    device_id=session.device_id,
-                    previous=graph,
-                )
-                session.task_graph = revised
-                self._remember(
-                    session,
-                    store.write_task_graph(revised),
-                    store.write_risk_audit(revised),
-                )
-                if revised.status == "completed":
-                    session.status = "succeeded"
-                else:
-                    session.status = "blocked"
-                    session.failed_reason = (
-                        "Qwen 的完成候选没有被 DeepSeek 新 revision 确认为完成。"
-                    )
             else:
                 raise UniversalAgentOrchestratorError(
                     f"不支持的 Qwen 状态：{proposal.status}"

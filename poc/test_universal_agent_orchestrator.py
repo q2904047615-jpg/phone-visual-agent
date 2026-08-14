@@ -452,6 +452,69 @@ class FakeQwenObserver:
         return decision
 
 
+class SequenceDeepSeekPlanner(FakeDeepSeekPlanner):
+    def __init__(self, graph: DynamicTaskGraph, *replan_results: DynamicTaskGraph):
+        super().__init__(graph)
+        self.replan_results = list(replan_results)
+
+    def replan(self, graph, observation, *, trigger, reason):
+        self.replan_calls.append((graph, observation, trigger, reason))
+        if not self.replan_results:
+            raise AssertionError("unexpected DeepSeek replan call")
+        return self.replan_results.pop(0)
+
+
+class SequenceQwenObserver:
+    def __init__(self, *statuses: str) -> None:
+        self.statuses = list(statuses)
+        self.calls = []
+
+    def decide(self, **kwargs):
+        if not self.statuses:
+            raise AssertionError("unexpected Qwen decision call")
+        kwargs.pop("available_action_kinds", None)
+        self.calls.append(kwargs)
+        return FakeQwenObserver(self.statuses.pop(0)).decide(**kwargs)
+
+
+class SequenceExecutingAdapter(FakeAdapter):
+    def __init__(
+        self,
+        scene: UIScene,
+        *after_steps: tuple[UIScene, str, tuple[str, ...]],
+    ) -> None:
+        super().__init__(scene)
+        self.after_steps = list(after_steps)
+
+    def execute(self, **kwargs):
+        self.execute_calls += 1
+        if not self.after_steps:
+            raise AssertionError("unexpected physical action")
+        after_scene, outcome, errors = self.after_steps.pop(0)
+        result = FakeExecutingAdapter(
+            kwargs["planned_scene"],
+            after_scene,
+            action_outcome=outcome,
+            verification_errors=errors,
+        ).execute(**kwargs)
+        self.scene = after_scene
+        return result
+
+
+class SequenceCaptureAdapter(FakeAdapter):
+    def __init__(self, *scenes: UIScene) -> None:
+        if not scenes:
+            raise ValueError("at least one scene is required")
+        super().__init__(scenes[0])
+        self.scenes = list(scenes)
+
+    def capture_scene(self, goal, *, evidence_dir, prefix):
+        if not self.scenes:
+            raise AssertionError("unexpected capture")
+        self.scene = self.scenes.pop(0)
+        return super().capture_scene(goal, evidence_dir=evidence_dir, prefix=prefix)
+
+
 def _trusted_factory(*, frames, device_id, scene, observation_id=None):
     if len(frames) < 4:
         raise AssertionError("trusted observation requires four frames")
@@ -1703,6 +1766,192 @@ def _risk_confirmation(session) -> dict:
     return dict(session.snapshot()["risk_confirmation_scope"])
 
 
+class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
+    @staticmethod
+    def _orchestrator(planner, qwen, adapter):
+        return UniversalAgentOrchestrator(
+            deepseek_planner=planner,
+            qwen_observer=qwen,
+            adapter_factory=lambda _device_id: adapter,
+            trusted_observation_factory=_trusted_factory,
+        )
+
+    @staticmethod
+    def _unknown_app_graph() -> DynamicTaskGraph:
+        base = _graph()
+        graph = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="在首次出现的资料工具中查看唯一条目及其下一层只读内容",
+                target_apps=(
+                    TargetApp(
+                        app_id="unseen.reference.workspace",
+                        app_name="陌生资料工具",
+                    ),
+                ),
+            ),
+            raw_user_goal="查看眼前唯一资料，再查看它的下一层只读内容",
+        )
+        graph.validate()
+        return graph
+
+    def test_unknown_app_multistep_requires_two_separate_confirmations(self) -> None:
+        initial = self._unknown_app_graph()
+        revision_two = replace(initial, revision=2)
+        completed = _completed_graph(revision_two)
+        planner = SequenceDeepSeekPlanner(initial, revision_two, completed)
+        qwen = SequenceQwenObserver("action", "action")
+        adapter = SequenceExecutingAdapter(
+            _scene(),
+            (_scene(fingerprint="frame-b", label="进入公开内容"), "matched", ()),
+            (_scene(fingerprint="frame-c", label="公开内容已显示"), "matched", ()),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(planner, qwen, adapter)
+            session = orchestrator.start(
+                session_id="session-unseen-multistep",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+            first = orchestrator.confirm_one(session, _confirmation(session))
+            self.assertEqual("awaiting_confirmation", session.status)
+            self.assertEqual(1, session.physical_actions)
+            second = orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, first.physical_actions)
+        self.assertEqual(1, second.physical_actions)
+        self.assertEqual(2, adapter.execute_calls)
+        self.assertEqual(2, session.physical_actions)
+        self.assertEqual(2, len(session.history))
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual(3, session.task_graph.revision)
+        self.assertEqual("unseen.reference.workspace", session.goal_draft.app_id)
+
+    def test_unchanged_screen_is_mismatch_evidence_and_replans_once(self) -> None:
+        initial = self._unknown_app_graph()
+        revised = replace(initial, revision=2)
+        planner = SequenceDeepSeekPlanner(initial, revised)
+        qwen = SequenceQwenObserver("action", "blocked")
+        unchanged = _scene()
+        adapter = SequenceExecutingAdapter(
+            unchanged,
+            (
+                unchanged,
+                "mismatched",
+                ("动作后画面未变化，预期语义结果未出现。",),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(planner, qwen, adapter)
+            session = orchestrator.start(
+                session_id="session-no-effect",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual("mismatched", result.action_outcome)
+        self.assertEqual(result.before_scene.fingerprint, result.after_scene.fingerprint)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual("action_result_mismatch", planner.replan_calls[0][2])
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual("blocked", session.status)
+
+    def test_candidate_disappears_after_action_and_old_candidate_is_not_reused(self) -> None:
+        initial = self._unknown_app_graph()
+        revised = replace(initial, revision=2)
+        planner = SequenceDeepSeekPlanner(initial, revised)
+        qwen = SequenceQwenObserver("action", "blocked")
+        disappeared = replace(
+            _scene(fingerprint="frame-no-candidate"),
+            summary="动作后目标候选已经不在当前画面",
+            elements=(),
+        )
+        adapter = SequenceExecutingAdapter(
+            _scene(),
+            (disappeared, "matched", ()),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(planner, qwen, adapter)
+            session = orchestrator.start(
+                session_id="session-candidate-disappeared",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            orchestrator.confirm_one(session, _confirmation(session))
+
+        second_observation = qwen.calls[1]["trusted_observation"]
+        self.assertEqual((), second_observation.scene.elements)
+        self.assertEqual("frame-no-candidate", second_observation.fingerprint)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual("blocked", session.status)
+        self.assertIsNone(session.snapshot()["confirmation_scope"])
+
+    def test_refresh_finished_is_reviewed_by_deepseek_without_action(self) -> None:
+        initial = self._unknown_app_graph()
+        completed = _completed_graph(initial)
+        planner = SequenceDeepSeekPlanner(initial, completed)
+        qwen = SequenceQwenObserver("action", "finished")
+        adapter = SequenceCaptureAdapter(
+            _scene(),
+            _scene(fingerprint="frame-complete", label="公开内容已显示"),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(planner, qwen, adapter)
+            session = orchestrator.start(
+                session_id="session-refresh-completed",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            decision = orchestrator.refresh_decision(session)
+
+        self.assertEqual("finished", decision.proposal.status)
+        self.assertEqual("subgoal_completed", planner.replan_calls[0][2])
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_refresh_changes_fingerprint_and_invalidates_old_action_scope(self) -> None:
+        initial = self._unknown_app_graph()
+        planner = SequenceDeepSeekPlanner(initial)
+        qwen = SequenceQwenObserver("action", "action")
+        adapter = SequenceCaptureAdapter(
+            _scene(),
+            _scene(fingerprint="frame-new-candidate", label="新的唯一入口"),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(planner, qwen, adapter)
+            session = orchestrator.start(
+                session_id="session-stale-fingerprint",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            stale_scope = _confirmation(session)
+            orchestrator.refresh_decision(session)
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError,
+                "不一致",
+            ):
+                orchestrator.confirm_one(session, stale_scope)
+
+        self.assertNotEqual(
+            stale_scope["fingerprint"],
+            session.trusted_observation.fingerprint,
+        )
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+
 class UniversalAgentRiskConfirmationTests(unittest.TestCase):
     def _started(self, temp: str, *, impact: str = "external_state"):
         initial = _external_graph(impact=impact)
@@ -1764,9 +2013,16 @@ class UniversalAgentRiskConfirmationTests(unittest.TestCase):
     def test_action_confirmation_executes_once_then_new_revision_requires_new_risk(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             orchestrator, session, qwen, adapter = self._started(temp)
-            orchestrator.approve_risks(session, _risk_confirmation(session))
+            old_risk_scope = _risk_confirmation(session)
+            orchestrator.approve_risks(session, old_risk_scope)
 
             result = orchestrator.confirm_one(session, _confirmation(session))
+            new_risk_scope = dict(session.snapshot()["risk_confirmation_scope"])
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError,
+                "不一致",
+            ):
+                orchestrator.approve_risks(session, old_risk_scope)
 
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(1, adapter.execute_calls)
@@ -1776,7 +2032,10 @@ class UniversalAgentRiskConfirmationTests(unittest.TestCase):
         self.assertEqual((), session.confirmed_risk_ids)
         self.assertEqual(1, len(qwen.calls))
         self.assertIsNone(session.snapshot()["confirmation_scope"])
-        self.assertTrue(session.snapshot()["risk_confirmation_ready"])
+        self.assertEqual(2, new_risk_scope["revision"])
+        self.assertNotEqual(old_risk_scope, new_risk_scope)
+        self.assertFalse(session.snapshot()["risk_confirmation_ready"])
+        self.assertIsNone(session.snapshot()["risk_confirmation_scope"])
 
 
 class UniversalAgentConfirmTests(unittest.TestCase):

@@ -15,6 +15,18 @@ ROOT = Path(__file__).resolve().parent
 PAGE_PATH = ROOT / "static" / "touch_calibration.html"
 ACTION_PAGE_PATH = ROOT / "static" / "action_acceptance.html"
 OUTPUT_ROOT = ROOT / "output" / "xy_calibration"
+ROOT_ACTION_MODES = frozenset(
+    {"index", "swipe", "tap", "back", "input", "long_press", "drag", "sequence"}
+)
+
+
+def root_action_location(mode: str | None) -> str | None:
+    normalized = str(mode or "").strip()
+    if not normalized:
+        return None
+    if normalized not in ROOT_ACTION_MODES:
+        raise ValueError(f"不支持的根页动作验收模式: {normalized}")
+    return f"/actions?mode={normalized}"
 
 
 class SampleStore:
@@ -218,6 +230,7 @@ ACTION_STORE = ActionEventStore()
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "TouchCalibration/1.0"
+    root_action_mode: str | None = None
 
     def _send_json(self, payload: object, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -231,6 +244,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         path = urlparse(self.path).path
         if path == "/":
+            redirect = root_action_location(self.root_action_mode)
+            if redirect is not None:
+                self.send_response(HTTPStatus.SEE_OTHER)
+                self.send_header("Location", redirect)
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
             body = PAGE_PATH.read_bytes()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -306,7 +326,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Harmless multi-point touch calibration page")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8770)
+    parser.add_argument(
+        "--root-action-mode",
+        choices=sorted(ROOT_ACTION_MODES),
+        default=None,
+        help="让根页安全重定向到指定通用动作验收模式；省略时仍为校准页",
+    )
     args = parser.parse_args()
+    Handler.root_action_mode = args.root_action_mode
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"Touch calibration: http://{args.host}:{args.port}/", flush=True)
     try:

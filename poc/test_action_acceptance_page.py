@@ -10,6 +10,7 @@ from touch_calibration_server import (
     PAGE_PATH,
     ActionEventStore,
     PageStateStore,
+    root_action_location,
 )
 
 
@@ -158,6 +159,17 @@ class ActionAcceptancePageTests(unittest.TestCase):
         for app_name in ("微信", "抖音", "支付宝"):
             self.assertNotIn(app_name, page)
         self.assertNotIn("placeholder=", page)
+
+    def test_root_can_redirect_only_to_explicit_generic_action_modes(self) -> None:
+        self.assertIsNone(root_action_location(None))
+        self.assertEqual("/actions?mode=input", root_action_location("input"))
+        self.assertEqual(
+            "/actions?mode=long_press",
+            root_action_location("long_press"),
+        )
+        self.assertEqual("/actions?mode=drag", root_action_location("drag"))
+        with self.assertRaisesRegex(ValueError, "不支持"):
+            root_action_location("account_action")
 
     def test_action_event_store_records_one_supported_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

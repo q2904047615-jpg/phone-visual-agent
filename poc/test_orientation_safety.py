@@ -105,6 +105,22 @@ class OrientationCredentialTests(unittest.TestCase):
         with self.assertRaisesRegex(OrientationSafetyError, "实际独立审计"):
             gate.arm(manual, action="tap_semantic", scene_fingerprint="scene-a")
 
+    def test_failed_rearm_clears_previous_authorization(self):
+        gate = PhysicalExecutionGate("device-a")
+        first = audited_credential()
+        gate.arm(first, action="tap_semantic", scene_fingerprint="scene-a")
+
+        invalid = OrientationCredential.from_dict(audited_credential().to_dict())
+        with self.assertRaisesRegex(OrientationSafetyError, "实际独立审计"):
+            gate.arm(
+                invalid,
+                action="tap_semantic",
+                scene_fingerprint="scene-a",
+            )
+
+        with self.assertRaisesRegex(OrientationSafetyError, "缺少一次性方向授权"):
+            gate.consume(action="tap_semantic", frame=FRAME.copy())
+
     def test_placeholder_device_ids_fail_before_model_or_robot(self):
         for value in ("", "unbound", "unknown"):
             with self.subTest(value=value), self.assertRaises((ValueError, OrientationSafetyError)):

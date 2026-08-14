@@ -275,13 +275,17 @@ class PhysicalExecutionGate:
         ] | None = None
 
     def arm(self, credential: OrientationCredential, *, action: str, scene_fingerprint: str) -> None:
-        credential.assert_authorizes(
-            device_id=self.device_id,
-            scene_fingerprint=scene_fingerprint,
-            frame_size=credential.frame_size,
-        )
-        visual_binding = _claim_audit_seal(credential)
         with self._lock:
+            # Every arm attempt replaces the authorization state atomically.
+            # A malformed, stale, or already-consumed credential must never
+            # leave an earlier authorization available to a later consume.
+            self._armed = None
+            credential.assert_authorizes(
+                device_id=self.device_id,
+                scene_fingerprint=scene_fingerprint,
+                frame_size=credential.frame_size,
+            )
+            visual_binding = _claim_audit_seal(credential)
             self._armed = (
                 action,
                 credential,

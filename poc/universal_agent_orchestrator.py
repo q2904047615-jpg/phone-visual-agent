@@ -2518,9 +2518,22 @@ class PhaseOneNavigationPolicy:
                 "允许对一个精确可信输入候选执行本地聚焦。",
                 "focus_input",
             )
+        clear_claimed = (
+            element.meaning == "clear_local_text"
+            or str(action.params.get("target") or "") == "clear_local_text"
+        )
+        if clear_claimed and element.states.get("local_text_clear") is not True:
+            return self._deny("本地文字清空候选缺少可信 local_text_clear 状态。")
         if action_kind == "tap_semantic" and element.states.get("local_text_clear") is True:
             if impact != "navigation_only" or element.role not in {"button", "icon"}:
                 return self._deny("本地文字清空控件只允许用于 navigation_only 的独立按钮或图标。")
+            visible_semantics = " ".join(
+                [element.meaning, element.label, *element.evidence]
+            ).casefold()
+            if "取消" in visible_semantics or re.search(
+                r"\bcancel(?:led|ing)?\b", visible_semantics
+            ):
+                return self._deny("文字取消控件不能冒充本地文字清空图标。")
             focused_inputs = tuple(
                 candidate
                 for candidate in scene.elements
@@ -2538,11 +2551,17 @@ class PhaseOneNavigationPolicy:
             il, it, ir, ib = input_element.bounds
             el, et, er, eb = element.bounds
             vertical_overlap = max(0.0, min(ib, eb) - max(it, et))
+            input_height = max(1e-9, ib - it)
+            element_width = er - el
             element_height = max(1e-9, eb - et)
+            gap = max(0.0, el - ir)
             geometrically_bound = (
                 vertical_overlap / element_height >= 0.6
                 and el >= il + 0.4 * (ir - il)
                 and er <= min(1.0, ir + 0.2)
+                and gap <= max(0.04, input_height)
+                and element_width <= 2.0 * input_height
+                and element_height <= 1.5 * input_height
             )
             if not geometrically_bound:
                 return self._deny("本地文字清空控件没有与唯一目标输入框形成可信几何绑定。")

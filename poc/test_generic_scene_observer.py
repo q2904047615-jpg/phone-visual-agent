@@ -184,6 +184,142 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
 
         self.assertNotIn("focused", scene.elements[0].states)
+
+    def test_clear_goal_binds_unique_nonempty_input_before_focus_inference(self) -> None:
+        payload = scene_payload()
+        payload["summary"] = '输入框含文字"yi"，右侧有清空图标；软键盘可见'
+        payload["elements"] = [
+            {
+                "element_id": "input_0",
+                "role": "input",
+                "meaning": "local_search_input",
+                "label": "搜索输入框",
+                "bounds": [85, 575, 810, 635],
+                "confidence": 0.96,
+                "states": {"value": "yi", "keyboard_layout": "qwerty"},
+                "evidence": ["输入框内文字yi"],
+            },
+            {
+                "element_id": "clear_0",
+                "role": "icon",
+                "meaning": "clear_local_text",
+                "label": "清空图标",
+                "bounds": [820, 575, 890, 625],
+                "confidence": 0.95,
+                "states": {"local_text_clear": True},
+                "evidence": ["输入框右侧独立圆形叉号"],
+            },
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-clear-bound",
+            goal_context={"objective": "把当前输入框中的文字清空"},
+        )
+
+        input_element, clear_control = scene.elements
+        self.assertTrue(input_element.states["goal_relevant"])
+        self.assertTrue(input_element.states["focused"])
+        self.assertEqual("yi", input_element.states["value"])
+        self.assertTrue(clear_control.states["goal_relevant"])
+
+    def test_clear_goal_does_not_bind_ambiguous_or_distant_structure(self) -> None:
+        base_input = {
+            "element_id": "input_0",
+            "role": "input",
+            "meaning": "local_search_input",
+            "label": "搜索输入框",
+            "bounds": [85, 575, 810, 635],
+            "confidence": 0.96,
+            "states": {"value": "yi", "keyboard_layout": "qwerty"},
+            "evidence": ["输入框内文字yi"],
+        }
+        clear_control = {
+            "element_id": "clear_0",
+            "role": "icon",
+            "meaning": "clear_local_text",
+            "label": "清空图标",
+            "bounds": [820, 200, 890, 250],
+            "confidence": 0.95,
+            "states": {"local_text_clear": True},
+            "evidence": ["远离输入框的叉号"],
+        }
+        payload = scene_payload()
+        payload["summary"] = "软键盘可见"
+        payload["elements"] = [base_input, clear_control]
+
+        distant_scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-clear-distant",
+            goal_context={"objective": "清空当前输入框"},
+        )
+        self.assertFalse(distant_scene.elements[0].states["goal_relevant"])
+        self.assertNotIn("focused", distant_scene.elements[0].states)
+
+        second_input = dict(base_input)
+        second_input.update(
+            {
+                "element_id": "input_1",
+                "bounds": [85, 675, 810, 735],
+                "states": {"value": "other", "keyboard_layout": "qwerty"},
+            }
+        )
+        bound_clear = dict(clear_control)
+        bound_clear["bounds"] = [820, 575, 890, 625]
+        payload["elements"] = [base_input, second_input, bound_clear]
+        ambiguous_scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-clear-ambiguous",
+            goal_context={"objective": "清空当前输入框"},
+        )
+        self.assertTrue(
+            all(item.states.get("goal_relevant") is False for item in ambiguous_scene.elements)
+        )
+        self.assertTrue(all("focused" not in item.states for item in ambiguous_scene.elements))
+
+    def test_clear_goal_demotes_cancel_text_even_when_model_claims_clear(self) -> None:
+        payload = scene_payload()
+        payload["summary"] = "搜索输入框含文字agent.com，右侧有取消，软键盘可见"
+        payload["elements"] = [
+            {
+                "element_id": "input_0",
+                "role": "input",
+                "meaning": "local_search_input",
+                "label": "搜索输入框",
+                "bounds": [150, 12, 680, 52],
+                "confidence": 0.95,
+                "states": {
+                    "value": "agent.com",
+                    "keyboard_layout": "qwerty",
+                    "goal_relevant": True,
+                    "focused": True,
+                },
+                "evidence": ["agent.com"],
+            },
+            {
+                "element_id": "cancel_0",
+                "role": "button",
+                "meaning": "clear_local_text",
+                "label": "清除按钮",
+                "bounds": [770, 14, 880, 48],
+                "confidence": 0.92,
+                "states": {"local_text_clear": True, "goal_relevant": True},
+                "evidence": ["右侧‘取消’按钮"],
+            },
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-cancel-mislabel",
+            goal_context={"objective": "清空当前输入框"},
+        )
+
+        input_element, cancel = scene.elements
+        self.assertFalse(input_element.states["goal_relevant"])
+        self.assertNotIn("focused", input_element.states)
+        self.assertFalse(cancel.states["goal_relevant"])
+        self.assertNotIn("local_text_clear", cancel.states)
+
     def test_observes_arbitrary_app_and_normalizes_bounds(self) -> None:
         provider = FakeProvider(scene_payload())
         observer = GenericSceneObserver(provider)

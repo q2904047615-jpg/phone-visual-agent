@@ -25,7 +25,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v6"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v8"
 COMPACT_OUTPUT_TOKENS = 800
 COMPACT_RETRY_TOKENS = 800
 TARGETED_OUTPUT_TOKENS = 1200
@@ -486,7 +486,8 @@ INPUT_VALUE_OBSERVATION_RULE = (
     "qwerty、numeric、symbol或unknown；这只是画面事实，不授权输入。"
     "若非空输入框内部或紧邻右侧清楚可见独立的圆形×/清空图标，必须另建role=button或icon元素，"
     "meaning写clear_local_text，states写local_text_clear:true；只框该图标自身，不能与输入框合并，"
-    "也绝不能把键盘退格键/删除键标成local_text_clear。"
+    "也绝不能把键盘退格键/删除键标成local_text_clear。页面右侧的文字‘取消’/cancel是取消编辑或"
+    "退出控件，不是本地清空图标；必须meaning=cancel且goal_relevant:false，绝不能标成clear_local_text。"
 )
 
 
@@ -666,6 +667,7 @@ def _parse_scene(
         payload = _extract_json_object(raw)
         _normalize_compact_scene_payload(payload)
         _normalize_prefilled_input_structure(payload, goal_context or {})
+        _normalize_local_text_clear_structure(payload, goal_context or {})
         _normalize_unique_input_focus(payload)
         return UIScene.from_dict(
             payload,
@@ -728,6 +730,117 @@ def _normalize_unique_input_focus(payload: dict[str, Any]) -> None:
         return
     states["focused"] = True
     candidate["states"] = states
+
+
+def _normalize_local_text_clear_structure(
+    payload: dict[str, Any],
+    goal_context: dict[str, Any],
+) -> None:
+    """Bind one observed clear control to one non-empty input for clear goals.
+
+    This normalization grants no action permission.  It only restores omitted
+    goal-relevance facts when the model has already reported the complete
+    high-confidence structure required by the controller.  Focus is still
+    derived separately and only when the same scene also reports a visible
+    soft keyboard.
+    """
+
+    if not _goal_requests_local_text_clear(goal_context):
+        return
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return
+
+    all_inputs = [
+        item
+        for item in elements
+        if isinstance(item, dict)
+        and str(item.get("role") or "").strip() == "input"
+        and isinstance(item.get("states"), dict)
+        and isinstance(item["states"].get("value"), str)
+        and bool(item["states"]["value"])
+        and isinstance(item.get("confidence"), (int, float))
+        and not isinstance(item.get("confidence"), bool)
+        and float(item["confidence"]) >= 0.9
+        and _valid_1000_bounds(item.get("bounds"))
+    ]
+    claimed_clear_controls = [
+        item
+        for item in elements
+        if isinstance(item, dict)
+        and str(item.get("role") or "").strip() in {"button", "icon"}
+        and isinstance(item.get("states"), dict)
+        and (
+            str(item.get("meaning") or "").strip() == "clear_local_text"
+            or item["states"].get("local_text_clear") is True
+        )
+    ]
+    inputs = [
+        item
+        for item in all_inputs
+        if item["states"].get("goal_relevant") is not False
+    ]
+    clear_controls = [
+        item
+        for item in claimed_clear_controls
+        if item["states"].get("local_text_clear") is True
+        and item["states"].get("goal_relevant") is not False
+        and isinstance(item.get("confidence"), (int, float))
+        and not isinstance(item.get("confidence"), bool)
+        and float(item["confidence"]) >= 0.9
+        and _valid_1000_bounds(item.get("bounds"))
+        and not _has_cancel_semantics(item)
+    ]
+    matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for input_element in inputs:
+        il, it, ir, ib = (float(value) for value in input_element["bounds"])
+        input_height = max(1e-9, ib - it)
+        for clear_control in clear_controls:
+            cl, ct, cr, cb = (float(value) for value in clear_control["bounds"])
+            clear_width = cr - cl
+            clear_height = max(1e-9, cb - ct)
+            vertical_overlap = max(0.0, min(ib, cb) - max(it, ct))
+            gap = max(0.0, cl - ir)
+            geometrically_bound = (
+                vertical_overlap / clear_height >= 0.6
+                and cl >= il + 0.4 * (ir - il)
+                and cr <= min(1000.0, ir + 200.0)
+                and gap <= max(40.0, input_height)
+                and clear_width <= 2.0 * input_height
+                and clear_height <= 1.5 * input_height
+            )
+            if geometrically_bound:
+                matches.append((input_element, clear_control))
+
+    if len(matches) == 1 and len(inputs) == 1 and len(clear_controls) == 1:
+        input_element, clear_control = matches[0]
+        input_element["states"] = dict(input_element["states"])
+        input_element["states"]["goal_relevant"] = True
+        clear_control["states"] = dict(clear_control["states"])
+        clear_control["states"]["goal_relevant"] = True
+        return
+
+    # Fail closed and let targeted refinement re-observe the exact visual
+    # structure. A model semantic claim alone grants no clear-button authority.
+    for item in all_inputs:
+        item["states"] = dict(item["states"])
+        item["states"]["goal_relevant"] = False
+        item["states"].pop("focused", None)
+    for item in claimed_clear_controls:
+        item["states"] = dict(item["states"])
+        item["states"].pop("local_text_clear", None)
+        item["states"]["goal_relevant"] = False
+
+
+def _has_cancel_semantics(item: dict[str, Any]) -> bool:
+    visible = " ".join(
+        [
+            str(item.get("meaning") or ""),
+            str(item.get("label") or ""),
+            *(str(value) for value in (item.get("evidence") or [])),
+        ]
+    ).casefold()
+    return "取消" in visible or bool(re.search(r"\bcancel(?:led|ing)?\b", visible))
 
 
 def _goal_directed_roi_bounds(
@@ -940,6 +1053,27 @@ def _goal_requests_input(context: dict[str, Any]) -> bool:
             "editable field",
             "address bar",
             "textbox",
+        )
+    )
+
+
+def _goal_requests_local_text_clear(context: dict[str, Any]) -> bool:
+    if not _goal_requests_input(context):
+        return False
+    visible = json.dumps(context, ensure_ascii=False).casefold()
+    return any(
+        term in visible
+        for term in (
+            "清空",
+            "清除",
+            "置空",
+            "文字变为空",
+            "内容变为空",
+            "clear text",
+            "clear the text",
+            "empty the input",
+            "empty the field",
+            "remove the text",
         )
     )
 

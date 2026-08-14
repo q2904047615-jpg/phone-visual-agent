@@ -844,6 +844,43 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertFalse(denied.allowed)
         self.assertIn("几何绑定", denied.reason)
 
+        cancel_element = replace(
+            clear_element,
+            label="清除按钮",
+            bounds=(0.77, 0.014, 0.88, 0.048),
+            evidence=("右侧‘取消’按钮",),
+        )
+        cancel_scene = replace(scene, elements=(input_element, cancel_element))
+        cancel_decision = _decision(cancel_scene)
+        cancel_decision.proposal = GenericStepProposal(
+            status="action",
+            action=SemanticAction(
+                node_id="clear-local-cancel",
+                action="tap_semantic",
+                params={
+                    "element_id": "clear",
+                    "target": "clear_local_text",
+                    "meaning": "clear_local_text",
+                    "role": "icon",
+                    "label": "清除按钮",
+                    "states": {"local_text_clear": True},
+                    "expected_effect": {"scene_changed": True},
+                },
+            ),
+        )
+        cancel_decision.target_region = SimpleNamespace(
+            kind="element",
+            element_id="clear",
+            bounds=cancel_element.bounds,
+        )
+        denied_cancel = self.policy.evaluate(
+            task_context=_context(impact="navigation_only"),
+            trusted_observation=cancel_decision.trusted_observation,
+            decision=cancel_decision,
+        )
+        self.assertFalse(denied_cancel.allowed)
+        self.assertIn("取消", denied_cancel.reason)
+
     def test_read_only_subgoal_cannot_focus_input(self) -> None:
         scene = _scene(
             meaning="顶部搜索输入框",

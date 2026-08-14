@@ -29,6 +29,7 @@ from robot_core import (
     classify_obscured_wechat_title,
     classify_wechat_page,
     controller_client_has_camera,
+    controller_navigation_button_point,
     oriented_navigation_ratio,
     qwerty_keyboard_config_from_anchors,
     qwerty_key_point,
@@ -153,6 +154,44 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             oriented_navigation_ratio(0.685, 0.976, landscape=False),
             (0.685, 0.976),
         )
+
+    def test_controller_navigation_buttons_use_complete_portrait_toolbar(self):
+        self.assertEqual(
+            controller_navigation_button_point(810, 1515, "back"),
+            (597, 1488),
+        )
+        self.assertEqual(
+            controller_navigation_button_point(540, 1010, "home"),
+            (348, 992),
+        )
+
+    def test_controller_navigation_button_rejects_clipped_landscape_toolbar(self):
+        with self.assertRaisesRegex(ValueError, "横屏控制端"):
+            controller_navigation_button_point(1440, 810, "back")
+
+    def test_android_back_clicks_dedicated_controller_button_once(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"back"},
+        )
+
+        with (
+            patch("robot_core.legacy.find_window", return_value=(123, "test")),
+            patch(
+                "robot_core.legacy.client_geometry",
+                return_value=(0, 0, 810, 1515),
+            ),
+            patch.object(controller, "_checkpoint"),
+            patch("robot_core.legacy.click_client_control") as click,
+            patch("robot_core.legacy.move_cursor_outside_camera") as park,
+            patch.object(controller, "_capture_phone") as capture,
+        ):
+            point = controller.vision_android_back()
+
+        self.assertEqual(point, (597, 1488))
+        click.assert_called_once_with(123, 597, 1488)
+        park.assert_called_once_with(123)
+        capture.assert_not_called()
 
     def test_navigation_tap_forces_single_click_and_returns_exact_pixel(self):
         controller = RobotController.__new__(RobotController)

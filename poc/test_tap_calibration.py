@@ -917,6 +917,24 @@ class TapCalibrationMathTests(unittest.TestCase):
                 newer_than=timestamp,
             )
 
+    def test_page_state_wait_skips_fresh_heartbeat_until_sequence_advances(self):
+        before = datetime.now(timezone.utc) - timedelta(seconds=1)
+        early = fresh_page_state("calibration", sequence=0)
+        advanced = fresh_page_state("calibration", sequence=1)
+        with patch(
+            "run_xy_calibration.request_json",
+            side_effect=[early, advanced],
+        ), patch("run_xy_calibration.time.sleep"):
+            result = wait_for_page_state(
+                "http://127.0.0.1:8770",
+                phases={"calibration"},
+                timeout=1.0,
+                newer_than=before.isoformat(),
+                expected_sequence=1,
+            )
+
+        self.assertEqual(1, result["sequence"])
+
     def test_single_touch_probe_records_one_verified_contact(self):
         frame = Image.new("RGB", (540, 960), "black")
         robot = FakeProbeRobot(frame)

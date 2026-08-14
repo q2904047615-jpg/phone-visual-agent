@@ -144,6 +144,7 @@ def wait_for_page_state(
     phases: set[str],
     timeout: float = 6.0,
     newer_than: str | None = None,
+    expected_sequence: int | None = None,
 ) -> dict[str, object]:
     deadline = time.monotonic() + timeout
     latest: dict[str, object] = {}
@@ -163,6 +164,10 @@ def wait_for_page_state(
             str(latest.get("phase") or "") in phases
             and 0 <= age <= 3.0
             and heartbeat_advanced
+            and (
+                expected_sequence is None
+                or int(latest.get("sequence", -1)) == expected_sequence
+            )
         ):
             return latest
         time.sleep(0.2)
@@ -773,6 +778,7 @@ def _execute_calibration_action(
                     phases={expected_phase},
                     timeout=8.0,
                     newer_than=str(locked_state.get("updated_at") or ""),
+                    expected_sequence=sequence + 1,
                 )
                 if (
                     int(after_state.get("sequence", -1)) != sequence + 1

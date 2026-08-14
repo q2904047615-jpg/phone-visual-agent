@@ -887,17 +887,112 @@ class PromotionScope:
         }
 
 
+_PROMOTION_AUTHORITY_FACTORY_TOKEN = object()
+
+
+def _resolved_execution_kind(execution_result: Any) -> str:
+    resolved = getattr(execution_result, "resolved_action", None)
+    if isinstance(resolved, Mapping):
+        return str(resolved.get("kind") or "").strip()
+    return str(getattr(resolved, "kind", "") or "").strip()
+
+
+def _validate_live_promotion_source(
+    *,
+    report: Mapping[str, Any],
+    orientation_credential: OrientationCredential,
+    execution_result: Any,
+) -> None:
+    if not isinstance(orientation_credential, OrientationCredential):
+        raise CapabilityAcceptanceError(
+            "能力晋级必须接收本进程真实方向凭据对象。"
+        )
+    if getattr(execution_result, "orientation_credential", None) is not orientation_credential:
+        raise CapabilityAcceptanceError("能力晋级方向凭据不是本次动作结果持有的同一对象。")
+    physical_actions = getattr(execution_result, "physical_actions", None)
+    if isinstance(physical_actions, bool) or physical_actions != 1:
+        raise CapabilityAcceptanceError("能力晋级来源必须是恰好一次物理动作结果。")
+    if str(getattr(execution_result, "action_outcome", "") or "") != "matched":
+        raise CapabilityAcceptanceError("能力晋级来源动作结果未通过闭环验证。")
+    action = str(report.get("candidate_action") or "")
+    if _resolved_execution_kind(execution_result) != action:
+        raise CapabilityAcceptanceError("能力晋级来源动作类型与报告不一致。")
+    if orientation_credential.device_id != report.get("device_id"):
+        raise CapabilityAcceptanceError("能力晋级 live 方向凭据与报告设备不一致。")
+    before_scene = getattr(execution_result, "before_scene", None)
+    before_fingerprint = str(getattr(before_scene, "fingerprint", "") or "")
+    if before_fingerprint != orientation_credential.scene_fingerprint:
+        raise CapabilityAcceptanceError("能力晋级 live 方向凭据与动作前场景不一致。")
+    before_frames = getattr(execution_result, "before_frames", None)
+    if not isinstance(before_frames, tuple) or not before_frames:
+        raise CapabilityAcceptanceError("能力晋级来源缺少本进程动作前原始帧对象。")
+    matching_frames = [
+        frame
+        for frame in before_frames
+        if isinstance(frame, Image.Image)
+        and tuple(frame.size) == orientation_credential.frame_size
+        and frame_fingerprint(frame) == orientation_credential.frame_fingerprint
+    ]
+    if not matching_frames:
+        raise CapabilityAcceptanceError("能力晋级 live 方向凭据未绑定动作前帧对象。")
+    execution = report.get("execution")
+    if not isinstance(execution, Mapping):
+        raise CapabilityAcceptanceError("能力晋级报告缺少执行对象。")
+    if execution.get("orientation_credential") != orientation_credential.to_dict():
+        raise CapabilityAcceptanceError("能力晋级报告方向凭据不是 live 对象的序列化视图。")
+    if report.get("physical_actions") != physical_actions:
+        raise CapabilityAcceptanceError("能力晋级报告与 live 动作计数不一致。")
+    if report.get("action_outcome") != getattr(execution_result, "action_outcome", None):
+        raise CapabilityAcceptanceError("能力晋级报告与 live 动作结果不一致。")
+    before_paths = tuple(str(value) for value in report.get("before_frame_paths", ()))
+    result_paths = tuple(
+        str(value) for value in getattr(execution_result, "before_frame_paths", ())
+    )
+    if before_paths != result_paths:
+        raise CapabilityAcceptanceError("能力晋级报告与 live 动作前证据路径不一致。")
+
+
 class PromotionAuthority:
     """One-shot local authority bound to one report and registry revision."""
 
-    def __init__(self, scope: PromotionScope) -> None:
+    def __init__(
+        self,
+        scope: PromotionScope,
+        *,
+        orientation_credential: OrientationCredential,
+        execution_result: Any,
+        report: Mapping[str, Any],
+        _factory_token: object | None = None,
+    ) -> None:
+        if _factory_token is not _PROMOTION_AUTHORITY_FACTORY_TOKEN:
+            raise CapabilityAcceptanceError("PromotionAuthority 只能由 live preview 签发。")
         self.scope = scope
         self.consumed = False
+        self._orientation_credential = orientation_credential
+        self._execution_result = execution_result
+        self._report = json.loads(json.dumps(dict(report), ensure_ascii=False))
+        self._source_nonce = object()
+
+    def _live_source(self) -> tuple[OrientationCredential, Any, Mapping[str, Any]]:
+        if (
+            self._source_nonce is None
+            or self._orientation_credential is None
+            or self._execution_result is None
+            or self._report is None
+        ):
+            raise CapabilityAcceptanceError("能力晋级 live 来源已失效。")
+        return self._orientation_credential, self._execution_result, self._report
 
     def validate_and_consume(self, value: Mapping[str, Any]) -> None:
         if self.consumed:
             raise CapabilityAcceptanceError("能力晋级确认已使用，禁止重放。")
         self.consumed = True
+        orientation_credential, execution_result, report = self._live_source()
+        _validate_live_promotion_source(
+            report=report,
+            orientation_credential=orientation_credential,
+            execution_result=execution_result,
+        )
         if not isinstance(value, Mapping):
             raise CapabilityAcceptanceError("能力晋级确认范围必须是对象。")
         expected = self.scope.to_dict()
@@ -907,6 +1002,24 @@ class PromotionAuthority:
             for key in expected
         ):
             raise CapabilityAcceptanceError("能力晋级确认范围不匹配。")
+
+    def assert_current_report(self, report: Mapping[str, Any]) -> None:
+        orientation_credential, execution_result, _stored_report = self._live_source()
+        _validate_live_promotion_source(
+            report=report,
+            orientation_credential=orientation_credential,
+            execution_result=execution_result,
+        )
+
+    def release_source(self) -> None:
+        self._source_nonce = None
+        self._orientation_credential = None
+        self._execution_result = None
+        self._report = None
+
+    def invalidate(self) -> None:
+        self.consumed = True
+        self.release_source()
 
 
 class CapabilityRegistryPromoter:
@@ -990,20 +1103,48 @@ class CapabilityRegistryPromoter:
                 "触控标定与真机验收报告不一致；必须在当前标定上重新验收。"
             )
 
-    def preview(self, report_path: Path) -> PromotionScope:
+    def preview(
+        self,
+        report_path: Path,
+        *,
+        orientation_credential: OrientationCredential | None = None,
+        execution_result: Any | None = None,
+    ) -> PromotionAuthority:
+        if orientation_credential is None or execution_result is None:
+            raise CapabilityAcceptanceError(
+                "能力晋级 preview 必须由 live manager 提供方向凭据和一次动作结果。"
+            )
         report = validate_acceptance_report(report_path)
+        _validate_live_promotion_source(
+            report=report,
+            orientation_credential=orientation_credential,
+            execution_result=execution_result,
+        )
         registry, raw = self._load_registry()
         device = self._registry_device(registry, report["device_id"])
         action = report["candidate_action"]
         self._require_matching_calibration(report, device)
         if action in device["verified_actions"]:
             raise CapabilityAcceptanceError(f"设备能力 {action} 已经启用。")
-        return PromotionScope(
+        scope = PromotionScope(
             trial_id=report["trial_id"],
             device_id=report["device_id"],
             action=action,
             report_sha256=sha256_file(Path(report_path)),
             registry_sha256=_sha256_bytes(raw),
+        )
+        try:
+            orientation_credential.claim_live_execution_source()
+        except OrientationSafetyError as exc:
+            raise CapabilityAcceptanceError(
+                f"能力晋级缺少 live-trial 方向来源：{exc}"
+            ) from exc
+        return PromotionAuthority(
+            scope,
+            orientation_credential=orientation_credential,
+            execution_result=execution_result,
+            report=report,
+            _factory_token=_PROMOTION_AUTHORITY_FACTORY_TOKEN,
         )
 
     @staticmethod
@@ -1043,6 +1184,22 @@ class CapabilityRegistryPromoter:
         confirmation: Mapping[str, Any],
         authority: PromotionAuthority,
     ) -> dict[str, Any]:
+        try:
+            return self._promote_bound(
+                report_path,
+                confirmation=confirmation,
+                authority=authority,
+            )
+        finally:
+            authority.release_source()
+
+    def _promote_bound(
+        self,
+        report_path: Path,
+        *,
+        confirmation: Mapping[str, Any],
+        authority: PromotionAuthority,
+    ) -> dict[str, Any]:
         authority.validate_and_consume(confirmation)
         scope = authority.scope
         lease = InterProcessLease(
@@ -1061,6 +1218,7 @@ class CapabilityRegistryPromoter:
             if sha256_file(Path(report_path)) != scope.report_sha256:
                 raise CapabilityAcceptanceError("验收报告在确认后发生变化。")
             report = validate_acceptance_report(report_path)
+            authority.assert_current_report(report)
             if (
                 report["trial_id"] != scope.trial_id
                 or report["device_id"] != scope.device_id

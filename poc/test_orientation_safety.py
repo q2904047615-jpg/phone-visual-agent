@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gc
 import unittest
+import weakref
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw, ImageEnhance
@@ -10,6 +12,7 @@ from orientation_safety import (
     OrientationCredential,
     OrientationSafetyError,
     PhysicalExecutionGate,
+    _CLAIMED_AUDIT_CREDENTIALS,
     _mint_audited_credential,
 )
 from robot_core import RobotController, WorkflowNotReady
@@ -40,6 +43,27 @@ def audited_credential(*, device_id="device-a", scene="scene-a", frame=FRAME):
 
 
 class OrientationCredentialTests(unittest.TestCase):
+    def test_live_execution_source_claim_is_exact_once_and_weakly_held(self):
+        gate = PhysicalExecutionGate("device-a")
+        credential = audited_credential()
+        gate.arm(credential, action="tap_semantic", scene_fingerprint="scene-a")
+
+        credential.claim_live_execution_source()
+        with self.assertRaisesRegex(OrientationSafetyError, "live 对象"):
+            credential.claim_live_execution_source()
+
+        pending = audited_credential()
+        pending_seal = pending._audit_seal
+        pending_ref = weakref.ref(pending)
+        gate.clear()
+        gate.arm(pending, action="tap_semantic", scene_fingerprint="scene-a")
+        gate.clear()
+        del pending
+        gc.collect()
+
+        self.assertIsNone(pending_ref())
+        self.assertNotIn(pending_seal, _CLAIMED_AUDIT_CREDENTIALS)
+
     def test_gate_binds_device_scene_size_and_exact_action_frame(self):
         reference = patterned_frame()
         gate = PhysicalExecutionGate("device-a")

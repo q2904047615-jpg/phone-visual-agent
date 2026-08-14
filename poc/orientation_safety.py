@@ -5,6 +5,7 @@ import re
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +22,9 @@ ORIENTATION_AUDIT_SOURCE = "independent_orientation_audit"
 _PLACEHOLDER_DEVICE_IDS = frozenset({"", "unbound", "unknown", "none", "null"})
 _AUDIT_SEAL_LOCK = threading.Lock()
 _LIVE_AUDIT_SEALS: dict[object, "_FrameVisualBinding"] = {}
+_CLAIMED_AUDIT_CREDENTIALS: weakref.WeakValueDictionary[object, Any] = (
+    weakref.WeakValueDictionary()
+)
 
 
 class OrientationSafetyError(RuntimeError):
@@ -173,6 +177,18 @@ class OrientationCredential:
         if float(self.confidence) < MIN_ORIENTATION_CONFIDENCE:
             raise OrientationSafetyError("方向独立审计置信度不足。")
 
+    def claim_live_execution_source(self) -> None:
+        """Atomically claim this exact in-process credential for one promotion."""
+
+        self.validate()
+        seal = self._audit_seal
+        with _AUDIT_SEAL_LOCK:
+            if seal is None or _CLAIMED_AUDIT_CREDENTIALS.get(seal) is not self:
+                raise OrientationSafetyError(
+                    "方向凭据不是本进程已进入物理执行门的 live 对象。"
+                )
+            del _CLAIMED_AUDIT_CREDENTIALS[seal]
+
     def to_dict(self) -> dict[str, Any]:
         self.validate()
         return {
@@ -261,7 +277,9 @@ def _claim_audit_seal(credential: OrientationCredential) -> _FrameVisualBinding:
             raise OrientationSafetyError(
                 "方向凭据不是本进程实际独立审计直接签发，或已使用。"
             )
-        return _LIVE_AUDIT_SEALS.pop(seal)
+        visual_binding = _LIVE_AUDIT_SEALS.pop(seal)
+        _CLAIMED_AUDIT_CREDENTIALS[seal] = credential
+        return visual_binding
 
 
 class PhysicalExecutionGate:

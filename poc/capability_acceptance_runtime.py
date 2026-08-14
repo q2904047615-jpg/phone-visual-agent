@@ -685,8 +685,11 @@ class CapabilityAcceptanceManager:
                 _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
 
             promoter = self.promoter_factory(self.registry_path)
-            trial.promotion_authority = PromotionAuthority(
-                promoter.preview(trial.report_path)
+            orientation_credential = getattr(result, "orientation_credential", None)
+            trial.promotion_authority = promoter.preview(
+                trial.report_path,
+                orientation_credential=orientation_credential,
+                execution_result=result,
             )
             _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
             return result
@@ -720,10 +723,10 @@ class CapabilityAcceptanceManager:
             try:
                 current_revision = str(self.code_revision_provider() or "").strip()
             except Exception:
-                authority.consumed = True
+                authority.invalidate()
                 raise
             if current_revision != trial.code_revision:
-                authority.consumed = True
+                authority.invalidate()
                 raise CapabilityAcceptanceError(
                     "验收后代码状态发生变化，晋级确认已作废；请重启后重新验收。"
                 )
@@ -740,11 +743,13 @@ class CapabilityAcceptanceManager:
 
     def cancel(self, trial_id: str) -> None:
         trial = self._require_live_trial(self.get(trial_id))
-        request_stop = getattr(trial.controller, "request_stop", None)
-        if callable(request_stop):
-            request_stop()
         with trial.operation_lock:
-            trial.orchestrator.cancel(trial.session)
-            if trial.promotion_authority is not None:
-                trial.promotion_authority.consumed = True
-            _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
+            try:
+                request_stop = getattr(trial.controller, "request_stop", None)
+                if callable(request_stop):
+                    request_stop()
+                trial.orchestrator.cancel(trial.session)
+            finally:
+                if trial.promotion_authority is not None:
+                    trial.promotion_authority.invalidate()
+                _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())

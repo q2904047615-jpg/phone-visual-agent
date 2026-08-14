@@ -1,7 +1,9 @@
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 from PIL import Image
@@ -9,7 +11,6 @@ from PIL import Image
 from capability_acceptance import (
     CapabilityAcceptanceError,
     CapabilityRegistryPromoter,
-    PromotionAuthority,
     validated_calibration_evidence,
     validate_acceptance_report,
 )
@@ -17,6 +18,9 @@ from device_exclusivity import InterProcessLease
 from orientation_safety import (
     ORIENTATION_AUDIT_SOURCE,
     ORIENTATION_CREDENTIAL_VERSION,
+    OrientationCredential,
+    PhysicalExecutionGate,
+    _mint_audited_credential,
     frame_fingerprint,
 )
 
@@ -323,6 +327,52 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         self.report_path.write_text(
             json.dumps(report, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
+        )
+
+    def _live_promotion_source(self, *, write_report: bool = True):
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        before_frames = tuple(
+            Image.open(path).convert("RGB") for path in report["before_frame_paths"]
+        )
+        credential = replace(
+            _mint_audited_credential(
+                device_id=report["device_id"],
+                scene_fingerprint=report["execution"]["before_scene"]["fingerprint"],
+                frame=before_frames[0],
+                phone_content_rotation="upright",
+                confidence=0.95,
+                evidence=("手机状态文字正向",),
+            ),
+            evidence_frame_fingerprint=frame_fingerprint(before_frames[0]),
+        )
+        PhysicalExecutionGate(report["device_id"]).arm(
+            credential,
+            action=report["candidate_action"],
+            scene_fingerprint=credential.scene_fingerprint,
+        )
+        result = SimpleNamespace(
+            orientation_credential=credential,
+            physical_actions=1,
+            action_outcome="matched",
+            resolved_action=SimpleNamespace(kind=report["candidate_action"]),
+            before_scene=SimpleNamespace(fingerprint=credential.scene_fingerprint),
+            before_frames=before_frames,
+            before_frame_paths=tuple(report["before_frame_paths"]),
+        )
+        if write_report:
+            report["execution"]["orientation_credential"] = credential.to_dict()
+            self.report_path.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        return credential, result
+
+    def _preview_live(self, promoter: CapabilityRegistryPromoter):
+        credential, result = self._live_promotion_source()
+        return promoter.preview(
+            self.report_path,
+            orientation_credential=credential,
+            execution_result=result,
         )
 
     def test_valid_report_requires_one_matched_action_and_eight_trial_frames(self) -> None:
@@ -786,13 +836,17 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
 
     def test_promotion_rejects_calibration_changed_after_report(self) -> None:
         promoter = CapabilityRegistryPromoter(self.registry_path)
-        promoter.preview(self.report_path)
         payload = json.loads(self.calibration_path.read_text(encoding="utf-8"))
         payload["frame_size"] = [720, 1280]
         self.calibration_path.write_text(json.dumps(payload), encoding="utf-8")
+        credential, result = self._live_promotion_source()
 
         with self.assertRaisesRegex(CapabilityAcceptanceError, "标定.*不一致"):
-            promoter.preview(self.report_path)
+            promoter.preview(
+                self.report_path,
+                orientation_credential=credential,
+                execution_result=result,
+            )
 
     def test_report_rejects_uncommitted_code_revision(self) -> None:
         self._mutate_report(
@@ -838,7 +892,8 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
 
     def test_promotion_scope_binds_report_and_registry_hashes(self) -> None:
         promoter = CapabilityRegistryPromoter(self.registry_path)
-        scope = promoter.preview(self.report_path)
+        authority = self._preview_live(promoter)
+        scope = authority.scope
 
         self.assertEqual(scope.trial_id, "trial-001")
         self.assertEqual(scope.device_id, "device-a")
@@ -852,10 +907,86 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
             hashlib.sha256(self.registry_path.read_bytes()).hexdigest(),
         )
 
+    def test_report_only_preview_fails_closed_without_registry_write(self) -> None:
+        promoter = CapabilityRegistryPromoter(self.registry_path)
+        before = self.registry_path.read_bytes()
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "live manager"):
+            promoter.preview(self.report_path)
+
+        self.assertEqual(self.registry_path.read_bytes(), before)
+
+    def test_deserialized_or_different_credential_cannot_preview(self) -> None:
+        promoter = CapabilityRegistryPromoter(self.registry_path)
+        credential, result = self._live_promotion_source()
+        serialized = OrientationCredential.from_dict(credential.to_dict())
+        serialized_result = SimpleNamespace(**vars(result))
+        serialized_result.orientation_credential = serialized
+        before = self.registry_path.read_bytes()
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "live-trial"):
+            promoter.preview(
+                self.report_path,
+                orientation_credential=serialized,
+                execution_result=serialized_result,
+            )
+
+        cloned = replace(credential)
+        cloned_result = SimpleNamespace(**vars(result))
+        cloned_result.orientation_credential = cloned
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "live-trial"):
+            promoter.preview(
+                self.report_path,
+                orientation_credential=cloned,
+                execution_result=cloned_result,
+            )
+        authority = promoter.preview(
+            self.report_path,
+            orientation_credential=credential,
+            execution_result=result,
+        )
+        authority.invalidate()
+
+        other_credential, other_result = self._live_promotion_source(
+            write_report=False
+        )
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "序列化视图"):
+            promoter.preview(
+                self.report_path,
+                orientation_credential=other_credential,
+                execution_result=other_result,
+            )
+
+        self.assertIsNot(credential, other_credential)
+        self.assertIs(result.orientation_credential, credential)
+        self.assertEqual(self.registry_path.read_bytes(), before)
+
+    def test_copied_report_cannot_reissue_live_authority(self) -> None:
+        promoter = CapabilityRegistryPromoter(self.registry_path)
+        credential, result = self._live_promotion_source()
+        promoter.preview(
+            self.report_path,
+            orientation_credential=credential,
+            execution_result=result,
+        )
+        copied_report = self.trial_dir / "copied_acceptance_report.json"
+        copied_report.write_bytes(self.report_path.read_bytes())
+        before = self.registry_path.read_bytes()
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "live-trial"):
+            promoter.preview(
+                copied_report,
+                orientation_credential=credential,
+                execution_result=result,
+            )
+
+        self.assertEqual(self.registry_path.read_bytes(), before)
+
     def test_scope_mismatch_consumes_authority_without_changing_registry(self) -> None:
         promoter = CapabilityRegistryPromoter(self.registry_path)
-        scope = promoter.preview(self.report_path)
-        authority = PromotionAuthority(scope)
+        authority = self._preview_live(promoter)
+        scope = authority.scope
         before = self.registry_path.read_bytes()
         bad_confirmation = scope.to_dict()
         bad_confirmation["report_sha256"] = "0" * 64
@@ -872,8 +1003,8 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
 
     def test_changed_registry_after_preview_consumes_authority_and_fails(self) -> None:
         promoter = CapabilityRegistryPromoter(self.registry_path)
-        scope = promoter.preview(self.report_path)
-        authority = PromotionAuthority(scope)
+        authority = self._preview_live(promoter)
+        scope = authority.scope
         self.registry_path.write_bytes(self.registry_path.read_bytes() + b" ")
 
         with self.assertRaisesRegex(CapabilityAcceptanceError, "注册表.*变化"):
@@ -887,8 +1018,9 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
 
     def test_changed_report_after_preview_consumes_authority_and_fails(self) -> None:
         promoter = CapabilityRegistryPromoter(self.registry_path)
-        scope = promoter.preview(self.report_path)
-        authority = PromotionAuthority(scope)
+        authority = self._preview_live(promoter)
+        scope = authority.scope
+        before = self.registry_path.read_bytes()
         self._mutate_report(
             lambda report: report.__setitem__("code_revision", "changed-revision")
         )
@@ -901,6 +1033,9 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
             )
 
         self.assertTrue(authority.consumed)
+        self.assertIsNone(authority._orientation_credential)
+        self.assertIsNone(authority._execution_result)
+        self.assertEqual(self.registry_path.read_bytes(), before)
 
     def test_registry_lease_contention_consumes_authority_without_writing(self) -> None:
         lease_path = self.root / "promotion.lease"
@@ -908,8 +1043,8 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
             self.registry_path,
             lease_path=lease_path,
         )
-        scope = promoter.preview(self.report_path)
-        authority = PromotionAuthority(scope)
+        authority = self._preview_live(promoter)
+        scope = authority.scope
         before = self.registry_path.read_bytes()
         held = InterProcessLease(
             lease_path,
@@ -938,8 +1073,8 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
             self.registry_path,
             replace_file=fail_replace,
         )
-        scope = promoter.preview(self.report_path)
-        authority = PromotionAuthority(scope)
+        authority = self._preview_live(promoter)
+        scope = authority.scope
         before = self.registry_path.read_bytes()
 
         with self.assertRaisesRegex(CapabilityAcceptanceError, "原子替换失败"):
@@ -957,8 +1092,8 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
 
     def test_successful_promotion_adds_one_action_and_is_not_replayable(self) -> None:
         promoter = CapabilityRegistryPromoter(self.registry_path)
-        scope = promoter.preview(self.report_path)
-        authority = PromotionAuthority(scope)
+        authority = self._preview_live(promoter)
+        scope = authority.scope
 
         result = promoter.promote(
             self.report_path,
@@ -975,6 +1110,7 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         self.assertEqual(result["action"], "drag")
         self.assertTrue((self.trial_dir / "registry_before.json").is_file())
         self.assertTrue((self.trial_dir / "promotion.json").is_file())
+        promoted_registry = self.registry_path.read_bytes()
 
         with self.assertRaisesRegex(CapabilityAcceptanceError, "已使用"):
             promoter.promote(
@@ -982,6 +1118,9 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 confirmation=scope.to_dict(),
                 authority=authority,
             )
+        self.assertEqual(self.registry_path.read_bytes(), promoted_registry)
+        self.assertIsNone(authority._orientation_credential)
+        self.assertIsNone(authority._execution_result)
 
     def test_already_enabled_action_cannot_be_promoted(self) -> None:
         self._mutate_report(
@@ -994,7 +1133,13 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(CapabilityAcceptanceError, "已经启用"):
-            CapabilityRegistryPromoter(self.registry_path).preview(self.report_path)
+            promoter = CapabilityRegistryPromoter(self.registry_path)
+            credential, result = self._live_promotion_source()
+            promoter.preview(
+                self.report_path,
+                orientation_credential=credential,
+                execution_result=result,
+            )
 
 
 if __name__ == "__main__":

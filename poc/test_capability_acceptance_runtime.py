@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -7,12 +8,15 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 from orientation_safety import (
-    ORIENTATION_AUDIT_SOURCE,
-    ORIENTATION_CREDENTIAL_VERSION,
+    PhysicalExecutionGate,
+    _mint_audited_credential,
     frame_fingerprint,
 )
 
-from capability_acceptance import CapabilityAcceptanceError
+from capability_acceptance import (
+    CapabilityAcceptanceError,
+    CapabilityRegistryPromoter,
+)
 from capability_acceptance_runtime import CapabilityAcceptanceManager
 from generic_action_adapter import GenericActionAdapterError
 from universal_agent_orchestrator import DeviceTaskRegistry
@@ -170,25 +174,26 @@ class FakeTrialResult:
             self._frame(run_dir / f"confirm_after_{index}.jpg", "white")
             for index in range(1, 5)
         )
+        self.before_frames = tuple(
+            Image.open(path).convert("RGB") for path in self.before_frame_paths
+        )
         self.evidence = self.before_frame_paths + self.after_frame_paths
-        self.orientation_credential = {
-            "version": ORIENTATION_CREDENTIAL_VERSION,
-            "credential_id": "runtime-credential",
-            "source": ORIENTATION_AUDIT_SOURCE,
-            "device_id": "device-a",
-            "scene_fingerprint": "fingerprint-execution-before",
-            "frame_fingerprint": frame_fingerprint(
-                Image.open(self.before_frame_paths[0]).convert("RGB")
+        self.orientation_credential = replace(
+            _mint_audited_credential(
+                device_id="device-a",
+                scene_fingerprint="fingerprint-execution-before",
+                frame=self.before_frames[0],
+                phone_content_rotation="upright",
+                confidence=0.95,
+                evidence=("手机状态文字正向",),
             ),
-            "evidence_frame_fingerprint": frame_fingerprint(
-                Image.open(self.before_frame_paths[0]).convert("RGB")
-            ),
-            "frame_size": [16, 16],
-            "camera_layout_orientation": "square",
-            "phone_content_rotation": "upright",
-            "confidence": 0.95,
-            "evidence": ["手机状态文字正向"],
-        }
+            evidence_frame_fingerprint=frame_fingerprint(self.before_frames[0]),
+        )
+        PhysicalExecutionGate("device-a").arm(
+            self.orientation_credential,
+            action=action,
+            scene_fingerprint="fingerprint-execution-before",
+        )
 
     @staticmethod
     def _frame(path: Path, color: str) -> str:
@@ -205,7 +210,7 @@ class FakeTrialResult:
             "robot_result": self.robot_result,
             "before_frame_paths": list(self.before_frame_paths),
             "after_frame_paths": list(self.after_frame_paths),
-            "orientation_credential": dict(self.orientation_credential),
+            "orientation_credential": self.orientation_credential.to_dict(),
         }
         if self.resolved_action.kind == "drag":
             payload.update(
@@ -536,6 +541,7 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             candidate_action="drag",
             text="拖动一个安全控件",
         )
+        registry_before = self.registry_path.read_bytes()
         recovered_provisional_calls = []
         recovered_orchestrator_calls = []
         recovered = CapabilityAcceptanceManager(
@@ -561,7 +567,10 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(CapabilityAcceptanceError, "仅可查看"):
             recovered.promotion_scope("trial-001")
         with self.assertRaisesRegex(CapabilityAcceptanceError, "仅可查看"):
+            recovered.promote("trial-001", {})
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "仅可查看"):
             recovered.cancel("trial-001")
+        self.assertEqual(self.registry_path.read_bytes(), registry_before)
 
     def test_mismatched_qwen_action_cancels_without_physical_action(self):
         self.proposed_action = "long_press"
@@ -906,6 +915,13 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             trial.session.snapshot()["confirmation_scope"],
         )
         scope = self.manager.promotion_scope("trial-001")
+        persisted_before_promotion = (
+            trial.run_dir / "trial.json"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("promotion_authority", persisted_before_promotion)
+        self.assertNotIn("source_nonce", persisted_before_promotion)
+        self.assertNotIn("receipt", persisted_before_promotion)
+        self.assertNotIn("secret", persisted_before_promotion)
 
         result = self.manager.promote(
             "trial-001",
@@ -929,6 +945,35 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
                 "trial-001",
                 scope.to_dict(),
             )
+        self.assertIsNone(trial.promotion_authority._orientation_credential)
+        self.assertIsNone(trial.promotion_authority._execution_result)
+
+    def test_cancel_releases_live_source_without_allowing_reissue(self):
+        trial = self.manager.start(
+            device_id="device-a",
+            candidate_action="drag",
+            text="拖动一个安全控件",
+        )
+        result = self.manager.confirm(
+            "trial-001",
+            trial.session.snapshot()["confirmation_scope"],
+        )
+        authority = trial.promotion_authority
+        credential = result.orientation_credential
+        registry_before = self.registry_path.read_bytes()
+
+        self.manager.cancel("trial-001")
+
+        self.assertTrue(authority.consumed)
+        self.assertIsNone(authority._orientation_credential)
+        self.assertIsNone(authority._execution_result)
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "live-trial"):
+            CapabilityRegistryPromoter(self.registry_path).preview(
+                trial.report_path,
+                orientation_credential=credential,
+                execution_result=result,
+            )
+        self.assertEqual(self.registry_path.read_bytes(), registry_before)
 
     def test_promotion_rejects_while_device_is_active_without_consuming_authority(self):
         trial = self.manager.start(
@@ -971,6 +1016,8 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             self.manager.promote("trial-001", scope.to_dict())
 
         self.assertTrue(trial.promotion_authority.consumed)
+        self.assertIsNone(trial.promotion_authority._orientation_credential)
+        self.assertIsNone(trial.promotion_authority._execution_result)
         registry = json.loads(self.registry_path.read_text(encoding="utf-8"))
         device = next(item for item in registry["devices"] if item["device_id"] == "device-a")
         self.assertNotIn("drag", device["verified_actions"])

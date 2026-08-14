@@ -418,6 +418,16 @@ def _annotate_target(
     return annotated
 
 
+def _frame_fingerprint(frame: Image.Image) -> str:
+    """Record the exact fresh camera observation used for a calibration decision."""
+
+    rgb = frame.convert("RGB")
+    digest = hashlib.sha256()
+    digest.update(f"{rgb.width}x{rgb.height}:RGB:".encode("ascii"))
+    digest.update(rgb.tobytes())
+    return digest.hexdigest()
+
+
 def _build_sample(
     attempt: dict[str, object], record: dict[str, object]
 ) -> dict[str, object]:
@@ -727,6 +737,7 @@ def _execute_calibration_action(
             "desired_frame": [desired_x, desired_y],
             "command_frame": [command_x, command_y],
             "frame_size": [locked_frame.width, locked_frame.height],
+            "observation_fingerprint": _frame_fingerprint(locked_frame),
             "before": str(before_path),
             "device_id": device_id,
             "calibration_session_id": calibration_session_id,
@@ -946,6 +957,7 @@ def _run_calibration_step_reserved(
             "target_frame": [desired_x, desired_y],
             "command_frame": [command_x, command_y],
             "frame_size": [frame.width, frame.height],
+            "observation_fingerprint": _frame_fingerprint(frame),
             "page_state": page_state,
             "page_session_id": page_session_id,
             "sample_count": len(local_samples),

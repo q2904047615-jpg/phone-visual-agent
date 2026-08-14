@@ -166,7 +166,7 @@ class FakeTrialResult:
         return str(path)
 
     def to_dict(self):
-        return {
+        payload = {
             "resolved_action": {"kind": self.resolved_action.kind},
             "physical_actions": self.physical_actions,
             "action_outcome": self.action_outcome,
@@ -175,6 +175,41 @@ class FakeTrialResult:
             "before_frame_paths": list(self.before_frame_paths),
             "after_frame_paths": list(self.after_frame_paths),
         }
+        if self.resolved_action.kind == "input_verified_text":
+            payload.update(
+                {
+                    "resolved_action": {
+                        "kind": "input_verified_text",
+                        "text": "agent",
+                        "target_element_id": "field",
+                    },
+                    "before_scene": {
+                        "elements": [
+                            {
+                                "element_id": "field",
+                                "role": "input",
+                                "meaning": "search_field",
+                                "label": "搜索",
+                                "confidence": 0.95,
+                                "states": {"value": ""},
+                            }
+                        ]
+                    },
+                    "after_scene": {
+                        "elements": [
+                            {
+                                "element_id": "field",
+                                "role": "input",
+                                "meaning": "search_field",
+                                "label": "搜索",
+                                "confidence": 0.95,
+                                "states": {"value": "agent.com"},
+                            }
+                        ]
+                    },
+                }
+            )
+        return payload
 
 
 class FakeTrialOrchestrator:
@@ -408,6 +443,28 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             [call[0] for call in self.orchestrator_calls].count("confirm"),
             1,
         )
+
+    def test_wrong_exact_input_is_failed_and_has_no_promotion_authority(self):
+        self.proposed_action = "input_verified_text"
+        trial = self.manager.start(
+            device_id="device-a",
+            candidate_action="input_verified_text",
+            text="让当前空输入框显示 agent，但不要提交。",
+        )
+        confirmation = trial.session.snapshot()["confirmation_scope"]
+
+        with self.assertRaisesRegex(
+            CapabilityAcceptanceError,
+            "未满足验收通过标准",
+        ):
+            self.manager.confirm("trial-001", confirmation)
+
+        self.assertEqual(1, trial.session.physical_actions)
+        report = json.loads(trial.report_path.read_text(encoding="utf-8"))
+        self.assertEqual("failed", report["status"])
+        self.assertEqual("mismatched", report["action_outcome"])
+        self.assertRegex(report["execution"]["verification_errors"][0], "文字不匹配")
+        self.assertIsNone(trial.promotion_authority)
 
     def test_post_action_failure_records_one_action_without_promotion_or_retry(self):
         trial = self.manager.start(

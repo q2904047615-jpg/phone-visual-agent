@@ -17,6 +17,7 @@ from capability_acceptance import (
     PROMOTABLE_ACTIONS,
     PromotionAuthority,
     PromotionScope,
+    exact_input_evidence_error,
     validate_acceptance_report,
 )
 
@@ -436,6 +437,11 @@ class CapabilityAcceptanceManager:
         action_outcome = str(getattr(result, "action_outcome", "") or "").strip()
         observation_errors = list(getattr(result, "observation_errors", ()) or ())
         verification_errors = list(getattr(result, "verification_errors", ()) or ())
+        if trial.candidate_action == "input_verified_text":
+            exact_error = exact_input_evidence_error(execution)
+            if exact_error:
+                verification_errors.append(exact_error)
+                action_outcome = "mismatched"
         before_scene = getattr(result, "before_scene", None)
         after_scene = getattr(result, "after_scene", None)
         before_fingerprint = str(getattr(before_scene, "fingerprint", "") or "")

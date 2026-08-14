@@ -307,7 +307,11 @@ class GenericActionAdapterTests(unittest.TestCase):
                         label="搜索",
                         bounds=(0.1, 0.1, 0.9, 0.2),
                         confidence=0.96,
-                        states={"focused": True},
+                        states={
+                            "focused": True,
+                            "value": "",
+                            "keyboard_layout": "qwerty",
+                        },
                     ),
                 ),
                 stable=True,

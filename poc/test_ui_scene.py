@@ -388,6 +388,88 @@ class UISceneTests(unittest.TestCase):
         self.assertEqual("蓝牙设置", resolved.text)
         self.assertEqual("search-field", resolved.target_element_id)
 
+        exact_after = scene(
+            element(
+                "search-field-after",
+                "搜索输入框",
+                role="input",
+                states={"focused": True, "value": "蓝牙设置"},
+            ),
+            fingerprint="after",
+        )
+        UniversalActionController().verify_after_action(resolved, current, exact_after)
+
+    def test_verified_input_rejects_wrong_or_missing_exact_value(self) -> None:
+        current = scene(
+            element(
+                "search-field",
+                "搜索输入框",
+                role="input",
+                states={"focused": True, "value": ""},
+            ),
+            fingerprint="before",
+        )
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="type-query",
+                action="input_verified_text",
+                params={
+                    "element_id": "search-field",
+                    "target": "搜索输入框",
+                    "text": "Agent123",
+                },
+            ),
+            current,
+        )
+        cases = (
+            ({"focused": True, "value": "agent.com"}, "文字不匹配"),
+            ({"focused": True}, "states.value"),
+        )
+        for states, message in cases:
+            with self.subTest(states=states), self.assertRaisesRegex(
+                UniversalActionError,
+                message,
+            ):
+                UniversalActionController().verify_after_action(
+                    resolved,
+                    current,
+                    scene(
+                        element(
+                            "search-field-after",
+                            "搜索输入框",
+                            role="input",
+                            states=states,
+                        ),
+                        fingerprint="after",
+                    ),
+                )
+
+    def test_input_state_value_and_keyboard_layout_are_typed(self) -> None:
+        parsed = UIElement.from_dict(
+            {
+                "element_id": "field",
+                "role": "input",
+                "meaning": "search_field",
+                "bounds": [100, 100, 900, 200],
+                "confidence": 0.95,
+                "states": {"value": "", "keyboard_layout": "qwerty"},
+            },
+            coordinate_scale=1000,
+        )
+        self.assertEqual("", parsed.states["value"])
+        with self.assertRaisesRegex(UISceneError, "keyboard_layout"):
+            UIElement.from_dict(
+                {
+                    "element_id": "field",
+                    "role": "input",
+                    "meaning": "search_field",
+                    "bounds": [100, 100, 900, 200],
+                    "confidence": 0.95,
+                    "states": {"keyboard_layout": "t9"},
+                },
+                coordinate_scale=1000,
+            )
+
     def test_android_home_resolves_as_independent_system_action(self) -> None:
         current = scene(element("title", "设置", role="text"), app_id="settings")
         action = SemanticAction(

@@ -557,6 +557,18 @@ class GenericSingleActionAdapter:
                 method = getattr(self.robot, "vision_type_text", None)
                 if not callable(method):
                     raise GenericActionAdapterError("机械臂不支持经过验证的文字输入。")
+                validator = getattr(self.robot, "validate_verified_text", None)
+                if callable(validator):
+                    try:
+                        input_element = before.get_element(
+                            str(resolved.target_element_id or ""),
+                            min_confidence=self.controller.min_confidence,
+                        )
+                        validator(resolved.text, dict(input_element.states))
+                    except (UISceneError, ValueError, RuntimeError) as exc:
+                        raise GenericActionAdapterError(
+                            f"当前文字输入不满足设备已验证配置：{exc}"
+                        ) from exc
                 physical_actions = 1
                 robot_result = method(resolved.text)
             elif resolved.kind == "long_press":

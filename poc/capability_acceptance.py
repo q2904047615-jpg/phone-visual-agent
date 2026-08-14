@@ -28,6 +28,83 @@ PROMOTABLE_ACTIONS = frozenset(
 )
 
 
+def exact_input_evidence_error(execution: Any) -> str:
+    """Return a fail-closed error when an input report lacks exact target evidence."""
+
+    if not isinstance(execution, dict):
+        return "输入验收 execution 必须是对象。"
+    resolved = execution.get("resolved_action")
+    before_scene = execution.get("before_scene")
+    after_scene = execution.get("after_scene")
+    if not all(isinstance(value, dict) for value in (resolved, before_scene, after_scene)):
+        return "输入验收缺少结构化 resolved_action/before_scene/after_scene。"
+    expected = resolved.get("text")
+    target_id = str(resolved.get("target_element_id") or "").strip()
+    if not isinstance(expected, str) or not expected or not target_id:
+        return "输入验收缺少精确文字或目标输入框身份。"
+
+    before_elements = before_scene.get("elements")
+    after_elements = after_scene.get("elements")
+    if not isinstance(before_elements, list) or not isinstance(after_elements, list):
+        return "输入验收缺少动作前后元素证据。"
+    before_matches = [
+        item
+        for item in before_elements
+        if isinstance(item, dict)
+        and item.get("element_id") == target_id
+        and item.get("role") == "input"
+        and isinstance(item.get("confidence"), (int, float))
+        and not isinstance(item.get("confidence"), bool)
+        and float(item["confidence"]) >= 0.72
+    ]
+    if len(before_matches) != 1:
+        return "输入验收无法唯一绑定动作前目标输入框。"
+    before_input = before_matches[0]
+    def visible_states(item: dict[str, Any]) -> dict[str, Any] | None:
+        states = item.get("states")
+        return states if isinstance(states, dict) else None
+
+    exact_id = [
+        item
+        for item in after_elements
+        if isinstance(item, dict)
+        and item.get("element_id") == target_id
+        and item.get("role") == "input"
+        and isinstance(item.get("confidence"), (int, float))
+        and not isinstance(item.get("confidence"), bool)
+        and float(item["confidence"]) >= 0.72
+        and visible_states(item) is not None
+        and visible_states(item).get("visible") is not False
+    ]
+    if exact_id:
+        candidates = exact_id
+    else:
+        candidates = [
+            item
+            for item in after_elements
+            if isinstance(item, dict)
+            and item.get("role") == "input"
+            and isinstance(item.get("confidence"), (int, float))
+            and not isinstance(item.get("confidence"), bool)
+            and float(item["confidence"]) >= 0.72
+            and visible_states(item) is not None
+            and visible_states(item).get("visible") is not False
+            and str(item.get("meaning") or "").casefold()
+            == str(before_input.get("meaning") or "").casefold()
+            and str(item.get("label") or "").casefold()
+            == str(before_input.get("label") or "").casefold()
+        ]
+    if len(candidates) != 1:
+        return "输入验收无法唯一绑定动作后目标输入框。"
+    states = candidates[0].get("states")
+    if not isinstance(states, dict) or not isinstance(states.get("value"), str):
+        return "输入验收缺少动作后 states.value 精确文字证据。"
+    actual = states["value"]
+    if actual != expected:
+        return f"输入验收文字不匹配：实际 {actual!r}，预期 {expected!r}。"
+    return ""
+
+
 class CapabilityAcceptanceError(RuntimeError):
     pass
 
@@ -193,6 +270,10 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     verification_errors = execution.get("verification_errors")
     if not isinstance(verification_errors, list) or verification_errors:
         raise CapabilityAcceptanceError("验收报告包含验证错误，不能晋级。")
+    if action == "input_verified_text":
+        exact_error = exact_input_evidence_error(execution)
+        if exact_error:
+            raise CapabilityAcceptanceError(exact_error)
 
     trial_root = resolved_report.parent
     before_paths = _validate_frame_paths(

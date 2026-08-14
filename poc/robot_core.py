@@ -859,10 +859,32 @@ class RobotController:
 
     def vision_type_text(self, text: str) -> None:
         self._require_verified_action("input_verified_text", "输入文字")
-        hwnd, _title = legacy.find_window(self.title)
-        self._checkpoint()
-        self._invoke_seller_input(hwnd, text)
-        legacy.move_cursor_outside_camera(hwnd)
+        self._validate_verified_text_characters(text)
+        # The seller controller's bulk-input command is not exact for digits
+        # and symbol pages (a historical real-device run turned "1" into
+        # ".com").  The first verified profile therefore uses only the
+        # calibrated QWERTY letter path and fails closed for every other text.
+        self.vision_type_pinyin(text, text)
+
+    @staticmethod
+    def _validate_verified_text_characters(text: str) -> None:
+        if not isinstance(text, str) or not re.fullmatch(r"[a-z]{1,30}", text):
+            raise WorkflowNotReady(
+                "当前设备的安全文字输入仅验收了1～30个小写英文字母；"
+                "大写、数字、中文和符号尚未验收。"
+            )
+
+    def validate_verified_text(self, text: str, input_states: dict[str, Any]) -> None:
+        """Fail before hardware unless the current visual keyboard profile is exact."""
+
+        self._require_verified_action("input_verified_text", "输入文字")
+        self._validate_verified_text_characters(text)
+        if input_states.get("focused") is not True:
+            raise WorkflowNotReady("当前输入框没有可信聚焦证据。")
+        if input_states.get("value") != "":
+            raise WorkflowNotReady("当前安全文字输入只允许从视觉确认的空输入框开始。")
+        if input_states.get("keyboard_layout") != "qwerty":
+            raise WorkflowNotReady("当前安全文字输入要求画面确认标准 QWERTY 键盘。")
 
     def vision_type_pinyin(
         self,

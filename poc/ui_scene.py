@@ -71,6 +71,23 @@ class UIElement:
             raise UISceneError("元素置信度格式无效。")
         if not 0.0 <= float(self.confidence) <= 1.0:
             raise UISceneError("元素置信度必须在0到1之间。")
+        if "value" in self.states:
+            value = self.states["value"]
+            if self.role != "input" or not isinstance(value, str):
+                raise UISceneError("只有 input 元素的 states.value 可以保存可见字符串。")
+            if len(value) > 200:
+                raise UISceneError("input 元素的 states.value 最多200个字符。")
+        if "keyboard_layout" in self.states:
+            layout = self.states["keyboard_layout"]
+            if self.role != "input" or layout not in {
+                "qwerty",
+                "numeric",
+                "symbol",
+                "unknown",
+            }:
+                raise UISceneError(
+                    "input 元素的 states.keyboard_layout 必须是 qwerty、numeric、symbol 或 unknown。"
+                )
         _reject_action_data(self.states, "states")
 
     @property

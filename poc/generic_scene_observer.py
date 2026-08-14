@@ -480,6 +480,12 @@ PREFILLED_INPUT_OBSERVATION_RULE = (
     "上述成组结构的带文字区域仍不得仅因含有文字就被认作输入框。"
 )
 
+INPUT_VALUE_OBSERVATION_RULE = (
+    "role=input且框内文字清晰可读时，必须在states.value中逐字填写当前可见文字；空框写空字符串，"
+    "看不清才省略value，禁止根据目标补写。软键盘可见时还必须在states.keyboard_layout写"
+    "qwerty、numeric、symbol或unknown；这只是画面事实，不授权输入。"
+)
+
 
 def _compact_prompt(context: dict[str, Any]) -> str:
     return f"""
@@ -502,6 +508,7 @@ def _compact_prompt(context: dict[str, Any]) -> str:
    是否存在。清晰稳定的页面即使没有目标控件，也应保持与画面质量一致的高confidence并返回空
    elements；只有模糊、遮挡、过渡或无法判断页面事实时才降低confidence。
 9. {PREFILLED_INPUT_OBSERVATION_RULE}
+10. {INPUT_VALUE_OBSERVATION_RULE}
 
 只返回下列完整JSON，不要Markdown：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
@@ -536,6 +543,7 @@ overlays只能是字符串数组；带bounds、role、element_id或overlay_id的
 并使用element_id。禁止把对象序列化成字符串塞入overlays。
 与目标直接相关的元素写states.goal_relevant=true。禁止任何动作或计划字段。不要Markdown。
 输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
+输入框文字与键盘规则：{INPUT_VALUE_OBSERVATION_RULE}
 """
 
 
@@ -561,6 +569,7 @@ def _targeted_retry_prompt(
 bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能是x/y/width/height对象、两个点或嵌套数组。
 overlays只能是字符串数组；可交互候选必须放入elements并使用element_id，不能把对象放入overlays。
 输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
+输入框文字与键盘规则：{INPUT_VALUE_OBSERVATION_RULE}
 """
 
 
@@ -593,7 +602,8 @@ def _targeted_prompt(
 应用入口可形成高可信观察，即使应用尚未打开。模糊、遮挡或不唯一时仍必须降低，禁止虚增。
 目标相关控件确实不存在时返回空elements，但只要页面事实清楚稳定，场景confidence仍应保持高值；
 不得因为系统级动作没有屏内按钮、或因为未找到目标控件，就把清晰页面写成低置信。
-输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
+    输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
+    输入框文字与键盘规则：{INPUT_VALUE_OBSERVATION_RULE}
 如果能清楚看见相关横向边框、框内文字和右侧独立搜索/提交按钮，但仍无法判断边框是否可编辑，
 不得因此返回空elements：请分别报告container、其内部text和右侧button的真实边界与证据；
 这三个元素都必须在states中明确写fully_visible:true或false。若画面边缘还有被裁切的相似结构，
@@ -891,7 +901,7 @@ def _normalize_prefilled_input_structure(
                 float(text["confidence"]),
                 float(button["confidence"]),
             ),
-            "states": {"goal_relevant": True},
+            "states": {"goal_relevant": True, "value": label},
             "evidence": evidence[:6],
         }
     )

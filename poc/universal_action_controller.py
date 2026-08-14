@@ -443,6 +443,59 @@ class UniversalActionController:
                 )
             except UISceneError as exc:
                 raise UniversalActionError(f"动作结果缺少元素状态证据：{exc}") from exc
+        if resolved.kind == "input_verified_text":
+            self._verify_exact_input_value(resolved, before, after)
+
+    def _verify_exact_input_value(
+        self,
+        resolved: ResolvedSemanticAction,
+        before: UIScene,
+        after: UIScene,
+    ) -> None:
+        expected = resolved.text
+        target_id = str(resolved.target_element_id or "").strip()
+        if not expected or not target_id:
+            raise UniversalActionError("输入动作缺少精确文字或目标输入框身份。")
+        try:
+            before_input = before.get_element(
+                target_id,
+                min_confidence=self.min_confidence,
+            )
+        except UISceneError as exc:
+            raise UniversalActionError(f"输入前目标证据无效：{exc}") from exc
+        if before_input.role != "input":
+            raise UniversalActionError("输入前目标不是 input 元素。")
+
+        exact_id = tuple(
+            element
+            for element in after.elements
+            if element.element_id == target_id
+            and element.role == "input"
+            and float(element.confidence) >= self.min_confidence
+            and element.states.get("visible") is not False
+        )
+        if exact_id:
+            candidates = exact_id
+        else:
+            candidates = tuple(
+                element
+                for element in after.elements
+                if element.role == "input"
+                and float(element.confidence) >= self.min_confidence
+                and element.states.get("visible") is not False
+                and element.meaning.casefold() == before_input.meaning.casefold()
+                and element.label.casefold() == before_input.label.casefold()
+            )
+        if len(candidates) != 1:
+            raise UniversalActionError("动作后无法唯一绑定原目标输入框。")
+        states = candidates[0].states
+        if "value" not in states or not isinstance(states["value"], str):
+            raise UniversalActionError("动作后缺少输入框 states.value 精确文字证据。")
+        actual = states["value"]
+        if actual != expected:
+            raise UniversalActionError(
+                f"动作后输入框文字不匹配：实际 {actual!r}，预期 {expected!r}。"
+            )
 
     @classmethod
     def scenes_semantically_equivalent(

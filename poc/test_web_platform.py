@@ -211,6 +211,52 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
 
         find_window.assert_not_called()
 
+    def test_verified_text_profile_rejects_unverified_characters_before_hardware(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"input_verified_text"},
+        )
+
+        with patch("robot_core.legacy.find_window") as find_window:
+            for text in ("Agent123", "中文", ".com"):
+                with self.subTest(text=text), self.assertRaisesRegex(
+                    Exception,
+                    "小写英文字母",
+                ):
+                    controller.vision_type_text(text)
+
+        find_window.assert_not_called()
+
+    def test_verified_text_profile_uses_calibrated_qwerty_letter_path(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"input_verified_text"},
+        )
+
+        with patch.object(controller, "vision_type_pinyin") as type_pinyin:
+            controller.vision_type_text("agent")
+
+        type_pinyin.assert_called_once_with("agent", "agent")
+
+    def test_verified_text_profile_requires_empty_focused_qwerty_scene(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"input_verified_text"},
+        )
+        valid = {"focused": True, "value": "", "keyboard_layout": "qwerty"}
+        controller.validate_verified_text("agent", valid)
+        cases = (
+            ({**valid, "value": "old"}, "空输入框"),
+            ({**valid, "keyboard_layout": "symbol"}, "QWERTY"),
+            ({**valid, "focused": False}, "聚焦"),
+        )
+        for states, message in cases:
+            with self.subTest(states=states), self.assertRaisesRegex(
+                Exception,
+                message,
+            ):
+                controller.validate_verified_text("agent", states)
+
     def test_every_unverified_physical_primitive_fails_before_hardware_access(self):
         controller = RobotController(title="test", verified_actions=set())
 

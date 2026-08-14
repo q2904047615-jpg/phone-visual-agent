@@ -139,6 +139,58 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 with self.assertRaisesRegex(CapabilityAcceptanceError, message):
                     validate_acceptance_report(self.report_path)
 
+    def test_input_report_requires_exact_structured_value(self) -> None:
+        report = self._valid_report()
+        report["candidate_action"] = "input_verified_text"
+        report["execution"].update(
+            {
+                "resolved_action": {
+                    "kind": "input_verified_text",
+                    "text": "agent",
+                    "target_element_id": "field",
+                },
+                "before_scene": {
+                    "elements": [
+                        {
+                            "element_id": "field",
+                            "role": "input",
+                            "meaning": "search_field",
+                            "label": "搜索",
+                            "confidence": 0.95,
+                            "states": {"value": ""},
+                        }
+                    ]
+                },
+                "after_scene": {
+                    "elements": [
+                        {
+                            "element_id": "field-after",
+                            "role": "input",
+                            "meaning": "search_field",
+                            "label": "搜索",
+                            "confidence": 0.95,
+                            "states": {"value": "agent.com"},
+                        }
+                    ]
+                },
+            }
+        )
+        self.report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "文字不匹配"):
+            validate_acceptance_report(self.report_path)
+
+        report["execution"]["after_scene"]["elements"][0]["states"]["value"] = "agent"
+        self.report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        validated = validate_acceptance_report(self.report_path)
+        self.assertEqual("input_verified_text", validated["candidate_action"])
+
     def test_report_rejects_uncommitted_code_revision(self) -> None:
         self._mutate_report(
             lambda report: report.__setitem__("code_revision", "86b63d8+dirty")

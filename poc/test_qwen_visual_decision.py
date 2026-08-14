@@ -389,6 +389,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 "value": "",
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "direct_latin",
+                "goal_relevant": True,
             },
             evidence=("输入光标可见",),
         )
@@ -423,6 +424,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 "value": "",
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "direct_latin",
+                "goal_relevant": True,
             },
             evidence=("输入光标可见",),
         )

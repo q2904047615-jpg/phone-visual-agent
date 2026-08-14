@@ -312,6 +312,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                             "value": "",
                             "keyboard_layout": "qwerty",
                             "keyboard_input_mode": "direct_latin",
+                            "goal_relevant": True,
                         },
                     ),
                 ),

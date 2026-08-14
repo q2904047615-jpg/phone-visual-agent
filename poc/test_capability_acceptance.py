@@ -10,6 +10,7 @@ from capability_acceptance import (
     CapabilityAcceptanceError,
     CapabilityRegistryPromoter,
     PromotionAuthority,
+    validated_calibration_evidence,
     validate_acceptance_report,
 )
 from device_exclusivity import InterProcessLease
@@ -22,6 +23,46 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         self.trial_dir = self.root / "trial-001"
         self.trial_dir.mkdir()
         self.registry_path = self.root / "device_registry.json"
+        self.calibration_path = self.root / "tap-a.json"
+        self.calibration_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "enabled": True,
+                    "validated": True,
+                    "accepted_fit": True,
+                    "frame_size": [540, 960],
+                    "coverage": {
+                        "sufficient": True,
+                        "normalized_bounds": [0.05, 0.05, 0.95, 0.95],
+                        "normalized_hull": [
+                            [0.05, 0.05],
+                            [0.95, 0.05],
+                            [0.95, 0.95],
+                            [0.05, 0.95],
+                        ],
+                    },
+                    "validation": {
+                        "passed": True,
+                        "coverage_passed": True,
+                        "coverage": {
+                            "sufficient": True,
+                            "normalized_bounds": [0.05, 0.05, 0.95, 0.95],
+                            "normalized_hull": [
+                                [0.05, 0.05],
+                                [0.95, 0.05],
+                                [0.95, 0.95],
+                                [0.05, 0.95],
+                            ],
+                        },
+                    },
+                    "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         self.registry_path.write_text(
             json.dumps(
                 {
@@ -62,12 +103,15 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         before = [self._frame(f"before_{index}.jpg", "black") for index in range(1, 5)]
         after = [self._frame(f"after_{index}.jpg", "white") for index in range(1, 5)]
         return {
-            "version": 1,
+            "version": 2,
             "trial_id": "trial-001",
             "session_id": "session-001",
             "task_id": "task-001",
             "device_id": "device-a",
             "candidate_action": "drag",
+            "calibration_evidence": validated_calibration_evidence(
+                self.calibration_path
+            ),
             "status": "passed",
             "code_revision": "86b63d8",
             "physical_actions": 1,
@@ -163,6 +207,7 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 },
                 "observation_errors": [],
                 "verification_errors": [],
+                "robot_result": [[2, 4], [12, 8]],
             },
             "before_frame_paths": before,
             "after_frame_paths": after,
@@ -221,6 +266,7 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
     def test_input_report_requires_exact_structured_value(self) -> None:
         report = self._valid_report()
         report["candidate_action"] = "input_verified_text"
+        report["calibration_evidence"] = None
         report["execution"].update(
             {
                 "resolved_action": {
@@ -246,6 +292,7 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                                 "value": "",
                                 "keyboard_layout": "qwerty",
                                 "keyboard_input_mode": "direct_latin",
+                                "goal_relevant": True,
                             },
                         }
                     ],
@@ -290,9 +337,84 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         validated = validate_acceptance_report(self.report_path)
         self.assertEqual("input_verified_text", validated["candidate_action"])
 
+        report["execution"]["after_scene"]["screen_id"] = "other-input-screen"
+        self.report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "App 或页面身份"):
+            validate_acceptance_report(self.report_path)
+
+    def test_input_report_requires_goal_relevant_unique_target(self) -> None:
+        report = self._valid_report()
+        report["candidate_action"] = "input_verified_text"
+        report["calibration_evidence"] = None
+        report["execution"].update(
+            {
+                "resolved_action": {
+                    "kind": "input_verified_text",
+                    "text": "agent",
+                    "target_element_id": "field",
+                    "before_fingerprint": "fingerprint-execution-before",
+                },
+                "before_scene": {
+                    "foreground_app_id": "test-app",
+                    "screen_id": "input",
+                    "summary": "输入前",
+                    "elements": [
+                        {
+                            "element_id": "field",
+                            "role": "input",
+                            "meaning": "search_field",
+                            "label": "搜索",
+                            "bounds": [0.1, 0.1, 0.9, 0.2],
+                            "confidence": 0.95,
+                            "states": {
+                                "focused": True,
+                                "value": "",
+                                "keyboard_layout": "qwerty",
+                                "keyboard_input_mode": "direct_latin",
+                                "goal_relevant": False,
+                            },
+                        }
+                    ],
+                    "stable": True,
+                    "confidence": 0.95,
+                    "fingerprint": "fingerprint-execution-before",
+                },
+                "after_scene": {
+                    "foreground_app_id": "test-app",
+                    "screen_id": "input",
+                    "summary": "输入后",
+                    "elements": [
+                        {
+                            "element_id": "field",
+                            "role": "input",
+                            "meaning": "search_field",
+                            "label": "搜索",
+                            "bounds": [0.1, 0.1, 0.9, 0.2],
+                            "confidence": 0.95,
+                            "states": {"value": "agent"},
+                        }
+                    ],
+                    "stable": True,
+                    "confidence": 0.95,
+                    "fingerprint": "fingerprint-after",
+                },
+            }
+        )
+        self.report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "缺少可信关联"):
+            validate_acceptance_report(self.report_path)
+
     def test_input_report_rejects_missing_direct_latin_precondition(self) -> None:
         report = self._valid_report()
         report["candidate_action"] = "input_verified_text"
+        report["calibration_evidence"] = None
         report["execution"].update(
             {
                 "resolved_action": {
@@ -318,6 +440,7 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                                 "value": "",
                                 "keyboard_layout": "qwerty",
                                 "keyboard_input_mode": "chinese_pinyin",
+                                "goal_relevant": True,
                             },
                         }
                     ],
@@ -376,6 +499,100 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 self._mutate_report(mutation)
                 with self.assertRaisesRegex(CapabilityAcceptanceError, message):
                     validate_acceptance_report(self.report_path)
+
+    def test_gesture_report_requires_calibration_and_physical_result_evidence(self) -> None:
+        mutations = (
+            (
+                "触控标定证据",
+                lambda report: report.__setitem__("calibration_evidence", None),
+            ),
+            (
+                "实际像素端点",
+                lambda report: report["execution"].__setitem__("robot_result", None),
+            ),
+        )
+        for message, mutation in mutations:
+            with self.subTest(message=message):
+                self._write_valid_report()
+                self._mutate_report(mutation)
+                with self.assertRaisesRegex(CapabilityAcceptanceError, message):
+                    validate_acceptance_report(self.report_path)
+
+    def test_calibration_requires_independent_validation_record(self) -> None:
+        original = json.loads(self.calibration_path.read_text(encoding="utf-8"))
+        mutations = (
+            (
+                "独立验证记录",
+                lambda payload: payload.pop("validation"),
+            ),
+            (
+                "独立验证记录",
+                lambda payload: payload["validation"].__setitem__("passed", False),
+            ),
+            (
+                "独立验证记录",
+                lambda payload: payload["validation"].__setitem__(
+                    "coverage_passed", False
+                ),
+            ),
+            (
+                "独立验证覆盖",
+                lambda payload: payload["validation"]["coverage"].__setitem__(
+                    "sufficient", False
+                ),
+            ),
+        )
+        for message, mutation in mutations:
+            with self.subTest(message=message):
+                payload = json.loads(json.dumps(original))
+                mutation(payload)
+                self.calibration_path.write_text(
+                    json.dumps(payload),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(CapabilityAcceptanceError, message):
+                    validated_calibration_evidence(self.calibration_path)
+        self.calibration_path.write_text(json.dumps(original), encoding="utf-8")
+
+    def test_report_rejects_unsafe_calibration_evidence_bounds(self) -> None:
+        mutations = (
+            (
+                "归一化屏幕范围",
+                "coverage_bounds",
+                [-0.01, 0.05, 0.95, 0.95],
+            ),
+            (
+                "归一化屏幕范围",
+                "coverage_bounds",
+                [0.2, 0.05, 0.7, 0.95],
+            ),
+            (
+                "归一化屏幕范围",
+                "validation_coverage_bounds",
+                [0.05, 0.2, 0.95, 0.7],
+            ),
+        )
+        for message, field, value in mutations:
+            with self.subTest(field=field, value=value):
+                self._write_valid_report()
+                self._mutate_report(
+                    lambda report: report["calibration_evidence"].__setitem__(
+                        field,
+                        value,
+                    )
+                )
+                with self.assertRaisesRegex(CapabilityAcceptanceError, message):
+                    validate_acceptance_report(self.report_path)
+
+    def test_promotion_rejects_calibration_changed_after_report(self) -> None:
+        promoter = CapabilityRegistryPromoter(self.registry_path)
+        promoter.preview(self.report_path)
+        payload = json.loads(self.calibration_path.read_text(encoding="utf-8"))
+        payload["frame_size"] = [720, 1280]
+        self.calibration_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "标定.*不一致"):
+            promoter.preview(self.report_path)
 
     def test_report_rejects_uncommitted_code_revision(self) -> None:
         self._mutate_report(
@@ -570,6 +787,7 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         self._mutate_report(
             lambda report: (
                 report.__setitem__("candidate_action", "back"),
+                report.__setitem__("calibration_evidence", None),
                 report["execution"]["resolved_action"].__setitem__("kind", "back"),
                 report["execution"]["after_scene"].__setitem__("screen_id", "other"),
             )

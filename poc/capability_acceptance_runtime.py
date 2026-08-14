@@ -12,6 +12,8 @@ from typing import Any, Callable, Mapping
 import uuid
 
 from capability_acceptance import (
+    ACCEPTANCE_REPORT_VERSION,
+    CALIBRATION_BOUND_ACTIONS,
     CapabilityAcceptanceError,
     CapabilityRegistryPromoter,
     PROMOTABLE_ACTIONS,
@@ -19,6 +21,7 @@ from capability_acceptance import (
     PromotionScope,
     action_execution_evidence_error,
     exact_input_evidence_error,
+    validated_calibration_evidence,
     validate_acceptance_report,
 )
 
@@ -89,6 +92,7 @@ class CapabilityTrial:
     session: Any = field(repr=False)
     code_revision: str
     report_path: Path
+    calibration_evidence: dict[str, Any] | None = None
     promotion_authority: PromotionAuthority | None = field(default=None, repr=False)
     promotion_result: dict[str, Any] | None = None
     confirmation_attempted: bool = False
@@ -112,6 +116,7 @@ class CapabilityTrial:
             "text": self.text,
             "device_id": self.device_id,
             "code_revision": self.code_revision,
+            "calibration_evidence": self.calibration_evidence,
             "session": self.session.snapshot(),
             "report": report,
             "promotion_scope": (
@@ -310,6 +315,20 @@ class CapabilityAcceptanceManager:
                     f"期望 {trial.candidate_action}，实际 {proposed or 'missing'}。"
                 )
 
+    @staticmethod
+    def _controller_calibration_evidence(
+        controller: Any,
+        action: str,
+    ) -> dict[str, Any] | None:
+        if action not in CALIBRATION_BOUND_ACTIONS:
+            return None
+        calibration_path = getattr(controller, "calibration_path", None)
+        if calibration_path is None:
+            raise CapabilityAcceptanceError(
+                "正式长按/拖动验收要求设备控制器提供触控标定路径。"
+            )
+        return validated_calibration_evidence(Path(calibration_path))
+
     def start(
         self,
         *,
@@ -341,6 +360,10 @@ class CapabilityAcceptanceManager:
             raise CapabilityAcceptanceError("当前代码存在未提交修改，不能开始真机验收。")
 
         controller = self.provisional_controller_factory(resolved_device, action)
+        calibration_evidence = self._controller_calibration_evidence(
+            controller,
+            action,
+        )
         orchestrator = self.orchestrator_factory(controller)
         session_id = f"capability-trial-{trial_id}"
         run_dir = self.output_dir / f"capability_acceptance_{trial_id}"
@@ -367,6 +390,7 @@ class CapabilityAcceptanceManager:
             session=session,
             code_revision=revision,
             report_path=run_dir / "acceptance_report.json",
+            calibration_evidence=calibration_evidence,
         )
         self._ensure_candidate(trial)
         with self._guard:
@@ -497,12 +521,13 @@ class CapabilityAcceptanceManager:
         execution["observation_errors"] = observation_errors
         execution["verification_errors"] = verification_errors
         report = {
-            "version": 1,
+            "version": ACCEPTANCE_REPORT_VERSION,
             "trial_id": trial.trial_id,
             "session_id": str(getattr(trial.session, "session_id", "")),
             "task_id": self._task_id(before_snapshot),
             "device_id": trial.device_id,
             "candidate_action": trial.candidate_action,
+            "calibration_evidence": trial.calibration_evidence,
             "status": "passed" if passed else "failed",
             "code_revision": trial.code_revision,
             "physical_actions": physical_actions,
@@ -570,12 +595,13 @@ class CapabilityAcceptanceManager:
                 for value in getattr(result, "verification_errors", ()) or ()
             )
         failure = {
-            "version": 1,
+            "version": ACCEPTANCE_REPORT_VERSION,
             "trial_id": trial.trial_id,
             "session_id": str(getattr(trial.session, "session_id", "")),
             "task_id": self._task_id(before_snapshot),
             "device_id": trial.device_id,
             "candidate_action": trial.candidate_action,
+            "calibration_evidence": trial.calibration_evidence,
             "status": "failed",
             "code_revision": trial.code_revision,
             "physical_actions": request_actions,
@@ -620,6 +646,14 @@ class CapabilityAcceptanceManager:
             trial.confirmation_attempted = True
             result = None
             try:
+                current_calibration = self._controller_calibration_evidence(
+                    trial.controller,
+                    trial.candidate_action,
+                )
+                if current_calibration != trial.calibration_evidence:
+                    raise CapabilityAcceptanceError(
+                        "验收开始后触控标定发生变化；本次会话已失效，必须重新创建。"
+                    )
                 result = trial.orchestrator.confirm_one(trial.session, confirmation)
                 request_actions = (
                     int(getattr(trial.session, "physical_actions", 0)) - before_actions

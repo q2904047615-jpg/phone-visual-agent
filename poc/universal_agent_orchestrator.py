@@ -2246,7 +2246,7 @@ class PhaseOneNavigationPolicy:
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
-    VERSION = "2026-08-14-universal-action-policy-v8"
+    VERSION = "2026-08-14-universal-action-policy-v9"
     ALLOWED_ACTIONS = frozenset(
         {
             "swipe",
@@ -2287,6 +2287,28 @@ class PhaseOneNavigationPolicy:
 
     def _semantic_class(self, *values: str) -> str:
         return navigation_semantic_class(*values)
+
+    @staticmethod
+    def _has_unresolved_candidate_conflict(
+        conflicts: Any,
+        element_id: str,
+    ) -> bool:
+        for conflict in conflicts or ():
+            if not isinstance(conflict, dict):
+                if element_id in str(conflict):
+                    return True
+                continue
+            conflict_ids = conflict.get("element_ids") or []
+            resolved_duplicate = (
+                conflict.get("kind") == "duplicate_visual_object_collapsed"
+                and conflict.get("canonical_element_id") == element_id
+                and element_id in conflict_ids
+            )
+            if resolved_duplicate:
+                continue
+            if element_id in conflict_ids or element_id in str(conflict):
+                return True
+        return False
 
     def _matches_target_app(self, task_context: Any, element: Any) -> bool:
         """Bind a visible App entry to the formal task target without App rules."""
@@ -2448,6 +2470,16 @@ class PhaseOneNavigationPolicy:
                 return self._deny(f"拖动端点不能由可信观察唯一解析：{exc}")
             if source.element_id == destination.element_id:
                 return self._deny("拖动起点和终点不能相同。")
+            if source.role == "container":
+                return self._deny("拖动起点必须是可识别元素，不能是页面容器。")
+            if source.role in self.FORBIDDEN_ROLES or destination.role in self.FORBIDDEN_ROLES:
+                return self._deny("拖动端点不能使用禁止进入通用动作的角色。")
+            conflicts = self._value(trusted_observation, "candidate_conflicts", ()) or ()
+            if any(
+                self._has_unresolved_candidate_conflict(conflicts, element.element_id)
+                for element in (source, destination)
+            ):
+                return self._deny("拖动起点或终点存在语义冲突或不唯一。")
             for prefix, element in (
                 ("source_", source),
                 ("destination_", destination),
@@ -2488,6 +2520,8 @@ class PhaseOneNavigationPolicy:
         if action_kind == "input_verified_text":
             if element.role != "input" or element.states.get("focused") is not True:
                 return self._deny("输入动作要求最新画面证明 input 候选已聚焦。")
+            if element.states.get("goal_relevant") is not True:
+                return self._deny("输入动作要求最新画面证明 input 候选与当前目标相关。")
             if element.states.get("value") != "":
                 return self._deny("精确文字输入只允许从最新画面确认的空输入框开始。")
             if element.states.get("keyboard_layout") != "qwerty":
@@ -2497,6 +2531,20 @@ class PhaseOneNavigationPolicy:
                     "精确英文输入要求最新画面确认 direct_latin 直输模式；"
                     "中文拼音 QWERTY 必须先切换模式并重新观察。"
                 )
+            eligible_inputs = tuple(
+                candidate
+                for candidate in scene.elements
+                if candidate.role == "input"
+                and float(candidate.confidence) >= self.min_confidence
+                and candidate.states.get("visible") is not False
+                and candidate.states.get("goal_relevant") is True
+                and candidate.states.get("focused") is True
+                and candidate.states.get("value") == ""
+                and candidate.states.get("keyboard_layout") == "qwerty"
+                and candidate.states.get("keyboard_input_mode") == "direct_latin"
+            )
+            if len(eligible_inputs) != 1 or eligible_inputs[0].element_id != element.element_id:
+                return self._deny("输入动作要求唯一符合安全条件的目标输入框。")
             text = action.params.get("text")
             if (
                 not isinstance(text, str)
@@ -2539,21 +2587,8 @@ class PhaseOneNavigationPolicy:
             return self._deny("目标区域没有逐项复用可信候选 bounds。")
 
         conflicts = self._value(trusted_observation, "candidate_conflicts", ()) or ()
-        for conflict in conflicts:
-            if not isinstance(conflict, dict):
-                if element.element_id in str(conflict):
-                    return self._deny("当前候选存在语义冲突或不唯一。")
-                continue
-            conflict_ids = conflict.get("element_ids") or []
-            resolved_duplicate = (
-                conflict.get("kind") == "duplicate_visual_object_collapsed"
-                and conflict.get("canonical_element_id") == element.element_id
-                and element.element_id in conflict_ids
-            )
-            if resolved_duplicate:
-                continue
-            if element.element_id in conflict_ids or element.element_id in str(conflict):
-                return self._deny("当前候选存在语义冲突或不唯一。")
+        if self._has_unresolved_candidate_conflict(conflicts, element.element_id):
+            return self._deny("当前候选存在语义冲突或不唯一。")
 
         if action_kind == "tap_semantic" and element.role == "input":
             if element.states.get("focused") is True:

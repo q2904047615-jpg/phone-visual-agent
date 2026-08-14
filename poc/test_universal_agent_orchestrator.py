@@ -635,6 +635,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
                 "value": "",
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "direct_latin",
+                "goal_relevant": True,
             },
         )
         decision = _decision(scene, action_kind="input_verified_text")
@@ -657,6 +658,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
                 "value": "",
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "chinese_pinyin",
+                "goal_relevant": True,
             },
         )
         chinese_decision = _decision(
@@ -1236,6 +1238,96 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         self.assertFalse(result.allowed)
         self.assertIn("fingerprint", result.reason)
+
+    def test_drag_rejects_conflicted_or_forbidden_endpoints(self) -> None:
+        source = UIElement(
+            element_id="source",
+            role="list_item",
+            meaning="draggable_item",
+            label="项目",
+            bounds=(0.10, 0.20, 0.20, 0.30),
+            confidence=0.95,
+        )
+        destination = UIElement(
+            element_id="destination",
+            role="container",
+            meaning="drop_zone",
+            label="目标",
+            bounds=(0.70, 0.20, 0.90, 0.40),
+            confidence=0.95,
+        )
+        scene = UIScene(
+            app_id="sample.app",
+            screen_id="board",
+            summary="拖动场景",
+            elements=(source, destination),
+            stable=True,
+            confidence=0.95,
+            fingerprint="drag-frame",
+        )
+        action = SemanticAction(
+            node_id="drag-1",
+            action="drag",
+            params={
+                "source_element_id": source.element_id,
+                "source_target": source.meaning,
+                "source_role": source.role,
+                "source_label": source.label,
+                "destination_element_id": destination.element_id,
+                "destination_target": destination.meaning,
+                "destination_role": destination.role,
+                "destination_label": destination.label,
+                "expected_effect": {"scene_changed": True},
+            },
+        )
+        observation = SimpleNamespace(
+            device_id="device-1",
+            fingerprint=scene.fingerprint,
+            scene=scene,
+            candidate_conflicts=(
+                {"kind": "overlap", "element_ids": [source.element_id, "alias"]},
+            ),
+        )
+        observation.target_local_candidate = scene.unique_trusted_goal_element
+        decision = SimpleNamespace(
+            task_id="task-1",
+            device_id="device-1",
+            revision=1,
+            fingerprint=scene.fingerprint,
+            confidence=0.94,
+            proposal=GenericStepProposal(status="action", action=action),
+            trusted_observation=observation,
+            target_region=SimpleNamespace(
+                kind="element_path",
+                element_id=source.element_id,
+                bounds=source.bounds,
+                destination_element_id=destination.element_id,
+                destination_bounds=destination.bounds,
+            ),
+        )
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=observation,
+            decision=decision,
+        )
+        self.assertFalse(result.allowed)
+        self.assertIn("冲突", result.reason)
+
+        keyboard_source = replace(source, role="keyboard_key")
+        keyboard_scene = replace(scene, elements=(keyboard_source, destination))
+        observation.scene = keyboard_scene
+        observation.fingerprint = keyboard_scene.fingerprint
+        observation.candidate_conflicts = ()
+        decision.trusted_observation = observation
+        decision.proposal.action.params["source_role"] = "keyboard_key"
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=observation,
+            decision=decision,
+        )
+        self.assertFalse(result.allowed)
+        self.assertIn("禁止", result.reason)
 
 
 class ObservationBridgeTests(unittest.TestCase):

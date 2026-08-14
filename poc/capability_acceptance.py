@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -12,6 +13,13 @@ import uuid
 from PIL import Image, UnidentifiedImageError
 
 from device_exclusivity import InterProcessLease
+from tap_calibration import (
+    Affine2D,
+    CALIBRATION_VERSION,
+    MIN_COVERAGE_SPAN_X,
+    MIN_COVERAGE_SPAN_Y,
+    TapCalibrationError,
+)
 from ui_scene import UIScene, UISceneError
 from universal_action_controller import (
     ResolvedSemanticAction,
@@ -33,6 +41,169 @@ PROMOTABLE_ACTIONS = frozenset(
         "drag",
     }
 )
+CALIBRATION_BOUND_ACTIONS = frozenset({"long_press", "drag"})
+ACCEPTANCE_REPORT_VERSION = 2
+
+
+def _normalized_coverage_bounds(value: Any, *, label: str) -> list[float]:
+    if (
+        not isinstance(value, list)
+        or len(value) != 4
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not math.isfinite(float(item))
+            for item in value
+        )
+    ):
+        raise CapabilityAcceptanceError(f"{label}边界格式无效。")
+    bounds = [float(item) for item in value]
+    if (
+        any(not 0.0 <= item <= 1.0 for item in bounds)
+        or bounds[2] - bounds[0] < MIN_COVERAGE_SPAN_X
+        or bounds[3] - bounds[1] < MIN_COVERAGE_SPAN_Y
+    ):
+        raise CapabilityAcceptanceError(f"{label}没有覆盖足够的归一化屏幕范围。")
+    return bounds
+
+
+def _validated_coverage(value: Any, *, label: str) -> list[float]:
+    if not isinstance(value, dict) or value.get("sufficient") is not True:
+        raise CapabilityAcceptanceError(f"{label}没有足够的实测屏幕覆盖。")
+    bounds = _normalized_coverage_bounds(
+        value.get("normalized_bounds"),
+        label=label,
+    )
+    hull = value.get("normalized_hull")
+    if (
+        not isinstance(hull, list)
+        or len(hull) < 3
+        or any(
+            not isinstance(point, list)
+            or len(point) != 2
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, (int, float))
+                or not math.isfinite(float(item))
+                or not 0.0 <= float(item) <= 1.0
+                for item in point
+            )
+            for point in hull
+        )
+    ):
+        raise CapabilityAcceptanceError(f"{label}凸包格式无效。")
+    derived = [
+        min(float(point[0]) for point in hull),
+        min(float(point[1]) for point in hull),
+        max(float(point[0]) for point in hull),
+        max(float(point[1]) for point in hull),
+    ]
+    if any(abs(stored - computed) > 1e-6 for stored, computed in zip(bounds, derived)):
+        raise CapabilityAcceptanceError(f"{label}边界与凸包不一致。")
+    return bounds
+
+
+def validated_calibration_evidence(path: Path) -> dict[str, Any]:
+    """Load the exact active calibration state used by one gesture trial."""
+
+    try:
+        resolved = Path(path).resolve(strict=True)
+        raw = resolved.read_bytes()
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise CapabilityAcceptanceError(f"触控标定无法读取：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise CapabilityAcceptanceError("触控标定必须是 JSON 对象。")
+    version = payload.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < CALIBRATION_VERSION:
+        raise CapabilityAcceptanceError("触控标定版本过旧，不能用于正式手势验收。")
+    if payload.get("enabled") is not True or payload.get("validated") is not True:
+        raise CapabilityAcceptanceError("触控标定尚未启用并完成独立验证。")
+    if payload.get("accepted_fit") is not True:
+        raise CapabilityAcceptanceError("触控标定拟合尚未达到验收标准。")
+    try:
+        Affine2D.from_json(payload["target_to_command"])
+    except (KeyError, TypeError, ValueError, TapCalibrationError) as exc:
+        raise CapabilityAcceptanceError("触控标定变换矩阵无效。") from exc
+    frame_size = payload.get("frame_size")
+    if (
+        not isinstance(frame_size, list)
+        or len(frame_size) != 2
+        or any(
+            isinstance(item, bool) or not isinstance(item, (int, float)) or item <= 0
+            for item in frame_size
+        )
+    ):
+        raise CapabilityAcceptanceError("触控标定 frame_size 无效。")
+    bounds = _validated_coverage(payload.get("coverage"), label="触控标定采集覆盖")
+    validation = payload.get("validation")
+    if (
+        not isinstance(validation, dict)
+        or validation.get("passed") is not True
+        or validation.get("coverage_passed") is not True
+    ):
+        raise CapabilityAcceptanceError("触控标定缺少通过的独立验证记录。")
+    validation_bounds = _validated_coverage(
+        validation.get("coverage"),
+        label="触控标定独立验证覆盖",
+    )
+    return {
+        "version": version,
+        "sha256": _sha256_bytes(raw),
+        "frame_size": [float(frame_size[0]), float(frame_size[1])],
+        "coverage_bounds": bounds,
+        "validation_coverage_bounds": validation_bounds,
+    }
+
+
+def _calibration_evidence(value: Any, *, action: str) -> dict[str, Any] | None:
+    if action not in CALIBRATION_BOUND_ACTIONS:
+        if value is not None:
+            raise CapabilityAcceptanceError("非点位手势验收不能携带触控标定证据。")
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "sha256",
+        "frame_size",
+        "coverage_bounds",
+        "validation_coverage_bounds",
+    }:
+        raise CapabilityAcceptanceError("手势验收缺少完整触控标定证据。")
+    version = value.get("version")
+    digest = value.get("sha256")
+    frame_size = value.get("frame_size")
+    bounds = _normalized_coverage_bounds(
+        value.get("coverage_bounds"),
+        label="手势验收采集覆盖",
+    )
+    validation_bounds = _normalized_coverage_bounds(
+        value.get("validation_coverage_bounds"),
+        label="手势验收独立验证覆盖",
+    )
+    if isinstance(version, bool) or not isinstance(version, int) or version < CALIBRATION_VERSION:
+        raise CapabilityAcceptanceError("手势验收触控标定版本无效。")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise CapabilityAcceptanceError("手势验收触控标定摘要无效。")
+    if (
+        not isinstance(frame_size, list)
+        or len(frame_size) != 2
+        or any(
+            isinstance(item, bool) or not isinstance(item, (int, float)) or item <= 0
+            for item in frame_size
+        )
+    ):
+        raise CapabilityAcceptanceError("手势验收触控标定范围无效。")
+    return {
+        "version": version,
+        "sha256": digest,
+        "frame_size": [float(item) for item in frame_size],
+        "coverage_bounds": bounds,
+        "validation_coverage_bounds": validation_bounds,
+    }
 
 
 def exact_input_evidence_error(execution: Any) -> str:
@@ -76,12 +247,40 @@ def exact_input_evidence_error(execution: Any) -> str:
         return "输入验收缺少动作前输入框 states。"
     if before_states.get("focused") is not True:
         return "输入验收要求动作前输入框已聚焦。"
+    if before_states.get("goal_relevant") is not True:
+        return "输入验收要求动作前输入框与当前目标明确相关。"
     if before_states.get("value") != "":
         return "输入验收只允许从动作前确认的空输入框开始。"
     if before_states.get("keyboard_layout") != "qwerty":
         return "输入验收要求动作前画面确认 QWERTY 键盘。"
     if before_states.get("keyboard_input_mode") != "direct_latin":
         return "输入验收要求动作前画面确认 direct_latin 直输模式。"
+    eligible_before = [
+        item
+        for item in before_elements
+        if isinstance(item, dict)
+        and item.get("role") == "input"
+        and isinstance(item.get("confidence"), (int, float))
+        and not isinstance(item.get("confidence"), bool)
+        and float(item["confidence"]) >= 0.72
+        and isinstance(item.get("states"), dict)
+        and item["states"].get("visible") is not False
+        and item["states"].get("goal_relevant") is True
+        and item["states"].get("focused") is True
+        and item["states"].get("value") == ""
+        and item["states"].get("keyboard_layout") == "qwerty"
+        and item["states"].get("keyboard_input_mode") == "direct_latin"
+    ]
+    if len(eligible_before) != 1 or eligible_before[0].get("element_id") != target_id:
+        return "输入验收要求动作前只有一个符合安全条件的目标输入框。"
+    if (
+        str(before_scene.get("foreground_app_id") or "").strip()
+        != str(after_scene.get("foreground_app_id") or "").strip()
+        or str(before_scene.get("screen_id") or "").strip()
+        != str(after_scene.get("screen_id") or "").strip()
+    ):
+        return "输入验收动作后 App 或页面身份发生变化。"
+
     def visible_states(item: dict[str, Any]) -> dict[str, Any] | None:
         states = item.get("states")
         return states if isinstance(states, dict) else None
@@ -208,6 +407,28 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
         UniversalActionController().verify_after_action(resolved, before, after)
     except (CapabilityAcceptanceError, UISceneError, UniversalActionError, ValueError) as exc:
         return f"验收动作证据无法通过控制器复核：{exc}"
+    robot_result = execution.get("robot_result")
+
+    def pixel_point(value: Any) -> bool:
+        return bool(
+            isinstance(value, (list, tuple))
+            and len(value) == 2
+            and all(
+                isinstance(item, int) and not isinstance(item, bool) and item >= 0
+                for item in value
+            )
+        )
+
+    if action == "long_press" and not pixel_point(robot_result):
+        return "长按验收缺少机械臂返回的实际像素落点。"
+    if action == "drag":
+        if (
+            not isinstance(robot_result, (list, tuple))
+            or len(robot_result) != 2
+            or not all(pixel_point(point) for point in robot_result)
+            or tuple(robot_result[0]) == tuple(robot_result[1])
+        ):
+            return "拖动验收缺少机械臂返回的两个不同实际像素端点。"
     return ""
 
 
@@ -378,12 +599,28 @@ def _validate_frame_paths(
     return tuple(result)
 
 
+def _consistent_frame_size(paths: tuple[str, ...], *, field: str) -> tuple[int, int]:
+    sizes: set[tuple[int, int]] = set()
+    for value in paths:
+        try:
+            with Image.open(value) as image:
+                sizes.add(tuple(image.size))
+        except (OSError, UnidentifiedImageError) as exc:
+            raise CapabilityAcceptanceError(f"{field} 证据尺寸无法读取。") from exc
+    if len(sizes) != 1:
+        raise CapabilityAcceptanceError(f"{field} 四张证据尺寸不一致。")
+    width, height = sizes.pop()
+    if width <= 0 or height <= 0:
+        raise CapabilityAcceptanceError(f"{field} 证据尺寸无效。")
+    return width, height
+
+
 def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     """Validate evidence strong enough to make one capability promotable."""
 
     resolved_report = Path(report_path).resolve(strict=True)
     report = _load_json_object(resolved_report, label="验收报告")
-    if report.get("version") != 1:
+    if report.get("version") != ACCEPTANCE_REPORT_VERSION:
         raise CapabilityAcceptanceError("验收报告版本无效。")
 
     trial_id = _required_text(report.get("trial_id"), field="trial_id", max_length=128)
@@ -399,6 +636,10 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     )
     if action not in PROMOTABLE_ACTIONS:
         raise CapabilityAcceptanceError(f"动作类型不能进入真机验收：{action}。")
+    calibration_evidence = _calibration_evidence(
+        report.get("calibration_evidence"),
+        action=action,
+    )
     code_revision = _required_text(
         report.get("code_revision"), field="code_revision", max_length=128
     )
@@ -476,6 +717,27 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     )
     if set(before_paths) & set(after_paths):
         raise CapabilityAcceptanceError("动作前后证据不能引用同一文件。")
+    before_frame_size = _consistent_frame_size(
+        before_paths,
+        field="before_frame_paths",
+    )
+    after_frame_size = _consistent_frame_size(
+        after_paths,
+        field="after_frame_paths",
+    )
+    if before_frame_size != after_frame_size:
+        raise CapabilityAcceptanceError("动作前后证据画面尺寸不一致。")
+    if calibration_evidence is not None:
+        width, height = before_frame_size
+        robot_result = execution.get("robot_result")
+        points = [robot_result] if action == "long_press" else list(robot_result)
+        if any(
+            not 0 <= int(point[0]) < width or not 0 <= int(point[1]) < height
+            for point in points
+        ):
+            raise CapabilityAcceptanceError(
+                "手势验收机械臂实际像素端点超出动作前画面范围。"
+            )
 
     normalized = dict(report)
     normalized.update(
@@ -485,6 +747,7 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
             "task_id": task_id,
             "device_id": device_id,
             "candidate_action": action,
+            "calibration_evidence": calibration_evidence,
             "before_observation": before,
             "after_observation": after,
             "confirmation_scope": confirmation_scope,
@@ -596,11 +859,32 @@ class CapabilityRegistryPromoter:
             raise CapabilityAcceptanceError("设备注册表必须是 JSON 对象。")
         return payload, raw
 
+    def _require_matching_calibration(
+        self,
+        report: Mapping[str, Any],
+        device: Mapping[str, Any],
+    ) -> None:
+        action = str(report.get("candidate_action") or "")
+        if action not in CALIBRATION_BOUND_ACTIONS:
+            return
+        calibration_value = device.get("calibration_path")
+        if not isinstance(calibration_value, str) or not calibration_value.strip():
+            raise CapabilityAcceptanceError("设备注册表缺少触控标定路径。")
+        calibration_path = Path(calibration_value.strip())
+        if not calibration_path.is_absolute():
+            calibration_path = self.registry_path.parent / calibration_path
+        current = validated_calibration_evidence(calibration_path)
+        if current != report.get("calibration_evidence"):
+            raise CapabilityAcceptanceError(
+                "触控标定与真机验收报告不一致；必须在当前标定上重新验收。"
+            )
+
     def preview(self, report_path: Path) -> PromotionScope:
         report = validate_acceptance_report(report_path)
         registry, raw = self._load_registry()
         device = self._registry_device(registry, report["device_id"])
         action = report["candidate_action"]
+        self._require_matching_calibration(report, device)
         if action in device["verified_actions"]:
             raise CapabilityAcceptanceError(f"设备能力 {action} 已经启用。")
         return PromotionScope(
@@ -677,6 +961,7 @@ class CapabilityRegistryPromoter:
             if _sha256_bytes(registry_raw) != scope.registry_sha256:
                 raise CapabilityAcceptanceError("设备注册表在确认后发生变化。")
             device = self._registry_device(registry, scope.device_id)
+            self._require_matching_calibration(report, device)
             if scope.action in device["verified_actions"]:
                 raise CapabilityAcceptanceError(f"设备能力 {scope.action} 已经启用。")
 

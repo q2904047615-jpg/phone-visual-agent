@@ -9,7 +9,7 @@ from semantic_executor import SemanticAction
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v8"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v9"
 
 SAFE_VERIFIED_TEXT_RE = re.compile(r"[a-z]{1,30}\Z")
 GESTURE_EDGE_MARGIN = 0.02
@@ -333,6 +333,24 @@ class UniversalActionController:
                     "精确英文输入要求当前画面确认 direct_latin 直输模式；"
                     "QWERTY 与英文直输不是同一事实。"
                 )
+            if element.states.get("goal_relevant") is not True:
+                raise UniversalActionError("文字输入目标必须由当前画面证明与当前目标相关。")
+            eligible_inputs = tuple(
+                candidate
+                for candidate in scene.elements
+                if candidate.role == "input"
+                and float(candidate.confidence) >= self.min_confidence
+                and candidate.states.get("visible") is not False
+                and candidate.states.get("goal_relevant") is True
+                and candidate.states.get("focused") is True
+                and candidate.states.get("value") == ""
+                and candidate.states.get("keyboard_layout") == "qwerty"
+                and candidate.states.get("keyboard_input_mode") == "direct_latin"
+            )
+            if len(eligible_inputs) != 1 or eligible_inputs[0].element_id != element.element_id:
+                raise UniversalActionError(
+                    "精确文字输入要求当前画面只有一个符合安全条件的目标输入框。"
+                )
             return ResolvedSemanticAction(
                 node_id=action.node_id,
                 kind="input_verified_text",
@@ -540,6 +558,8 @@ class UniversalActionController:
                 raise UniversalActionError(f"动作结果缺少元素状态证据：{exc}") from exc
         if resolved.kind == "input_verified_text":
             self._verify_exact_input_value(resolved, before, after)
+        if resolved.kind == "long_press":
+            self._verify_long_press_result(resolved, before, after)
         if resolved.kind == "drag":
             self._verify_drag_result(resolved, before, after)
 
@@ -659,7 +679,7 @@ class UniversalActionController:
 
         expected = resolved.expected_effect
         has_alternative_proof = bool(
-            expected.get("element_state")
+            self._element_state_transition_expected(expected, before)
             or (
                 str(expected.get("app_id") or "").strip()
                 and str(expected.get("app_id") or "").strip()
@@ -675,6 +695,69 @@ class UniversalActionController:
             raise UniversalActionError(
                 "拖动后缺少源元素向终点显著移动或等价结构化状态证据。"
             )
+
+    def _verify_long_press_result(
+        self,
+        resolved: ResolvedSemanticAction,
+        before: UIScene,
+        after: UIScene,
+    ) -> None:
+        if set(after.overlays) - set(before.overlays):
+            return
+        target_id = str(resolved.target_element_id or "").strip()
+        try:
+            before_target = before.get_element(
+                target_id,
+                min_confidence=self.min_confidence,
+            )
+        except UISceneError as exc:
+            raise UniversalActionError(f"长按前目标证据无效：{exc}") from exc
+        after_targets = tuple(
+            element
+            for element in after.elements
+            if element.element_id == target_id
+            and element.role == before_target.role
+            and float(element.confidence) >= self.min_confidence
+            and element.states.get("visible") is not False
+        )
+        if len(after_targets) == 1 and after_targets[0].states != before_target.states:
+            return
+        expected = resolved.expected_effect
+        if self._element_state_transition_expected(expected, before):
+            return
+        if (
+            str(expected.get("app_id") or "").strip()
+            and str(expected.get("app_id") or "").strip() != before.foreground_app_id
+        ) or (
+            str(expected.get("screen_id") or "").strip()
+            and str(expected.get("screen_id") or "").strip() != before.screen_id
+        ):
+            return
+        raise UniversalActionError(
+            "长按后缺少新增弹层、目标状态变化或等价结构化结果证据。"
+        )
+
+    def _element_state_transition_expected(
+        self,
+        expected: dict[str, Any],
+        before: UIScene,
+    ) -> bool:
+        element_state = expected.get("element_state")
+        if not isinstance(element_state, dict):
+            return False
+        meaning = str(element_state.get("meaning") or "").strip()
+        states = element_state.get("states")
+        if not meaning or not isinstance(states, dict) or not states:
+            return False
+        matches = tuple(
+            element
+            for element in before.elements
+            if element.meaning == meaning
+            and float(element.confidence) >= self.min_confidence
+            and element.states.get("visible") is not False
+            and all(element.states.get(key) == value for key, value in states.items())
+        )
+        return not matches
 
     def _verify_long_press_contract(
         self,
@@ -718,6 +801,13 @@ class UniversalActionController:
             raise UniversalActionError(f"输入前目标证据无效：{exc}") from exc
         if before_input.role != "input":
             raise UniversalActionError("输入前目标不是 input 元素。")
+        if before_input.states.get("goal_relevant") is not True:
+            raise UniversalActionError("输入前目标与当前目标缺少可信关联。")
+        if (
+            before.foreground_app_id != after.foreground_app_id
+            or before.screen_id != after.screen_id
+        ):
+            raise UniversalActionError("输入动作后 App 或页面身份发生变化。")
 
         exact_id = tuple(
             element

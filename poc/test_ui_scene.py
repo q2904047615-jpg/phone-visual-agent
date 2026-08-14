@@ -371,6 +371,7 @@ class UISceneTests(unittest.TestCase):
                     "value": "",
                     "keyboard_layout": "qwerty",
                     "keyboard_input_mode": "direct_latin",
+                    "goal_relevant": True,
                 },
             )
         )
@@ -387,6 +388,7 @@ class UISceneTests(unittest.TestCase):
                     "value": "",
                     "keyboard_layout": "qwerty",
                     "keyboard_input_mode": "direct_latin",
+                    "goal_relevant": True,
                 },
                 "text": "agent",
             },
@@ -420,6 +422,7 @@ class UISceneTests(unittest.TestCase):
                     "value": "",
                     "keyboard_layout": "qwerty",
                     "keyboard_input_mode": "direct_latin",
+                    "goal_relevant": True,
                 },
             ),
             fingerprint="before",
@@ -470,6 +473,7 @@ class UISceneTests(unittest.TestCase):
                     "value": "",
                     "keyboard_layout": "qwerty",
                     "keyboard_input_mode": "chinese_pinyin",
+                    "goal_relevant": True,
                 },
             ),
             fingerprint="before",
@@ -778,6 +782,99 @@ class UISceneTests(unittest.TestCase):
         )
         moved = scene(moved_source, destination, fingerprint="after-moved")
         UniversalActionController().verify_after_action(resolved, before, moved)
+
+    def test_drag_preexisting_unrelated_state_is_not_alternative_result_proof(self) -> None:
+        source = UIElement(
+            "source", "button", "源", (0.10, 0.20, 0.20, 0.30), 0.95, label="源"
+        )
+        destination = UIElement(
+            "destination",
+            "container",
+            "目标",
+            (0.70, 0.20, 0.90, 0.40),
+            0.95,
+            label="目标",
+        )
+        existing = element("status", "完成状态", states={"done": True})
+        before = scene(source, destination, existing, fingerprint="before")
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="drag",
+                action="drag",
+                params={
+                    "source_element_id": "source",
+                    "source_target": "源",
+                    "destination_element_id": "destination",
+                    "destination_target": "目标",
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "完成状态",
+                            "states": {"done": True},
+                        }
+                    },
+                },
+            ),
+            before,
+        )
+        after = scene(source, destination, existing, fingerprint="after")
+
+        with self.assertRaisesRegex(UniversalActionError, "缺少源元素向终点显著移动"):
+            UniversalActionController().verify_after_action(resolved, before, after)
+
+    def test_long_press_requires_result_specific_visual_evidence(self) -> None:
+        item = element("item", "列表项目", role="list_item")
+        before = scene(item, fingerprint="before")
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="hold",
+                action="long_press",
+                params={
+                    "element_id": "item",
+                    "target": "列表项目",
+                    "duration_ms": 800,
+                    "expected_effect": {"scene_changed": True},
+                },
+            ),
+            before,
+        )
+        unrelated = scene(element("other", "其他变化"), fingerprint="after")
+        with self.assertRaisesRegex(UniversalActionError, "长按后缺少"):
+            UniversalActionController().verify_after_action(resolved, before, unrelated)
+
+        overlay = UIScene(
+            app_id="calculator",
+            screen_id="home",
+            summary="context menu",
+            elements=(item,),
+            overlays=("context_menu",),
+            confidence=0.95,
+            stable=True,
+            fingerprint="after-overlay",
+        )
+        UniversalActionController().verify_after_action(resolved, before, overlay)
+
+    def test_verified_input_requires_one_goal_relevant_safe_target(self) -> None:
+        states = {
+            "focused": True,
+            "value": "",
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "goal_relevant": True,
+        }
+        current = scene(
+            element("field-a", "查询框", role="input", states=states),
+            element("field-b", "备用查询框", role="input", states=states),
+        )
+
+        with self.assertRaisesRegex(UniversalActionError, "只有一个"):
+            UniversalActionController().resolve_one(
+                SemanticAction(
+                    node_id="type",
+                    action="input_verified_text",
+                    params={"element_id": "field-a", "target": "查询框", "text": "agent"},
+                ),
+                current,
+            )
 
     def test_action_verification_rejects_stale_before_fingerprint(self) -> None:
         current = scene(element("item", "列表项目"), fingerprint="before")

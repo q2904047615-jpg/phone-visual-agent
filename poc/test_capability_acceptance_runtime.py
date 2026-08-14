@@ -150,6 +150,13 @@ class FakeTrialResult:
         self.after_scene = SimpleNamespace(fingerprint="fingerprint-after")
         self.observation_errors = ()
         self.verification_errors = ()
+        self.robot_result = (
+            ((2, 4), (12, 8))
+            if action == "drag"
+            else (8, 9)
+            if action == "long_press"
+            else None
+        )
         self.before_frame_paths = tuple(
             self._frame(run_dir / f"confirm_before_{index}.jpg", "black")
             for index in range(1, 5)
@@ -172,6 +179,7 @@ class FakeTrialResult:
             "action_outcome": self.action_outcome,
             "observation_errors": [],
             "verification_errors": [],
+            "robot_result": self.robot_result,
             "before_frame_paths": list(self.before_frame_paths),
             "after_frame_paths": list(self.after_frame_paths),
         }
@@ -245,6 +253,7 @@ class FakeTrialResult:
                                     "value": "",
                                     "keyboard_layout": "qwerty",
                                     "keyboard_input_mode": "direct_latin",
+                                    "goal_relevant": True,
                                 },
                             }
                         ],
@@ -373,6 +382,44 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.registry_path = self.root / "device_registry.json"
+        self.calibration_path = self.root / "tap-a.json"
+        self.calibration_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "enabled": True,
+                    "validated": True,
+                    "accepted_fit": True,
+                    "frame_size": [540, 960],
+                    "coverage": {
+                        "sufficient": True,
+                        "normalized_bounds": [0.05, 0.05, 0.95, 0.95],
+                        "normalized_hull": [
+                            [0.05, 0.05],
+                            [0.95, 0.05],
+                            [0.95, 0.95],
+                            [0.05, 0.95],
+                        ],
+                    },
+                    "validation": {
+                        "passed": True,
+                        "coverage_passed": True,
+                        "coverage": {
+                            "sufficient": True,
+                            "normalized_bounds": [0.05, 0.05, 0.95, 0.95],
+                            "normalized_hull": [
+                                [0.05, 0.05],
+                                [0.95, 0.05],
+                                [0.95, 0.95],
+                                [0.05, 0.95],
+                            ],
+                        },
+                    },
+                    "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                }
+            ),
+            encoding="utf-8",
+        )
         self.registry_path.write_text(
             json.dumps(
                 {
@@ -382,11 +429,13 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
                         {
                             "device_id": "device-a",
                             "enabled": True,
+                            "calibration_path": "tap-a.json",
                             "verified_actions": ["tap_semantic", "swipe", "back"],
                         },
                         {
                             "device_id": "device-b",
                             "enabled": True,
+                            "calibration_path": "tap-a.json",
                             "verified_actions": ["tap_semantic", "swipe", "back"],
                         },
                     ],
@@ -402,7 +451,11 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
 
         def provisional(device_id, action):
             self.provisional_calls.append((device_id, action))
-            return SimpleNamespace(device_id=device_id, candidate_action=action)
+            return SimpleNamespace(
+                device_id=device_id,
+                candidate_action=action,
+                calibration_path=self.calibration_path,
+            )
 
         def orchestrator_factory(_controller):
             return FakeTrialOrchestrator(
@@ -515,6 +568,59 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             self.device_registry.active_session("device-a"),
             "capability-trial-trial-001",
         )
+
+    def test_gesture_trial_rejects_unvalidated_calibration_before_models(self):
+        payload = json.loads(self.calibration_path.read_text(encoding="utf-8"))
+        payload["validated"] = False
+        self.calibration_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "标定尚未启用并完成独立验证"):
+            self.manager.start(
+                device_id="device-a",
+                candidate_action="drag",
+                text="拖动一个安全控件",
+            )
+
+        self.assertEqual(self.orchestrator_calls, [])
+        self.assertFalse((self.root / "output").exists())
+
+    def test_gesture_trial_rejects_forged_top_level_validation_before_models(self):
+        payload = json.loads(self.calibration_path.read_text(encoding="utf-8"))
+        payload["validation"]["passed"] = False
+        self.calibration_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "独立验证记录"):
+            self.manager.start(
+                device_id="device-a",
+                candidate_action="drag",
+                text="拖动一个安全控件",
+            )
+
+        self.assertEqual(self.orchestrator_calls, [])
+        self.assertFalse((self.root / "output").exists())
+
+    def test_calibration_drift_invalidates_trial_before_physical_action(self):
+        trial = self.manager.start(
+            device_id="device-a",
+            candidate_action="drag",
+            text="拖动一个安全控件",
+        )
+        payload = json.loads(self.calibration_path.read_text(encoding="utf-8"))
+        payload["frame_size"] = [720, 1280]
+        self.calibration_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "标定发生变化"):
+            self.manager.confirm(
+                "trial-001",
+                trial.session.snapshot()["confirmation_scope"],
+            )
+
+        self.assertEqual(trial.session.physical_actions, 0)
+        self.assertNotIn("confirm", [call[0] for call in self.orchestrator_calls])
+        report = json.loads(trial.report_path.read_text(encoding="utf-8"))
+        self.assertEqual("failed", report["status"])
+        self.assertEqual(0, report["physical_actions"])
+        self.assertIsNone(trial.promotion_authority)
 
     def test_global_stop_reaches_provisional_controller_without_action(self):
         trial = self.manager.start(

@@ -810,6 +810,38 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             ("未出现搜索输入或搜索结果", "输入框保持为空"),
         )
 
+    def test_allows_system_navigation_keys_as_visible_state_nouns(self):
+        payload = base_payload()
+        payload["completion_conditions"][0]["evidence_required"] = [
+            "屏幕底部可见返回键、主页键和多任务按键"
+        ]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "恢复系统导航区域可见状态",
+            device_id="phone-1",
+        )
+
+        self.assertEqual(
+            (
+                "屏幕底部可见返回键、主页键和多任务按键",
+            ),
+            graph.completion_conditions[0].evidence_required,
+        )
+
+    def test_rejects_system_navigation_key_press_instruction(self):
+        payload = base_payload()
+        payload["completion_conditions"][0]["evidence_required"] = [
+            "按返回键后页面返回"
+        ]
+
+        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(payload, copy.deepcopy(payload))
+            ).plan(
+                "目标",
+                device_id="phone-1",
+            )
+
     def test_rejects_low_level_instruction_in_completion_condition(self):
         payload = base_payload()
         payload["subgoals"][0]["completion_conditions"] = ["点击收藏按钮后完成"]

@@ -57,34 +57,6 @@ def oriented_navigation_ratio(
     return x_ratio, y_ratio
 
 
-def controller_navigation_button_point(
-    client_width: int,
-    client_height: int,
-    action: str,
-) -> tuple[int, int]:
-    """Return one stable seller-toolbar Android navigation button point.
-
-    The real controller clips its second toolbar row in landscape layout. A
-    hidden button must fail closed rather than falling back to a phone-screen
-    coordinate that can land inside a fullscreen App.
-    """
-
-    if int(client_width) >= int(client_height):
-        raise ValueError("横屏控制端未完整显示系统导航工具栏。")
-    try:
-        baseline_x = {
-            "home": 348,
-            "back": 398,
-        }[action]
-    except KeyError as exc:
-        raise ValueError(f"不支持的控制端系统导航动作：{action}") from exc
-    return legacy.seller_control_point(
-        int(client_width),
-        int(client_height),
-        baseline_x,
-        legacy.CONTROL_Y_FROM_BOTTOM,
-    )
-
 DEFAULT_CONFIG: dict[str, Any] = {
     "wechat": {
         "input_wait_per_character": 0.8,
@@ -860,22 +832,11 @@ class RobotController:
 
     def vision_android_back(self) -> tuple[int, int]:
         self._require_verified_action("back", "返回")
-        hwnd, _title = legacy.find_window(self.title)
-        _left, _top, width, height = legacy.client_geometry(hwnd)
-        try:
-            point = controller_navigation_button_point(width, height, "back")
-        except ValueError as exc:
-            raise WorkflowNotReady(
-                "控制端必须恢复竖屏并完整显示底部工具栏，"
-                "才能安全执行系统返回。"
-            ) from exc
-        self._checkpoint()
-        # This is one seller-controller command, not a phone-screen tap. It
-        # bypasses fullscreen/immersive navigation-bar visibility without
-        # inheriting the controller's persisted multi-click count.
-        legacy.click_client_control(hwnd, point[0], point[1])
-        legacy.move_cursor_outside_camera(hwnd)
-        return point
+        cfg = load_workflow_config()["vision_agent"]
+        return self._vision_nav_tap(
+            float(cfg["android_back_x_ratio"]),
+            float(cfg["android_back_y_ratio"]),
+        )
 
     def _vision_swipe(self, direction: str) -> None:
         self._require_verified_action("swipe", "滑动")

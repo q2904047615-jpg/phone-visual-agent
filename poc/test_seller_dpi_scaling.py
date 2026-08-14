@@ -24,6 +24,7 @@ class SellerDpiScalingTests(unittest.TestCase):
         self.assertEqual(seller.seller_camera_height(810, 1515), 1440)
         self.assertEqual(seller.seller_control_point(810, 1515, 176), (264, 1488))
         self.assertEqual(seller.seller_control_point(810, 1515, 520), (780, 1488))
+        self.assertEqual(seller.cursor_parking_client_point(810, 1515), (405, 1477))
 
     def test_150_percent_landscape_uses_height_for_vertical_scale(self) -> None:
         self.assertEqual(seller.seller_layout_scale(1440, 810), 1.5)
@@ -50,6 +51,8 @@ class SellerDpiScalingTests(unittest.TestCase):
             seller.seller_ui_scale(0)
         with self.assertRaisesRegex(ValueError, "超出"):
             seller.seller_control_point(100, 20, 540)
+        with self.assertRaisesRegex(ValueError, "相机外控制条"):
+            seller.cursor_parking_client_point(540, 960)
 
 
 if __name__ == "__main__":

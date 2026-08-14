@@ -871,12 +871,29 @@ def configure_single_click_count(hwnd: int) -> None:
     time.sleep(0.25)
 
 
+def cursor_parking_client_point(width: int, height: int) -> tuple[int, int]:
+    """Return a passive pointer position below the seller camera preview."""
+
+    camera_height = seller_camera_height(width, height, DEFAULT_CAMERA_HEIGHT)
+    if camera_height >= height:
+        raise ValueError("卖家窗口没有可用于停放鼠标的相机外控制条。")
+    return width // 2, camera_height + (height - camera_height) // 2
+
+
 def move_cursor_outside_camera(hwnd: int) -> None:
-    """Move the pointer to the title bar so it cannot tint the heart icon."""
-    left, top, width, _height = client_geometry(hwnd)
-    title_y = max(0, top - scale_seller_ui_value(12, width))
-    user32.SetCursorPos(left + width // 2, title_y)
-    time.sleep(0.12)
+    """Move the pointer into the seller toolbar, outside the camera preview.
+
+    The old title-bar parking point is still interpreted by seller v1.0.1018
+    as a preview coordinate near y=30, leaving its opaque PX/MM tooltip over
+    the top of the phone.  The documented bottom control strip is inside the
+    same window but outside the camera crop, so moving there clears the tooltip
+    without clicking or operating the phone.
+    """
+
+    left, top, width, height = client_geometry(hwnd)
+    client_x, client_y = cursor_parking_client_point(width, height)
+    user32.SetCursorPos(left + client_x, top + client_y)
+    time.sleep(0.18)
 
 
 def configure_swipe(hwnd: int, direction: str) -> None:

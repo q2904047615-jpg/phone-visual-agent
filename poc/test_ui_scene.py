@@ -512,6 +512,21 @@ class UISceneTests(unittest.TestCase):
                 },
                 coordinate_scale=1000,
             )
+        with self.assertRaisesRegex(
+            UISceneError,
+            r"keyboard-key.*role=keyboard_key.*keyboard_layout",
+        ):
+            UIElement.from_dict(
+                {
+                    "element_id": "keyboard-key",
+                    "role": "keyboard_key",
+                    "meaning": "letter_key",
+                    "bounds": [100, 700, 200, 800],
+                    "confidence": 0.95,
+                    "states": {"keyboard_layout": "qwerty"},
+                },
+                coordinate_scale=1000,
+            )
 
         clear = UIElement.from_dict(
             {

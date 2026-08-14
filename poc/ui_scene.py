@@ -86,7 +86,9 @@ class UIElement:
                 "unknown",
             }:
                 raise UISceneError(
-                    "input 元素的 states.keyboard_layout 必须是 qwerty、numeric、symbol 或 unknown。"
+                    f"元素 {self.element_id}（role={self.role}）的 "
+                    "states.keyboard_layout 只允许 input 使用，且值必须是 "
+                    "qwerty、numeric、symbol 或 unknown。"
                 )
         if "keyboard_input_mode" in self.states:
             input_mode = self.states["keyboard_input_mode"]
@@ -96,8 +98,9 @@ class UIElement:
                 "unknown",
             }:
                 raise UISceneError(
-                    "input 元素的 states.keyboard_input_mode 必须是 direct_latin、"
-                    "chinese_pinyin 或 unknown。"
+                    f"元素 {self.element_id}（role={self.role}）的 "
+                    "states.keyboard_input_mode 只允许 input 使用，且值必须是 "
+                    "direct_latin、chinese_pinyin 或 unknown。"
                 )
         if "local_text_clear" in self.states:
             if self.role not in {"button", "icon"} or self.states["local_text_clear"] is not True:

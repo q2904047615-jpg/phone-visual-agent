@@ -388,14 +388,14 @@ class UISceneTests(unittest.TestCase):
                     "keyboard_layout": "qwerty",
                     "keyboard_input_mode": "direct_latin",
                 },
-                "text": "蓝牙设置",
+                "text": "agent",
             },
         )
 
         resolved = UniversalActionController().resolve_one(action, current)
 
         self.assertEqual("input_verified_text", resolved.kind)
-        self.assertEqual("蓝牙设置", resolved.text)
+        self.assertEqual("agent", resolved.text)
         self.assertEqual("search-field", resolved.target_element_id)
 
         exact_after = scene(
@@ -403,7 +403,7 @@ class UISceneTests(unittest.TestCase):
                 "search-field-after",
                 "搜索输入框",
                 role="input",
-                states={"focused": True, "value": "蓝牙设置"},
+                states={"focused": True, "value": "agent"},
             ),
             fingerprint="after",
         )
@@ -431,7 +431,7 @@ class UISceneTests(unittest.TestCase):
                 params={
                     "element_id": "search-field",
                     "target": "搜索输入框",
-                    "text": "Agent123",
+                    "text": "agent",
                 },
             ),
             current,
@@ -574,7 +574,7 @@ class UISceneTests(unittest.TestCase):
         action = SemanticAction(
             node_id="type",
             action="input_verified_text",
-            params={"element_id": "field", "target": "查询框", "text": "测试"},
+            params={"element_id": "field", "target": "查询框", "text": "agent"},
         )
 
         with self.assertRaisesRegex(UniversalActionError, "已聚焦"):
@@ -589,6 +589,7 @@ class UISceneTests(unittest.TestCase):
                 "element_id": "item",
                 "target": "列表项目",
                 "duration_ms": 900,
+                "expected_effect": {"scene_changed": True},
             },
         )
 
@@ -617,6 +618,7 @@ class UISceneTests(unittest.TestCase):
                 "source_target": "待移动项目",
                 "destination_element_id": "destination",
                 "destination_target": "目标区域",
+                "expected_effect": {"scene_changed": True},
             },
         )
 
@@ -624,6 +626,162 @@ class UISceneTests(unittest.TestCase):
 
         self.assertEqual(source.center, resolved.normalized_point)
         self.assertEqual(destination.center, resolved.normalized_end_point)
+        self.assertEqual(0.8, resolved.hold_seconds)
+        self.assertGreaterEqual(resolved.path_distance, 0.08)
+
+    def test_verified_input_rejects_characters_outside_first_hardware_profile(self) -> None:
+        current = scene(
+            element(
+                "field",
+                "查询框",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                },
+            )
+        )
+        for text in ("Agent", "agent1", "中文", "a" * 31):
+            with self.subTest(text=text), self.assertRaisesRegex(
+                UniversalActionError,
+                "1～30个小写英文字母",
+            ):
+                UniversalActionController().resolve_one(
+                    SemanticAction(
+                        node_id="type",
+                        action="input_verified_text",
+                        params={
+                            "element_id": "field",
+                            "target": "查询框",
+                            "text": text,
+                        },
+                    ),
+                    current,
+                )
+
+    def test_long_press_requires_safe_bounds_and_visual_postcondition(self) -> None:
+        edge = UIElement(
+            element_id="edge",
+            role="button",
+            meaning="边缘控件",
+            label="边缘控件",
+            bounds=(0.0, 0.0, 0.02, 0.02),
+            confidence=0.95,
+        )
+        for current, expected_message, expected_effect in (
+            (scene(element("item", "列表项目")), "结构化预期", {}),
+            (scene(edge), "画面边缘", {"scene_changed": True}),
+        ):
+            with self.subTest(message=expected_message), self.assertRaisesRegex(
+                UniversalActionError,
+                expected_message,
+            ):
+                UniversalActionController().resolve_one(
+                    SemanticAction(
+                        node_id="hold",
+                        action="long_press",
+                        params={
+                            "element_id": current.elements[0].element_id,
+                            "target": current.elements[0].meaning,
+                            "duration_ms": 800,
+                            "expected_effect": expected_effect,
+                        },
+                    ),
+                    current,
+                )
+
+    def test_drag_rejects_too_short_too_long_and_edge_paths(self) -> None:
+        cases = (
+            ((0.20, 0.20, 0.30, 0.30), (0.21, 0.21, 0.31, 0.31), "中心距离"),
+            ((0.02, 0.02, 0.08, 0.08), (0.90, 0.90, 0.98, 0.98), "中心距离"),
+            ((0.0, 0.0, 0.02, 0.02), (0.20, 0.20, 0.30, 0.30), "画面边缘"),
+        )
+        for source_bounds, destination_bounds, message in cases:
+            source = UIElement("source", "button", "源", source_bounds, 0.95, label="源")
+            destination = UIElement(
+                "destination",
+                "container",
+                "目标",
+                destination_bounds,
+                0.95,
+                label="目标",
+            )
+            with self.subTest(message=message), self.assertRaisesRegex(
+                UniversalActionError,
+                message,
+            ):
+                UniversalActionController().resolve_one(
+                    SemanticAction(
+                        node_id="drag",
+                        action="drag",
+                        params={
+                            "source_element_id": "source",
+                            "source_target": "源",
+                            "destination_element_id": "destination",
+                            "destination_target": "目标",
+                            "expected_effect": {"scene_changed": True},
+                        },
+                    ),
+                    scene(source, destination),
+                )
+
+    def test_drag_postcondition_requires_source_movement_toward_destination(self) -> None:
+        source = UIElement(
+            "source", "button", "源", (0.10, 0.20, 0.20, 0.30), 0.95, label="源"
+        )
+        destination = UIElement(
+            "destination",
+            "container",
+            "目标",
+            (0.70, 0.20, 0.90, 0.40),
+            0.95,
+            label="目标",
+        )
+        before = scene(source, destination, fingerprint="before")
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="drag",
+                action="drag",
+                params={
+                    "source_element_id": "source",
+                    "source_target": "源",
+                    "destination_element_id": "destination",
+                    "destination_target": "目标",
+                    "expected_effect": {"scene_changed": True},
+                },
+            ),
+            before,
+        )
+        unmoved = scene(source, destination, fingerprint="after")
+        with self.assertRaisesRegex(UniversalActionError, "缺少源元素向终点显著移动"):
+            UniversalActionController().verify_after_action(resolved, before, unmoved)
+
+        moved_source = UIElement(
+            "source", "button", "源", (0.55, 0.20, 0.65, 0.30), 0.95, label="源"
+        )
+        moved = scene(moved_source, destination, fingerprint="after-moved")
+        UniversalActionController().verify_after_action(resolved, before, moved)
+
+    def test_action_verification_rejects_stale_before_fingerprint(self) -> None:
+        current = scene(element("item", "列表项目"), fingerprint="before")
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="hold",
+                action="long_press",
+                params={
+                    "element_id": "item",
+                    "target": "列表项目",
+                    "expected_effect": {"scene_changed": True},
+                },
+            ),
+            current,
+        )
+        stale = scene(element("item", "列表项目"), fingerprint="new-before")
+        changed = scene(element("menu", "菜单"), fingerprint="after")
+        with self.assertRaisesRegex(UniversalActionError, "fingerprint 已过期"):
+            UniversalActionController().verify_after_action(resolved, stale, changed)
 
 
 if __name__ == "__main__":

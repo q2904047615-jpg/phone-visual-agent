@@ -375,7 +375,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
     def test_input_action_must_copy_structured_text_exactly(self) -> None:
         context = task_context()
-        context["goal"]["entities"] = {"input_text": "蓝牙设置"}
+        context["goal"]["entities"] = {"input_text": "agent"}
         context["current_subgoal"]["objective"] = "在已聚焦输入框输入查询词"
         field = UIElement(
             element_id="query_field",
@@ -395,7 +395,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         observation = trusted_observation(self.frames, elements=(field,))
         payload = action_payload(context, observation, element_id="query_field")
         payload["next_action"].update(
-            {"kind": "input_verified_text", "text": "蓝牙设置"}
+            {"kind": "input_verified_text", "text": "agent"}
         )
         payload["expected_result"] = {"content_changed": True}
 
@@ -406,7 +406,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         )
 
         self.assertEqual("input_verified_text", decision.proposal.action.action)
-        self.assertEqual("蓝牙设置", decision.proposal.action.params["text"])
+        self.assertEqual("agent", decision.proposal.action.params["text"])
 
     def test_input_action_rejects_model_invented_text(self) -> None:
         context = task_context()

@@ -146,7 +146,7 @@ class FakeTrialResult:
         self.physical_actions = 1
         self.action_outcome = "matched"
         self.resolved_action = SimpleNamespace(kind=action)
-        self.before_scene = SimpleNamespace(fingerprint="fingerprint-before-action")
+        self.before_scene = SimpleNamespace(fingerprint="fingerprint-execution-before")
         self.after_scene = SimpleNamespace(fingerprint="fingerprint-after")
         self.observation_errors = ()
         self.verification_errors = ()
@@ -175,15 +175,64 @@ class FakeTrialResult:
             "before_frame_paths": list(self.before_frame_paths),
             "after_frame_paths": list(self.after_frame_paths),
         }
-        if self.resolved_action.kind == "input_verified_text":
+        if self.resolved_action.kind == "drag":
+            payload.update(
+                {
+                    "resolved_action": {
+                        "kind": "drag",
+                        "normalized_point": [0.15, 0.25],
+                        "normalized_end_point": [0.8, 0.3],
+                        "hold_seconds": 0.8,
+                        "path_distance": 0.6519202405202649,
+                        "target_element_id": "source",
+                        "destination_element_id": "destination",
+                        "before_fingerprint": "fingerprint-execution-before",
+                        "expected_effect": {"scene_changed": True},
+                    },
+                    "before_scene": self._drag_scene(
+                        source_bounds=[0.1, 0.2, 0.2, 0.3],
+                        fingerprint="fingerprint-execution-before",
+                    ),
+                    "after_scene": self._drag_scene(
+                        source_bounds=[0.55, 0.2, 0.65, 0.3],
+                        fingerprint="fingerprint-after",
+                    ),
+                }
+            )
+        elif self.resolved_action.kind == "long_press":
+            payload.update(
+                {
+                    "resolved_action": {
+                        "kind": "long_press",
+                        "normalized_point": [0.3, 0.4],
+                        "hold_seconds": 0.8,
+                        "target_element_id": "item",
+                        "before_fingerprint": "fingerprint-execution-before",
+                        "expected_effect": {"scene_changed": True},
+                    },
+                    "before_scene": self._long_press_scene(
+                        fingerprint="fingerprint-execution-before",
+                        overlay=False,
+                    ),
+                    "after_scene": self._long_press_scene(
+                        fingerprint="fingerprint-after",
+                        overlay=True,
+                    ),
+                }
+            )
+        elif self.resolved_action.kind == "input_verified_text":
             payload.update(
                 {
                     "resolved_action": {
                         "kind": "input_verified_text",
                         "text": "agent",
                         "target_element_id": "field",
+                        "before_fingerprint": "fingerprint-execution-before",
                     },
                     "before_scene": {
+                        "foreground_app_id": "test-app",
+                        "screen_id": "input",
+                        "summary": "输入前",
                         "elements": [
                             {
                                 "element_id": "field",
@@ -191,11 +240,22 @@ class FakeTrialResult:
                                 "meaning": "search_field",
                                 "label": "搜索",
                                 "confidence": 0.95,
-                                "states": {"value": ""},
+                                "states": {
+                                    "focused": True,
+                                    "value": "",
+                                    "keyboard_layout": "qwerty",
+                                    "keyboard_input_mode": "direct_latin",
+                                },
                             }
-                        ]
+                        ],
+                        "stable": True,
+                        "confidence": 0.95,
+                        "fingerprint": "fingerprint-execution-before",
                     },
                     "after_scene": {
+                        "foreground_app_id": "test-app",
+                        "screen_id": "input",
+                        "summary": "输入后",
                         "elements": [
                             {
                                 "element_id": "field",
@@ -205,11 +265,68 @@ class FakeTrialResult:
                                 "confidence": 0.95,
                                 "states": {"value": "agent.com"},
                             }
-                        ]
+                        ],
+                        "stable": True,
+                        "confidence": 0.95,
+                        "fingerprint": "fingerprint-after",
                     },
                 }
             )
         return payload
+
+    @staticmethod
+    def _drag_scene(*, source_bounds, fingerprint):
+        return {
+            "foreground_app_id": "test-app",
+            "screen_id": "board",
+            "summary": "拖动场景",
+            "elements": [
+                {
+                    "element_id": "source",
+                    "role": "button",
+                    "meaning": "draggable_item",
+                    "label": "项目",
+                    "bounds": source_bounds,
+                    "confidence": 0.95,
+                    "states": {},
+                },
+                {
+                    "element_id": "destination",
+                    "role": "container",
+                    "meaning": "drop_zone",
+                    "label": "目标",
+                    "bounds": [0.7, 0.2, 0.9, 0.4],
+                    "confidence": 0.95,
+                    "states": {},
+                },
+            ],
+            "stable": True,
+            "confidence": 0.95,
+            "fingerprint": fingerprint,
+        }
+
+    @staticmethod
+    def _long_press_scene(*, fingerprint, overlay):
+        return {
+            "foreground_app_id": "test-app",
+            "screen_id": "list",
+            "summary": "长按场景",
+            "elements": [
+                {
+                    "element_id": "item",
+                    "role": "list_item",
+                    "meaning": "list_item",
+                    "label": "项目",
+                    "bounds": [0.2, 0.3, 0.4, 0.5],
+                    "confidence": 0.95,
+                    "states": {},
+                }
+            ],
+            "overlays": (["context_menu"] if overlay else []),
+            "stable": True,
+            "confidence": 0.95,
+            "fingerprint": fingerprint,
+        }
 
 
 class FakeTrialOrchestrator:
@@ -443,6 +560,85 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             [call[0] for call in self.orchestrator_calls].count("confirm"),
             1,
         )
+
+    def test_long_press_confirm_records_bounded_duration_and_visual_reobservation(self):
+        self.proposed_action = "long_press"
+        trial = self.manager.start(
+            device_id="device-a",
+            candidate_action="long_press",
+            text="长按一个安全项目并观察上下文菜单。",
+        )
+
+        result = self.manager.confirm(
+            "trial-001",
+            trial.session.snapshot()["confirmation_scope"],
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        report = json.loads(trial.report_path.read_text(encoding="utf-8"))
+        self.assertEqual("passed", report["status"])
+        self.assertEqual(0.8, report["execution"]["resolved_action"]["hold_seconds"])
+        self.assertEqual(
+            ["context_menu"],
+            report["execution"]["after_scene"]["overlays"],
+        )
+        self.assertIsNotNone(trial.promotion_authority)
+
+    def test_report_separates_confirmed_and_execution_fresh_fingerprints(self):
+        trial = self.manager.start(
+            device_id="device-a",
+            candidate_action="drag",
+            text="拖动一个安全控件",
+        )
+        confirmed_scope = trial.session.snapshot()["confirmation_scope"]
+
+        self.manager.confirm("trial-001", confirmed_scope)
+
+        report = json.loads(trial.report_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            confirmed_scope["fingerprint"],
+            report["before_observation"]["fingerprint"],
+        )
+        self.assertEqual(
+            "fingerprint-execution-before",
+            report["execution"]["before_scene"]["fingerprint"],
+        )
+        self.assertEqual(
+            "fingerprint-execution-before",
+            report["execution"]["resolved_action"]["before_fingerprint"],
+        )
+
+    def test_drag_without_verified_source_movement_fails_closed(self):
+        trial = self.manager.start(
+            device_id="device-a",
+            candidate_action="drag",
+            text="拖动一个安全控件",
+        )
+        original_confirm = trial.orchestrator.confirm_one
+
+        def confirm_without_movement(session, confirmation):
+            result = original_confirm(session, confirmation)
+            payload = result.to_dict()
+            payload["after_scene"]["elements"][0]["bounds"] = [0.1, 0.2, 0.2, 0.3]
+            result.to_dict = lambda: payload
+            return result
+
+        trial.orchestrator.confirm_one = confirm_without_movement
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "未满足验收通过标准"):
+            self.manager.confirm(
+                "trial-001",
+                trial.session.snapshot()["confirmation_scope"],
+            )
+
+        report = json.loads(trial.report_path.read_text(encoding="utf-8"))
+        self.assertEqual("failed", report["status"])
+        self.assertEqual("mismatched", report["action_outcome"])
+        self.assertRegex(
+            report["execution"]["verification_errors"][0],
+            "缺少源元素向终点显著移动",
+        )
+        self.assertIsNone(trial.promotion_authority)
 
     def test_wrong_exact_input_is_failed_and_has_no_promotion_authority(self):
         self.proposed_action = "input_verified_text"

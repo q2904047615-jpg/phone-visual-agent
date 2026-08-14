@@ -4164,7 +4164,7 @@ class ApiEndToEndTests(unittest.TestCase):
                 "universal_agent": {
                     "goal_protocol": "2026-08-10-generic-intent-v1",
                     "scene_protocol": "2026-08-10-ui-scene-v2",
-                    "action_protocol": "2026-08-14-universal-action-v7",
+                    "action_protocol": "2026-08-14-universal-action-v8",
                     "goal_preview_enabled": True,
                     "scene_preview_enabled": True,
                     "hardware_execution_enabled": True,

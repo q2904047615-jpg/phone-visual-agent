@@ -12,6 +12,13 @@ import uuid
 from PIL import Image, UnidentifiedImageError
 
 from device_exclusivity import InterProcessLease
+from ui_scene import UIScene, UISceneError
+from universal_action_controller import (
+    ResolvedSemanticAction,
+    SAFE_VERIFIED_TEXT_RE,
+    UniversalActionController,
+    UniversalActionError,
+)
 
 
 PROMOTABLE_ACTIONS = frozenset(
@@ -40,7 +47,11 @@ def exact_input_evidence_error(execution: Any) -> str:
         return "输入验收缺少结构化 resolved_action/before_scene/after_scene。"
     expected = resolved.get("text")
     target_id = str(resolved.get("target_element_id") or "").strip()
-    if not isinstance(expected, str) or not expected or not target_id:
+    if (
+        not isinstance(expected, str)
+        or not SAFE_VERIFIED_TEXT_RE.fullmatch(expected)
+        or not target_id
+    ):
         return "输入验收缺少精确文字或目标输入框身份。"
 
     before_elements = before_scene.get("elements")
@@ -60,6 +71,17 @@ def exact_input_evidence_error(execution: Any) -> str:
     if len(before_matches) != 1:
         return "输入验收无法唯一绑定动作前目标输入框。"
     before_input = before_matches[0]
+    before_states = before_input.get("states")
+    if not isinstance(before_states, dict):
+        return "输入验收缺少动作前输入框 states。"
+    if before_states.get("focused") is not True:
+        return "输入验收要求动作前输入框已聚焦。"
+    if before_states.get("value") != "":
+        return "输入验收只允许从动作前确认的空输入框开始。"
+    if before_states.get("keyboard_layout") != "qwerty":
+        return "输入验收要求动作前画面确认 QWERTY 键盘。"
+    if before_states.get("keyboard_input_mode") != "direct_latin":
+        return "输入验收要求动作前画面确认 direct_latin 直输模式。"
     def visible_states(item: dict[str, Any]) -> dict[str, Any] | None:
         states = item.get("states")
         return states if isinstance(states, dict) else None
@@ -102,6 +124,90 @@ def exact_input_evidence_error(execution: Any) -> str:
     actual = states["value"]
     if actual != expected:
         return f"输入验收文字不匹配：实际 {actual!r}，预期 {expected!r}。"
+    return ""
+
+
+def _normalized_point(value: Any, *, field: str) -> tuple[float, float] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) != 2
+        or any(
+            isinstance(item, bool) or not isinstance(item, (int, float))
+            for item in value
+        )
+    ):
+        raise CapabilityAcceptanceError(f"验收执行字段 {field} 格式无效。")
+    return float(value[0]), float(value[1])
+
+
+def action_execution_evidence_error(action: str, execution: Any) -> str:
+    """Independently replay controller verification from persisted scenes."""
+
+    if not isinstance(execution, dict):
+        return "验收 execution 必须是对象。"
+    raw_resolved = execution.get("resolved_action")
+    raw_before = execution.get("before_scene")
+    raw_after = execution.get("after_scene")
+    if not all(isinstance(value, dict) for value in (raw_resolved, raw_before, raw_after)):
+        return "验收缺少结构化 resolved_action/before_scene/after_scene。"
+    try:
+        expected_effect = raw_resolved.get("expected_effect") or {}
+        if not isinstance(expected_effect, dict):
+            raise CapabilityAcceptanceError("验收执行字段 expected_effect 格式无效。")
+        hold_seconds = raw_resolved.get("hold_seconds")
+        path_distance = raw_resolved.get("path_distance")
+        for field, value in (
+            ("hold_seconds", hold_seconds),
+            ("path_distance", path_distance),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+            ):
+                raise CapabilityAcceptanceError(f"验收执行字段 {field} 格式无效。")
+        resolved = ResolvedSemanticAction(
+            node_id=str(raw_resolved.get("node_id") or "acceptance"),
+            kind=str(raw_resolved.get("kind") or "").strip(),
+            normalized_point=_normalized_point(
+                raw_resolved.get("normalized_point"),
+                field="normalized_point",
+            ),
+            normalized_end_point=_normalized_point(
+                raw_resolved.get("normalized_end_point"),
+                field="normalized_end_point",
+            ),
+            text=(
+                raw_resolved.get("text")
+                if isinstance(raw_resolved.get("text"), str)
+                else None
+            ),
+            direction=(
+                raw_resolved.get("direction")
+                if isinstance(raw_resolved.get("direction"), str)
+                else None
+            ),
+            hold_seconds=(float(hold_seconds) if hold_seconds is not None else None),
+            path_distance=(float(path_distance) if path_distance is not None else None),
+            target_element_id=(
+                str(raw_resolved.get("target_element_id") or "").strip() or None
+            ),
+            destination_element_id=(
+                str(raw_resolved.get("destination_element_id") or "").strip()
+                or None
+            ),
+            before_fingerprint=str(
+                raw_resolved.get("before_fingerprint") or ""
+            ).strip(),
+            expected_effect=dict(expected_effect),
+        )
+        if resolved.kind != action:
+            return "执行动作类型与候选动作类型不一致。"
+        before = UIScene.from_dict(raw_before)
+        after = UIScene.from_dict(raw_after)
+        UniversalActionController().verify_after_action(resolved, before, after)
+    except (CapabilityAcceptanceError, UISceneError, UniversalActionError, ValueError) as exc:
+        return f"验收动作证据无法通过控制器复核：{exc}"
     return ""
 
 
@@ -150,6 +256,61 @@ def _observation(value: Any, *, field: str) -> dict[str, str]:
             value.get("fingerprint"), field=f"{field}.fingerprint"
         ),
     }
+
+
+def _confirmation_scope(
+    value: Any,
+    *,
+    session_id: str,
+    task_id: str,
+    device_id: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise CapabilityAcceptanceError("验收报告 confirmation_scope 必须是对象。")
+    required = {
+        "session_id",
+        "task_id",
+        "device_id",
+        "revision",
+        "subgoal_id",
+        "risk_ids",
+        "observation_id",
+        "fingerprint",
+    }
+    if set(value) != required:
+        raise CapabilityAcceptanceError("验收报告 confirmation_scope 字段不完整。")
+    normalized = dict(value)
+    for field, expected in (
+        ("session_id", session_id),
+        ("task_id", task_id),
+        ("device_id", device_id),
+    ):
+        if normalized.get(field) != expected:
+            raise CapabilityAcceptanceError(
+                f"验收报告 confirmation_scope.{field} 与报告范围不一致。"
+            )
+    revision = normalized.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise CapabilityAcceptanceError("验收报告 confirmation_scope.revision 无效。")
+    _required_text(normalized.get("subgoal_id"), field="confirmation_scope.subgoal_id")
+    _required_text(
+        normalized.get("observation_id"),
+        field="confirmation_scope.observation_id",
+    )
+    _required_text(
+        normalized.get("fingerprint"),
+        field="confirmation_scope.fingerprint",
+    )
+    risk_ids = normalized.get("risk_ids")
+    if not isinstance(risk_ids, list) or any(
+        not isinstance(item, str) or not item.strip() for item in risk_ids
+    ):
+        raise CapabilityAcceptanceError("验收报告 confirmation_scope.risk_ids 无效。")
+    if risk_ids != sorted(set(risk_ids)):
+        raise CapabilityAcceptanceError(
+            "验收报告 confirmation_scope.risk_ids 必须去重并排序。"
+        )
+    return normalized
 
 
 def _validate_frame_paths(
@@ -253,6 +414,19 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
 
     before = _observation(report.get("before_observation"), field="before_observation")
     after = _observation(report.get("after_observation"), field="after_observation")
+    confirmation_scope = _confirmation_scope(
+        report.get("confirmation_scope"),
+        session_id=session_id,
+        task_id=task_id,
+        device_id=device_id,
+    )
+    if (
+        confirmation_scope["observation_id"] != before["observation_id"]
+        or confirmation_scope["fingerprint"] != before["fingerprint"]
+    ):
+        raise CapabilityAcceptanceError(
+            "动作前 observation/fingerprint 与确认作用域不一致。"
+        )
     if after["observation_id"] == before["observation_id"]:
         raise CapabilityAcceptanceError("动作后 observation_id 未变化。")
     if after["fingerprint"] == before["fingerprint"]:
@@ -270,10 +444,22 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     verification_errors = execution.get("verification_errors")
     if not isinstance(verification_errors, list) or verification_errors:
         raise CapabilityAcceptanceError("验收报告包含验证错误，不能晋级。")
+    evidence_error = action_execution_evidence_error(action, execution)
+    if evidence_error:
+        raise CapabilityAcceptanceError(evidence_error)
     if action == "input_verified_text":
         exact_error = exact_input_evidence_error(execution)
         if exact_error:
             raise CapabilityAcceptanceError(exact_error)
+    before_scene = execution["before_scene"]
+    after_scene = execution["after_scene"]
+    if str(after_scene.get("fingerprint") or "") != after["fingerprint"]:
+        raise CapabilityAcceptanceError("动作后场景 fingerprint 与验收观察不一致。")
+    execution_before_fingerprint = str(before_scene.get("fingerprint") or "")
+    if not execution_before_fingerprint:
+        raise CapabilityAcceptanceError("执行前场景缺少 fingerprint。")
+    if execution_before_fingerprint == after["fingerprint"]:
+        raise CapabilityAcceptanceError("动作后 fingerprint 与执行前场景相同。")
 
     trial_root = resolved_report.parent
     before_paths = _validate_frame_paths(
@@ -301,6 +487,7 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
             "candidate_action": action,
             "before_observation": before,
             "after_observation": after,
+            "confirmation_scope": confirmation_scope,
             "before_frame_paths": list(before_paths),
             "after_frame_paths": list(after_paths),
         }

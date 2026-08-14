@@ -74,14 +74,93 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
             "action_outcome": "matched",
             "before_observation": {
                 "observation_id": "obs-before",
-                "fingerprint": "fingerprint-before",
+                "fingerprint": "fingerprint-confirmed",
             },
             "after_observation": {
                 "observation_id": "obs-after",
                 "fingerprint": "fingerprint-after",
             },
+            "confirmation_scope": {
+                "session_id": "session-001",
+                "task_id": "task-001",
+                "device_id": "device-a",
+                "revision": 1,
+                "subgoal_id": "subgoal-001",
+                "risk_ids": [],
+                "observation_id": "obs-before",
+                "fingerprint": "fingerprint-confirmed",
+            },
             "execution": {
-                "resolved_action": {"kind": "drag"},
+                "resolved_action": {
+                    "node_id": "drag-001",
+                    "kind": "drag",
+                    "normalized_point": [0.15, 0.25],
+                    "normalized_end_point": [0.8, 0.3],
+                    "hold_seconds": 0.8,
+                    "path_distance": 0.6519202405202649,
+                    "target_element_id": "source",
+                    "destination_element_id": "destination",
+                    "before_fingerprint": "fingerprint-execution-before",
+                    "expected_effect": {"scene_changed": True},
+                },
+                "before_scene": {
+                    "foreground_app_id": "test-app",
+                    "screen_id": "board",
+                    "summary": "拖动前",
+                    "elements": [
+                        {
+                            "element_id": "source",
+                            "role": "button",
+                            "meaning": "draggable_item",
+                            "label": "项目",
+                            "bounds": [0.1, 0.2, 0.2, 0.3],
+                            "confidence": 0.95,
+                            "states": {},
+                        },
+                        {
+                            "element_id": "destination",
+                            "role": "container",
+                            "meaning": "drop_zone",
+                            "label": "目标",
+                            "bounds": [0.7, 0.2, 0.9, 0.4],
+                            "confidence": 0.95,
+                            "states": {},
+                        },
+                    ],
+                    "overlays": [],
+                    "stable": True,
+                    "confidence": 0.95,
+                    "fingerprint": "fingerprint-execution-before",
+                },
+                "after_scene": {
+                    "foreground_app_id": "test-app",
+                    "screen_id": "board",
+                    "summary": "拖动后",
+                    "elements": [
+                        {
+                            "element_id": "source",
+                            "role": "button",
+                            "meaning": "draggable_item",
+                            "label": "项目",
+                            "bounds": [0.55, 0.2, 0.65, 0.3],
+                            "confidence": 0.95,
+                            "states": {},
+                        },
+                        {
+                            "element_id": "destination",
+                            "role": "container",
+                            "meaning": "drop_zone",
+                            "label": "目标",
+                            "bounds": [0.7, 0.2, 0.9, 0.4],
+                            "confidence": 0.95,
+                            "states": {},
+                        },
+                    ],
+                    "overlays": [],
+                    "stable": True,
+                    "confidence": 0.95,
+                    "fingerprint": "fingerprint-after",
+                },
                 "observation_errors": [],
                 "verification_errors": [],
             },
@@ -148,30 +227,50 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                     "kind": "input_verified_text",
                     "text": "agent",
                     "target_element_id": "field",
+                    "before_fingerprint": "fingerprint-execution-before",
                 },
                 "before_scene": {
+                    "foreground_app_id": "test-app",
+                    "screen_id": "input",
+                    "summary": "输入前",
                     "elements": [
                         {
                             "element_id": "field",
                             "role": "input",
                             "meaning": "search_field",
                             "label": "搜索",
+                            "bounds": [0.1, 0.1, 0.9, 0.2],
                             "confidence": 0.95,
-                            "states": {"value": ""},
+                            "states": {
+                                "focused": True,
+                                "value": "",
+                                "keyboard_layout": "qwerty",
+                                "keyboard_input_mode": "direct_latin",
+                            },
                         }
-                    ]
+                    ],
+                    "stable": True,
+                    "confidence": 0.95,
+                    "fingerprint": "fingerprint-execution-before",
                 },
                 "after_scene": {
+                    "foreground_app_id": "test-app",
+                    "screen_id": "input",
+                    "summary": "输入后",
                     "elements": [
                         {
                             "element_id": "field-after",
                             "role": "input",
                             "meaning": "search_field",
                             "label": "搜索",
+                            "bounds": [0.1, 0.1, 0.9, 0.2],
                             "confidence": 0.95,
                             "states": {"value": "agent.com"},
                         }
-                    ]
+                    ],
+                    "stable": True,
+                    "confidence": 0.95,
+                    "fingerprint": "fingerprint-after",
                 },
             }
         )
@@ -191,6 +290,93 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         validated = validate_acceptance_report(self.report_path)
         self.assertEqual("input_verified_text", validated["candidate_action"])
 
+    def test_input_report_rejects_missing_direct_latin_precondition(self) -> None:
+        report = self._valid_report()
+        report["candidate_action"] = "input_verified_text"
+        report["execution"].update(
+            {
+                "resolved_action": {
+                    "kind": "input_verified_text",
+                    "text": "agent",
+                    "target_element_id": "field",
+                    "before_fingerprint": "fingerprint-execution-before",
+                },
+                "before_scene": {
+                    "foreground_app_id": "test-app",
+                    "screen_id": "input",
+                    "summary": "输入前",
+                    "elements": [
+                        {
+                            "element_id": "field",
+                            "role": "input",
+                            "meaning": "search_field",
+                            "label": "搜索",
+                            "bounds": [0.1, 0.1, 0.9, 0.2],
+                            "confidence": 0.95,
+                            "states": {
+                                "focused": True,
+                                "value": "",
+                                "keyboard_layout": "qwerty",
+                                "keyboard_input_mode": "chinese_pinyin",
+                            },
+                        }
+                    ],
+                    "stable": True,
+                    "confidence": 0.95,
+                    "fingerprint": "fingerprint-execution-before",
+                },
+                "after_scene": {
+                    "foreground_app_id": "test-app",
+                    "screen_id": "input",
+                    "summary": "输入后",
+                    "elements": [
+                        {
+                            "element_id": "field",
+                            "role": "input",
+                            "meaning": "search_field",
+                            "label": "搜索",
+                            "bounds": [0.1, 0.1, 0.9, 0.2],
+                            "confidence": 0.95,
+                            "states": {"value": "agent"},
+                        }
+                    ],
+                    "stable": True,
+                    "confidence": 0.95,
+                    "fingerprint": "fingerprint-after",
+                },
+            }
+        )
+        self.report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "direct_latin"):
+            validate_acceptance_report(self.report_path)
+
+    def test_report_rejects_confirmation_scope_fingerprint_drift(self) -> None:
+        self._mutate_report(
+            lambda report: report["confirmation_scope"].__setitem__(
+                "fingerprint",
+                "stale-fingerprint",
+            )
+        )
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "确认作用域不一致"):
+            validate_acceptance_report(self.report_path)
+
+    def test_drag_report_rejects_tampered_distance_or_duration(self) -> None:
+        mutations = (
+            ("路径距离", lambda report: report["execution"]["resolved_action"].__setitem__("path_distance", 0.1)),
+            ("固定的0.8秒", lambda report: report["execution"]["resolved_action"].__setitem__("hold_seconds", 1.2)),
+        )
+        for message, mutation in mutations:
+            with self.subTest(message=message):
+                self._write_valid_report()
+                self._mutate_report(mutation)
+                with self.assertRaisesRegex(CapabilityAcceptanceError, message):
+                    validate_acceptance_report(self.report_path)
+
     def test_report_rejects_uncommitted_code_revision(self) -> None:
         self._mutate_report(
             lambda report: report.__setitem__("code_revision", "86b63d8+dirty")
@@ -202,7 +388,7 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
     def test_report_rejects_unchanged_observation_or_fingerprint(self) -> None:
         mutations = (
             lambda report: report["after_observation"].__setitem__("observation_id", "obs-before"),
-            lambda report: report["after_observation"].__setitem__("fingerprint", "fingerprint-before"),
+            lambda report: report["after_observation"].__setitem__("fingerprint", "fingerprint-confirmed"),
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation):
@@ -385,6 +571,7 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
             lambda report: (
                 report.__setitem__("candidate_action", "back"),
                 report["execution"]["resolved_action"].__setitem__("kind", "back"),
+                report["execution"]["after_scene"].__setitem__("screen_id", "other"),
             )
         )
 

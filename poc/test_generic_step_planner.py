@@ -334,7 +334,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                     label="搜索",
                     bounds=(0.1, 0.1, 0.9, 0.2),
                     confidence=0.96,
-                    states={"focused": True, "value": "蓝牙设置"},
+                    states={"focused": True, "value": "agent"},
                 ),
             ),
             stable=True,
@@ -352,7 +352,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 "role": "input",
                 "label": "搜索",
                 "states": {"focused": True},
-                "text": "蓝牙设置",
+                "text": "agent",
             },
         )
 
@@ -363,7 +363,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             confirmed=True,
         )
 
-        self.assertEqual([("input", "蓝牙设置")], robot.actions)
+        self.assertEqual([("input", "agent")], robot.actions)
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(2, observer.calls)
 

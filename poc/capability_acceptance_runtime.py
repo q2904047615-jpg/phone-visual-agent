@@ -17,6 +17,7 @@ from capability_acceptance import (
     PROMOTABLE_ACTIONS,
     PromotionAuthority,
     PromotionScope,
+    action_execution_evidence_error,
     exact_input_evidence_error,
     validate_acceptance_report,
 )
@@ -457,6 +458,16 @@ class CapabilityAcceptanceManager:
         before_observation_id = str(
             confirmation_scope.get("observation_id") or ""
         )
+        scoped_before_fingerprint = str(
+            confirmation_scope.get("fingerprint") or ""
+        )
+        action_evidence_error = action_execution_evidence_error(
+            trial.candidate_action,
+            execution,
+        )
+        if action_evidence_error:
+            verification_errors.append(action_evidence_error)
+            action_outcome = "mismatched"
         passed = bool(
             not isinstance(physical_actions, bool)
             and physical_actions == 1
@@ -467,8 +478,10 @@ class CapabilityAcceptanceManager:
             and len(before_paths) == 4
             and len(after_paths) == 4
             and before_fingerprint
+            and scoped_before_fingerprint
             and after_fingerprint
             and before_fingerprint != after_fingerprint
+            and scoped_before_fingerprint != after_fingerprint
             and before_observation_id
             and after_observation_id
             and before_observation_id != after_observation_id
@@ -497,7 +510,7 @@ class CapabilityAcceptanceManager:
             "confirmation_scope": confirmation_scope,
             "before_observation": {
                 "observation_id": before_observation_id,
-                "fingerprint": before_fingerprint,
+                "fingerprint": scoped_before_fingerprint,
             },
             "after_observation": {
                 "observation_id": after_observation_id,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
+import math
 import re
 from typing import Any
 
@@ -8,7 +9,14 @@ from semantic_executor import SemanticAction
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v7"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v8"
+
+SAFE_VERIFIED_TEXT_RE = re.compile(r"[a-z]{1,30}\Z")
+GESTURE_EDGE_MARGIN = 0.02
+MIN_DRAG_DISTANCE = 0.08
+MAX_DRAG_DISTANCE = 0.90
+DRAG_DURATION_SECONDS = 0.8
+MIN_DRAG_RESULT_DISPLACEMENT = 0.04
 
 
 class UniversalActionError(RuntimeError):
@@ -223,6 +231,7 @@ class ResolvedSemanticAction:
     text: str | None = None
     direction: str | None = None
     hold_seconds: float | None = None
+    path_distance: float | None = None
     target_element_id: str | None = None
     destination_element_id: str | None = None
     before_fingerprint: str = ""
@@ -307,10 +316,10 @@ class UniversalActionController:
             )
         if action.action == "input_verified_text":
             text = str(action.params.get("text") or "")
-            if not text:
-                raise UniversalActionError("文字输入动作缺少 text。")
-            if len(text) > 100 or "\n" in text or "\r" in text:
-                raise UniversalActionError("文字输入必须为1～100个无换行字符。")
+            if not SAFE_VERIFIED_TEXT_RE.fullmatch(text):
+                raise UniversalActionError(
+                    "当前安全文字输入仅允许1～30个小写英文字母。"
+                )
             element = self._resolve_target(action, scene, required_role="input")
             if element.states.get("focused") is not True:
                 raise UniversalActionError("文字输入前必须有当前画面证明输入框已聚焦。")
@@ -334,11 +343,17 @@ class UniversalActionController:
             )
         if action.action == "long_press":
             element = self._resolve_target(action, scene)
+            self._validate_gesture_point(element.center, label="长按落点")
             duration_ms = action.params.get("duration_ms", 800)
             if isinstance(duration_ms, bool) or not isinstance(duration_ms, (int, float)):
                 raise UniversalActionError("长按 duration_ms 格式无效。")
             if not 500 <= float(duration_ms) <= 2000:
                 raise UniversalActionError("长按 duration_ms 必须在500～2000之间。")
+            self._require_visual_postcondition(
+                "long_press",
+                expected_effect,
+                scene,
+            )
             resolved = self._point_action(
                 action,
                 element,
@@ -358,6 +373,17 @@ class UniversalActionController:
             )
             if source.element_id == destination.element_id:
                 raise UniversalActionError("拖动起点和终点不能是同一元素。")
+            if source.role == "container":
+                raise UniversalActionError("拖动起点必须是可识别元素，不能是页面容器。")
+            self._validate_gesture_point(source.center, label="拖动起点")
+            self._validate_gesture_point(destination.center, label="拖动终点")
+            distance = math.dist(source.center, destination.center)
+            if not MIN_DRAG_DISTANCE <= distance <= MAX_DRAG_DISTANCE:
+                raise UniversalActionError(
+                    "拖动两端中心距离必须在"
+                    f"{MIN_DRAG_DISTANCE:.2f}～{MAX_DRAG_DISTANCE:.2f}个归一化屏幕单位之间。"
+                )
+            self._require_visual_postcondition("drag", expected_effect, scene)
             return ResolvedSemanticAction(
                 node_id=action.node_id,
                 kind="drag",
@@ -365,6 +391,8 @@ class UniversalActionController:
                 normalized_end_point=destination.center,
                 target_element_id=source.element_id,
                 destination_element_id=destination.element_id,
+                hold_seconds=DRAG_DURATION_SECONDS,
+                path_distance=distance,
                 before_fingerprint=scene.fingerprint,
                 expected_effect=expected_effect,
             )
@@ -452,6 +480,19 @@ class UniversalActionController:
     ) -> None:
         before.validate()
         after.validate()
+        if resolved.kind not in {"observe", "verify", "finish", "wait_for_change"}:
+            if not resolved.before_fingerprint:
+                raise UniversalActionError("动作缺少执行前场景 fingerprint。")
+            if resolved.before_fingerprint != before.fingerprint:
+                raise UniversalActionError("动作绑定的 fingerprint 已过期。")
+        if resolved.kind in {"long_press", "drag"}:
+            self._require_visual_postcondition(
+                resolved.kind,
+                resolved.expected_effect,
+                before,
+            )
+        if resolved.kind == "long_press":
+            self._verify_long_press_contract(resolved, before)
         if not after.stable or float(after.confidence) < self.min_confidence:
             raise UniversalActionError("动作后的页面不稳定或置信度不足。")
         if (
@@ -463,7 +504,10 @@ class UniversalActionController:
                     and after.fingerprint
                     and before.fingerprint == after.fingerprint
                 )
-                or self.scenes_semantically_equivalent(before, after)
+                or (
+                    resolved.kind != "drag"
+                    and self.scenes_semantically_equivalent(before, after)
+                )
             )
         ):
             raise UniversalActionError("动作后页面没有可验证的语义变化。")
@@ -495,6 +539,164 @@ class UniversalActionController:
                 raise UniversalActionError(f"动作结果缺少元素状态证据：{exc}") from exc
         if resolved.kind == "input_verified_text":
             self._verify_exact_input_value(resolved, before, after)
+        if resolved.kind == "drag":
+            self._verify_drag_result(resolved, before, after)
+
+    @staticmethod
+    def _validate_gesture_point(point: tuple[float, float], *, label: str) -> None:
+        x, y = point
+        if not (
+            GESTURE_EDGE_MARGIN <= x <= 1.0 - GESTURE_EDGE_MARGIN
+            and GESTURE_EDGE_MARGIN <= y <= 1.0 - GESTURE_EDGE_MARGIN
+        ):
+            raise UniversalActionError(
+                f"{label}必须离画面边缘至少{GESTURE_EDGE_MARGIN:.2f}个归一化屏幕单位。"
+            )
+
+    @staticmethod
+    def _has_structured_postcondition(
+        expected: dict[str, Any],
+        before: UIScene,
+    ) -> bool:
+        if any(
+            expected.get(key) is True
+            for key in ("scene_changed", "content_changed", "current_video_changed")
+        ):
+            return True
+        expected_app = str(expected.get("app_id") or "").strip()
+        if expected_app and expected_app != before.foreground_app_id:
+            return True
+        expected_screen = str(expected.get("screen_id") or "").strip()
+        if expected_screen and expected_screen != before.screen_id:
+            return True
+        element_state = expected.get("element_state")
+        return bool(
+            isinstance(element_state, dict)
+            and str(element_state.get("meaning") or "").strip()
+            and isinstance(element_state.get("states"), dict)
+            and element_state["states"]
+        )
+
+    @classmethod
+    def _require_visual_postcondition(
+        cls,
+        kind: str,
+        expected: dict[str, Any],
+        before: UIScene,
+    ) -> None:
+        if expected.get("allow_unchanged") is True:
+            raise UniversalActionError(f"{kind} 禁止声明 allow_unchanged。")
+        if not cls._has_structured_postcondition(expected, before):
+            raise UniversalActionError(
+                f"{kind} 必须声明可由动作后新画面验证的结构化预期。"
+            )
+
+    def _verify_drag_result(
+        self,
+        resolved: ResolvedSemanticAction,
+        before: UIScene,
+        after: UIScene,
+    ) -> None:
+        source_id = str(resolved.target_element_id or "").strip()
+        destination_id = str(resolved.destination_element_id or "").strip()
+        if not source_id or not destination_id:
+            raise UniversalActionError("拖动结果缺少起点或终点元素身份。")
+        try:
+            source = before.get_element(source_id, min_confidence=self.min_confidence)
+            destination = before.get_element(
+                destination_id,
+                min_confidence=self.min_confidence,
+            )
+        except UISceneError as exc:
+            raise UniversalActionError(f"拖动前端点证据无效：{exc}") from exc
+
+        if source.role == "container":
+            raise UniversalActionError("拖动起点必须是可识别元素，不能是页面容器。")
+        self._validate_gesture_point(source.center, label="拖动起点")
+        self._validate_gesture_point(destination.center, label="拖动终点")
+
+        distance = math.dist(source.center, destination.center)
+        if not MIN_DRAG_DISTANCE <= distance <= MAX_DRAG_DISTANCE:
+            raise UniversalActionError("拖动路径距离超出安全范围。")
+        if (
+            resolved.path_distance is None
+            or abs(float(resolved.path_distance) - distance) > 1e-6
+        ):
+            raise UniversalActionError("拖动路径距离与动作前端点不一致。")
+        if resolved.hold_seconds != DRAG_DURATION_SECONDS:
+            raise UniversalActionError("拖动执行时长不是控制器固定的0.8秒。")
+
+        exact_id = tuple(
+            element
+            for element in after.elements
+            if element.element_id == source_id
+            and element.role == source.role
+            and float(element.confidence) >= self.min_confidence
+            and element.states.get("visible") is not False
+        )
+        if exact_id:
+            candidates = exact_id
+        else:
+            candidates = tuple(
+                element
+                for element in after.elements
+                if element.role == source.role
+                and float(element.confidence) >= self.min_confidence
+                and element.states.get("visible") is not False
+                and element.meaning.casefold() == source.meaning.casefold()
+                and element.label.casefold() == source.label.casefold()
+            )
+        if len(candidates) == 1:
+            moved = math.dist(source.center, candidates[0].center)
+            remaining = math.dist(candidates[0].center, destination.center)
+            required_improvement = max(0.03, distance * 0.20)
+            if (
+                moved >= MIN_DRAG_RESULT_DISPLACEMENT
+                and remaining <= distance - required_improvement
+            ):
+                return
+
+        expected = resolved.expected_effect
+        has_alternative_proof = bool(
+            expected.get("element_state")
+            or (
+                str(expected.get("app_id") or "").strip()
+                and str(expected.get("app_id") or "").strip()
+                != before.foreground_app_id
+            )
+            or (
+                str(expected.get("screen_id") or "").strip()
+                and str(expected.get("screen_id") or "").strip()
+                != before.screen_id
+            )
+        )
+        if not has_alternative_proof:
+            raise UniversalActionError(
+                "拖动后缺少源元素向终点显著移动或等价结构化状态证据。"
+            )
+
+    def _verify_long_press_contract(
+        self,
+        resolved: ResolvedSemanticAction,
+        before: UIScene,
+    ) -> None:
+        target_id = str(resolved.target_element_id or "").strip()
+        if not target_id or resolved.normalized_point is None:
+            raise UniversalActionError("长按结果缺少目标元素身份或落点。")
+        if (
+            resolved.hold_seconds is None
+            or not 0.5 <= float(resolved.hold_seconds) <= 2.0
+        ):
+            raise UniversalActionError("长按执行时长必须在0.5～2.0秒之间。")
+        try:
+            target = before.get_element(target_id, min_confidence=self.min_confidence)
+        except UISceneError as exc:
+            raise UniversalActionError(f"长按前目标证据无效：{exc}") from exc
+        if target.role == "container":
+            raise UniversalActionError("页面容器不是可长按控件。")
+        self._validate_gesture_point(target.center, label="长按落点")
+        if math.dist(resolved.normalized_point, target.center) > 1e-6:
+            raise UniversalActionError("长按落点与动作前目标中心不一致。")
 
     def _verify_exact_input_value(
         self,

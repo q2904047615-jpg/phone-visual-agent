@@ -36,12 +36,15 @@ PROMOTABLE_ACTIONS = frozenset(
         "swipe",
         "back",
         "home",
+        "reveal_system_navigation",
         "input_verified_text",
         "long_press",
         "drag",
     }
 )
-CALIBRATION_BOUND_ACTIONS = frozenset({"long_press", "drag"})
+CALIBRATION_BOUND_ACTIONS = frozenset(
+    {"long_press", "drag", "reveal_system_navigation"}
+)
 ACCEPTANCE_REPORT_VERSION = 2
 
 
@@ -429,6 +432,61 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
             or tuple(robot_result[0]) == tuple(robot_result[1])
         ):
             return "拖动验收缺少机械臂返回的两个不同实际像素端点。"
+    if action == "reveal_system_navigation":
+        geometry_fields = (
+            "normalized_point",
+            "normalized_end_point",
+            "text",
+            "direction",
+            "hold_seconds",
+            "path_distance",
+            "target_element_id",
+            "destination_element_id",
+        )
+        if any(raw_resolved.get(field) is not None for field in geometry_fields):
+            return "系统边缘唤栏验收的已解析动作不能携带模型坐标、方向或距离。"
+        client_path = (
+            robot_result.get("client_path")
+            if isinstance(robot_result, dict)
+            else None
+        )
+        requested_grid = (
+            robot_result.get("requested_grid")
+            if isinstance(robot_result, dict)
+            else None
+        )
+        corrected_grid = (
+            robot_result.get("corrected_grid")
+            if isinstance(robot_result, dict)
+            else None
+        )
+        grid_path = lambda value: bool(
+            isinstance(value, (list, tuple))
+            and len(value) == 2
+            and all(
+                isinstance(point, (list, tuple))
+                and len(point) == 2
+                and all(
+                    isinstance(item, int)
+                    and not isinstance(item, bool)
+                    and 0 <= item <= 1000
+                    for item in point
+                )
+                for point in value
+            )
+        )
+        if (
+            not isinstance(robot_result, dict)
+            or robot_result.get("action") != "reveal_system_navigation"
+            or robot_result.get("edge") != "bottom"
+            or not isinstance(client_path, (list, tuple))
+            or len(client_path) != 2
+            or not all(pixel_point(point) for point in client_path)
+            or tuple(client_path[0]) == tuple(client_path[1])
+            or not grid_path(requested_grid)
+            or not grid_path(corrected_grid)
+        ):
+            return "系统边缘唤栏验收缺少受限语义和两个不同实际像素端点。"
     return ""
 
 
@@ -730,13 +788,24 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     if calibration_evidence is not None:
         width, height = before_frame_size
         robot_result = execution.get("robot_result")
-        points = [robot_result] if action == "long_press" else list(robot_result)
+        if action == "long_press":
+            points = [robot_result]
+        elif action == "reveal_system_navigation":
+            points = list(robot_result["client_path"])
+        else:
+            points = list(robot_result)
         if any(
             not 0 <= int(point[0]) < width or not 0 <= int(point[1]) < height
             for point in points
         ):
             raise CapabilityAcceptanceError(
                 "手势验收机械臂实际像素端点超出动作前画面范围。"
+            )
+        if action == "reveal_system_navigation" and robot_result.get(
+            "frame_size"
+        ) != [width, height]:
+            raise CapabilityAcceptanceError(
+                "系统边缘唤栏回执的相机尺寸与动作前证据不一致。"
             )
 
     normalized = dict(report)

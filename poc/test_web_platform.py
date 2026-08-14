@@ -4291,6 +4291,7 @@ class ApiEndToEndTests(unittest.TestCase):
                         "swipe",
                         "back",
                         "home",
+                        "reveal_system_navigation",
                         "input_verified_text",
                         "long_press",
                         "drag",

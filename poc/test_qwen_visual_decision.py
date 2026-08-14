@@ -18,7 +18,7 @@ from qwen_visual_decision import (
     TrustedObservation,
     _decision_retry_prompt,
 )
-from ui_scene import UIElement, UIScene, UISceneError
+from ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
 from vision_agent import VisionAgentError
 
 
@@ -1129,7 +1129,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         object.__setattr__(
             current_scene,
             "system_ui",
-            SimpleNamespace(
+            SystemUIFacts(
                 immersive_or_fullscreen=True,
                 navigation_bar_visible=False,
             ),

@@ -24,7 +24,7 @@ from generic_action_adapter import (
     GenericActionExecutionResult,
 )
 from semantic_executor import SemanticAction
-from ui_scene import UIElement, UIScene
+from ui_scene import SystemUIFacts, UIElement, UIScene
 from universal_action_controller import ResolvedSemanticAction
 from universal_agent_orchestrator import (
     AgentEvidenceStore,
@@ -68,9 +68,8 @@ def _scene(
         stable=True,
         confidence=scene_confidence,
         fingerprint=fingerprint,
+        system_ui=system_ui or SystemUIFacts(),
     )
-    if system_ui is not None:
-        object.__setattr__(current, "system_ui", system_ui)
     return current
 
 
@@ -574,7 +573,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
     def test_allows_structured_system_navigation_reveal(self) -> None:
         scene = _scene(
-            system_ui=SimpleNamespace(
+            system_ui=SystemUIFacts(
                 immersive_or_fullscreen=True,
                 navigation_bar_visible=False,
             )
@@ -593,7 +592,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
     def test_rejects_system_navigation_reveal_for_read_only_or_risk(self) -> None:
         scene = _scene(
-            system_ui=SimpleNamespace(
+            system_ui=SystemUIFacts(
                 immersive_or_fullscreen=True,
                 navigation_bar_visible=False,
             )
@@ -614,11 +613,11 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
     def test_rejects_system_navigation_reveal_for_unknown_or_visible_bar(self) -> None:
         for facts in (
-            SimpleNamespace(
+            SystemUIFacts(
                 immersive_or_fullscreen="unknown",
                 navigation_bar_visible="unknown",
             ),
-            SimpleNamespace(
+            SystemUIFacts(
                 immersive_or_fullscreen=True,
                 navigation_bar_visible=True,
             ),

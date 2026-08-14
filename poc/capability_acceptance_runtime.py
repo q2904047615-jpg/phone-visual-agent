@@ -325,7 +325,7 @@ class CapabilityAcceptanceManager:
         calibration_path = getattr(controller, "calibration_path", None)
         if calibration_path is None:
             raise CapabilityAcceptanceError(
-                "正式长按/拖动验收要求设备控制器提供触控标定路径。"
+                "正式长按/拖动/系统边缘唤栏验收要求设备控制器提供触控标定路径。"
             )
         return validated_calibration_evidence(Path(calibration_path))
 

@@ -1407,6 +1407,7 @@ def device() -> dict[str, Any]:
                 "swipe",
                 "back",
                 "home",
+                "reveal_system_navigation",
                 "input_verified_text",
                 "long_press",
                 "drag",

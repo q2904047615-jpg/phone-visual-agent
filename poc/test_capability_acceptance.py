@@ -227,6 +227,73 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         )
         return report
 
+    def _valid_reveal_system_navigation_report(self) -> dict:
+        report = self._valid_report()
+        report["candidate_action"] = "reveal_system_navigation"
+        report["before_observation"]["fingerprint"] = (
+            "fingerprint-execution-before"
+        )
+        report["confirmation_scope"]["fingerprint"] = (
+            "fingerprint-execution-before"
+        )
+        report["execution"].update(
+            {
+                "resolved_action": {
+                    "node_id": "reveal-system-navigation-001",
+                    "kind": "reveal_system_navigation",
+                    "normalized_point": None,
+                    "normalized_end_point": None,
+                    "text": None,
+                    "direction": None,
+                    "hold_seconds": None,
+                    "path_distance": None,
+                    "target_element_id": None,
+                    "destination_element_id": None,
+                    "before_fingerprint": "fingerprint-execution-before",
+                    "expected_effect": {
+                        "system_ui": {"navigation_bar_visible": True}
+                    },
+                },
+                "before_scene": {
+                    "foreground_app_id": "test-app",
+                    "screen_id": "immersive-page",
+                    "summary": "沉浸页面，导航栏隐藏",
+                    "system_ui": {
+                        "immersive_or_fullscreen": True,
+                        "navigation_bar_visible": False,
+                    },
+                    "elements": [],
+                    "overlays": [],
+                    "stable": True,
+                    "confidence": 0.95,
+                    "fingerprint": "fingerprint-execution-before",
+                },
+                "after_scene": {
+                    "foreground_app_id": "test-app",
+                    "screen_id": "immersive-page",
+                    "summary": "系统导航栏已经可见",
+                    "system_ui": {
+                        "immersive_or_fullscreen": True,
+                        "navigation_bar_visible": True,
+                    },
+                    "elements": [],
+                    "overlays": [],
+                    "stable": True,
+                    "confidence": 0.95,
+                    "fingerprint": "fingerprint-after",
+                },
+                "robot_result": {
+                    "action": "reveal_system_navigation",
+                    "edge": "bottom",
+                    "frame_size": [16, 16],
+                    "requested_grid": [[120, 491], [331, 490]],
+                    "corrected_grid": [[94, 486], [314, 485]],
+                    "client_path": [[2, 15], [8, 10]],
+                },
+            }
+        )
+        return report
+
     def _mutate_report(self, mutation) -> None:
         report = json.loads(self.report_path.read_text(encoding="utf-8"))
         mutation(report)
@@ -240,6 +307,65 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
 
         self.assertEqual(report["trial_id"], "trial-001")
         self.assertEqual(report["candidate_action"], "drag")
+
+    def test_reveal_system_navigation_report_requires_structured_system_ui(self) -> None:
+        report = self._valid_reveal_system_navigation_report()
+        self.report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        validated = validate_acceptance_report(self.report_path)
+
+        self.assertEqual(
+            "reveal_system_navigation", validated["candidate_action"]
+        )
+
+    def test_reveal_system_navigation_rejects_summary_only_success(self) -> None:
+        report = self._valid_reveal_system_navigation_report()
+        report["execution"]["after_scene"]["system_ui"][
+            "navigation_bar_visible"
+        ] = "unknown"
+        self.report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "导航栏"):
+            validate_acceptance_report(self.report_path)
+
+    def test_reveal_system_navigation_rejects_model_geometry(self) -> None:
+        report = self._valid_reveal_system_navigation_report()
+        report["execution"]["resolved_action"]["direction"] = "up"
+        self.report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "模型坐标"):
+            validate_acceptance_report(self.report_path)
+
+    def test_reveal_system_navigation_rejects_bad_robot_receipt(self) -> None:
+        mutations = (
+            (
+                "实际像素端点",
+                lambda result: result.__setitem__("client_path", [[2, 15]]),
+            ),
+            (
+                "相机尺寸",
+                lambda result: result.__setitem__("frame_size", [15, 16]),
+            ),
+        )
+        for expected, mutation in mutations:
+            with self.subTest(expected=expected):
+                report = self._valid_reveal_system_navigation_report()
+                mutation(report["execution"]["robot_result"])
+                self.report_path.write_text(
+                    json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(CapabilityAcceptanceError, expected):
+                    validate_acceptance_report(self.report_path)
 
     def test_report_rejects_wrong_physical_action_count(self) -> None:
         for value in (0, 2, True, "1"):

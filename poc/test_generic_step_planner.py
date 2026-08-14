@@ -18,7 +18,7 @@ from generic_step_planner import (
 )
 from generic_supervised_runtime import GenericSupervisedSession
 from semantic_executor import SemanticAction
-from ui_scene import UIElement, UIScene
+from ui_scene import SystemUIFacts, UIElement, UIScene
 from universal_action_controller import UniversalActionController, UniversalActionError
 from vision_agent import VisionAgentError
 
@@ -153,9 +153,8 @@ def scene(
         stable=True,
         confidence=0.95,
         fingerprint=fingerprint,
+        system_ui=system_ui or SystemUIFacts(),
     )
-    if system_ui is not None:
-        object.__setattr__(current, "system_ui", system_ui)
     return current
 
 
@@ -176,7 +175,7 @@ class GenericStepPlannerTests(unittest.TestCase):
         )
         current = scene(
             "a",
-            system_ui=SimpleNamespace(
+            system_ui=SystemUIFacts(
                 immersive_or_fullscreen=True,
                 navigation_bar_visible=False,
             ),
@@ -207,7 +206,7 @@ class GenericStepPlannerTests(unittest.TestCase):
         )
         current = scene(
             "a",
-            system_ui=SimpleNamespace(
+            system_ui=SystemUIFacts(
                 immersive_or_fullscreen=True,
                 navigation_bar_visible=False,
             ),
@@ -285,7 +284,7 @@ class RevealSystemNavigationControllerTests(unittest.TestCase):
         controller = UniversalActionController()
         before = scene(
             "same",
-            system_ui=SimpleNamespace(
+            system_ui=SystemUIFacts(
                 immersive_or_fullscreen=True,
                 navigation_bar_visible=False,
             ),
@@ -297,7 +296,7 @@ class RevealSystemNavigationControllerTests(unittest.TestCase):
             before,
             scene(
                 "same",
-                system_ui=SimpleNamespace(
+                system_ui=SystemUIFacts(
                     immersive_or_fullscreen=True,
                     navigation_bar_visible=True,
                 ),
@@ -314,11 +313,11 @@ class RevealSystemNavigationControllerTests(unittest.TestCase):
     def test_rejects_unknown_or_already_visible_system_ui_precondition(self):
         controller = UniversalActionController()
         for facts in (
-            SimpleNamespace(
+            SystemUIFacts(
                 immersive_or_fullscreen="unknown",
                 navigation_bar_visible="unknown",
             ),
-            SimpleNamespace(
+            SystemUIFacts(
                 immersive_or_fullscreen=True,
                 navigation_bar_visible=True,
             ),
@@ -360,11 +359,11 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertIn("swipe", supported)
 
     def test_reveal_system_navigation_calls_one_dedicated_robot_action(self):
-        hidden = SimpleNamespace(
+        hidden = SystemUIFacts(
             immersive_or_fullscreen=True,
             navigation_bar_visible=False,
         )
-        visible = SimpleNamespace(
+        visible = SystemUIFacts(
             immersive_or_fullscreen=True,
             navigation_bar_visible=True,
         )
@@ -401,7 +400,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
 
     def test_reveal_system_navigation_failure_does_not_fallback_to_swipe(self):
-        hidden = SimpleNamespace(
+        hidden = SystemUIFacts(
             immersive_or_fullscreen=True,
             navigation_bar_visible=False,
         )

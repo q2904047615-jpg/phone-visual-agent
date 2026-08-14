@@ -54,10 +54,10 @@ def locate_magenta_target(frame: Image.Image) -> tuple[int, int, tuple[int, int,
     green = pixels[:, :, 1]
     blue = pixels[:, :, 2]
     mask = (
-        (red > 165)
-        & (blue > 125)
-        & (green < 150)
-        & ((red.astype(np.int16) - green.astype(np.int16)) > 55)
+        (red > 110)
+        & (blue > 100)
+        & (green < 140)
+        & ((red.astype(np.int16) - green.astype(np.int16)) > 45)
         & ((blue.astype(np.int16) - green.astype(np.int16)) > 35)
     )
     ys, xs = np.nonzero(mask)

@@ -180,6 +180,22 @@ class TapCalibrationMathTests(unittest.TestCase):
         self.assertLessEqual(abs(x - 140), 2)
         self.assertLessEqual(abs(y - 230), 2)
 
+    def test_dim_magenta_target_clipped_by_camera_edge_is_located(self):
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGB", (300, 500), "black")
+        draw = ImageDraw.Draw(image)
+        dim_magenta = (125, 12, 122)
+        draw.ellipse((118, -14, 162, 30), outline=dim_magenta, width=7)
+        draw.line((110, 8, 170, 8), fill=dim_magenta, width=4)
+        draw.line((140, 0, 140, 38), fill=dim_magenta, width=4)
+
+        x, y, box = locate_magenta_target(image)
+
+        self.assertLessEqual(abs(x - 140), 3)
+        self.assertLess(y, 24)
+        self.assertEqual(0, box[1])
+
     def test_fit_known_affine_and_inverse(self):
         source = [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9), (0.5, 0.5)]
         expected = Affine2D(((1.02, 0.03, -0.01), (-0.02, 0.98, 0.025)))

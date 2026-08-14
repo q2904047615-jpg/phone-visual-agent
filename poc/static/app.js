@@ -24,6 +24,7 @@ const promotableCapabilityActions = [
   "dismiss_overlay",
   "swipe",
   "back",
+  "home",
   "input_verified_text",
   "long_press",
   "drag",
@@ -57,6 +58,7 @@ const semanticActionNames = {
   dismiss_overlay: "关闭当前弹层",
   swipe: "滑动当前页面",
   back: "返回上一页",
+  home: "返回系统桌面",
   long_press: "长按目标控件",
   drag: "拖动目标控件",
   input_verified_text: "输入并核对文字",
@@ -296,7 +298,11 @@ function renderAction() {
     || view.risk.confirmationGate.phase === "risk";
   const highAttention = view.risk.hasCurrentRisk || view.risk.accountEffectPossible;
   const riskSummary = view.risk.currentActions.map(item => `${item.id}：${item.description}`).join("；");
-  const actionMetadata = ["qwen-visual-decision-v2", "qwen-visual-decision-v3"].includes(action.protocol)
+  const actionMetadata = [
+    "qwen-visual-decision-v2",
+    "qwen-visual-decision-v3",
+    "qwen-visual-decision-v4",
+  ].includes(action.protocol)
     ? `<div class="action-metadata">
          <span>${escapeHtml(action.protocolVersion || "qwen-v2")}</span>
          <span>status ${escapeHtml(action.status)}</span>

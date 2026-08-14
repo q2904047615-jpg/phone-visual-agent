@@ -12,6 +12,7 @@
         "dismiss_overlay",
         "swipe",
         "back",
+        "home",
         "wait_for_change"
       ]
     }

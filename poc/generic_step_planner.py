@@ -9,13 +9,14 @@ from semantic_executor import SemanticAction
 from ui_scene import UIScene
 
 
-GENERIC_STEP_PROTOCOL_VERSION = "2026-08-12-generic-step-v2"
+GENERIC_STEP_PROTOCOL_VERSION = "2026-08-14-generic-step-v3"
 ALLOWED_STEP_ACTIONS = frozenset(
     {
         "tap_semantic",
         "dismiss_overlay",
         "swipe",
         "back",
+        "home",
         "wait_for_change",
         "input_verified_text",
         "long_press",
@@ -141,7 +142,7 @@ class GenericStepPlanner:
 {{
   "status":"action|finished|blocked",
   "action":{{
-    "kind":"tap_semantic|dismiss_overlay|swipe|back|wait_for_change",
+    "kind":"tap_semantic|dismiss_overlay|swipe|back|home|wait_for_change",
     "element_id":"点击时必须是当前场景已有的 element_id",
     "target":"元素 meaning",
     "role":"元素 role",

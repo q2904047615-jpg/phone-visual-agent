@@ -376,6 +376,10 @@ class UIScene:
         overlays = value.get("overlays") or []
         if not isinstance(overlays, list):
             raise UISceneError("场景 overlays 必须是数组。")
+        if any(not isinstance(item, str) for item in overlays):
+            raise UISceneError(
+                "场景 overlays 只允许字符串描述；可交互候选必须放入 elements。"
+            )
         screen_id = str(value.get("screen_id") or "unknown").strip().lower()
         if (
             value.get("foreground_app_id")
@@ -399,7 +403,7 @@ class UIScene:
             screen_id=screen_id,
             summary=str(value.get("summary") or "").strip()[:500],
             elements=elements,
-            overlays=tuple(str(item).strip()[:120] for item in overlays if str(item).strip()),
+            overlays=tuple(item.strip()[:120] for item in overlays if item.strip()),
             stable=(
                 bool(value.get("stable"))
                 if stable_override is None

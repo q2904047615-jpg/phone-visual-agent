@@ -429,24 +429,21 @@ def _root_window_at(screen_x: int, screen_y: int) -> int:
     return int(root or candidate)
 
 
-def ensure_camera_region_unoccluded(
+def _window_is_minimized(hwnd: int) -> bool:
+    """Read window state without restoring or activating it."""
+
+    try:
+        return bool(user32.IsIconic(hwnd))
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _validate_camera_region_unoccluded(
     hwnd: int,
     *,
     camera_height: int = DEFAULT_CAMERA_HEIGHT,
 ) -> None:
-    """Put the seller controller in front and prove its camera is visible.
-
-    The legacy implementation grabbed a desktop rectangle.  If Edge or Codex
-    covered main.exe, those pixels were silently treated as the phone image.
-    Sampling the Win32 owner at several camera points makes that failure
-    explicit before any screenshot can reach the visual model.
-    """
-
-    user32.ShowWindow(hwnd, SW_RESTORE)
-    ensure_window_fully_visible(hwnd)
-    user32.BringWindowToTop(hwnd)
-    user32.SetForegroundWindow(hwnd)
-    time.sleep(0.12)
+    """Prove the current desktop pixels belong to the seller controller."""
 
     left, top, width, height = client_geometry(hwnd)
     if not seller_layout_has_full_camera(width, height, camera_height):
@@ -489,11 +486,41 @@ def ensure_camera_region_unoccluded(
         )
 
 
+def ensure_camera_region_unoccluded(
+    hwnd: int,
+    *,
+    camera_height: int = DEFAULT_CAMERA_HEIGHT,
+) -> None:
+    """Activate the seller controller for one explicitly requested task capture."""
+
+    user32.ShowWindow(hwnd, SW_RESTORE)
+    ensure_window_fully_visible(hwnd)
+    user32.BringWindowToTop(hwnd)
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.12)
+    _validate_camera_region_unoccluded(hwnd, camera_height=camera_height)
+
+
 def capture_client(hwnd: int) -> Image.Image:
     ensure_camera_region_unoccluded(hwnd)
     left, top, width, height = client_geometry(hwnd)
     if width <= 0 or height <= 0:
         raise RuntimeError("控制端窗口当前没有有效大小，可能已最小化。")
+    return ImageGrab.grab(
+        bbox=(left, top, left + width, top + height),
+        all_screens=True,
+    ).convert("RGB")
+
+
+def capture_client_passive(hwnd: int) -> Image.Image:
+    """Capture a visible preview without restoring, raising or focusing main.exe."""
+
+    if _window_is_minimized(hwnd):
+        raise RuntimeError("控制端已最小化，被动预览已暂停。")
+    _validate_camera_region_unoccluded(hwnd)
+    left, top, width, height = client_geometry(hwnd)
+    if width <= 0 or height <= 0:
+        raise RuntimeError("控制端窗口当前没有有效大小，被动预览已暂停。")
     return ImageGrab.grab(
         bbox=(left, top, left + width, top + height),
         all_screens=True,

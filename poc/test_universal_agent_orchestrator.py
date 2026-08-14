@@ -91,8 +91,12 @@ def _decision(
             "direction": direction,
             "expected_effect": {"scene_changed": True},
         }
-    elif action_kind in {"back", "wait_for_change"}:
-        params = {"expected_effect": {"scene_changed": action_kind == "back"}}
+    elif action_kind in {"back", "home", "wait_for_change"}:
+        params = {
+            "expected_effect": {
+                "scene_changed": action_kind in {"back", "home"},
+            }
+        }
     elif action_kind == "input_verified_text":
         params["text"] = "蓝牙设置"
         params["states"] = dict(element.states)
@@ -120,7 +124,7 @@ def _decision(
                 if action_kind
                 in {"tap_semantic", "dismiss_overlay", "input_verified_text", "long_press"}
                 else "system_navigation"
-                if action_kind == "back"
+                if action_kind in {"back", "home"}
                 else "screen"
             ),
             element_id=(
@@ -143,6 +147,7 @@ def _context(
     *,
     impact: str = "navigation_only",
     external_action_allowed: bool = False,
+    target_apps: tuple[dict, ...] = (),
 ) -> SimpleNamespace:
     return SimpleNamespace(
         task_id="task-1",
@@ -150,6 +155,7 @@ def _context(
         revision=1,
         current_external_impact=impact,
         external_action_allowed=external_action_allowed,
+        goal={"target_apps": list(target_apps)},
     )
 
 
@@ -484,6 +490,50 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         self.assertTrue(result.allowed)
         self.assertEqual("back", result.canonical_class)
+
+    def test_allows_home_for_navigation_only_subgoal(self) -> None:
+        scene = _scene()
+        decision = _decision(scene, action_kind="home")
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+            available_action_kinds=frozenset({"home"}),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("home", result.canonical_class)
+
+    def test_allows_exact_formal_target_app_entry_without_open_word(self) -> None:
+        scene = _scene(meaning="settings_app", label="设置", role="icon")
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                target_apps=({"app_id": "settings", "app_name": "系统设置"},),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("open", result.canonical_class)
+
+    def test_rejects_unrelated_app_entry_without_navigation_semantics(self) -> None:
+        scene = _scene(meaning="camera_app", label="相机", role="icon")
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                target_apps=({"app_id": "settings", "app_name": "系统设置"},),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("无法证明", result.reason)
 
     def test_rejects_action_missing_from_device_capabilities(self) -> None:
         scene = _scene()
@@ -825,6 +875,14 @@ class ObservationBridgeTests(unittest.TestCase):
         goal = self.bridge.goal_draft(graph)
 
         self.assertEqual("风景", goal.entities["category"])
+        self.assertEqual(
+            "看看图片工具里的风景分类",
+            goal.entities["original_goal_visual_context"],
+        )
+        self.assertNotIn(
+            "original_goal_visual_context",
+            graph.to_qwen_context()["goal"]["entities"],
+        )
         self.assertIn("仅查看公开信息", goal.constraints)
         self.assertIn("不得改变任何账号状态", goal.constraints)
         self.assertEqual(

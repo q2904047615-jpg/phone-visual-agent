@@ -1077,6 +1077,24 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual("", decision.target_region.element_id)
         self.assertEqual((0.0, 0.0, 1.0, 1.0), decision.target_region.bounds)
 
+    def test_home_is_a_bound_system_navigation_action(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        payload["next_action"] = {"kind": "home"}
+        payload["target_region"] = {
+            "kind": "system_navigation",
+            "bounds": [0, 0, 1000, 1000],
+            "description": "Android系统Home键",
+        }
+        payload["expected_result"] = {"scene_changed": True}
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("home", decision.proposal.action.action)
+        self.assertEqual("system_navigation", decision.target_region.kind)
+        self.assertEqual("", decision.target_region.element_id)
+        self.assertEqual((0.0, 0.0, 1.0, 1.0), decision.target_region.bounds)
+
     def test_conflicting_nested_action_param_is_rejected(self) -> None:
         bad = action_payload(self.context, self.observation)
         bad["next_action"] = {

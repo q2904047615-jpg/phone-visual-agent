@@ -359,6 +359,44 @@ class GenericSceneObserverTests(unittest.TestCase):
             retry_text,
         )
 
+    def test_overlay_objects_trigger_one_format_retry_and_keep_candidate_in_elements(self) -> None:
+        invalid = scene_payload()
+        candidate = dict(invalid["elements"][0])
+        candidate["element_id"] = "add-new"
+        candidate["meaning"] = "add_new"
+        candidate["label"] = "+"
+        candidate["states"] = {"goal_relevant": True}
+        invalid["elements"] = []
+        invalid["overlays"] = [
+            {
+                "overlay_id": "add-new",
+                "role": "button",
+                "meaning": "add_new",
+                "bounds": [100, 600, 260, 760],
+                "confidence": 0.98,
+            }
+        ]
+        repaired = scene_payload()
+        repaired["elements"] = [candidate]
+        repaired["overlays"] = ["window_manager"]
+        provider = SequenceProvider([invalid, repaired])
+
+        observer = GenericSceneObserver(provider)
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "让新的空白页面可见"},
+        )
+
+        self.assertEqual(2, provider.calls)
+        self.assertEqual("add-new", scene.elements[0].element_id)
+        self.assertEqual(("window_manager",), scene.overlays)
+        retry_text = provider.messages_seen[1][1]["content"][0]["text"]
+        self.assertIn("overlays只能是字符串数组", retry_text)
+        self.assertIn("必须改写成elements", retry_text)
+        self.assertIn("格式修复不能靠删除真实候选通过", retry_text)
+        self.assertIn("即使目标结果", retry_text)
+        self.assertIn("尚未出现", retry_text)
+
     def test_service_disconnect_is_not_misclassified_as_format_retry(self) -> None:
         provider = SequenceProvider(
             [VisionAgentError("千问视觉连接连续1次中断：Server disconnected")]
@@ -515,9 +553,46 @@ class GenericSceneObserverTests(unittest.TestCase):
             self.assertIn("预填充且未聚焦时可以没有光标", prompt)
             self.assertIn("role=input", prompt)
             self.assertIn("不得仅因没有光标而降级成text或container", prompt)
-            self.assertIn("相邻按钮必须作为另一个控件观察", prompt)
-            self.assertIn("绝不表示可以激活相邻按钮", prompt)
+            self.assertIn("尾部功能控件必须作为另一个控件观察", prompt)
+            self.assertIn("绝不表示可以激活尾部控件", prompt)
             self.assertIn("框内文字的内容或主题不能改变控件角色", prompt)
+
+    def test_editable_field_wording_triggers_generic_input_structure_audit(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = {
+            "structures": [
+                {
+                    "structure_id": "field-with-scan",
+                    "bounds": [110, 40, 850, 110],
+                    "fully_visible": True,
+                    "text": "已有文字",
+                    "confidence": 0.98,
+                    "right_button": {
+                        "label": "扫描",
+                        "bounds": [780, 40, 850, 110],
+                        "confidence": 0.97,
+                    },
+                }
+            ]
+        }
+        provider = SequenceProvider([empty, empty, audit])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "使顶部白色字段进入编辑焦点并显示软键盘"},
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(candidate)
+        self.assertEqual("input", candidate.role)
+        self.assertEqual("已有文字", candidate.label)
+        self.assertEqual((0.11, 0.04, 0.78, 0.11), candidate.bounds)
+        self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
+        audit_text = provider.messages_seen[2][1]["content"][0]["text"]
+        self.assertIn("trailing utility control", audit_text)
+        self.assertIn("is never authorized for activation", audit_text)
 
     def test_targeted_refinement_uses_goal_directed_roi_but_keeps_full_frame_bounds(self) -> None:
         first = scene_payload()

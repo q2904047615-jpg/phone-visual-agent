@@ -85,6 +85,59 @@ TEST_QWERTY_LAYOUT = {
 
 
 class PhysicalNavigationSafetyTests(unittest.TestCase):
+    def test_live_preview_uses_passive_capture_without_active_capture_path(self):
+        controller = RobotController(title="test")
+        frame = Image.new("RGB", (540, 1038), "white")
+
+        with (
+            patch("robot_core.legacy.find_window", return_value=(123, "test")),
+            patch(
+                "robot_core.legacy.capture_client_passive",
+                return_value=frame,
+            ) as passive,
+            patch("robot_core.legacy.capture_client") as active,
+        ):
+            payload = controller.capture_preview()
+
+        self.assertTrue(payload.startswith(b"\xff\xd8"))
+        passive.assert_called_once_with(123)
+        active.assert_not_called()
+
+    def test_passive_capture_never_invokes_window_activation(self):
+        frame = Image.new("RGB", (540, 1038), "white")
+
+        with (
+            patch("robot_gui_poc._window_is_minimized", return_value=False),
+            patch("robot_gui_poc._validate_camera_region_unoccluded") as validate,
+            patch(
+                "robot_gui_poc.client_geometry",
+                return_value=(10, 20, 540, 1038),
+            ),
+            patch("robot_gui_poc.ImageGrab.grab", return_value=frame) as grab,
+            patch("robot_gui_poc.ensure_camera_region_unoccluded") as activate,
+        ):
+            result = robot_gui_poc.capture_client_passive(123)
+
+        self.assertEqual((540, 1038), result.size)
+        validate.assert_called_once_with(123)
+        grab.assert_called_once_with(
+            bbox=(10, 20, 550, 1058),
+            all_screens=True,
+        )
+        activate.assert_not_called()
+
+    def test_passive_capture_keeps_minimized_window_minimized(self):
+        with (
+            patch("robot_gui_poc._window_is_minimized", return_value=True),
+            patch("robot_gui_poc.ImageGrab.grab") as grab,
+            patch("robot_gui_poc.ensure_camera_region_unoccluded") as activate,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "已最小化"):
+                robot_gui_poc.capture_client_passive(123)
+
+        grab.assert_not_called()
+        activate.assert_not_called()
+
     def test_controller_client_rejects_small_landscape_error_dialog(self):
         self.assertFalse(controller_client_has_camera(379, 169))
         self.assertFalse(controller_client_has_camera(540, 400))
@@ -4058,7 +4111,7 @@ class ApiEndToEndTests(unittest.TestCase):
                 "universal_agent": {
                     "goal_protocol": "2026-08-10-generic-intent-v1",
                     "scene_protocol": "2026-08-10-ui-scene-v2",
-                    "action_protocol": "2026-08-12-universal-action-v4",
+                    "action_protocol": "2026-08-14-universal-action-v5",
                     "goal_preview_enabled": True,
                     "scene_preview_enabled": True,
                     "hardware_execution_enabled": True,
@@ -4069,6 +4122,7 @@ class ApiEndToEndTests(unittest.TestCase):
                         "back",
                         "dismiss_overlay",
                         "drag",
+                        "home",
                         "input_verified_text",
                         "long_press",
                         "swipe",
@@ -4079,6 +4133,7 @@ class ApiEndToEndTests(unittest.TestCase):
                         "dismiss_overlay",
                         "swipe",
                         "back",
+                        "home",
                         "input_verified_text",
                         "long_press",
                         "drag",
@@ -4088,6 +4143,7 @@ class ApiEndToEndTests(unittest.TestCase):
                         "dismiss_overlay": True,
                         "swipe": True,
                         "back": True,
+                        "home": True,
                         "wait_for_change": True,
                         "input_verified_text": True,
                         "long_press": True,

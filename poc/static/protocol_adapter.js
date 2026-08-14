@@ -147,9 +147,11 @@
     ));
     const isExecutable = status === "action" && Boolean(actionType);
     return {
-      protocol: String(firstDefined(decision.protocol_version, "")).includes("-v3")
-        ? "qwen-visual-decision-v3"
-        : "qwen-visual-decision-v2",
+      protocol: String(firstDefined(decision.protocol_version, "")).includes("-v4")
+        ? "qwen-visual-decision-v4"
+        : String(firstDefined(decision.protocol_version, "")).includes("-v3")
+          ? "qwen-visual-decision-v3"
+          : "qwen-visual-decision-v2",
       protocolVersion: String(firstDefined(decision.protocol_version, "")),
       status,
       actionType,

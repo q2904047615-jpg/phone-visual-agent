@@ -95,6 +95,7 @@ class GenericSingleActionAdapter:
             "dismiss_overlay",
             "swipe",
             "back",
+            "home",
             "input_verified_text",
             "long_press",
             "drag",
@@ -130,6 +131,8 @@ class GenericSingleActionAdapter:
             supported.add("swipe")
         if available("back", "vision_android_back"):
             supported.add("back")
+        if available("home", "vision_android_home"):
+            supported.add("home")
         if available("input_verified_text", "vision_type_text"):
             supported.add("input_verified_text")
         if available("long_press", "vision_long_press_relative"):
@@ -545,6 +548,9 @@ class GenericSingleActionAdapter:
             elif resolved.kind == "back":
                 physical_actions = 1
                 robot_result = self.robot.vision_android_back()
+            elif resolved.kind == "home":
+                physical_actions = 1
+                robot_result = self.robot.vision_android_home()
             elif resolved.kind == "input_verified_text":
                 if not resolved.text:
                     raise GenericActionAdapterError("输入动作缺少已校验文字。")

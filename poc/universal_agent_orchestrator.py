@@ -159,6 +159,14 @@ class ObservationBridge:
         if active is not None:
             constraints.extend(active.constraints)
         entities = dict(graph.goal.entities)
+        # DeepSeek intentionally abstracts low-level wording out of the task
+        # graph. Preserve the user's original visual descriptors only inside
+        # the read-only scene-observation draft so labels, colors, shapes and
+        # coarse positions are not lost. The Qwen action context is still
+        # produced directly from ``DynamicTaskGraph.to_qwen_context()``, so
+        # this value cannot authorize or specify an action.
+        if graph.raw_user_goal.strip():
+            entities["original_goal_visual_context"] = graph.raw_user_goal.strip()
         entities["target_apps"] = [
             {"app_id": item.app_id, "app_name": item.app_name}
             for item in graph.goal.target_apps
@@ -2209,6 +2217,7 @@ class PhaseOneNavigationPolicy:
         {
             "swipe",
             "back",
+            "home",
             "wait_for_change",
             "tap_semantic",
             "dismiss_overlay",
@@ -2244,6 +2253,31 @@ class PhaseOneNavigationPolicy:
 
     def _semantic_class(self, *values: str) -> str:
         return navigation_semantic_class(*values)
+
+    def _matches_target_app(self, task_context: Any, element: Any) -> bool:
+        """Bind a visible App entry to the formal task target without App rules."""
+
+        goal = self._value(task_context, "goal", {})
+        target_apps = self._value(goal, "target_apps", ()) or ()
+        candidate_tokens = self._tokens(
+            " ".join(
+                (
+                    str(self._value(element, "meaning", "")),
+                    str(self._value(element, "label", "")),
+                )
+            )
+        )
+        candidate_label = str(self._value(element, "label", "")).strip().casefold()
+        for target_app in target_apps:
+            app_id_tokens = self._tokens(
+                str(self._value(target_app, "app_id", ""))
+            )
+            if app_id_tokens and app_id_tokens.issubset(candidate_tokens):
+                return True
+            app_name = str(self._value(target_app, "app_name", "")).strip().casefold()
+            if app_name and candidate_label == app_name:
+                return True
+        return False
 
     def evaluate(
         self,
@@ -2356,6 +2390,12 @@ class PhaseOneNavigationPolicy:
             return NavigationPolicyDecision(True, "允许一个四向导航滑动。", "swipe")
         if action_kind == "back":
             return NavigationPolicyDecision(True, "允许一个系统返回动作。", "back")
+        if action_kind == "home":
+            return NavigationPolicyDecision(
+                True,
+                "允许一个Android系统Home动作，返回系统Launcher。",
+                "home",
+            )
         if action_kind == "wait_for_change":
             return NavigationPolicyDecision(True, "允许等待页面变化，不产生物理动作。", "wait")
 
@@ -2495,6 +2535,13 @@ class PhaseOneNavigationPolicy:
                 canonical = "input"
             elif action_kind == "long_press":
                 canonical = "long_press"
+            elif (
+                action_kind == "tap_semantic"
+                and impact == "navigation_only"
+                and element.role in {"button", "icon", "image", "list_item"}
+                and self._matches_target_app(task_context, element)
+            ):
+                canonical = "open"
             elif impact == "external_state" and external_allowed:
                 canonical = "external"
             else:

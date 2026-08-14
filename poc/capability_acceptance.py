@@ -20,6 +20,7 @@ PROMOTABLE_ACTIONS = frozenset(
         "dismiss_overlay",
         "swipe",
         "back",
+        "home",
         "input_verified_text",
         "long_press",
         "drag",

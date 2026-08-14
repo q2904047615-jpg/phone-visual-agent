@@ -8,7 +8,7 @@ from semantic_executor import SemanticAction
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-12-universal-action-v4"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v5"
 
 
 class UniversalActionError(RuntimeError):
@@ -368,7 +368,14 @@ class UniversalActionController:
                 before_fingerprint=scene.fingerprint,
                 expected_effect=expected_effect,
             )
-        if action.action in {"back", "observe", "wait_for_change", "verify", "finish"}:
+        if action.action in {
+            "back",
+            "home",
+            "observe",
+            "wait_for_change",
+            "verify",
+            "finish",
+        }:
             return ResolvedSemanticAction(
                 node_id=action.node_id,
                 kind=action.action,

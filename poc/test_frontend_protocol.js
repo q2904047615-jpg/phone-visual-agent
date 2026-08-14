@@ -213,6 +213,18 @@ test("real Qwen decision.to_dict snapshot exposes the complete unique next actio
   assert.equal(action.isExecutable, true);
 });
 
+test("current Qwen v4 decision is labelled without losing the bound action", () => {
+  const session = safeActionSession();
+  session.qwen_decision.protocol_version = "2026-08-14-qwen-visual-decision-v4";
+
+  const action = Protocol.adaptSession(session).visualAction;
+
+  assert.equal(action.protocol, "qwen-visual-decision-v4");
+  assert.equal(action.protocolVersion, "2026-08-14-qwen-visual-decision-v4");
+  assert.equal(action.actionType, "tap_semantic");
+  assert.equal(action.isExecutable, true);
+});
+
 test("Qwen v2 blocked and finished decisions never become executable actions", () => {
   for (const status of ["blocked", "finished"]) {
     const session = safeActionSession();

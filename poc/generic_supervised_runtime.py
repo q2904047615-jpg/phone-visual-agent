@@ -22,7 +22,11 @@ from universal_action_controller import (
 
 
 DEEPSEEK_TASK_GRAPH_V3 = "2026-08-11-deepseek-task-graph-v3"
-QWEN_VISUAL_DECISION_V2 = "2026-08-12-qwen-visual-decision-v3"
+QWEN_VISUAL_DECISION_V3 = "2026-08-12-qwen-visual-decision-v3"
+QWEN_VISUAL_DECISION_V4 = "2026-08-14-qwen-visual-decision-v4"
+SUPPORTED_QWEN_VISUAL_DECISION_PROTOCOLS = frozenset(
+    {QWEN_VISUAL_DECISION_V3, QWEN_VISUAL_DECISION_V4}
+)
 _SCOPED_CONFIRMATION_CAPABILITY = object()
 
 
@@ -339,7 +343,8 @@ class GenericSupervisedSession:
             raise GenericActionAdapterError("v3任务设备与会话锁定设备不一致。")
 
         if (
-            decision.get("protocol_version") != QWEN_VISUAL_DECISION_V2
+            decision.get("protocol_version")
+            not in SUPPORTED_QWEN_VISUAL_DECISION_PROTOCOLS
             or str(decision.get("status") or "") != "action"
         ):
             raise GenericActionAdapterError("Qwen blocked/finished决策不可执行。")
@@ -543,7 +548,16 @@ class GenericSupervisedSession:
                 "physical_action_possible": bool(
                     action
                     and action.action
-                    in {"tap_semantic", "dismiss_overlay", "swipe", "back"}
+                    in {
+                        "tap_semantic",
+                        "dismiss_overlay",
+                        "swipe",
+                        "back",
+                        "home",
+                        "input_verified_text",
+                        "long_press",
+                        "drag",
+                    }
                 ),
             },
             "task_graph": copy.deepcopy(self.task_graph),

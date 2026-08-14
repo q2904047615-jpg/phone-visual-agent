@@ -7,7 +7,7 @@ from task_orchestrator import (
     PlanNode,
     TaskPlanError,
 )
-from ui_scene import UIElement, UIScene, UISceneError
+from ui_scene import UI_SCENE_PROTOCOL_VERSION, UIElement, UIScene, UISceneError
 from universal_action_controller import (
     UniversalActionController,
     UniversalActionError,
@@ -53,6 +53,31 @@ def scene(
 
 
 class UISceneTests(unittest.TestCase):
+    def test_overlay_objects_are_rejected_instead_of_stringified(self) -> None:
+        with self.assertRaisesRegex(
+            UISceneError,
+            "overlays 只允许字符串描述",
+        ):
+            UIScene.from_dict(
+                {
+                    "protocol_version": UI_SCENE_PROTOCOL_VERSION,
+                    "foreground_app_id": "unknown",
+                    "screen_id": "window_manager",
+                    "summary": "窗口管理",
+                    "elements": [],
+                    "overlays": [
+                        {
+                            "overlay_id": "add-new",
+                            "role": "button",
+                            "bounds": [0.4, 0.8, 0.6, 0.9],
+                        }
+                    ],
+                    "stable": True,
+                    "confidence": 0.95,
+                    "fingerprint": "frame-1",
+                }
+            )
+
     def test_scene_protocol_separates_foreground_app_from_target_goal(self) -> None:
         current = UIScene.from_dict(
             {
@@ -362,6 +387,20 @@ class UISceneTests(unittest.TestCase):
         self.assertEqual("input_verified_text", resolved.kind)
         self.assertEqual("蓝牙设置", resolved.text)
         self.assertEqual("search-field", resolved.target_element_id)
+
+    def test_android_home_resolves_as_independent_system_action(self) -> None:
+        current = scene(element("title", "设置", role="text"), app_id="settings")
+        action = SemanticAction(
+            node_id="return-to-launcher",
+            action="home",
+            params={"expected_effect": {"scene_changed": True, "app_id": "launcher"}},
+        )
+
+        resolved = UniversalActionController().resolve_one(action, current)
+
+        self.assertEqual("home", resolved.kind)
+        self.assertIsNone(resolved.normalized_point)
+        self.assertEqual("launcher", resolved.expected_effect["app_id"])
 
     def test_verified_input_rejects_unfocused_field(self) -> None:
         current = scene(element("field", "查询框", role="input"))

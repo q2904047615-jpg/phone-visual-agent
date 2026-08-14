@@ -29,7 +29,7 @@ from universal_action_controller import UniversalActionController, UniversalActi
 from vision_agent import VisionAgentError, _image_data_url
 
 
-QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-12-qwen-visual-decision-v3"
+QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-14-qwen-visual-decision-v4"
 SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v3"
 MIGRATION_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v2"
 SUPPORTED_TASK_CONTEXT_PROTOCOLS = frozenset(
@@ -691,7 +691,11 @@ class VisualTargetRegion:
                 raise GenericStepPlanningError("屏幕/系统动作不能携带拖动终点。")
             if self.bounds != (0.0, 0.0, 1.0, 1.0):
                 raise GenericStepPlanningError("屏幕/系统动作只能描述整屏区域。")
-            expected_kind = "system_navigation" if action.action == "back" else "screen"
+            expected_kind = (
+                "system_navigation"
+                if action.action in {"back", "home"}
+                else "screen"
+            )
             if self.kind != expected_kind:
                 raise GenericStepPlanningError("动作与目标区域类型不一致。")
 
@@ -1306,7 +1310,8 @@ def _decision_prompt(
    target/role/label/states必须逐字复制，target_region.bounds必须逐项复制候选原始bounds。
 4. input_verified_text只能绑定role=input的候选，text必须逐字复制goal.entities.input_text；不能改写、补全或推断。
 5. drag必须绑定两个不同可信候选并逐字复制两端字段和bounds；long_press时长限制500到2000毫秒。
-6. swipe/wait使用整屏[0,0,1000,1000]和kind=screen；back使用整屏和kind=system_navigation。
+6. swipe/wait使用整屏[0,0,1000,1000]和kind=screen；back/home使用整屏和kind=system_navigation。
+   home只表示按下Android系统Home键、回到系统Launcher；绝不能用它表示浏览器或任何App里的“首页”。
    swipe只返回direction=up|down|left|right，绝对不要返回distance；距离由本地已校准控制器决定。
 7. 找不到可靠候选、文字不完全一致、候选不唯一、画面模糊或置信度不足时必须blocked。
 8. finished只能用completion_evidence_element_ids引用可信候选ID，或用scene引用可信scene摘要；
@@ -1810,6 +1815,7 @@ def _parse_action(
         },
         "swipe": {"direction"},
         "back": set(),
+        "home": set(),
         "wait_for_change": set(),
     }
     effective_fields = parameter_fields_by_kind[kind]
@@ -1945,11 +1951,15 @@ def _parse_target_region(
                     f"{destination.label or destination.meaning}"
                 ),
             }
-        elif action.action == "back":
+        elif action.action in {"back", "home"}:
             defaults = {
                 "kind": "system_navigation",
                 "bounds": [0.0, 0.0, 1000.0, 1000.0],
-                "description": "系统返回区域",
+                "description": (
+                    "Android系统Home键"
+                    if action.action == "home"
+                    else "系统返回区域"
+                ),
             }
         else:
             defaults = {

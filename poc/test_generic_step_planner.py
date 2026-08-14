@@ -66,6 +66,10 @@ class FakeRobot:
         self.actions.append(("back",))
         return (500, 950)
 
+    def vision_android_home(self):
+        self.actions.append(("home",))
+        return (500, 950)
+
     def vision_type_text(self, text):
         self.actions.append(("input", text))
 
@@ -218,8 +222,48 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertIn("long_press", supported)
         self.assertIn("drag", supported)
         self.assertIn("back", supported)
+        self.assertIn("home", supported)
         self.assertIn("wait_for_change", supported)
         self.assertIn("swipe", supported)
+
+    def test_confirmed_home_executes_exactly_once_and_reobserves(self):
+        planned = scene(
+            "planned",
+            screen_id="settings_home",
+            element_id="settings-title",
+            app_id="settings",
+        )
+        fresh = scene(
+            "before",
+            screen_id="settings_home",
+            element_id="settings-title",
+            app_id="settings",
+        )
+        after = scene(
+            "after",
+            screen_id="android_home",
+            element_id="launcher-icon",
+            app_id="launcher",
+        )
+        observer = FakeSceneObserver([fresh, after])
+        robot = FakeRobot()
+        action = SemanticAction(
+            node_id="return-to-launcher",
+            action="home",
+            params={"expected_effect": {"scene_changed": True, "app_id": "launcher"}},
+        )
+
+        result = self._adapter(observer, robot).execute(
+            requested_action=action,
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("home",)], robot.actions)
+        self.assertEqual("home", result.resolved_action.kind)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(2, observer.calls)
 
     def test_confirmed_tap_executes_exactly_once_and_reobserves(self):
         planned = scene("planned", bounds=(0.1, 0.2, 0.3, 0.4))

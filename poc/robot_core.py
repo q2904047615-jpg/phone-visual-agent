@@ -540,6 +540,7 @@ class RobotController:
             "dismiss_overlay",
             "swipe",
             "back",
+            "home",
             "wait_for_change",
         }
         self.verified_actions = frozenset(
@@ -564,6 +565,7 @@ class RobotController:
                 "dismiss_overlay",
                 "swipe",
                 "back",
+                "home",
                 "wait_for_change",
                 "input_verified_text",
                 "long_press",
@@ -638,9 +640,15 @@ class RobotController:
                 legacy.capture_client(hwnd), legacy.DEFAULT_CAMERA_HEIGHT
             )
 
+    def _capture_phone_passive(self, hwnd: int) -> Image.Image:
+        with self.capture_lock:
+            return legacy.camera_crop(
+                legacy.capture_client_passive(hwnd), legacy.DEFAULT_CAMERA_HEIGHT
+            )
+
     def capture_preview(self, quality: int = 72) -> bytes:
         hwnd, _title = legacy.find_window(self.title)
-        image = self._capture_phone(hwnd)
+        image = self._capture_phone_passive(hwnd)
         from io import BytesIO
 
         buffer = BytesIO()
@@ -811,10 +819,10 @@ class RobotController:
         return point
 
     def vision_android_home(self) -> tuple[int, int]:
-        # Android Home is a navigation tap and has no separate action in the
-        # universal protocol.  It therefore inherits the verified semantic-tap
-        # capability instead of silently becoming an additional primitive.
-        self._require_verified_action("tap_semantic", "主页导航点击")
+        # This is the independently verified Android system Home primitive.
+        # It must never inherit ordinary semantic-tap authority because it is
+        # not an App/browser "home page" element.
+        self._require_verified_action("home", "Android系统Home")
         cfg = load_workflow_config()["vision_agent"]
         return self._vision_nav_tap(
             float(cfg["android_home_x_ratio"]),
@@ -1641,6 +1649,7 @@ class MockRobotController(RobotController):
             "dismiss_overlay",
             "swipe",
             "back",
+            "home",
             "wait_for_change",
             "input_verified_text",
             "long_press",

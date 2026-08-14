@@ -472,11 +472,12 @@ def _json_only_system_message() -> dict[str, str]:
 
 PREFILLED_INPUT_OBSERVATION_RULE = (
     "输入框可能为空，也可能已经含有文字；预填充且未聚焦时可以没有光标或占位提示。"
-    "当一个有清晰独立边界的矩形内含查询/表单文字，并紧邻一个边界独立的提交类按钮时，"
+    "当一个有清晰独立边界的横向矩形内含查询/地址/表单文字，并带有边界独立的尾部功能控件"
+    "（例如搜索、提交、清除、语音或扫描图标）时，"
     "这组结构本身就是role=input的可靠视觉证据，不得仅因没有光标而降级成text或container；"
-    "相邻按钮必须作为另一个控件观察，不能把输入框和按钮合成横幅。这个判断只报告页面事实，"
-    "绝不表示可以激活相邻按钮。框内文字的内容或主题不能改变控件角色；其他没有上述成组结构的"
-    "带文字区域仍不得仅因含有文字就被认作输入框。"
+    "尾部功能控件必须作为另一个控件观察，不能把输入框和功能控件合成横幅。这个判断只报告"
+    "页面事实，绝不表示可以激活尾部控件。框内文字的内容或主题不能改变控件角色；其他没有"
+    "上述成组结构的带文字区域仍不得仅因含有文字就被认作输入框。"
 )
 
 
@@ -495,6 +496,8 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 5. meaning用lower_snake_case。与目标直接相关的控件在states中写goal_relevant:true。
 6. evidence只抄画面短文字或明确外观。看不清就降低confidence或省略元素。
 7. 禁止action、plan、step、tap、swipe、command、coordinates等动作字段。
+   overlays只允许简短字符串名称；任何带边界、角色或ID的可交互候选必须放入elements，
+   不得把对象放入overlays。
 8. 场景confidence只评价当前画面本身是否清楚、稳定、可描述，不评价目标是否已完成或目标控件
    是否存在。清晰稳定的页面即使没有目标控件，也应保持与画面质量一致的高confidence并返回空
    elements；只有模糊、遮挡、过渡或无法判断页面事实时才降低confidence。
@@ -518,6 +521,8 @@ def _compact_retry_prompt(context: dict[str, Any], error: Exception) -> str:
 summary最多40字，elements最多2个，evidence每个元素最多1条且最多30字；禁止罗列非目标内容。
 没有把握就写unknown和空elements，禁止猜。务必在token耗尽前闭合全部括号。
 画面清晰稳定但目标控件不存在时，空elements不等于低置信；confidence仍只按画面质量填写。
+格式修复不能靠删除真实候选通过：若原图清楚存在与目标直接相关的可交互入口，即使目标结果
+尚未出现，也必须在elements中报告该入口；只有重新观察后仍无法确认时才返回空elements。
 格式必须是：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"短描述","elements":[],"overlays":[],
@@ -527,6 +532,8 @@ bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能�
 两个点或嵌套数组。
 role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
 container仅表示与目标有关的页面内容区域；tab_group、tab_bar、navigation_bar、toolbar等其他非点击结构只写进summary，不要放入elements。
+overlays只能是字符串数组；带bounds、role、element_id或overlay_id的对象必须改写成elements，
+并使用element_id。禁止把对象序列化成字符串塞入overlays。
 与目标直接相关的元素写states.goal_relevant=true。禁止任何动作或计划字段。不要Markdown。
 输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
 """
@@ -544,12 +551,15 @@ def _targeted_retry_prompt(
 目标上下文：{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
 {_roi_observation_note(roi_bounds)}
 这是本轮观察唯一一次格式修复。请重新独立观察原图，只返回最小完整JSON；没有可靠目标就返回空elements并降低confidence。
+格式修复不能靠删除真实候选通过；原图中清楚可见且与目标直接相关的入口必须改写为elements，
+即使目标最终结果尚未出现。只有重新观察后仍无法确认时才返回空elements。
 格式：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"短描述","elements":[],"overlays":[],
 "stable":true,"confidence":0.0,"fingerprint":""}}
 元素仅允许element_id、role、meaning、label、bounds、confidence、states、evidence；禁止动作、计划和裸坐标。不要Markdown。
 bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能是x/y/width/height对象、两个点或嵌套数组。
+overlays只能是字符串数组；可交互候选必须放入elements并使用element_id，不能把对象放入overlays。
 输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
 """
 
@@ -577,6 +587,8 @@ def _targeted_prompt(
 重新检查原图中与目标直接相关的文字、图标、输入框、列表项和最上层弹层。
 只保留最多4个最相关元素；目标元素必须states.goal_relevant=true。看不清或不唯一就不要输出，
 并降低场景confidence。坐标0..1000，只框元素自身。禁止任何动作、计划或建议字段。
+目标相关元素既包括已经满足完成条件的可见结果，也包括画面上清楚可见、能使该结果进入视野
+的入口控件；这里只报告控件事实，不建议也不授权使用它。
 置信度只评价当前画面观察本身是否可靠，不能因为目标尚未完成而降低；例如清晰桌面上唯一目标
 应用入口可形成高可信观察，即使应用尚未打开。模糊、遮挡或不唯一时仍必须降低，禁止虚增。
 目标相关控件确实不存在时返回空elements，但只要页面事实清楚稳定，场景confidence仍应保持高值；
@@ -595,6 +607,8 @@ goal_relevant:true，相邻button写goal_relevant:false。本地只会在三者�
 元素仅允许element_id、role、meaning、label、bounds、confidence、states、evidence。不要Markdown。
 role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
 container仅表示与目标有关的页面内容区域；tab_group、tab_bar、navigation_bar、toolbar等其他非点击结构只写进summary，不要放入elements。
+overlays只能是字符串数组；任何可交互候选都必须放入elements并使用element_id，
+不得把带bounds、role或ID的对象放入overlays。
 """
 
 
@@ -607,9 +621,9 @@ def _input_structure_audit_prompt(
 You are a read-only generic UI structure auditor. The normal scene observer did not establish an input target.
 Goal context (evidence selection only): {json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
 Image 1 is always the complete phone frame. {_input_audit_detail_note(roi_bounds)}
-Enumerate every horizontal search/form-like structure relevant to the goal, including structures clipped by an image edge.
+Enumerate every horizontal search/address/form-like editable structure relevant to the goal, including structures clipped by an image edge.
 Do not plan, suggest, authorize, or perform any action. All bounds MUST use Image 1 full-frame normalized coordinates 0..1000.
-For each structure report whether all four outer edges are fully visible, its current text, confidence, and its separate right-side submit/search button.
+For each structure report whether all four outer edges are fully visible, its current text, confidence, and its separate trailing utility control (for example search, submit, clear, voice, or scan). A trailing control is structural evidence only and is never authorized for activation.
 Return exactly this JSON schema and no other fields:
 {{"structures":[{{"structure_id":"s1","bounds":[0,0,1000,1000],"fully_visible":true,
 "text":"current visible text","confidence":0.0,"right_button":{{"label":"button text",
@@ -899,7 +913,21 @@ def _goal_requests_input(context: dict[str, Any]) -> bool:
     visible = json.dumps(context, ensure_ascii=False).casefold()
     return any(
         term in visible
-        for term in ("输入框", "搜索框", "input field", "search box", "textbox")
+        for term in (
+            "输入框",
+            "搜索框",
+            "编辑框",
+            "地址栏",
+            "字段进入编辑",
+            "字段获得焦点",
+            "字段内容",
+            "input field",
+            "search box",
+            "text field",
+            "editable field",
+            "address bar",
+            "textbox",
+        )
     )
 
 

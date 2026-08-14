@@ -24,8 +24,8 @@ from generic_step_planner import GenericStepProposal
 from ocr_runtime import find_text
 from robot_core import (
     DEFAULT_CONFIG,
-    MockRobotController,
-    RobotController,
+    MockRobotController as _MockRobotController,
+    RobotController as _RobotController,
     classify_obscured_wechat_title,
     classify_wechat_page,
     controller_client_has_camera,
@@ -33,6 +33,41 @@ from robot_core import (
     qwerty_keyboard_config_from_anchors,
     qwerty_key_point,
 )
+from orientation_safety import _mint_audited_credential
+
+
+class _TestDirectionCredentialMixin:
+    """Keep legacy no-hardware tests behind the same one-shot gate."""
+
+    def _consume_physical_execution(self, action, frame):
+        credential = _mint_audited_credential(
+            device_id=self.device_id,
+            scene_fingerprint="test-scene",
+            frame=frame,
+            phone_content_rotation="upright",
+            confidence=0.99,
+            evidence=("合成手机界面轴线",),
+        )
+        self._physical_execution_gate.arm(
+            credential,
+            action=action,
+            scene_fingerprint="test-scene",
+        )
+        return super()._consume_physical_execution(action, frame)
+
+
+class RobotController(_TestDirectionCredentialMixin, _RobotController):
+    def __init__(self, *args, device_id="test-device", **kwargs):
+        super().__init__(*args, device_id=device_id, **kwargs)
+
+
+class MockRobotController(_TestDirectionCredentialMixin, _MockRobotController):
+    def __init__(self, *args, device_id="test-device", **kwargs):
+        super().__init__(*args, device_id=device_id, **kwargs)
+
+
+web_app.RobotController = RobotController
+web_app.MockRobotController = MockRobotController
 from web_app import (
     HybridAgent,
     RuleAgent,
@@ -155,9 +190,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         )
 
     def test_navigation_tap_forces_single_click_and_returns_exact_pixel(self):
-        controller = RobotController.__new__(RobotController)
-        controller.title = "test"
-        controller.stop_event = threading.Event()
+        controller = RobotController(title="test")
         frame = Image.new("RGB", (540, 960), "white")
 
         with (
@@ -172,7 +205,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
                 return_value={"vision_agent": {"tap_hold": 0.35}},
             ),
         ):
-            point = controller._vision_nav_tap(0.685, 0.976)
+            point = controller._vision_nav_tap(0.685, 0.976, action="back")
 
         self.assertEqual(point, (370, 937))
         configure.assert_called_once_with(123)
@@ -4248,7 +4281,7 @@ class ApiEndToEndTests(unittest.TestCase):
         observer = universal.pop("observer")
         self.assertEqual(
             observer["observer_version"],
-            "2026-08-14-generic-scene-observer-v14",
+            "2026-08-14-generic-scene-observer-v15",
         )
         self.assertEqual(observer["supported_app_scope"], "dynamic")
         architecture["universal_agent"] = universal

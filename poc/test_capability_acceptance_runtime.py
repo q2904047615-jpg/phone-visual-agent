@@ -6,6 +6,11 @@ import unittest
 from unittest.mock import Mock, patch
 
 from PIL import Image
+from orientation_safety import (
+    ORIENTATION_AUDIT_SOURCE,
+    ORIENTATION_CREDENTIAL_VERSION,
+    frame_fingerprint,
+)
 
 from capability_acceptance import CapabilityAcceptanceError
 from capability_acceptance_runtime import CapabilityAcceptanceManager
@@ -166,6 +171,24 @@ class FakeTrialResult:
             for index in range(1, 5)
         )
         self.evidence = self.before_frame_paths + self.after_frame_paths
+        self.orientation_credential = {
+            "version": ORIENTATION_CREDENTIAL_VERSION,
+            "credential_id": "runtime-credential",
+            "source": ORIENTATION_AUDIT_SOURCE,
+            "device_id": "device-a",
+            "scene_fingerprint": "fingerprint-execution-before",
+            "frame_fingerprint": frame_fingerprint(
+                Image.open(self.before_frame_paths[0]).convert("RGB")
+            ),
+            "evidence_frame_fingerprint": frame_fingerprint(
+                Image.open(self.before_frame_paths[0]).convert("RGB")
+            ),
+            "frame_size": [16, 16],
+            "camera_layout_orientation": "square",
+            "phone_content_rotation": "upright",
+            "confidence": 0.95,
+            "evidence": ["手机状态文字正向"],
+        }
 
     @staticmethod
     def _frame(path: Path, color: str) -> str:
@@ -182,6 +205,7 @@ class FakeTrialResult:
             "robot_result": self.robot_result,
             "before_frame_paths": list(self.before_frame_paths),
             "after_frame_paths": list(self.after_frame_paths),
+            "orientation_credential": dict(self.orientation_credential),
         }
         if self.resolved_action.kind == "drag":
             payload.update(

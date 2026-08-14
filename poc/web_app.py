@@ -873,17 +873,19 @@ class DeviceControllerRegistry:
                 calibration_path = self.path.parent / calibration_path
             controller: RobotController
             if mock:
-                controller = MockRobotController()
+                controller = MockRobotController(device_id=device_id)
             elif window_title:
                 controller = RobotController(
                     window_title,
                     calibration_path=calibration_path,
                     verified_actions=verified_actions,
+                    device_id=device_id,
                 )
             else:
                 controller = RobotController(
                     calibration_path=calibration_path,
                     verified_actions=verified_actions,
+                    device_id=device_id,
                 )
             self._controllers[device_id] = controller
             self._descriptors[device_id] = {
@@ -935,11 +937,15 @@ class DeviceControllerRegistry:
             )
         verified_actions = set(original.verified_actions) | {action}
         if isinstance(original, MockRobotController):
-            return MockRobotController(verified_actions=verified_actions)
+            return MockRobotController(
+                verified_actions=verified_actions,
+                device_id=resolved_device,
+            )
         return RobotController(
             descriptor["window_title"] or original.title,
             calibration_path=Path(descriptor["calibration_path"]),
             verified_actions=verified_actions,
+            device_id=resolved_device,
         )
 
     def descriptors(self) -> list[dict[str, Any]]:
@@ -979,6 +985,7 @@ class Runtime:
                 observer=self.generic_scene_observer,
                 robot=self.controller_for_device(device_id),
                 controller=UniversalActionController(),
+                device_id=device_id,
             ),
             device_registry=self.device_task_registry,
         )
@@ -1052,11 +1059,12 @@ class Runtime:
         return UniversalAgentOrchestrator(
             deepseek_planner=self.deepseek_task_graph_planner,
             qwen_observer=self.qwen_visual_decision_observer,
-            adapter_factory=lambda _device_id: GenericSingleActionAdapter(
+            adapter_factory=lambda device_id: GenericSingleActionAdapter(
                 capture=provisional_controller.vision_capture,
                 observer=self.generic_scene_observer,
                 robot=provisional_controller,
                 controller=UniversalActionController(),
+                device_id=device_id,
             ),
             device_registry=self.device_task_registry,
         )
@@ -1684,6 +1692,7 @@ def _new_generic_action_adapter() -> GenericSingleActionAdapter:
         observer=runtime.generic_scene_observer,
         robot=runtime.controller,
         controller=UniversalActionController(),
+        device_id=runtime.device_controllers.default_device_id,
     )
 
 
@@ -3419,7 +3428,7 @@ def preview_jpg(device_id: str) -> Response:
     try:
         content = controller.capture_preview()
     except Exception:
-        content = MockRobotController().capture_preview()
+        content = MockRobotController(device_id="mock-preview").capture_preview()
     return Response(content, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
@@ -3435,7 +3444,9 @@ def preview_mjpg(device_id: str) -> StreamingResponse:
             try:
                 frame = controller.capture_preview(quality=68)
             except Exception:
-                frame = MockRobotController().capture_preview(quality=68)
+                frame = MockRobotController(
+                    device_id="mock-preview"
+                ).capture_preview(quality=68)
             yield (
                 b"--frame\r\nContent-Type: image/jpeg\r\n"
                 + f"Content-Length: {len(frame)}\r\n\r\n".encode("ascii")

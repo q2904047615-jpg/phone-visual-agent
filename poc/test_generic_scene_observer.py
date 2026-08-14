@@ -15,6 +15,7 @@ from generic_scene_observer import (
     _parse_scene,
     _scene_enum_values,
 )
+from orientation_safety import ORIENTATION_AUDIT_PROTOCOL_VERSION
 from ui_scene import UI_SCENE_PROTOCOL_VERSION, UISceneError
 from vision_agent import VisionAgentError
 
@@ -372,18 +373,80 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn('"navigation_bar_visible":"unknown"', prompt)
         self.assertIn("绝不得写入elements", prompt)
 
-    def test_compact_observation_uses_three_orientations_for_alignment(self) -> None:
+    def test_compact_observation_uses_one_image_without_direction_audit(self) -> None:
         provider = FakeProvider(scene_payload())
 
         scene = GenericSceneObserver(provider).observe(frames=stable_frames())
 
         content = provider.messages[1]["content"]
         self.assertEqual(
-            3,
+            1,
             sum(item.get("type") == "image_url" for item in content),
         )
         self.assertEqual("portrait", scene.camera_alignment.camera_layout_orientation)
         self.assertEqual("upright", scene.camera_alignment.phone_content_rotation)
+
+    def test_independent_direction_audit_uses_three_images_and_exact_cache_key(self):
+        provider = FakeProvider(
+            {
+                "protocol_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
+                "phone_content_rotation": "upright",
+                "confidence": 0.95,
+                "evidence": ["手机状态文字正向"],
+            }
+        )
+        observer = GenericSceneObserver(provider)
+        frames = stable_frames()
+
+        first = observer.audit_camera_alignment(
+            frames=frames,
+            device_id="device-a",
+            scene_fingerprint="scene-a",
+        )
+        first_content = provider.messages[1]["content"]
+        self.assertEqual(
+            3, sum(item.get("type") == "image_url" for item in first_content)
+        )
+        self.assertEqual(1, provider.calls)
+        self.assertEqual(3, observer.last_orientation_audit_diagnostics["image_count"])
+
+        second = observer.audit_camera_alignment(
+            frames=frames,
+            device_id="device-a",
+            scene_fingerprint="scene-a",
+        )
+        self.assertEqual(1, provider.calls)
+        self.assertNotEqual(first.credential_id, second.credential_id)
+        self.assertTrue(observer.last_orientation_audit_diagnostics["cache_hit"])
+
+        observer.audit_camera_alignment(
+            frames=frames,
+            device_id="device-a",
+            scene_fingerprint="scene-b",
+        )
+        self.assertEqual(2, provider.calls)
+
+    def test_independent_direction_audit_fails_closed_on_unknown_low_or_extra_fields(self):
+        cases = (
+            ({"phone_content_rotation": "unknown", "confidence": 0.95}, "未知"),
+            ({"phone_content_rotation": "upright", "confidence": 0.4}, "置信度"),
+            ({"phone_content_rotation": "upright", "confidence": 0.95, "x": 10}, "协议外字段"),
+        )
+        for mutation, message in cases:
+            with self.subTest(mutation=mutation):
+                payload = {
+                    "protocol_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
+                    "phone_content_rotation": "upright",
+                    "confidence": 0.95,
+                    "evidence": ["手机状态文字正向"],
+                }
+                payload.update(mutation)
+                with self.assertRaisesRegex(VisionAgentError, message):
+                    GenericSceneObserver(FakeProvider(payload)).audit_camera_alignment(
+                        frames=stable_frames(),
+                        device_id="device-a",
+                        scene_fingerprint="scene-a",
+                    )
 
     def test_local_frame_geometry_rejects_model_layout_orientation(self) -> None:
         payload = scene_payload()

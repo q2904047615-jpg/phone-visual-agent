@@ -17,6 +17,7 @@ def capture_click_burst(
     relative_x: int,
     relative_y: int,
     output_dir: Path,
+    device_id: str,
     before_seconds: float = 0.6,
     after_seconds: float = 1.2,
     interval_seconds: float = 0.04,
@@ -29,7 +30,7 @@ def capture_click_burst(
     """
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    robot = RobotController()
+    robot = RobotController(device_id=device_id)
     hwnd, title = legacy.find_window(robot.title)
     frames: list[tuple[float, Image.Image]] = []
     capture_errors: list[str] = []
@@ -106,8 +107,14 @@ def main() -> int:
     parser.add_argument("--x", type=int, required=True, help="1000-grid X coordinate")
     parser.add_argument("--y", type=int, required=True, help="1000-grid Y coordinate")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--device-id", required=True)
     args = parser.parse_args()
-    result = capture_click_burst(relative_x=args.x, relative_y=args.y, output_dir=args.output)
+    result = capture_click_burst(
+        relative_x=args.x,
+        relative_y=args.y,
+        output_dir=args.output,
+        device_id=args.device_id,
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

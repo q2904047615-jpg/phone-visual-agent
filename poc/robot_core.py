@@ -13,6 +13,10 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 import robot_gui_poc as legacy
+from orientation_safety import (
+    OrientationCredential,
+    PhysicalExecutionGate,
+)
 from ocr_runtime import (
     OcrMatch,
     find_text as find_ocr_text,
@@ -523,8 +527,11 @@ class RobotController:
         *,
         calibration_path: Path | None = None,
         verified_actions: set[str] | frozenset[str] | None = None,
+        device_id: str,
     ) -> None:
         self.title = title
+        self.device_id = str(device_id or "").strip()
+        self._physical_execution_gate = PhysicalExecutionGate(self.device_id)
         self.calibration_path = (
             Path(calibration_path)
             if calibration_path is not None
@@ -581,6 +588,30 @@ class RobotController:
             raise WorkflowNotReady(
                 f"当前设备尚未完成{label}真机验收，拒绝执行。"
             )
+
+    def arm_physical_execution(
+        self,
+        credential: OrientationCredential,
+        *,
+        action: str,
+        scene_fingerprint: str,
+    ) -> None:
+        self._physical_execution_gate.arm(
+            credential,
+            action=action,
+            scene_fingerprint=scene_fingerprint,
+        )
+
+    def clear_physical_execution_authorization(self) -> None:
+        self._physical_execution_gate.clear()
+
+    def _consume_physical_execution(
+        self, action: str, frame: Image.Image
+    ) -> OrientationCredential:
+        return self._physical_execution_gate.consume(
+            action=action,
+            frame=frame,
+        )
 
     def request_stop(self) -> None:
         self.stop_event.set()
@@ -670,6 +701,7 @@ class RobotController:
         return self._vision_press_relative(
             x,
             y,
+            action="tap_semantic",
             hold_seconds=float(load_workflow_config()["vision_agent"]["tap_hold"]),
         )
 
@@ -680,6 +712,7 @@ class RobotController:
         return self._vision_press_relative(
             x,
             y,
+            action="dismiss_overlay",
             hold_seconds=float(load_workflow_config()["vision_agent"]["tap_hold"]),
         )
 
@@ -694,7 +727,9 @@ class RobotController:
         self._require_verified_action("long_press", "长按")
         if not 0.5 <= float(hold_seconds) <= 2.0:
             raise ValueError("通用长按时间必须在0.5～2.0秒之间。")
-        return self._vision_press_relative(x, y, hold_seconds=float(hold_seconds))
+        return self._vision_press_relative(
+            x, y, action="long_press", hold_seconds=float(hold_seconds)
+        )
 
     def vision_drag_relative(
         self,
@@ -713,6 +748,7 @@ class RobotController:
             raise ValueError("拖动起点和终点不能相同。")
         hwnd, _title = legacy.find_window(self.title)
         frame = self._capture_phone(hwnd)
+        self._consume_physical_execution("drag", frame)
         from tap_calibration import corrected_grid_point
 
         corrected_start = corrected_grid_point(
@@ -758,6 +794,9 @@ class RobotController:
         )
         hwnd, _title = legacy.find_window(self.title)
         frame = self._capture_phone(hwnd)
+        self._consume_physical_execution(
+            "reveal_system_navigation", frame
+        )
         from tap_calibration import reveal_system_navigation_path
 
         evidence = reveal_system_navigation_path(
@@ -788,12 +827,14 @@ class RobotController:
         x: int,
         y: int,
         *,
+        action: str,
         hold_seconds: float,
     ) -> tuple[int, int]:
         if not (0 <= x <= 1000 and 0 <= y <= 1000):
             raise ValueError("视觉 Agent 坐标必须在0～1000之间。")
         hwnd, _title = legacy.find_window(self.title)
         frame = self._capture_phone(hwnd)
+        self._consume_physical_execution(action, frame)
         # Multi-position calibration corrects camera-to-physical XY distortion.
         # Dedicated Android navigation stays on its independently validated
         # ratios and intentionally does not pass through this transform.
@@ -825,9 +866,12 @@ class RobotController:
         legacy.move_cursor_outside_camera(hwnd)
         return point
 
-    def _vision_nav_tap(self, x_ratio: float, y_ratio: float) -> tuple[int, int]:
+    def _vision_nav_tap(
+        self, x_ratio: float, y_ratio: float, *, action: str
+    ) -> tuple[int, int]:
         hwnd, _title = legacy.find_window(self.title)
         frame = self._capture_phone(hwnd)
+        self._consume_physical_execution(action, frame)
         x_ratio, y_ratio = oriented_navigation_ratio(
             x_ratio,
             y_ratio,
@@ -864,6 +908,7 @@ class RobotController:
         return self._vision_nav_tap(
             float(cfg["android_home_x_ratio"]),
             float(cfg["android_home_y_ratio"]),
+            action="home",
         )
 
     def vision_android_back(self) -> tuple[int, int]:
@@ -872,11 +917,14 @@ class RobotController:
         return self._vision_nav_tap(
             float(cfg["android_back_x_ratio"]),
             float(cfg["android_back_y_ratio"]),
+            action="back",
         )
 
     def _vision_swipe(self, direction: str) -> None:
         self._require_verified_action("swipe", "滑动")
         hwnd, _title = legacy.find_window(self.title)
+        frame = self._capture_phone(hwnd)
+        self._consume_physical_execution("swipe", frame)
         self._checkpoint()
         legacy.configure_swipe(hwnd, direction)
         legacy.trigger_selected_action(hwnd)
@@ -952,6 +1000,7 @@ class RobotController:
             )
         hwnd, _title = legacy.find_window(self.title)
         frame = self._capture_phone(hwnd)
+        self._consume_physical_execution("input_verified_text", frame)
         if frame.width < 400 or frame.height < 700:
             raise RobotWorkflowError("键盘画面尺寸异常，拒绝执行拼音点击。")
         legacy.configure_single_click_count(hwnd)
@@ -1034,6 +1083,7 @@ class RobotController:
                 )
         hwnd, _title = legacy.find_window(self.title)
         frame = self._capture_phone(hwnd)
+        self._consume_physical_execution("input_verified_text", frame)
         point = (
             min(
                 frame.width - 1,
@@ -1385,18 +1435,10 @@ class RobotController:
         )
 
     def execute(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:
-        handlers = {
-            "wechat.send_text_to_file_transfer": self.send_wechat_text,
-            "douyin.like_current": self.like_current_douyin,
-            "douyin.comment_current": self.comment_current_douyin,
-        }
-        try:
-            handler = handlers[operation]
-        except KeyError as exc:
-            raise ValueError(f"不支持的操作：{operation}") from exc
-        with self.operation_lock:
-            self.clear_stop()
-            return handler(params)
+        del operation, params
+        raise WorkflowNotReady(
+            "旧多步 workflow 入口未绑定独立方向凭据且破坏一次动作语义，已禁用。"
+        )
 
     def like_current_douyin(self, _params: dict[str, Any]) -> dict[str, Any]:
         self._require_verified_action("tap_semantic", "点击")
@@ -1707,6 +1749,7 @@ class MockRobotController(RobotController):
         self,
         *,
         verified_actions: set[str] | frozenset[str] | None = None,
+        device_id: str = "mock-default",
     ) -> None:
         all_actions = {
             "tap_semantic",
@@ -1725,6 +1768,7 @@ class MockRobotController(RobotController):
             verified_actions=(
                 all_actions if verified_actions is None else verified_actions
             ),
+            device_id=device_id,
         )
         self.executions: list[dict[str, Any]] = []
 
@@ -1760,11 +1804,16 @@ class MockRobotController(RobotController):
 
         return Image.open(BytesIO(self.capture_preview())).convert("RGB")
 
+    def _consume_mock_execution(self, action: str) -> None:
+        self._consume_physical_execution(action, self.vision_capture())
+
     def vision_tap_relative(self, x: int, y: int) -> tuple[int, int]:
+        self._consume_mock_execution("tap_semantic")
         self.executions.append({"action": "tap", "coordinate": [x, y]})
         return x, y
 
     def vision_dismiss_overlay_relative(self, x: int, y: int) -> tuple[int, int]:
+        self._consume_mock_execution("dismiss_overlay")
         self.executions.append({"action": "dismiss_overlay", "coordinate": [x, y]})
         return x, y
 
@@ -1774,6 +1823,7 @@ class MockRobotController(RobotController):
         y: int,
         hold_seconds: float = 0.8,
     ) -> tuple[int, int]:
+        self._consume_mock_execution("long_press")
         self.executions.append(
             {
                 "action": "long_press",
@@ -1790,6 +1840,7 @@ class MockRobotController(RobotController):
         end_x: int,
         end_y: int,
     ) -> tuple[tuple[int, int], tuple[int, int]]:
+        self._consume_mock_execution("drag")
         self.executions.append(
             {
                 "action": "drag",
@@ -1804,6 +1855,7 @@ class MockRobotController(RobotController):
             "reveal_system_navigation",
             "系统边缘唤出导航栏",
         )
+        self._consume_mock_execution("reveal_system_navigation")
         evidence = {
             "action": "reveal_system_navigation",
             "edge": "bottom",
@@ -1818,26 +1870,33 @@ class MockRobotController(RobotController):
         return evidence
 
     def vision_android_home(self) -> tuple[int, int]:
+        self._consume_mock_execution("home")
         self.executions.append({"action": "android_home"})
         return 500, 976
 
     def vision_android_back(self) -> tuple[int, int]:
+        self._consume_mock_execution("back")
         self.executions.append({"action": "android_back"})
         return 910, 976
 
     def vision_swipe_up(self) -> None:
+        self._consume_mock_execution("swipe")
         self.executions.append({"action": "swipe_up"})
 
     def vision_swipe_down(self) -> None:
+        self._consume_mock_execution("swipe")
         self.executions.append({"action": "swipe_down"})
 
     def vision_swipe_left(self) -> None:
+        self._consume_mock_execution("swipe")
         self.executions.append({"action": "swipe_left"})
 
     def vision_swipe_right(self) -> None:
+        self._consume_mock_execution("swipe")
         self.executions.append({"action": "swipe_right"})
 
     def vision_type_text(self, text: str) -> None:
+        self._consume_mock_execution("input_verified_text")
         self.executions.append({"action": "type_text", "text": text})
 
     def vision_type_pinyin(
@@ -1846,6 +1905,7 @@ class MockRobotController(RobotController):
         pinyin: str,
         keyboard_layout: dict[str, Any] | None = None,
     ) -> None:
+        self._consume_mock_execution("input_verified_text")
         record: dict[str, Any] = {
             "action": "type_pinyin",
             "text": text,
@@ -1860,6 +1920,7 @@ class MockRobotController(RobotController):
         keyboard_layout: dict[str, Any] | None = None,
         delete_count: int | None = None,
     ) -> None:
+        self._consume_mock_execution("input_verified_text")
         record: dict[str, Any] = {
             "action": "clear_text",
             "delete_count": delete_count,
@@ -1869,11 +1930,7 @@ class MockRobotController(RobotController):
         self.executions.append(record)
 
     def execute(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:
-        with self.operation_lock:
-            self.clear_stop()
-            for _ in range(3):
-                if self.stop_event.wait(0.05):
-                    raise RobotWorkflowError("用户已请求停止任务。")
-            record = {"operation": operation, "params": params}
-            self.executions.append(record)
-            return {"mock": True, "changed": True, **record}
+        del operation, params
+        raise WorkflowNotReady(
+            "旧多步 workflow 入口未绑定独立方向凭据且破坏一次动作语义，已禁用。"
+        )

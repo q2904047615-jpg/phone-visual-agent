@@ -16,6 +16,12 @@ from observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
 )
+from orientation_safety import (
+    ORIENTATION_AUDIT_PROTOCOL_VERSION,
+    OrientationCredential,
+    OrientationSafetyError,
+    _mint_audited_credential,
+)
 from qwen_runtime_errors import (
     FORMAT_ERROR_TYPES,
     classify_qwen_error,
@@ -33,7 +39,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v14"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v15"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 800
@@ -41,6 +47,7 @@ COMPACT_RETRY_TOKENS = 800
 TARGETED_OUTPUT_TOKENS = 1200
 INPUT_STRUCTURE_AUDIT_TOKENS = 700
 SYSTEM_UI_AUDIT_TOKENS = 600
+ORIENTATION_AUDIT_TOKENS = 500
 MIN_SYSTEM_UI_AUDIT_CONFIDENCE = 0.80
 OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 12
@@ -59,6 +66,8 @@ STAGE_LABELS = {
     "waiting_system_ui_audit": "等待系统界面只读审计",
     "parsing_system_ui_audit": "解析系统界面只读审计",
     "waiting_system_ui_audit_retry": "等待系统界面审计格式修正",
+    "waiting_orientation_audit": "等待独立方向只读审计",
+    "parsing_orientation_audit": "解析独立方向只读审计",
     "completed": "观察完成",
     "failed": "观察安全停止",
 }
@@ -74,6 +83,107 @@ class GenericSceneObserver:
         self._stage_lock = threading.RLock()
         self._current_stage = "idle"
         self._last_stage = "idle"
+        self.last_orientation_audit_diagnostics: dict[str, Any] = {}
+        self._orientation_cache: dict[
+            tuple[str, str, str, tuple[int, int]], dict[str, Any]
+        ] = {}
+
+    def audit_camera_alignment(
+        self,
+        *,
+        frames: list[Image.Image],
+        device_id: str,
+        scene_fingerprint: str,
+    ) -> OrientationCredential:
+        """Mint action authority from a separate, read-only model response."""
+
+        self.last_orientation_audit_diagnostics = {}
+        if len(frames) < 4:
+            raise VisionAgentError("方向独立审计至少需要4帧。")
+        stability = measure_local_stability(frames, allow_leading_outlier=True)
+        if not stability.stable:
+            raise VisionAgentError("方向独立审计的本地帧不稳定。")
+        tail_start = max(0, len(frames) - min(3, len(frames)))
+        scores = [measure_frame_sharpness(item) for item in frames]
+        selected_index = max(
+            range(tail_start, len(frames)), key=scores.__getitem__
+        )
+        frame = frames[selected_index].convert("RGB")
+        local_fingerprint = _local_frame_fingerprint(frame)
+        key = (device_id, scene_fingerprint, local_fingerprint, tuple(frame.size))
+        cached = self._orientation_cache.get(key)
+        if cached is not None:
+            credential = _mint_audited_credential(
+                device_id=device_id,
+                scene_fingerprint=scene_fingerprint,
+                frame=frame,
+                phone_content_rotation=cached["phone_content_rotation"],
+                confidence=cached["confidence"],
+                evidence=tuple(cached["evidence"]),
+            )
+            self.last_orientation_audit_diagnostics = {
+                "audit_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
+                "model_calls": 0,
+                "image_count": 0,
+                "cache_hit": True,
+                "selected_frame_index": selected_index,
+                "frame_size": list(frame.size),
+                "frame_fingerprint": local_fingerprint,
+            }
+            return credential
+
+        images = (
+            frame,
+            frame.transpose(Image.Transpose.ROTATE_90),
+            frame.transpose(Image.Transpose.ROTATE_270),
+        )
+        content: list[dict[str, Any]] = [
+            {"type": "text", "text": _orientation_audit_prompt()}
+        ]
+        content.extend(
+            {
+                "type": "image_url",
+                "image_url": {"url": _image_data_url(item)},
+            }
+            for item in images
+        )
+        self._set_stage("waiting_orientation_audit")
+        try:
+            raw = self._provider_chat(
+                [_json_only_system_message(), {"role": "user", "content": content}],
+                max_tokens=ORIENTATION_AUDIT_TOKENS,
+            )
+            self._set_stage("parsing_orientation_audit")
+            payload = _parse_orientation_audit(raw)
+            credential = _mint_audited_credential(
+                device_id=device_id,
+                scene_fingerprint=scene_fingerprint,
+                frame=frame,
+                phone_content_rotation=payload["phone_content_rotation"],
+                confidence=payload["confidence"],
+                evidence=tuple(payload["evidence"]),
+            )
+            credential.assert_authorizes(
+                device_id=device_id,
+                scene_fingerprint=scene_fingerprint,
+                frame_size=tuple(frame.size),
+            )
+            self._orientation_cache[key] = dict(payload)
+            self.last_orientation_audit_diagnostics = {
+                "audit_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
+                "model_calls": 1,
+                "image_count": 3,
+                "cache_hit": False,
+                "selected_frame_index": selected_index,
+                "frame_size": list(frame.size),
+                "frame_fingerprint": local_fingerprint,
+                "confidence": float(credential.confidence),
+            }
+            return credential
+        except (OrientationSafetyError, UISceneError, ValueError) as exc:
+            raise VisionAgentError(f"方向独立审计失败：{exc}") from exc
+        finally:
+            self._set_stage("idle")
 
     def _set_stage(self, stage: str) -> None:
         with self._stage_lock:
@@ -184,19 +294,6 @@ class GenericSceneObserver:
                 "type": "image_url",
                 "image_url": {"url": _image_data_url(frame)},
             }
-            rotated_90 = frame.transpose(Image.Transpose.ROTATE_90)
-            rotated_270 = frame.transpose(Image.Transpose.ROTATE_270)
-            orientation_image_parts = [
-                image_part,
-                {
-                    "type": "image_url",
-                    "image_url": {"url": _image_data_url(rotated_90)},
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {"url": _image_data_url(rotated_270)},
-                },
-            ]
             detail_image_part = image_part
             first_messages = [
                 _json_only_system_message(),
@@ -204,7 +301,7 @@ class GenericSceneObserver:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": _compact_prompt(context)},
-                        *orientation_image_parts,
+                        image_part,
                     ],
                 }
             ]
@@ -250,7 +347,7 @@ class GenericSceneObserver:
                                 "type": "text",
                                 "text": _compact_retry_prompt(context, first_error),
                             },
-                            *orientation_image_parts,
+                            image_part,
                         ],
                     }
                 ]
@@ -379,7 +476,21 @@ class GenericSceneObserver:
 
             if system_ui_audit_required:
                 system_ui_audit_used = True
-                system_ui_images = orientation_image_parts
+                system_ui_images = [
+                    image_part,
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _image_data_url(
+                            frame.transpose(Image.Transpose.ROTATE_90)
+                        )},
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _image_data_url(
+                            frame.transpose(Image.Transpose.ROTATE_270)
+                        )},
+                    },
+                ]
                 self._set_stage("waiting_system_ui_audit")
                 audit_messages = [
                     _json_only_system_message(),
@@ -750,19 +861,59 @@ SYSTEM_UI_OBSERVATION_RULE = (
 )
 
 CAMERA_ALIGNMENT_OBSERVATION_RULE = (
-    "Images 1, 2, and 3 are the same stable camera frame at original, ROTATE_90, "
-    "and ROTATE_270 orientations; they are not a temporal sequence. "
-    "camera_alignment.camera_layout_orientation describes Image 1 canvas only "
+    "camera_alignment in the compact scene is descriptive and can never authorize "
+    "hardware. camera_layout_orientation describes the supplied canvas only "
     "and must be portrait, landscape, or square. phone_content_rotation describes "
-    "how the phone App/system axes appear in Image 1: upright, rotated_90, "
+    "how the phone App/system axes appear: upright, rotated_90, "
     "rotated_180, rotated_270, or unknown. Inspect only the physical phone display; "
     "seller-controller PX/MM readouts, colored borders, and bottom action/orientation "
-    "buttons are external chrome and never phone evidence. Use the rotated views only "
-    "to decide which direction makes the phone UI upright; all element bounds still "
-    "belong to Image 1. Black or sparse App content does not lower alignment confidence "
+    "buttons are external chrome and never phone evidence. Black or sparse App content "
+    "does not lower alignment confidence "
     "when visible phone text or system structure establishes its axes. Evidence must "
     "contain one or two short non-control strings and no coordinates, actions, or bounds."
 )
+
+
+def _orientation_audit_prompt() -> str:
+    return f"""
+This is an independent read-only camera/phone-axis audit. The three images are
+the same stable frame: original, ROTATE_90, ROTATE_270; they are not temporal.
+Judge only the physical phone display. Seller-controller PX/MM text, borders,
+orientation buttons and bottom controls are external chrome and forbidden evidence.
+Black or sparse App content does not reduce confidence when phone/system text or
+structure establishes axes. Do not return coordinates, bounds, actions or plans.
+Return exactly this JSON object and no Markdown:
+{{"protocol_version":"{ORIENTATION_AUDIT_PROTOCOL_VERSION}",
+"phone_content_rotation":"upright|rotated_90|rotated_180|rotated_270|unknown",
+"confidence":0.0,"evidence":["one or two short phone-only facts"]}}
+""".strip()
+
+
+def _parse_orientation_audit(raw: str) -> dict[str, Any]:
+    payload = _extract_json_object(raw)
+    required = {
+        "protocol_version", "phone_content_rotation", "confidence", "evidence"
+    }
+    if set(payload) != required:
+        raise VisionAgentError("方向审计字段缺失或包含坐标/动作等协议外字段。")
+    if payload.get("protocol_version") != ORIENTATION_AUDIT_PROTOCOL_VERSION:
+        raise VisionAgentError("方向审计协议版本无效。")
+    rotation = payload.get("phone_content_rotation")
+    if rotation not in {
+        "upright", "rotated_90", "rotated_180", "rotated_270", "unknown"
+    }:
+        raise VisionAgentError("方向审计手机内容方向无效。")
+    confidence = payload.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        raise VisionAgentError("方向审计置信度无效。")
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, list):
+        raise VisionAgentError("方向审计证据必须是数组。")
+    return {
+        "phone_content_rotation": rotation,
+        "confidence": float(confidence),
+        "evidence": evidence,
+    }
 
 
 def _system_ui_audit_prompt(context: dict[str, Any]) -> str:

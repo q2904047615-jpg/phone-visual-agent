@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import re
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,14 +12,15 @@ from PIL import Image, ImageChops, ImageStat
 from generic_intent import GenericIntentDraft
 from generic_scene_observer import GenericSceneObserver
 from observation_images import measure_local_stability
+from orientation_safety import (
+    OrientationCredential,
+    OrientationSafetyError,
+    frame_fingerprint,
+    validate_device_id,
+)
 from qwen_runtime_errors import FORMAT_ERROR_TYPES, classify_qwen_error
 from semantic_executor import SemanticAction
-from ui_scene import (
-    MIN_CAMERA_ALIGNMENT_CONFIDENCE,
-    UIElement,
-    UIScene,
-    UISceneError,
-)
+from ui_scene import UIElement, UIScene, UISceneError
 from universal_action_controller import (
     ResolvedSemanticAction,
     UniversalActionController,
@@ -70,6 +71,7 @@ class GenericActionExecutionResult:
         compare=False,
     )
     before_frame_paths: tuple[str, ...] = ()
+    orientation_credential: OrientationCredential | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +90,11 @@ class GenericActionExecutionResult:
             "observation_errors": list(self.observation_errors),
             "before_frame_count": len(self.before_frames),
             "before_frame_paths": list(self.before_frame_paths),
+            "orientation_credential": (
+                self.orientation_credential.to_dict()
+                if self.orientation_credential is not None
+                else None
+            ),
         }
 
 
@@ -164,6 +171,7 @@ class GenericSingleActionAdapter:
         post_action_timeout: float = 10.0,
         post_action_max_observations: int = 2,
         confirmation_frame_delta_max: float = 6.0,
+        device_id: str,
     ) -> None:
         self.capture = capture
         self.observer = observer
@@ -180,6 +188,10 @@ class GenericSingleActionAdapter:
             0.0,
             float(confirmation_frame_delta_max),
         )
+        try:
+            self.device_id = validate_device_id(device_id)
+        except OrientationSafetyError as exc:
+            raise ValueError(str(exc)) from exc
 
     @staticmethod
     def _confirmation_frame_delta(
@@ -209,52 +221,6 @@ class GenericSingleActionAdapter:
         if frame.width < 400 or frame.height < 700:
             raise GenericActionAdapterError("摄像头返回残缺画面，停止单步动作。")
         return frame
-
-    @staticmethod
-    def _assert_camera_alignment(
-        scene: UIScene,
-        frames: list[Image.Image],
-        *,
-        evidence: tuple[str, ...],
-    ) -> None:
-        """Fail closed before hardware when phone axes do not match the canvas."""
-
-        if not frames:
-            raise GenericActionAdapterError(
-                "动作前缺少相机方向验证帧。",
-                evidence=evidence,
-            )
-        sizes = {frame.size for frame in frames}
-        if len(sizes) != 1:
-            raise GenericActionAdapterError(
-                "动作前稳定帧的相机画布尺寸不一致。",
-                evidence=evidence,
-            )
-        width, height = next(iter(sizes))
-        local_orientation = "square"
-        if width > height:
-            local_orientation = "landscape"
-        elif height > width:
-            local_orientation = "portrait"
-        facts = scene.camera_alignment
-        facts.validate()
-        if facts.camera_layout_orientation != local_orientation:
-            raise GenericActionAdapterError(
-                "场景中的相机画布方向与本地稳定帧不一致，已在动作前停止。",
-                evidence=evidence,
-            )
-        if facts.phone_content_rotation != "upright":
-            raise GenericActionAdapterError(
-                "卖家控制端相机画布与手机内容/系统方向不一致或未知，"
-                "已在动作前停止。",
-                evidence=evidence,
-            )
-        if float(facts.confidence) < MIN_CAMERA_ALIGNMENT_CONFIDENCE:
-            raise GenericActionAdapterError(
-                "相机画布与手机内容方向一致性的视觉置信度不足，"
-                "已在动作前停止。",
-                evidence=evidence,
-            )
 
     def _capture_confirmation_frames(
         self,
@@ -581,12 +547,67 @@ class GenericSingleActionAdapter:
                 evidence=before_paths,
             )
 
+        orientation_credential: OrientationCredential | None = None
+        clear_authorization = getattr(
+            self.robot, "clear_physical_execution_authorization", None
+        )
         if resolved.kind in self.PHYSICAL_KINDS:
-            self._assert_camera_alignment(
-                before,
-                before_frames,
-                evidence=before_paths,
-            )
+            arm = getattr(self.robot, "arm_physical_execution", None)
+            audit = getattr(self.observer, "audit_camera_alignment", None)
+            if not callable(arm) or not callable(clear_authorization):
+                raise GenericActionAdapterError(
+                    "机械臂控制器未提供共享物理执行门禁，拒绝动作。",
+                    evidence=before_paths,
+                )
+            if not callable(audit):
+                raise GenericActionAdapterError(
+                    "观察器未提供独立方向审计，拒绝动作。",
+                    evidence=before_paths,
+                )
+            clear_authorization()
+            try:
+                orientation_credential = audit(
+                    frames=before_frames,
+                    device_id=self.device_id,
+                    scene_fingerprint=before.fingerprint,
+                )
+                audit_diagnostics = getattr(
+                    self.observer,
+                    "last_orientation_audit_diagnostics",
+                    {},
+                )
+                selected_index = (
+                    audit_diagnostics.get("selected_frame_index")
+                    if isinstance(audit_diagnostics, dict)
+                    else None
+                )
+                if (
+                    isinstance(selected_index, int)
+                    and 0 <= selected_index < len(before_paths)
+                ):
+                    with Image.open(before_paths[selected_index]) as persisted:
+                        orientation_credential = replace(
+                            orientation_credential,
+                            evidence_frame_fingerprint=frame_fingerprint(
+                                persisted.convert("RGB")
+                            ),
+                        )
+                orientation_credential.assert_authorizes(
+                    device_id=self.device_id,
+                    scene_fingerprint=before.fingerprint,
+                    frame_size=orientation_credential.frame_size,
+                )
+                arm(
+                    orientation_credential,
+                    action=resolved.kind,
+                    scene_fingerprint=before.fingerprint,
+                )
+            except (OrientationSafetyError, RuntimeError, ValueError) as exc:
+                clear_authorization()
+                raise GenericActionAdapterError(
+                    f"动作前独立方向凭据校验失败：{exc}",
+                    evidence=before_paths,
+                ) from exc
 
         physical_actions = 0
         robot_result: Any = None
@@ -686,12 +707,21 @@ class GenericSingleActionAdapter:
                 time.sleep(max(0.5, self.post_action_settle))
         except GenericActionAdapterError:
             raise
+        except OrientationSafetyError as exc:
+            raise GenericActionAdapterError(
+                f"共享物理执行门在控制端原语前拒绝动作：{exc}",
+                physical_actions=0,
+                evidence=before_paths,
+            ) from exc
         except Exception as exc:
             raise GenericActionAdapterError(
                 f"机械臂单步动作调用失败：{exc}",
                 physical_actions=physical_actions,
                 evidence=before_paths,
             ) from exc
+        finally:
+            if callable(clear_authorization):
+                clear_authorization()
 
         try:
             (
@@ -740,6 +770,7 @@ class GenericSingleActionAdapter:
             observation_errors=observation_errors,
             before_frames=before_frames,
             before_frame_paths=before_paths,
+            orientation_credential=orientation_credential,
         )
 
     def _rebind_action(

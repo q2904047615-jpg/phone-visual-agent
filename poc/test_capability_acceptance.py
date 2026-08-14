@@ -14,6 +14,11 @@ from capability_acceptance import (
     validate_acceptance_report,
 )
 from device_exclusivity import InterProcessLease
+from orientation_safety import (
+    ORIENTATION_AUDIT_SOURCE,
+    ORIENTATION_CREDENTIAL_VERSION,
+    frame_fingerprint,
+)
 
 
 class CapabilityAcceptanceCoreTests(unittest.TestCase):
@@ -103,7 +108,7 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         before = [self._frame(f"before_{index}.jpg", "black") for index in range(1, 5)]
         after = [self._frame(f"after_{index}.jpg", "white") for index in range(1, 5)]
         return {
-            "version": 2,
+            "version": 3,
             "trial_id": "trial-001",
             "session_id": "session-001",
             "task_id": "task-001",
@@ -135,6 +140,24 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 "fingerprint": "fingerprint-confirmed",
             },
             "execution": {
+                "orientation_credential": {
+                    "version": ORIENTATION_CREDENTIAL_VERSION,
+                    "credential_id": "credential-001",
+                    "source": ORIENTATION_AUDIT_SOURCE,
+                    "device_id": "device-a",
+                    "scene_fingerprint": "fingerprint-execution-before",
+                    "frame_fingerprint": frame_fingerprint(
+                        Image.open(before[0]).convert("RGB")
+                    ),
+                    "evidence_frame_fingerprint": frame_fingerprint(
+                        Image.open(before[0]).convert("RGB")
+                    ),
+                    "frame_size": [16, 16],
+                    "camera_layout_orientation": "square",
+                    "phone_content_rotation": "upright",
+                    "confidence": 0.95,
+                    "evidence": ["手机状态文字正向"],
+                },
                 "resolved_action": {
                     "node_id": "drag-001",
                     "kind": "drag",
@@ -307,6 +330,57 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
 
         self.assertEqual(report["trial_id"], "trial-001")
         self.assertEqual(report["candidate_action"], "drag")
+
+    def test_v2_report_remains_readable_but_cannot_promote(self) -> None:
+        self._mutate_report(lambda report: report.__setitem__("version", 2))
+        readable = json.loads(self.report_path.read_text(encoding="utf-8"))
+        self.assertEqual(2, readable["version"])
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "版本无效"):
+            validate_acceptance_report(self.report_path)
+
+    def test_missing_low_conflicting_or_tampered_orientation_cannot_promote(self):
+        cases = (
+            (
+                lambda report: report["execution"].pop("orientation_credential"),
+                "独立方向凭据",
+            ),
+            (
+                lambda report: report["execution"]["orientation_credential"].__setitem__(
+                    "confidence", 0.4
+                ),
+                "置信度不足",
+            ),
+            (
+                lambda report: report["execution"]["orientation_credential"].__setitem__(
+                    "device_id", "device-b"
+                ),
+                "设备不匹配",
+            ),
+            (
+                lambda report: report["execution"]["orientation_credential"].__setitem__(
+                    "evidence_frame_fingerprint", "tampered"
+                ),
+                "未绑定动作前保存",
+            ),
+            (
+                lambda report: report["execution"]["before_scene"].__setitem__(
+                    "camera_alignment",
+                    {
+                        "camera_layout_orientation": "square",
+                        "phone_content_rotation": "rotated_90",
+                        "confidence": 0.95,
+                        "evidence": ["手机文字旋转九十度"],
+                    },
+                ),
+                "主场景方向事实.*冲突",
+            ),
+        )
+        for mutation, message in cases:
+            with self.subTest(message=message):
+                self._write_valid_report()
+                self._mutate_report(mutation)
+                with self.assertRaisesRegex(CapabilityAcceptanceError, message):
+                    validate_acceptance_report(self.report_path)
 
     def test_reveal_system_navigation_report_requires_structured_system_ui(self) -> None:
         report = self._valid_reveal_system_navigation_report()

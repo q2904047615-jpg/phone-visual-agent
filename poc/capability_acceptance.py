@@ -11,6 +11,11 @@ from typing import Any, Callable, Mapping
 import uuid
 
 from PIL import Image, UnidentifiedImageError
+from orientation_safety import (
+    OrientationCredential,
+    OrientationSafetyError,
+    frame_fingerprint,
+)
 
 from device_exclusivity import InterProcessLease
 from tap_calibration import (
@@ -45,7 +50,7 @@ PROMOTABLE_ACTIONS = frozenset(
 CALIBRATION_BOUND_ACTIONS = frozenset(
     {"long_press", "drag", "reveal_system_navigation"}
 )
-ACCEPTANCE_REPORT_VERSION = 2
+ACCEPTANCE_REPORT_VERSION = 3
 
 
 def _normalized_coverage_bounds(value: Any, *, label: str) -> list[float]:
@@ -785,6 +790,43 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     )
     if before_frame_size != after_frame_size:
         raise CapabilityAcceptanceError("动作前后证据画面尺寸不一致。")
+    try:
+        orientation_credential = OrientationCredential.from_dict(
+            execution.get("orientation_credential")
+        )
+        orientation_credential.assert_authorizes(
+            device_id=device_id,
+            scene_fingerprint=execution_before_fingerprint,
+            frame_size=before_frame_size,
+        )
+    except OrientationSafetyError as exc:
+        raise CapabilityAcceptanceError(
+            f"独立方向凭据不能支持能力晋级：{exc}"
+        ) from exc
+    before_fingerprints: set[str] = set()
+    for path in before_paths:
+        with Image.open(path) as image:
+            before_fingerprints.add(frame_fingerprint(image.convert("RGB")))
+    if (
+        not orientation_credential.evidence_frame_fingerprint
+        or orientation_credential.evidence_frame_fingerprint
+        not in before_fingerprints
+    ):
+        raise CapabilityAcceptanceError(
+            "独立方向凭据未绑定动作前保存的稳定帧。"
+        )
+    raw_alignment = before_scene.get("camera_alignment")
+    if isinstance(raw_alignment, dict):
+        compact_layout = raw_alignment.get("camera_layout_orientation")
+        compact_rotation = raw_alignment.get("phone_content_rotation")
+        if compact_layout not in {
+            "unknown", orientation_credential.camera_layout_orientation
+        } or compact_rotation not in {
+            "unknown", orientation_credential.phone_content_rotation
+        }:
+            raise CapabilityAcceptanceError(
+                "主场景方向事实与独立方向凭据冲突，不能晋级。"
+            )
     if calibration_evidence is not None:
         width, height = before_frame_size
         robot_result = execution.get("robot_result")

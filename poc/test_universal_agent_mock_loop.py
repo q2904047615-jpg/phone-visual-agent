@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw
 from deepseek_task_graph import TargetApp
 from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
 from generic_step_planner import GenericStepProposal
+from orientation_safety import _claim_audit_seal, _mint_audited_credential
 from semantic_executor import SemanticAction
 from ui_scene import CameraAlignmentFacts, UIElement, UIScene
 from universal_agent_orchestrator import UniversalAgentOrchestrator
@@ -100,6 +101,16 @@ class ScriptedObserver:
         pixel = frames[-1].getpixel((0, 0))
         return self.after_scene if pixel == (220, 238, 255) else self.before_scene
 
+    def audit_camera_alignment(self, *, frames, device_id, scene_fingerprint):
+        return _mint_audited_credential(
+            device_id=device_id,
+            scene_fingerprint=scene_fingerprint,
+            frame=frames[-1],
+            phone_content_rotation="upright",
+            confidence=0.98,
+            evidence=("合成手机界面轴线",),
+        )
+
 
 class ScriptedCapture:
     def __init__(self, *, unstable_after: bool = False) -> None:
@@ -121,16 +132,37 @@ class ScriptedCapture:
 class RecordingRobot:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[int, ...]]] = []
+        self._armed = None
+
+    def arm_physical_execution(self, credential, *, action, scene_fingerprint):
+        credential.assert_authorizes(
+            device_id="mock-device",
+            scene_fingerprint=scene_fingerprint,
+            frame_size=credential.frame_size,
+        )
+        _claim_audit_seal(credential)
+        self._armed = action
+
+    def clear_physical_execution_authorization(self):
+        self._armed = None
+
+    def _consume(self, action):
+        if self._armed != action:
+            raise RuntimeError("missing test physical authorization")
+        self._armed = None
 
     def vision_tap_relative(self, x: int, y: int):
+        self._consume("tap_semantic")
         self.calls.append(("tap", (x, y)))
         return {"ok": True, "kind": "tap"}
 
     def vision_android_back(self):
+        self._consume("back")
         self.calls.append(("back", ()))
         return {"ok": True, "kind": "back"}
 
     def vision_swipe_up(self):
+        self._consume("swipe")
         self.calls.append(("swipe_up", ()))
         return {"ok": True, "kind": "swipe"}
 
@@ -264,6 +296,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
             capture=capture,
             observer=observer,
             robot=robot,
+            device_id="mock-device",
             frame_interval=0,
             post_action_settle=0,
             post_action_timeout=0.02,

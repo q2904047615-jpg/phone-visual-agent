@@ -108,6 +108,7 @@ def click_raw_pixel(robot: RobotController, frame: Image.Image, point: tuple[int
     x, y = point
     if not (0 <= x < frame.width and 0 <= y < frame.height):
         raise TapCalibrationError(f"校准落点{x, y}超出相机画面。")
+    robot._consume_physical_execution("tap_semantic", frame)
     hwnd, _title = legacy.find_window(robot.title)
     robot._checkpoint()
     legacy.configure_single_click_count(hwnd)
@@ -1268,7 +1269,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--device-id",
-        default=None,
+        required=True,
         help="目标device_id；省略时使用/api/device报告的default_device_id",
     )
     parser.add_argument(
@@ -1292,7 +1293,7 @@ def main() -> int:
         )
         result = probe_single_touch(
             base_url=base_url,
-            robot=RobotController(),
+            robot=RobotController(device_id=args.device_id),
             execute=bool(args.execute),
             output_dir=output,
             device_status_url=args.device_status_url,
@@ -1307,7 +1308,7 @@ def main() -> int:
     result = run_calibration_step(
         mode=args.phase,
         base_url=base_url,
-        robot=RobotController(),
+        robot=RobotController(device_id=args.device_id),
         execute=bool(args.execute),
         device_status_url=args.device_status_url,
         device_id=args.device_id,

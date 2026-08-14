@@ -9,9 +9,16 @@ from types import SimpleNamespace
 
 from PIL import Image
 
-from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
+from generic_action_adapter import (
+    GenericActionAdapterError,
+    GenericSingleActionAdapter as _GenericSingleActionAdapter,
+)
 from generic_intent import GenericIntentDraft
 from generic_scene_observer import _local_frame_fingerprint
+from orientation_safety import (
+    _claim_audit_seal,
+    _mint_audited_credential,
+)
 from generic_step_planner import (
     GenericStepPlanner,
     GenericStepPlanningError,
@@ -38,9 +45,11 @@ class FakeTextProvider:
 
 
 class FakeSceneObserver:
-    def __init__(self, scenes):
+    def __init__(self, scenes, *, audit_rotation="upright", audit_confidence=0.96):
         self.scenes = list(scenes)
         self.calls = 0
+        self.audit_rotation = audit_rotation
+        self.audit_confidence = audit_confidence
 
     def observe(self, *, frames, goal_context=None):
         self.calls += 1
@@ -54,43 +63,86 @@ class FakeSceneObserver:
             )
         return result
 
+    def audit_camera_alignment(self, *, frames, device_id, scene_fingerprint):
+        return _mint_audited_credential(
+            device_id=device_id,
+            scene_fingerprint=scene_fingerprint,
+            frame=frames[-1],
+            phone_content_rotation=self.audit_rotation,
+            confidence=self.audit_confidence,
+            evidence=("测试手机界面轴线",),
+        )
+
 
 class FakeRobot:
     def __init__(self):
         self.actions = []
+        self.device_id = "test-device"
+        self._armed = None
+
+    def arm_physical_execution(self, credential, *, action, scene_fingerprint):
+        credential.assert_authorizes(
+            device_id=self.device_id,
+            scene_fingerprint=scene_fingerprint,
+            frame_size=credential.frame_size,
+        )
+        _claim_audit_seal(credential)
+        self._armed = action
+
+    def clear_physical_execution_authorization(self):
+        self._armed = None
+
+    def _consume(self, action):
+        if self._armed != action:
+            raise RuntimeError("missing test physical authorization")
+        self._armed = None
 
     def vision_tap_relative(self, x, y):
+        self._consume("tap_semantic")
         self.actions.append(("tap", x, y))
         return (x, y)
 
     def vision_dismiss_overlay_relative(self, x, y):
+        self._consume("dismiss_overlay")
         self.actions.append(("dismiss", x, y))
         return (x, y)
 
     def vision_swipe_up(self):
+        self._consume("swipe")
         self.actions.append(("swipe", "up"))
 
     def vision_reveal_system_navigation(self):
+        self._consume("reveal_system_navigation")
         self.actions.append(("reveal_system_navigation",))
         return (500, 950)
 
     def vision_android_back(self):
+        self._consume("back")
         self.actions.append(("back",))
         return (500, 950)
 
     def vision_android_home(self):
+        self._consume("home")
         self.actions.append(("home",))
         return (500, 950)
 
     def vision_type_text(self, text):
+        self._consume("input_verified_text")
         self.actions.append(("input", text))
 
     def vision_long_press_relative(self, x, y, hold_seconds):
+        self._consume("long_press")
         self.actions.append(("long_press", x, y, hold_seconds))
         return (x, y)
 
     def vision_drag_relative(self, start_x, start_y, end_x, end_y):
+        self._consume("drag")
         self.actions.append(("drag", start_x, start_y, end_x, end_y))
+
+
+class GenericSingleActionAdapter(_GenericSingleActionAdapter):
+    def __init__(self, *args, device_id="test-device", **kwargs):
+        super().__init__(*args, device_id=device_id, **kwargs)
 
 
 class SequenceCapture:
@@ -449,7 +501,9 @@ class GenericActionAdapterTests(unittest.TestCase):
                 robot = FakeRobot()
                 adapter = GenericSingleActionAdapter(
                     capture=SequenceCapture(["gray"] * 4),
-                    observer=FakeSceneObserver([]),
+                    observer=FakeSceneObserver(
+                        [], audit_rotation="rotated_90"
+                    ),
                     robot=robot,
                     frame_interval=0,
                     post_action_settle=0,
@@ -470,40 +524,20 @@ class GenericActionAdapterTests(unittest.TestCase):
 
     def test_orientation_gate_rejects_unknown_low_confidence_or_local_mismatch(self):
         cases = (
-            (
-                CameraAlignmentFacts(
-                    camera_layout_orientation="portrait",
-                    phone_content_rotation="unknown",
-                    confidence=0.95,
-                ),
-                "方向不一致或未知",
-            ),
-            (
-                CameraAlignmentFacts(
-                    camera_layout_orientation="portrait",
-                    phone_content_rotation="upright",
-                    confidence=0.4,
-                    evidence=("界面轴线看似正向",),
-                ),
-                "置信度不足",
-            ),
-            (
-                CameraAlignmentFacts(
-                    camera_layout_orientation="landscape",
-                    phone_content_rotation="upright",
-                    confidence=0.95,
-                    evidence=("界面轴线正向",),
-                ),
-                "本地稳定帧不一致",
-            ),
+            ("unknown", 0.95, "方向不一致或未知"),
+            ("upright", 0.4, "置信度不足"),
         )
         frames = tuple(Image.new("RGB", (540, 960), "gray") for _ in range(4))
-        for facts, error in cases:
-            with self.subTest(facts=facts):
+        for rotation, confidence, error in cases:
+            with self.subTest(rotation=rotation, confidence=confidence):
                 robot = FakeRobot()
                 adapter = GenericSingleActionAdapter(
                     capture=SequenceCapture(["gray"] * 4),
-                    observer=FakeSceneObserver([]),
+                    observer=FakeSceneObserver(
+                        [],
+                        audit_rotation=rotation,
+                        audit_confidence=confidence,
+                    ),
                     robot=robot,
                     frame_interval=0,
                     post_action_settle=0,
@@ -515,10 +549,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                             action="back",
                             params={},
                         ),
-                        planned_scene=scene(
-                            "planned",
-                            camera_alignment=facts,
-                        ),
+                        planned_scene=scene("planned"),
                         planned_frames=frames,
                         goal=goal(),
                         confirmed=True,

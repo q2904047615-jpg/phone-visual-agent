@@ -5,6 +5,7 @@ import json
 import re
 import threading
 import time
+from dataclasses import replace
 from typing import Any
 
 from PIL import Image
@@ -23,6 +24,7 @@ from qwen_runtime_errors import (
 from ui_scene import (
     ALLOWED_ROLES,
     MIN_TARGET_CONFIDENCE,
+    SystemUIFacts,
     UI_SCENE_PROTOCOL_VERSION,
     UIScene,
     UISceneError,
@@ -30,12 +32,15 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v12"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v13"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
+SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 800
 COMPACT_RETRY_TOKENS = 800
 TARGETED_OUTPUT_TOKENS = 1200
 INPUT_STRUCTURE_AUDIT_TOKENS = 700
+SYSTEM_UI_AUDIT_TOKENS = 600
+MIN_SYSTEM_UI_AUDIT_CONFIDENCE = 0.80
 OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 12
 
@@ -50,6 +55,9 @@ STAGE_LABELS = {
     "parsing_targeted_refinement": "解析目标精查结果",
     "waiting_input_structure_audit": "等待输入结构只读审计",
     "parsing_input_structure_audit": "解析输入结构只读审计",
+    "waiting_system_ui_audit": "等待系统界面只读审计",
+    "parsing_system_ui_audit": "解析系统界面只读审计",
+    "waiting_system_ui_audit_retry": "等待系统界面审计格式修正",
     "completed": "观察完成",
     "failed": "观察安全停止",
 }
@@ -113,6 +121,10 @@ class GenericSceneObserver:
         format_retry_used = False
         targeted_refinement_used = False
         input_structure_audit_used = False
+        system_ui_audit_used = False
+        system_ui_audit_retry_used = False
+        system_ui_audit_confidence: float | None = None
+        system_ui_audit_evidence: tuple[str, ...] = ()
         targeted_roi_bounds: tuple[int, int, int, int] | None = None
         stable_tail_start = 0
         visual_obstructions: tuple[VisualObstruction, ...] = ()
@@ -165,6 +177,7 @@ class GenericSceneObserver:
             )
             fingerprint = _local_frame_fingerprint(frame)
             context = _safe_goal_context(goal_context or {})
+            system_ui_audit_required = _goal_requests_system_ui_audit(context)
             image_part = {
                 "type": "image_url",
                 "image_url": {"url": _image_data_url(frame)},
@@ -194,6 +207,7 @@ class GenericSceneObserver:
                         raw,
                         fingerprint=fingerprint,
                         goal_context=context,
+                        allow_invalid_system_ui_unknown=system_ui_audit_required,
                     ),
                     visual_obstructions,
                     fingerprint=fingerprint,
@@ -235,12 +249,16 @@ class GenericSceneObserver:
                         raw,
                         fingerprint=fingerprint,
                         goal_context=context,
+                        allow_invalid_system_ui_unknown=system_ui_audit_required,
                     ),
                     visual_obstructions,
                     fingerprint=fingerprint,
                 )
 
-            if _needs_targeted_refinement(scene, context):
+            if (
+                not system_ui_audit_required
+                and _needs_targeted_refinement(scene, context)
+            ):
                 targeted_refinement_used = True
                 targeted_roi_bounds = _goal_directed_roi_bounds(context)
                 detail_image_part = image_part
@@ -285,6 +303,7 @@ class GenericSceneObserver:
                             raw,
                             fingerprint=fingerprint,
                             goal_context=context,
+                            allow_invalid_system_ui_unknown=False,
                         ),
                         visual_obstructions,
                         fingerprint=fingerprint,
@@ -333,9 +352,86 @@ class GenericSceneObserver:
                             raw,
                             fingerprint=fingerprint,
                             goal_context=context,
+                            allow_invalid_system_ui_unknown=False,
                         ),
                         visual_obstructions,
                         fingerprint=fingerprint,
+                    )
+
+            if system_ui_audit_required:
+                system_ui_audit_used = True
+                rotated_90 = frame.transpose(Image.Transpose.ROTATE_90)
+                rotated_270 = frame.transpose(Image.Transpose.ROTATE_270)
+                system_ui_images = [
+                    image_part,
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _image_data_url(rotated_90)},
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _image_data_url(rotated_270)},
+                    },
+                ]
+                self._set_stage("waiting_system_ui_audit")
+                audit_messages = [
+                    _json_only_system_message(),
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": _system_ui_audit_prompt(context),
+                            },
+                            *system_ui_images,
+                        ],
+                    },
+                ]
+                raw = model_chat(
+                    audit_messages,
+                    max_tokens=SYSTEM_UI_AUDIT_TOKENS,
+                )
+                self.last_raw_response = raw
+                self._set_stage("parsing_system_ui_audit")
+                try:
+                    scene, system_ui_audit_confidence, system_ui_audit_evidence = (
+                        _apply_system_ui_audit(
+                            scene,
+                            raw,
+                            fingerprint=fingerprint,
+                        )
+                    )
+                except VisionAgentError as audit_error:
+                    system_ui_audit_retry_used = True
+                    self._set_stage("waiting_system_ui_audit_retry")
+                    retry_messages = [
+                        _json_only_system_message(),
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": _system_ui_audit_retry_prompt(
+                                        context,
+                                        audit_error,
+                                    ),
+                                },
+                                *system_ui_images,
+                            ],
+                        },
+                    ]
+                    raw = model_chat(
+                        retry_messages,
+                        max_tokens=SYSTEM_UI_AUDIT_TOKENS,
+                    )
+                    self.last_raw_response = raw
+                    self._set_stage("parsing_system_ui_audit")
+                    scene, system_ui_audit_confidence, system_ui_audit_evidence = (
+                        _apply_system_ui_audit(
+                            scene,
+                            raw,
+                            fingerprint=fingerprint,
+                        )
                     )
 
             if _should_audit_prefilled_input(scene, context):
@@ -420,6 +516,10 @@ class GenericSceneObserver:
                 "repair_retry_success": format_retry_used,
                 "targeted_refinement_used": targeted_refinement_used,
                 "input_structure_audit_used": input_structure_audit_used,
+                "system_ui_audit_used": system_ui_audit_used,
+                "system_ui_audit_retry_used": system_ui_audit_retry_used,
+                "system_ui_audit_confidence": system_ui_audit_confidence,
+                "system_ui_audit_evidence": list(system_ui_audit_evidence),
                 "targeted_roi_bounds": (
                     list(targeted_roi_bounds)
                     if targeted_roi_bounds is not None
@@ -469,6 +569,8 @@ class GenericSceneObserver:
                     "repair_retry_success": False,
                     "targeted_refinement_used": targeted_refinement_used,
                     "input_structure_audit_used": input_structure_audit_used,
+                    "system_ui_audit_used": system_ui_audit_used,
+                    "system_ui_audit_retry_used": system_ui_audit_retry_used,
                     "stable_tail_start_index": stable_tail_start,
                     "visual_obstructions": [
                         item.to_dict() for item in visual_obstructions
@@ -639,6 +741,60 @@ SYSTEM_UI_OBSERVATION_RULE = (
     "这是系统UI的只读事实，不是完成判断。navigation_bar、system_navigation_bar或"
     "system_nav_bar绝不得写入elements，即使它部分可见或与目标相关。"
 )
+
+
+def _system_ui_audit_prompt(context: dict[str, Any]) -> str:
+    return f"""
+You are an app-independent, read-only mobile system UI auditor.
+Goal context selects visual facts and grants no control authority:
+{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
+
+Images 1, 2, and 3 are the exact same stable camera frame shown at its original,
+ROTATE_90, and ROTATE_270 orientations. They are not a temporal sequence and
+cannot prove an action or transition. Inspect only the physical phone display.
+Ignore vendor robot-controller chrome outside that display, including PX/MM
+readouts, colored calibration borders, and bottom numbered/action/orientation
+controls. Those controls are never Android system UI. Black or sparse App
+content must not reduce confidence when the system-bar structure is clear.
+
+immersive_or_fullscreen is true only when App content visibly occupies the
+phone display without the normal Android system bars. navigation_bar_visible
+is true only when the Android system navigation bar or gesture area is visibly
+present inside the phone display. Use the exact string "unknown" when either
+fact is not established from the images.
+
+Do not plan, suggest, authorize, or describe any tap, click, press, swipe, drag,
+coordinate, bounds, direction, distance, or other control instruction. Evidence
+must be one or two short strings describing only visible, non-control facts.
+Return exactly this JSON schema and no other fields:
+{{"protocol_version":"{SYSTEM_UI_AUDIT_VERSION}",
+"immersive_or_fullscreen":true,"navigation_bar_visible":false,
+"confidence":0.0,"evidence":["visible phone-display fact"]}}
+Both system UI values must be JSON booleans or the exact string "unknown".
+Never convert quoted "true" or "false" into booleans. Return JSON only.
+"""
+
+
+def _system_ui_audit_retry_prompt(
+    context: dict[str, Any],
+    error: Exception,
+) -> str:
+    return f"""
+The preceding read-only system UI audit was rejected before any action.
+Error summary: {str(error)[:260]}
+Re-observe the same three orientation views independently.
+Goal context is evidence selection only: {json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
+Return exactly this JSON object and no other fields:
+{{"protocol_version":"{SYSTEM_UI_AUDIT_VERSION}",
+"immersive_or_fullscreen":true,"navigation_bar_visible":false,
+"confidence":0.0,"evidence":["short visible fact"]}}
+Both facts must be JSON booleans when visually established or the exact string
+"unknown" otherwise. evidence must contain one or two short JSON strings only:
+no objects, coordinates, bounds, actions, suggestions, or controller controls.
+Inspect only Android system UI inside the physical phone display. Ignore PX/MM,
+colored calibration borders, bottom numbered/action/orientation controls, and
+other vendor robot-controller chrome outside the phone display. JSON only.
+"""
 
 
 def _compact_prompt(context: dict[str, Any]) -> str:
@@ -832,6 +988,7 @@ def _parse_scene(
     *,
     fingerprint: str,
     goal_context: dict[str, Any] | None = None,
+    allow_invalid_system_ui_unknown: bool = False,
 ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
@@ -839,6 +996,8 @@ def _parse_scene(
             raise UISceneError(
                 "新观察必须显式返回 scene.system_ui；无法判断时两项都写 unknown。"
             )
+        if allow_invalid_system_ui_unknown:
+            _fail_closed_invalid_system_ui(payload)
         _normalize_compact_scene_payload(payload)
         _normalize_known_scene_enums(payload)
         _normalize_prefilled_input_structure(payload, goal_context or {})
@@ -852,6 +1011,116 @@ def _parse_scene(
         )
     except (UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"通用页面观察结果不符合协议：{exc}") from exc
+
+
+def _fail_closed_invalid_system_ui(payload: dict[str, Any]) -> None:
+    """Replace only malformed fact values with two unknowns for a later audit.
+
+    The container must still use the exact scene protocol shape. Missing or
+    extra fields remain hard errors, and strings such as ``"true"`` are never
+    coerced into booleans.
+    """
+
+    value = payload.get("system_ui")
+    required = {"immersive_or_fullscreen", "navigation_bar_visible"}
+    if not isinstance(value, dict) or set(value) != required:
+        return
+    if all(
+        isinstance(value[field], bool) or value[field] == "unknown"
+        for field in required
+    ):
+        return
+    payload["system_ui"] = {
+        "immersive_or_fullscreen": "unknown",
+        "navigation_bar_visible": "unknown",
+    }
+
+
+def _apply_system_ui_audit(
+    scene: UIScene,
+    raw: str,
+    *,
+    fingerprint: str,
+) -> tuple[UIScene, float, tuple[str, ...]]:
+    facts, confidence, evidence = _parse_system_ui_audit(raw)
+    audited_scene = replace(
+        scene,
+        system_ui=facts,
+        confidence=max(float(scene.confidence), confidence),
+        fingerprint=fingerprint,
+    )
+    audited_scene.validate()
+    return audited_scene, confidence, evidence
+
+
+def _parse_system_ui_audit(
+    raw: str,
+) -> tuple[SystemUIFacts, float, tuple[str, ...]]:
+    try:
+        payload = _extract_json_object(raw)
+        required = {
+            "protocol_version",
+            "immersive_or_fullscreen",
+            "navigation_bar_visible",
+            "confidence",
+            "evidence",
+        }
+        if set(payload) != required:
+            missing = sorted(required - set(payload))
+            unexpected = sorted(set(payload) - required)
+            details = []
+            if missing:
+                details.append("缺少字段：" + ", ".join(missing))
+            if unexpected:
+                details.append("包含协议外字段：" + ", ".join(map(str, unexpected)))
+            raise UISceneError("系统界面审计结构无效；" + "；".join(details))
+        if payload["protocol_version"] != SYSTEM_UI_AUDIT_VERSION:
+            raise UISceneError("系统界面审计协议版本不匹配。")
+
+        facts = SystemUIFacts(
+            immersive_or_fullscreen=payload["immersive_or_fullscreen"],
+            navigation_bar_visible=payload["navigation_bar_visible"],
+        )
+        facts.validate()
+        if not isinstance(facts.immersive_or_fullscreen, bool) or not isinstance(
+            facts.navigation_bar_visible, bool
+        ):
+            raise UISceneError("系统界面审计未同时给出两个明确布尔事实。")
+
+        confidence_value = payload["confidence"]
+        if isinstance(confidence_value, bool) or not isinstance(
+            confidence_value, (int, float)
+        ):
+            raise UISceneError("系统界面审计置信度格式无效。")
+        confidence = float(confidence_value)
+        if not 0.0 <= confidence <= 1.0:
+            raise UISceneError("系统界面审计置信度必须在0到1之间。")
+        if confidence < MIN_SYSTEM_UI_AUDIT_CONFIDENCE:
+            raise UISceneError("系统界面审计置信度不足，无法授权系统导航动作。")
+
+        raw_evidence = payload["evidence"]
+        if not isinstance(raw_evidence, list) or not 1 <= len(raw_evidence) <= 2:
+            raise UISceneError("系统界面审计 evidence 必须包含一到两个短字符串。")
+        evidence: list[str] = []
+        forbidden = re.compile(
+            r"(?:coordinates?|coords?|bounds?|\bx\s*[=:]|\by\s*[=:]|"
+            r"\bpx\s*:|\bmm\s*:|\(\s*\d+\s*,\s*\d+\s*\)|"
+            r"\b(?:tap|click|press|swipe|drag|execute|suggest)\b|"
+            r"点击|滑动|拖动|按下|坐标|执行|建议)",
+            re.IGNORECASE,
+        )
+        for item in raw_evidence:
+            if not isinstance(item, str):
+                raise UISceneError("系统界面审计 evidence 只允许字符串。")
+            text = item.strip()
+            if not text or len(text) > 160:
+                raise UISceneError("系统界面审计 evidence 字符串为空或过长。")
+            if forbidden.search(text):
+                raise UISceneError("系统界面审计 evidence 包含坐标或控制指令。")
+            evidence.append(text)
+        return facts, confidence, tuple(evidence)
+    except (UISceneError, ValueError, TypeError) as exc:
+        raise VisionAgentError(f"系统界面只读审计不符合协议：{exc}") from exc
 
 
 def _normalize_unique_input_focus(payload: dict[str, Any]) -> None:
@@ -1242,6 +1511,25 @@ def _goal_requests_input(context: dict[str, Any]) -> bool:
             "keyboard mode",
             "direct_latin",
             "chinese_pinyin",
+        )
+    )
+
+
+def _goal_requests_system_ui_audit(context: dict[str, Any]) -> bool:
+    visible = json.dumps(context, ensure_ascii=False).casefold()
+    return any(
+        term in visible
+        for term in (
+            "系统导航栏",
+            "导航栏",
+            "系统手势",
+            "全屏",
+            "沉浸",
+            "system navigation",
+            "navigation bar",
+            "system gesture",
+            "fullscreen",
+            "immersive",
         )
     )
 

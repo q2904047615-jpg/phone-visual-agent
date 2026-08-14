@@ -5,7 +5,11 @@ import unittest
 
 from PIL import Image, ImageDraw, ImageFilter
 
-from generic_scene_observer import GenericSceneObserver, INPUT_STRUCTURE_AUDIT_VERSION
+from generic_scene_observer import (
+    GenericSceneObserver,
+    INPUT_STRUCTURE_AUDIT_VERSION,
+    SYSTEM_UI_AUDIT_VERSION,
+)
 from generic_scene_observer import _parse_scene, _scene_enum_values
 from ui_scene import UISceneError
 from vision_agent import VisionAgentError
@@ -151,6 +155,22 @@ def input_audit_payload(
     }
 
 
+def system_ui_audit_payload(
+    *,
+    immersive_or_fullscreen: bool | str = True,
+    navigation_bar_visible: bool | str = False,
+    confidence: float = 0.95,
+    evidence: list[object] | None = None,
+) -> dict:
+    return {
+        "protocol_version": SYSTEM_UI_AUDIT_VERSION,
+        "immersive_or_fullscreen": immersive_or_fullscreen,
+        "navigation_bar_visible": navigation_bar_visible,
+        "confidence": confidence,
+        "evidence": evidence or ["App内容填满手机显示区域", "系统导航栏未显示"],
+    }
+
+
 def audited_application_input(
     *,
     structure_id: str = "field",
@@ -174,6 +194,115 @@ def audited_application_input(
 
 
 class GenericSceneObserverTests(unittest.TestCase):
+    def test_system_ui_goal_uses_independent_three_orientation_audit(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = []
+        compact["confidence"] = 0.65
+        compact["system_ui"] = {
+            "immersive_or_fullscreen": "likely_true",
+            "navigation_bar_visible": "hidden",
+        }
+        provider = SequenceProvider([compact, system_ui_audit_payload()])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "恢复当前手机的系统导航栏可见状态"},
+        )
+
+        self.assertIs(scene.system_ui.immersive_or_fullscreen, True)
+        self.assertIs(scene.system_ui.navigation_bar_visible, False)
+        self.assertEqual(0.95, scene.confidence)
+        self.assertEqual(2, provider.calls)
+        self.assertEqual([800, 600], provider.max_tokens_seen)
+        self.assertTrue(observer.last_diagnostics["system_ui_audit_used"])
+        self.assertFalse(observer.last_diagnostics["system_ui_audit_retry_used"])
+        self.assertFalse(observer.last_diagnostics["targeted_refinement_used"])
+        audit_content = provider.messages_seen[1][1]["content"]
+        self.assertEqual(
+            3,
+            sum(item.get("type") == "image_url" for item in audit_content),
+        )
+
+    def test_system_ui_audit_retries_once_then_fails_closed_on_unknown(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = []
+        provider = SequenceProvider(
+            [
+                compact,
+                system_ui_audit_payload(confidence=0.4),
+                system_ui_audit_payload(
+                    immersive_or_fullscreen="unknown",
+                    navigation_bar_visible="unknown",
+                ),
+            ]
+        )
+        observer = GenericSceneObserver(provider)
+
+        with self.assertRaisesRegex(VisionAgentError, "系统界面只读审计"):
+            observer.observe(
+                frames=stable_frames(),
+                goal_context={"objective": "检查全屏状态和系统导航栏"},
+            )
+
+        self.assertEqual(3, provider.calls)
+        self.assertTrue(observer.last_diagnostics["system_ui_audit_used"])
+        self.assertTrue(observer.last_diagnostics["system_ui_audit_retry_used"])
+
+    def test_system_ui_audit_rejects_action_fields_and_coordinate_evidence(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = []
+        bad_action = system_ui_audit_payload()
+        bad_action["action"] = "swipe"
+        bad_evidence = system_ui_audit_payload(evidence=["点击坐标(500,900)"])
+        for invalid in (bad_action, bad_evidence):
+            with self.subTest(invalid=invalid):
+                provider = SequenceProvider([compact, invalid, invalid])
+                with self.assertRaisesRegex(VisionAgentError, "系统界面只读审计"):
+                    GenericSceneObserver(provider).observe(
+                        frames=stable_frames(),
+                        goal_context={"objective": "显示系统导航栏"},
+                    )
+                self.assertEqual(3, provider.calls)
+
+    def test_non_system_ui_goal_does_not_trigger_system_ui_audit(self) -> None:
+        payload = scene_payload()
+        payload["elements"][0]["states"]["goal_relevant"] = True
+        provider = FakeProvider(payload)
+        observer = GenericSceneObserver(provider)
+
+        observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "查看数字七"},
+        )
+
+        self.assertEqual(1, provider.calls)
+        self.assertFalse(observer.last_diagnostics["system_ui_audit_used"])
+
+    def test_system_ui_goal_only_fails_closed_invalid_fact_values(self) -> None:
+        payload = scene_payload()
+        payload["system_ui"] = {
+            "immersive_or_fullscreen": "true",
+            "navigation_bar_visible": "false",
+        }
+
+        scene = _parse_scene(
+            json.dumps(payload),
+            fingerprint="system-ui-fallback",
+            allow_invalid_system_ui_unknown=True,
+        )
+
+        self.assertEqual("unknown", scene.system_ui.immersive_or_fullscreen)
+        self.assertEqual("unknown", scene.system_ui.navigation_bar_visible)
+
+        payload["system_ui"]["extra"] = False
+        with self.assertRaisesRegex(VisionAgentError, "协议外字段"):
+            _parse_scene(
+                json.dumps(payload),
+                fingerprint="system-ui-extra",
+                allow_invalid_system_ui_unknown=True,
+            )
+
     def test_scene_parser_requires_explicit_structured_system_ui(self) -> None:
         payload = scene_payload()
         payload.pop("system_ui")

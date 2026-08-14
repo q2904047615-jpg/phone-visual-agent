@@ -1607,6 +1607,15 @@ def _normalize_known_scene_enums(payload: dict[str, Any]) -> None:
         states = item.get("states")
         if not isinstance(states, dict):
             continue
+        role = str(item.get("role") or "").strip()
+        if role != "input" and states.get("goal_relevant") is not True:
+            # Qwen sometimes emits a non-interactive keyboard container and
+            # attaches global keyboard facts to it. Those peripheral facts are
+            # not actionable and the scene protocol intentionally allows them
+            # only on the bound input. Remove them only from non-target
+            # elements; a malformed goal element must still fail closed.
+            states.pop("keyboard_layout", None)
+            states.pop("keyboard_input_mode", None)
         for field, allowed in enum_fields.items():
             value = states.get(field)
             if not isinstance(value, str):

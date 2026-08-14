@@ -358,6 +358,77 @@ class GenericSceneObserverTests(unittest.TestCase):
                 goal_context={"objective": "在空输入框输入agent"},
             )
 
+    def test_discards_keyboard_facts_from_non_target_peripheral_container(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "input-top",
+                "role": "input",
+                "meaning": "search_input",
+                "label": "搜索",
+                "bounds": [80, 20, 600, 80],
+                "confidence": 0.96,
+                "states": {
+                    "goal_relevant": True,
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "chinese_pinyin",
+                },
+                "evidence": ["应用输入框与键盘同时可见"],
+            },
+            {
+                "element_id": "kb_layout_qwerty",
+                "role": "container",
+                "meaning": "keyboard_layout_region",
+                "label": "",
+                "bounds": [0, 600, 1000, 1000],
+                "confidence": 0.95,
+                "states": {
+                    "goal_relevant": False,
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "chinese_pinyin",
+                },
+                "evidence": ["非交互键盘区域"],
+            },
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-peripheral-keyboard-container",
+            goal_context={"objective": "在空输入框输入agent"},
+        )
+
+        container = scene.get_element("kb_layout_qwerty")
+        self.assertNotIn("keyboard_layout", container.states)
+        self.assertNotIn("keyboard_input_mode", container.states)
+        self.assertEqual("qwerty", scene.get_element("input-top").states["keyboard_layout"])
+
+    def test_goal_relevant_non_input_keyboard_facts_still_fail_closed(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "bad-goal-container",
+                "role": "container",
+                "meaning": "keyboard_layout_region",
+                "label": "",
+                "bounds": [0, 600, 1000, 1000],
+                "confidence": 0.95,
+                "states": {
+                    "goal_relevant": True,
+                    "keyboard_layout": "qwerty",
+                },
+                "evidence": ["错误目标结构"],
+            }
+        ]
+
+        with self.assertRaisesRegex(VisionAgentError, "bad-goal-container"):
+            _parse_scene(
+                json.dumps(payload, ensure_ascii=False),
+                fingerprint="frame-bad-goal-container",
+                goal_context={"objective": "切换输入模式"},
+            )
+
     def test_scene_enum_diagnostics_expose_only_keyboard_tokens(self) -> None:
         payload = scene_payload()
         payload["summary"] = "不应出现在枚举诊断中的页面文字"

@@ -1312,6 +1312,7 @@ def _decision_prompt(
    input和states.local_text_clear=true的独立button/icon，只能选择该独立清空控件，不能选择输入框本体
    或键盘退格键。
 4. input_verified_text只能绑定role=input的候选，text必须逐字复制goal.entities.input_text；不能改写、补全或推断。
+   role=input且states.focused=true时禁止再用tap_semantic重复聚焦；这不会推进子目标。
    对小写英文字母精确输入，候选还必须同时提供states.value=""、keyboard_layout="qwerty"和
    keyboard_input_mode="direct_latin"。QWERTY但keyboard_input_mode="chinese_pinyin"时禁止直接输入；
    若可信观察另有meaning=switch_keyboard_input_mode、keyboard_input_mode_switch=true且明确从

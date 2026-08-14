@@ -602,6 +602,18 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn("禁止再点击", prompt)
         self.assertIn("已选中tab", prompt)
 
+    def test_prompt_forbids_redundant_focus_on_focused_input(self) -> None:
+        from qwen_visual_decision import _decision_prompt
+
+        prompt = _decision_prompt(
+            QwenTaskContext.from_dict(self.context),
+            self.observation,
+            decision_number=1,
+            available_action_kinds=frozenset({"tap_semantic", "input_verified_text"}),
+        )
+
+        self.assertIn("states.focused=true时禁止再用tap_semantic重复聚焦", prompt)
+
     def test_forged_mars_element_and_self_authored_page_state_are_rejected(self) -> None:
         forged = action_payload(self.context, self.observation)
         forged["page_state"]["elements"] = [

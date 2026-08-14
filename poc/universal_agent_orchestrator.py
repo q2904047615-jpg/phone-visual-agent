@@ -2246,7 +2246,7 @@ class PhaseOneNavigationPolicy:
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
-    VERSION = "2026-08-14-universal-action-policy-v6"
+    VERSION = "2026-08-14-universal-action-policy-v7"
     ALLOWED_ACTIONS = frozenset(
         {
             "swipe",
@@ -2556,6 +2556,10 @@ class PhaseOneNavigationPolicy:
                 return self._deny("当前候选存在语义冲突或不唯一。")
 
         if action_kind == "tap_semantic" and element.role == "input":
+            if element.states.get("focused") is True:
+                return self._deny(
+                    "输入框已由当前画面证明聚焦，禁止再次点击制造冗余物理动作。"
+                )
             return NavigationPolicyDecision(
                 True,
                 "允许对一个精确可信输入候选执行本地聚焦。",

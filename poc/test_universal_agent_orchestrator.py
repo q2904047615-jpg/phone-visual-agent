@@ -951,6 +951,31 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual("focus_input", result.canonical_class)
 
+    def test_rejects_redundant_tap_on_already_focused_input(self) -> None:
+        scene = _scene(
+            meaning="application_text_input",
+            label="",
+            role="input",
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "chinese_pinyin",
+            },
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(impact="navigation_only"),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("已由当前画面证明聚焦", result.reason)
+
     def test_allows_only_geometrically_bound_local_text_clear_control(self) -> None:
         input_element = UIElement(
             element_id="field",

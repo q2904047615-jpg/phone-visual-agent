@@ -201,6 +201,57 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
             self.assertEqual(0, configure.call_count)
             self.assertEqual(0, click.call_count)
 
+    def test_deprecated_public_app_workflows_are_zero_physical_with_or_without_authorization(self):
+        entries = (
+            ("like", lambda controller: controller.like_current_douyin({})),
+            (
+                "comment",
+                lambda controller: controller.comment_current_douyin(
+                    {"text": "draft"}
+                ),
+            ),
+            (
+                "wechat",
+                lambda controller: controller.send_wechat_text(
+                    {"text": "draft"}
+                ),
+            ),
+        )
+        for authorized in (False, True):
+            for label, invoke in entries:
+                with self.subTest(authorized=authorized, entry=label):
+                    controller = self._controller()
+                    if authorized:
+                        controller.arm_physical_execution(
+                            audited_credential(),
+                            action="tap_semantic",
+                            scene_fingerprint="scene-a",
+                        )
+                    with (
+                        patch("robot_core.legacy.find_window") as find_window,
+                        patch("robot_core.legacy.configure_single_click_count") as configure,
+                        patch("robot_core.legacy.click_client_point") as click,
+                        patch("robot_core.legacy.drag_client_path") as drag,
+                        patch("robot_core.legacy.trigger_selected_action") as trigger,
+                        patch("robot_core.legacy.click_client_control") as control,
+                    ):
+                        with self.assertRaisesRegex(
+                            WorkflowNotReady,
+                            "已废弃的 App 多步流程入口已禁用",
+                        ):
+                            invoke(controller)
+                        self.assertEqual(
+                            [0, 0, 0, 0, 0, 0],
+                            [
+                                find_window.call_count,
+                                configure.call_count,
+                                click.call_count,
+                                drag.call_count,
+                                trigger.call_count,
+                                control.call_count,
+                            ],
+                        )
+
 
 if __name__ == "__main__":
     unittest.main()

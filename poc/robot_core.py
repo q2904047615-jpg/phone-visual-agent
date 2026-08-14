@@ -1441,6 +1441,9 @@ class RobotController:
         )
 
     def like_current_douyin(self, _params: dict[str, Any]) -> dict[str, Any]:
+        raise WorkflowNotReady(
+            "已废弃的 App 多步流程入口已禁用；必须使用通用单动作闭环。"
+        )
         self._require_verified_action("tap_semantic", "点击")
         ready = workflow_readiness()["douyin_like"]
         if not ready["ready"]:
@@ -1529,6 +1532,9 @@ class RobotController:
         }
 
     def comment_current_douyin(self, params: dict[str, Any]) -> dict[str, Any]:
+        raise WorkflowNotReady(
+            "已废弃的 App 多步流程入口已禁用；必须使用通用单动作闭环。"
+        )
         self._require_verified_action("input_verified_text", "输入文字")
         self._require_verified_action("tap_semantic", "点击")
         text = str(params.get("text", "")).strip()
@@ -1592,6 +1598,9 @@ class RobotController:
         }
 
     def send_wechat_text(self, params: dict[str, Any]) -> dict[str, Any]:
+        raise WorkflowNotReady(
+            "已废弃的 App 多步流程入口已禁用；必须使用通用单动作闭环。"
+        )
         self._require_verified_action("input_verified_text", "输入文字")
         self._require_verified_action("tap_semantic", "点击")
         text = str(params.get("text", "")).strip()

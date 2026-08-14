@@ -1076,6 +1076,7 @@ def _goal_requests_input(context: dict[str, Any]) -> bool:
         term in visible
         for term in (
             "输入框",
+            "文本框",
             "搜索框",
             "编辑框",
             "地址栏",
@@ -1088,6 +1089,7 @@ def _goal_requests_input(context: dict[str, Any]) -> bool:
             "editable field",
             "address bar",
             "textbox",
+            "input_text",
             "输入模式",
             "直输模式",
             "键盘模式",
@@ -1141,11 +1143,52 @@ def _goal_requests_local_text_clear(context: dict[str, Any]) -> bool:
 def _should_audit_prefilled_input(scene: UIScene, context: dict[str, Any]) -> bool:
     if not _goal_requests_input(context):
         return False
-    return not any(
-        item.role == "input"
+    trusted_inputs = tuple(
+        item
+        for item in scene.elements
+        if item.role == "input"
         and item.states.get("goal_relevant") is True
         and float(item.confidence) >= 0.9
-        for item in scene.elements
+    )
+    if len(trusted_inputs) != 1:
+        return True
+    states = trusted_inputs[0].states
+    if not isinstance(states.get("value"), str):
+        return True
+    keyboard_is_relevant = states.get("focused") is True or _scene_reports_keyboard(
+        scene
+    )
+    if not keyboard_is_relevant:
+        return False
+    return not (
+        states.get("fully_visible") is True
+        and states.get("focused") is True
+        and states.get("keyboard_layout") in {"qwerty", "numeric", "symbol"}
+        and states.get("keyboard_input_mode")
+        in {"direct_latin", "chinese_pinyin"}
+    )
+
+
+def _scene_reports_keyboard(scene: UIScene) -> bool:
+    visible = " ".join(
+        [
+            scene.summary,
+            *scene.overlays,
+            *(
+                " ".join(
+                    [
+                        element.role,
+                        element.meaning,
+                        element.label,
+                        *element.evidence,
+                    ]
+                )
+                for element in scene.elements
+            ),
+        ]
+    )
+    return bool(
+        re.search(r"(?:软键盘|输入法|键盘|keyboard|ime)", visible, re.IGNORECASE)
     )
 
 
@@ -1340,11 +1383,19 @@ def _apply_input_structure_audit(
             return scene
 
         value = scene.to_dict()
-        elements = list(value.get("elements") or [])
-        for element in elements:
-            if isinstance(element, dict):
-                element["states"] = dict(element.get("states") or {})
-                element["states"]["goal_relevant"] = False
+        elements: list[dict[str, Any]] = []
+        for element in value.get("elements") or []:
+            if not isinstance(element, dict):
+                continue
+            element = dict(element)
+            element["states"] = dict(element.get("states") or {})
+            element["states"]["goal_relevant"] = False
+            # A trusted audit input supersedes preliminary input proposals. Keeping
+            # both would leave two overlapping high-confidence action targets and
+            # correctly make unique_trusted_goal_element reject the scene.
+            if trusted_input is not None and element.get("role") == "input":
+                continue
+            elements.append(element)
         if trusted_input is not None:
             states: dict[str, Any] = {
                 "goal_relevant": not switch_is_goal,

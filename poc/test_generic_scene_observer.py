@@ -1076,6 +1076,72 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertFalse(mode_switch.states["goal_relevant"])
         self.assertEqual("direct_latin", mode_switch.states["target_mode"])
 
+    def test_input_audit_enriches_known_focused_input_missing_keyboard_facts(self) -> None:
+        preliminary = scene_payload()
+        preliminary["summary"] = "唯一空输入框已聚焦，外围键盘容器可见"
+        preliminary["elements"] = [
+            {
+                "element_id": "input-target",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "",
+                "bounds": [150, 440, 850, 530],
+                "confidence": 0.98,
+                "states": {
+                    "value": "",
+                    "goal_relevant": True,
+                    "focused": True,
+                    "fully_visible": True,
+                },
+                "evidence": ["输入框为空，光标可见"],
+            },
+            {
+                "element_id": "keyboard-container",
+                "role": "container",
+                "meaning": "keyboard_region",
+                "label": "QWERTY键盘",
+                "bounds": [70, 580, 930, 990],
+                "confidence": 0.95,
+                "states": {"goal_relevant": False},
+                "evidence": ["标准QWERTY按键可见"],
+            },
+        ]
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="empty-focused-input",
+                    bounds=[150, 440, 850, 530],
+                    text="",
+                    placeholder="",
+                    right_button=None,
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [70, 580, 930, 990],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "mode_switch": None,
+            },
+        )
+        provider = SequenceProvider([preliminary, audit])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "使唯一文本框最终显示小写文字 agent"},
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(candidate)
+        self.assertEqual("local_audited_input_1", candidate.element_id)
+        self.assertEqual("", candidate.states["value"])
+        self.assertTrue(candidate.states["focused"])
+        self.assertTrue(candidate.states["fully_visible"])
+        self.assertEqual("qwerty", candidate.states["keyboard_layout"])
+        self.assertEqual("direct_latin", candidate.states["keyboard_input_mode"])
+        self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
+
     def test_input_audit_never_promotes_ime_preedit_region_to_application_input(self) -> None:
         empty = scene_payload()
         empty["elements"] = []

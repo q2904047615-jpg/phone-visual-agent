@@ -6,7 +6,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from generic_scene_observer import _local_frame_fingerprint
 from generic_step_planner import GenericStepPlanningError
@@ -194,7 +194,11 @@ def scene_for(
 
     for frame in frames:
         sharpness.append(measure_frame_sharpness(frame))
-    selected = max(range(len(frames)), key=sharpness.__getitem__)
+    stable_tail_start = max(0, len(frames) - min(3, len(frames)))
+    selected = max(
+        range(stable_tail_start, len(frames)),
+        key=sharpness.__getitem__,
+    )
     return UIScene(
         app_id=app_id,
         screen_id=screen_id,
@@ -1414,6 +1418,26 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 device_id="offline_phone_01",
                 scene=stale,
             )
+
+    def test_trusted_observation_uses_converged_tail_not_sharper_leading_frame(self) -> None:
+        base = self.frames[-1].copy().convert("RGB")
+        leading = base.copy()
+        draw = ImageDraw.Draw(leading)
+        for y in range(220, 700, 8):
+            for x in range(140, 400, 8):
+                color = "white" if ((x + y) // 8) % 2 else "black"
+                draw.rectangle((x, y, x + 7, y + 7), fill=color)
+        frames = [leading, base.copy(), base.copy(), base.copy()]
+        scene = scene_for(frames)
+
+        observation = TrustedObservation.from_scene(
+            frames=frames,
+            device_id="offline_phone_01",
+            scene=scene,
+        )
+
+        self.assertGreaterEqual(observation.selected_frame_index, 1)
+        self.assertEqual(_local_frame_fingerprint(base), observation.fingerprint)
 
     def test_finished_uses_only_trusted_evidence_ids(self) -> None:
         payload = action_payload(self.context, self.observation)

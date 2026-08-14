@@ -530,13 +530,21 @@ class TrustedObservation:
             raise VisionAgentError("可信观察至少需要4帧。")
         if not DEVICE_ID_PATTERN.fullmatch(str(device_id or "").strip()):
             raise VisionAgentError(f"可信观察 device_id 无效：{device_id!r}")
-        stability = measure_local_stability(frames)
+        stability = measure_local_stability(frames, allow_leading_outlier=True)
         if not stability.stable:
             raise VisionAgentError(
                 f"本地多帧稳定性检查未通过：{stability.reason}；不能建立可信观察。"
             )
         sharpness = tuple(measure_frame_sharpness(frame) for frame in frames)
-        selected = max(range(len(frames)), key=sharpness.__getitem__)
+        # GenericSceneObserver permits one stale leading camera frame and only
+        # exposes a fingerprint from the converged three-frame tail.  Reusing
+        # the leading sample here could make the same read-only capture reject
+        # itself merely because a transient overlay looked sharper.
+        stable_tail_start = max(0, len(frames) - min(3, len(frames)))
+        selected = max(
+            range(stable_tail_start, len(frames)),
+            key=sharpness.__getitem__,
+        )
         sharpness_floor = float(
             os.environ.get(
                 "ROBOT_LOCAL_FRAME_SHARPNESS_MIN",
@@ -579,19 +587,35 @@ class TrustedObservation:
             candidate_aliases=aliases,
             candidate_conflicts=conflicts,
         )
-        result.validate_against_frames(frames)
+        result.validate_against_frames(frames, allow_leading_outlier=True)
         return result
 
-    def validate_against_frames(self, frames: list[Image.Image]) -> None:
+    def validate_against_frames(
+        self,
+        frames: list[Image.Image],
+        *,
+        allow_leading_outlier: bool = False,
+    ) -> None:
         if len(frames) < 4:
             raise VisionAgentError("新鲜度校验至少需要4帧。")
-        stability = measure_local_stability(frames)
+        stability = measure_local_stability(
+            frames,
+            allow_leading_outlier=allow_leading_outlier,
+        )
         if not stability.stable:
             raise VisionAgentError(
                 f"当前画面已不稳定：{stability.reason}；旧观察失效。"
             )
         sharpness = [measure_frame_sharpness(frame) for frame in frames]
-        selected = max(range(len(frames)), key=sharpness.__getitem__)
+        eligible_start = (
+            max(0, len(frames) - min(3, len(frames)))
+            if allow_leading_outlier
+            else 0
+        )
+        selected = max(
+            range(eligible_start, len(frames)),
+            key=sharpness.__getitem__,
+        )
         sharpness_floor = float(
             os.environ.get(
                 "ROBOT_LOCAL_FRAME_SHARPNESS_MIN",
@@ -1080,7 +1104,14 @@ class QwenVisualDecisionObserver:
         available_actions = _normalize_available_action_kinds(
             available_action_kinds
         )
-        trusted_observation.validate_against_frames(frames)
+        # These are the same read-only frames that established the trusted
+        # observation, so apply the observer's one-leading-frame tolerance.
+        # Confirmation-time recapture and post-action verification use their
+        # own stricter full-window stability checks.
+        trusted_observation.validate_against_frames(
+            frames,
+            allow_leading_outlier=True,
+        )
         if context.device_id != trusted_observation.device_id:
             raise VisionAgentError("任务 device_id 与可信观察不一致。")
         self._metrics["decision_count"] += 1

@@ -689,6 +689,7 @@ def _parse_scene(
     try:
         payload = _extract_json_object(raw)
         _normalize_compact_scene_payload(payload)
+        _normalize_known_scene_enums(payload)
         _normalize_prefilled_input_structure(payload, goal_context or {})
         _normalize_local_text_clear_structure(payload, goal_context or {})
         _normalize_unique_input_focus(payload)
@@ -1572,6 +1573,41 @@ def _normalize_compact_scene_payload(payload: dict[str, Any]) -> None:
         # not converted into a clickable role and therefore cannot be targeted.
 
     payload["elements"] = accepted
+
+
+def _normalize_known_scene_enums(payload: dict[str, Any]) -> None:
+    """Normalize only casing/outer whitespace for already-known enum tokens.
+
+    Unknown values are intentionally preserved so the strict UI scene parser
+    still rejects them instead of guessing a keyboard fact.
+    """
+
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return
+    enum_fields = {
+        "keyboard_layout": {"qwerty", "numeric", "symbol", "unknown"},
+        "keyboard_input_mode": {
+            "direct_latin",
+            "chinese_pinyin",
+            "unknown",
+        },
+        "current_mode": {"direct_latin", "chinese_pinyin"},
+        "target_mode": {"direct_latin", "chinese_pinyin"},
+    }
+    for item in elements:
+        if not isinstance(item, dict):
+            continue
+        states = item.get("states")
+        if not isinstance(states, dict):
+            continue
+        for field, allowed in enum_fields.items():
+            value = states.get(field)
+            if not isinstance(value, str):
+                continue
+            normalized = value.strip().casefold()
+            if normalized in allowed:
+                states[field] = normalized
 
 
 def _compact_retry_allowed(error: VisionAgentError) -> bool:

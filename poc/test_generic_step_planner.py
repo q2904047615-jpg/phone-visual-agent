@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 
+from capability_acceptance import _validate_live_promotion_source
 from generic_action_adapter import (
     GenericActionAdapterError,
     GenericSingleActionAdapter as _GenericSingleActionAdapter,
@@ -902,11 +903,29 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual(4, len(result.after_frames))
         self.assertEqual(4, len(result.before_frames))
+        self.assertIsInstance(result.after_frames, tuple)
+        self.assertIsInstance(result.before_frames, tuple)
         self.assertEqual(4, len(result.before_frame_paths))
         self.assertTrue(
             all(frame.getpixel((0, 0)) == (255, 255, 255) for frame in result.after_frames)
         )
         self.assertEqual(4, len(result.after_frame_paths))
+        credential = result.orientation_credential
+        self.assertIsNotNone(credential)
+        _validate_live_promotion_source(
+            report={
+                "candidate_action": "tap_semantic",
+                "device_id": credential.device_id,
+                "physical_actions": 1,
+                "action_outcome": "matched",
+                "execution": {
+                    "orientation_credential": credential.to_dict(),
+                },
+                "before_frame_paths": list(result.before_frame_paths),
+            },
+            orientation_credential=credential,
+            execution_result=result,
+        )
 
     def test_after_frame_fingerprint_matches_after_scene(self):
         gray = Image.new("RGB", (540, 960), "gray")

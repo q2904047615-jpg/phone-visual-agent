@@ -73,6 +73,14 @@ class GenericActionExecutionResult:
     before_frame_paths: tuple[str, ...] = ()
     orientation_credential: OrientationCredential | None = None
 
+    def __post_init__(self) -> None:
+        # Capture helpers intentionally build mutable lists while sampling.  The
+        # completed execution result is a live promotion source, so freeze both
+        # frame collections at the result boundary instead of exposing a
+        # list-shaped object that the promotion validator must reject.
+        object.__setattr__(self, "after_frames", tuple(self.after_frames))
+        object.__setattr__(self, "before_frames", tuple(self.before_frames))
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "requested_action": self.requested_action.to_dict(),

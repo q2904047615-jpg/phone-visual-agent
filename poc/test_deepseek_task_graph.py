@@ -420,6 +420,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         prompt = provider.messages[0][0]["content"]
         self.assertIn("任意 App", prompt)
         self.assertIn("不能输出坐标", prompt)
+        self.assertIn("具名入口在列表中可见", prompt)
+        self.assertIn("入口可见绝不能证明", prompt)
 
     def test_qwen_context_exposes_only_current_subgoal_and_linked_risks(self):
         graph = DeepSeekTaskGraphPlanner(FakeProvider(base_payload())).plan(

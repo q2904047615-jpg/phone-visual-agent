@@ -333,6 +333,8 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         for prompt in (compact, targeted):
             self.assertIn("部分可见的后续", prompt)
+            self.assertIn("连续引导轨", prompt)
+            self.assertIn("页面延续标记", prompt)
             self.assertIn("summary", prompt)
             self.assertIn("不得", prompt)
             self.assertIn("可操作目标", prompt)

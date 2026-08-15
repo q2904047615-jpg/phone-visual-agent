@@ -620,7 +620,9 @@ class QwenVisualDecisionTests(unittest.TestCase):
         )
 
         self.assertIn("目标字面标签或目标区域尚未出现在可信候选中", prompt)
-        self.assertIn("列表边缘存在被裁切的", prompt)
+        self.assertIn("边缘存在", prompt)
+        self.assertIn("被裁切的后续内容", prompt)
+        self.assertIn("连续引导轨/连接线明确接触该边缘", prompt)
         self.assertIn('expected_result只写{"content_changed":true}', prompt)
         self.assertIn("动作后必须重新观察，不能连续执行", prompt)
 

@@ -1505,8 +1505,9 @@ def _decision_prompt(
     证明子目标时必须 finished，并可用 completion_evidence_element_ids=["scene"] 引用可信场景摘要；
     尚未证明时必须 blocked。只有目标明确要求等待异步变化时才可使用 wait_for_change。
 16. current_external_impact=navigation_only 且目标字面标签或目标区域尚未出现在可信候选中时，
-    只有原图明确显示当前就是与目标相关、仍可继续浏览的列表/信息流，并且列表边缘存在被裁切的
-    后续内容、没有遮挡层时，才允许返回一次整屏 swipe 去显示更多内容。根据原图内容延伸方向选择
+    只有原图明确显示当前就是与目标相关、仍可继续浏览的列表/信息流/结构化分步流程，并且边缘存在
+    被裁切的后续内容，或属于页面内容的连续引导轨/连接线明确接触该边缘、同时没有遮挡层时，才允许
+    返回一次整屏 swipe 去显示更多内容。根据原图内容延伸方向选择
     up/down/left/right，expected_result只写{{"content_changed":true}}；不得点击无关候选，不得猜测
     目标已经存在，也不得在无法证明可继续浏览时滑动。动作后必须重新观察，不能连续执行。
 """
@@ -1553,8 +1554,9 @@ def _decision_retry_prompt(
 - current_external_impact=read_only 时禁止点击、滑动、返回、输入、长按和拖动；画面已证明结果就
   finished，并可用 completion_evidence_element_ids=["scene"]，否则blocked；只有明确等待异步变化
   才可 wait_for_change。
-- navigation_only 的目标候选尚未出现时，只有原图明确显示相关列表/信息流可继续浏览且边缘有被裁切
-  内容、没有遮挡层，才可返回一次整屏swipe；expected_result必须是{{"content_changed":true}}，
+- navigation_only 的目标候选尚未出现时，只有原图明确显示相关列表/信息流/结构化分步流程可继续浏览，
+  且边缘有被裁切内容或属于页面内容的连续引导轨/连接线明确接触该边缘、没有遮挡层，才可返回一次
+  整屏swipe；expected_result必须是{{"content_changed":true}}，
   不得点击无关候选或连续滑动。
 - swipe只允许direction=up|down|left|right，绝对不要返回distance；距离由本地控制器决定。
 - status是互斥判别字段，必须先选择且只选择下面一种完整形状：

@@ -524,6 +524,9 @@ class GenericActionAdapterTests(unittest.TestCase):
 
     def test_orientation_gate_rejects_unknown_low_confidence_or_local_mismatch(self):
         cases = (
+            ("rotated_90", 0.95, "方向不一致或未知"),
+            ("rotated_180", 0.95, "方向不一致或未知"),
+            ("rotated_270", 0.95, "方向不一致或未知"),
             ("unknown", 0.95, "方向不一致或未知"),
             ("upright", 0.4, "置信度不足"),
         )
@@ -542,7 +545,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                     frame_interval=0,
                     post_action_settle=0,
                 )
-                with self.assertRaisesRegex(GenericActionAdapterError, error):
+                with self.assertRaisesRegex(GenericActionAdapterError, error) as caught:
                     adapter.execute(
                         requested_action=SemanticAction(
                             node_id="blocked-back",
@@ -554,6 +557,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                         goal=goal(),
                         confirmed=True,
                     )
+                self.assertEqual(0, caught.exception.physical_actions)
                 self.assertEqual([], robot.actions)
 
     def test_reveal_system_navigation_calls_one_dedicated_robot_action(self):

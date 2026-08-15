@@ -84,9 +84,6 @@ class GenericSceneObserver:
         self._current_stage = "idle"
         self._last_stage = "idle"
         self.last_orientation_audit_diagnostics: dict[str, Any] = {}
-        self._orientation_cache: dict[
-            tuple[str, str, str, tuple[int, int]], dict[str, Any]
-        ] = {}
 
     def audit_camera_alignment(
         self,
@@ -110,27 +107,6 @@ class GenericSceneObserver:
         )
         frame = frames[selected_index].convert("RGB")
         local_fingerprint = _local_frame_fingerprint(frame)
-        key = (device_id, scene_fingerprint, local_fingerprint, tuple(frame.size))
-        cached = self._orientation_cache.get(key)
-        if cached is not None:
-            credential = _mint_audited_credential(
-                device_id=device_id,
-                scene_fingerprint=scene_fingerprint,
-                frame=frame,
-                phone_content_rotation=cached["phone_content_rotation"],
-                confidence=cached["confidence"],
-                evidence=tuple(cached["evidence"]),
-            )
-            self.last_orientation_audit_diagnostics = {
-                "audit_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
-                "model_calls": 0,
-                "image_count": 0,
-                "cache_hit": True,
-                "selected_frame_index": selected_index,
-                "frame_size": list(frame.size),
-                "frame_fingerprint": local_fingerprint,
-            }
-            return credential
 
         images = (
             frame,
@@ -177,7 +153,6 @@ class GenericSceneObserver:
                 scene_fingerprint=scene_fingerprint,
                 frame_size=tuple(frame.size),
             )
-            self._orientation_cache[key] = dict(payload)
             self.last_orientation_audit_diagnostics = {
                 "audit_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
                 "model_calls": 1,
@@ -203,7 +178,6 @@ class GenericSceneObserver:
                 "response_payload": _orientation_audit_diagnostic_payload(raw),
                 "audit_accepted": False,
                 "error_type": classify_qwen_error(exc, raw_response=raw),
-                "error": str(exc)[:500],
             }
             if isinstance(exc, VisionAgentError):
                 raise
@@ -957,9 +931,33 @@ Return exactly this JSON object and no Markdown:
 def _orientation_audit_diagnostic_payload(raw: str) -> dict[str, Any]:
     """Keep only bounded protocol facts; never retain raw evidence or authority."""
 
+    def value_type(value: Any, *, missing: object) -> str:
+        if value is missing:
+            return "missing"
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, (int, float)):
+            return "number"
+        if isinstance(value, str):
+            return "string"
+        if isinstance(value, list):
+            return "array"
+        if isinstance(value, dict):
+            return "object"
+        return "other"
+
+    missing = object()
     result: dict[str, Any] = {
-        "response_length": len(str(raw or "")),
-        "json_object_found": False,
+        "payload_object_found": False,
+        "protocol_version_match": False,
+        "rotation_valid": False,
+        "confidence_valid": False,
+        "confidence_type": "missing",
+        "evidence_value_type": "missing",
+        "unexpected_fields_count": 0,
+        "has_unexpected_fields": False,
     }
     try:
         payload = _extract_json_object(raw)
@@ -967,39 +965,49 @@ def _orientation_audit_diagnostic_payload(raw: str) -> dict[str, Any]:
         return result
     if not isinstance(payload, dict):
         return result
-    result["json_object_found"] = True
+    result["payload_object_found"] = True
     allowed = {
         "protocol_version", "phone_content_rotation", "confidence", "evidence"
     }
-    unexpected = sorted(
-        str(key)[:64] for key in payload if key not in allowed
+    unexpected_count = sum(1 for key in payload if key not in allowed)
+    result["unexpected_fields_count"] = unexpected_count
+    result["has_unexpected_fields"] = unexpected_count > 0
+    result["protocol_version_match"] = (
+        payload.get("protocol_version", missing)
+        == ORIENTATION_AUDIT_PROTOCOL_VERSION
     )
-    if unexpected:
-        result["unexpected_fields"] = unexpected[:16]
-    for key in ("protocol_version", "phone_content_rotation"):
-        value = payload.get(key)
-        result[key] = value[:96] if isinstance(value, str) else {
-            "value_type": type(value).__name__
-        }
-    confidence = payload.get("confidence")
-    result["confidence"] = (
-        float(confidence)
-        if not isinstance(confidence, bool) and isinstance(confidence, (int, float))
-        else {"value_type": type(confidence).__name__}
+    rotation = payload.get("phone_content_rotation", missing)
+    valid_rotations = {
+        "upright", "rotated_90", "rotated_180", "rotated_270", "unknown"
+    }
+    result["rotation_valid"] = (
+        isinstance(rotation, str) and rotation in valid_rotations
     )
-    evidence = payload.get("evidence")
-    if isinstance(evidence, list):
-        result["evidence"] = {
-            "value_type": "list",
-            "item_count": len(evidence),
-            "item_types": [type(item).__name__ for item in evidence[:8]],
-            "item_lengths": [
-                len(item) if isinstance(item, str) else None
-                for item in evidence[:8]
-            ],
-        }
+    if result["rotation_valid"]:
+        result["phone_content_rotation"] = rotation
+    confidence = payload.get("confidence", missing)
+    confidence_valid = (
+        not isinstance(confidence, bool)
+        and isinstance(confidence, (int, float))
+        and 0.0 <= float(confidence) <= 1.0
+    )
+    result["confidence_valid"] = confidence_valid
+    if confidence_valid:
+        result["confidence"] = float(confidence)
+        result.pop("confidence_type", None)
     else:
-        result["evidence"] = {"value_type": type(evidence).__name__}
+        result["confidence_type"] = value_type(confidence, missing=missing)
+    evidence = payload.get("evidence", missing)
+    result["evidence_value_type"] = value_type(evidence, missing=missing)
+    if isinstance(evidence, list):
+        result["evidence_count"] = len(evidence)
+        result["evidence_item_types"] = [
+            value_type(item, missing=missing) for item in evidence[:8]
+        ]
+        result["evidence_item_lengths"] = [
+            len(item) if isinstance(item, str) else None
+            for item in evidence[:8]
+        ]
     return result
 
 

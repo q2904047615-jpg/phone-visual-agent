@@ -404,7 +404,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("portrait", scene.camera_alignment.camera_layout_orientation)
         self.assertEqual("upright", scene.camera_alignment.phone_content_rotation)
 
-    def test_independent_direction_audit_uses_three_images_and_exact_cache_key(self):
+    def test_each_independent_direction_audit_uses_one_fresh_three_image_call(self):
         provider = FakeProvider(
             {
                 "protocol_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
@@ -431,6 +431,14 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         self.assertEqual(1, provider.calls)
         self.assertEqual(3, observer.last_orientation_audit_diagnostics["image_count"])
+        accepted_payload = observer.last_orientation_audit_diagnostics[
+            "response_payload"
+        ]
+        self.assertTrue(accepted_payload["protocol_version_match"])
+        self.assertTrue(accepted_payload["rotation_valid"])
+        self.assertEqual("upright", accepted_payload["phone_content_rotation"])
+        self.assertTrue(accepted_payload["confidence_valid"])
+        self.assertEqual(0.95, accepted_payload["confidence"])
         prompt = first_content[0]["text"]
         self.assertIn("Classify ONLY Image 1", prompt)
         self.assertIn("never classification targets", prompt)
@@ -453,16 +461,18 @@ class GenericSceneObserverTests(unittest.TestCase):
             device_id="device-a",
             scene_fingerprint="scene-a",
         )
-        self.assertEqual(1, provider.calls)
+        self.assertEqual(2, provider.calls)
         self.assertNotEqual(first.credential_id, second.credential_id)
-        self.assertTrue(observer.last_orientation_audit_diagnostics["cache_hit"])
+        self.assertEqual(1, observer.last_orientation_audit_diagnostics["model_calls"])
+        self.assertEqual(3, observer.last_orientation_audit_diagnostics["image_count"])
+        self.assertFalse(observer.last_orientation_audit_diagnostics["cache_hit"])
 
         observer.audit_camera_alignment(
             frames=frames,
             device_id="device-a",
             scene_fingerprint="scene-b",
         )
-        self.assertEqual(2, provider.calls)
+        self.assertEqual(3, provider.calls)
 
     def test_independent_direction_audit_fails_closed_on_unknown_low_or_extra_fields(self):
         cases = (
@@ -499,11 +509,11 @@ class GenericSceneObserverTests(unittest.TestCase):
 
     def test_direction_audit_failure_diagnostics_redact_evidence_and_extra_values(self):
         payload = {
-            "protocol_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
-            "phone_content_rotation": "unknown",
-            "confidence": 0.95,
+            "protocol_version": "private-protocol-value",
+            "phone_content_rotation": "sideways-private-value",
+            "confidence": "high-private-value",
             "evidence": ["联系人张三 13800138000"],
-            "action": "tap x=123 y=456",
+            "private_instruction": "tap x=123 y=456",
         }
         observer = GenericSceneObserver(FakeProvider(payload))
 
@@ -517,11 +527,22 @@ class GenericSceneObserverTests(unittest.TestCase):
         diagnostics = observer.last_orientation_audit_diagnostics
         structured = diagnostics["response_payload"]
         serialized = json.dumps(diagnostics, ensure_ascii=False)
-        self.assertEqual("unknown", structured["phone_content_rotation"])
-        self.assertEqual(["action"], structured["unexpected_fields"])
-        self.assertEqual(1, structured["evidence"]["item_count"])
+        self.assertFalse(structured["protocol_version_match"])
+        self.assertFalse(structured["rotation_valid"])
+        self.assertNotIn("phone_content_rotation", structured)
+        self.assertFalse(structured["confidence_valid"])
+        self.assertEqual("string", structured["confidence_type"])
+        self.assertNotIn("confidence", structured)
+        self.assertTrue(structured["has_unexpected_fields"])
+        self.assertEqual(1, structured["unexpected_fields_count"])
+        self.assertEqual(1, structured["evidence_count"])
+        self.assertEqual(["string"], structured["evidence_item_types"])
         self.assertNotIn("张三", serialized)
         self.assertNotIn("13800138000", serialized)
+        self.assertNotIn("sideways-private-value", serialized)
+        self.assertNotIn("private-protocol-value", serialized)
+        self.assertNotIn("high-private-value", serialized)
+        self.assertNotIn("private_instruction", serialized)
         self.assertNotIn("tap x=123", serialized)
         self.assertNotIn("credential", serialized.casefold())
         self.assertFalse(diagnostics["audit_accepted"])

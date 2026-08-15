@@ -31,12 +31,18 @@ def patterned_frame() -> Image.Image:
     return frame
 
 
-def audited_credential(*, device_id="device-a", scene="scene-a", frame=FRAME):
+def audited_credential(
+    *,
+    device_id="device-a",
+    scene="scene-a",
+    frame=FRAME,
+    phone_content_rotation="upright",
+):
     return _mint_audited_credential(
         device_id=device_id,
         scene_fingerprint=scene,
         frame=frame,
-        phone_content_rotation="upright",
+        phone_content_rotation=phone_content_rotation,
         confidence=0.95,
         evidence=("手机状态文字正向",),
     )
@@ -207,6 +213,59 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                     self.assertEqual(
                         [0] * len(physical_names),
                         [item.call_count for item in mocks],
+                    )
+
+    def test_non_upright_credentials_cannot_reach_public_robot_physical_entry(self):
+        for rotation in (
+            "rotated_90",
+            "rotated_180",
+            "rotated_270",
+            "unknown",
+        ):
+            with self.subTest(rotation=rotation):
+                controller = self._controller()
+                credential = audited_credential(
+                    phone_content_rotation=rotation,
+                )
+                with self.assertRaisesRegex(
+                    OrientationSafetyError,
+                    "方向不一致或未知",
+                ):
+                    controller.arm_physical_execution(
+                        credential,
+                        action="back",
+                        scene_fingerprint="scene-a",
+                    )
+                with (
+                    patch(
+                        "robot_core.legacy.find_window",
+                        return_value=(123, "test"),
+                    ),
+                    patch.object(
+                        controller,
+                        "_capture_phone",
+                        return_value=FRAME.copy(),
+                    ),
+                    patch("robot_core.legacy.configure_single_click_count") as configure,
+                    patch("robot_core.legacy.click_client_point") as click,
+                    patch("robot_core.legacy.drag_client_path") as drag,
+                    patch("robot_core.legacy.configure_swipe") as configure_swipe,
+                    patch("robot_core.legacy.trigger_selected_action") as trigger,
+                ):
+                    with self.assertRaisesRegex(
+                        OrientationSafetyError,
+                        "一次性方向授权",
+                    ):
+                        controller.vision_android_back()
+                    self.assertEqual(
+                        [0, 0, 0, 0, 0],
+                        [
+                            configure.call_count,
+                            click.call_count,
+                            drag.call_count,
+                            configure_swipe.call_count,
+                            trigger.call_count,
+                        ],
                     )
 
     def test_legacy_multi_step_and_calibration_bypasses_are_closed(self):

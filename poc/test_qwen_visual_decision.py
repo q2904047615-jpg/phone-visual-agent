@@ -609,6 +609,92 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn("禁止再点击", prompt)
         self.assertIn("已选中tab", prompt)
 
+    def test_drag_prompt_uses_flat_endpoint_fields_and_container_destination(self) -> None:
+        from qwen_visual_decision import _decision_prompt
+
+        prompt = _decision_prompt(
+            QwenTaskContext.from_dict(self.context),
+            self.observation,
+            decision_number=1,
+            available_action_kinds=frozenset({"drag"}),
+        )
+
+        self.assertIn("source_element_id/source_target/source_role", prompt)
+        self.assertIn("destination_element_id/destination_target/destination_role", prompt)
+        self.assertIn("绝不能返回source或destination嵌套对象", prompt)
+        self.assertIn("container可以逐字复制为destination_element_id", prompt)
+
+    def test_flat_drag_payload_binds_two_trusted_candidates(self) -> None:
+        source = UIElement(
+            element_id="source",
+            role="image",
+            meaning="drag_source_block",
+            label="起点",
+            bounds=(0.19, 0.67, 0.38, 0.81),
+            confidence=0.98,
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=("紫色方块内逐字显示起点",),
+        )
+        destination = UIElement(
+            element_id="destination",
+            role="container",
+            meaning="drop_target_zone",
+            label="绿色终点",
+            bounds=(0.53, 0.63, 0.83, 0.86),
+            confidence=0.98,
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=("绿色虚线区域内逐字显示绿色终点",),
+        )
+        observation = trusted_observation(
+            self.frames,
+            elements=(source, destination),
+        )
+        payload = action_payload(
+            self.context,
+            observation,
+            element_id="source",
+        )
+        payload["next_action"] = {
+            "kind": "drag",
+            "source_element_id": source.element_id,
+            "source_target": source.meaning,
+            "source_role": source.role,
+            "source_label": source.label,
+            "source_states": dict(source.states),
+            "destination_element_id": destination.element_id,
+            "destination_target": destination.meaning,
+            "destination_role": destination.role,
+            "destination_label": destination.label,
+            "destination_states": dict(destination.states),
+        }
+        payload["target_region"] = {
+            "kind": "element_path",
+            "element_id": source.element_id,
+            "bounds": [round(item * 1000) for item in source.bounds],
+            "destination_element_id": destination.element_id,
+            "destination_bounds": [
+                round(item * 1000) for item in destination.bounds
+            ],
+            "description": "起点到绿色终点",
+        }
+
+        _observer, decision = self.decide(
+            FakeProvider(payload),
+            observation=observation,
+        )
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("drag", decision.proposal.action.action)
+        self.assertEqual(
+            source.element_id,
+            decision.proposal.action.params["source_element_id"],
+        )
+        self.assertEqual(
+            destination.element_id,
+            decision.proposal.action.params["destination_element_id"],
+        )
+        self.assertEqual("element_path", decision.target_region.kind)
+
     def test_prompt_forbids_redundant_focus_on_focused_input(self) -> None:
         from qwen_visual_decision import _decision_prompt
 
@@ -1444,6 +1530,10 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn('"element_id":"逐字复制可信候选ID"', prompt)
         self.assertIn('"target_region":{"kind":"element"', prompt)
         self.assertIn('"expected_result":{"scene_changed":true}', prompt)
+        self.assertIn('"source_element_id":"逐字复制起点候选ID"', prompt)
+        self.assertIn('"destination_element_id":"逐字复制终点候选ID"', prompt)
+        self.assertIn('"kind":"element_path"', prompt)
+        self.assertIn("绝不能返回source或destination对象", prompt)
         self.assertIn(
             '"element_state":{"meaning":"逐字复制输入候选meaning",'
             '"states":{"value":"逐字复制goal.entities.input_text"}}',

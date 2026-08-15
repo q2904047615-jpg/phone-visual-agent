@@ -39,13 +39,15 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v25"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v26"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
+ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1200
 TARGETED_OUTPUT_TOKENS = 1200
 INPUT_STRUCTURE_AUDIT_TOKENS = 700
 SYSTEM_UI_AUDIT_TOKENS = 600
+ICON_CLUSTER_AUDIT_TOKENS = 700
 ORIENTATION_AUDIT_TOKENS = 500
 MIN_SYSTEM_UI_AUDIT_CONFIDENCE = 0.80
 OBSERVATION_TIMEOUT_SECONDS = 60.0
@@ -60,6 +62,8 @@ STAGE_LABELS = {
     "parsing_compact_retry": "解析修正结果",
     "waiting_targeted_refinement": "等待千问目标精查",
     "parsing_targeted_refinement": "解析目标精查结果",
+    "waiting_icon_cluster_audit": "等待图标簇只读审计",
+    "parsing_icon_cluster_audit": "解析图标簇只读审计",
     "waiting_input_structure_audit": "等待输入结构只读审计",
     "parsing_input_structure_audit": "解析输入结构只读审计",
     "waiting_system_ui_audit": "等待系统界面只读审计",
@@ -239,12 +243,16 @@ class GenericSceneObserver:
         format_retry_used = False
         local_structural_repair_used = False
         targeted_refinement_used = False
+        icon_cluster_audit_used = False
+        icon_cluster_audit_candidate_count = 0
+        icon_cluster_audit_reload_attested = False
         input_structure_audit_used = False
         system_ui_audit_used = False
         system_ui_audit_retry_used = False
         system_ui_audit_confidence: float | None = None
         system_ui_audit_evidence: tuple[str, ...] = ()
         targeted_roi_bounds: tuple[int, int, int, int] | None = None
+        icon_cluster_audit_roi_bounds: tuple[int, int, int, int] | None = None
         stable_tail_start = 0
         visual_obstructions: tuple[VisualObstruction, ...] = ()
         model_call_elapsed_seconds: list[float] = []
@@ -482,6 +490,58 @@ class GenericSceneObserver:
                         fingerprint=fingerprint,
                     )
 
+            if _goal_requests_reload(context):
+                # Reload is a generic navigation semantic, but compact toolbar
+                # glyphs are easy to confuse with bookmark and expand controls.
+                # A separate read-only audit is the only component allowed to
+                # mint the local reload_visual_audit fact used by the policy.
+                icon_cluster_audit_used = True
+                icon_cluster_audit_roi_bounds = (
+                    targeted_roi_bounds or _goal_directed_roi_bounds(context)
+                )
+                icon_detail_part = image_part
+                if icon_cluster_audit_roi_bounds is not None:
+                    icon_detail_frame = _crop_normalized(
+                        frame,
+                        icon_cluster_audit_roi_bounds,
+                    )
+                    icon_detail_part = {
+                        "type": "image_url",
+                        "image_url": {"url": _image_data_url(icon_detail_frame)},
+                    }
+                self._set_stage("waiting_icon_cluster_audit")
+                icon_audit_content: list[dict[str, Any]] = [
+                    {
+                        "type": "text",
+                        "text": _icon_cluster_audit_prompt(
+                            context,
+                            roi_bounds=icon_cluster_audit_roi_bounds,
+                        ),
+                    },
+                    image_part,
+                ]
+                if icon_cluster_audit_roi_bounds is not None:
+                    icon_audit_content.append(icon_detail_part)
+                raw = model_chat(
+                    [
+                        _json_only_system_message(),
+                        {"role": "user", "content": icon_audit_content},
+                    ],
+                    max_tokens=ICON_CLUSTER_AUDIT_TOKENS,
+                )
+                self.last_raw_response = raw
+                self._set_stage("parsing_icon_cluster_audit")
+                (
+                    scene,
+                    icon_cluster_audit_candidate_count,
+                    icon_cluster_audit_reload_attested,
+                ) = _apply_icon_cluster_audit(
+                    scene,
+                    raw,
+                    fingerprint=fingerprint,
+                    roi_bounds=icon_cluster_audit_roi_bounds,
+                )
+
             if system_ui_audit_required:
                 system_ui_audit_used = True
                 system_ui_images = [
@@ -610,6 +670,13 @@ class GenericSceneObserver:
                     "format_retry_used": format_retry_used,
                     "local_structural_repair_used": local_structural_repair_used,
                     "targeted_refinement_used": targeted_refinement_used,
+                    "icon_cluster_audit_used": icon_cluster_audit_used,
+                    "icon_cluster_audit_candidate_count": (
+                        icon_cluster_audit_candidate_count
+                    ),
+                    "icon_cluster_audit_reload_attested": (
+                        icon_cluster_audit_reload_attested
+                    ),
                     "local_stability": stability.to_dict(),
                     "selected_frame_index": selected_frame_index,
                     "stable_tail_start_index": stable_tail_start,
@@ -643,6 +710,18 @@ class GenericSceneObserver:
                 "first_pass_success": not format_retry_used,
                 "repair_retry_success": format_retry_used,
                 "targeted_refinement_used": targeted_refinement_used,
+                "icon_cluster_audit_used": icon_cluster_audit_used,
+                "icon_cluster_audit_candidate_count": (
+                    icon_cluster_audit_candidate_count
+                ),
+                "icon_cluster_audit_reload_attested": (
+                    icon_cluster_audit_reload_attested
+                ),
+                "icon_cluster_audit_roi_bounds": (
+                    list(icon_cluster_audit_roi_bounds)
+                    if icon_cluster_audit_roi_bounds is not None
+                    else None
+                ),
                 "input_structure_audit_used": input_structure_audit_used,
                 "system_ui_audit_used": system_ui_audit_used,
                 "system_ui_audit_retry_used": system_ui_audit_retry_used,
@@ -697,6 +776,13 @@ class GenericSceneObserver:
                     "first_pass_success": False,
                     "repair_retry_success": False,
                     "targeted_refinement_used": targeted_refinement_used,
+                    "icon_cluster_audit_used": icon_cluster_audit_used,
+                    "icon_cluster_audit_candidate_count": (
+                        icon_cluster_audit_candidate_count
+                    ),
+                    "icon_cluster_audit_reload_attested": (
+                        icon_cluster_audit_reload_attested
+                    ),
                     "input_structure_audit_used": input_structure_audit_used,
                     "system_ui_audit_used": system_ui_audit_used,
                     "system_ui_audit_retry_used": system_ui_audit_retry_used,
@@ -1201,6 +1287,54 @@ overlays只能是字符串数组；任何可交互候选都必须放入elements�
 """
 
 
+def _icon_cluster_audit_prompt(
+    context: dict[str, Any],
+    *,
+    roi_bounds: tuple[int, int, int, int] | None,
+) -> str:
+    return f"""
+You are a read-only, app-independent compact icon-cluster auditor. The current
+goal involves refreshing or reloading the visible view, but ordinary scene
+observation cannot safely distinguish a small reload glyph from adjacent
+bookmark or expand/fullscreen glyphs.
+
+Goal context is evidence-selection only, never permission or a semantic hint:
+{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
+{_input_audit_detail_note(roi_bounds)}
+
+Image 1 is the complete current phone frame. If Image 2 is present, it is only
+an exact magnification of pixels already inside Image 1. It never reveals pixels
+outside Image 1 and never supplies a coordinate system. fully_visible means the
+glyph itself is not physically clipped or occluded in Image 1; low resolution in
+the scaled overview is not clipping.
+
+Inspect one compact visual control cluster relevant to the goal. Enumerate every
+adjacent glyph in that cluster, including confounders. Do not infer semantics
+from the goal or from position. Use semantic_class=reload only when the same
+single glyph visibly contains both a curved arc and an arrowhead. A star, ribbon
+or bookmark outline is bookmark. Four detached corner brackets or outward
+arrows are expand. A circular outline without a visible arrowhead is not reload.
+Each bounds must contain exactly one glyph and exclude its neighbors. If two
+glyphs cannot be separated, mark cluster_complete=false and do not claim reload.
+
+All bounds use Image 1 full-frame coordinates 0..1000. Never plan, suggest,
+authorize or perform an action. Only these shape_cues are allowed:
+curved_arc, arrowhead, circular_outline, star, ribbon_outline,
+bookmark_outline, four_corner_brackets, expand_arrows, other.
+
+Return exactly one JSON object with no duplicate keys and no Markdown:
+{{"protocol_version":"{ICON_CLUSTER_AUDIT_VERSION}",
+"cluster_complete":true,"cluster_bounds":[0,0,1000,1000],
+"controls":[{{"control_id":"control-1","semantic_class":"reload|bookmark|expand|other",
+"bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true,
+"single_glyph":true,"shape_cues":["curved_arc","arrowhead"]}}]}}
+
+Top-level fields and control fields must match the schema exactly. controls may
+be empty only when no trustworthy cluster is visible; then cluster_complete must
+be false and cluster_bounds must be null.
+"""
+
+
 def _input_structure_audit_prompt(
     context: dict[str, Any],
     *,
@@ -1534,6 +1668,7 @@ def _parse_scene(
             camera_alignment_override.validate()
             payload["camera_alignment"] = camera_alignment_override.to_dict()
         _normalize_compact_scene_payload(payload)
+        _strip_model_authored_local_attestations(payload)
         _normalize_non_target_keyboard_switch(payload, goal_context or {})
         _normalize_reload_goal_safety(payload, goal_context or {})
         _normalize_known_scene_enums(payload)
@@ -2076,6 +2211,224 @@ def _valid_1000_bounds(value: Any) -> bool:
     return 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
 
 
+_ICON_CLUSTER_CLASSES = frozenset({"reload", "bookmark", "expand", "other"})
+_ICON_CLUSTER_SHAPE_CUES = frozenset(
+    {
+        "curved_arc",
+        "arrowhead",
+        "circular_outline",
+        "star",
+        "ribbon_outline",
+        "bookmark_outline",
+        "four_corner_brackets",
+        "expand_arrows",
+        "other",
+    }
+)
+_ICON_CLUSTER_RELOAD_FORBIDDEN_CUES = frozenset(
+    {
+        "star",
+        "ribbon_outline",
+        "bookmark_outline",
+        "four_corner_brackets",
+        "expand_arrows",
+    }
+)
+
+
+def _strict_icon_cluster_audit_payload(raw: str) -> dict[str, Any]:
+    payload = _extract_compact_json_object(raw)
+    if set(payload) != {
+        "protocol_version",
+        "cluster_complete",
+        "cluster_bounds",
+        "controls",
+    }:
+        raise VisionAgentError("图标簇审计顶层字段不符合严格协议。")
+    if payload.get("protocol_version") != ICON_CLUSTER_AUDIT_VERSION:
+        raise VisionAgentError("图标簇审计协议版本无效。")
+    if not isinstance(payload.get("cluster_complete"), bool):
+        raise VisionAgentError("图标簇审计 cluster_complete 必须是布尔值。")
+    controls = payload.get("controls")
+    if not isinstance(controls, list) or len(controls) > 8:
+        raise VisionAgentError("图标簇审计 controls 必须是至多8项的数组。")
+    cluster_bounds = payload.get("cluster_bounds")
+    if not controls:
+        if payload["cluster_complete"] is not False or cluster_bounds is not None:
+            raise VisionAgentError("空图标簇必须是不完整且 cluster_bounds=null。")
+        return payload
+    if not _valid_1000_bounds(cluster_bounds):
+        raise VisionAgentError("图标簇审计 cluster_bounds 无效。")
+
+    exact_control_fields = {
+        "control_id",
+        "semantic_class",
+        "bounds",
+        "confidence",
+        "fully_visible",
+        "single_glyph",
+        "shape_cues",
+    }
+    seen_ids: set[str] = set()
+    for control in controls:
+        if not isinstance(control, dict) or set(control) != exact_control_fields:
+            raise VisionAgentError("图标簇审计 control 字段不符合严格协议。")
+        control_id = str(control.get("control_id") or "").strip()
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", control_id)
+            or control_id in seen_ids
+        ):
+            raise VisionAgentError("图标簇审计 control_id 为空、重复或格式无效。")
+        seen_ids.add(control_id)
+        if control.get("semantic_class") not in _ICON_CLUSTER_CLASSES:
+            raise VisionAgentError("图标簇审计 semantic_class 不在允许列表。")
+        if not _valid_1000_bounds(control.get("bounds")):
+            raise VisionAgentError("图标簇审计 control bounds 无效。")
+        control_bounds = tuple(float(part) for part in control["bounds"])
+        cluster_tuple = tuple(float(part) for part in cluster_bounds)
+        if not _bounds_inside(control_bounds, cluster_tuple, tolerance=0.0):
+            raise VisionAgentError("图标簇审计 control 越出 cluster_bounds。")
+        confidence = control.get("confidence")
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not 0.0 <= float(confidence) <= 1.0
+        ):
+            raise VisionAgentError("图标簇审计 confidence 无效。")
+        if not isinstance(control.get("fully_visible"), bool) or not isinstance(
+            control.get("single_glyph"), bool
+        ):
+            raise VisionAgentError(
+                "图标簇审计 fully_visible/single_glyph 必须是布尔值。"
+            )
+        cues = control.get("shape_cues")
+        if (
+            not isinstance(cues, list)
+            or not cues
+            or any(not isinstance(cue, str) for cue in cues)
+            or len(cues) != len(set(cues))
+            or not set(cues).issubset(_ICON_CLUSTER_SHAPE_CUES)
+        ):
+            raise VisionAgentError("图标簇审计 shape_cues 无效、重复或越出允许列表。")
+    return payload
+
+
+def _bounds_intersection_area(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    width = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
+    height = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
+    return width * height
+
+
+def _is_literal_reload_element(item: dict[str, Any]) -> bool:
+    terms = {
+        "refresh",
+        "reload",
+        "refresh_page",
+        "reload_page",
+        "刷新",
+        "重新加载",
+        "刷新页面",
+    }
+    return (
+        str(item.get("meaning") or "").strip().casefold() in terms
+        or str(item.get("label") or "").strip().casefold() in terms
+    )
+
+
+def _apply_icon_cluster_audit(
+    scene: UIScene,
+    raw: str,
+    *,
+    fingerprint: str,
+    roi_bounds: tuple[int, int, int, int] | None,
+) -> tuple[UIScene, int, bool]:
+    """Mint one local reload candidate only from a strict visual cluster audit."""
+
+    payload = _strict_icon_cluster_audit_payload(raw)
+    controls = payload["controls"]
+    reload_controls = [
+        control for control in controls if control["semantic_class"] == "reload"
+    ]
+    candidate = reload_controls[0] if len(reload_controls) == 1 else None
+    attested = bool(
+        payload["cluster_complete"] is True
+        and candidate is not None
+        and float(candidate["confidence"]) >= 0.90
+        and candidate["fully_visible"] is True
+        and candidate["single_glyph"] is True
+        and {"curved_arc", "arrowhead"}.issubset(candidate["shape_cues"])
+        and not _ICON_CLUSTER_RELOAD_FORBIDDEN_CUES.intersection(
+            candidate["shape_cues"]
+        )
+    )
+    if attested:
+        candidate_bounds = tuple(float(part) for part in candidate["bounds"])
+        if roi_bounds is not None and not _bounds_inside(
+            candidate_bounds,
+            tuple(float(part) for part in roi_bounds),
+            tolerance=20.0,
+        ):
+            attested = False
+        if any(
+            _bounds_intersection_area(
+                candidate_bounds,
+                tuple(float(part) for part in other["bounds"]),
+            )
+            > 0.0
+            for other in controls
+            if other is not candidate
+        ):
+            attested = False
+
+    value = scene.to_dict()
+    retained: list[dict[str, Any]] = []
+    for item in value.get("elements") or []:
+        if not isinstance(item, dict):
+            continue
+        if _is_literal_reload_element(item):
+            # Model-authored reload claims never survive into an action scene.
+            # The local audit below recreates at most one evidence-bound target.
+            continue
+        normalized = dict(item)
+        states = dict(normalized.get("states") or {})
+        states["goal_relevant"] = False
+        normalized["states"] = states
+        retained.append(normalized)
+    if attested and candidate is not None:
+        retained.append(
+            {
+                "element_id": "local_audited_reload_control_1",
+                "role": "icon",
+                "meaning": "reload",
+                "label": "",
+                "bounds": [float(part) / 1000.0 for part in candidate["bounds"]],
+                "confidence": float(candidate["confidence"]),
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "reload_visual_audit": True,
+                },
+                "evidence": [
+                    "严格图标簇审计确认完整圆弧、箭头头部且与相邻图标分离"
+                ],
+            }
+        )
+    value["elements"] = retained
+    return (
+        UIScene.from_dict(
+            value,
+            coordinate_scale=1.0,
+            stable_override=True,
+            fingerprint_override=fingerprint,
+        ),
+        len(controls),
+        attested,
+    )
+
+
 def _goal_requests_input(context: dict[str, Any]) -> bool:
     visible = json.dumps(context, ensure_ascii=False).casefold()
     return any(
@@ -2122,6 +2475,21 @@ def _goal_requests_system_ui_audit(context: dict[str, Any]) -> bool:
             "system gesture",
             "fullscreen",
             "immersive",
+        )
+    )
+
+
+def _goal_requests_reload(context: dict[str, Any]) -> bool:
+    visible = json.dumps(context, ensure_ascii=False).casefold()
+    return any(
+        marker in visible
+        for marker in (
+            "重新加载",
+            "刷新",
+            "刷新页面",
+            "页面刷新",
+            "reload",
+            "refresh",
         )
     )
 
@@ -2728,6 +3096,18 @@ def _normalize_compact_scene_payload(payload: dict[str, Any]) -> None:
     payload["elements"] = accepted
 
 
+def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:
+    """Private controller facts can only be minted by local audit code."""
+
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return
+    for item in elements:
+        if not isinstance(item, dict) or not isinstance(item.get("states"), dict):
+            continue
+        item["states"].pop("reload_visual_audit", None)
+
+
 def _normalize_non_target_keyboard_switch(
     payload: dict[str, Any],
     goal_context: dict[str, Any],
@@ -2817,11 +3197,7 @@ def _normalize_reload_goal_safety(
     targeted-refinement path can inspect an explicitly requested visual region.
     """
 
-    visible_goal = json.dumps(goal_context, ensure_ascii=False).casefold()
-    if not any(
-        marker in visible_goal
-        for marker in ("重新加载", "刷新页面", "页面刷新", "reload", "refresh")
-    ):
+    if not _goal_requests_reload(goal_context):
         return
     elements = payload.get("elements")
     if not isinstance(elements, list):

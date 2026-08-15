@@ -2247,7 +2247,7 @@ class PhaseOneNavigationPolicy:
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
-    VERSION = "2026-08-14-universal-action-policy-v11"
+    VERSION = "2026-08-15-universal-action-policy-v12"
     ALLOWED_ACTIONS = frozenset(
         {
             "swipe",
@@ -2973,6 +2973,22 @@ class PhaseOneNavigationPolicy:
                 canonical = "input"
             else:
                 return self._deny("候选包含外部状态、输入或破坏性语义。")
+        if canonical == "refresh":
+            if (
+                impact != "navigation_only"
+                or action_kind != "tap_semantic"
+                or element.role not in {"button", "icon"}
+                or element.meaning != "reload"
+                or float(element.confidence) < 0.90
+                or element.states.get("fully_visible") is not True
+                or element.states.get("reload_visual_audit") is not True
+            ):
+                return self._deny(
+                    "刷新候选缺少本地图标簇审计、完整可见或高置信证据。"
+                )
+            requested_states = action.params.get("states")
+            if not isinstance(requested_states, dict) or requested_states != element.states:
+                return self._deny("刷新动作没有逐项复用本地审计 states。")
         if not canonical:
             if action_kind == "input_verified_text":
                 canonical = "input"

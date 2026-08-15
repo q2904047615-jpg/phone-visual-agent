@@ -660,7 +660,16 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertEqual("home", result.canonical_class)
 
     def test_allows_observed_refresh_icon_as_generic_navigation(self) -> None:
-        scene = _scene(meaning="refresh_page", label="刷新", role="icon")
+        scene = _scene(
+            meaning="reload",
+            label="",
+            role="icon",
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "reload_visual_audit": True,
+            },
+        )
         decision = _decision(scene)
 
         result = self.policy.evaluate(
@@ -671,6 +680,91 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         self.assertTrue(result.allowed)
         self.assertEqual("refresh", result.canonical_class)
+
+    def test_rejects_refresh_without_local_visual_audit(self) -> None:
+        scene = _scene(
+            meaning="reload",
+            role="icon",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("本地图标簇审计", result.reason)
+
+    def test_rejects_audited_refresh_that_is_not_fully_visible(self) -> None:
+        scene = _scene(
+            meaning="reload",
+            role="icon",
+            states={
+                "goal_relevant": True,
+                "fully_visible": False,
+                "reload_visual_audit": True,
+            },
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("完整可见", result.reason)
+
+    def test_rejects_refresh_when_action_does_not_reuse_audit_states(self) -> None:
+        scene = _scene(
+            meaning="reload",
+            role="icon",
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "reload_visual_audit": True,
+            },
+        )
+        decision = _decision(scene)
+        decision.proposal.action.params["states"] = {
+            "fully_visible": True,
+            "reload_visual_audit": True,
+        }
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("逐项复用", result.reason)
+
+    def test_rejects_audited_refresh_below_strict_confidence(self) -> None:
+        scene = _scene(
+            meaning="reload",
+            role="icon",
+            confidence=0.89,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "reload_visual_audit": True,
+            },
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("高置信", result.reason)
 
     def test_allows_exact_formal_target_app_entry_without_open_word(self) -> None:
         scene = _scene(meaning="settings_app", label="设置", role="icon")

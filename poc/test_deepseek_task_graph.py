@@ -1161,6 +1161,29 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         self.assertEqual(graph.subgoals[0].constraints, ("不要点击广告",))
 
+    def test_allows_long_negated_low_level_safety_constraint(self):
+        payload = base_payload()
+        payload["constraints"] = ["不要执行任何改变状态的操作"]
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "确认当前只读结果",
+            device_id="phone-1",
+        )
+        self.assertEqual(graph.constraints, ("不要执行任何改变状态的操作",))
+
+    def test_negation_does_not_cover_later_positive_instruction(self):
+        payload = base_payload()
+        payload["subgoals"][0]["constraints"] = [
+            "不要点击广告，但点击确定按钮"
+        ]
+        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(payload, copy.deepcopy(payload))
+            ).plan(
+                "目标",
+                device_id="phone-1",
+            )
+
     def test_rejects_control_data_hidden_in_entities(self):
         payload = base_payload()
         payload["goal"]["entities"]["coordinate"] = [10, 20]

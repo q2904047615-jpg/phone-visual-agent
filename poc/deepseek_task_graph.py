@@ -167,6 +167,15 @@ SAFE_NAVIGATION_SEMANTIC_PATTERN = re.compile(
     r"\b(?:open|enter|launch|navigate|switch|back|close|view)\b)",
     re.IGNORECASE,
 )
+NEGATED_LOW_LEVEL_INSTRUCTION_PREFIX_PATTERN = re.compile(
+    r"(?:不|未|没有|未曾|勿|不要|不得|禁止|不能|避免|无需|无须|"
+    r"do\s+not|don't|never|without)\s*"
+    r"(?:(?:进行|执行)\s*)?"
+    r"(?:(?:任何|任意|一切|all|any)\s*)?"
+    r"(?:(?!(?:但|但是|然而|不过|可以|仍可|需要|应当|然后|再|"
+    r"but|however|may|can)).){0,24}$",
+    re.IGNORECASE,
+)
 REPAIRABLE_INITIAL_GRAPH_ERRORS = (
     "任务图至少需要一个全局完成条件。",
     "可推进任务图必须且只能有一个活动子目标。",
@@ -2470,10 +2479,9 @@ def _reject_low_level_instruction(
     allow_negated: bool = False,
 ) -> None:
     for match in LOW_LEVEL_INSTRUCTION_PATTERN.finditer(value):
-        prefix = value[max(0, match.start() - 8) : match.start()].lower()
-        if allow_negated and any(
-            prefix.endswith(marker)
-            for marker in ("不要", "不得", "禁止", "不能", "避免", "do not", "never")
+        prefix = value[max(0, match.start() - 40) : match.start()].lower()
+        if allow_negated and NEGATED_LOW_LEVEL_INSTRUCTION_PREFIX_PATTERN.search(
+            prefix
         ):
             continue
         raise TaskGraphError(f"DeepSeek 高层任务图包含低层动作表达：{path}")

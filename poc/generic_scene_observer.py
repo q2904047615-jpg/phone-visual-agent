@@ -3202,7 +3202,18 @@ def _goal_requests_input(context: dict[str, Any]) -> bool:
 
 
 def _goal_requests_system_ui_audit(context: dict[str, Any]) -> bool:
-    visible = json.dumps(context, ensure_ascii=False).casefold()
+    evidence_selectors: dict[str, Any] = {
+        "objective": context.get("objective"),
+        "target_ui_label": context.get("target_ui_label"),
+        "completion_conditions": context.get("completion_conditions"),
+        "success_criteria": context.get("success_criteria"),
+    }
+    entities = context.get("entities")
+    if isinstance(entities, dict):
+        evidence_selectors["entity_target_ui_label"] = entities.get(
+            "target_ui_label"
+        )
+    visible = json.dumps(evidence_selectors, ensure_ascii=False).casefold()
     return any(
         term in visible
         for term in (

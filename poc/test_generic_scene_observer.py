@@ -573,6 +573,27 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(1, provider.calls)
         self.assertFalse(observer.last_diagnostics["system_ui_audit_used"])
 
+    def test_system_ui_prohibition_constraint_does_not_trigger_audit(self) -> None:
+        payload = scene_payload()
+        payload["elements"][0]["states"]["goal_relevant"] = True
+        provider = FakeProvider(payload)
+        observer = GenericSceneObserver(provider)
+
+        observer.observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "显示本地验收模式选择列表",
+                "target_ui_label": "验收模式选择列表",
+                "constraints": ["禁止操作全屏、屏幕方向和卖家控制栏"],
+                "entities": {
+                    "original_goal_visual_context": "显示列表并禁止操作全屏"
+                },
+            },
+        )
+
+        self.assertEqual(1, provider.calls)
+        self.assertFalse(observer.last_diagnostics["system_ui_audit_used"])
+
     def test_non_system_ui_goal_downgrades_invalid_fact_values_to_unknown(self) -> None:
         payload = scene_payload()
         payload["elements"][0]["states"]["goal_relevant"] = True

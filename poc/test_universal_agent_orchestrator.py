@@ -1906,6 +1906,96 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         )
         self.assertFalse(destructive.allowed)
 
+    def test_drag_allows_only_compact_goal_bound_container_source(self) -> None:
+        source = UIElement(
+            element_id="source",
+            role="container",
+            meaning="movable_source_object",
+            label="起点",
+            bounds=(0.18, 0.68, 0.38, 0.82),
+            confidence=0.98,
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=("紧凑圆角方块，内部逐字显示起点",),
+        )
+        destination = UIElement(
+            element_id="destination",
+            role="container",
+            meaning="target_zone",
+            label="绿色终点",
+            bounds=(0.53, 0.63, 0.83, 0.87),
+            confidence=0.98,
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=("绿色虚线目标区域",),
+        )
+        scene = UIScene(
+            app_id="sample.app",
+            screen_id="board",
+            summary="通用拖动页面",
+            elements=(source, destination),
+            stable=True,
+            confidence=0.98,
+            fingerprint="compact-container-drag",
+        )
+        action = SemanticAction(
+            node_id="compact-container-drag",
+            action="drag",
+            params={
+                "source_element_id": source.element_id,
+                "source_target": source.meaning,
+                "source_role": source.role,
+                "source_label": source.label,
+                "destination_element_id": destination.element_id,
+                "destination_target": destination.meaning,
+                "destination_role": destination.role,
+                "destination_label": destination.label,
+                "expected_effect": {"scene_changed": True},
+            },
+        )
+        observation = SimpleNamespace(
+            device_id="device-1",
+            fingerprint=scene.fingerprint,
+            scene=scene,
+            candidate_conflicts=(),
+        )
+        decision = SimpleNamespace(
+            task_id="task-1",
+            device_id="device-1",
+            revision=1,
+            fingerprint=scene.fingerprint,
+            confidence=0.98,
+            proposal=GenericStepProposal(status="action", action=action),
+            trusted_observation=observation,
+            target_region=SimpleNamespace(
+                kind="element_path",
+                element_id=source.element_id,
+                bounds=source.bounds,
+                destination_element_id=destination.element_id,
+                destination_bounds=destination.bounds,
+            ),
+        )
+
+        allowed = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=observation,
+            decision=decision,
+            available_action_kinds=frozenset({"drag"}),
+        )
+        self.assertTrue(allowed.allowed, allowed.reason)
+
+        oversized = replace(source, bounds=(0.02, 0.05, 0.98, 0.90))
+        oversized_scene = replace(scene, elements=(oversized, destination))
+        observation.scene = oversized_scene
+        action.params["source_role"] = oversized.role
+        decision.target_region.bounds = oversized.bounds
+        denied = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=observation,
+            decision=decision,
+            available_action_kinds=frozenset({"drag"}),
+        )
+        self.assertFalse(denied.allowed)
+        self.assertIn("过大的页面容器", denied.reason)
+
 
 class ObservationBridgeTests(unittest.TestCase):
     def setUp(self) -> None:

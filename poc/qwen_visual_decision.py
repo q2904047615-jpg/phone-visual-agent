@@ -1448,8 +1448,10 @@ def _decision_prompt(
    overlays和候选证据。若当前scene已语义证明目标状态/界面已经存在，必须finished；此时即使还有
    meaning含open/enter/start/launch或label像入口的候选，也禁止再点击它。只有当前证据尚未完成目标
    才能考虑action；不要把当前界面的标题、数量指示或已选中tab误判为“打开当前界面”的按钮。
-   role=container/dialog的候选不能作为单元素动作目标或drag起点；仅当drag的终点本身就是可信目标区域时，
-   container可以逐字复制为destination_element_id。其他情况下它们只能被
+   role=dialog的候选不能作为单元素动作目标或drag起点。广阔、无标签、未完整可见或包含其他控件的
+   页面container也不能作为drag起点；只有紧凑、逐字有标签、fully_visible=true且代表单个源物体的
+   container才可逐字复制为source_element_id，并仍须通过本地独立几何审计。drag终点本身是可信
+   目标区域时，container可以逐字复制为destination_element_id。其他情况下container/dialog只能被
    completion_evidence_element_ids引用。一个数量指示加一个可见卡片/列表容器足以证明列表已打开时，
    应finished并引用这些候选ID。
 1. 每轮最多一个next_action，禁止actions、steps、plan、后续动作或裸坐标。
@@ -1527,8 +1529,9 @@ def _decision_retry_prompt(
 - page_state只能包含foreground_app_id、screen_id、summary、overlays，禁止elements。
 - 先比较current_subgoal.completion_conditions与可信scene；当前摘要或候选证据已经语义证明目标界面/
   状态存在时必须finished，禁止再选open/enter/start/launch类动作，也禁止把标题、计数或已选tab当入口。
-- role=container/dialog不能作为单元素动作目标或drag起点；container只可作为drag的
-  destination_element_id，其他情况只能作为finished的completion_evidence_element_ids。
+- role=dialog不能作为单元素动作目标或drag起点。页面级、无标签、未完整可见或包含其他控件的container
+  不能作为drag起点；只有紧凑、逐字有标签、fully_visible=true且代表单个源物体的container可以作为
+  source_element_id。可信container也可作为drag的destination_element_id；其他情况只能作为finished证据。
 - action只能选择可信候选已有element_id并复制原始字段与bounds；不能新建元素。
 - 找不到逐字匹配且唯一的可信候选就blocked；finished只引用可信证据ID或scene。
 - “已刷新/已重新加载/已导航/已重新获取/已同步”等发生型完成条件必须有前后变化、动作回执或被引用

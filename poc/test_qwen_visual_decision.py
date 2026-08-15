@@ -623,6 +623,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn("destination_element_id/destination_target/destination_role", prompt)
         self.assertIn("绝不能返回source或destination嵌套对象", prompt)
         self.assertIn("container可以逐字复制为destination_element_id", prompt)
+        self.assertIn("代表单个源物体的", prompt)
 
     def test_flat_drag_payload_binds_two_trusted_candidates(self) -> None:
         source = UIElement(

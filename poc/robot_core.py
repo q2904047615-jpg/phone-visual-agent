@@ -83,6 +83,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "vision_agent": {
         "tap_hold": 0.35,
+        # Browser long-press handlers commonly fire at the requested threshold.
+        # Keep contact slightly longer so actuator latency and timer scheduling
+        # cannot release the pointer at the same instant as that threshold.
+        "long_press_actuation_margin": 0.25,
         "android_home_x_ratio": 0.50,
         "android_home_y_ratio": 0.976,
         "android_back_x_ratio": 0.685,
@@ -751,11 +755,21 @@ class RobotController:
             ),
         )
         self._checkpoint()
+        vision_config = load_workflow_config()["vision_agent"]
+        actuation_margin = float(
+            vision_config.get("long_press_actuation_margin", 0.25)
+        )
+        if not 0.0 <= actuation_margin <= 0.5:
+            raise WorkflowNotReady("长按机械保压余量必须在0～0.5秒之间。")
+        physical_hold_seconds = min(
+            2.0,
+            float(hold_seconds) + actuation_margin,
+        )
         legacy.long_press_client_point(
             hwnd,
             point[0],
             point[1],
-            hold_seconds=float(hold_seconds),
+            hold_seconds=physical_hold_seconds,
         )
         legacy.move_cursor_outside_camera(hwnd)
         return point

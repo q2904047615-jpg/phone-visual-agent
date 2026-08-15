@@ -1181,7 +1181,8 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 1. 桌面写 launcher；不确定写 unknown。不得把目标App当成当前App。
 2. elements最多{MAX_COMPACT_ELEMENTS}个。必须先报告目标相关控件和当前输入框，
    再报告关闭/返回与必要导航；省略新闻、商品、图片、标签组等无关内容。
-3. bounds使用0..1000的[left,top,right,bottom]，必须只框真实清晰控件。
+3. bounds使用0..1000的[left,top,right,bottom]，必须只框真实清晰控件。0和1000分别代表
+   原图四边；禁止复制原图像素坐标（例如810x1515画面的y=1130），任何边界超出0..1000就省略该元素。
 4. role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
 5. meaning用lower_snake_case。与目标直接相关的控件在states中写goal_relevant:true。
 6. 每个element的evidence最多一条不超过40个字的画面短文字或明确外观。
@@ -1684,6 +1685,7 @@ def _parse_scene(
         _normalize_prefilled_input_structure(payload, goal_context or {})
         _normalize_local_text_clear_structure(payload, goal_context or {})
         _normalize_unique_input_focus(payload)
+        _drop_out_of_range_non_goal_elements(payload)
         return UIScene.from_dict(
             payload,
             coordinate_scale=1000.0,
@@ -2217,6 +2219,34 @@ def _valid_1000_bounds(value: Any) -> bool:
         return False
     left, top, right, bottom = (float(part) for part in value)
     return 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
+
+
+def _drop_out_of_range_non_goal_elements(payload: dict[str, Any]) -> None:
+    """Discard only explicitly non-goal peripheral elements with invalid bounds.
+
+    Model-authored goal candidates, inputs, and elements without an explicit
+    ``goal_relevant: false`` assertion remain strict and still fail closed.
+    Dropping a non-goal peripheral can only remove information; it never creates
+    a target or converts pixel coordinates into actionable coordinates.
+    """
+
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return
+    retained: list[Any] = []
+    for item in elements:
+        if not isinstance(item, dict) or _valid_1000_bounds(item.get("bounds")):
+            retained.append(item)
+            continue
+        states = item.get("states")
+        safe_to_discard = (
+            isinstance(states, dict)
+            and states.get("goal_relevant") is False
+            and str(item.get("role") or "").strip() != "input"
+        )
+        if not safe_to_discard:
+            retained.append(item)
+    payload["elements"] = retained
 
 
 _ICON_CLUSTER_CLASSES = frozenset({"reload", "bookmark", "expand", "other"})

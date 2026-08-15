@@ -16,6 +16,7 @@ from generic_scene_observer import (
     _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES,
     _MAX_JSON_STRUCTURAL_REPAIR_CHARS,
     _camera_layout_orientation,
+    _compact_prompt,
     _input_structure_diagnostic_shape,
     _parse_scene_after_unique_structural_edit,
     _parse_scene,
@@ -267,6 +268,61 @@ def audited_application_input(
 
 
 class GenericSceneObserverTests(unittest.TestCase):
+    def test_compact_prompt_forbids_copying_source_pixel_coordinates(self) -> None:
+        prompt = _compact_prompt({"objective": "读取当前页面"})
+        self.assertIn("禁止复制原图像素坐标", prompt)
+        self.assertIn("810x1515", prompt)
+        self.assertIn("任何边界超出0..1000就省略该元素", prompt)
+
+    def test_out_of_range_explicit_non_goal_peripheral_is_discarded(self) -> None:
+        payload = scene_payload()
+        payload["elements"][0]["states"] = {"goal_relevant": True}
+        payload["elements"].append(
+            {
+                "element_id": "pixel-coordinate-key",
+                "role": "keyboard_key",
+                "meaning": "keyboard_enter",
+                "label": "开始",
+                "bounds": [730, 1130, 810, 1190],
+                "confidence": 0.99,
+                "states": {"goal_relevant": False, "enabled": True},
+                "evidence": ["键盘右下角按键"],
+            }
+        )
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="local-fingerprint",
+            goal_context={"objective": "查看数字七"},
+            camera_layout_orientation="portrait",
+        )
+
+        self.assertEqual(["e1"], [item.element_id for item in scene.elements])
+
+    def test_out_of_range_goal_or_input_element_remains_fail_closed(self) -> None:
+        for role, goal_relevant in (("button", True), ("input", False)):
+            with self.subTest(role=role, goal_relevant=goal_relevant):
+                payload = scene_payload()
+                payload["elements"] = [
+                    {
+                        "element_id": "unsafe-pixel-coordinate",
+                        "role": role,
+                        "meaning": "target_control",
+                        "label": "目标",
+                        "bounds": [730, 1130, 810, 1190],
+                        "confidence": 0.99,
+                        "states": {"goal_relevant": goal_relevant},
+                        "evidence": ["目标控件"],
+                    }
+                ]
+                with self.assertRaisesRegex(VisionAgentError, "bounds"):
+                    _parse_scene(
+                        json.dumps(payload, ensure_ascii=False),
+                        fingerprint="local-fingerprint",
+                        goal_context={"objective": "操作目标控件"},
+                        camera_layout_orientation="portrait",
+                    )
+
     def test_saved_controller_canvas_shapes_have_distinct_local_orientations(self) -> None:
         self.assertEqual(
             "portrait",

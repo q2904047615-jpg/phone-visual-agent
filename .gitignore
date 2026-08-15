@@ -24,6 +24,7 @@ poc/data/
 poc/evals/vision_replay/cache/
 poc/evals/vision_replay/history/
 poc/evals/vision_replay/results/
+poc/*.promotion.lease
 *.db
 *.sqlite
 *.sqlite3

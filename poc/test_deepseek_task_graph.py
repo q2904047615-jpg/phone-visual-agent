@@ -2244,6 +2244,9 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual(result.active_subgoal_id, "save_target")
         self.assertEqual(result.replan_history[-1].added_subgoal_ids, ("verify_saved",))
         self.assertEqual(result.replan_history[-1].trigger, "subgoal_completed")
+        replan_prompt = provider.messages[2][0]["content"]
+        self.assertIn("最多3项", replan_prompt)
+        self.assertIn("不得复制整个观察对象或 JSON", replan_prompt)
 
     def test_replan_can_skip_stale_subgoal_after_mismatch(self):
         initial = base_payload()

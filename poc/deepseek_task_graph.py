@@ -1514,6 +1514,9 @@ def _replan_prompt(
 9. 当 trigger=subgoal_completed 且当前子目标是 read_only 时，本轮必须用 visible_evidence 完成
    该只读子目标及匹配的全局条件，或明确阻塞，或推进到后续非只读子目标；不得继续保留任何
    read_only 活动子目标，避免只读复核再次请求视觉动作或形成循环。
+10. completion_conditions[].evidence 和 subgoals[].completion_evidence 只能选择
+    visible_evidence 中完整、逐字相同的独立短字符串；每个数组最多3项，不得拼接多项、
+    不得复制整个观察对象或 JSON。没有匹配短证据时保持未完成或阻塞，不得自造长证据。
 """
 
 
@@ -1556,6 +1559,8 @@ def _repair_replan_prompt(
 7. 只返回符合结构的完整 JSON 对象，不要 Markdown。
 8. 当 trigger=subgoal_completed 且原活动子目标是 read_only 时，不得继续返回 read_only 活动
    子目标；只能依据 visible_evidence 完成、阻塞，或推进到后续非只读子目标。
+9. 证据数组只能选择 visible_evidence 中完整、逐字相同的独立短字符串，每个数组最多3项；
+   禁止拼接多项或复制整个观察对象/JSON。没有匹配证据时保持未完成或阻塞。
 """
 
 

@@ -1201,6 +1201,8 @@ Distinguish three different visual structures; never merge them:
 1. application_inputs: editable search/address/form fields in the App content area. Include an empty field only when a complete border plus a visible placeholder, caret, focus highlight, or other literal editable cue is visible.
 2. ime_preedit_regions: the input method's composition/candidate strip. It is never an application input, even when it contains composed text and a trailing icon.
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
+Determine keyboard.input_mode only from the current whole keyboard image, never from the goal or the JSON example. Visible Chinese composition/candidates, pinyin separators, or a current-mode label such as 中/中文/Pinyin prove chinese_pinyin. A visible current-mode label such as 英/EN/English/ABC/Latin together with a plain Latin QWERTY layout and no Chinese composition/candidate strip proves direct_latin. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
+keyboard.mode_switch.current_mode MUST equal keyboard.input_mode whenever input_mode is known. Treat an unambiguous single-mode label on the key as the current visible mode: 中/中文/Pinyin means chinese_pinyin; 英/EN/English/ABC/Latin means direct_latin. If the label could instead name a destination and the current whole-keyboard state is not independently clear, do not guess a direction; set mode_switch to null.
 Do not plan, suggest, authorize, or perform any action. All bounds MUST use Image 1 full-frame normalized coordinates 0..1000.
 Use text="" for a visibly empty application field. Copy placeholders and visible_editable_cues literally; do not infer them from the goal. right_button describes a trailing utility control; it is structural evidence only and is never authorized for activation. Set it to null when no separate trailing control is visible.
 Return exactly this JSON schema and no other fields:
@@ -2516,6 +2518,9 @@ def _validated_keyboard_mode_switch(
     if current_mode not in modes or target_mode not in modes or current_mode == target_mode:
         raise UISceneError("mode_switch 必须给出方向明确且不同的输入模式。")
     label = str(value.get("label") or "").strip()
+    label_mode = _keyboard_mode_implied_by_label(label)
+    if label_mode is not None and label_mode != current_mode:
+        raise UISceneError("mode_switch label 与 current_mode 冲突。")
     bounds = tuple(float(part) for part in value["bounds"])
     keyboard_width = keyboard_bounds[2] - keyboard_bounds[0]
     keyboard_height = keyboard_bounds[3] - keyboard_bounds[1]
@@ -2553,6 +2558,15 @@ def _is_explicit_keyboard_mode_label(label: str) -> bool:
         "latin",
         "pinyin",
     }
+
+
+def _keyboard_mode_implied_by_label(label: str) -> str | None:
+    visible = re.sub(r"[\s_\-/]+", "", str(label or "").strip().casefold())
+    if visible in {"中", "中文", "chinese", "pinyin"}:
+        return "chinese_pinyin"
+    if visible in {"英", "en", "eng", "english", "abc", "latin"}:
+        return "direct_latin"
+    return None
 
 
 def _has_any_semantic_term(item: dict[str, Any], terms: tuple[str, ...]) -> bool:

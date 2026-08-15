@@ -1950,6 +1950,67 @@ class GenericSceneObserverTests(unittest.TestCase):
                 goal_context={"objective": "切换到英文直输模式"},
             )
 
+    def test_keyboard_mode_switch_label_cannot_contradict_current_mode(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "mode_switch": {
+                    "label": "英",
+                    "bounds": [650, 900, 760, 970],
+                    "confidence": 0.97,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "label.*current_mode.*冲突"):
+            GenericSceneObserver(
+                SequenceProvider([empty, empty, audit])
+            ).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "读取当前键盘输入模式"},
+            )
+
+    def test_direct_latin_mode_accepts_matching_english_mode_label(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[audited_application_input(text="", placeholder="")],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "mode_switch": {
+                    "label": "英",
+                    "bounds": [650, 900, 760, 970],
+                    "confidence": 0.97,
+                    "current_mode": "direct_latin",
+                    "target_mode": "chinese_pinyin",
+                },
+            },
+        )
+        audit["application_inputs"][0]["visible_editable_cues"] = ["caret"]
+
+        scene = GenericSceneObserver(
+            SequenceProvider([empty, empty, audit])
+        ).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "读取当前空白输入框和英文键盘"},
+        )
+
+        input_element = scene.get_element("local_audited_input_1")
+        self.assertEqual("direct_latin", input_element.states["keyboard_input_mode"])
+        mode_switch = scene.get_element("local_audited_keyboard_mode_switch_1")
+        self.assertEqual("direct_latin", mode_switch.states["current_mode"])
+        self.assertEqual("chinese_pinyin", mode_switch.states["target_mode"])
+
     def test_ordinary_letter_key_cannot_become_keyboard_mode_switch(self) -> None:
         empty = scene_payload()
         empty["elements"] = []

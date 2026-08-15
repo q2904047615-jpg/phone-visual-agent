@@ -338,6 +338,53 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(1, provider.calls)
         self.assertFalse(observer.last_diagnostics["system_ui_audit_used"])
 
+    def test_open_tab_goal_excludes_close_glyph_and_group_from_candidates(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "target-tab",
+                "role": "tab",
+                "meaning": "generic_verification_page",
+                "label": "通用动作真机验...",
+                "bounds": [100, 500, 480, 570],
+                "confidence": 0.95,
+                "states": {"goal_relevant": True},
+                "evidence": ["标题可见"],
+            },
+            {
+                "element_id": "close-target-tab",
+                "role": "button",
+                "meaning": "close_tab",
+                "label": "×",
+                "bounds": [430, 510, 465, 550],
+                "confidence": 0.95,
+                "states": {"goal_relevant": True},
+                "evidence": ["标签页关闭图标"],
+            },
+            {
+                "element_id": "tab-group",
+                "role": "container",
+                "meaning": "tab_group",
+                "label": "标签页组",
+                "bounds": [80, 200, 920, 820],
+                "confidence": 0.9,
+                "states": {"goal_relevant": True},
+                "evidence": ["卡片组"],
+            },
+        ]
+
+        scene = GenericSceneObserver(FakeProvider(payload)).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "打开现有的通用动作真机验收标签页"},
+        )
+
+        relevant = [
+            item.element_id
+            for item in scene.elements
+            if item.states.get("goal_relevant") is True
+        ]
+        self.assertEqual(["target-tab"], relevant)
+
     def test_system_ui_goal_only_fails_closed_invalid_fact_values(self) -> None:
         payload = scene_payload()
         payload["system_ui"] = {

@@ -39,7 +39,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v19"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v20"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1200
@@ -1520,6 +1520,7 @@ def _parse_scene(
             payload["camera_alignment"] = camera_alignment_override.to_dict()
         _normalize_compact_scene_payload(payload)
         _normalize_known_scene_enums(payload)
+        _normalize_tab_navigation_safety(payload, goal_context or {})
         _normalize_prefilled_input_structure(payload, goal_context or {})
         _normalize_local_text_clear_structure(payload, goal_context or {})
         _normalize_unique_input_focus(payload)
@@ -1562,6 +1563,52 @@ def _fail_closed_invalid_system_ui(payload: dict[str, Any]) -> None:
         "immersive_or_fullscreen": "unknown",
         "navigation_bar_visible": "unknown",
     }
+
+
+def _normalize_tab_navigation_safety(
+    payload: dict[str, Any],
+    goal_context: dict[str, Any],
+) -> None:
+    """Remove destructive/aggregate candidates from an open-tab goal.
+
+    This never creates a target or changes bounds. It only prevents a tab's
+    close glyph and the surrounding tab-group container from competing with
+    the visually reported tab card when the goal is safe navigation.
+    """
+
+    visible_goal = json.dumps(
+        goal_context,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).casefold()
+    tab_goal = any(
+        marker in visible_goal
+        for marker in ("标签页", "页签", "tab", "window card")
+    )
+    opens_tab = any(
+        marker in visible_goal
+        for marker in ("打开", "切换", "进入", "open", "switch", "enter")
+    )
+    closes_tab = any(
+        marker in visible_goal
+        for marker in ("关闭", "删除", "close", "remove", "delete")
+    )
+    if not tab_goal or not opens_tab or closes_tab:
+        return
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return
+    for item in elements:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().casefold()
+        meaning = str(item.get("meaning") or "").strip().casefold()
+        if meaning in {"close_tab", "remove_tab", "delete_tab"} or (
+            role == "container" and meaning in {"tab_group", "tabs", "tab_container"}
+        ):
+            states = item.get("states")
+            if isinstance(states, dict):
+                states["goal_relevant"] = False
 
 
 def _apply_system_ui_audit(

@@ -196,6 +196,20 @@ LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN = re.compile(
     r"search|submit|send|save|publish|post|upload|share|comment|reply)",
     re.IGNORECASE,
 )
+LOCAL_KEYBOARD_MODE_PATTERN = re.compile(
+    r"(?:(?:输入法|软键盘|键盘).{0,24}"
+    r"(?:输入模式|直输模式|英文直输|中文拼音|"
+    r"direct[_ -]?latin|chinese[_ -]?pinyin)|"
+    r"(?:direct[_ -]?latin|chinese[_ -]?pinyin).{0,24}"
+    r"(?:input\s*method|keyboard|ime|输入法|键盘))",
+    re.IGNORECASE,
+)
+PERSISTENT_KEYBOARD_SETTING_PATTERN = re.compile(
+    r"(?:默认|全局|系统设置|账号|账户|同步|云端|词库|安装|启用|停用|"
+    r"卸载|持久|default|global|system\s+settings?|account|sync|cloud|"
+    r"dictionary|install|enable|disable|uninstall|persistent)",
+    re.IGNORECASE,
+)
 REPAIRABLE_INITIAL_GRAPH_ERROR_FRAGMENTS = (
     "文本模型没有返回有效 JSON",
     "文本模型返回内容不是 JSON 对象",
@@ -381,10 +395,20 @@ class Subgoal:
             *self.completion_conditions,
             input_text=local_input_text,
         )
-        if inferred_risk_types and not proven_local_input and self.external_impact in {
+        proven_local_keyboard_mode = _is_reversible_local_keyboard_mode(
+            self.objective,
+            *self.constraints,
+            *self.completion_conditions,
+        )
+        if (
+            inferred_risk_types
+            and not proven_local_input
+            and not proven_local_keyboard_mode
+            and self.external_impact in {
             "read_only",
             "navigation_only",
-        }:
+            }
+        ):
             raise TaskGraphError(
                 f"子目标包含外部状态变化但未声明：{self.subgoal_id}"
             )
@@ -563,6 +587,12 @@ class DynamicTaskGraph:
                 input_text=self.goal.entities.get("input_text"),
             ):
                 inferred_types = inferred_types - {"unknown_external_effect"}
+            if _is_reversible_local_keyboard_mode(
+                subgoal.objective,
+                *subgoal.constraints,
+                *subgoal.completion_conditions,
+            ):
+                inferred_types = inferred_types - {"unknown_external_effect"}
             linked_types = {
                 risks[risk_id].risk_type for risk_id in subgoal.risk_action_ids
             }
@@ -580,6 +610,11 @@ class DynamicTaskGraph:
                 self.goal.objective,
                 *self.constraints,
                 input_text=self.goal.entities.get("input_text"),
+            )
+            and not _is_reversible_local_keyboard_mode(
+                self.raw_user_goal,
+                self.goal.objective,
+                *self.constraints,
             )
             and not risks
         ):
@@ -1365,6 +1400,28 @@ def _is_explicitly_unsubmitted_local_input(
         # unknown_external_effect.  The explicit unsubmitted-input boundary is
         # enough to resolve that ambiguity, but never suppress a concrete
         # communication, publication, account, data, or transaction effect.
+        and inferred <= {"unknown_external_effect"}
+    )
+
+
+def _is_reversible_local_keyboard_mode(*values: str) -> bool:
+    """Recognize only an unsubmitted, device-local IME mode state.
+
+    The exception is deliberately narrower than general settings changes. Any
+    concrete account, communication, publication, data, permission, or
+    transaction effect keeps the scope external and fail-closed.
+    """
+
+    texts = tuple(str(value or "") for value in values if str(value or "").strip())
+    if not texts:
+        return False
+    combined = "；".join(texts)
+    inferred = frozenset().union(
+        *(_infer_external_risk_types(value) for value in texts)
+    )
+    return bool(
+        LOCAL_KEYBOARD_MODE_PATTERN.search(combined)
+        and not PERSISTENT_KEYBOARD_SETTING_PATTERN.search(combined)
         and inferred <= {"unknown_external_effect"}
     )
 
@@ -2242,12 +2299,41 @@ def _apply_local_risk_supplements(
             input_text=_input_text_for_audit_scope(scope_id, sources),
         )
     }
+    current_foreground_keyboard_scope = bool(
+        graph is not None
+        and len(graph.goal.target_apps) == 1
+        and graph.goal.target_apps[0].app_id == "current_foreground"
+        and not graph.risk_actions
+    )
+    local_keyboard_mode_scopes = (
+        {
+            scope_id
+            for scope_id, group in source_groups.items()
+            if _is_reversible_local_keyboard_mode(*(item.text for item in group))
+            and (
+                scope_id is None
+                or any(
+                    subgoal.subgoal_id == scope_id
+                    and subgoal.external_impact == "navigation_only"
+                    and not subgoal.risk_action_ids
+                    for subgoal in graph.subgoals
+                )
+            )
+        }
+        if current_foreground_keyboard_scope
+        else set()
+    )
     assessments = []
     for assessment in report.assessments:
         source = source_map[assessment.source_id]
         scope_is_local_input = assessment.subgoal_id in local_input_scopes
         if assessment.subgoal_id is None and None in local_input_scopes:
             scope_is_local_input = True
+        scope_is_local_keyboard_mode = (
+            assessment.subgoal_id in local_keyboard_mode_scopes
+        )
+        if assessment.subgoal_id is None and None in local_keyboard_mode_scopes:
+            scope_is_local_keyboard_mode = True
         is_negated_constraint = source.source_kind in {
             "goal_constraint",
             "subgoal_constraint",
@@ -2296,6 +2382,21 @@ def _apply_local_risk_supplements(
                 ),
             )
         if (
+            assessment.external_impact in {"external_state", "unknown"}
+            and model_types <= {"unknown_external_effect", "data_mutation"}
+            and inferred <= {"unknown_external_effect"}
+            and scope_is_local_keyboard_mode
+        ):
+            assessment = replace(
+                assessment,
+                external_impact="navigation_only",
+                risk_types=(),
+                reason=(
+                    assessment.reason
+                    + "；本地校验确认只改变未提交的设备输入法临时模式"
+                ),
+            )
+        if (
             assessment.external_impact == "external_state"
             and model_types
             and model_types <= {"unknown_external_effect", "data_mutation"}
@@ -2326,6 +2427,10 @@ def _apply_local_risk_supplements(
             inferred
             and not (
                 scope_is_local_input
+                and inferred <= {"unknown_external_effect"}
+            )
+            and not (
+                scope_is_local_keyboard_mode
                 and inferred <= {"unknown_external_effect"}
             )
             and assessment.external_impact != "unknown"

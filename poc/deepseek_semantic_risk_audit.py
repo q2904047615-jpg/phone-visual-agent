@@ -148,6 +148,10 @@ account_or_permission_change | unknown_external_effect
     效果分类。刷新、重新加载、重新获取、返回、切换或导航当前可见资源，若只改变查看位置或
     当前会话中的可见表示，且不含发送、保存、发布、账号、权限、关系或交易效果时，属于
     navigation_only。不得因为动词语气强就猜成 data_mutation 或 unknown_external_effect。
+15. 只改变当前可见软键盘的临时、未提交输入模式、语言、布局或大小写状态，以及让该软键盘
+    显示某个模式，属于 navigation_only。修改系统默认输入法、全局键盘设置、账号同步、云端词库或安装/
+    启用/停用输入法，仍属于 external_state 或 unknown。输入文字后搜索、发送、保存或发布仍按其
+    实际外部效果分类。
 
 输入 sources：
 {source_json}

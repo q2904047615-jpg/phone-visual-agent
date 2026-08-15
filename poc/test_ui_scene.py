@@ -540,6 +540,37 @@ class UISceneTests(unittest.TestCase):
                     ),
                 )
 
+    def test_verified_input_rejects_nonempty_value_before_resolution(self) -> None:
+        current = scene(
+            element(
+                "search-field",
+                "搜索输入框",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "alreadythere",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                    "goal_relevant": True,
+                },
+            ),
+            fingerprint="before",
+        )
+
+        with self.assertRaisesRegex(UniversalActionError, "空输入框"):
+            UniversalActionController().resolve_one(
+                SemanticAction(
+                    node_id="type-query",
+                    action="input_verified_text",
+                    params={
+                        "element_id": "search-field",
+                        "target": "搜索输入框",
+                        "text": "agent",
+                    },
+                ),
+                current,
+            )
+
     def test_verified_input_rejects_chinese_pinyin_qwerty_before_resolution(self) -> None:
         current = scene(
             element(

@@ -2137,6 +2137,44 @@ class GenericSceneObserverTests(unittest.TestCase):
             )
         )
 
+    def test_text_entry_result_discards_incomplete_non_target_mode_switch(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[audited_application_input(text="agent", placeholder="")],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "mode_switch": {
+                    "label": "英",
+                    "bounds": [650, 900, 760, 970],
+                    "confidence": 0.97,
+                    "current_mode": "direct_latin",
+                },
+            },
+        )
+        audit["application_inputs"][0]["visible_editable_cues"] = ["caret"]
+
+        scene = GenericSceneObserver(
+            SequenceProvider([empty, empty, audit])
+        ).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "让当前唯一输入框逐字显示 agent，不提交"},
+        )
+
+        input_element = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(input_element)
+        self.assertEqual("agent", input_element.states["value"])
+        self.assertEqual("direct_latin", input_element.states["keyboard_input_mode"])
+        self.assertFalse(
+            any(
+                item.element_id == "local_audited_keyboard_mode_switch_1"
+                for item in scene.elements
+            )
+        )
+
     def test_switch_goal_rejects_incomplete_mode_switch(self) -> None:
         empty = scene_payload()
         empty["elements"] = []

@@ -39,7 +39,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v20"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v21"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1200
@@ -2383,17 +2383,19 @@ def _apply_input_structure_audit(
         if (
             not switch_is_goal
             and trusted_input is not None
-            and trusted_input["text"] == ""
             and keyboard_visible
             and keyboard_layout == "qwerty"
             and keyboard_input_mode == "direct_latin"
             and _is_incomplete_optional_keyboard_mode_switch(raw_mode_switch)
         ):
             # A text-entry target does not consume the keyboard switch. When
-            # the current input state is already independently proven safe,
-            # discard only an incomplete subset of the optional switch schema.
-            # Extra fields, malformed geometry and all switch goals still reach
-            # strict validation below and fail closed.
+            # the current input and direct-Latin keyboard state are independently
+            # proven, discard only an incomplete subset of the optional switch
+            # schema. This applies both before input (empty value) and while
+            # verifying the exact non-empty result. Action authorization still
+            # requires an empty value in UniversalActionController. Extra fields,
+            # malformed geometry and all switch goals reach strict validation
+            # below and fail closed.
             mode_switch = None
         else:
             mode_switch = _validated_keyboard_mode_switch(

@@ -319,6 +319,7 @@ def _prompt_fingerprint(
 ) -> str:
     digest = hashlib.sha256()
     digest.update((ROOT / "vision_agent.py").read_bytes())
+    digest.update((ROOT / "vision_model_config.py").read_bytes())
     digest.update(json.dumps(case, ensure_ascii=False, sort_keys=True).encode("utf-8"))
     digest.update(model.encode("utf-8"))
     for relative in case["images"]:

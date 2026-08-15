@@ -28,6 +28,7 @@ from semantic_executor import SemanticAction
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 from universal_action_controller import UniversalActionController, UniversalActionError
 from vision_agent import VisionAgentError, _image_data_url
+from vision_model_config import public_model_identity
 
 
 QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-14-qwen-visual-decision-v5"
@@ -1142,8 +1143,10 @@ class QwenVisualDecisionObserver:
             raise VisionAgentError("任务 device_id 与可信观察不一致。")
         self._metrics["decision_count"] += 1
 
+        model_identity = public_model_identity(self.provider.status())
         base_diagnostics = {
             "visual_decision_protocol": QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
+            "vision_model": model_identity,
             "task_id": context.task_id,
             "device_id": context.device_id,
             "revision": context.revision,
@@ -1168,6 +1171,8 @@ class QwenVisualDecisionObserver:
             try:
                 return self._provider_chat(messages, max_tokens=max_tokens)
             finally:
+                model_identity.clear()
+                model_identity.update(public_model_identity(self.provider.status()))
                 model_call_elapsed_seconds.append(
                     round(time.perf_counter() - call_started, 3)
                 )

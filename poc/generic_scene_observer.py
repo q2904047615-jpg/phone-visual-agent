@@ -37,6 +37,7 @@ from ui_scene import (
     UISceneError,
 )
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
+from vision_model_config import public_model_identity
 
 
 GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v26"
@@ -235,7 +236,8 @@ class GenericSceneObserver:
         goal_context: dict[str, Any] | None = None,
     ) -> UIScene:
         self.last_raw_response = ""
-        self.last_diagnostics = {}
+        model_identity = public_model_identity(self.provider.status())
+        self.last_diagnostics = {"vision_model": model_identity}
         self._set_stage("checking_stability")
         started = time.perf_counter()
         model_calls = 0
@@ -266,6 +268,8 @@ class GenericSceneObserver:
             try:
                 return self._provider_chat(messages, max_tokens=max_tokens)
             finally:
+                model_identity.clear()
+                model_identity.update(public_model_identity(self.provider.status()))
                 model_call_elapsed_seconds.append(
                     round(time.perf_counter() - call_started, 3)
                 )
@@ -280,6 +284,7 @@ class GenericSceneObserver:
             if not stability.stable:
                 self.last_diagnostics = {
                     "observer_version": GENERIC_SCENE_OBSERVER_VERSION,
+                    "vision_model": model_identity,
                     "model_calls": 0,
                     "local_stability": stability.to_dict(),
                     "failed_stage": "checking_stability",
@@ -664,6 +669,7 @@ class GenericSceneObserver:
             ):
                 self.last_diagnostics = {
                     "observer_version": GENERIC_SCENE_OBSERVER_VERSION,
+                    "vision_model": model_identity,
                     "strategy": "compact_then_targeted_on_demand",
                     "model_calls": model_calls,
                     "compact_retry_used": compact_retry_used,
@@ -702,6 +708,7 @@ class GenericSceneObserver:
 
             self.last_diagnostics = {
                 "observer_version": GENERIC_SCENE_OBSERVER_VERSION,
+                "vision_model": model_identity,
                 "strategy": "compact_then_targeted_on_demand",
                 "model_calls": model_calls,
                 "compact_retry_used": compact_retry_used,
@@ -769,6 +776,7 @@ class GenericSceneObserver:
             base.update(
                 {
                     "observer_version": GENERIC_SCENE_OBSERVER_VERSION,
+                    "vision_model": model_identity,
                     "model_calls": model_calls,
                     "compact_retry_used": compact_retry_used,
                     "format_retry_used": format_retry_used,

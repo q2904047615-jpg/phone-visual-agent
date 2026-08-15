@@ -6,6 +6,14 @@ if not defined DASHSCOPE_API_KEY (
   for /f "tokens=2,*" %%A in ('reg query HKCU\Environment /v DASHSCOPE_API_KEY 2^>nul ^| findstr /i "DASHSCOPE_API_KEY"') do set "DASHSCOPE_API_KEY=%%B"
 )
 
+if not defined VISION_MODEL (
+  if defined QWEN_VL_MODEL (
+    set "VISION_MODEL=%QWEN_VL_MODEL%"
+  ) else (
+    set "VISION_MODEL=qwen3.7-plus"
+  )
+)
+
 if not exist ".venv\Scripts\python.exe" (
   echo [1/3] Creating local Python environment...
   python -m venv --system-site-packages .venv
@@ -21,7 +29,7 @@ if errorlevel 1 (
 
 echo [3/3] Starting robot web console...
 if defined DASHSCOPE_API_KEY (
-  echo Qwen vision agent: qwen3-vl-plus ready
+  echo Qwen vision agent: %VISION_MODEL% ready, thinking disabled
 ) else (
   echo Qwen vision agent: API key not configured; fixed workflows remain available
 )

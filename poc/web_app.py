@@ -1344,7 +1344,10 @@ def apps() -> dict[str, Any]:
         readiness = runtime.controller.device_status()["readiness"]
     readiness["vision_agent"] = {
         "ready": bool(runtime.vision_provider.status().get("configured")),
-        "mode": "qwen3-vl-plus",
+        "mode": runtime.vision_provider.status().get("model", "unknown"),
+        "thinking_enabled": runtime.vision_provider.status().get(
+            "thinking_enabled", False
+        ),
         "missing_templates": [],
         "missing_capabilities": (
             []

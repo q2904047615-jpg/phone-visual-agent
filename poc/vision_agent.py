@@ -19,10 +19,16 @@ from operation_specs import (
     InputRecoveryCoordinator,
     editable_character_count,
 )
+from vision_model_config import (
+    DEFAULT_VISION_BASE_URL,
+    DEFAULT_VISION_MODEL,
+    VisionModelConfig,
+    load_vision_model_config,
+)
 
 
-DEFAULT_MODEL = "qwen3-vl-plus"
-DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEFAULT_MODEL = DEFAULT_VISION_MODEL
+DEFAULT_BASE_URL = DEFAULT_VISION_BASE_URL
 ALLOWED_ACTIONS = {
     "tap",
     "type_symbol",
@@ -1371,21 +1377,30 @@ class DashScopeVisionProvider:
         api_key: str | None = None,
         model: str | None = None,
         base_url: str | None = None,
+        model_config: VisionModelConfig | None = None,
+        enable_thinking: bool = False,
         timeout: float = 45.0,
         max_attempts: int = 3,
         retry_base_delay: float = 0.8,
     ) -> None:
+        if model_config is not None and (model is not None or base_url is not None):
+            raise ValueError("model_config 不能与 model/base_url 同时传入。")
         self.api_key = api_key if api_key is not None else os.getenv("DASHSCOPE_API_KEY", "")
-        self.model = model or os.getenv("QWEN_VL_MODEL", DEFAULT_MODEL)
-        self.base_url = (
-            base_url or os.getenv("DASHSCOPE_BASE_URL", DEFAULT_BASE_URL)
-        ).rstrip("/")
+        self.model_config = model_config or load_vision_model_config(
+            model=model,
+            base_url=base_url,
+            enable_thinking=enable_thinking,
+        )
+        self.model = self.model_config.model
+        self.base_url = self.model_config.base_url
         self.timeout = timeout
         self.max_attempts = max(1, int(max_attempts))
         self.retry_base_delay = max(0.0, float(retry_base_delay))
         self.last_usage: dict[str, Any] = {}
         self.last_request_id = ""
         self.last_network_attempts = 0
+        self.last_finish_reason = ""
+        self.last_response_model = ""
 
     @property
     def configured(self) -> bool:
@@ -1393,13 +1408,18 @@ class DashScopeVisionProvider:
 
     def status(self) -> dict[str, Any]:
         return {
-            "provider": "aliyun_model_studio",
+            "model_config_version": self.model_config.config_version,
+            "provider": self.model_config.provider,
             "model": self.model,
+            "thinking_enabled": self.model_config.enable_thinking,
+            "coordinate_scale": self.model_config.coordinate_scale,
             "configured": self.configured,
             "base_url": self.base_url,
             "last_usage": self.last_usage,
             "last_request_id": self.last_request_id,
             "last_network_attempts": self.last_network_attempts,
+            "last_finish_reason": self.last_finish_reason,
+            "response_model": self.last_response_model,
             "error": None if self.configured else "未配置 DASHSCOPE_API_KEY",
         }
 
@@ -1415,6 +1435,11 @@ class DashScopeVisionProvider:
             raise VisionAgentError(
                 "千问视觉尚未配置：请先设置 DASHSCOPE_API_KEY。"
             )
+        self.last_usage = {}
+        self.last_request_id = ""
+        self.last_network_attempts = 0
+        self.last_finish_reason = ""
+        self.last_response_model = ""
         effective_timeout = self.timeout if timeout is None else max(1.0, float(timeout))
         effective_attempts = (
             self.max_attempts
@@ -1436,6 +1461,7 @@ class DashScopeVisionProvider:
                         "messages": messages,
                         "temperature": 0.0,
                         "max_tokens": max_tokens,
+                        **self.model_config.request_options(),
                     },
                     timeout=effective_timeout,
                 )
@@ -1477,9 +1503,12 @@ class DashScopeVisionProvider:
 
         self.last_usage = payload.get("usage") or {}
         self.last_request_id = str(payload.get("id") or "")
+        self.last_response_model = str(payload.get("model") or "")
         try:
-            content = payload["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
+            choice = payload["choices"][0]
+            self.last_finish_reason = str(choice.get("finish_reason") or "")
+            content = choice["message"]["content"]
+        except (AttributeError, KeyError, IndexError, TypeError) as exc:
             raise VisionAgentError("千问视觉响应缺少 message.content。") from exc
         if not isinstance(content, str) or not content.strip():
             raise VisionAgentError("千问视觉返回了空内容。")
@@ -1888,7 +1917,7 @@ class ScriptedVisionProvider:
     def status(self) -> dict[str, Any]:
         return {
             "provider": "scripted_test",
-            "model": "mock-qwen3-vl-plus",
+            "model": "mock-vision-model",
             "configured": True,
             "last_usage": {},
             "last_request_id": "",
@@ -1911,7 +1940,7 @@ class ScriptedVisionProvider:
             "summary": text,
             "message": "mock",
             "needs_confirmation": True,
-            "provider": "mock-qwen3-vl-plus",
+            "provider": "mock-vision-model",
         }
 
     def decide(

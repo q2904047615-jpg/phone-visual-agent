@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-Write-Host "配置 qwen3-vl-plus 的阿里云百炼 API Key" -ForegroundColor Cyan
+Write-Host "配置 qwen3.7-plus 视觉模型的阿里云百炼 API Key" -ForegroundColor Cyan
 Write-Host "密钥只保存到 Windows 当前用户环境变量，不写入项目文件。"
 Write-Host ""
 

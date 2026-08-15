@@ -967,7 +967,51 @@ class GenericSingleActionAdapter:
                     and original_class != "forbidden"
                     and current_class != "forbidden"
                 )
-                if not labelled_drag_endpoint and (
+                def stripped_gesture_semantics(value: str) -> str:
+                    normalized = str(value or "").casefold()
+                    for marker in (
+                        "long_press",
+                        "longpress",
+                        "drag",
+                        "drop",
+                        "长按",
+                        "拖动",
+                        "拖拽",
+                    ):
+                        normalized = normalized.replace(marker, " ")
+                    return normalized
+
+                current_selector_tokens = {
+                    token
+                    for token in re.split(
+                        r"[^a-z0-9]+",
+                        stripped_gesture_semantics(current.meaning),
+                    )
+                    if token
+                }
+                labelled_local_mode_selector = bool(
+                    requested.action == "tap_semantic"
+                    and prefix == ""
+                    and original.label
+                    and current.label == original.label
+                    and original.role == current.role
+                    and current.role in {"button", "tab", "list_item"}
+                    and current.states == original.states
+                    and current_selector_tokens.intersection(
+                        {"select", "selector", "mode", "option", "entry", "navigate", "open"}
+                    )
+                    and navigation_semantic_class(
+                        stripped_gesture_semantics(original.meaning),
+                        stripped_gesture_semantics(original.label),
+                    )
+                    != "forbidden"
+                    and navigation_semantic_class(
+                        stripped_gesture_semantics(current.meaning),
+                        stripped_gesture_semantics(current.label),
+                    )
+                    != "forbidden"
+                )
+                if not (labelled_drag_endpoint or labelled_local_mode_selector) and (
                     not original_class
                     or original_class == "forbidden"
                     or current_class != original_class

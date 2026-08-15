@@ -1135,6 +1135,120 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual([("tap", 225, 95)], robot.actions)
         self.assertEqual("launch_browser_app", result.rebound_action.params["target"])
 
+    def test_rebind_accepts_exact_local_gesture_mode_selector_label(self):
+        states = {"goal_relevant": True, "fully_visible": True}
+        planned = UIScene(
+            app_id="unknown",
+            screen_id="unknown",
+            summary="本地验收模式列表",
+            elements=(
+                UIElement(
+                    element_id="mode",
+                    role="button",
+                    meaning="long_press_target",
+                    label="长按目标",
+                    bounds=(0.12, 0.76, 0.88, 0.85),
+                    confidence=1.0,
+                    states=states,
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = UIScene(
+            app_id="unknown",
+            screen_id="unknown",
+            summary="本地验收模式列表",
+            elements=(
+                UIElement(
+                    element_id="fresh-mode",
+                    role="button",
+                    meaning="select_long_press_target_mode",
+                    label="长按目标",
+                    bounds=(0.12, 0.77, 0.88, 0.86),
+                    confidence=1.0,
+                    states=states,
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        robot = FakeRobot()
+        result = self._adapter(
+            FakeSceneObserver([fresh, scene("after", screen_id="long-press")]),
+            robot,
+        ).execute(
+            requested_action=SemanticAction(
+                node_id="open-mode",
+                action="tap_semantic",
+                params={
+                    "element_id": "mode",
+                    "target": "long_press_target",
+                    "role": "button",
+                    "label": "长按目标",
+                    "states": states,
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("tap", 500, 815)], robot.actions)
+        self.assertEqual(
+            "select_long_press_target_mode",
+            result.rebound_action.params["target"],
+        )
+
+    def test_rebind_rejects_risky_gesture_label_even_for_mode_selector(self):
+        states = {"goal_relevant": True, "fully_visible": True}
+        planned = UIScene(
+            app_id="unknown",
+            screen_id="unknown",
+            summary="模式列表",
+            elements=(
+                UIElement(
+                    element_id="mode",
+                    role="button",
+                    meaning="long_press_target",
+                    label="长按删除",
+                    bounds=(0.12, 0.76, 0.88, 0.85),
+                    confidence=1.0,
+                    states=states,
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    element_id="fresh-mode",
+                    meaning="select_long_press_delete_mode",
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        robot = FakeRobot()
+
+        with self.assertRaisesRegex(GenericActionAdapterError, "语义"):
+            self._adapter(FakeSceneObserver([fresh]), robot).execute(
+                requested_action=SemanticAction(
+                    node_id="open-mode",
+                    action="tap_semantic",
+                    params={
+                        "element_id": "mode",
+                        "target": "long_press_target",
+                        "role": "button",
+                        "label": "长按删除",
+                        "states": states,
+                    },
+                ),
+                planned_scene=planned,
+                goal=goal(),
+                confirmed=True,
+            )
+        self.assertEqual([], robot.actions)
+
     def test_rebind_rejects_risky_meaning_drift_even_when_label_and_region_match(self):
         planned = UIScene(
             app_id="settings",

@@ -314,9 +314,14 @@ class GenericSceneObserver:
             ]
 
             def parse_compact_response(value: str) -> UIScene:
+                payload = _extract_compact_json_object(value)
                 return _suppress_obscured_input_evidence(
                     _parse_scene(
-                        value,
+                        json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
                         fingerprint=fingerprint,
                         goal_context=context,
                         allow_invalid_system_ui_unknown=system_ui_audit_required,
@@ -326,9 +331,13 @@ class GenericSceneObserver:
                     fingerprint=fingerprint,
                 )
 
-            def parse_unique_structural_repair(value: str) -> UIScene | None:
-                repaired = _parse_scene_after_unique_structural_edit(
-                    value,
+            def parse_remote_structural_repair(
+                original: str,
+                suggested: str,
+            ) -> UIScene | None:
+                repaired = _parse_remote_structural_repair_suggestion(
+                    original,
+                    suggested,
                     fingerprint=fingerprint,
                     goal_context=context,
                     allow_invalid_system_ui_unknown=system_ui_audit_required,
@@ -359,43 +368,39 @@ class GenericSceneObserver:
                 if (
                     first_error_type not in FORMAT_ERROR_TYPES
                     or not _compact_retry_allowed(first_error)
+                    or not _compact_response_has_repairable_syntax_error(
+                        self.last_raw_response
+                    )
                 ):
                     raise
-                scene = parse_unique_structural_repair(self.last_raw_response)
-                if scene is not None:
-                    format_retry_used = True
-                    local_structural_repair_used = True
-                else:
-                    compact_retry_used = True
-                    format_retry_used = True
-                    self._set_stage("waiting_compact_retry")
-                    retry_messages = [
-                        _json_only_system_message(),
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": _compact_retry_prompt(
-                                        self.last_raw_response
-                                    ),
-                                }
-                            ],
-                        }
-                    ]
-                    raw = model_chat(
-                        retry_messages,
-                        max_tokens=COMPACT_RETRY_TOKENS,
+                original_raw = self.last_raw_response
+                compact_retry_used = True
+                format_retry_used = True
+                self._set_stage("waiting_compact_retry")
+                retry_messages = [
+                    _json_only_system_message(),
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": _compact_retry_prompt(original_raw),
+                            }
+                        ],
+                    }
+                ]
+                raw = model_chat(
+                    retry_messages,
+                    max_tokens=COMPACT_RETRY_TOKENS,
+                )
+                self.last_raw_response = raw
+                self._set_stage("parsing_compact_retry")
+                scene = parse_remote_structural_repair(original_raw, raw)
+                if scene is None:
+                    raise VisionAgentError(
+                        "远程格式建议不是原始响应唯一、严格有效的单结构标点修复。"
                     )
-                    self.last_raw_response = raw
-                    self._set_stage("parsing_compact_retry")
-                    try:
-                        scene = parse_compact_response(raw)
-                    except VisionAgentError:
-                        scene = parse_unique_structural_repair(raw)
-                        if scene is None:
-                            raise
-                        local_structural_repair_used = True
+                local_structural_repair_used = True
 
             if (
                 not system_ui_audit_required
@@ -1411,6 +1416,42 @@ def _load_json_without_duplicate_keys(raw: str) -> Any:
     return json.loads(raw, object_pairs_hook=_reject_duplicate_json_object_pairs)
 
 
+def _extract_compact_json_object(raw: str) -> dict[str, Any]:
+    """Extract only compact-scene JSON while rejecting duplicate keys."""
+
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        value = _load_json_without_duplicate_keys(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise VisionAgentError("模型没有返回 JSON 对象。")
+        try:
+            value = _load_json_without_duplicate_keys(text[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
+        except (TypeError, ValueError) as exc:
+            raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
+    except (TypeError, ValueError) as exc:
+        raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
+    if not isinstance(value, dict):
+        raise VisionAgentError("模型返回值必须是 JSON 对象。")
+    return value
+
+
+def _compact_response_has_repairable_syntax_error(raw: str) -> bool:
+    try:
+        _extract_compact_json_object(raw)
+    except VisionAgentError as exc:
+        cause = exc.__cause__
+        return cause is None or isinstance(cause, json.JSONDecodeError)
+    return False
+
+
 def _single_json_structural_edits(raw: str) -> Iterator[str]:
     """Yield bounded one-character edits around the original parser error."""
 
@@ -1485,7 +1526,52 @@ def _parse_scene_after_unique_structural_edit(
 ) -> UIScene | None:
     """Accept one punctuation edit only when exactly one strict scene survives."""
 
-    accepted: list[UIScene] = []
+    result = _unique_strict_structural_scene_edit(
+        raw,
+        fingerprint=fingerprint,
+        goal_context=goal_context,
+        allow_invalid_system_ui_unknown=allow_invalid_system_ui_unknown,
+        camera_layout_orientation=camera_layout_orientation,
+    )
+    return result[1] if result is not None else None
+
+
+def _parse_remote_structural_repair_suggestion(
+    original_raw: str,
+    suggested_raw: str,
+    *,
+    fingerprint: str,
+    goal_context: dict[str, Any] | None = None,
+    allow_invalid_system_ui_unknown: bool = False,
+    camera_layout_orientation: str | None = None,
+) -> UIScene | None:
+    """Accept a remote suggestion only when it exactly names the unique edit."""
+
+    try:
+        _extract_compact_json_object(suggested_raw)
+    except VisionAgentError:
+        return None
+    result = _unique_strict_structural_scene_edit(
+        original_raw,
+        fingerprint=fingerprint,
+        goal_context=goal_context,
+        allow_invalid_system_ui_unknown=allow_invalid_system_ui_unknown,
+        camera_layout_orientation=camera_layout_orientation,
+    )
+    if result is None or str(suggested_raw).strip() != result[0]:
+        return None
+    return result[1]
+
+
+def _unique_strict_structural_scene_edit(
+    raw: str,
+    *,
+    fingerprint: str,
+    goal_context: dict[str, Any] | None = None,
+    allow_invalid_system_ui_unknown: bool = False,
+    camera_layout_orientation: str | None = None,
+) -> tuple[str, UIScene] | None:
+    accepted: list[tuple[str, UIScene]] = []
     for candidate in _single_json_structural_edits(raw):
         try:
             decoded = _load_json_without_duplicate_keys(candidate)
@@ -1500,7 +1586,7 @@ def _parse_scene_after_unique_structural_edit(
             )
         except (json.JSONDecodeError, ValueError, VisionAgentError):
             continue
-        accepted.append(scene)
+        accepted.append((candidate, scene))
         if len(accepted) > 1:
             return None
     return accepted[0] if accepted else None

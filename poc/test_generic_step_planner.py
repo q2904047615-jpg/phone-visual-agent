@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from generic_action_adapter import (
     GenericSingleActionAdapter as _GenericSingleActionAdapter,
 )
 from generic_intent import GenericIntentDraft
-from generic_scene_observer import _local_frame_fingerprint
+from generic_scene_observer import GenericSceneObserver, _local_frame_fingerprint
 from orientation_safety import (
     _claim_audit_seal,
     _mint_audited_credential,
@@ -42,6 +43,26 @@ class FakeTextProvider:
         self.calls += 1
         self.messages = messages
         return json.dumps(self.payload, ensure_ascii=False)
+
+
+class RawSceneProvider:
+    configured = True
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+        self.max_tokens_seen = []
+
+    def _chat(self, messages, *, max_tokens, **_kwargs):
+        self.calls += 1
+        self.max_tokens_seen.append(max_tokens)
+        value = self.responses.pop(0)
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return value
+
+    def status(self):
+        return {"configured": True, "model": "offline-sequence"}
 
 
 class FakeSceneObserver:
@@ -225,6 +246,14 @@ def scene(
         camera_alignment=camera_alignment or aligned_camera_facts(),
     )
     return current
+
+
+def compact_scene_raw(*, label="设置"):
+    payload = scene("model-scene").to_dict()
+    payload["elements"][0]["label"] = label
+    for element in payload["elements"]:
+        element["bounds"] = [value * 1000 for value in element["bounds"]]
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 class GenericStepPlannerTests(unittest.TestCase):
@@ -411,6 +440,57 @@ class GenericActionAdapterTests(unittest.TestCase):
             frame_interval=0,
             post_action_settle=0,
         )
+
+    def _assert_public_observation_failure_before_robot(self, responses):
+        provider = RawSceneProvider(responses)
+        robot = FakeRobot()
+        adapter = self._adapter(GenericSceneObserver(provider), robot)
+        action = SemanticAction(
+            node_id="blocked-observer-json",
+            action="tap_semantic",
+            params={"element_id": "e1", "target": "app_icon"},
+        )
+
+        with self.assertRaises(GenericActionAdapterError) as caught:
+            adapter.execute(
+                requested_action=action,
+                planned_scene=scene("planned"),
+                goal=goal(),
+                confirmed=True,
+            )
+
+        self.assertEqual(0, caught.exception.physical_actions)
+        self.assertEqual([], robot.actions)
+        self.assertIsNone(robot._armed)
+        self.assertEqual([800, 800], provider.max_tokens_seen)
+
+    def test_public_execute_irreparable_observation_never_calls_robot(self):
+        valid = compact_scene_raw()
+        self._assert_public_observation_failure_before_robot(
+            ["not-json", valid]
+        )
+
+    def test_public_execute_duplicate_key_observation_never_calls_robot(self):
+        valid = compact_scene_raw()
+        duplicate = valid.replace(
+            '"summary":',
+            '"summary":"duplicate","summary":',
+            1,
+        )
+        self._assert_public_observation_failure_before_robot(
+            [duplicate, duplicate]
+        )
+
+    def test_public_execute_ambiguous_observation_never_calls_robot(self):
+        first = compact_scene_raw(label="设置")
+        second = compact_scene_raw(label="蓝牙")
+        with patch(
+            "generic_scene_observer._single_json_structural_edits",
+            side_effect=lambda _raw: iter((first, second)),
+        ):
+            self._assert_public_observation_failure_before_robot(
+                ['{"bad":}', first]
+            )
 
     def test_reports_only_callable_device_actions(self):
         adapter = self._adapter(FakeSceneObserver([]), FakeRobot())

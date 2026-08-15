@@ -400,6 +400,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual(graph.active_subgoal().status, "active")
         self.assertEqual(len(provider.messages), 2)
         self.assertIn("临时标签页也属于 navigation_only", provider.messages[0][0]["content"])
+        self.assertIn("goal.entities.target_ui_label", provider.messages[0][0]["content"])
+        self.assertIn("字面标签当成动作指令", provider.messages[0][0]["content"])
 
     def test_initial_plan_allows_one_bounded_repair_for_a_different_error_category(self):
         first = base_payload()

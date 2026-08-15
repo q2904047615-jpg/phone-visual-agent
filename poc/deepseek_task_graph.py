@@ -1125,6 +1125,10 @@ def _initial_prompt(raw_goal: str) -> str:
    “只能向上滑动一次”改写为“页面内容只允许向上移动一次”。
    如果用户明确指“当前页面”“当前应用”或“当前前台”但没有说 App 名称，target_apps 使用
    [{{"app_id":"current_foreground","app_name":"当前前台应用"}}]；不能只因未重复 App 名称而阻塞。
+   如果目标界面的字面标签本身含有点击、滑动、输入、长按、拖动等动作词，这仍只是
+   可见文字；必须将它逐字保存在goal.entities.target_ui_label，不得复制到goal.objective、
+   subgoals.objective、completion_conditions或constraints。这些状态字段只能描述目标页面、区域或
+   内容可见，不能把字面标签当成动作指令。
 3. 只能有一个 active 子目标；其依赖必须已经 completed（初始图通常无依赖）。
 4. 初始规划没有画面证据，所有完成条件 satisfied=false，任何子目标都不能 completed。
 5. 每个子目标必须用 external_impact 标为 read_only、navigation_only、external_state 或 unknown。
@@ -1183,7 +1187,10 @@ def _repair_initial_prompt(
    “页面内容只允许向上移动一次”，不得把正向低层动作词放入 constraints。
 6. 如果用户明确指“当前页面”“当前应用”或“当前前台”但未说 App 名称，target_apps 必须使用
    [{{"app_id":"current_foreground","app_name":"当前前台应用"}}]，不得只因缺少 App 名称而阻塞。
-7. 只返回符合结构的完整 JSON 对象，不要 Markdown。
+7. 字面 UI 标签若包含点击、滑动、输入、长按、拖动等词，必须逐字放在
+   goal.entities.target_ui_label，不得出现在goal.objective、subgoals.objective、
+   completion_conditions或constraints；状态字段只描述目标页面、区域或内容可见。
+8. 只返回符合结构的完整 JSON 对象，不要 Markdown。
 """
 
 

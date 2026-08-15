@@ -1511,6 +1511,90 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(audited_source, result.before_scene.get_element("source").bounds)
         self.assertEqual(1, result.physical_actions)
 
+    def test_drag_rebind_accepts_safe_meaning_synonyms_for_exact_labelled_endpoints(self):
+        def make_scene(fingerprint, source_meaning, destination_meaning):
+            return UIScene(
+                app_id="local.acceptance",
+                screen_id="drag-board",
+                summary="通用拖动验收页面",
+                elements=(
+                    UIElement(
+                        element_id="source",
+                        role="container",
+                        meaning=source_meaning,
+                        label="起点",
+                        bounds=(0.18, 0.68, 0.38, 0.82),
+                        confidence=0.98,
+                        states={"goal_relevant": True, "fully_visible": True},
+                        evidence=("紧凑方块内逐字显示起点",),
+                    ),
+                    UIElement(
+                        element_id="destination",
+                        role="container",
+                        meaning=destination_meaning,
+                        label="绿色终点",
+                        bounds=(0.55, 0.65, 0.85, 0.88),
+                        confidence=0.98,
+                        states={"goal_relevant": True, "fully_visible": True},
+                        evidence=("绿色虚线区域内逐字显示绿色终点",),
+                    ),
+                ),
+                stable=True,
+                confidence=0.98,
+                fingerprint=fingerprint,
+                camera_alignment=aligned_camera_facts(),
+            )
+
+        planned = make_scene("planned", "drag_source_object", "drop_target_zone")
+        fresh = make_scene("fresh", "draggable_source_block", "drag_target_region")
+        after = make_scene("after", "draggable_source_block", "drag_target_region")
+        moved_source = replace(
+            after.elements[0],
+            bounds=(0.62, 0.68, 0.78, 0.82),
+        )
+        after = replace(after, elements=(moved_source, after.elements[1]))
+        observer = FakeSceneObserver(
+            [fresh, after],
+            geometry_scenes=[fresh, fresh],
+        )
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="drag-synonyms",
+                action="drag",
+                params={
+                    "source_element_id": "source",
+                    "source_target": "drag_source_object",
+                    "source_role": "container",
+                    "source_label": "起点",
+                    "source_states": {"goal_relevant": True, "fully_visible": True},
+                    "destination_element_id": "destination",
+                    "destination_target": "drop_target_zone",
+                    "destination_role": "container",
+                    "destination_label": "绿色终点",
+                    "destination_states": {"goal_relevant": True, "fully_visible": True},
+                    "expected_effect": {"scene_changed": True},
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("drag", 280, 750, 700, 765)], robot.actions)
+
     def test_changed_local_frames_stop_even_when_model_screen_id_matches(self):
         planned = scene("planned", screen_id="same_screen")
         fresh = scene("before", screen_id="same_screen")

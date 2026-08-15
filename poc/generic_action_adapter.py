@@ -905,15 +905,42 @@ class GenericSingleActionAdapter:
                 )
             current = matches[0]
             if current.meaning.casefold() != original.meaning.casefold():
-                original_class = navigation_semantic_class(
+                def semantic_class(meaning: str, label: str) -> str:
+                    normalized = str(meaning or "").casefold()
+                    if requested.action == "drag" and prefix in {
+                        "source_",
+                        "destination_",
+                    }:
+                        for marker in (
+                            "draggable",
+                            "drag_source",
+                            "drag_target",
+                            "drop_target",
+                            "drag",
+                            "drop",
+                            "拖动",
+                            "拖拽",
+                        ):
+                            normalized = normalized.replace(marker, " ")
+                    return navigation_semantic_class(normalized, label)
+
+                original_class = semantic_class(
                     original.meaning,
                     original.label,
                 )
-                current_class = navigation_semantic_class(
+                current_class = semantic_class(
                     current.meaning,
                     current.label,
                 )
-                if (
+                labelled_drag_endpoint = bool(
+                    requested.action == "drag"
+                    and prefix in {"source_", "destination_"}
+                    and original.label
+                    and current.label == original.label
+                    and original_class != "forbidden"
+                    and current_class != "forbidden"
+                )
+                if not labelled_drag_endpoint and (
                     not original_class
                     or original_class == "forbidden"
                     or current_class != original_class

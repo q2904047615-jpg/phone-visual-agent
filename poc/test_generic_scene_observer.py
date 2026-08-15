@@ -24,6 +24,7 @@ from generic_scene_observer import (
     _single_json_structural_edits,
     _snap_reload_audit_to_local_glyph,
     _strict_icon_cluster_audit_payload,
+    _targeted_prompt,
 )
 from orientation_safety import ORIENTATION_AUDIT_PROTOCOL_VERSION
 from ui_scene import UI_SCENE_PROTOCOL_VERSION, UISceneError
@@ -315,6 +316,26 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn("禁止复制原图像素坐标", prompt)
         self.assertIn("810x1515", prompt)
         self.assertIn("任何边界超出0..1000就省略该元素", prompt)
+
+    def test_observation_prompts_preserve_only_read_only_clipped_list_cue(self) -> None:
+        compact = _compact_prompt({"objective": "查看目标结果"})
+        targeted = _targeted_prompt(
+            {"objective": "查看目标结果"},
+            first_scene={
+                "foreground_app_id": "unknown",
+                "screen_id": "unknown",
+                "summary": "当前列表",
+                "system_ui": {},
+                "overlays": [],
+                "confidence": 1.0,
+            },
+        )
+
+        for prompt in (compact, targeted):
+            self.assertIn("部分可见的后续", prompt)
+            self.assertIn("summary", prompt)
+            self.assertIn("不得", prompt)
+            self.assertIn("可操作目标", prompt)
 
     def test_out_of_range_explicit_non_goal_peripheral_is_discarded(self) -> None:
         payload = scene_payload()

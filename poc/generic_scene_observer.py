@@ -1507,6 +1507,9 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 10. {INPUT_VALUE_OBSERVATION_RULE}
 11. {SYSTEM_UI_OBSERVATION_RULE}
 12. {CAMERA_ALIGNMENT_OBSERVATION_RULE}
+13. 如果目标尚未出现，而当前画面明确是列表或信息流，并且原图边缘能看见只露出一部分的后续
+    列表项/卡片，必须在summary中简短记录“对应边缘存在部分可见的后续内容，列表仍在延伸”。
+    这是只读滚动线索，不得猜测被裁切项就是目标，不得给动作建议；被裁切元素不得标成可操作目标。
 
 只返回下列完整JSON，不要Markdown：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
@@ -1534,6 +1537,8 @@ def _targeted_retry_prompt(
 这是本轮观察唯一一次格式修复。请重新独立观察原图，只返回最小完整JSON；没有可靠目标就返回空elements并降低confidence。
 格式修复不能靠删除真实候选通过；原图中清楚可见且与目标直接相关的入口必须改写为elements，
 即使目标最终结果尚未出现。只有重新观察后仍无法确认时才返回空elements。
+目标未出现但列表/信息流边缘有部分可见的后续项时，summary必须记录该边缘滚动线索；不得把被裁切
+内容猜成目标或写成动作建议，也不得把它标成可操作目标。
 格式：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"短描述","system_ui":{{"immersive_or_fullscreen":"unknown",
@@ -1578,6 +1583,9 @@ def _targeted_prompt(
 应用入口可形成高可信观察，即使应用尚未打开。模糊、遮挡或不唯一时仍必须降低，禁止虚增。
 目标相关控件确实不存在时返回空elements，但只要页面事实清楚稳定，场景confidence仍应保持高值；
 不得因为系统级动作没有屏内按钮、或因为未找到目标控件，就把清晰页面写成低置信。
+如果目标尚未出现，而当前画面明确是列表/信息流且原图边缘能看到部分可见的后续列表项或卡片，
+summary必须记录“对应边缘存在部分可见的后续内容，列表仍在延伸”。这只是只读页面事实，不能猜测
+被裁切项就是目标，不能给动作建议，也不能把被裁切项写成可操作目标。
 若目标是图标且高清局部内存在两个或以上相邻图标，必须逐个区分图标语义：一个element只能紧框一个
 完整图标，绝不能把工具栏、图标组或相邻图标合成同一bounds。目标图标与相邻非目标图标可明确区分时，
 只把目标写goal_relevant:true，相邻图标写false或省略；证据必须说明看见的目标字面图形以及与相邻图标

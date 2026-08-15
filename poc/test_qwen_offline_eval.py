@@ -9,6 +9,7 @@ from pathlib import Path
 from eval_qwen_visual_decision import (
     _evaluate_case,
     _build_report,
+    _format_model_usage,
     _format_metrics,
     _prior_reference,
     _timeout_result,
@@ -215,6 +216,35 @@ class QwenOfflineReportTests(unittest.TestCase):
         self.assertEqual(metrics["combined"]["attempted_count"], 2)
         self.assertEqual(metrics["combined"]["first_pass_rate"], 0.5)
         self.assertEqual(metrics["combined"]["repair_retry_rate"], 0.5)
+
+    def test_model_usage_sums_current_results_only(self) -> None:
+        current = {
+            "result_origin": "current_run",
+            "model_usage": {
+                "successful_model_calls": 2,
+                "prompt_tokens": 300,
+                "completion_tokens": 40,
+                "total_tokens": 340,
+            },
+        }
+        prior = {
+            "result_origin": "prior_run_reference",
+            "model_usage": {
+                "successful_model_calls": 99,
+                "prompt_tokens": 999,
+                "completion_tokens": 999,
+                "total_tokens": 1998,
+            },
+        }
+        self.assertEqual(
+            _format_model_usage([current, prior]),
+            {
+                "successful_model_calls": 2,
+                "prompt_tokens": 300,
+                "completion_tokens": 40,
+                "total_tokens": 340,
+            },
+        )
 
     def test_report_write_is_atomic_and_valid_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -2629,6 +2629,13 @@ def _apply_input_structure_audit(
 
         keyboard_visible = keyboard.get("visible")
         keyboard_layout = keyboard.get("layout")
+        if isinstance(keyboard_layout, str):
+            normalized_layout = keyboard_layout.strip().casefold()
+            if normalized_layout == "symbols":
+                normalized_layout = "symbol"
+            if normalized_layout in {"qwerty", "numeric", "symbol", "unknown"}:
+                keyboard_layout = normalized_layout
+                keyboard["layout"] = normalized_layout
         keyboard_input_mode = keyboard.get("input_mode")
         if not isinstance(keyboard_visible, bool):
             raise UISceneError("输入结构审计 keyboard.visible 必须是布尔值。")

@@ -1846,6 +1846,49 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertFalse(mode_switch.states["goal_relevant"])
         self.assertEqual("direct_latin", mode_switch.states["target_mode"])
 
+    def test_input_audit_normalizes_symbols_layout_without_relaxing_schema(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[audited_application_input(text=".com")],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": " Symbols ",
+                "input_mode": "chinese_pinyin",
+                "mode_switch": None,
+            },
+        )
+        observer = GenericSceneObserver(SequenceProvider([empty, empty, audit]))
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "确认输入框内容已经是 .com"},
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(candidate)
+        self.assertEqual("symbol", candidate.states["keyboard_layout"])
+
+    def test_input_audit_keeps_unknown_layout_fail_closed(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "symbols_custom",
+                "input_mode": "unknown",
+                "mode_switch": None,
+            }
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "keyboard.layout"):
+            GenericSceneObserver(SequenceProvider([empty, empty, audit])).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "读取当前输入框和键盘"},
+            )
+
     def test_input_audit_enriches_known_focused_input_missing_keyboard_facts(self) -> None:
         preliminary = scene_payload()
         preliminary["summary"] = "唯一空输入框已聚焦，外围键盘容器可见"

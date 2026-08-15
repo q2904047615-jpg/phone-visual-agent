@@ -131,6 +131,40 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
                 model_config=config,
             )
 
+    def test_usage_totals_accumulate_only_valid_token_counts(self) -> None:
+        provider = DashScopeVisionProvider(api_key="test-key", max_attempts=1)
+        first = self._response()
+        request = httpx.Request(
+            "POST",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        )
+        second = httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "request-38",
+                "model": "qwen3.7-plus",
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": "{}"}}
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 3,
+                    "total_tokens": 23,
+                    "invalid": "ignored",
+                },
+            },
+        )
+        with patch("vision_agent.httpx.post", side_effect=[first, second]):
+            provider._chat([{"role": "user", "content": "one"}], max_tokens=10)
+            provider._chat([{"role": "user", "content": "two"}], max_tokens=10)
+        status = provider.status()
+        self.assertEqual(status["successful_call_count"], 2)
+        self.assertEqual(
+            status["usage_totals"],
+            {"prompt_tokens": 20, "completion_tokens": 3, "total_tokens": 35},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

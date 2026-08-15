@@ -82,6 +82,32 @@ def _rate(numerator: int, denominator: int) -> float:
     return round(numerator / denominator, 4) if denominator else 0.0
 
 
+def _provider_model_usage(provider: Any) -> dict[str, int]:
+    try:
+        status = provider.status()
+    except (AttributeError, TypeError, ValueError):
+        status = {}
+    totals = status.get("usage_totals") if isinstance(status, dict) else {}
+    if not isinstance(totals, dict):
+        totals = {}
+
+    def safe_count(key: str) -> int:
+        value = totals.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    call_count = status.get("successful_call_count") if isinstance(status, dict) else 0
+    return {
+        "successful_model_calls": (
+            call_count
+            if isinstance(call_count, int) and not isinstance(call_count, bool) and call_count >= 0
+            else 0
+        ),
+        "prompt_tokens": safe_count("prompt_tokens"),
+        "completion_tokens": safe_count("completion_tokens"),
+        "total_tokens": safe_count("total_tokens"),
+    }
+
+
 def _evaluate_case(
     case: dict[str, Any],
     manifest_path: str,
@@ -135,6 +161,7 @@ def _evaluate_case(
                 },
                 "elapsed_seconds": round(time.perf_counter() - started, 3),
                 "hardware_actions_enabled": False,
+                "model_usage": _provider_model_usage(provider),
                 "score": score,
             }
         scene = scene_observer.observe(
@@ -201,6 +228,7 @@ def _evaluate_case(
             "failure": failure,
             "elapsed_seconds": round(time.perf_counter() - started, 3),
             "hardware_actions_enabled": False,
+            "model_usage": _provider_model_usage(provider),
             "score": score,
         }
     except (VisionAgentError, ValueError, TypeError, OSError) as exc:
@@ -253,6 +281,7 @@ def _evaluate_case(
             },
             "elapsed_seconds": round(time.perf_counter() - started, 3),
             "hardware_actions_enabled": False,
+            "model_usage": _provider_model_usage(provider),
             "score": score,
         }
 
@@ -483,6 +512,26 @@ def _format_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _format_model_usage(results: list[dict[str, Any]]) -> dict[str, int]:
+    current = [item for item in results if item.get("result_origin") == "current_run"]
+    keys = (
+        "successful_model_calls",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+    )
+    totals = {key: 0 for key in keys}
+    for item in current:
+        usage = item.get("model_usage") or {}
+        if not isinstance(usage, dict):
+            continue
+        for key in keys:
+            value = usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                totals[key] += value
+    return totals
+
+
 def _build_report(
     *,
     run_id: str,
@@ -551,6 +600,7 @@ def _build_report(
             "final_blocked_rate": _rate(statuses.count("blocked"), len(statuses)),
         },
         "format_metrics": _format_metrics(results),
+        "model_usage": _format_model_usage(results),
         "failures": failures,
         "results": results,
     }

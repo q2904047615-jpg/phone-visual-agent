@@ -1397,6 +1397,12 @@ class DashScopeVisionProvider:
         self.max_attempts = max(1, int(max_attempts))
         self.retry_base_delay = max(0.0, float(retry_base_delay))
         self.last_usage: dict[str, Any] = {}
+        self.usage_totals = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+        self.successful_call_count = 0
         self.last_request_id = ""
         self.last_network_attempts = 0
         self.last_finish_reason = ""
@@ -1416,6 +1422,8 @@ class DashScopeVisionProvider:
             "configured": self.configured,
             "base_url": self.base_url,
             "last_usage": self.last_usage,
+            "usage_totals": dict(self.usage_totals),
+            "successful_call_count": self.successful_call_count,
             "last_request_id": self.last_request_id,
             "last_network_attempts": self.last_network_attempts,
             "last_finish_reason": self.last_finish_reason,
@@ -1501,7 +1509,22 @@ class DashScopeVisionProvider:
         else:  # Defensive guard; each terminal failure above already raises.
             raise VisionAgentError(f"千问视觉连接失败：{last_error}")
 
-        self.last_usage = payload.get("usage") or {}
+        raw_usage = payload.get("usage") or {}
+        self.last_usage = raw_usage if isinstance(raw_usage, dict) else {}
+        normalized_usage: dict[str, int] = {}
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = self.last_usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                normalized_usage[key] = value
+        if "total_tokens" not in normalized_usage:
+            component_keys = ("prompt_tokens", "completion_tokens")
+            if all(key in normalized_usage for key in component_keys):
+                normalized_usage["total_tokens"] = sum(
+                    normalized_usage[key] for key in component_keys
+                )
+        for key, value in normalized_usage.items():
+            self.usage_totals[key] += value
+        self.successful_call_count += 1
         self.last_request_id = str(payload.get("id") or "")
         self.last_response_model = str(payload.get("model") or "")
         try:

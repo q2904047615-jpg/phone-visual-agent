@@ -2377,18 +2377,35 @@ def _apply_input_structure_audit(
                 }
             )
 
-        mode_switch = _validated_keyboard_mode_switch(
-            keyboard.get("mode_switch"),
-            keyboard_bounds=keyboard_bounds,
-        )
+        switch_is_goal = _goal_requests_keyboard_mode_switch(goal_context)
+        trusted_input = matches[0] if len(matches) == 1 else None
+        raw_mode_switch = keyboard.get("mode_switch")
+        if (
+            not switch_is_goal
+            and trusted_input is not None
+            and trusted_input["text"] == ""
+            and keyboard_visible
+            and keyboard_layout == "qwerty"
+            and keyboard_input_mode == "direct_latin"
+            and _is_incomplete_optional_keyboard_mode_switch(raw_mode_switch)
+        ):
+            # A text-entry target does not consume the keyboard switch. When
+            # the current input state is already independently proven safe,
+            # discard only an incomplete subset of the optional switch schema.
+            # Extra fields, malformed geometry and all switch goals still reach
+            # strict validation below and fail closed.
+            mode_switch = None
+        else:
+            mode_switch = _validated_keyboard_mode_switch(
+                raw_mode_switch,
+                keyboard_bounds=keyboard_bounds,
+            )
         if (
             mode_switch is not None
             and keyboard_input_mode != "unknown"
             and mode_switch["current_mode"] != keyboard_input_mode
         ):
             raise UISceneError("模式切换键 current_mode 与键盘 input_mode 冲突。")
-        switch_is_goal = _goal_requests_keyboard_mode_switch(goal_context)
-        trusted_input = matches[0] if len(matches) == 1 else None
         if trusted_input is None and (mode_switch is None or not switch_is_goal):
             return scene
 
@@ -2558,6 +2575,19 @@ def _is_explicit_keyboard_mode_label(label: str) -> bool:
         "latin",
         "pinyin",
     }
+
+
+def _is_incomplete_optional_keyboard_mode_switch(value: Any) -> bool:
+    """Recognize only a missing-field subset of the optional switch schema."""
+
+    required = {
+        "label",
+        "bounds",
+        "confidence",
+        "current_mode",
+        "target_mode",
+    }
+    return isinstance(value, dict) and set(value) < required
 
 
 def _keyboard_mode_implied_by_label(label: str) -> str | None:

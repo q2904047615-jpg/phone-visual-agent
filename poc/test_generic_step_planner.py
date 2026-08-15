@@ -170,7 +170,7 @@ class FakeRobot:
         self._consume("long_press")
         self.actions.append(("long_press", x, y, hold_seconds))
         self._long_press_receipt = {
-            "version": "2026-08-16-seller-gui-contact-barrier-v2",
+            "version": "2026-08-16-seller-gui-contact-barrier-v3",
             "channel": "right_button_stationary_touch",
             "seller_event_barrier_confirmed": True,
             "round_trip_position_confirmed": True,
@@ -180,6 +180,7 @@ class FakeRobot:
             "changed_pixels": 240,
             "return_changed_pixels": 240,
             "barrier_elapsed_ms": 35.0,
+            "post_barrier_settle_seconds": 0.45,
         }
         return (x, y)
 

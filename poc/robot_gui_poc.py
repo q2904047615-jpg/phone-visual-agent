@@ -92,6 +92,7 @@ SELLER_POSITION_CHANGED_PIXEL_MIN = 120
 SELLER_POSITION_RETURN_PIXEL_MAX = 24
 SELLER_POSITION_BARRIER_OFFSET = 3
 SELLER_POSITION_BARRIER_TIMEOUT = 2.5
+SELLER_TOUCH_DOWN_SETTLE_SECONDS = 0.45
 
 
 @dataclass(frozen=True)
@@ -853,6 +854,11 @@ def long_press_client_point(
             expect_changed=True,
         )
         barrier_seconds = time.monotonic() - barrier_started
+        # The seller GUI returning from its synchronous handler proves event
+        # ordering, but its native Z command has no documented contact ACK.
+        # Keep the pen stationary for a calibrated descent window before the
+        # requested semantic hold interval starts.
+        sleep_interruptible(SELLER_TOUCH_DOWN_SETTLE_SECONDS)
         sleep_interruptible(float(hold_seconds))
     finally:
         if pressed:
@@ -860,7 +866,7 @@ def long_press_client_point(
             time.sleep(0.12)
         user32.SetCursorPos(old_cursor.x, old_cursor.y)
     return {
-        "version": "2026-08-16-seller-gui-contact-barrier-v2",
+        "version": "2026-08-16-seller-gui-contact-barrier-v3",
         "channel": "right_button_stationary_touch",
         "seller_event_barrier_confirmed": True,
         "round_trip_position_confirmed": True,
@@ -870,6 +876,7 @@ def long_press_client_point(
         "changed_pixels": int(changed_pixels),
         "return_changed_pixels": int(return_changed_pixels),
         "barrier_elapsed_ms": round(barrier_seconds * 1000.0, 3),
+        "post_barrier_settle_seconds": SELLER_TOUCH_DOWN_SETTLE_SECONDS,
     }
 
 

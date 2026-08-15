@@ -441,7 +441,7 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
         )
         if (
             receipt.get("version")
-            != "2026-08-16-seller-gui-contact-barrier-v2"
+            != "2026-08-16-seller-gui-contact-barrier-v3"
             or receipt.get("channel") != "right_button_stationary_touch"
             or any(receipt.get(field) is not True for field in required_true)
         ):
@@ -458,6 +458,7 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
         changed = receipt.get("changed_pixels")
         return_changed = receipt.get("return_changed_pixels")
         elapsed = receipt.get("barrier_elapsed_ms")
+        settle = receipt.get("post_barrier_settle_seconds")
         if (
             isinstance(offset, bool)
             or not isinstance(offset, int)
@@ -471,6 +472,9 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
             or isinstance(elapsed, bool)
             or not isinstance(elapsed, (int, float))
             or not 0.0 <= float(elapsed) <= 5000.0
+            or isinstance(settle, bool)
+            or not isinstance(settle, (int, float))
+            or not 0.4 <= float(settle) <= 0.6
         ):
             return "长按验收的控制端事件栅栏测量值无效。"
     if action == "drag":

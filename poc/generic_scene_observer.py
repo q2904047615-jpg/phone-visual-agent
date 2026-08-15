@@ -35,6 +35,7 @@ from ui_scene import (
     UI_SCENE_PROTOCOL_VERSION,
     UIScene,
     UISceneError,
+    camera_alignment_evidence_is_safe,
 )
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
@@ -1657,6 +1658,7 @@ def _parse_scene(
             )
         if allow_invalid_system_ui_unknown:
             _fail_closed_invalid_system_ui(payload)
+        _drop_forbidden_camera_alignment_evidence(payload)
         if camera_alignment_override is None:
             if "camera_alignment" not in payload:
                 raise UISceneError(
@@ -1702,6 +1704,24 @@ def _camera_layout_orientation(frame: Image.Image) -> str:
     if frame.height > frame.width:
         return "portrait"
     return "square"
+
+
+def _drop_forbidden_camera_alignment_evidence(payload: dict[str, Any]) -> None:
+    """Remove unsafe peripheral evidence only when safe phone evidence remains."""
+
+    alignment = payload.get("camera_alignment")
+    if not isinstance(alignment, dict):
+        return
+    evidence = alignment.get("evidence")
+    if not isinstance(evidence, list) or not all(
+        isinstance(item, str) for item in evidence
+    ):
+        return
+    retained = [
+        item for item in evidence if camera_alignment_evidence_is_safe(item)
+    ]
+    if retained and len(retained) != len(evidence):
+        alignment["evidence"] = retained
 
 
 def _fail_closed_invalid_system_ui(payload: dict[str, Any]) -> None:

@@ -52,6 +52,26 @@ PHONE_CONTENT_ROTATIONS = frozenset(
     }
 )
 
+_CAMERA_ALIGNMENT_EVIDENCE_FORBIDDEN = re.compile(
+    r"(?:coordinates?|coords?|bounds?|\bx\s*[=:]|\by\s*[=:]|"
+    r"\bpx\s*(?::|/\s*mm\b)|\bmm\s*:|"
+    r"\b(?:robot[-_ ]?controller|controller|calibration)\b|"
+    r"机械臂|控制端|校准|底部(?:按钮|控件)|"
+    r"\(\s*\d+\s*,\s*\d+\s*\)|"
+    r"\b(?:tap|click|press|swipe|drag|execute|suggest)\b|"
+    r"点击|滑动|拖动|按下|坐标|执行|建议)",
+    re.IGNORECASE,
+)
+
+
+def camera_alignment_evidence_is_safe(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and value.strip()
+        and len(value) <= 160
+        and not _CAMERA_ALIGNMENT_EVIDENCE_FORBIDDEN.search(value)
+    )
+
 
 @dataclass(frozen=True)
 class SystemUIFacts:
@@ -136,22 +156,12 @@ class CameraAlignmentFacts:
             raise UISceneError("camera_alignment.confidence 必须在0到1之间。")
         if not isinstance(self.evidence, tuple) or len(self.evidence) > 2:
             raise UISceneError("camera_alignment.evidence 最多包含两个短字符串。")
-        forbidden = re.compile(
-            r"(?:coordinates?|coords?|bounds?|\bx\s*[=:]|\by\s*[=:]|"
-            r"\bpx\s*(?::|/\s*mm\b)|\bmm\s*:|"
-            r"\b(?:robot[-_ ]?controller|controller|calibration)\b|"
-            r"机械臂|控制端|校准|底部(?:按钮|控件)|"
-            r"\(\s*\d+\s*,\s*\d+\s*\)|"
-            r"\b(?:tap|click|press|swipe|drag|execute|suggest)\b|"
-            r"点击|滑动|拖动|按下|坐标|执行|建议)",
-            re.IGNORECASE,
-        )
         for item in self.evidence:
             if not isinstance(item, str) or not item.strip() or len(item) > 160:
                 raise UISceneError(
                     "camera_alignment.evidence 只允许非空短字符串。"
                 )
-            if forbidden.search(item):
+            if not camera_alignment_evidence_is_safe(item):
                 raise UISceneError(
                     "camera_alignment.evidence 包含坐标或控制指令。"
                 )

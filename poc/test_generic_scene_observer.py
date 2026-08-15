@@ -323,6 +323,37 @@ class GenericSceneObserverTests(unittest.TestCase):
                         camera_layout_orientation="portrait",
                     )
 
+    def test_camera_alignment_drops_forbidden_peripheral_evidence_only_when_safe_remains(self) -> None:
+        payload = scene_payload()
+        payload["camera_alignment"]["evidence"] = [
+            "顶部PX/MM坐标水平排列",
+            "页面文字在手机内容中纵向正立排列",
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="local-fingerprint",
+            goal_context={"objective": "读取当前页面"},
+            camera_layout_orientation="portrait",
+        )
+
+        self.assertEqual(
+            ("页面文字在手机内容中纵向正立排列",),
+            scene.camera_alignment.evidence,
+        )
+
+    def test_camera_alignment_with_only_forbidden_evidence_remains_fail_closed(self) -> None:
+        payload = scene_payload()
+        payload["camera_alignment"]["evidence"] = ["顶部PX/MM坐标水平排列"]
+
+        with self.assertRaisesRegex(VisionAgentError, "坐标或控制指令"):
+            _parse_scene(
+                json.dumps(payload, ensure_ascii=False),
+                fingerprint="local-fingerprint",
+                goal_context={"objective": "读取当前页面"},
+                camera_layout_orientation="portrait",
+            )
+
     def test_saved_controller_canvas_shapes_have_distinct_local_orientations(self) -> None:
         self.assertEqual(
             "portrait",

@@ -719,7 +719,7 @@ class GenericSupervisedDeviceRequest(StrictAgentRequest):
     device_id: StrictStr = Field(min_length=1, max_length=128)
 
 
-class GenericConfirmationScopeRequest(StrictAgentRequest):
+class BaseActionConfirmationScopeRequest(StrictAgentRequest):
     session_id: StrictStr = Field(min_length=1, max_length=128)
     task_id: StrictStr = Field(min_length=1, max_length=128)
     device_id: StrictStr = Field(min_length=1, max_length=128)
@@ -728,6 +728,9 @@ class GenericConfirmationScopeRequest(StrictAgentRequest):
     risk_ids: list[StrictStr] = Field(default_factory=list)
     observation_id: StrictStr = Field(min_length=1, max_length=128)
     fingerprint: StrictStr = Field(min_length=1, max_length=256)
+
+
+class GenericConfirmationScopeRequest(BaseActionConfirmationScopeRequest):
     decision_node_id: StrictStr = Field(min_length=1, max_length=128)
     action_digest: StrictStr = Field(min_length=64, max_length=64)
 
@@ -765,7 +768,7 @@ class CapabilityAcceptanceStartRequest(StrictAgentRequest):
     text: StrictStr = Field(min_length=1, max_length=500)
 
 
-class CapabilityActionConfirmationScopeRequest(GenericConfirmationScopeRequest):
+class CapabilityActionConfirmationScopeRequest(BaseActionConfirmationScopeRequest):
     trial_id: StrictStr = Field(min_length=1, max_length=128)
     action: StrictStr = Field(min_length=1, max_length=64)
 

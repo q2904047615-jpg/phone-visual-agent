@@ -958,6 +958,23 @@ class GenericSingleActionAdapter:
                 role=original.role,
                 states=dict(original.states),
             )
+            selector_roles = {"button", "tab", "list_item"}
+            if (
+                not matches
+                and requested.action == "tap_semantic"
+                and prefix == ""
+                and original.label
+                and original.role in selector_roles
+            ):
+                role_agnostic_matches = fresh_scene.find_elements(
+                    label=original.label,
+                    states=dict(original.states),
+                )
+                if (
+                    len(role_agnostic_matches) == 1
+                    and role_agnostic_matches[0].role in selector_roles
+                ):
+                    matches = role_agnostic_matches
             if len(matches) != 1:
                 raise GenericActionAdapterError(
                     "确认时目标语义不再严格唯一："
@@ -1027,8 +1044,8 @@ class GenericSingleActionAdapter:
                     and prefix == ""
                     and original.label
                     and current.label == original.label
-                    and original.role == current.role
-                    and current.role in {"button", "tab", "list_item"}
+                    and original.role in selector_roles
+                    and current.role in selector_roles
                     and current.states == original.states
                     and current_selector_tokens.intersection(
                         {"select", "selector", "mode", "option", "entry", "navigate", "open"}

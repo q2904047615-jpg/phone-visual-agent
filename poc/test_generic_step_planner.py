@@ -1199,6 +1199,65 @@ class GenericActionAdapterTests(unittest.TestCase):
             result.rebound_action.params["target"],
         )
 
+    def test_rebind_accepts_exact_navigation_label_across_selector_roles(self):
+        states = {"goal_relevant": True, "fully_visible": True}
+        label = "连续闭环：滑动→点击→返回"
+        planned = UIScene(
+            app_id="unknown",
+            screen_id="acceptance_modes",
+            summary="本地验收模式列表",
+            elements=(
+                UIElement(
+                    element_id="mode",
+                    role="list_item",
+                    meaning="continuous_loop_acceptance_mode_entry",
+                    label=label,
+                    bounds=(0.13, 0.79, 0.87, 0.86),
+                    confidence=1.0,
+                    states=states,
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    element_id="fresh-mode",
+                    role="button",
+                    meaning="target_entry",
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        robot = FakeRobot()
+
+        result = self._adapter(
+            FakeSceneObserver([fresh, scene("after", screen_id="sequence")]),
+            robot,
+        ).execute(
+            requested_action=SemanticAction(
+                node_id="open-mode",
+                action="tap_semantic",
+                params={
+                    "element_id": "mode",
+                    "target": "continuous_loop_acceptance_mode_entry",
+                    "role": "list_item",
+                    "label": label,
+                    "states": states,
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("tap", 500, 825)], robot.actions)
+        self.assertEqual("button", result.rebound_action.params["role"])
+        self.assertEqual("target_entry", result.rebound_action.params["target"])
+
     def test_rebind_accepts_fresh_positive_fully_visible_attestation(self):
         planned = scene("planned")
         fresh_element = replace(

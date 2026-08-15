@@ -1472,6 +1472,71 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             )
         )
 
+    def test_unknown_audit_cannot_override_strict_local_literal_action_state(self):
+        objective = "目标控件处于当前页面可见的本机临时结果状态"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        payload["goal"]["target_apps"] = [
+            {"app_id": "current_foreground", "app_name": "当前前台应用"}
+        ]
+        payload["goal"]["entities"] = {
+            "target_ui_label": "长按我 · 不要移动"
+        }
+        payload["constraints"] = ["不得发布内容"]
+        payload["subgoals"][0]["constraints"] = ["不得发布内容"]
+        raw_goal = (
+            "目标控件的可见文字是“长按我 · 不要移动”。"
+            "目标控件处于当前页面可见的本机临时结果状态。"
+            "不得发布内容。"
+        )
+        audit = audit_payload_for_graph(payload)
+        for assessment in audit["assessments"]:
+            assessment["external_impact"] = "unknown"
+            assessment["risk_types"] = ["unknown_external_effect"]
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(payload, audit_payloads=[audit])
+        )
+
+        graph = planner.plan(raw_goal, device_id="phone-1")
+
+        self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+        self.assertEqual((), graph.risk_actions)
+        self.assertTrue(
+            all(
+                item.external_impact == "navigation_only" and not item.risk_types
+                for item in planner.last_risk_audit.assessments
+            )
+        )
+
+    def test_local_literal_action_reconciliation_rejects_risky_label(self):
+        objective = "目标控件处于当前页面可见的本机临时结果状态"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        payload["goal"]["target_apps"] = [
+            {"app_id": "current_foreground", "app_name": "当前前台应用"}
+        ]
+        payload["goal"]["entities"] = {
+            "target_ui_label": "长按并删除数据"
+        }
+        raw_goal = (
+            "目标控件的可见文字是“长按并删除数据”。"
+            "目标控件处于当前页面可见的本机临时结果状态。"
+            "不得发布内容。"
+        )
+        audit = audit_payload_for_graph(payload)
+        for assessment in audit["assessments"]:
+            assessment["external_impact"] = "unknown"
+            assessment["risk_types"] = ["unknown_external_effect"]
+
+        with self.assertRaisesRegex(TaskGraphError, "外部状态|unknown"):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(payload, audit_payloads=[audit])
+            ).plan(raw_goal, device_id="phone-1")
+
     def test_local_keyboard_mode_exception_never_hides_account_change(self):
         objective = "修改账号权限并将软键盘输入法改为英文直输模式"
         payload = single_subgoal_payload(

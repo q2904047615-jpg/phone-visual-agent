@@ -2307,6 +2307,11 @@ def _apply_local_risk_supplements(
         if graph is not None
         else frozenset()
     )
+    local_literal_action_scopes = (
+        _structured_local_literal_action_scopes(graph, source_groups)
+        if graph is not None
+        else frozenset()
+    )
     local_input_scopes = {
         scope_id
         for scope_id, group in source_groups.items()
@@ -2410,6 +2415,28 @@ def _apply_local_risk_supplements(
                 reason=(
                     assessment.reason
                     + "；本地校验确认只改变未提交的设备输入法临时模式"
+                ),
+            )
+        if (
+            assessment.external_impact in {"external_state", "unknown"}
+            and model_types <= {"unknown_external_effect", "data_mutation"}
+            and inferred <= {"unknown_external_effect"}
+            and assessment.subgoal_id in local_literal_action_scopes
+        ):
+            expected_impact = "navigation_only"
+            if assessment.subgoal_id is not None:
+                expected_impact = next(
+                    item.external_impact
+                    for item in graph.subgoals
+                    if item.subgoal_id == assessment.subgoal_id
+                )
+            assessment = replace(
+                assessment,
+                external_impact=expected_impact,
+                risk_types=(),
+                reason=(
+                    assessment.reason
+                    + "；本地一致性校验确认精确字面动作标签仅对应当前页面的本机临时状态"
                 ),
             )
         if (
@@ -2597,6 +2624,72 @@ def _structured_reversible_navigation_scopes(
             continue
         safe_scopes.add(scope_id)
     return frozenset(safe_scopes)
+
+
+def _structured_local_literal_action_scopes(
+    graph: DynamicTaskGraph,
+    source_groups: dict[str | None, list[AuditSource]],
+) -> frozenset[str | None]:
+    """Reconcile only a fully structured, explicitly local gesture-label task."""
+
+    if (
+        len(graph.goal.target_apps) != 1
+        or graph.goal.target_apps[0].app_id != "current_foreground"
+        or graph.risk_actions
+        or _infer_external_risk_types(graph.raw_user_goal)
+        or not _infer_directly_negated_risk_types(graph.raw_user_goal)
+    ):
+        return frozenset()
+    label = str(graph.goal.entities.get("target_ui_label") or "").strip()
+    marker_groups = (
+        ("长按", "long_press", "longpress"),
+        ("拖动", "drag"),
+    )
+    matched = tuple(
+        group
+        for group in marker_groups
+        if any(marker in label.casefold() for marker in group)
+    )
+    if len(matched) != 1 or _infer_external_risk_types(label):
+        return frozenset()
+
+    subgoals = {item.subgoal_id: item for item in graph.subgoals}
+    safe_navigation_ids: set[str] = set()
+    safe_read_only_ids: set[str] = set()
+    for subgoal in graph.subgoals:
+        group = source_groups.get(subgoal.subgoal_id, [])
+        texts = tuple(item.text for item in group)
+        if (
+            subgoal.external_impact not in {"navigation_only", "read_only"}
+            or subgoal.risk_action_ids
+            or not texts
+            or any(_infer_external_risk_types(text) for text in texts)
+        ):
+            continue
+        combined = " ".join(texts)
+        if subgoal.external_impact == "navigation_only" and (
+            "本机临时" in combined and "当前页面" in combined
+        ):
+            safe_navigation_ids.add(subgoal.subgoal_id)
+        elif subgoal.external_impact == "read_only" and re.search(
+            r"(?:显示|可见|观察|状态区域)", combined
+        ):
+            safe_read_only_ids.add(subgoal.subgoal_id)
+    if not safe_navigation_ids:
+        return frozenset()
+
+    scopes: set[str | None] = set(safe_navigation_ids | safe_read_only_ids)
+    global_group = source_groups.get(None, [])
+    if (
+        global_group
+        and not any(_infer_external_risk_types(item.text) for item in global_group)
+        and all(
+            item.subgoal_id in scopes
+            for item in graph.subgoals
+        )
+    ):
+        scopes.add(None)
+    return frozenset(scopes)
 
 
 def _has_reversible_navigation_semantics(value: str) -> bool:

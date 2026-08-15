@@ -264,7 +264,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             patch(
                 "robot_core.legacy.long_press_client_point",
                 return_value={
-                    "version": "2026-08-16-seller-gui-contact-barrier-v1",
+                    "version": "2026-08-16-seller-gui-contact-barrier-v2",
                     "channel": "right_button_stationary_touch",
                     "seller_event_barrier_confirmed": True,
                     "round_trip_position_confirmed": True,
@@ -272,7 +272,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
                     "requested_hold_seconds": 0.8,
                     "barrier_offset_pixels": 3,
                     "changed_pixels": 240,
-                    "returned_pixels": 0,
+                    "return_changed_pixels": 240,
                     "barrier_elapsed_ms": 35.0,
                 },
             ) as long_press,

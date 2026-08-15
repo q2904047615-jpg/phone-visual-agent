@@ -170,7 +170,7 @@ class FakeTrialResult:
         )
         self.hardware_receipt = (
             {
-                "version": "2026-08-16-seller-gui-contact-barrier-v1",
+                "version": "2026-08-16-seller-gui-contact-barrier-v2",
                 "channel": "right_button_stationary_touch",
                 "seller_event_barrier_confirmed": True,
                 "round_trip_position_confirmed": True,
@@ -178,7 +178,7 @@ class FakeTrialResult:
                 "requested_hold_seconds": 0.8,
                 "barrier_offset_pixels": 3,
                 "changed_pixels": 240,
-                "returned_pixels": 0,
+                "return_changed_pixels": 240,
                 "barrier_elapsed_ms": 35.0,
             }
             if action == "long_press"
@@ -795,7 +795,7 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
                 "changed_pixels", 119
             ),
             lambda report: report["execution"]["hardware_receipt"].__setitem__(
-                "returned_pixels", 25
+                "return_changed_pixels", 119
             ),
             lambda report: report["execution"]["hardware_receipt"].__setitem__(
                 "requested_hold_seconds", 0.7

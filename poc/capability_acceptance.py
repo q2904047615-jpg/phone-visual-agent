@@ -441,7 +441,7 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
         )
         if (
             receipt.get("version")
-            != "2026-08-16-seller-gui-contact-barrier-v1"
+            != "2026-08-16-seller-gui-contact-barrier-v2"
             or receipt.get("channel") != "right_button_stationary_touch"
             or any(receipt.get(field) is not True for field in required_true)
         ):
@@ -456,7 +456,7 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
             return "长按验收的事件栅栏保压时长与已解析动作不一致。"
         offset = receipt.get("barrier_offset_pixels")
         changed = receipt.get("changed_pixels")
-        returned = receipt.get("returned_pixels")
+        return_changed = receipt.get("return_changed_pixels")
         elapsed = receipt.get("barrier_elapsed_ms")
         if (
             isinstance(offset, bool)
@@ -465,9 +465,9 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
             or isinstance(changed, bool)
             or not isinstance(changed, int)
             or changed < 120
-            or isinstance(returned, bool)
-            or not isinstance(returned, int)
-            or not 0 <= returned <= 24
+            or isinstance(return_changed, bool)
+            or not isinstance(return_changed, int)
+            or return_changed < 120
             or isinstance(elapsed, bool)
             or not isinstance(elapsed, (int, float))
             or not 0.0 <= float(elapsed) <= 5000.0

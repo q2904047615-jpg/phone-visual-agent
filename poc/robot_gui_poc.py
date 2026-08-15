@@ -833,7 +833,7 @@ def long_press_client_point(
     )
     pressed = False
     changed_pixels = 0
-    returned_pixels = 0
+    return_changed_pixels = 0
     barrier_seconds = 0.0
     try:
         user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
@@ -845,11 +845,12 @@ def long_press_client_point(
             baseline,
             expect_changed=True,
         )
+        offset_state = _capture_seller_position_overlay(hwnd)
         user32.SetCursorPos(point.x, point.y)
-        returned_pixels, _ = _wait_for_seller_position_state(
+        return_changed_pixels, _ = _wait_for_seller_position_state(
             hwnd,
-            baseline,
-            expect_changed=False,
+            offset_state,
+            expect_changed=True,
         )
         barrier_seconds = time.monotonic() - barrier_started
         sleep_interruptible(float(hold_seconds))
@@ -859,7 +860,7 @@ def long_press_client_point(
             time.sleep(0.12)
         user32.SetCursorPos(old_cursor.x, old_cursor.y)
     return {
-        "version": "2026-08-16-seller-gui-contact-barrier-v1",
+        "version": "2026-08-16-seller-gui-contact-barrier-v2",
         "channel": "right_button_stationary_touch",
         "seller_event_barrier_confirmed": True,
         "round_trip_position_confirmed": True,
@@ -867,7 +868,7 @@ def long_press_client_point(
         "requested_hold_seconds": float(hold_seconds),
         "barrier_offset_pixels": abs(int(offset)),
         "changed_pixels": int(changed_pixels),
-        "returned_pixels": int(returned_pixels),
+        "return_changed_pixels": int(return_changed_pixels),
         "barrier_elapsed_ms": round(barrier_seconds * 1000.0, 3),
     }
 

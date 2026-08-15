@@ -1444,6 +1444,12 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn('"element_id":"逐字复制可信候选ID"', prompt)
         self.assertIn('"target_region":{"kind":"element"', prompt)
         self.assertIn('"expected_result":{"scene_changed":true}', prompt)
+        self.assertIn(
+            '"element_state":{"meaning":"逐字复制输入候选meaning",'
+            '"states":{"value":"逐字复制goal.entities.input_text"}}',
+            prompt,
+        )
+        self.assertIn("element_state和states都必须是JSON对象", prompt)
         self.assertIn('"status":"blocked","next_action":null', prompt)
         self.assertIn('"status":"finished","next_action":null', prompt)
 

@@ -1459,6 +1459,9 @@ def _decision_prompt(
    input和states.local_text_clear=true的独立button/icon，只能选择该独立清空控件，不能选择输入框本体
    或键盘退格键。
 4. input_verified_text只能绑定role=input的候选，text必须逐字复制goal.entities.input_text；不能改写、补全或推断。
+   使用该动作时expected_result必须精确写成
+   {{"element_state":{{"meaning":"逐字复制输入候选meaning","states":{{"value":"逐字复制goal.entities.input_text"}}}}}}；
+   element_state和states都必须是JSON对象，绝不能返回字符串、数组或自然语言。
    role=input且states.focused=true时禁止再用tap_semantic重复聚焦；这不会推进子目标。
    对小写英文字母精确输入，候选还必须同时提供states.value=""、keyboard_layout="qwerty"和
    keyboard_input_mode="direct_latin"。QWERTY但keyboard_input_mode="chinese_pinyin"时禁止直接输入；
@@ -1528,6 +1531,9 @@ def _decision_retry_prompt(
 - 顶层只允许下方JSON中的字段；绝对不要action、actions、reasoning、analysis、plan或额外字段。
 - expected_result只能按需使用scene_changed、content_changed、current_video_changed、app_id、screen_id、
   element_state、system_ui；reveal_system_navigation 的 system_ui 必须精确证明导航栏可见。
+- input_verified_text的expected_result必须精确为
+  {{"element_state":{{"meaning":"逐字复制输入候选meaning","states":{{"value":"逐字复制goal.entities.input_text"}}}}}}；
+  element_state和states都必须是JSON对象，绝不能返回字符串、数组或自然语言。
 - 这是第{decision_number}轮。不要Markdown，不要解释，不要把JSON转义成字符串。
 - 当前设备只允许动作：{available_actions}；不得返回集合外动作，无法继续就blocked。
 - current_external_impact=read_only 时禁止点击、滑动、返回、输入、长按和拖动；画面已证明结果就

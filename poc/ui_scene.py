@@ -381,6 +381,48 @@ class UIElement:
         return element
 
 
+def compact_drag_source_container_error(scene: Any, source: UIElement) -> str:
+    """Return why a container cannot safely represent one draggable object.
+
+    Vision role names are descriptive, not hardware authority. A compact card
+    or block may be reported as either ``image`` or ``container``. This shared
+    gate lets only one labelled, fully visible, goal-bound object proceed to
+    confirmation-time geometry auditing; broad grouping containers remain
+    denied in every policy/controller phase.
+    """
+
+    if source.role != "container":
+        return ""
+    label = str(source.label or "").strip()
+    if not label:
+        return "容器型拖动起点必须有逐字可见标签。"
+    if source.states.get("goal_relevant") is not True:
+        return "容器型拖动起点必须明确绑定当前目标。"
+    if source.states.get("fully_visible") is not True:
+        return "容器型拖动起点必须完整可见。"
+    left, top, right, bottom = (float(value) for value in source.bounds)
+    width = right - left
+    height = bottom - top
+    if width > 0.45 or height > 0.45 or width * height > 0.12:
+        return "拖动起点是过大的页面容器，不能视为单个可拖动物体。"
+    for candidate in getattr(scene, "elements", ()):
+        if candidate.element_id == source.element_id:
+            continue
+        c_left, c_top, c_right, c_bottom = (
+            float(value) for value in candidate.bounds
+        )
+        center_x = (c_left + c_right) / 2.0
+        center_y = (c_top + c_bottom) / 2.0
+        if not (left <= center_x <= right and top <= center_y <= bottom):
+            continue
+        same_literal_text = (
+            candidate.role == "text" and str(candidate.label or "").strip() == label
+        )
+        if not same_literal_text:
+            return "拖动起点容器包含其他可见元素，不能证明它是单个物体。"
+    return ""
+
+
 @dataclass(frozen=True)
 class UIScene:
     """App-independent visual scene graph consumed by the controller."""

@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 from semantic_executor import SemanticAction
 from task_orchestrator import (
@@ -891,6 +892,58 @@ class UISceneTests(unittest.TestCase):
         )
         moved = scene(moved_source, destination, fingerprint="after-moved")
         UniversalActionController().verify_after_action(resolved, before, moved)
+
+    def test_drag_controller_accepts_only_compact_goal_bound_container_source(self) -> None:
+        source = UIElement(
+            "source",
+            "container",
+            "可移动源物体",
+            (0.18, 0.68, 0.38, 0.82),
+            0.98,
+            label="起点",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        destination = UIElement(
+            "destination",
+            "container",
+            "目标区域",
+            (0.55, 0.65, 0.85, 0.88),
+            0.98,
+            label="绿色终点",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        before = scene(source, destination, fingerprint="compact-before")
+        action = SemanticAction(
+            node_id="drag-container",
+            action="drag",
+            params={
+                "source_element_id": source.element_id,
+                "source_target": source.meaning,
+                "source_role": source.role,
+                "source_label": source.label,
+                "source_states": dict(source.states),
+                "destination_element_id": destination.element_id,
+                "destination_target": destination.meaning,
+                "destination_role": destination.role,
+                "destination_label": destination.label,
+                "destination_states": dict(destination.states),
+                "expected_effect": {"scene_changed": True},
+            },
+        )
+
+        resolved = UniversalActionController().resolve_one(action, before)
+        self.assertEqual("drag", resolved.kind)
+
+        moved_source = replace(source, bounds=(0.60, 0.68, 0.78, 0.82))
+        after = scene(moved_source, destination, fingerprint="compact-after")
+        UniversalActionController().verify_after_action(resolved, before, after)
+
+        oversized_source = replace(source, bounds=(0.02, 0.05, 0.98, 0.90))
+        with self.assertRaisesRegex(UniversalActionError, "过大的页面容器"):
+            UniversalActionController().resolve_one(
+                action,
+                scene(oversized_source, destination, fingerprint="oversized"),
+            )
 
     def test_drag_preexisting_unrelated_state_is_not_alternative_result_proof(self) -> None:
         source = UIElement(

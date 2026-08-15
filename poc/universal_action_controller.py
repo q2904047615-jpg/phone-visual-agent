@@ -7,7 +7,13 @@ import re
 from typing import Any
 
 from semantic_executor import SemanticAction
-from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
+from ui_scene import (
+    MIN_TARGET_CONFIDENCE,
+    UIElement,
+    UIScene,
+    UISceneError,
+    compact_drag_source_container_error,
+)
 
 
 UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v10"
@@ -401,8 +407,9 @@ class UniversalActionController:
             )
             if source.element_id == destination.element_id:
                 raise UniversalActionError("拖动起点和终点不能是同一元素。")
-            if source.role == "container":
-                raise UniversalActionError("拖动起点必须是可识别元素，不能是页面容器。")
+            source_container_error = compact_drag_source_container_error(scene, source)
+            if source_container_error:
+                raise UniversalActionError(source_container_error)
             self._validate_gesture_point(source.center, label="拖动起点")
             self._validate_gesture_point(destination.center, label="拖动终点")
             distance = math.dist(source.center, destination.center)
@@ -705,8 +712,9 @@ class UniversalActionController:
         except UISceneError as exc:
             raise UniversalActionError(f"拖动前端点证据无效：{exc}") from exc
 
-        if source.role == "container":
-            raise UniversalActionError("拖动起点必须是可识别元素，不能是页面容器。")
+        source_container_error = compact_drag_source_container_error(before, source)
+        if source_container_error:
+            raise UniversalActionError(source_container_error)
         self._validate_gesture_point(source.center, label="拖动起点")
         self._validate_gesture_point(destination.center, label="拖动终点")
 

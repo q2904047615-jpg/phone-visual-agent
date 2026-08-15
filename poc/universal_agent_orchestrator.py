@@ -17,7 +17,11 @@ from device_exclusivity import InterProcessLease
 from generic_action_adapter import GenericActionAdapterError
 from generic_intent import GenericIntentDraft
 from qwen_visual_decision import QwenTaskContext, TrustedObservation
-from ui_scene import MIN_TARGET_CONFIDENCE, UISceneError
+from ui_scene import (
+    MIN_TARGET_CONFIDENCE,
+    UISceneError,
+    compact_drag_source_container_error,
+)
 from universal_action_controller import (
     action_has_account_effect,
     navigation_semantic_class,
@@ -2611,58 +2615,6 @@ class PhaseOneNavigationPolicy:
             and element_state["states"]
         )
 
-    @staticmethod
-    def _compact_drag_source_container_error(scene: Any, source: Any) -> str:
-        """Distinguish one compact draggable object from a page container.
-
-        A vision model may reasonably call a labelled card/block either an image
-        or a container.  Role wording alone must not decide hardware authority.
-        This gate only lets a compact, fully visible, goal-bound object proceed
-        to the independent confirmation-time geometry audit.  Broad grouping
-        containers and containers holding unrelated controls remain denied.
-        """
-
-        if str(getattr(source, "role", "")) != "container":
-            return ""
-        label = str(getattr(source, "label", "") or "").strip()
-        states = getattr(source, "states", None)
-        bounds = tuple(getattr(source, "bounds", ()) or ())
-        if not label:
-            return "容器型拖动起点必须有逐字可见标签。"
-        if not isinstance(states, Mapping) or states.get("goal_relevant") is not True:
-            return "容器型拖动起点必须明确绑定当前目标。"
-        if states.get("fully_visible") is not True:
-            return "容器型拖动起点必须完整可见。"
-        if len(bounds) != 4:
-            return "容器型拖动起点缺少有效边界。"
-        left, top, right, bottom = (float(value) for value in bounds)
-        width = right - left
-        height = bottom - top
-        if width > 0.45 or height > 0.45 or width * height > 0.12:
-            return "拖动起点是过大的页面容器，不能视为单个可拖动物体。"
-        for candidate in getattr(scene, "elements", ()):
-            if getattr(candidate, "element_id", None) == getattr(
-                source, "element_id", None
-            ):
-                continue
-            candidate_bounds = tuple(getattr(candidate, "bounds", ()) or ())
-            if len(candidate_bounds) != 4:
-                continue
-            c_left, c_top, c_right, c_bottom = (
-                float(value) for value in candidate_bounds
-            )
-            center_x = (c_left + c_right) / 2.0
-            center_y = (c_top + c_bottom) / 2.0
-            if not (left <= center_x <= right and top <= center_y <= bottom):
-                continue
-            same_literal_text = (
-                str(getattr(candidate, "role", "")) == "text"
-                and str(getattr(candidate, "label", "") or "").strip() == label
-            )
-            if not same_literal_text:
-                return "拖动起点容器包含其他可见元素，不能证明它是单个物体。"
-        return ""
-
     def _goal_bound_navigation_fallback_error(
         self,
         *,
@@ -3003,7 +2955,7 @@ class PhaseOneNavigationPolicy:
                 return self._deny(f"拖动端点不能由可信观察唯一解析：{exc}")
             if source.element_id == destination.element_id:
                 return self._deny("拖动起点和终点不能相同。")
-            source_container_error = self._compact_drag_source_container_error(
+            source_container_error = compact_drag_source_container_error(
                 scene,
                 source,
             )

@@ -405,13 +405,6 @@ class GenericSceneObserver:
             ):
                 targeted_refinement_used = True
                 targeted_roi_bounds = _goal_directed_roi_bounds(context)
-                detail_image_part = image_part
-                if targeted_roi_bounds is not None:
-                    detail_frame = _crop_normalized(frame, targeted_roi_bounds)
-                    detail_image_part = {
-                        "type": "image_url",
-                        "image_url": {"url": _image_data_url(detail_frame)},
-                    }
                 self._set_stage("waiting_targeted_refinement")
                 detail_messages = [
                     _json_only_system_message(),
@@ -424,12 +417,11 @@ class GenericSceneObserver:
                                 "text": _targeted_prompt(
                                     context,
                                     first_scene=scene.to_dict(),
-                                    roi_bounds=targeted_roi_bounds,
+                                    roi_bounds=None,
                                 ),
                                 },
                                 image_part,
                             ]
-                            + ([detail_image_part] if targeted_roi_bounds is not None else [])
                         ),
                     }
                 ]
@@ -477,12 +469,11 @@ class GenericSceneObserver:
                                     "text": _targeted_retry_prompt(
                                         context,
                                         targeted_error,
-                                        roi_bounds=targeted_roi_bounds,
+                                        roi_bounds=None,
                                     ),
                                     },
                                     image_part,
                                 ]
-                                + ([detail_image_part] if targeted_roi_bounds is not None else [])
                             ),
                         }
                     ]
@@ -513,29 +504,17 @@ class GenericSceneObserver:
                 icon_cluster_audit_roi_bounds = (
                     targeted_roi_bounds or _goal_directed_roi_bounds(context)
                 )
-                icon_detail_part = image_part
-                if icon_cluster_audit_roi_bounds is not None:
-                    icon_detail_frame = _crop_normalized(
-                        frame,
-                        icon_cluster_audit_roi_bounds,
-                    )
-                    icon_detail_part = {
-                        "type": "image_url",
-                        "image_url": {"url": _image_data_url(icon_detail_frame)},
-                    }
                 self._set_stage("waiting_icon_cluster_audit")
                 icon_audit_content: list[dict[str, Any]] = [
                     {
                         "type": "text",
                         "text": _icon_cluster_audit_prompt(
                             context,
-                            roi_bounds=icon_cluster_audit_roi_bounds,
+                            roi_bounds=None,
                         ),
                     },
                     image_part,
                 ]
-                if icon_cluster_audit_roi_bounds is not None:
-                    icon_audit_content.append(icon_detail_part)
                 raw = model_chat(
                     [
                         _json_only_system_message(),
@@ -709,13 +688,11 @@ class GenericSceneObserver:
                         "type": "text",
                         "text": _input_structure_audit_prompt(
                             context,
-                            roi_bounds=targeted_roi_bounds,
+                            roi_bounds=None,
                         ),
                     },
                     image_part,
                 ]
-                if targeted_roi_bounds is not None:
-                    audit_content.append(detail_image_part)
                 raw = model_chat(
                     [
                         _json_only_system_message(),

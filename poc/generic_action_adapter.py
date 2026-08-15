@@ -122,6 +122,15 @@ class GenericSingleActionAdapter:
             "drag",
         }
     )
+    GEOMETRY_BOUND_KINDS = frozenset(
+        {
+            "tap_semantic",
+            "dismiss_overlay",
+            "input_verified_text",
+            "long_press",
+            "drag",
+        }
+    )
 
     def supported_action_kinds(self) -> frozenset[str]:
         """Return only actions backed by callable methods on this device."""
@@ -519,6 +528,17 @@ class GenericSingleActionAdapter:
                 )
             local_frame_identity_verified = True
             before = planned_scene
+            if requested_action.action in self.GEOMETRY_BOUND_KINDS:
+                try:
+                    before = self.observer.observe(
+                        frames=before_frames,
+                        goal_context=goal.to_dict(),
+                    )
+                except RuntimeError as exc:
+                    raise GenericActionAdapterError(
+                        f"确认前目标几何复核失败：{exc}",
+                        evidence=before_paths,
+                    ) from exc
         else:
             before, before_frames, before_paths = self.capture_scene(
                 goal,

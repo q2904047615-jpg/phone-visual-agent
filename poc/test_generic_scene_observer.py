@@ -3305,7 +3305,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             any(item.meaning == "switch_keyboard_input_mode" for item in scene.elements)
         )
 
-    def test_targeted_refinement_uses_goal_directed_roi_but_keeps_full_frame_bounds(self) -> None:
+    def test_targeted_refinement_uses_only_full_frame_for_actionable_bounds(self) -> None:
         first = scene_payload()
         first["elements"] = []
         refined = scene_payload()
@@ -3333,14 +3333,11 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(observer.last_diagnostics["targeted_roi_bounds"], [0, 0, 1000, 420])
         compact_image = provider.messages_seen[0][1]["content"][1]["image_url"]["url"]
         targeted_overview = provider.messages_seen[1][1]["content"][1]["image_url"]["url"]
-        targeted_image = provider.messages_seen[1][1]["content"][2]["image_url"]["url"]
         self.assertEqual(compact_image, targeted_overview)
-        self.assertNotEqual(compact_image, targeted_image)
+        self.assertEqual(2, len(provider.messages_seen[1][1]["content"]))
         targeted_text = provider.messages_seen[1][1]["content"][0]["text"]
-        self.assertIn("局部图只用于看清事实，不增加任何动作权限", targeted_text)
-        self.assertIn("所有bounds必须回到第一张完整手机画面", targeted_text)
-        self.assertIn("必须在第二张高清局部中重新辨认目标", targeted_text)
-        self.assertIn("第二张只提供放大细节，绝不能作为坐标系", targeted_text)
+        self.assertIn("本次仍提供完整手机画面", targeted_text)
+        self.assertNotIn("第二张高清局部", targeted_text)
 
     def test_no_spatial_goal_keeps_full_frame_for_targeted_refinement(self) -> None:
         first = scene_payload()

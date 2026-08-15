@@ -582,7 +582,13 @@ class GenericActionAdapterTests(unittest.TestCase):
                 adapter = GenericSingleActionAdapter(
                     capture=SequenceCapture(["gray"] * 4),
                     observer=FakeSceneObserver(
-                        [], audit_rotation="rotated_90"
+                        (
+                            [planned]
+                            if action.action
+                            in GenericSingleActionAdapter.GEOMETRY_BOUND_KINDS
+                            else []
+                        ),
+                        audit_rotation="rotated_90",
                     ),
                     robot=robot,
                     frame_interval=0,
@@ -1314,10 +1320,11 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(1, observer.calls)
 
-    def test_matching_planned_frames_do_not_require_second_model_interpretation(self):
+    def test_matching_planned_frames_require_fresh_geometry_interpretation(self):
         planned = scene("planned")
+        fresh = scene("fresh")
         after = scene("after", screen_id="app_home", element_id="after")
-        observer = FakeSceneObserver([after])
+        observer = FakeSceneObserver([fresh, after])
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
@@ -1343,6 +1350,41 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual(1, result.physical_actions)
         self.assertEqual([("tap", 300, 400)], robot.actions)
+        self.assertEqual(2, observer.calls)
+        self.assertEqual("fresh", result.before_scene.fingerprint)
+
+    def test_planned_frame_identity_cannot_bypass_fresh_geometry_drift(self):
+        planned = scene("planned", bounds=(0.12, 0.46, 0.58, 0.51))
+        fresh = scene("fresh", bounds=(0.12, 0.225, 0.45, 0.265))
+        observer = FakeSceneObserver([fresh])
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+
+        with self.assertRaisesRegex(
+            GenericActionAdapterError,
+            "目标区域已明显移动",
+        ):
+            adapter.execute(
+                requested_action=SemanticAction(
+                    node_id="generic_step_1",
+                    action="tap_semantic",
+                    params={"element_id": "e1", "target": "app_icon"},
+                ),
+                planned_scene=planned,
+                planned_frames=tuple(
+                    Image.new("RGB", (540, 960), "gray") for _ in range(4)
+                ),
+                goal=goal(),
+                confirmed=True,
+            )
+
+        self.assertEqual([], robot.actions)
         self.assertEqual(1, observer.calls)
 
     def test_changed_local_frames_stop_even_when_model_screen_id_matches(self):

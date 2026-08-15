@@ -727,9 +727,38 @@ class RobotController:
         self._require_verified_action("long_press", "长按")
         if not 0.5 <= float(hold_seconds) <= 2.0:
             raise ValueError("通用长按时间必须在0.5～2.0秒之间。")
-        return self._vision_press_relative(
-            x, y, action="long_press", hold_seconds=float(hold_seconds)
+        if not (0 <= x <= 1000 and 0 <= y <= 1000):
+            raise ValueError("视觉 Agent 坐标必须在0～1000之间。")
+        hwnd, _title = legacy.find_window(self.title)
+        frame = self._capture_phone(hwnd)
+        self._consume_physical_execution("long_press", frame)
+        from tap_calibration import corrected_grid_point
+
+        corrected_x, corrected_y = corrected_grid_point(
+            x,
+            y,
+            (frame.width, frame.height),
+            self.calibration_path,
         )
+        point = (
+            min(
+                frame.width - 1,
+                max(0, int(round(corrected_x * (frame.width - 1) / 1000))),
+            ),
+            min(
+                frame.height - 1,
+                max(0, int(round(corrected_y * (frame.height - 1) / 1000))),
+            ),
+        )
+        self._checkpoint()
+        legacy.long_press_client_point(
+            hwnd,
+            point[0],
+            point[1],
+            hold_seconds=float(hold_seconds),
+        )
+        legacy.move_cursor_outside_camera(hwnd)
+        return point
 
     def vision_drag_relative(
         self,

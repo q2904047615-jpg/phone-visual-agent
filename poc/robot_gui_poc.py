@@ -721,6 +721,46 @@ def click_client_point(
     user32.SetCursorPos(old_cursor.x, old_cursor.y)
 
 
+def long_press_client_point(
+    hwnd: int,
+    x: int,
+    y: int,
+    *,
+    hold_seconds: float,
+) -> None:
+    """Hold one stationary seller touch contact via the right-button channel."""
+
+    _, _, width, height = client_geometry(hwnd)
+    camera_height = seller_camera_height(width, height)
+    if not (0 <= x < width and 0 <= y < camera_height):
+        raise ValueError(
+            f"长按位置 ({x}, {y}) 超出摄像头客户区 {width}×{camera_height}。"
+        )
+    if not 0.5 <= float(hold_seconds) <= 2.0:
+        raise ValueError("长按时间必须在0.5～2.0秒之间。")
+
+    point = POINT(x, y)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(point)):
+        raise ctypes.WinError()
+    old_cursor = POINT()
+    user32.GetCursorPos(ctypes.byref(old_cursor))
+    user32.ShowWindow(hwnd, SW_RESTORE)
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.1)
+    user32.SetCursorPos(point.x, point.y)
+    _check_escape("用户按下 Esc，已取消长按。")
+    pressed = False
+    try:
+        user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+        pressed = True
+        sleep_interruptible(float(hold_seconds))
+    finally:
+        if pressed:
+            user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+            time.sleep(0.12)
+        user32.SetCursorPos(old_cursor.x, old_cursor.y)
+
+
 def drag_client_path(
     hwnd: int,
     start: tuple[int, int],

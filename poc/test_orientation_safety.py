@@ -193,7 +193,8 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
         )
         physical_names = (
             "configure_single_click_count", "click_client_point",
-            "drag_client_path", "configure_swipe", "trigger_selected_action",
+            "long_press_client_point", "drag_client_path", "configure_swipe",
+            "trigger_selected_action",
         )
         for label, invoke in calls:
             with self.subTest(label=label):
@@ -203,13 +204,21 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                     patch.object(controller, "_capture_phone", return_value=FRAME.copy()),
                     patch("robot_core.legacy.configure_single_click_count") as configure,
                     patch("robot_core.legacy.click_client_point") as click,
+                    patch("robot_core.legacy.long_press_client_point") as long_press,
                     patch("robot_core.legacy.drag_client_path") as drag,
                     patch("robot_core.legacy.configure_swipe") as configure_swipe,
                     patch("robot_core.legacy.trigger_selected_action") as trigger,
                 ):
                     with self.assertRaisesRegex(OrientationSafetyError, "一次性方向授权"):
                         invoke(controller)
-                    mocks = (configure, click, drag, configure_swipe, trigger)
+                    mocks = (
+                        configure,
+                        click,
+                        long_press,
+                        drag,
+                        configure_swipe,
+                        trigger,
+                    )
                     self.assertEqual(
                         [0] * len(physical_names),
                         [item.call_count for item in mocks],

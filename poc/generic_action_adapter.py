@@ -137,7 +137,7 @@ class GenericSingleActionAdapter:
             "drag",
         }
     )
-    INDEPENDENT_GEOMETRY_AUDIT_KINDS = frozenset({"drag"})
+    INDEPENDENT_GEOMETRY_AUDIT_KINDS = frozenset({"long_press", "drag"})
 
     def supported_action_kinds(self) -> frozenset[str]:
         """Return only actions backed by callable methods on this device."""
@@ -574,14 +574,22 @@ class GenericSingleActionAdapter:
                     local_frame_identity_verified=local_frame_identity_verified,
                     require_geometry_overlap=False,
                 )
-                planned_ids = (
-                    str(requested_action.params.get("source_element_id") or ""),
-                    str(requested_action.params.get("destination_element_id") or ""),
-                )
-                fresh_ids = (
-                    str(semantic_rebound.params.get("source_element_id") or ""),
-                    str(semantic_rebound.params.get("destination_element_id") or ""),
-                )
+                if requested_action.action == "drag":
+                    planned_ids = (
+                        str(requested_action.params.get("source_element_id") or ""),
+                        str(requested_action.params.get("destination_element_id") or ""),
+                    )
+                    fresh_ids = (
+                        str(semantic_rebound.params.get("source_element_id") or ""),
+                        str(semantic_rebound.params.get("destination_element_id") or ""),
+                    )
+                else:
+                    planned_ids = (
+                        str(requested_action.params.get("element_id") or ""),
+                    )
+                    fresh_ids = (
+                        str(semantic_rebound.params.get("element_id") or ""),
+                    )
                 rebind_planned_scene = audit_geometry(
                     frames=tuple(planned_frames),
                     scene=planned_scene,

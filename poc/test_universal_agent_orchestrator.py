@@ -2041,6 +2041,85 @@ class UniversalAgentStartTests(unittest.TestCase):
         revised.validate()
         return revised
 
+    @staticmethod
+    def _read_only_multi_locate_graph() -> DynamicTaskGraph:
+        base = _graph()
+        graph = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="让紫色方块位于绿色终点的本机临时位置",
+                entities={"source": "紫色方块", "destination": "绿色终点"},
+            ),
+            subgoals=(
+                replace(
+                    base.subgoals[0],
+                    subgoal_id="locate-endpoints",
+                    objective="紫色方块和绿色终点在当前页面可见",
+                    completion_conditions=("紫色方块和绿色终点均出现在当前画面中",),
+                    external_impact="read_only",
+                ),
+                Subgoal(
+                    subgoal_id="move-source",
+                    objective="紫色方块位于绿色终点的本机临时位置",
+                    status="pending",
+                    depends_on=("locate-endpoints",),
+                    constraints=("不得保存、提交或修改账号数据",),
+                    completion_conditions=("紫色方块与绿色终点重合",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+            ),
+            active_subgoal_id="locate-endpoints",
+            raw_user_goal="只改变当前页面未保存的临时布局",
+        )
+        graph.validate()
+        return graph
+
+    @staticmethod
+    def _advance_multi_locate_graph(graph: DynamicTaskGraph) -> DynamicTaskGraph:
+        revised = replace(
+            graph,
+            revision=graph.revision + 1,
+            subgoals=(
+                replace(
+                    graph.subgoals[0],
+                    status="completed",
+                    completion_evidence=("紫色方块和绿色终点均可见",),
+                ),
+                replace(graph.subgoals[1], status="active"),
+            ),
+            active_subgoal_id="move-source",
+        )
+        revised.validate()
+        return revised
+
+    @staticmethod
+    def _two_endpoint_scene(*, clipped: bool = False) -> UIScene:
+        scene = _scene()
+        source = replace(
+            scene.elements[0],
+            element_id="source",
+            role="image",
+            meaning="purple_start_block",
+            label="起点",
+            bounds=(0.0 if clipped else 0.18, 0.68, 0.38, 0.82),
+            states={"goal_relevant": True},
+            evidence=("粉紫色方块",),
+        )
+        destination = UIElement(
+            element_id="destination",
+            role="container",
+            meaning="green_end_point",
+            label="绿色终点",
+            bounds=(0.55, 0.63, 0.85, 0.85),
+            confidence=0.98,
+            states={"goal_relevant": True},
+            evidence=("绿色虚线终点区域",),
+        )
+        return replace(scene, elements=(source, destination))
+
     def test_start_plans_observes_and_decides_with_zero_physical_actions(self) -> None:
         graph = _graph()
         planner = FakeDeepSeekPlanner(graph)
@@ -2131,6 +2210,88 @@ class UniversalAgentStartTests(unittest.TestCase):
         self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
+
+    def test_start_advances_explicit_two_element_presence_checkpoint(self) -> None:
+        initial = self._read_only_multi_locate_graph()
+        revised = self._advance_multi_locate_graph(initial)
+        planner = FakeDeepSeekPlanner(initial, replan_result=revised)
+        qwen = FakeQwenObserver()
+        adapter = FakeAdapter(self._two_endpoint_scene())
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(planner, qwen, adapter).start(
+                session_id="session-two-endpoints",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual("move-source", session.task_graph.active_subgoal_id)
+        self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
+        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(1, adapter.capture_calls)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+        visible_evidence = planner.replan_calls[0][1].visible_evidence
+        self.assertTrue(any("element_id=source" in item for item in visible_evidence))
+        self.assertTrue(any("element_id=destination" in item for item in visible_evidence))
+
+    def test_multi_element_presence_requires_safe_interior_bounds(self) -> None:
+        initial = self._read_only_multi_locate_graph()
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_result=self._advance_multi_locate_graph(initial),
+        )
+        adapter = FakeAdapter(self._two_endpoint_scene(clipped=True))
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                planner,
+                FakeQwenObserver(),
+                adapter,
+            ).start(
+                session_id="session-clipped-two-endpoints",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("blocked", session.status)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_multi_element_presence_requires_explicit_conjunction(self) -> None:
+        initial = self._read_only_multi_locate_graph()
+        first = replace(
+            initial.subgoals[0],
+            objective="定位紫色方块；定位绿色终点",
+            completion_conditions=("两个对象可见",),
+        )
+        initial = replace(initial, subgoals=(first, initial.subgoals[1]))
+        initial.validate()
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_result=self._advance_multi_locate_graph(initial),
+        )
+        adapter = FakeAdapter(self._two_endpoint_scene())
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                planner,
+                FakeQwenObserver(),
+                adapter,
+            ).start(
+                session_id="session-unbound-two-endpoints",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("blocked", session.status)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(0, adapter.execute_calls)
 
     def test_start_does_not_advance_presence_checkpoint_without_full_visibility(self) -> None:
         initial = self._read_only_locate_graph()

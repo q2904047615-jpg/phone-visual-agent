@@ -1349,6 +1349,10 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 3. bounds使用0..1000的[left,top,right,bottom]，必须只框真实清晰控件。0和1000分别代表
    原图四边；禁止复制原图像素坐标（例如810x1515画面的y=1130），任何边界超出0..1000就省略该元素。
 4. role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
+   container只表示承载其他内容的分组、布局区或目标区域；四边独立、可单独识别的色块、卡片、图片
+   或控件不得写container，应按可见形态写image/list_item/button。可见文字或外观明确证明的移动源
+   与目标区域必须分别建元素，不能合成一个container。目标相关元素必须在states中逐项报告
+   fully_visible:true/false；只有整个轮廓均在原图内且无遮挡时才可写true。
 5. meaning用lower_snake_case。与目标直接相关的控件在states中写goal_relevant:true。
 6. 每个element的evidence最多一条不超过40个字的画面短文字或明确外观。
    summary不超过60个字。看不清就降低confidence或省略元素。
@@ -1454,7 +1458,10 @@ goal_relevant:true，相邻button写goal_relevant:false。本地只会在三者�
 "stable":true,"confidence":0.0,"fingerprint":""}}
 元素仅允许element_id、role、meaning、label、bounds、confidence、states、evidence。不要Markdown。
 role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
-container仅表示与目标有关的页面内容区域；tab_group、tab_bar和toolbar等其他非点击结构只写进summary。
+container仅表示承载其他内容的分组、布局区或目标区域；四边独立、可单独识别的色块、卡片、图片或
+控件必须按可见形态写image/list_item/button。可见事实明确区分移动源和目标区域时必须分别建元素，
+不得合成一个container；两者都要逐项写fully_visible:true/false。tab_group、tab_bar和toolbar等
+其他非点击结构只写进summary。
 {SYSTEM_UI_OBSERVATION_RULE}
 overlays只能是字符串数组；任何可交互候选都必须放入elements并使用element_id，
 不得把带bounds、role或ID的对象放入overlays。

@@ -712,6 +712,9 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn('"immersive_or_fullscreen":"unknown"', prompt)
         self.assertIn('"navigation_bar_visible":"unknown"', prompt)
         self.assertIn("绝不得写入elements", prompt)
+        self.assertIn("四边独立、可单独识别的色块", prompt)
+        self.assertIn("移动源", prompt)
+        self.assertIn("fully_visible:true/false", prompt)
 
     def test_compact_observation_uses_one_image_without_direction_audit(self) -> None:
         provider = FakeProvider(scene_payload())

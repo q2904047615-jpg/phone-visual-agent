@@ -744,6 +744,95 @@ class UniversalAgentOrchestrator:
                 return True
         return False
 
+    @staticmethod
+    def _presence_binding_terms(*values: Any) -> frozenset[str]:
+        """Return bounded literal terms for a zero-action presence check."""
+
+        text = " ".join(
+            str(value or "").casefold().replace("_", " ") for value in values
+        )
+        generic = {
+            "action", "button", "control", "current", "element", "image",
+            "item", "page", "screen", "target", "view", "visible",
+            "当前", "页面", "画面", "目标", "元素", "控件", "可见", "出现",
+        }
+        terms = {
+            token
+            for token in re.findall(r"[a-z0-9]{3,}", text)
+            if token not in generic
+        }
+        for run in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+            for size in range(2, min(6, len(run)) + 1):
+                terms.update(
+                    run[index:index + size]
+                    for index in range(0, len(run) - size + 1)
+                )
+        return frozenset(term for term in terms if term not in generic)
+
+    def _multi_presence_candidates(
+        self,
+        *,
+        subgoal: Any,
+        scene: Any,
+        trusted_observation: Any,
+    ) -> tuple[Any, ...] | None:
+        """Bind two to four explicitly conjoined visible objects, fail closed."""
+
+        text = " ".join(
+            str(item or "").strip()
+            for item in (
+                getattr(subgoal, "objective", ""),
+                *tuple(getattr(subgoal, "completion_conditions", ()) or ()),
+            )
+            if str(item or "").strip()
+        ).casefold()
+        if not re.search(r"(?:和|与|及|同时|均|都|\bboth\b|\band\b|\ball\b)", text):
+            return None
+        goal_candidates = tuple(
+            item
+            for item in scene.elements
+            if item.states.get("goal_relevant") is True
+        )
+        if not 2 <= len(goal_candidates) <= 4:
+            return None
+        text_terms = self._presence_binding_terms(text)
+        if not text_terms:
+            return None
+        candidate_terms: list[frozenset[str]] = []
+        for candidate in goal_candidates:
+            if (
+                float(candidate.confidence) < MIN_TARGET_CONFIDENCE
+                or candidate.states.get("visible") is False
+                or candidate.states.get("fully_visible") is False
+                or self._candidate_has_unresolved_conflict(
+                    trusted_observation,
+                    candidate.element_id,
+                )
+            ):
+                return None
+            left, top, right, bottom = candidate.bounds
+            if not (
+                0.02 <= left < right <= 0.98
+                and 0.02 <= top < bottom <= 0.98
+            ):
+                return None
+            terms = self._presence_binding_terms(
+                candidate.label,
+                candidate.meaning,
+                *candidate.evidence,
+            ).intersection(text_terms)
+            if not terms:
+                return None
+            candidate_terms.append(frozenset(terms))
+        for index, terms in enumerate(candidate_terms):
+            other_terms = frozenset().union(
+                *(item for other_index, item in enumerate(candidate_terms)
+                  if other_index != index)
+            )
+            if not terms.difference(other_terms):
+                return None
+        return goal_candidates
+
     def _try_advance_read_only_presence_subgoal(
         self,
         session: UniversalAgentSessionState,
@@ -766,36 +855,54 @@ class UniversalAgentOrchestrator:
         candidate = scene.unique_trusted_goal_element(
             min_confidence=MIN_TARGET_CONFIDENCE,
         )
-        if (
-            candidate is None
-            or candidate.states.get("fully_visible") is not True
-            or self._candidate_has_unresolved_conflict(
-                trusted_observation,
-                candidate.element_id,
-            )
-        ):
-            return None
+        candidates: tuple[Any, ...]
+        if candidate is not None:
+            if (
+                candidate.states.get("fully_visible") is not True
+                or self._candidate_has_unresolved_conflict(
+                    trusted_observation,
+                    candidate.element_id,
+                )
+            ):
+                return None
+            candidates = (candidate,)
+        else:
+            candidates = self._multi_presence_candidates(
+                subgoal=current,
+                scene=scene,
+                trusted_observation=trusted_observation,
+            ) or ()
+            if not candidates:
+                return None
 
-        candidate_fact = (
-            "当前可信画面仅有一个完整可见的目标元素："
-            f"element_id={candidate.element_id}, role={candidate.role}, "
-            f"label={candidate.label or '[empty]'}, meaning={candidate.meaning}, "
-            f"confidence={float(candidate.confidence):.3f}, fully_visible=true。"
+        candidate_facts = tuple(
+            "当前可信画面的目标元素："
+            f"element_id={item.element_id}, role={item.role}, "
+            f"label={item.label or '[empty]'}, meaning={item.meaning}, "
+            f"confidence={float(item.confidence):.3f}, "
+            f"fully_visible={item.states.get('fully_visible', 'unknown')}, "
+            "bounds_inside_safe_frame=true。"
+            for item in candidates
         )
         observed = self.bridge.observed_state(
             graph=graph,
             trusted_observation=trusted_observation,
             action_outcome="not_applicable",
-            verification={"visible_evidence": [candidate_fact, *candidate.evidence]},
+            verification={
+                "visible_evidence": [
+                    *candidate_facts,
+                    *(fact for item in candidates for fact in item.evidence),
+                ]
+            },
         )
         revised = self.deepseek_planner.replan(
             graph,
             observed,
             trigger="subgoal_completed",
             reason=(
-                "当前可信画面已经以唯一、高置信、完整可见的目标元素证明"
-                "定位类 read_only 子目标；只允许推进这一个子目标，不得推断"
-                "元素值、外部状态或执行动作。"
+                f"当前可信画面已经以{len(candidates)}个逐项语义绑定、"
+                "高置信且无冲突的目标元素证明定位类 read_only 子目标；"
+                "只允许推进这一个子目标，不得推断元素值、外部状态或执行动作。"
             ),
         )
         self._validate_graph_identity(

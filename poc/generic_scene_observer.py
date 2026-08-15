@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from dataclasses import replace
-from typing import Any
+from typing import Any, Iterator
 
 from PIL import Image
 
@@ -236,6 +236,7 @@ class GenericSceneObserver:
                 "last_stage": last_stage,
                 "last_stage_label": STAGE_LABELS.get(last_stage, last_stage),
                 "compact_output_tokens": COMPACT_OUTPUT_TOKENS,
+                "compact_retry_output_tokens": COMPACT_RETRY_TOKENS,
                 "observation_timeout_seconds": OBSERVATION_TIMEOUT_SECONDS,
                 "max_compact_elements": MAX_COMPACT_ELEMENTS,
                 "last_scene_enum_values": dict(
@@ -261,6 +262,7 @@ class GenericSceneObserver:
         model_calls = 0
         compact_retry_used = False
         format_retry_used = False
+        local_structural_repair_used = False
         targeted_refinement_used = False
         input_structure_audit_used = False
         system_ui_audit_used = False
@@ -337,17 +339,10 @@ class GenericSceneObserver:
                 }
             ]
 
-            self._set_stage("waiting_compact_observation")
-            try:
-                raw = model_chat(
-                    first_messages,
-                    max_tokens=COMPACT_OUTPUT_TOKENS,
-                )
-                self.last_raw_response = raw
-                self._set_stage("parsing_compact_observation")
-                scene = _suppress_obscured_input_evidence(
+            def parse_compact_response(value: str) -> UIScene:
+                return _suppress_obscured_input_evidence(
                     _parse_scene(
-                        raw,
+                        value,
                         fingerprint=fingerprint,
                         goal_context=context,
                         allow_invalid_system_ui_unknown=system_ui_audit_required,
@@ -356,6 +351,32 @@ class GenericSceneObserver:
                     visual_obstructions,
                     fingerprint=fingerprint,
                 )
+
+            def parse_unique_structural_repair(value: str) -> UIScene | None:
+                repaired = _parse_scene_after_unique_structural_edit(
+                    value,
+                    fingerprint=fingerprint,
+                    goal_context=context,
+                    allow_invalid_system_ui_unknown=system_ui_audit_required,
+                    camera_layout_orientation=camera_layout_orientation,
+                )
+                if repaired is None:
+                    return None
+                return _suppress_obscured_input_evidence(
+                    repaired,
+                    visual_obstructions,
+                    fingerprint=fingerprint,
+                )
+
+            self._set_stage("waiting_compact_observation")
+            try:
+                raw = model_chat(
+                    first_messages,
+                    max_tokens=COMPACT_OUTPUT_TOKENS,
+                )
+                self.last_raw_response = raw
+                self._set_stage("parsing_compact_observation")
+                scene = parse_compact_response(raw)
             except VisionAgentError as first_error:
                 first_error_type = classify_qwen_error(
                     first_error,
@@ -366,39 +387,41 @@ class GenericSceneObserver:
                     or not _compact_retry_allowed(first_error)
                 ):
                     raise
-                compact_retry_used = True
-                format_retry_used = True
-                self._set_stage("waiting_compact_retry")
-                retry_messages = [
-                    _json_only_system_message(),
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": _compact_retry_prompt(context, first_error),
-                            },
-                            image_part,
-                        ],
-                    }
-                ]
-                raw = model_chat(
-                    retry_messages,
-                    max_tokens=COMPACT_RETRY_TOKENS,
-                )
-                self.last_raw_response = raw
-                self._set_stage("parsing_compact_retry")
-                scene = _suppress_obscured_input_evidence(
-                    _parse_scene(
-                        raw,
-                        fingerprint=fingerprint,
-                        goal_context=context,
-                        allow_invalid_system_ui_unknown=system_ui_audit_required,
-                        camera_layout_orientation=camera_layout_orientation,
-                    ),
-                    visual_obstructions,
-                    fingerprint=fingerprint,
-                )
+                scene = parse_unique_structural_repair(self.last_raw_response)
+                if scene is not None:
+                    format_retry_used = True
+                    local_structural_repair_used = True
+                else:
+                    compact_retry_used = True
+                    format_retry_used = True
+                    self._set_stage("waiting_compact_retry")
+                    retry_messages = [
+                        _json_only_system_message(),
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": _compact_retry_prompt(
+                                        self.last_raw_response
+                                    ),
+                                }
+                            ],
+                        }
+                    ]
+                    raw = model_chat(
+                        retry_messages,
+                        max_tokens=COMPACT_RETRY_TOKENS,
+                    )
+                    self.last_raw_response = raw
+                    self._set_stage("parsing_compact_retry")
+                    try:
+                        scene = parse_compact_response(raw)
+                    except VisionAgentError:
+                        scene = parse_unique_structural_repair(raw)
+                        if scene is None:
+                            raise
+                        local_structural_repair_used = True
 
             if (
                 not system_ui_audit_required
@@ -631,6 +654,7 @@ class GenericSceneObserver:
                     "model_calls": model_calls,
                     "compact_retry_used": compact_retry_used,
                     "format_retry_used": format_retry_used,
+                    "local_structural_repair_used": local_structural_repair_used,
                     "targeted_refinement_used": targeted_refinement_used,
                     "local_stability": stability.to_dict(),
                     "selected_frame_index": selected_frame_index,
@@ -661,6 +685,7 @@ class GenericSceneObserver:
                 "model_calls": model_calls,
                 "compact_retry_used": compact_retry_used,
                 "format_retry_used": format_retry_used,
+                "local_structural_repair_used": local_structural_repair_used,
                 "first_pass_success": not format_retry_used,
                 "repair_retry_success": format_retry_used,
                 "targeted_refinement_used": targeted_refinement_used,
@@ -714,6 +739,7 @@ class GenericSceneObserver:
                     "model_calls": model_calls,
                     "compact_retry_used": compact_retry_used,
                     "format_retry_used": format_retry_used,
+                    "local_structural_repair_used": local_structural_repair_used,
                     "first_pass_success": False,
                     "repair_retry_success": False,
                     "targeted_refinement_used": targeted_refinement_used,
@@ -1095,35 +1121,143 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 """
 
 
-def _compact_retry_prompt(context: dict[str, Any], error: Exception) -> str:
+def _compact_retry_prompt(raw_response: str) -> str:
+    encoded_raw = json.dumps(raw_response, ensure_ascii=False)
+    encoded_schema = json.dumps(
+        _compact_scene_repair_schema(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     return f"""
-上一次快速观察超时或JSON不完整，控制器没有执行任何动作。请重新独立观察同一张图。
-目标上下文：{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
-只返回一个最小、完整、可解析JSON；不要转义成字符串，不要输出reasoning或说明文字。
-summary最多40字，elements最多2个，evidence每个元素最多1条且最多30字；禁止罗列非目标内容。
-没有把握就写unknown和空elements，禁止猜。务必在token耗尽前闭合全部括号。
-画面清晰稳定但目标控件不存在时，空elements不等于低置信；confidence仍只按画面质量填写。
-格式修复不能靠删除真实候选通过：若原图清楚存在与目标直接相关的可交互入口，即使目标结果
-尚未出现，也必须在elements中报告该入口；只有重新观察后仍无法确认时才返回空elements。
-格式必须是：
-{{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
-"screen_id":"unknown","summary":"短描述","system_ui":{{"immersive_or_fullscreen":"unknown",
-"navigation_bar_visible":"unknown"}},"camera_alignment":{{"camera_layout_orientation":"portrait",
-"phone_content_rotation":"unknown","confidence":0.0,"evidence":[]}},"elements":[],"overlays":[],
-"stable":true,"confidence":0.0,"fingerprint":""}}
-元素格式仅允许element_id、role、meaning、label、bounds、confidence、states、evidence。
-bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能是x/y/width/height对象、
-两个点或嵌套数组。
-role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
-container仅表示与目标有关的页面内容区域；tab_group、tab_bar和toolbar等非点击结构只写进summary。
-{SYSTEM_UI_OBSERVATION_RULE}
-{CAMERA_ALIGNMENT_OBSERVATION_RULE}
-overlays只能是字符串数组；带bounds、role、element_id或overlay_id的对象必须改写成elements，
-并使用element_id。禁止把对象序列化成字符串塞入overlays。
-与目标直接相关的元素写states.goal_relevant=true。禁止任何动作或计划字段。不要Markdown。
-输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
-输入框文字与键盘规则：{INPUT_VALUE_OBSERVATION_RULE}
-"""
+你只是JSON语法修复器，不是页面观察器。不得观察、推理、补造或改变任何语义。
+只允许修复JSON结构标点；不得增删元素、字段或字符串，不得改写任何已有值，不得移动元素、
+改变元素所属列表或把一种字段结构改写成另一种。原始响应缺少字段或不符合schema时不得猜测补齐。
+返回结果仍会由本地完整严格协议校验；无法无损修复就原样返回。
+只输出一个JSON对象，不要Markdown、说明或代码围栏。
+RAW_RESPONSE_JSON_STRING:
+{encoded_raw}
+STRICT_JSON_SCHEMA:
+{encoded_schema}
+""".strip()
+
+
+def _compact_scene_repair_schema() -> dict[str, Any]:
+    number_0_1000 = {"type": "number", "minimum": 0, "maximum": 1000}
+    unknown_or_boolean = {
+        "anyOf": [{"type": "boolean"}, {"const": "unknown"}]
+    }
+    element_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "element_id",
+            "role",
+            "meaning",
+            "label",
+            "bounds",
+            "confidence",
+            "states",
+            "evidence",
+        ],
+        "properties": {
+            "element_id": {"type": "string", "minLength": 1},
+            "role": {"enum": sorted(ALLOWED_ROLES)},
+            "meaning": {"type": "string", "minLength": 1},
+            "label": {"type": "string"},
+            "bounds": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": number_0_1000,
+            },
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "states": {"type": "object"},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "protocol_version",
+            "screen_id",
+            "summary",
+            "system_ui",
+            "camera_alignment",
+            "elements",
+            "overlays",
+            "stable",
+            "confidence",
+            "fingerprint",
+        ],
+        "anyOf": [
+            {"required": ["foreground_app_id"]},
+            {"required": ["app_id"]},
+        ],
+        "properties": {
+            "protocol_version": {"const": UI_SCENE_PROTOCOL_VERSION},
+            "foreground_app_id": {"type": "string", "minLength": 1},
+            "app_id": {"type": "string", "minLength": 1},
+            "screen_id": {"type": "string", "minLength": 1},
+            "summary": {"type": "string"},
+            "system_ui": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "immersive_or_fullscreen",
+                    "navigation_bar_visible",
+                ],
+                "properties": {
+                    "immersive_or_fullscreen": unknown_or_boolean,
+                    "navigation_bar_visible": unknown_or_boolean,
+                },
+            },
+            "camera_alignment": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "camera_layout_orientation",
+                    "phone_content_rotation",
+                    "confidence",
+                    "evidence",
+                ],
+                "properties": {
+                    "camera_layout_orientation": {
+                        "enum": ["portrait", "landscape", "square", "unknown"]
+                    },
+                    "phone_content_rotation": {
+                        "enum": [
+                            "upright",
+                            "rotated_90",
+                            "rotated_180",
+                            "rotated_270",
+                            "unknown",
+                        ]
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                    },
+                    "evidence": {
+                        "type": "array",
+                        "maxItems": 2,
+                        "items": {"type": "string"},
+                    },
+                },
+            },
+            "elements": {
+                "type": "array",
+                "maxItems": MAX_COMPACT_ELEMENTS,
+                "items": element_schema,
+            },
+            "overlays": {"type": "array", "items": {"type": "string"}},
+            "stable": {"type": "boolean"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "fingerprint": {"type": "string"},
+        },
+    }
 
 
 def _targeted_retry_prompt(
@@ -1246,6 +1380,188 @@ def _input_audit_detail_note(
         f"Image 2 is only a magnified read-only crop of Image 1 at {list(roi_bounds)}. "
         "Use it to read details, but never use Image 2 as a coordinate system."
     )
+
+
+_JSON_STRUCTURAL_PUNCTUATION = "{}[],:"
+_JSON_STRUCTURAL_REPAIR_WINDOW = 2
+_MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES = 40
+_MAX_JSON_STRUCTURAL_REPAIR_CHARS = 16000
+
+
+def _reject_duplicate_json_object_pairs(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _load_json_without_duplicate_keys(raw: str) -> Any:
+    return json.loads(raw, object_pairs_hook=_reject_duplicate_json_object_pairs)
+
+
+def _single_json_structural_edits(raw: str) -> Iterator[str]:
+    """Yield bounded one-character edits around the original parser error."""
+
+    text = str(raw or "").strip()
+    if (
+        not text.startswith("{")
+        or not text.endswith("}")
+        or len(text) > _MAX_JSON_STRUCTURAL_REPAIR_CHARS
+    ):
+        return
+    try:
+        _load_json_without_duplicate_keys(text)
+    except json.JSONDecodeError as error:
+        error_position = error.pos
+    except (TypeError, ValueError):
+        return
+    else:
+        return
+
+    boundaries: list[bool] = [True]
+    in_string = False
+    escaped = False
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+        elif character == '"':
+            in_string = True
+        boundaries.append(not in_string)
+
+    start = max(0, error_position - _JSON_STRUCTURAL_REPAIR_WINDOW)
+    stop = min(len(text), error_position + _JSON_STRUCTURAL_REPAIR_WINDOW + 1)
+    seen: set[str] = set()
+    yielded = 0
+    for index in range(start, stop):
+        character = text[index]
+        if character not in _JSON_STRUCTURAL_PUNCTUATION or not boundaries[index]:
+            continue
+        candidate = text[:index] + text[index + 1 :]
+        if candidate not in seen:
+            seen.add(candidate)
+            yield candidate
+            yielded += 1
+            if yielded >= _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES:
+                return
+
+    insertion_stop = min(len(text), stop - 1)
+    for index in range(start, insertion_stop + 1):
+        if not boundaries[index]:
+            continue
+        for character in _JSON_STRUCTURAL_PUNCTUATION:
+            candidate = text[:index] + character + text[index:]
+            if candidate not in seen:
+                seen.add(candidate)
+                yield candidate
+                yielded += 1
+                if yielded >= _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES:
+                    return
+
+
+def _parse_scene_after_unique_structural_edit(
+    raw: str,
+    *,
+    fingerprint: str,
+    goal_context: dict[str, Any] | None = None,
+    allow_invalid_system_ui_unknown: bool = False,
+    camera_layout_orientation: str | None = None,
+) -> UIScene | None:
+    """Accept one punctuation edit only when exactly one strict scene survives."""
+
+    accepted: list[UIScene] = []
+    for candidate in _single_json_structural_edits(raw):
+        try:
+            decoded = _load_json_without_duplicate_keys(candidate)
+            if not _matches_compact_repair_schema(decoded):
+                continue
+            scene = _parse_scene(
+                candidate,
+                fingerprint=fingerprint,
+                goal_context=goal_context,
+                allow_invalid_system_ui_unknown=allow_invalid_system_ui_unknown,
+                camera_layout_orientation=camera_layout_orientation,
+            )
+        except (json.JSONDecodeError, ValueError, VisionAgentError):
+            continue
+        accepted.append(scene)
+        if len(accepted) > 1:
+            return None
+    return accepted[0] if accepted else None
+
+
+def _matches_compact_repair_schema(payload: Any) -> bool:
+    """Require the exact compact container shape before normalizers run."""
+
+    if not isinstance(payload, dict):
+        return False
+    required = {
+        "protocol_version",
+        "screen_id",
+        "summary",
+        "system_ui",
+        "camera_alignment",
+        "elements",
+        "overlays",
+        "stable",
+        "confidence",
+        "fingerprint",
+    }
+    allowed = required | {"foreground_app_id", "app_id"}
+    if not required.issubset(payload) or not set(payload).issubset(allowed):
+        return False
+    if not ({"foreground_app_id", "app_id"} & set(payload)):
+        return False
+    system_ui = payload.get("system_ui")
+    alignment = payload.get("camera_alignment")
+    elements = payload.get("elements")
+    if (
+        payload.get("protocol_version") != UI_SCENE_PROTOCOL_VERSION
+        or not isinstance(system_ui, dict)
+        or set(system_ui)
+        != {"immersive_or_fullscreen", "navigation_bar_visible"}
+        or not isinstance(alignment, dict)
+        or set(alignment)
+        != {
+            "camera_layout_orientation",
+            "phone_content_rotation",
+            "confidence",
+            "evidence",
+        }
+        or not isinstance(elements, list)
+        or len(elements) > MAX_COMPACT_ELEMENTS
+        or not isinstance(payload.get("overlays"), list)
+    ):
+        return False
+    element_fields = {
+        "element_id",
+        "role",
+        "meaning",
+        "label",
+        "bounds",
+        "confidence",
+        "states",
+        "evidence",
+    }
+    for element in elements:
+        if not isinstance(element, dict) or set(element) != element_fields:
+            return False
+        if (
+            not isinstance(element["bounds"], list)
+            or len(element["bounds"]) != 4
+            or not isinstance(element["states"], dict)
+            or not isinstance(element["evidence"], list)
+        ):
+            return False
+    return True
 
 
 def _parse_scene(

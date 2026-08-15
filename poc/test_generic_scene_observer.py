@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -11,9 +12,13 @@ from generic_scene_observer import (
     SYSTEM_UI_AUDIT_VERSION,
 )
 from generic_scene_observer import (
+    _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES,
+    _MAX_JSON_STRUCTURAL_REPAIR_CHARS,
     _camera_layout_orientation,
+    _parse_scene_after_unique_structural_edit,
     _parse_scene,
     _scene_enum_values,
+    _single_json_structural_edits,
 )
 from orientation_safety import ORIENTATION_AUDIT_PROTOCOL_VERSION
 from ui_scene import UI_SCENE_PROTOCOL_VERSION, UISceneError
@@ -143,6 +148,19 @@ def scene_payload() -> dict:
         "confidence": 0.96,
         "fingerprint": "model-value-must-not-be-trusted",
     }
+
+
+def extra_brace_scene_response() -> str:
+    payload = scene_payload()
+    payload["foreground_app_id"] = "launcher"
+    payload["elements"][0]["meaning"] = "browser"
+    payload["elements"][0]["label"] = "浏览器"
+    payload["elements"][0]["evidence"] = ["浏览器"]
+    valid = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    malformed = valid.replace('}],"overlays"', '}}],"overlays"', 1)
+    if malformed == valid:
+        raise AssertionError("测试响应未插入额外右花括号。")
+    return malformed
 
 
 def input_audit_payload(
@@ -1177,6 +1195,15 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(scene.foreground_app_id, "calculator")
         self.assertEqual(provider.calls, 2)
         self.assertEqual(provider.max_tokens_seen, [800, 800])
+        retry_content = provider.messages_seen[1][1]["content"]
+        self.assertEqual(len(retry_content), 1)
+        self.assertEqual(retry_content[0]["type"], "text")
+        retry_text = retry_content[0]["text"]
+        self.assertIn("RAW_RESPONSE_JSON_STRING", retry_text)
+        self.assertIn("STRICT_JSON_SCHEMA", retry_text)
+        self.assertIn(json.dumps("{", ensure_ascii=False), retry_text)
+        self.assertIn("不得观察、推理、补造或改变任何语义", retry_text)
+        self.assertNotIn("目标上下文", retry_text)
         self.assertTrue(observer.last_diagnostics["compact_retry_used"])
         self.assertEqual(observer.last_diagnostics["model_calls"], 2)
         self.assertEqual(
@@ -1196,11 +1223,13 @@ class GenericSceneObserverTests(unittest.TestCase):
         provider = SequenceProvider([invalid, scene_payload()])
         scene = GenericSceneObserver(provider).observe(frames=stable_frames())
         self.assertEqual(scene.elements[0].bounds, (0.1, 0.6, 0.26, 0.76))
-        retry_text = provider.messages_seen[1][1]["content"][0]["text"]
-        self.assertIn(
-            "bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]",
-            retry_text,
-        )
+        retry_content = provider.messages_seen[1][1]["content"]
+        self.assertEqual(len(retry_content), 1)
+        retry_text = retry_content[0]["text"]
+        self.assertIn("STRICT_JSON_SCHEMA", retry_text)
+        self.assertIn('"minItems":4', retry_text)
+        self.assertIn('"maxItems":4', retry_text)
+        self.assertIn('\\"width\\": 160', retry_text)
 
     def test_overlay_objects_trigger_one_format_retry_and_keep_candidate_in_elements(self) -> None:
         invalid = scene_payload()
@@ -1233,12 +1262,110 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(2, provider.calls)
         self.assertEqual("add-new", scene.elements[0].element_id)
         self.assertEqual(("window_manager",), scene.overlays)
-        retry_text = provider.messages_seen[1][1]["content"][0]["text"]
-        self.assertIn("overlays只能是字符串数组", retry_text)
-        self.assertIn("必须改写成elements", retry_text)
-        self.assertIn("格式修复不能靠删除真实候选通过", retry_text)
-        self.assertIn("即使目标结果", retry_text)
-        self.assertIn("尚未出现", retry_text)
+        retry_content = provider.messages_seen[1][1]["content"]
+        self.assertEqual(len(retry_content), 1)
+        retry_text = retry_content[0]["text"]
+        self.assertIn("不得移动元素", retry_text)
+        self.assertIn("改变元素所属列表", retry_text)
+        self.assertIn("不得增删元素、字段或字符串", retry_text)
+
+    def test_exact_extra_brace_response_is_repaired_after_one_model_retry(self) -> None:
+        malformed = extra_brace_scene_response()
+        self.assertEqual(len(malformed), 608)
+        self.assertIn('"evidence":["浏览器"]}}],"overlays"', malformed)
+        provider = SequenceProvider(["not-json", malformed])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(frames=stable_frames())
+
+        self.assertEqual(scene.foreground_app_id, "launcher")
+        self.assertEqual(scene.elements[0].label, "浏览器")
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(provider.max_tokens_seen, [800, 800])
+        self.assertTrue(observer.last_diagnostics["compact_retry_used"])
+        self.assertTrue(observer.last_diagnostics["local_structural_repair_used"])
+        self.assertEqual(observer.last_diagnostics["model_calls"], 2)
+        self.assertFalse(observer.status()["hardware_actions_enabled"])
+
+    def test_exact_extra_brace_response_is_repaired_without_remote_retry(self) -> None:
+        provider = SequenceProvider([extra_brace_scene_response()])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(frames=stable_frames())
+
+        self.assertEqual(scene.elements[0].label, "浏览器")
+        self.assertEqual(provider.calls, 1)
+        self.assertTrue(observer.last_diagnostics["format_retry_used"])
+        self.assertFalse(observer.last_diagnostics["compact_retry_used"])
+        self.assertTrue(observer.last_diagnostics["local_structural_repair_used"])
+        self.assertEqual(observer.last_diagnostics["model_calls"], 1)
+
+    def test_structural_edit_must_still_pass_strict_scene_validation(self) -> None:
+        payload = scene_payload()
+        payload["unexpected"] = "forbidden"
+        valid = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        malformed = valid.replace('}],"overlays"', '}}],"overlays"', 1)
+        provider = SequenceProvider(["not-json", malformed])
+        observer = GenericSceneObserver(provider)
+
+        with self.assertRaises(VisionAgentError):
+            observer.observe(frames=stable_frames())
+
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(provider.max_tokens_seen, [800, 800])
+        self.assertFalse(observer.last_diagnostics["repair_retry_success"])
+        self.assertEqual(observer.last_diagnostics["model_calls"], 2)
+        self.assertFalse(observer.status()["hardware_actions_enabled"])
+
+    def test_multiple_strict_structural_edit_candidates_fail_closed(self) -> None:
+        first = json.dumps(scene_payload(), ensure_ascii=False)
+        second_payload = scene_payload()
+        second_payload["elements"][0]["label"] = "8"
+        second = json.dumps(second_payload, ensure_ascii=False)
+
+        with patch(
+            "generic_scene_observer._single_json_structural_edits",
+            return_value=iter([first, second]),
+        ):
+            scene = _parse_scene_after_unique_structural_edit(
+                "{}",
+                fingerprint="stable-fingerprint",
+                camera_layout_orientation="portrait",
+            )
+
+        self.assertIsNone(scene)
+
+    def test_structural_repair_rejects_duplicate_json_keys(self) -> None:
+        malformed = extra_brace_scene_response().replace(
+            '"summary":',
+            '"summary":"duplicate","summary":',
+            1,
+        )
+
+        scene = _parse_scene_after_unique_structural_edit(
+            malformed,
+            fingerprint="stable-fingerprint",
+            camera_layout_orientation="portrait",
+        )
+
+        self.assertIsNone(scene)
+
+    def test_structural_repair_has_hard_size_and_candidate_limits(self) -> None:
+        oversized = '{"summary":"' + (
+            "x" * _MAX_JSON_STRUCTURAL_REPAIR_CHARS
+        ) + '"}}'
+        self.assertEqual(list(_single_json_structural_edits(oversized)), [])
+
+        payload = scene_payload()
+        payload["summary"] = "x" * 14000
+        valid = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        malformed = valid.replace('}],"overlays"', '}}],"overlays"', 1)
+        candidates = list(_single_json_structural_edits(malformed))
+        self.assertGreater(len(candidates), 0)
+        self.assertLessEqual(
+            len(candidates),
+            _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES,
+        )
 
     def test_service_disconnect_is_not_misclassified_as_format_retry(self) -> None:
         provider = SequenceProvider(

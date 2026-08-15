@@ -245,6 +245,16 @@ class AgentEvidenceStore:
             transition,
         )
 
+    def write_confirmation_failure(
+        self,
+        step_number: int,
+        transition: Any,
+    ) -> Path:
+        return self.write_json(
+            f"confirmation_failure_step_{int(step_number)}.json",
+            transition,
+        )
+
     def write_report(self, report: Any) -> Path:
         return self.write_json("report.json", report)
 
@@ -499,6 +509,7 @@ class UniversalAgentSessionState:
     history: list[dict[str, Any]] = field(default_factory=list)
     evidence_paths: list[str] = field(default_factory=list)
     last_post_action_transition: dict[str, Any] | None = None
+    last_confirmation_failure: dict[str, Any] | None = None
     confirm_stage: str = ""
     failed_reason: str = ""
     created_at: str = field(
@@ -569,6 +580,11 @@ class UniversalAgentSessionState:
             "last_post_action_transition": (
                 dict(self.last_post_action_transition)
                 if self.last_post_action_transition is not None
+                else None
+            ),
+            "last_confirmation_failure": (
+                dict(self.last_confirmation_failure)
+                if self.last_confirmation_failure is not None
                 else None
             ),
             "available_action_kinds": sorted(
@@ -1311,6 +1327,27 @@ class UniversalAgentOrchestrator:
             }
         )
         self._remember(session, report_path)
+
+    def _ensure_terminal_snapshot(self, session: UniversalAgentSessionState) -> None:
+        """Write a terminal report only when the persisted one is missing/stale."""
+
+        report_path = session.run_dir / "report.json"
+        try:
+            persisted = json.loads(report_path.read_text(encoding="utf-8"))["session"]
+            current = session.snapshot()
+            compared_fields = (
+                "status",
+                "failed_reason",
+                "confirm_stage",
+                "physical_actions",
+                "last_post_action_transition",
+                "last_confirmation_failure",
+            )
+            if all(persisted.get(key) == current.get(key) for key in compared_fields):
+                return
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        self._write_terminal_snapshot(session)
 
     def _current_confirmation_scope(
         self,
@@ -2195,6 +2232,7 @@ class UniversalAgentOrchestrator:
             )
         before_actions = session.physical_actions
         authority_before = session.confirmation_authority
+        post_transition_before = session.last_post_action_transition
         try:
             with self.device_registry.device_lock(session.device_id):
                 try:
@@ -2205,6 +2243,7 @@ class UniversalAgentOrchestrator:
                         exc,
                         before_actions=before_actions,
                         authority_before=authority_before,
+                        post_transition_before=post_transition_before,
                     )
                     raise
         finally:
@@ -2217,6 +2256,7 @@ class UniversalAgentOrchestrator:
         *,
         before_actions: int,
         authority_before: Any,
+        post_transition_before: Any,
     ) -> None:
         """Best-effort memory/artifact convergence after a consumed confirm.
 
@@ -2230,21 +2270,87 @@ class UniversalAgentOrchestrator:
             authority is not None and getattr(authority, "consumed", False)
         )
         request_actions = max(0, session.physical_actions - int(before_actions))
-        entered_execution = session.confirm_stage in {
-            "executing",
-            "validating_execution_result",
-            "validating_post_action_evidence",
-            "building_trusted_observation",
-            "persisting_post_observation",
-            "replanning",
-        }
-        if not (authority_consumed or entered_execution or request_actions):
+        if not (authority_consumed or request_actions):
+            return
+
+        # A transition produced by the normal after-observation path is more
+        # specific than this exception boundary.  Never replace it; only make a
+        # best-effort attempt to converge the terminal report with memory.
+        if session.last_post_action_transition is not post_transition_before:
+            try:
+                self._ensure_terminal_snapshot(session)
+            except Exception:
+                pass
             return
 
         failed_stage = session.confirm_stage or "confirmation"
         reason = str(error).strip() or error.__class__.__name__
+        if request_actions == 0 and session.status == "blocked":
+            # Policy recheck already produced the authoritative blocked terminal
+            # state and snapshot.  Consuming the confirmation token alone does
+            # not turn that pre-action rejection into an execution failure.
+            try:
+                self._ensure_terminal_snapshot(session)
+            except Exception:
+                pass
+            return
         session.status = "failed"
         session.failed_reason = reason
+        if request_actions == 0:
+            requested_kind = str(
+                getattr(
+                    getattr(
+                        getattr(session.qwen_decision, "proposal", None),
+                        "action",
+                        None,
+                    ),
+                    "action",
+                    "",
+                )
+                or ""
+            )
+            if failed_stage == "validating_confirmation":
+                transition_kind = "confirmation_failure"
+            elif requested_kind == "wait_for_change":
+                transition_kind = "wait_observation_failure"
+            else:
+                transition_kind = "pre_action_failure"
+            transition = {
+                "protocol_version": POST_ACTION_TRANSITION_PROTOCOL_VERSION,
+                "transition_kind": transition_kind,
+                "disposition": "failed",
+                "failed_stage": failed_stage,
+                "error_type": error.__class__.__name__,
+                "error": reason,
+                "authority_consumed": authority_consumed,
+                "physical_actions_before": int(before_actions),
+                "physical_actions": int(session.physical_actions),
+                "request_physical_actions": 0,
+                "evidence": list(dict.fromkeys(session.evidence_paths)),
+            }
+            if authority is not None and callable(getattr(authority, "scope", None)):
+                try:
+                    transition["authority_scope"] = authority.scope()
+                except Exception:
+                    pass
+            session.last_confirmation_failure = transition
+            failure_step = max(1, session.step_number)
+            try:
+                self._remember(
+                    session,
+                    session.evidence_store.write_confirmation_failure(
+                        failure_step,
+                        transition,
+                    ),
+                )
+            except Exception:
+                pass
+            try:
+                self._write_terminal_snapshot(session)
+            except Exception:
+                pass
+            return
+
         transition: dict[str, Any] = {
             "protocol_version": POST_ACTION_TRANSITION_PROTOCOL_VERSION,
             "transition_kind": "post_action_failure",

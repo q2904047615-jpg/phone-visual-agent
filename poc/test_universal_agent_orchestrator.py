@@ -2801,6 +2801,17 @@ def _failure_artifacts(temp: str, *, step_number: int = 1):
     return transition, report
 
 
+def _confirmation_failure_artifacts(temp: str, *, step_number: int = 1):
+    root = Path(temp)
+    transition = json.loads(
+        (root / f"confirmation_failure_step_{step_number}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+    return transition, report
+
+
 class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
     @staticmethod
     def _orchestrator(planner, qwen, adapter):
@@ -3689,7 +3700,45 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 orchestrator.confirm_one(session, confirmation)
             self.assertEqual(1, adapter.execute_calls)
 
+    def test_bad_confirmation_scope_is_not_reported_as_post_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, adapter = self._started(temp)
+            confirmation = _confirmation(session)
+            confirmation["revision"] = 99
+
+            with self.assertRaisesRegex(UniversalAgentOrchestratorError, "不一致"):
+                orchestrator.confirm_one(session, confirmation)
+            transition, report = _confirmation_failure_artifacts(temp)
+            post_action_exists = (
+                Path(temp) / "post_action_transition_step_1.json"
+            ).exists()
+
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual("failed", session.status)
+        self.assertEqual("confirmation_failure", transition["transition_kind"])
+        self.assertEqual("validating_confirmation", transition["failed_stage"])
+        self.assertEqual(0, transition["request_physical_actions"])
+        self.assertIsNone(session.last_post_action_transition)
+        self.assertEqual(transition, session.last_confirmation_failure)
+        self.assertFalse(post_action_exists)
+        self.assertEqual("failed", report["session"]["status"])
+        self.assertEqual(
+            transition,
+            report["session"]["last_confirmation_failure"],
+        )
+        self.assertIsNone(report["session"]["last_post_action_transition"])
+
     def test_policy_is_rechecked_immediately_before_execute(self) -> None:
+        class CountingReportStore(AgentEvidenceStore):
+            def __init__(self, run_dir):
+                super().__init__(run_dir)
+                self.report_writes = 0
+
+            def write_report(self, report):
+                self.report_writes += 1
+                return super().write_report(report)
+
         class FlipPolicy(PhaseOneNavigationPolicy):
             def __init__(self):
                 super().__init__()
@@ -3706,16 +3755,44 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 )
 
         policy = FlipPolicy()
+        stores = []
+
+        def evidence_store_factory(run_dir):
+            store = CountingReportStore(run_dir)
+            stores.append(store)
+            return store
+
         with tempfile.TemporaryDirectory() as temp:
             orchestrator, session, _planner, qwen, adapter = self._started(
-                temp, policy=policy
+                temp,
+                policy=policy,
+                evidence_store_factory=evidence_store_factory,
             )
 
             with self.assertRaisesRegex(UniversalAgentOrchestratorError, "策略状态已变化"):
                 orchestrator.confirm_one(session, _confirmation(session))
+            report = json.loads(
+                (Path(temp) / "report.json").read_text(encoding="utf-8")
+            )
+            post_action_exists = (
+                Path(temp) / "post_action_transition_step_1.json"
+            ).exists()
+            confirmation_failure_exists = (
+                Path(temp) / "confirmation_failure_step_1.json"
+            ).exists()
 
         self.assertEqual(2, policy.calls)
         self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual("blocked", session.status)
+        self.assertEqual("策略状态已变化", session.failed_reason)
+        self.assertIsNone(session.last_post_action_transition)
+        self.assertIsNone(session.last_confirmation_failure)
+        self.assertFalse(post_action_exists)
+        self.assertFalse(confirmation_failure_exists)
+        self.assertEqual(2, stores[0].report_writes)
+        self.assertEqual("blocked", report["session"]["status"])
+        self.assertEqual("策略状态已变化", report["session"]["failed_reason"])
 
     def test_new_observation_fingerprint_and_revision_are_required(self) -> None:
         initial = _graph()

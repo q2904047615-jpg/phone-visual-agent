@@ -1199,6 +1199,80 @@ class GenericActionAdapterTests(unittest.TestCase):
             result.rebound_action.params["target"],
         )
 
+    def test_rebind_accepts_fresh_positive_fully_visible_attestation(self):
+        planned = scene("planned")
+        fresh_element = replace(
+            planned.elements[0],
+            element_id="fresh-target",
+            states={**planned.elements[0].states, "fully_visible": True},
+        )
+        fresh = replace(
+            planned,
+            elements=(fresh_element,),
+            fingerprint="fresh",
+        )
+        after = scene("after", screen_id="next-screen", element_id="after")
+        robot = FakeRobot()
+
+        result = self._adapter(
+            FakeSceneObserver([fresh, after]),
+            robot,
+        ).execute(
+            requested_action=SemanticAction(
+                node_id="open-target",
+                action="tap_semantic",
+                params={
+                    "element_id": planned.elements[0].element_id,
+                    "target": planned.elements[0].meaning,
+                    "role": planned.elements[0].role,
+                    "label": planned.elements[0].label,
+                    "states": dict(planned.elements[0].states),
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("tap", 300, 400)], robot.actions)
+        self.assertTrue(result.rebound_action.params["states"]["fully_visible"])
+
+    def test_rebind_rejects_fresh_negative_fully_visible_attestation(self):
+        planned = scene("planned")
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    element_id="fresh-target",
+                    states={**planned.elements[0].states, "fully_visible": False},
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        robot = FakeRobot()
+
+        with self.assertRaisesRegex(GenericActionAdapterError, "状态"):
+            self._adapter(FakeSceneObserver([fresh]), robot).execute(
+                requested_action=SemanticAction(
+                    node_id="open-target",
+                    action="tap_semantic",
+                    params={
+                        "element_id": planned.elements[0].element_id,
+                        "target": planned.elements[0].meaning,
+                        "role": planned.elements[0].role,
+                        "label": planned.elements[0].label,
+                        "states": dict(planned.elements[0].states),
+                    },
+                ),
+                planned_scene=planned,
+                goal=goal(),
+                confirmed=True,
+            )
+
+        self.assertEqual([], robot.actions)
+
     def test_rebind_rejects_risky_gesture_label_even_for_mode_selector(self):
         states = {"goal_relevant": True, "fully_visible": True}
         planned = UIScene(

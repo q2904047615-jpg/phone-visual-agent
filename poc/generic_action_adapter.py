@@ -1075,7 +1075,18 @@ class GenericSingleActionAdapter:
                     raise GenericActionAdapterError(
                         "确认时目标语义已经变化，旧确认失效。"
                     )
-            if current.label != original.label or current.states != original.states:
+            states_match = current.states == original.states
+            if (
+                not states_match
+                and "fully_visible" not in original.states
+                and current.states.get("fully_visible") is True
+            ):
+                states_match = {
+                    key: value
+                    for key, value in current.states.items()
+                    if key != "fully_visible"
+                } == original.states
+            if current.label != original.label or not states_match:
                 raise GenericActionAdapterError(
                     "确认时目标标签或状态已经变化，旧确认失效。"
                 )

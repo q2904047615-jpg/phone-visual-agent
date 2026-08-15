@@ -1584,7 +1584,7 @@ class UniversalAgentOrchestrator:
                 resolved_action_digest=_action_digest(result.resolved_action),
                 action_kind=str(previous_decision.proposal.action.action),
                 before_observation_id=str(before_observation.observation_id),
-                before_fingerprint=str(result.before_scene.fingerprint),
+                before_fingerprint=str(before_observation.fingerprint),
                 after_observation_id=str(new_observation.observation_id),
                 after_fingerprint=str(new_observation.fingerprint),
                 physical_actions=int(result.physical_actions),
@@ -1618,7 +1618,8 @@ class UniversalAgentOrchestrator:
             "matched": matched,
             "action_outcome": action_outcome,
             "physical_actions": result.physical_actions,
-            "before_fingerprint": result.before_scene.fingerprint,
+            "before_fingerprint": before_observation.fingerprint,
+            "execution_before_fingerprint": result.before_scene.fingerprint,
             "after_fingerprint": result.after_scene.fingerprint,
             "visible_evidence": [result.after_scene.summary],
             "blocked_reasons": list(verification_errors),
@@ -2575,11 +2576,15 @@ class UniversalAgentOrchestrator:
             )
             raise UniversalAgentOrchestratorError(session.failed_reason)
         if (
-            result.before_scene.fingerprint != observation.fingerprint
-            or result.resolved_action.before_fingerprint != observation.fingerprint
+            result.planned_scene_fingerprint != observation.fingerprint
+            or result.confirmation_frame_identity_verified is not True
         ):
             session.status = "failed"
-            session.failed_reason = "动作结果没有绑定确认时的 before fingerprint。"
+            session.failed_reason = "动作结果没有绑定确认 scope 的规划画面。"
+            raise UniversalAgentOrchestratorError(session.failed_reason)
+        if result.resolved_action.before_fingerprint != result.before_scene.fingerprint:
+            session.status = "failed"
+            session.failed_reason = "动作结果没有绑定复核后的执行前画面。"
             raise UniversalAgentOrchestratorError(session.failed_reason)
         after_frames = tuple(getattr(result, "after_frames", ()))
         after_paths = tuple(

@@ -53,6 +53,9 @@ class GenericActionExecutionResult:
     resolved_action: ResolvedSemanticAction
     before_scene: UIScene
     after_scene: UIScene
+    planned_scene_fingerprint: str
+    confirmation_frame_identity_verified: bool
+    confirmation_frame_delta: float | None
     physical_actions: int
     action_outcome: str = "matched"
     verification_errors: tuple[str, ...] = ()
@@ -95,6 +98,11 @@ class GenericActionExecutionResult:
             "resolved_action": self.resolved_action.to_dict(),
             "before_scene": self.before_scene.to_dict(),
             "after_scene": self.after_scene.to_dict(),
+            "planned_scene_fingerprint": self.planned_scene_fingerprint,
+            "confirmation_frame_identity_verified": (
+                self.confirmation_frame_identity_verified
+            ),
+            "confirmation_frame_delta": self.confirmation_frame_delta,
             "physical_actions": self.physical_actions,
             "action_outcome": self.action_outcome,
             "verification_errors": list(self.verification_errors),
@@ -530,12 +538,14 @@ class GenericSingleActionAdapter:
         safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
         evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
         local_frame_identity_verified = False
+        confirmation_frame_delta: float | None = None
         if planned_frames:
             before_frames, before_paths = self._capture_confirmation_frames(
                 evidence_dir=evidence_dir,
                 prefix=f"{evidence_prefix}_before",
             )
             frame_delta = self._confirmation_frame_delta(planned_frames, before_frames)
+            confirmation_frame_delta = frame_delta
             if frame_delta > self.confirmation_frame_delta_max:
                 raise GenericActionAdapterError(
                     "确认时本地真实画面已变化："
@@ -889,6 +899,9 @@ class GenericSingleActionAdapter:
             resolved_action=resolved,
             before_scene=before,
             after_scene=after,
+            planned_scene_fingerprint=planned_scene.fingerprint,
+            confirmation_frame_identity_verified=local_frame_identity_verified,
+            confirmation_frame_delta=confirmation_frame_delta,
             physical_actions=physical_actions,
             action_outcome=(
                 "mismatched" if verification_errors else "matched"

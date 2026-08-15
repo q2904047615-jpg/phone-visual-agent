@@ -431,6 +431,9 @@ class FakeExecutingAdapter(FakeAdapter):
             ),
             before_scene=planned_scene,
             after_scene=self.after_scene,
+            planned_scene_fingerprint=planned_scene.fingerprint,
+            confirmation_frame_identity_verified=True,
+            confirmation_frame_delta=0.0,
             physical_actions=1,
             action_outcome=self.action_outcome,
             verification_errors=self.verification_errors,
@@ -3187,6 +3190,102 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertEqual("awaiting_confirmation", session.status)
         self.assertEqual(2, session.step_number)
         self.assertEqual(2, session.task_graph.revision)
+
+    def test_confirmation_accepts_fresh_execution_scene_with_new_fingerprint(self) -> None:
+        class FreshConfirmationAdapter(FakeExecutingAdapter):
+            def execute(self, **kwargs):
+                result = super().execute(**kwargs)
+                fresh = _scene(fingerprint="frame-confirmed")
+                return replace(
+                    result,
+                    before_scene=fresh,
+                    resolved_action=replace(
+                        result.resolved_action,
+                        before_fingerprint=fresh.fingerprint,
+                    ),
+                )
+
+        adapter = FreshConfirmationAdapter(
+            _scene(),
+            _scene(fingerprint="frame-b"),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, planner, _qwen, adapter = self._started(
+                temp,
+                adapter=adapter,
+            )
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+        receipt = planner.replan_calls[0][1].verified_action_transition
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("frame-confirmed", result.before_scene.fingerprint)
+        self.assertEqual("frame-a", result.planned_scene_fingerprint)
+        self.assertEqual("frame-a", receipt.before_fingerprint)
+        self.assertEqual("awaiting_confirmation", session.status)
+
+    def test_confirmation_rejects_wrong_planned_scene_binding(self) -> None:
+        class WrongPlannedBindingAdapter(FakeExecutingAdapter):
+            def execute(self, **kwargs):
+                return replace(
+                    super().execute(**kwargs),
+                    planned_scene_fingerprint="wrong-planned-frame",
+                )
+
+        adapter = WrongPlannedBindingAdapter(
+            _scene(),
+            _scene(fingerprint="frame-b"),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, adapter = self._started(
+                temp,
+                adapter=adapter,
+            )
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError,
+                "确认 scope 的规划画面",
+            ):
+                orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(
+            "post_action_failure",
+            session.last_post_action_transition["transition_kind"],
+        )
+
+    def test_confirmation_rejects_wrong_execution_scene_binding(self) -> None:
+        class WrongExecutionBindingAdapter(FakeExecutingAdapter):
+            def execute(self, **kwargs):
+                result = super().execute(**kwargs)
+                return replace(
+                    result,
+                    resolved_action=replace(
+                        result.resolved_action,
+                        before_fingerprint="wrong-execution-frame",
+                    ),
+                )
+
+        adapter = WrongExecutionBindingAdapter(
+            _scene(),
+            _scene(fingerprint="frame-b"),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, adapter = self._started(
+                temp,
+                adapter=adapter,
+            )
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError,
+                "复核后的执行前画面",
+            ):
+                orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(
+            "post_action_failure",
+            session.last_post_action_transition["transition_kind"],
+        )
 
     def test_consecutive_swipe_remains_a_valid_multistep_navigation(self) -> None:
         initial = _graph()

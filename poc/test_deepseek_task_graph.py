@@ -757,6 +757,58 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual(2, len(provider.messages))
 
+    def test_explicit_action_like_ui_label_is_preserved_only_as_entity(self):
+        payload = single_subgoal_payload(
+            "“长按目标”对应的本地验收页面可见",
+            external_impact="navigation_only",
+        )
+        payload["goal"]["entities"] = {}
+        payload["completion_conditions"][0]["description"] = (
+            "长按目标页面的黄色虚线区域可见"
+        )
+        payload["completion_conditions"][0]["evidence_required"] = [
+            "长按目标页面显示黄色虚线区域"
+        ]
+        payload["subgoals"][0]["completion_conditions"] = [
+            "长按目标页面显示黄色虚线区域"
+        ]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "当前前台进入本地验收模式。"
+            "目标入口的可见文字是“长按目标”；"
+            "完成状态为黄色虚线区域可见。",
+            device_id="phone-1",
+        )
+
+        self.assertEqual("长按目标", graph.goal.entities["target_ui_label"])
+        state_text = " ".join(
+            [
+                graph.goal.objective,
+                *(item.description for item in graph.completion_conditions),
+                *(item.objective for item in graph.subgoals),
+                *(
+                    condition
+                    for item in graph.subgoals
+                    for condition in item.completion_conditions
+                ),
+            ]
+        )
+        self.assertNotIn("长按目标", state_text)
+        self.assertIn("目标入口", state_text)
+
+    def test_ui_label_normalization_rejects_conflicting_model_entity(self):
+        payload = single_subgoal_payload(
+            "长按目标对应的本地页面可见",
+            external_impact="navigation_only",
+        )
+        payload["goal"]["entities"]["target_ui_label"] = "拖动目标"
+
+        with self.assertRaisesRegex(TaskGraphError, "target_ui_label.*冲突"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                "目标入口的可见文字是“长按目标”。",
+                device_id="phone-1",
+            )
+
     def test_rejects_low_level_action_fields(self):
         payload = base_payload()
         payload["subgoals"][0]["steps"] = [{"tap": [10, 20]}]

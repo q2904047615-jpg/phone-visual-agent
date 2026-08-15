@@ -1064,6 +1064,7 @@ class DeepSeekTaskGraphPlanner:
             payload = _parse_json_object(raw)
         except GenericIntentError as exc:
             raise TaskGraphError(str(exc)) from exc
+        payload = _normalize_explicit_ui_label_payload(payload, raw_user_goal)
         graph = _graph_from_payload(
             payload,
             task_id=task_id,
@@ -2458,6 +2459,80 @@ def _apply_local_risk_supplements(
             )
         assessments.append(assessment)
     return replace(report, assessments=tuple(assessments))
+
+
+def _normalize_explicit_ui_label_payload(
+    payload: dict[str, Any],
+    raw_user_goal: str,
+) -> dict[str, Any]:
+    """Keep an explicitly quoted UI label out of high-level state prose.
+
+    The original user text is deliberately left untouched for the independent
+    semantic risk audit.  Only a narrow ``visible text/label is \"...\"`` form
+    can mint ``target_ui_label``; this does not authorize an action.
+    """
+
+    match = re.search(
+        r"(?:目标(?:入口|控件|元素)?的?)?"
+        r"(?:可见)?(?:文字|标签|名称)\s*(?:是|为|：|:)\s*"
+        r"[“‘\"]([^”’\"\r\n]{1,80})[”’\"]",
+        str(raw_user_goal or ""),
+        re.IGNORECASE,
+    )
+    if match is None:
+        return payload
+    label = match.group(1).strip()
+    try:
+        _reject_low_level_instruction(label, "goal.entities.target_ui_label")
+    except TaskGraphError:
+        pass
+    else:
+        return payload
+
+    value = json.loads(json.dumps(payload, ensure_ascii=False))
+    raw_goal = value.get("goal")
+    if not isinstance(raw_goal, dict):
+        return value
+    entities = raw_goal.get("entities")
+    if not isinstance(entities, dict):
+        return value
+    existing = entities.get("target_ui_label")
+    if existing not in (None, "", label):
+        raise TaskGraphError("DeepSeek 返回的 target_ui_label 与用户字面标签冲突。")
+    entities["target_ui_label"] = label
+
+    def replace_label(item: Any) -> Any:
+        if not isinstance(item, str):
+            return item
+        normalized = item.replace(f"“{label}”", "目标入口")
+        normalized = normalized.replace(f"‘{label}’", "目标入口")
+        normalized = normalized.replace(f'"{label}"', "目标入口")
+        return normalized.replace(label, "目标入口")
+
+    raw_goal["objective"] = replace_label(raw_goal.get("objective"))
+    conditions = value.get("completion_conditions")
+    if isinstance(conditions, list):
+        for condition in conditions:
+            if not isinstance(condition, dict):
+                continue
+            condition["description"] = replace_label(condition.get("description"))
+            evidence = condition.get("evidence_required")
+            if isinstance(evidence, list):
+                condition["evidence_required"] = [
+                    replace_label(item) for item in evidence
+                ]
+    subgoals = value.get("subgoals")
+    if isinstance(subgoals, list):
+        for subgoal in subgoals:
+            if not isinstance(subgoal, dict):
+                continue
+            subgoal["objective"] = replace_label(subgoal.get("objective"))
+            completion = subgoal.get("completion_conditions")
+            if isinstance(completion, list):
+                subgoal["completion_conditions"] = [
+                    replace_label(item) for item in completion
+                ]
+    return value
 
 
 def _structured_reversible_navigation_scopes(

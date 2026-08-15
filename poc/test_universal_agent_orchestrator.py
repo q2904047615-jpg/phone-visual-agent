@@ -898,6 +898,51 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual("long_press", result.canonical_class)
 
+    def test_allows_long_press_in_deterministic_capability_trial(self) -> None:
+        scene = _scene(
+            meaning="long_press_target",
+            label="长按我 · 不要移动",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        decision = _decision(scene, action_kind="long_press")
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"capability_trial_kind": "long_press"},
+                subgoal_objective="目标视觉对象显示持续触发后的可见状态",
+                subgoal_completion_conditions=(
+                    "新画面显示仅由持续触发产生的结构化状态变化",
+                ),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+            available_action_kinds=frozenset({"long_press"}),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("long_press", result.canonical_class)
+
+    def test_capability_trial_long_press_keeps_delete_forbidden(self) -> None:
+        scene = _scene(
+            meaning="long_press_delete_target",
+            label="长按并删除",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        decision = _decision(scene, action_kind="long_press")
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"capability_trial_kind": "long_press"},
+                subgoal_objective="目标视觉对象显示持续触发后的可见状态",
+                subgoal_completion_conditions=("结果状态可见",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+            available_action_kinds=frozenset({"long_press"}),
+        )
+
+        self.assertFalse(result.allowed)
+
     def test_long_press_literal_exception_keeps_delete_forbidden(self) -> None:
         scene = _scene(
             meaning="long_press_delete_target",

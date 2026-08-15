@@ -2501,6 +2501,18 @@ class PhaseOneNavigationPolicy:
         if not isinstance(entities, Mapping):
             return False
         literal = str(entities.get("target_ui_label") or "").strip()
+        action_kind = str(self._value(action, "action", ""))
+        if (
+            not literal
+            and str(entities.get("capability_trial_kind") or "") == action_kind
+            and action_kind == "long_press"
+        ):
+            # A deterministic capability trial intentionally carries only the
+            # primitive kind in its task graph.  The visual label must still be
+            # copied byte-for-byte by Qwen and bound to the observed element;
+            # destructive words left after removing the gesture marker remain
+            # forbidden below.
+            literal = str(element.label or "").strip()
         if not literal or str(element.label or "").strip() != literal:
             return False
         if str(action.params.get("label") or "").strip() != literal:

@@ -39,7 +39,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-14-generic-scene-observer-v15"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v16"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 800
@@ -137,17 +137,26 @@ class GenericSceneObserver:
             frame.transpose(Image.Transpose.ROTATE_90),
             frame.transpose(Image.Transpose.ROTATE_270),
         )
+        image_roles = (
+            "IMAGE 1 - CLASSIFICATION TARGET - ORIGINAL STABLE FRAME",
+            "IMAGE 2 - REFERENCE ONLY - IMAGE 1 ROTATED 90 DEGREES",
+            "IMAGE 3 - REFERENCE ONLY - IMAGE 1 ROTATED 270 DEGREES",
+        )
         content: list[dict[str, Any]] = [
             {"type": "text", "text": _orientation_audit_prompt()}
         ]
-        content.extend(
-            {
-                "type": "image_url",
-                "image_url": {"url": _image_data_url(item)},
-            }
-            for item in images
-        )
+        for role, item in zip(image_roles, images):
+            content.extend(
+                (
+                    {"type": "text", "text": role},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _image_data_url(item)},
+                    },
+                )
+            )
         self._set_stage("waiting_orientation_audit")
+        raw = ""
         try:
             raw = self._provider_chat(
                 [_json_only_system_message(), {"role": "user", "content": content}],
@@ -178,10 +187,29 @@ class GenericSceneObserver:
                 "frame_size": list(frame.size),
                 "frame_fingerprint": local_fingerprint,
                 "confidence": float(credential.confidence),
+                "response_payload": _orientation_audit_diagnostic_payload(raw),
+                "audit_accepted": True,
             }
             return credential
-        except (OrientationSafetyError, UISceneError, ValueError) as exc:
-            raise VisionAgentError(f"方向独立审计失败：{exc}") from exc
+        except Exception as exc:
+            self.last_orientation_audit_diagnostics = {
+                "audit_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
+                "model_calls": 1,
+                "image_count": 3,
+                "cache_hit": False,
+                "selected_frame_index": selected_index,
+                "frame_size": list(frame.size),
+                "frame_fingerprint": local_fingerprint,
+                "response_payload": _orientation_audit_diagnostic_payload(raw),
+                "audit_accepted": False,
+                "error_type": classify_qwen_error(exc, raw_response=raw),
+                "error": str(exc)[:500],
+            }
+            if isinstance(exc, VisionAgentError):
+                raise
+            if isinstance(exc, (OrientationSafetyError, UISceneError, ValueError)):
+                raise VisionAgentError(f"方向独立审计失败：{exc}") from exc
+            raise
         finally:
             self._set_stage("idle")
 
@@ -212,6 +240,9 @@ class GenericSceneObserver:
                 "max_compact_elements": MAX_COMPACT_ELEMENTS,
                 "last_scene_enum_values": dict(
                     self.last_diagnostics.get("scene_enum_values") or {}
+                ),
+                "last_orientation_audit_diagnostics": dict(
+                    self.last_orientation_audit_diagnostics
                 ),
             }
         )
@@ -878,6 +909,14 @@ def _orientation_audit_prompt() -> str:
     return f"""
 This is an independent read-only camera/phone-axis audit. The three images are
 the same stable frame: original, ROTATE_90, ROTATE_270; they are not temporal.
+Classify ONLY Image 1, the original stable frame, relative to Image 1's own
+canvas. Images 2 and 3 are derived orientation references only. They may help
+identify the phone-content axes, but they are never classification targets.
+Never report the rotation of Image 2 or Image 3, never report which reference
+looks upright, and never report the transform that would make Image 1 upright.
+For example, if Image 1 is already upright, return "upright" even though Images
+2 and 3 show rotated copies. phone_content_rotation must always describe how
+the phone App/system axes appear inside Image 1 as supplied.
 Judge only the physical phone display. Seller-controller PX/MM text, borders,
 orientation buttons and bottom controls are external chrome and forbidden evidence.
 Black or sparse App content does not reduce confidence when phone/system text or
@@ -887,6 +926,55 @@ Return exactly this JSON object and no Markdown:
 "phone_content_rotation":"upright|rotated_90|rotated_180|rotated_270|unknown",
 "confidence":0.0,"evidence":["one or two short phone-only facts"]}}
 """.strip()
+
+
+def _orientation_audit_diagnostic_payload(raw: str) -> dict[str, Any]:
+    """Keep only bounded protocol facts; never retain raw evidence or authority."""
+
+    result: dict[str, Any] = {
+        "response_length": len(str(raw or "")),
+        "json_object_found": False,
+    }
+    try:
+        payload = _extract_json_object(raw)
+    except Exception:
+        return result
+    if not isinstance(payload, dict):
+        return result
+    result["json_object_found"] = True
+    allowed = {
+        "protocol_version", "phone_content_rotation", "confidence", "evidence"
+    }
+    unexpected = sorted(
+        str(key)[:64] for key in payload if key not in allowed
+    )
+    if unexpected:
+        result["unexpected_fields"] = unexpected[:16]
+    for key in ("protocol_version", "phone_content_rotation"):
+        value = payload.get(key)
+        result[key] = value[:96] if isinstance(value, str) else {
+            "value_type": type(value).__name__
+        }
+    confidence = payload.get("confidence")
+    result["confidence"] = (
+        float(confidence)
+        if not isinstance(confidence, bool) and isinstance(confidence, (int, float))
+        else {"value_type": type(confidence).__name__}
+    )
+    evidence = payload.get("evidence")
+    if isinstance(evidence, list):
+        result["evidence"] = {
+            "value_type": "list",
+            "item_count": len(evidence),
+            "item_types": [type(item).__name__ for item in evidence[:8]],
+            "item_lengths": [
+                len(item) if isinstance(item, str) else None
+                for item in evidence[:8]
+            ],
+        }
+    else:
+        result["evidence"] = {"value_type": type(evidence).__name__}
+    return result
 
 
 def _parse_orientation_audit(raw: str) -> dict[str, Any]:

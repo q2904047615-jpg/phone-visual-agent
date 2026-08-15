@@ -407,8 +407,28 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(
             3, sum(item.get("type") == "image_url" for item in first_content)
         )
+        self.assertEqual(
+            ["text", "text", "image_url", "text", "image_url", "text", "image_url"],
+            [item.get("type") for item in first_content],
+        )
         self.assertEqual(1, provider.calls)
         self.assertEqual(3, observer.last_orientation_audit_diagnostics["image_count"])
+        prompt = first_content[0]["text"]
+        self.assertIn("Classify ONLY Image 1", prompt)
+        self.assertIn("never classification targets", prompt)
+        labels = [
+            item["text"]
+            for item in first_content
+            if item.get("type") == "text"
+        ]
+        self.assertEqual(
+            [
+                "IMAGE 1 - CLASSIFICATION TARGET - ORIGINAL STABLE FRAME",
+                "IMAGE 2 - REFERENCE ONLY - IMAGE 1 ROTATED 90 DEGREES",
+                "IMAGE 3 - REFERENCE ONLY - IMAGE 1 ROTATED 270 DEGREES",
+            ],
+            labels[1:],
+        )
 
         second = observer.audit_camera_alignment(
             frames=frames,
@@ -429,6 +449,7 @@ class GenericSceneObserverTests(unittest.TestCase):
     def test_independent_direction_audit_fails_closed_on_unknown_low_or_extra_fields(self):
         cases = (
             ({"phone_content_rotation": "unknown", "confidence": 0.95}, "未知"),
+            ({"phone_content_rotation": "rotated_90", "confidence": 0.95}, "不一致"),
             ({"phone_content_rotation": "upright", "confidence": 0.4}, "置信度"),
             ({"phone_content_rotation": "upright", "confidence": 0.95, "x": 10}, "协议外字段"),
         )
@@ -441,12 +462,55 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "evidence": ["手机状态文字正向"],
                 }
                 payload.update(mutation)
+                provider = FakeProvider(payload)
+                observer = GenericSceneObserver(provider)
                 with self.assertRaisesRegex(VisionAgentError, message):
-                    GenericSceneObserver(FakeProvider(payload)).audit_camera_alignment(
+                    observer.audit_camera_alignment(
                         frames=stable_frames(),
                         device_id="device-a",
                         scene_fingerprint="scene-a",
                     )
+                self.assertEqual(1, provider.calls)
+                diagnostics = observer.last_orientation_audit_diagnostics
+                self.assertFalse(diagnostics["audit_accepted"])
+                self.assertEqual(1, diagnostics["model_calls"])
+                self.assertEqual(
+                    payload["phone_content_rotation"],
+                    diagnostics["response_payload"]["phone_content_rotation"],
+                )
+
+    def test_direction_audit_failure_diagnostics_redact_evidence_and_extra_values(self):
+        payload = {
+            "protocol_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
+            "phone_content_rotation": "unknown",
+            "confidence": 0.95,
+            "evidence": ["联系人张三 13800138000"],
+            "action": "tap x=123 y=456",
+        }
+        observer = GenericSceneObserver(FakeProvider(payload))
+
+        with self.assertRaises(VisionAgentError):
+            observer.audit_camera_alignment(
+                frames=stable_frames(),
+                device_id="device-a",
+                scene_fingerprint="scene-a",
+            )
+
+        diagnostics = observer.last_orientation_audit_diagnostics
+        structured = diagnostics["response_payload"]
+        serialized = json.dumps(diagnostics, ensure_ascii=False)
+        self.assertEqual("unknown", structured["phone_content_rotation"])
+        self.assertEqual(["action"], structured["unexpected_fields"])
+        self.assertEqual(1, structured["evidence"]["item_count"])
+        self.assertNotIn("张三", serialized)
+        self.assertNotIn("13800138000", serialized)
+        self.assertNotIn("tap x=123", serialized)
+        self.assertNotIn("credential", serialized.casefold())
+        self.assertFalse(diagnostics["audit_accepted"])
+        self.assertEqual(
+            diagnostics,
+            observer.status()["last_orientation_audit_diagnostics"],
+        )
 
     def test_local_frame_geometry_rejects_model_layout_orientation(self) -> None:
         payload = scene_payload()

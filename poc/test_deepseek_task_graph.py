@@ -8,6 +8,7 @@ from deepseek_task_graph import (
     ObservedState,
     TaskGraphError,
     _infer_external_risk_types,
+    _named_visual_identity_anchor,
 )
 
 
@@ -644,6 +645,17 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 reason="动作后重新观察。",
             )
 
+    def test_generic_element_presence_is_not_a_named_page_identity(self):
+        self.assertEqual(
+            "",
+            _named_visual_identity_anchor(
+                (
+                    "目标控件（目标入口）在当前页面可见",
+                    "目标元素在当前页面可见",
+                )
+            ),
+        )
+
     def test_replan_accepts_named_page_completion_with_grounded_identity(self):
         objective = "原来的只读通用动作验收页面可见"
         initial = single_subgoal_payload(objective, external_impact="read_only")
@@ -794,7 +806,79 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             ]
         )
         self.assertNotIn("长按目标", state_text)
+        self.assertNotIn("可见文字为目标入口", state_text)
         self.assertIn("目标入口", state_text)
+
+    def test_explicit_label_normalizes_presence_only_subgoal_wording(self):
+        payload = single_subgoal_payload(
+            "目标控件（可见文字为“长按我 · 不要移动”）在当前页面可见",
+            external_impact="read_only",
+        )
+        payload["goal"]["entities"] = {}
+        payload["subgoals"][0]["completion_conditions"] = [
+            "目标控件在当前页面可见"
+        ]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "目标控件的可见文字是“长按我 · 不要移动”。",
+            device_id="phone-1",
+        )
+
+        self.assertEqual(
+            "长按我 · 不要移动",
+            graph.goal.entities["target_ui_label"],
+        )
+        self.assertNotIn("文字", graph.subgoals[0].objective)
+        self.assertIn("目标入口", graph.subgoals[0].objective)
+
+    def test_action_rederived_from_literal_label_is_normalized_to_state(self):
+        payload = single_subgoal_payload(
+            "目标控件被长按且未移动",
+            external_impact="navigation_only",
+        )
+        payload["goal"]["entities"] = {}
+        payload["subgoals"][0]["completion_conditions"] = [
+            "目标控件被长按",
+            "目标控件未移动",
+        ]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "目标控件的可见文字是“长按我 · 不要移动”。",
+            device_id="phone-1",
+        )
+
+        state_text = " ".join(
+            (
+                graph.subgoals[0].objective,
+                *graph.subgoals[0].completion_conditions,
+            )
+        )
+        self.assertNotIn("长按", state_text)
+        self.assertIn("当前页面可见的本机临时结果状态", state_text)
+
+    def test_drag_rederived_from_literal_label_is_normalized_to_state(self):
+        payload = single_subgoal_payload(
+            "目标元素被拖动至目标区域",
+            external_impact="navigation_only",
+        )
+        payload["goal"]["entities"] = {}
+        payload["subgoals"][0]["completion_conditions"] = [
+            "目标元素被拖动到目标区域"
+        ]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "目标入口的可见文字是“拖动目标”。",
+            device_id="phone-1",
+        )
+
+        state_text = " ".join(
+            (
+                graph.subgoals[0].objective,
+                *graph.subgoals[0].completion_conditions,
+            )
+        )
+        self.assertNotIn("拖动", state_text)
+        self.assertIn("本机临时目标位置", state_text)
 
     def test_ui_label_normalization_rejects_conflicting_model_entity(self):
         payload = single_subgoal_payload(

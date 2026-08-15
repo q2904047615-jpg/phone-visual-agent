@@ -1800,6 +1800,9 @@ _VISUAL_IDENTITY_GENERIC_TOKENS = (
     "视图",
     "面板",
     "卡片",
+    "控件",
+    "元素",
+    "入口",
     "显示",
     "出现",
     "可见",
@@ -2507,7 +2510,25 @@ def _normalize_explicit_ui_label_payload(
         normalized = item.replace(f"“{label}”", "目标入口")
         normalized = normalized.replace(f"‘{label}’", "目标入口")
         normalized = normalized.replace(f'"{label}"', "目标入口")
-        return normalized.replace(label, "目标入口")
+        normalized = normalized.replace(label, "目标入口")
+        normalized = re.sub(
+            r"(?:可见)?(?:文字|标签|名称)\s*(?:是|为|：|:)\s*目标入口",
+            "目标入口",
+            normalized,
+        )
+        if "长按" in label:
+            normalized = re.sub(
+                r"(?:被\s*)?长按(?:完成|成功)?",
+                "处于当前页面可见的本机临时结果状态",
+                normalized,
+            )
+        if "拖动" in label:
+            normalized = re.sub(
+                r"(?:被\s*)?拖动\s*(?:到|至|进入)?",
+                "位于当前页面的本机临时目标位置",
+                normalized,
+            )
+        return normalized
 
     raw_goal["objective"] = replace_label(raw_goal.get("objective"))
     conditions = value.get("completion_conditions")

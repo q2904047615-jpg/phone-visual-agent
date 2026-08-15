@@ -2985,11 +2985,44 @@ class UniversalAgentOrchestrator:
             )
 
             if impact == "read_only":
+                initial_read_only = graph.active_subgoal()
                 revised = self._try_advance_read_only_presence_subgoal(
                     session,
                     graph=graph,
                     trusted_observation=observation,
                 )
+                if (
+                    revised is None
+                    and initial_read_only is not None
+                    and not self._is_presence_only_read_only_subgoal(
+                        initial_read_only
+                    )
+                ):
+                    observed = self.bridge.observed_state(
+                        graph=graph,
+                        trusted_observation=observation,
+                        action_outcome="not_applicable",
+                        verification={
+                            "visible_evidence": [scene.summary],
+                            "blocked_reasons": [],
+                        },
+                    )
+                    revised = self.deepseek_planner.replan(
+                        graph,
+                        observed,
+                        trigger="observation_changed",
+                        reason=(
+                            "初始可信画面不能直接证明当前 read_only 结果。"
+                            "如果目标页面或区域尚未出现，必须先修订为一个"
+                            " navigation_only 中间状态；不得请求低层动作、"
+                            "不得直接宣称结果完成。"
+                        ),
+                    )
+                    self._validate_graph_identity(
+                        revised,
+                        device_id=session.device_id,
+                        previous=graph,
+                    )
                 if revised is None:
                     session.status = "blocked"
                     session.failed_reason = (

@@ -1394,6 +1394,9 @@ def _initial_prompt(raw_goal: str) -> str:
 6. read_only 只能描述查看、读取、检查等纯观察结果；navigation_only 只能描述打开或进入页面等
    导航结果。仅改变本机临时界面层级、前后台页面或临时标签页也属于 navigation_only，不得为它
    虚构 risk_actions；但登录/退出账号、修改账号数据或云端同步状态仍属于 external_state。
+   当用户要查看、读取或核对某个目标页面的结果，但没有明确说明该结果已经在当前画面中时，
+   必须先建立一个 navigation_only 子目标描述“目标页面或目标区域可见”，再建立 read_only 子目标
+   描述要核对的结果；不得把潜在导航需求隐藏在单个 read_only 子目标中。
    只改变当前可见输入框中的未提交临时文字，也可归入 navigation_only，但必须同时满足：目标文字
    明确非空；用户直接禁止了该上下文中的搜索、提交、发送、保存或发布等效果；句中没有任何未被
    否定的外部效果。输入并搜索/发送/保存、未明确禁止提交效果、或含义不清时仍必须标为
@@ -1772,6 +1775,9 @@ def _replan_prompt(
    awaiting_confirmation。每轮只选择一个 active 高层子目标；不要提出下一视觉动作。
 7. 既有 external_state 不能降级，unknown 没有新的可靠证据时不能改成 read_only 或
    navigation_only；read_only/navigation_only 必须分别有纯观察或纯导航依据。
+   trigger=observation_changed 且当前 read_only 结果无法由新画面直接证明时，如果目标页面或区域
+   尚未出现，应把未完成路径改写为先达到 navigation_only 的目标页面可见状态，再保留后续
+   read_only 结果核对；不得把导航动作本身写入子目标，也不得凭空宣称结果完成。
 8. 只返回 JSON 对象，不要 Markdown，也不要返回 task_id、device_id、revision、协议版本、
     current_subgoal 或历史记录；这些字段由本地协议层生成。
 9. 当 trigger=subgoal_completed 且当前子目标是 read_only 时，本轮必须用 visible_evidence 完成

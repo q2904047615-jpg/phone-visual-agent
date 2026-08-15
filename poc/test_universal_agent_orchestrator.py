@@ -2587,9 +2587,34 @@ class UniversalAgentStartTests(unittest.TestCase):
             ),
         )
         verify_value.validate()
+        navigation = replace(
+            verify_value,
+            revision=verify_value.revision + 1,
+            subgoals=(
+                replace(
+                    verify_value.subgoals[0],
+                    status="pending",
+                    depends_on=("show-target-page",),
+                ),
+                verify_value.subgoals[1],
+                Subgoal(
+                    subgoal_id="show-target-page",
+                    objective="目标输入框所在页面可见",
+                    status="active",
+                    depends_on=(),
+                    constraints=("不得提交、搜索或发送",),
+                    completion_conditions=("目标输入框所在页面可见",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+            ),
+            active_subgoal_id="show-target-page",
+        )
+        navigation.validate()
         planner = FakeDeepSeekPlanner(
             verify_value,
-            replan_result=self._advance_locate_graph(verify_value),
+            replan_result=navigation,
         )
         scene = _scene(
             meaning="当前可编辑输入框",
@@ -2607,9 +2632,14 @@ class UniversalAgentStartTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
 
-        self.assertEqual("blocked", session.status)
-        self.assertEqual([], planner.replan_calls)
-        self.assertEqual([], qwen.calls)
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual("show-target-page", session.task_graph.active_subgoal_id)
+        self.assertEqual(
+            ["observation_changed"],
+            [call[2] for call in planner.replan_calls],
+        )
+        self.assertEqual(1, len(qwen.calls))
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
 

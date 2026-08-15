@@ -39,10 +39,10 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v16"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v17"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
-COMPACT_OUTPUT_TOKENS = 800
+COMPACT_OUTPUT_TOKENS = 1200
 TARGETED_OUTPUT_TOKENS = 1200
 INPUT_STRUCTURE_AUDIT_TOKENS = 700
 SYSTEM_UI_AUDIT_TOKENS = 600
@@ -1303,7 +1303,6 @@ def _single_json_structural_edits(raw: str) -> Iterator[str]:
     text = str(raw or "").strip()
     if (
         not text.startswith("{")
-        or not text.endswith("}")
         or len(text) > _MAX_JSON_STRUCTURAL_REPAIR_CHARS
     ):
         return
@@ -1314,6 +1313,8 @@ def _single_json_structural_edits(raw: str) -> Iterator[str]:
     except (TypeError, ValueError):
         return
     else:
+        return
+    if not text.endswith("}") and error_position != len(text):
         return
 
     boundaries: list[bool] = [True]
@@ -1347,7 +1348,10 @@ def _single_json_structural_edits(raw: str) -> Iterator[str]:
             if yielded >= _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES:
                 return
 
-    insertion_stop = min(len(text), stop - 1)
+    insertion_stop = min(
+        len(text),
+        error_position + _JSON_STRUCTURAL_REPAIR_WINDOW,
+    )
     for index in range(start, insertion_stop + 1):
         if not boundaries[index]:
             continue

@@ -253,7 +253,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIs(scene.system_ui.navigation_bar_visible, False)
         self.assertEqual(0.95, scene.confidence)
         self.assertEqual(2, provider.calls)
-        self.assertEqual([800, 600], provider.max_tokens_seen)
+        self.assertEqual([1200, 600], provider.max_tokens_seen)
         self.assertTrue(observer.last_diagnostics["system_ui_audit_used"])
         self.assertFalse(observer.last_diagnostics["system_ui_audit_retry_used"])
         self.assertFalse(observer.last_diagnostics["targeted_refinement_used"])
@@ -1052,7 +1052,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(scene.elements[0].bounds, (0.1, 0.6, 0.26, 0.76))
         self.assertNotEqual(scene.fingerprint, "model-value-must-not-be-trusted")
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.max_tokens, 800)
+        self.assertEqual(provider.max_tokens, 1200)
         self.assertEqual(provider.call_options["timeout"], 60.0)
 
     def test_low_confidence_scene_is_rejected_before_trusted_observation(self) -> None:
@@ -1215,7 +1215,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         with self.assertRaisesRegex(VisionAgentError, "唯一、严格有效"):
             observer.observe(frames=stable_frames())
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.max_tokens_seen, [800])
+        self.assertEqual(provider.max_tokens_seen, [1200])
         self.assertEqual(len(provider.responses), 1)
         self.assertFalse(observer.last_diagnostics["compact_retry_used"])
         self.assertEqual(observer.last_diagnostics["model_calls"], 1)
@@ -1281,7 +1281,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(scene.foreground_app_id, "launcher")
         self.assertEqual(scene.elements[0].label, "浏览器")
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.max_tokens_seen, [800])
+        self.assertEqual(provider.max_tokens_seen, [1200])
         self.assertFalse(observer.last_diagnostics["compact_retry_used"])
         self.assertTrue(observer.last_diagnostics["local_structural_repair_used"])
         self.assertEqual(observer.last_diagnostics["model_calls"], 1)
@@ -1296,6 +1296,38 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIsNotNone(scene)
         assert scene is not None
         self.assertEqual(scene.elements[0].label, "浏览器")
+
+    def test_missing_final_brace_is_repaired_only_as_one_strict_scene(self) -> None:
+        valid = json.dumps(
+            scene_payload(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        provider = SequenceProvider([valid[:-1]])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(frames=stable_frames())
+
+        self.assertEqual(scene.foreground_app_id, "calculator")
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(provider.max_tokens_seen, [1200])
+        self.assertTrue(observer.last_diagnostics["local_structural_repair_used"])
+
+    def test_missing_two_final_braces_still_fails_closed(self) -> None:
+        valid = json.dumps(
+            scene_payload(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        provider = SequenceProvider([valid[:-2]])
+        observer = GenericSceneObserver(provider)
+
+        with self.assertRaisesRegex(VisionAgentError, "唯一、严格有效"):
+            observer.observe(frames=stable_frames())
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(provider.max_tokens_seen, [1200])
+        self.assertFalse(observer.last_diagnostics["local_structural_repair_used"])
 
     def test_valid_duplicate_key_first_response_fails_closed(self) -> None:
         valid = json.dumps(scene_payload(), ensure_ascii=False, separators=(",", ":"))
@@ -1326,7 +1358,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             observer.observe(frames=stable_frames())
 
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.max_tokens_seen, [800])
+        self.assertEqual(provider.max_tokens_seen, [1200])
         self.assertEqual(len(provider.responses), 1)
         self.assertFalse(observer.last_diagnostics["repair_retry_success"])
         self.assertEqual(observer.last_diagnostics["model_calls"], 1)
@@ -1408,7 +1440,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         self.assertEqual(scene.elements[0].element_id, "e1")
         self.assertEqual(provider.calls, 3)
-        self.assertEqual(provider.max_tokens_seen, [800, 1200, 1200])
+        self.assertEqual(provider.max_tokens_seen, [1200, 1200, 1200])
         self.assertTrue(observer.last_diagnostics["format_retry_used"])
         self.assertTrue(observer.last_diagnostics["repair_retry_success"])
 
@@ -1424,7 +1456,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 goal_context={"objective": "查找目标按钮"},
             )
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.max_tokens_seen, [800])
+        self.assertEqual(provider.max_tokens_seen, [1200])
         self.assertEqual(len(provider.responses), 1)
         self.assertFalse(observer.last_diagnostics["format_retry_used"])
         self.assertFalse(observer.last_diagnostics["repair_retry_success"])
@@ -1511,7 +1543,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         )
         self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [800, 1200])
+        self.assertEqual(provider.max_tokens_seen, [1200, 1200])
         self.assertEqual(scene.elements[0].label, "微信")
         self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
         targeted_text = provider.messages_seen[1][1]["content"][0]["text"]
@@ -2140,7 +2172,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual((0.704, 0.078, 0.836, 0.129), button.bounds)
         self.assertFalse(button.states["goal_relevant"])
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
-        self.assertEqual([800, 1200, 700], provider.max_tokens_seen)
+        self.assertEqual([1200, 1200, 700], provider.max_tokens_seen)
 
     def test_top_obstruction_prevents_audit_crop_from_promoting_hidden_input(self) -> None:
         empty = scene_payload()
@@ -2334,7 +2366,7 @@ class GenericSceneObserverTests(unittest.TestCase):
 
     def test_status_exposes_observation_policy(self) -> None:
         status = GenericSceneObserver(FakeProvider(scene_payload())).status()
-        self.assertEqual(status["compact_output_tokens"], 800)
+        self.assertEqual(status["compact_output_tokens"], 1200)
         self.assertEqual(status["observation_timeout_seconds"], 60.0)
         self.assertEqual(status["max_compact_elements"], 12)
         self.assertEqual(status["current_stage"], "idle")

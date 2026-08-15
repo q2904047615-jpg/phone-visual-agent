@@ -67,9 +67,18 @@ class RawSceneProvider:
 
 
 class FakeSceneObserver:
-    def __init__(self, scenes, *, audit_rotation="upright", audit_confidence=0.96):
+    def __init__(
+        self,
+        scenes,
+        *,
+        audit_rotation="upright",
+        audit_confidence=0.96,
+        geometry_scenes=None,
+    ):
         self.scenes = list(scenes)
         self.calls = 0
+        self.geometry_audit_calls = []
+        self.geometry_scenes = list(geometry_scenes or ())
         self.audit_rotation = audit_rotation
         self.audit_confidence = audit_confidence
 
@@ -94,6 +103,10 @@ class FakeSceneObserver:
             confidence=self.audit_confidence,
             evidence=("测试手机界面轴线",),
         )
+
+    def audit_element_geometry(self, *, frames, scene, element_ids):
+        self.geometry_audit_calls.append(tuple(element_ids))
+        return self.geometry_scenes.pop(0) if self.geometry_scenes else scene
 
 
 class FakeRobot:
@@ -1386,6 +1399,117 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual([], robot.actions)
         self.assertEqual(1, observer.calls)
+
+    def test_drag_uses_two_independently_audited_endpoint_scenes(self):
+        def drag_scene(fingerprint, source_bounds, destination_bounds):
+            return UIScene(
+                app_id="local.acceptance",
+                screen_id="drag-board",
+                summary="本地拖动验收页面",
+                elements=(
+                    UIElement(
+                        element_id="source",
+                        role="image",
+                        meaning="draggable_purple_block",
+                        label="起点",
+                        bounds=source_bounds,
+                        confidence=0.98,
+                        states={"fully_visible": True},
+                        evidence=("紫色圆角方块，中心写有起点二字",),
+                    ),
+                    UIElement(
+                        element_id="destination",
+                        role="container",
+                        meaning="drop_target_green_zone",
+                        label="绿色终点",
+                        bounds=destination_bounds,
+                        confidence=0.98,
+                        states={"fully_visible": True},
+                        evidence=("绿色虚线框区域，内部写有绿色终点",),
+                    ),
+                ),
+                stable=True,
+                confidence=0.98,
+                fingerprint=fingerprint,
+                camera_alignment=aligned_camera_facts(),
+            )
+
+        destination_bounds = (0.62, 0.66, 0.78, 0.82)
+        planned = drag_scene(
+            "planned",
+            (0.12, 0.46, 0.58, 0.51),
+            destination_bounds,
+        )
+        fresh = drag_scene(
+            "fresh",
+            (0.12, 0.225, 0.45, 0.265),
+            destination_bounds,
+        )
+        audited_source = (0.18, 0.20, 0.32, 0.30)
+        planned_audited = drag_scene(
+            "planned",
+            audited_source,
+            destination_bounds,
+        )
+        fresh_audited = drag_scene(
+            "fresh",
+            audited_source,
+            destination_bounds,
+        )
+        after = drag_scene(
+            "after",
+            (0.63, 0.68, 0.73, 0.78),
+            destination_bounds,
+        )
+        observer = FakeSceneObserver(
+            [fresh, after],
+            geometry_scenes=[planned_audited, fresh_audited],
+        )
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="drag-audited",
+                action="drag",
+                params={
+                    "source_element_id": "source",
+                    "source_target": "draggable_purple_block",
+                    "source_role": "image",
+                    "source_label": "起点",
+                    "source_states": {"fully_visible": True},
+                    "destination_element_id": "destination",
+                    "destination_target": "drop_target_green_zone",
+                    "destination_role": "container",
+                    "destination_label": "绿色终点",
+                    "destination_states": {"fully_visible": True},
+                    "expected_effect": {"scene_changed": True},
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual(
+            [("source", "destination"), ("source", "destination")],
+            observer.geometry_audit_calls,
+        )
+        self.assertEqual(
+            [("drag", 250, 250, 700, 740)],
+            robot.actions,
+        )
+        self.assertEqual(audited_source, result.before_scene.get_element("source").bounds)
+        self.assertEqual(1, result.physical_actions)
 
     def test_changed_local_frames_stop_even_when_model_screen_id_matches(self):
         planned = scene("planned", screen_id="same_screen")

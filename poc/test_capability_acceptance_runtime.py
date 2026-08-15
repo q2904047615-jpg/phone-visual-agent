@@ -487,7 +487,8 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
                 calibration_path=self.calibration_path,
             )
 
-        def orchestrator_factory(_controller):
+        def orchestrator_factory(_controller, candidate_action):
+            self.assertEqual(_controller.candidate_action, candidate_action)
             return FakeTrialOrchestrator(
                 self.device_registry,
                 self.proposed_action,

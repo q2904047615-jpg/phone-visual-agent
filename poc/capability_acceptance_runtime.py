@@ -216,7 +216,7 @@ class CapabilityAcceptanceManager:
         self,
         *,
         provisional_controller_factory: Callable[[str, str], Any],
-        orchestrator_factory: Callable[[Any], Any],
+        orchestrator_factory: Callable[[Any, str], Any],
         device_registry: Any,
         output_dir: Path,
         registry_path: Path,
@@ -364,7 +364,7 @@ class CapabilityAcceptanceManager:
             controller,
             action,
         )
-        orchestrator = self.orchestrator_factory(controller)
+        orchestrator = self.orchestrator_factory(controller, action)
         session_id = f"capability-trial-{trial_id}"
         run_dir = self.output_dir / f"capability_acceptance_{trial_id}"
         run_dir.mkdir(parents=True, exist_ok=False)

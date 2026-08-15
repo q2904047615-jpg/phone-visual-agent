@@ -786,20 +786,20 @@ class UniversalAgentOrchestrator:
             )
             if str(item or "").strip()
         ).casefold()
-        if not re.search(r"(?:和|与|及|同时|均|都|\bboth\b|\band\b|\ball\b)", text):
-            return None
-        goal_candidates = tuple(
-            item
-            for item in scene.elements
-            if item.states.get("goal_relevant") is True
-        )
-        if not 2 <= len(goal_candidates) <= 4:
+        if not self._is_explicit_multi_presence_text(text):
             return None
         text_terms = self._presence_binding_terms(text)
         if not text_terms:
             return None
-        candidate_terms: list[frozenset[str]] = []
-        for candidate in goal_candidates:
+        matched: list[tuple[Any, frozenset[str]]] = []
+        for candidate in scene.elements:
+            terms = self._presence_binding_terms(
+                candidate.label,
+                candidate.meaning,
+                *candidate.evidence,
+            ).intersection(text_terms)
+            if not terms:
+                continue
             if (
                 float(candidate.confidence) < MIN_TARGET_CONFIDENCE
                 or candidate.states.get("visible") is False
@@ -816,14 +816,34 @@ class UniversalAgentOrchestrator:
                 and 0.02 <= top < bottom <= 0.98
             ):
                 return None
-            terms = self._presence_binding_terms(
-                candidate.label,
-                candidate.meaning,
-                *candidate.evidence,
-            ).intersection(text_terms)
-            if not terms:
-                return None
-            candidate_terms.append(frozenset(terms))
+            matched.append((candidate, frozenset(terms)))
+        # An instruction card may repeat every endpoint name. It is aggregate
+        # evidence, not either endpoint. Remove it only when two or more
+        # smaller candidates together cover all of its bound terms.
+        reduced: list[tuple[Any, frozenset[str]]] = []
+        for index, item in enumerate(matched):
+            _candidate, terms = item
+            others = [
+                other_terms
+                for other_index, (_other, other_terms) in enumerate(matched)
+                if other_index != index and other_terms.intersection(terms)
+            ]
+            aggregate = False
+            if len(others) >= 2:
+                for first in range(len(others)):
+                    for second in range(first + 1, len(others)):
+                        combined = others[first].union(others[second])
+                        if combined and combined.issubset(terms):
+                            aggregate = True
+                            break
+                    if aggregate:
+                        break
+            if not aggregate:
+                reduced.append(item)
+        if not 2 <= len(reduced) <= 4:
+            return None
+        goal_candidates = tuple(item[0] for item in reduced)
+        candidate_terms = [item[1] for item in reduced]
         for index, terms in enumerate(candidate_terms):
             other_terms = frozenset().union(
                 *(item for other_index, item in enumerate(candidate_terms)
@@ -832,6 +852,16 @@ class UniversalAgentOrchestrator:
             if not terms.difference(other_terms):
                 return None
         return goal_candidates
+
+    @staticmethod
+    def _is_explicit_multi_presence_text(text: str) -> bool:
+        return bool(
+            re.search(
+                r"(?:和|与|及|同时|均|都|两者|两个|多个|分别|"
+                r"\bboth\b|\band\b|\ball\b|\btwo\b|\bmultiple\b)",
+                str(text or "").casefold(),
+            )
+        )
 
     def _try_advance_read_only_presence_subgoal(
         self,
@@ -852,11 +882,27 @@ class UniversalAgentOrchestrator:
         scene = getattr(trusted_observation, "scene", None)
         if scene is None:
             return None
-        candidate = scene.unique_trusted_goal_element(
-            min_confidence=MIN_TARGET_CONFIDENCE,
-        )
         candidates: tuple[Any, ...]
-        if candidate is not None:
+        presence_text = " ".join(
+            (
+                current.objective,
+                *tuple(current.completion_conditions or ()),
+            )
+        )
+        if self._is_explicit_multi_presence_text(presence_text):
+            candidates = self._multi_presence_candidates(
+                subgoal=current,
+                scene=scene,
+                trusted_observation=trusted_observation,
+            ) or ()
+            if not candidates:
+                return None
+        else:
+            candidate = scene.unique_trusted_goal_element(
+                min_confidence=MIN_TARGET_CONFIDENCE,
+            )
+            if candidate is None:
+                return None
             if (
                 candidate.states.get("fully_visible") is not True
                 or self._candidate_has_unresolved_conflict(
@@ -866,14 +912,6 @@ class UniversalAgentOrchestrator:
             ):
                 return None
             candidates = (candidate,)
-        else:
-            candidates = self._multi_presence_candidates(
-                subgoal=current,
-                scene=scene,
-                trusted_observation=trusted_observation,
-            ) or ()
-            if not candidates:
-                return None
 
         candidate_facts = tuple(
             "当前可信画面的目标元素："
@@ -2946,10 +2984,17 @@ class PhaseOneNavigationPolicy:
                 != tuple(destination.bounds)
             ):
                 return self._deny("拖动路径没有逐项复用两端可信候选 bounds。")
-            if any(
-                self._semantic_class(element.meaning, element.label) == "forbidden"
-                for element in (source, destination)
-            ) and not external_allowed:
+            endpoint_safety_strings = self._without_literal_local_action_markers(
+                tuple(
+                    value
+                    for element in (source, destination)
+                    for value in (element.meaning, element.label)
+                )
+            )
+            if (
+                self._semantic_class(*endpoint_safety_strings) == "forbidden"
+                and not external_allowed
+            ):
                 return self._deny("拖动端点包含外部状态、输入或破坏性语义。")
             return NavigationPolicyDecision(True, "允许一个双候选语义拖动。", "drag")
 

@@ -131,6 +131,7 @@ class GenericSingleActionAdapter:
             "drag",
         }
     )
+    INDEPENDENT_GEOMETRY_AUDIT_KINDS = frozenset({"drag"})
 
     def supported_action_kinds(self) -> frozenset[str]:
         """Return only actions backed by callable methods on this device."""
@@ -546,9 +547,48 @@ class GenericSingleActionAdapter:
                 prefix=f"{evidence_prefix}_before",
             )
         try:
+            rebind_planned_scene = planned_scene
+            if (
+                planned_frames
+                and requested_action.action in self.INDEPENDENT_GEOMETRY_AUDIT_KINDS
+            ):
+                audit_geometry = getattr(
+                    self.observer,
+                    "audit_element_geometry",
+                    None,
+                )
+                if not callable(audit_geometry):
+                    raise GenericActionAdapterError(
+                        "当前观察器没有独立目标几何审计，拒绝拖动动作。"
+                    )
+                semantic_rebound = self._rebind_action(
+                    requested_action,
+                    planned_scene,
+                    before,
+                    local_frame_identity_verified=local_frame_identity_verified,
+                    require_geometry_overlap=False,
+                )
+                planned_ids = (
+                    str(requested_action.params.get("source_element_id") or ""),
+                    str(requested_action.params.get("destination_element_id") or ""),
+                )
+                fresh_ids = (
+                    str(semantic_rebound.params.get("source_element_id") or ""),
+                    str(semantic_rebound.params.get("destination_element_id") or ""),
+                )
+                rebind_planned_scene = audit_geometry(
+                    frames=tuple(planned_frames),
+                    scene=planned_scene,
+                    element_ids=planned_ids,
+                )
+                before = audit_geometry(
+                    frames=before_frames,
+                    scene=before,
+                    element_ids=fresh_ids,
+                )
             rebound = self._rebind_action(
                 requested_action,
-                planned_scene,
+                rebind_planned_scene,
                 before,
                 local_frame_identity_verified=local_frame_identity_verified,
             )
@@ -556,6 +596,11 @@ class GenericSingleActionAdapter:
             raise GenericActionAdapterError(
                 str(exc),
                 evidence=before_paths + tuple(getattr(exc, "evidence", ())),
+            ) from exc
+        except RuntimeError as exc:
+            raise GenericActionAdapterError(
+                f"确认前独立目标几何审计失败：{exc}",
+                evidence=before_paths,
             ) from exc
         try:
             resolved = self.controller.resolve_one(
@@ -808,6 +853,7 @@ class GenericSingleActionAdapter:
         fresh_scene: UIScene,
         *,
         local_frame_identity_verified: bool = False,
+        require_geometry_overlap: bool = True,
     ) -> SemanticAction:
         planned_app = planned_scene.foreground_app_id
         fresh_app = fresh_scene.foreground_app_id
@@ -892,7 +938,7 @@ class GenericSingleActionAdapter:
             ) * max(0.0, current.bounds[3] - current.bounds[1])
             union = original_area + current_area - intersection
             overlap = intersection / union if union > 0 else 0.0
-            if overlap < 0.60:
+            if require_geometry_overlap and overlap < 0.60:
                 raise GenericActionAdapterError(
                     "确认时目标区域已明显移动，旧确认失效。"
                 )

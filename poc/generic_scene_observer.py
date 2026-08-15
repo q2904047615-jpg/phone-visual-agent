@@ -11,6 +11,12 @@ from typing import Any, Iterator
 
 from PIL import Image, ImageFilter
 
+from element_geometry_audit import (
+    ElementGeometryAuditError,
+    build_candidate_crop_transform,
+    element_geometry_audit_prompt,
+    select_unique_audited_geometry,
+)
 from observation_images import (
     VisualObstruction,
     consensus_top_edge_obstructions,
@@ -43,7 +49,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v28"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-16-generic-scene-observer-v29"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
@@ -52,6 +58,7 @@ TARGETED_OUTPUT_TOKENS = 1200
 INPUT_STRUCTURE_AUDIT_TOKENS = 700
 SYSTEM_UI_AUDIT_TOKENS = 600
 ICON_CLUSTER_AUDIT_TOKENS = 700
+ELEMENT_GEOMETRY_AUDIT_TOKENS = 500
 ORIENTATION_AUDIT_TOKENS = 500
 MIN_SYSTEM_UI_AUDIT_CONFIDENCE = 0.80
 OBSERVATION_TIMEOUT_SECONDS = 60.0
@@ -70,6 +77,8 @@ STAGE_LABELS = {
     "parsing_icon_cluster_audit": "解析图标簇只读审计",
     "waiting_icon_cluster_localization": "等待图标簇局部定位复核",
     "parsing_icon_cluster_localization": "解析图标簇局部定位复核",
+    "waiting_element_geometry_audit": "等待目标元素几何审计",
+    "parsing_element_geometry_audit": "解析目标元素几何审计",
     "waiting_input_structure_audit": "等待输入结构只读审计",
     "parsing_input_structure_audit": "解析输入结构只读审计",
     "waiting_system_ui_audit": "等待系统界面只读审计",
@@ -94,6 +103,138 @@ class GenericSceneObserver:
         self._current_stage = "idle"
         self._last_stage = "idle"
         self.last_orientation_audit_diagnostics: dict[str, Any] = {}
+        self.last_geometry_audit_diagnostics: dict[str, Any] = {}
+
+    def audit_element_geometry(
+        self,
+        *,
+        frames: list[Image.Image] | tuple[Image.Image, ...],
+        scene: UIScene,
+        element_ids: tuple[str, ...] | list[str],
+    ) -> UIScene:
+        """Replace only selected bounds after strict one-crop localization."""
+
+        self.last_geometry_audit_diagnostics = {}
+        scene.validate()
+        requested_ids = tuple(str(value or "").strip() for value in element_ids)
+        if not 1 <= len(requested_ids) <= 2 or any(not value for value in requested_ids):
+            raise ElementGeometryAuditError(
+                "一次几何审计只接受1个目标，或拖动动作的2个端点。"
+            )
+        if len(requested_ids) != len(set(requested_ids)):
+            raise ElementGeometryAuditError("几何审计目标 element_id 重复。")
+        frame_list = list(frames)
+        if len(frame_list) < 4:
+            raise ElementGeometryAuditError("几何审计至少需要4帧稳定画面。")
+        stability = measure_local_stability(
+            frame_list,
+            allow_leading_outlier=True,
+        )
+        if not stability.stable:
+            raise ElementGeometryAuditError("几何审计画面未通过本地稳定性检查。")
+        tail_start = max(0, len(frame_list) - min(3, len(frame_list)))
+        matching_indices = tuple(
+            index
+            for index in range(tail_start, len(frame_list))
+            if _local_frame_fingerprint(frame_list[index].convert("RGB"))
+            == scene.fingerprint
+        )
+        if not matching_indices:
+            raise ElementGeometryAuditError(
+                "几何审计帧与可信场景 fingerprint 不一致。"
+            )
+        selected_index = max(
+            matching_indices,
+            key=lambda index: measure_frame_sharpness(frame_list[index]),
+        )
+        frame = frame_list[selected_index].convert("RGB")
+        replacements: dict[str, tuple[float, float, float, float]] = {}
+        audit_records: list[dict[str, Any]] = []
+        for element_id in requested_ids:
+            element = scene.get_element(element_id)
+            transform = build_candidate_crop_transform(frame.size, element.bounds)
+            source_digest = hashlib.sha256(
+                frame.tobytes()
+                + element.element_id.encode("utf-8")
+                + element.label.encode("utf-8")
+                + element.role.encode("utf-8")
+            ).hexdigest()
+            source_ref = f"geom-{source_digest[:24]}"
+            prompt = None
+            selected_evidence = ""
+            for evidence in element.evidence:
+                try:
+                    prompt = element_geometry_audit_prompt(
+                        source_ref=source_ref,
+                        literal_label=element.label,
+                        visual_role=element.role,
+                        visible_evidence=evidence,
+                    )
+                    selected_evidence = evidence
+                    break
+                except ElementGeometryAuditError:
+                    continue
+            if prompt is None:
+                raise ElementGeometryAuditError(
+                    f"目标 {element_id} 缺少可用于独立几何审计的原始可见证据。"
+                )
+            crop = transform.crop(frame)
+            self._set_stage("waiting_element_geometry_audit")
+            raw = self._provider_chat(
+                [
+                    _json_only_system_message(),
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": _image_data_url(crop)},
+                            },
+                        ],
+                    },
+                ],
+                max_tokens=ELEMENT_GEOMETRY_AUDIT_TOKENS,
+            )
+            self._set_stage("parsing_element_geometry_audit")
+            audited = select_unique_audited_geometry(
+                raw,
+                expected_source_ref=source_ref,
+                expected_label=element.label,
+                expected_role=element.role,
+                transform=transform,
+            )
+            replacements[element_id] = audited.full_bounds
+            audit_records.append(
+                {
+                    "element_id": element_id,
+                    "source_ref": source_ref,
+                    "role": element.role,
+                    "label": element.label,
+                    "visible_evidence": selected_evidence,
+                    "pixel_bounds": list(transform.pixel_bounds),
+                    "local_bounds": list(audited.local_bounds),
+                    "full_bounds": list(audited.full_bounds),
+                    "confidence": audited.confidence,
+                }
+            )
+        audited_scene = replace(
+            scene,
+            elements=tuple(
+                replace(element, bounds=replacements[element.element_id])
+                if element.element_id in replacements
+                else element
+                for element in scene.elements
+            ),
+        )
+        audited_scene.validate()
+        self.last_geometry_audit_diagnostics = {
+            "scene_fingerprint": scene.fingerprint,
+            "selected_frame_index": selected_index,
+            "audits": audit_records,
+        }
+        self._set_stage("completed")
+        return audited_scene
 
     def audit_camera_alignment(
         self,

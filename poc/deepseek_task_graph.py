@@ -1780,6 +1780,13 @@ _VISUAL_IDENTITY_CONTAINER_PATTERN = re.compile(
     r"页面|界面|屏幕|视图|面板|卡片|(?:^|\b)(?:page|screen|view|panel|card)(?:\b|$)",
     re.IGNORECASE,
 )
+_GENERIC_VISUAL_LOCATION_PATTERN = re.compile(
+    r"(?:在|位于)\s*(?:当前|同一|该)?(?:页面|界面|屏幕|视图)"
+    r"(?:中|内|上)?\s*(?:可见|出现|显示|存在)?|"
+    r"(?:visible|present|shown)\s+(?:in|on)\s+(?:the\s+)?"
+    r"(?:current\s+)?(?:page|screen|view)",
+    re.IGNORECASE,
+)
 _VISUAL_IDENTITY_GENERIC_TOKENS = (
     "原来的",
     "原有的",
@@ -1836,9 +1843,13 @@ def _named_visual_identity_anchor(texts: tuple[str, ...]) -> str:
     anchors: list[str] = []
     for item in texts:
         value = str(item or "").strip()
-        if not value or not _VISUAL_IDENTITY_CONTAINER_PATTERN.search(value):
+        identity_value = _GENERIC_VISUAL_LOCATION_PATTERN.sub(" ", value)
+        if (
+            not identity_value.strip()
+            or not _VISUAL_IDENTITY_CONTAINER_PATTERN.search(identity_value)
+        ):
             continue
-        cleaned = value.casefold()
+        cleaned = identity_value.casefold()
         for token in _VISUAL_IDENTITY_GENERIC_TOKENS:
             cleaned = cleaned.replace(token, " ")
         anchor = _compact_identity_text(cleaned)

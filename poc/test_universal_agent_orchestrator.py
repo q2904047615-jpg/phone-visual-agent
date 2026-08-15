@@ -1818,6 +1818,94 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertFalse(result.allowed)
         self.assertIn("禁止", result.reason)
 
+    def test_drag_allows_its_own_gesture_marker_but_not_destructive_semantics(self) -> None:
+        source = UIElement(
+            element_id="source",
+            role="image",
+            meaning="draggable_purple_block",
+            label="起点",
+            bounds=(0.18, 0.66, 0.38, 0.80),
+            confidence=0.98,
+        )
+        destination = UIElement(
+            element_id="destination",
+            role="container",
+            meaning="drop_target_green_zone",
+            label="绿色终点",
+            bounds=(0.55, 0.63, 0.85, 0.83),
+            confidence=0.98,
+        )
+        scene = UIScene(
+            app_id="sample.app",
+            screen_id="acceptance-board",
+            summary="本地动作验收页面",
+            elements=(source, destination),
+            stable=True,
+            confidence=0.98,
+            fingerprint="drag-safe-frame",
+        )
+        action = SemanticAction(
+            node_id="drag-safe",
+            action="drag",
+            params={
+                "source_element_id": source.element_id,
+                "source_target": source.meaning,
+                "source_role": source.role,
+                "source_label": source.label,
+                "destination_element_id": destination.element_id,
+                "destination_target": destination.meaning,
+                "destination_role": destination.role,
+                "destination_label": destination.label,
+                "expected_effect": {"scene_changed": True},
+            },
+        )
+        observation = SimpleNamespace(
+            device_id="device-1",
+            fingerprint=scene.fingerprint,
+            scene=scene,
+            candidate_conflicts=(),
+        )
+        observation.target_local_candidate = scene.unique_trusted_goal_element
+        decision = SimpleNamespace(
+            task_id="task-1",
+            device_id="device-1",
+            revision=1,
+            fingerprint=scene.fingerprint,
+            confidence=0.98,
+            proposal=GenericStepProposal(status="action", action=action),
+            trusted_observation=observation,
+            target_region=SimpleNamespace(
+                kind="element_path",
+                element_id=source.element_id,
+                bounds=source.bounds,
+                destination_element_id=destination.element_id,
+                destination_bounds=destination.bounds,
+            ),
+        )
+
+        allowed = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=observation,
+            decision=decision,
+            available_action_kinds=frozenset({"drag"}),
+        )
+        self.assertTrue(allowed.allowed, allowed.reason)
+
+        destructive_source = replace(source, meaning="draggable_delete_item")
+        destructive_scene = replace(
+            scene,
+            elements=(destructive_source, destination),
+        )
+        observation.scene = destructive_scene
+        action.params["source_target"] = destructive_source.meaning
+        destructive = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=observation,
+            decision=decision,
+            available_action_kinds=frozenset({"drag"}),
+        )
+        self.assertFalse(destructive.allowed)
+
 
 class ObservationBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -2098,6 +2186,16 @@ class UniversalAgentStartTests(unittest.TestCase):
     @staticmethod
     def _two_endpoint_scene(*, clipped: bool = False) -> UIScene:
         scene = _scene()
+        instruction = replace(
+            scene.elements[0],
+            element_id="instruction",
+            role="button",
+            meaning="select_drag_task",
+            label="动作：把紫色方块拖到绿色终点",
+            bounds=(0.1, 0.39, 0.9, 0.47),
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=("任务描述同时写有紫色方块和绿色终点",),
+        )
         source = replace(
             scene.elements[0],
             element_id="source",
@@ -2105,7 +2203,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             meaning="purple_start_block",
             label="起点",
             bounds=(0.0 if clipped else 0.18, 0.68, 0.38, 0.82),
-            states={"goal_relevant": True},
+            states={"goal_relevant": False, "fully_visible": True},
             evidence=("粉紫色方块",),
         )
         destination = UIElement(
@@ -2115,10 +2213,10 @@ class UniversalAgentStartTests(unittest.TestCase):
             label="绿色终点",
             bounds=(0.55, 0.63, 0.85, 0.85),
             confidence=0.98,
-            states={"goal_relevant": True},
+            states={"goal_relevant": False, "fully_visible": True},
             evidence=("绿色虚线终点区域",),
         )
-        return replace(scene, elements=(source, destination))
+        return replace(scene, elements=(instruction, source, destination))
 
     def test_start_plans_observes_and_decides_with_zero_physical_actions(self) -> None:
         graph = _graph()
@@ -2262,20 +2360,14 @@ class UniversalAgentStartTests(unittest.TestCase):
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
 
-    def test_multi_element_presence_requires_explicit_conjunction(self) -> None:
+    def test_multi_element_presence_rejects_aggregate_instruction_alone(self) -> None:
         initial = self._read_only_multi_locate_graph()
-        first = replace(
-            initial.subgoals[0],
-            objective="定位紫色方块；定位绿色终点",
-            completion_conditions=("两个对象可见",),
-        )
-        initial = replace(initial, subgoals=(first, initial.subgoals[1]))
-        initial.validate()
         planner = FakeDeepSeekPlanner(
             initial,
             replan_result=self._advance_multi_locate_graph(initial),
         )
-        adapter = FakeAdapter(self._two_endpoint_scene())
+        scene = self._two_endpoint_scene()
+        adapter = FakeAdapter(replace(scene, elements=(scene.elements[0],)))
 
         with tempfile.TemporaryDirectory() as temp:
             session = self._orchestrator(

@@ -26,6 +26,7 @@ from capability_acceptance import (
     PROMOTABLE_ACTIONS,
 )
 from capability_acceptance_runtime import CapabilityAcceptanceManager
+from capability_acceptance_planner import CapabilityAcceptanceTaskGraphPlanner
 from intent_provider import DeepSeekIntentProvider, IntentProviderError
 from generic_intent import GenericIntentError, GenericIntentParser
 from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
@@ -1053,11 +1054,14 @@ class Runtime:
     def capability_trial_orchestrator(
         self,
         provisional_controller: RobotController,
+        candidate_action: str,
     ) -> UniversalAgentOrchestrator:
-        """Build one isolated orchestrator that shares only the device lease."""
+        """Build one isolated primitive-certification orchestrator."""
 
         return UniversalAgentOrchestrator(
-            deepseek_planner=self.deepseek_task_graph_planner,
+            deepseek_planner=CapabilityAcceptanceTaskGraphPlanner(
+                candidate_action
+            ),
             qwen_observer=self.qwen_visual_decision_observer,
             adapter_factory=lambda device_id: GenericSingleActionAdapter(
                 capture=provisional_controller.vision_capture,

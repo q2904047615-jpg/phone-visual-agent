@@ -1,0 +1,128 @@
+{
+  "source": "generic_supervised_20260815_221400_2bd3f60e/session.json",
+  "redacted": true,
+  "session": {
+    "session_id": "generic-supervised-redacted-2bd3",
+    "status": "cancelled",
+    "step_number": 2,
+    "physical_actions": 1,
+    "failed_reason": "用户取消了会话",
+    "api_token": "sensitive-token-must-not-render",
+    "task_graph": {
+      "protocol_version": "2026-08-11-deepseek-task-graph-v3",
+      "task_id": "task-redacted-2bd3",
+      "device_id": "phone-redacted",
+      "revision": 2,
+      "status": "ready",
+      "goal": {
+        "objective": "在当前画面执行一个通用视觉目标",
+        "target_apps": []
+      },
+      "active_subgoal_id": "trigger_visible_change",
+      "current_subgoal": {
+        "subgoal_id": "trigger_visible_change",
+        "index": 1,
+        "objective": "触发唯一可信的可见变化",
+        "status": "active",
+        "external_impact": "none",
+        "risk_action_ids": [],
+        "completion_conditions": ["动作后画面产生可验证变化"]
+      },
+      "subgoals": [
+        {
+          "subgoal_id": "trigger_visible_change",
+          "index": 1,
+          "objective": "触发唯一可信的可见变化",
+          "status": "active",
+          "external_impact": "none",
+          "risk_action_ids": [],
+          "completion_conditions": ["动作后画面产生可验证变化"]
+        }
+      ],
+      "risk_actions": [],
+      "confirmation_gate": { "required": false, "state": "not_required", "risk_ids": [] },
+      "replan_history": [
+        {
+          "revision": 2,
+          "trigger": "observation_changed",
+          "reason": "动作后观察已更新，继续由当前任务图决策。",
+          "scene_id": "obs-redacted-after"
+        }
+      ]
+    },
+    "trusted_observation": {
+      "observation_id": "obs-redacted-after",
+      "device_id": "phone-redacted",
+      "fingerprint": "fingerprint-redacted-after"
+    },
+    "qwen_decision": {
+      "protocol_version": "2026-08-15-qwen-visual-decision-v5",
+      "task_id": "task-redacted-2bd3",
+      "device_id": "phone-redacted",
+      "revision": 2,
+      "observation_id": "obs-redacted-after",
+      "fingerprint": "fingerprint-redacted-after",
+      "status": "action",
+      "next_action": {
+        "node_id": "qwen-redacted-revision-2",
+        "action": "reload",
+        "params": {
+          "element_id": "unique_reload_candidate",
+          "target": "reload_visible_content",
+          "label": "重新加载"
+        }
+      },
+      "target_region": {
+        "kind": "element",
+        "element_id": "unique_reload_candidate",
+        "bounds": [0.82, 0.02, 0.91, 0.09]
+      },
+      "confidence": 0.94,
+      "reason": "当前画面存在唯一可信候选。"
+    },
+    "confirmation_scope": null,
+    "history": [
+      {
+        "step_number": 1,
+        "task_revision": 1,
+        "qwen_decision": {
+          "protocol_version": "2026-08-15-qwen-visual-decision-v5",
+          "task_id": "task-redacted-2bd3",
+          "device_id": "phone-redacted",
+          "revision": 1,
+          "observation_id": "obs-redacted-before",
+          "fingerprint": "fingerprint-redacted-before",
+          "status": "action",
+          "next_action": {
+            "node_id": "qwen-redacted-revision-1",
+            "action": "reload",
+            "params": {
+              "element_id": "unique_reload_candidate",
+              "target": "reload_visible_content",
+              "label": "重新加载"
+            }
+          },
+          "target_region": {
+            "kind": "element",
+            "element_id": "unique_reload_candidate",
+            "bounds": [0.82, 0.02, 0.91, 0.09]
+          },
+          "confidence": 0.95,
+          "reason": "可信候选唯一且清晰。"
+        },
+        "execution": {
+          "physical_actions": 1,
+          "action_outcome": "matched",
+          "before_scene": { "fingerprint": "fingerprint-redacted-before" },
+          "after_scene": { "fingerprint": "fingerprint-redacted-after" },
+          "verification_errors": [],
+          "observation_errors": [],
+          "evidence": ["[REDACTED_LOCAL_PATH]\\after-1.jpg"],
+          "after_frame_paths": ["[REDACTED_LOCAL_PATH]\\after-1.jpg"]
+        },
+        "after_observation_id": "obs-redacted-after",
+        "after_fingerprint": "fingerprint-redacted-after"
+      }
+    ]
+  }
+}

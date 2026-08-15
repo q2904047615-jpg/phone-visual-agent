@@ -5,6 +5,7 @@ const Protocol = require("./static/protocol_adapter.js");
 const deepSeekFixture = require("./frontend_contract_fixtures/deepseek_task_graph_v3.json");
 const deepSeekV2Fixture = require("./frontend_contract_fixtures/deepseek_task_graph_v2.json");
 const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v2.json");
+const redacted2bd3Fixture = require("./frontend_contract_fixtures/generic_supervised_2bd3_redacted.json");
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -66,12 +67,62 @@ function safeActionSession() {
       risk_ids: [],
       observation_id: "obs_0123456789abcdef0123456789abcdef",
       fingerprint: "51277d0d9e6f986b00dc",
+      decision_node_id: "qwen_visual_revision_1",
+      action_digest: "a".repeat(64),
     },
     confirmation_ready: true,
     physical_actions: 0,
     evidence: ["before_step_1_frame_1.jpg"],
     history: [],
   };
+}
+
+function phaseTwoTraceSession() {
+  const session = safeActionSession();
+  const priorDecision = clone(session.qwen_decision);
+  session.task_graph.revision = 2;
+  session.task_graph.replan_history = [{
+    revision: 2,
+    trigger: "action_result_mismatch",
+    reason: "动作后可见结果与预期不一致，重新规划当前子目标。",
+    scene_id: "obs-after-001",
+    evidence: ["结果仍未满足完成条件"],
+  }];
+  session.qwen_decision.revision = 2;
+  session.qwen_decision.observation_id = "obs-after-001";
+  session.qwen_decision.fingerprint = "fingerprint-after-001";
+  session.qwen_decision.trusted_observation.observation_id = "obs-after-001";
+  session.qwen_decision.trusted_observation.fingerprint = "fingerprint-after-001";
+  session.confirmation_scope.revision = 2;
+  session.confirmation_scope.observation_id = "obs-after-001";
+  session.confirmation_scope.fingerprint = "fingerprint-after-001";
+  session.physical_actions = 1;
+  session.history = [{
+    step_number: 1,
+    task_revision: 1,
+    current_subgoal: "识别并操作唯一可信目标",
+    subgoal_id: "locate_target",
+    qwen_decision: priorDecision,
+    controller_decision: {
+      allowed: true,
+      reason: "唯一动作通过本地策略。",
+      canonical_class: "navigation_open",
+      policy_version: "policy-v1",
+    },
+    execution: {
+      physical_actions: 1,
+      action_outcome: "mismatched",
+      before_scene: { fingerprint: "51277d0d9e6f986b00dc" },
+      after_scene: { fingerprint: "fingerprint-after-001" },
+      verification_errors: ["目标状态没有按预期改变"],
+      observation_errors: [],
+      evidence: ["after-frame-1.jpg"],
+      after_frame_paths: ["after-frame-1.jpg", "after-frame-2.jpg"],
+    },
+    after_observation_id: "obs-after-001",
+    after_fingerprint: "fingerprint-after-001",
+  }];
+  return session;
 }
 
 function capabilityTrial({ passed = false } = {}) {
@@ -169,6 +220,8 @@ test("real DeepSeek 438cd22 to_qwen_context snapshot keeps v3 gate scope", () =>
     riskIds: [],
     observationId: "",
     fingerprint: "",
+    decisionNodeId: "",
+    actionDigest: "",
   });
 });
 
@@ -302,6 +355,8 @@ test("an explicit confirmation grant is scoped and can be consumed only once", (
       risk_ids: [],
       observation_id: "obs_0123456789abcdef0123456789abcdef",
       fingerprint: "51277d0d9e6f986b00dc",
+      decision_node_id: "qwen_visual_revision_1",
+      action_digest: "a".repeat(64),
     },
   });
   assert.throws(
@@ -353,15 +408,18 @@ test("compatibility auto payload is hard-bounded to one exact confirmed action",
   );
 });
 
-test("confirmation scope cannot cross revision, risk, subgoal, task, device, observation, or fingerprint", () => {
+test("confirmation scope cannot cross any action authority field", () => {
   const original = Protocol.adaptSession(safeActionSession());
   const mutations = [
     session => { session.task_graph.revision = 2; },
+    session => { session.confirmation_scope.session_id = "different-session"; },
     session => { session.confirmation_scope.risk_ids = ["different_risk"]; },
     session => { session.confirmation_scope.subgoal_id = "different_subgoal"; },
     session => { session.task_graph.task_id = "different-task"; },
     session => { session.confirmation_scope.observation_id = "obs-changed"; },
     session => { session.confirmation_scope.fingerprint = "frame-changed"; },
+    session => { session.confirmation_scope.decision_node_id = "different-node"; },
+    session => { session.confirmation_scope.action_digest = "b".repeat(64); },
   ];
 
   for (const mutate of mutations) {
@@ -392,6 +450,156 @@ test("adapter exposes controller gate action count and evidence", () => {
   });
   assert.equal(view.physicalActions, 0);
   assert.deepEqual(view.evidence, ["before_step_1_frame_1.jpg"]);
+});
+
+test("phase two trace exposes each authority boundary without inventing success", () => {
+  const view = Protocol.adaptSession(phaseTwoTraceSession());
+
+  assert.equal(view.taskGraph.revision, 2);
+  assert.equal(view.currentSubgoal.id, "locate_target");
+  assert.equal(view.executionTrace.length, 2);
+
+  const completed = view.executionTrace[0];
+  assert.equal(completed.graphRevision, 1);
+  assert.deepEqual(completed.observation, {
+    id: "obs_0123456789abcdef0123456789abcdef",
+    fingerprint: "51277d0d9e6f986b00dc",
+  });
+  assert.equal(completed.action.status, "action");
+  assert.equal(completed.action.actionType, "tap_semantic");
+  assert.equal(completed.controllerGate.allowed, true);
+  assert.equal(completed.physicalActions, 1);
+  assert.equal(completed.verification.outcome, "mismatched");
+  assert.equal(completed.verification.matched, false);
+  assert.equal(completed.verification.afterObservationId, "obs-after-001");
+  assert.equal(completed.verification.afterFingerprint, "fingerprint-after-001");
+  assert.deepEqual(completed.verification.errors, ["目标状态没有按预期改变"]);
+  assert.equal(completed.transition.kind, "replan");
+  assert.equal(completed.transition.trigger, "action_result_mismatch");
+  assert.equal(completed.transition.fromRevision, 1);
+  assert.equal(completed.transition.toRevision, 2);
+  assert.match(completed.transition.reason, /重新规划/);
+  assert.equal(completed.scopeState.state, "unknown");
+  assert.match(completed.scopeState.reason, /没有可验证的确认消费回执/);
+
+  const current = view.executionTrace[1];
+  assert.equal(current.phase, "current");
+  assert.equal(current.graphRevision, 2);
+  assert.equal(current.observation.id, "obs-after-001");
+  assert.equal(current.observation.fingerprint, "fingerprint-after-001");
+  assert.equal(current.physicalActions, 0);
+  assert.equal(current.scopeState.state, "active");
+  assert.equal(view.physicalActions, 1);
+});
+
+test("stale or incomplete action scope is visible and cannot mint a confirmation grant", () => {
+  for (const mutate of [
+    session => { session.confirmation_scope.revision = 1; },
+    session => { delete session.confirmation_scope.fingerprint; },
+    session => { delete session.confirmation_scope.decision_node_id; },
+    session => { delete session.confirmation_scope.action_digest; },
+    session => { session.confirmation_scope.observation_id = "obs-stale"; },
+  ]) {
+    const session = phaseTwoTraceSession();
+    mutate(session);
+    const view = Protocol.adaptSession(session);
+    assert.notEqual(view.scopeState.state, "active");
+    assert.throws(
+      () => Protocol.createConfirmationGrant(view, "phone-01"),
+      /已经变化|缺失/,
+    );
+    assert.equal(view.executionTrace.at(-1).scopeState.state, view.scopeState.state);
+  }
+});
+
+test("terminal and legacy records keep stop and unknown evidence explicit", () => {
+  const terminal = phaseTwoTraceSession();
+  terminal.status = "blocked";
+  terminal.failed_reason = "重规划后的任务图没有活动子目标。";
+  terminal.confirmation_scope = null;
+  const stopped = Protocol.adaptSession(terminal);
+  assert.equal(stopped.stopState.stopped, true);
+  assert.equal(stopped.stopState.status, "blocked");
+  assert.match(stopped.stopState.reason, /没有活动子目标/);
+  assert.equal(stopped.scopeState.state, "invalidated");
+  assert.equal(stopped.executionTrace.at(-1).transition.kind, "stopped");
+  assert.equal(stopped.executionTrace.at(-1).phase, "terminal");
+  assert.equal(stopped.executionTrace.at(-1).verification.outcome, "terminal");
+  assert.notEqual(stopped.executionTrace.at(-1).verification.outcome, "awaiting_next_action");
+
+  terminal.failed_reason = "";
+  terminal.auto_pause_reason = "本地控制器已安全暂停";
+  assert.equal(Protocol.adaptSession(terminal).stopState.reason, "本地控制器已安全暂停");
+
+  const legacy = safeActionSession();
+  legacy.history = [{ step_number: 1, execution: { physical_actions: 1 } }];
+  const legacyRound = Protocol.adaptSession(legacy).executionTrace[0];
+  assert.equal(legacyRound.verification.outcome, "unknown");
+  assert.equal(legacyRound.controllerGate.reason, "");
+  assert.equal(legacyRound.transition.kind, "unknown");
+});
+
+test("redacted real 2bd3 shape keeps unknown history authority and exact replan binding", () => {
+  const view = Protocol.adaptSession(clone(redacted2bd3Fixture.session));
+  const completed = view.executionTrace[0];
+  const terminal = view.executionTrace.at(-1);
+
+  assert.equal(view.protocol, "deepseek-task-graph-v3");
+  assert.equal(view.stopState.status, "cancelled");
+  assert.equal(completed.subgoal, "旧记录未提供");
+  assert.equal(completed.controllerGate.reason, "");
+  assert.equal(completed.verification.outcome, "matched");
+  assert.equal(completed.verification.afterObservationId, "obs-redacted-after");
+  assert.equal(completed.transition.kind, "advance_or_replan");
+  assert.equal(completed.transition.toRevision, 2);
+  assert.equal(completed.scopeState.state, "unknown");
+  assert.equal(terminal.phase, "terminal");
+  assert.equal(terminal.verification.outcome, "terminal");
+
+  const unrelated = clone(redacted2bd3Fixture.session);
+  unrelated.task_graph.replan_history = [{
+    revision: 3,
+    trigger: "observation_changed",
+    scene_id: "unrelated-observation",
+  }];
+  const unrelatedHistory = Protocol.adaptSession(unrelated).executionTrace[0];
+  assert.equal(unrelatedHistory.transition.kind, "unknown");
+  assert.equal(unrelatedHistory.transition.toRevision, null);
+});
+
+test("history is consumed only with a complete authoritative receipt", () => {
+  const raw = phaseTwoTraceSession();
+  const history = raw.history[0];
+  history.risk_ids = [];
+  history.confirmation_receipt = {
+    authoritative: true,
+    consumed: true,
+    scope: {
+      session_id: raw.session_id,
+      task_id: history.qwen_decision.task_id,
+      device_id: history.qwen_decision.device_id,
+      revision: history.task_revision,
+      subgoal_id: history.subgoal_id,
+      risk_ids: [],
+      observation_id: history.qwen_decision.observation_id,
+      fingerprint: history.qwen_decision.fingerprint,
+      decision_node_id: history.qwen_decision.next_action.node_id,
+      action_digest: "receipt-bound-digest",
+    },
+  };
+  assert.equal(Protocol.adaptSession(raw).executionTrace[0].scopeState.state, "consumed");
+
+  history.confirmation_receipt.scope.session_id = "different-session";
+  assert.equal(Protocol.adaptSession(raw).executionTrace[0].scopeState.state, "unknown");
+});
+
+test("risk scope rejects action-only authority fields", () => {
+  const raw = riskApprovalSession();
+  raw.risk_confirmation_scope.action_digest = "a".repeat(64);
+  const view = Protocol.adaptSession(raw);
+  assert.equal(view.scopeState.state, "stale");
+  assert.match(view.scopeState.mismatches.join(" "), /risk_scope_extra_action_fields/);
+  assert.throws(() => Protocol.createConfirmationGrant(view, "phone-01"), /已经变化|缺失/);
 });
 
 test("current Qwen v2 fields win over conflicting legacy fallback data after a v3 graph", () => {

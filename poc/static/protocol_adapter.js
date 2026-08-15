@@ -118,12 +118,14 @@
       riskIds: normalizeStringList(scope.risk_ids),
       observationId: String(firstDefined(scope.observation_id, "")),
       fingerprint: String(firstDefined(scope.fingerprint, "")),
+      decisionNodeId: String(firstDefined(scope.decision_node_id, "")),
+      actionDigest: String(firstDefined(scope.action_digest, "")),
     };
   }
 
   function isQwenV2Decision(value) {
     const decision = asObject(value);
-    return /qwen-visual-decision-v[23]/.test(String(decision.protocol_version || ""))
+    return /qwen-visual-decision-v\d+/.test(String(decision.protocol_version || ""))
       || (Object.prototype.hasOwnProperty.call(decision, "next_action")
         && decision.task_id !== undefined
         && decision.revision !== undefined
@@ -146,14 +148,13 @@
       status === "finished" ? "目标完成" : status === "blocked" ? "当前步骤已阻止" : "未提供语义目标",
     ));
     const isExecutable = status === "action" && Boolean(actionType);
+    const protocolVersion = String(firstDefined(decision.protocol_version, ""));
+    const protocolMatch = protocolVersion.match(/qwen-visual-decision-v\d+/);
     return {
-      protocol: String(firstDefined(decision.protocol_version, "")).includes("-v4")
-        ? "qwen-visual-decision-v4"
-        : String(firstDefined(decision.protocol_version, "")).includes("-v3")
-          ? "qwen-visual-decision-v3"
-          : "qwen-visual-decision-v2",
-      protocolVersion: String(firstDefined(decision.protocol_version, "")),
+      protocol: protocolMatch ? protocolMatch[0] : "qwen-visual-decision-v2",
+      protocolVersion,
       status,
+      decisionNodeId: String(firstDefined(nextAction.node_id, "")),
       actionType,
       semanticTarget,
       elementId,
@@ -183,6 +184,7 @@
       protocol: "legacy-visual-action",
       protocolVersion: String(firstDefined(raw.protocol_version, "")),
       status: actionType ? "action" : "unknown",
+      decisionNodeId: String(firstDefined(raw.node_id, params.node_id, "")),
       actionType,
       semanticTarget: String(firstDefined(raw.semantic_target, params.semantic_target, params.target, params.label, params.element_id, "当前语义目标")),
       elementId: String(firstDefined(params.element_id, "")),
@@ -227,7 +229,144 @@
     return completed;
   }
 
-  function normalizeHistory(rawHistory) {
+  function normalizeControllerGate(value) {
+    const gate = asObject(value);
+    return {
+      allowed: gate.allowed === true,
+      reason: String(firstDefined(gate.reason, "")),
+      canonicalClass: String(firstDefined(gate.canonical_class, gate.canonicalClass, "")),
+      policyVersion: String(firstDefined(gate.policy_version, gate.policyVersion, "")),
+    };
+  }
+
+  function normalizeVerification(entry, action) {
+    const execution = asObject(entry.execution);
+    const executionVerification = asObject(execution.verification);
+    const verification = Object.keys(executionVerification).length
+      ? executionVerification
+      : asObject(entry.verification);
+    const beforeScene = asObject(execution.before_scene);
+    const afterScene = asObject(execution.after_scene);
+    const outcome = String(firstDefined(
+      execution.action_outcome,
+      verification.action_outcome,
+      entry.action_outcome,
+      "unknown",
+    ));
+    const errors = [...new Set([
+      ...normalizeStringList(execution.verification_errors),
+      ...normalizeStringList(execution.observation_errors),
+      ...normalizeStringList(verification.blocked_reasons),
+      ...normalizeStringList(verification.verification_errors),
+    ])];
+    return {
+      outcome,
+      matched: outcome === "matched",
+      beforeFingerprint: String(firstDefined(
+        verification.before_fingerprint,
+        beforeScene.fingerprint,
+        action.fingerprint,
+        "",
+      )),
+      afterObservationId: String(firstDefined(
+        entry.after_observation_id,
+        verification.after_observation_id,
+        asObject(entry.after_observation).observation_id,
+        "",
+      )),
+      afterFingerprint: String(firstDefined(
+        entry.after_fingerprint,
+        verification.after_fingerprint,
+        asObject(entry.after_observation).fingerprint,
+        afterScene.fingerprint,
+        "",
+      )),
+      errors,
+      evidence: [...new Set([
+        ...normalizeStringList(execution.evidence),
+        ...normalizeStringList(execution.after_frame_paths),
+      ])],
+      raw: verification,
+    };
+  }
+
+  function normalizeTransition(entry, verification, replanHistory, currentRevision, sessionStatus, failedReason) {
+    const explicit = asObject(firstDefined(entry.transition, entry.replan));
+    const sourceRevision = firstDefined(entry.task_revision, entry.revision, null);
+    const nextReplan = replanHistory.find(item => {
+      const candidate = asObject(item);
+      return Number.isInteger(sourceRevision)
+        && candidate.revision === sourceRevision + 1
+        && String(candidate.scene_id || "")
+        && String(candidate.scene_id) === verification.afterObservationId;
+    });
+    const replan = Object.keys(explicit).length ? explicit : asObject(nextReplan);
+    const trigger = String(firstDefined(replan.trigger, entry.replan_trigger, ""));
+    let kind = String(firstDefined(replan.outcome, replan.kind, entry.advance_outcome, ""));
+    if (!kind) {
+      if (trigger === "action_result_mismatch" || verification.outcome === "mismatched") kind = "replan";
+      else if (trigger === "subgoal_completed") kind = "advance";
+      else if (trigger) kind = "advance_or_replan";
+      else if (["blocked", "failed"].includes(sessionStatus)) kind = "blocked";
+      else kind = "unknown";
+    }
+    return {
+      kind,
+      trigger,
+      reason: String(firstDefined(
+        replan.reason,
+        entry.transition_reason,
+        entry.reason,
+        kind === "blocked" ? failedReason : "",
+      )),
+      fromRevision: sourceRevision,
+      toRevision: Number.isInteger(replan.revision) ? replan.revision : null,
+      raw: replan,
+    };
+  }
+
+  function normalizeHistoricalScope(entry, action, context) {
+    const execution = asObject(entry.execution);
+    const receipt = asObject(firstDefined(
+      entry.confirmation_receipt,
+      execution.confirmation_receipt,
+    ));
+    const scope = normalizeConfirmationGateScope(receipt.scope);
+    const expectedSubgoalId = String(firstDefined(entry.subgoal_id, asObject(entry.scope).subgoal_id, ""));
+    const expectedRiskIds = Array.isArray(entry.risk_ids)
+      ? normalizeStringList(entry.risk_ids).map(String).sort()
+      : null;
+    const authoritative = receipt.authoritative === true && receipt.consumed === true;
+    const exact = authoritative
+      && Boolean(context.sessionId)
+      && scope.sessionId === context.sessionId
+      && scope.taskId === action.taskId
+      && scope.deviceId === action.deviceId
+      && scope.revision === action.revision
+      && Boolean(expectedSubgoalId)
+      && scope.subgoalId === expectedSubgoalId
+      && expectedRiskIds !== null
+      && JSON.stringify([...scope.riskIds].map(String).sort()) === JSON.stringify(expectedRiskIds)
+      && scope.observationId === action.observationId
+      && scope.fingerprint === action.fingerprint
+      && scope.decisionNodeId === action.decisionNodeId
+      && Boolean(scope.actionDigest);
+    return exact
+      ? {
+        state: "consumed",
+        reason: "后端权威回执证明该单动作确认已消费",
+        mismatches: [],
+        scope,
+      }
+      : {
+        state: "unknown",
+        reason: "旧记录没有可验证的确认消费回执",
+        mismatches: [],
+        scope: {},
+      };
+  }
+
+  function normalizeHistory(rawHistory, context = {}) {
     if (!Array.isArray(rawHistory)) return [];
     return rawHistory.map((item, index) => {
       const entry = asObject(item);
@@ -236,12 +375,35 @@
       const action = isQwenV2Decision(candidate)
         ? normalizeQwenV2Decision(candidate)
         : normalizeLegacyVisualAction(candidate, proposal, firstDefined(entry.after_scene, entry.scene));
+      const verification = normalizeVerification(entry, action);
+      const controllerGate = normalizeControllerGate(firstDefined(
+        entry.controller_decision,
+        entry.controller_gate,
+      ));
+      const historicalScope = normalizeHistoricalScope(entry, action, context);
       return {
         stepNumber: Number(firstDefined(entry.step_number, index + 1)),
-        subgoal: String(firstDefined(entry.current_subgoal, proposal.current_subgoal, asObject(proposal.action).action, "动态步骤")),
+        graphRevision: firstDefined(entry.task_revision, entry.revision, action.revision, null),
+        subgoal: String(firstDefined(entry.current_subgoal, proposal.current_subgoal, "旧记录未提供")),
+        subgoalId: String(firstDefined(entry.subgoal_id, asObject(entry.scope).subgoal_id, "")),
+        observation: {
+          id: String(firstDefined(entry.observation_id, action.observationId, "")),
+          fingerprint: String(firstDefined(entry.fingerprint, action.fingerprint, verification.beforeFingerprint, "")),
+        },
         action,
+        controllerGate,
         reason: String(firstDefined(entry.reason, proposal.reason, "已执行并重新观察")),
         physicalActions: Number(firstDefined(asObject(entry.execution).physical_actions, 0)),
+        verification,
+        transition: normalizeTransition(
+          entry,
+          verification,
+          context.replanHistory || [],
+          context.currentRevision,
+          context.sessionStatus,
+          context.failedReason,
+        ),
+        scopeState: historicalScope,
         completionEvidence: normalizeStringList(entry.completion_evidence),
         evidence: normalizeStringList(firstDefined(
           asObject(entry.execution).evidence,
@@ -250,6 +412,83 @@
         raw: entry,
       };
     });
+  }
+
+  function normalizeScopeState(session, context) {
+    const scope = context.scope;
+    const hasScope = Boolean(
+      scope.sessionId || scope.taskId || scope.deviceId || scope.subgoalId
+      || scope.observationId || scope.fingerprint || scope.decisionNodeId
+      || scope.actionDigest || scope.riskIds.length
+    );
+    const explicitReason = String(firstDefined(
+      session.confirmation_invalid_reason,
+      session.scope_invalid_reason,
+      session.stale_scope_reason,
+      "",
+    ));
+    const mismatches = [];
+    const actionPhase = context.status === "awaiting_confirmation";
+    const riskPhase = context.status === "awaiting_risk_confirmation";
+    const expectedRiskIds = [...context.riskIds].map(String).sort();
+    const actualRiskIds = [...scope.riskIds].map(String).sort();
+    const requiredScopeMissing = actionPhase
+      ? !scope.sessionId || !scope.taskId || !scope.deviceId
+        || !Number.isInteger(scope.revision) || !scope.subgoalId
+        || !scope.observationId || !scope.fingerprint
+        || !scope.decisionNodeId || !scope.actionDigest
+      : riskPhase
+        ? !scope.sessionId || !scope.taskId || !scope.deviceId
+          || !Number.isInteger(scope.revision) || !scope.subgoalId
+        : false;
+    if (hasScope) {
+      if (scope.sessionId !== context.sessionId) mismatches.push("session_id");
+      if (scope.taskId !== context.taskId) mismatches.push("task_id");
+      if (scope.deviceId !== context.deviceId) mismatches.push("device_id");
+      if (scope.revision !== context.revision) mismatches.push("revision");
+      if (scope.subgoalId !== context.subgoalId) mismatches.push("subgoal_id");
+      if (JSON.stringify(actualRiskIds) !== JSON.stringify(expectedRiskIds)) mismatches.push("risk_ids");
+      if (actionPhase) {
+        if (scope.observationId !== context.observationId) mismatches.push("observation_id");
+        if (scope.fingerprint !== context.fingerprint) mismatches.push("fingerprint");
+        if (scope.decisionNodeId !== context.decisionNodeId) mismatches.push("decision_node_id");
+      }
+      if (riskPhase && (
+        scope.observationId || scope.fingerprint || scope.decisionNodeId || scope.actionDigest
+      )) mismatches.push("risk_scope_extra_action_fields");
+    }
+    let state = "none";
+    let reason = explicitReason;
+    if (context.isTerminal) {
+      state = "invalidated";
+      reason ||= `会话已停止于 ${context.status}`;
+    } else if ((actionPhase || riskPhase) && requiredScopeMissing) {
+      state = "missing";
+      reason = "等待确认但缺少完整作用域";
+    } else if (explicitReason || mismatches.length) {
+      state = "stale";
+      reason ||= `作用域字段已变化：${mismatches.join("、")}`;
+    } else if ((actionPhase || riskPhase) && hasScope) {
+      state = "active";
+      reason = "后端 scope 与当前权威任务、观察和动作字段一致";
+    } else if (context.physicalActions > 0 && !hasScope) {
+      state = "unknown";
+      reason = "当前快照没有可验证的确认消费回执";
+    }
+    return { state, reason, mismatches, scope };
+  }
+
+  function normalizeStopState(status, failedReason, autoPauseReason) {
+    const stopped = terminalStatuses.has(status);
+    return {
+      stopped,
+      status: stopped ? status : "active",
+      reason: String(
+        (stopped && failedReason)
+        || autoPauseReason
+        || (stopped ? `会话已停止于 ${status}` : "")
+      ),
+    };
   }
 
   function adaptSession(rawSession, options = {}) {
@@ -374,6 +613,102 @@
     const formalV3 = protocolVersion === formalDeepSeekProtocol;
     const compatibilityV2 = protocolVersion === legacyDeepSeekV2Protocol;
     const targetApps = normalizeTargetApps(firstDefined(graphGoal.target_apps, asObject(qwenContext.goal).target_apps));
+    const controllerGate = normalizeControllerGate(session.controller_decision);
+    const physicalActions = Number(firstDefined(session.physical_actions, 0));
+    const failedReason = String(firstDefined(session.failed_reason, ""));
+    const autoPauseReason = String(firstDefined(session.auto_pause_reason, ""));
+    const replanHistory = Array.isArray(graph.replan_history) ? graph.replan_history : [];
+    const history = normalizeHistory(session.history, {
+      sessionId: String(firstDefined(session.session_id, session.id, "")),
+      replanHistory,
+      currentRevision: revision,
+      sessionStatus: status,
+      failedReason,
+    });
+    const trustedObservation = asObject(firstDefined(
+      session.trusted_observation,
+      asObject(qwenDecisionRaw).trusted_observation,
+    ));
+    const currentObservation = {
+      id: String(firstDefined(
+        trustedObservation.observation_id,
+        visualAction.observationId,
+        authorityScope.observationId,
+        "",
+      )),
+      fingerprint: String(firstDefined(
+        trustedObservation.fingerprint,
+        visualAction.fingerprint,
+        authorityScope.fingerprint,
+        "",
+      )),
+    };
+    const stopState = normalizeStopState(status, failedReason, autoPauseReason);
+    const scopeState = normalizeScopeState(session, {
+      scope: authorityScope,
+      sessionId: String(firstDefined(session.session_id, session.id, "")),
+      taskId,
+      deviceId,
+      revision,
+      subgoalId: currentSubgoal.id,
+      observationId: currentObservation.id,
+      fingerprint: currentObservation.fingerprint,
+      decisionNodeId: visualAction.decisionNodeId,
+      riskIds: gateRiskIds,
+      status,
+      isTerminal: stopState.stopped,
+      physicalActions,
+    });
+    const currentTransitionKind = stopState.stopped
+      ? "stopped"
+      : status === "blocked"
+        ? "blocked"
+        : status === "replanning"
+          ? "replan"
+          : status === "awaiting_confirmation"
+            ? "awaiting_confirmation"
+            : status === "awaiting_risk_confirmation"
+              ? "awaiting_risk_confirmation"
+              : "observing";
+    const currentTrace = {
+      phase: stopState.stopped ? "terminal" : "current",
+      stepNumber: Number(firstDefined(session.step_number, currentSubgoal.index, 1)),
+      graphRevision: revision,
+      subgoal: currentSubgoal.label,
+      subgoalId: currentSubgoal.id,
+      observation: currentObservation,
+      action: stopState.stopped
+        ? { status: "terminal", actionType: "", semanticTarget: "", reason: stopState.reason }
+        : visualAction,
+      controllerGate,
+      physicalActions: 0,
+      verification: {
+        outcome: stopState.stopped
+          ? "terminal"
+          : visualAction.status === "action"
+            ? "not_executed"
+            : history.length
+              ? "awaiting_next_action"
+              : "not_executed",
+        matched: false,
+        beforeFingerprint: currentObservation.fingerprint,
+        afterObservationId: "",
+        afterFingerprint: "",
+        errors: [],
+        evidence: [],
+        raw: {},
+      },
+      transition: {
+        kind: currentTransitionKind,
+        trigger: "",
+        reason: failedReason || autoPauseReason || controllerGate.reason,
+        fromRevision: revision,
+        toRevision: null,
+        raw: {},
+      },
+      scopeState,
+      status,
+    };
     return {
       protocol: formalV3
         ? "deepseek-task-graph-v3"
@@ -404,7 +739,23 @@
         confidence: firstDefined(scene.confidence, null),
         raw: scene,
       },
-      history: normalizeHistory(session.history),
+      history,
+      taskGraph: {
+        revision,
+        status: String(firstDefined(graph.status, graph.task_status, status)),
+        currentSubgoalId: currentSubgoal.id,
+        replanHistory: replanHistory.map(item => ({ ...asObject(item) })),
+      },
+      executionTrace: [
+        ...history.map(item => ({
+          ...item,
+          phase: "completed",
+          status: "completed_round",
+        })),
+        currentTrace,
+      ],
+      scopeState,
+      stopState,
       risk: {
         accountEffectPossible,
         requiresConfirmation,
@@ -425,16 +776,11 @@
         },
         maxPhysicalActions: 1,
       },
-      controllerGate: {
-        allowed: asObject(session.controller_decision).allowed === true,
-        reason: String(firstDefined(asObject(session.controller_decision).reason, "")),
-        canonicalClass: String(firstDefined(asObject(session.controller_decision).canonical_class, "")),
-        policyVersion: String(firstDefined(asObject(session.controller_decision).policy_version, "")),
-      },
-      physicalActions: Number(firstDefined(session.physical_actions, 0)),
+      controllerGate,
+      physicalActions,
       evidence: normalizeStringList(session.evidence),
-      autoPauseReason: String(firstDefined(session.auto_pause_reason, "")),
-      failedReason: String(firstDefined(session.failed_reason, "")),
+      autoPauseReason,
+      failedReason,
       raw: session,
     };
   }
@@ -451,6 +797,8 @@
       || confirmationPayload.confirmed !== true
       || !asObject(confirmationPayload.confirmation).observation_id
       || !asObject(confirmationPayload.confirmation).fingerprint
+      || !asObject(confirmationPayload.confirmation).decision_node_id
+      || !asObject(confirmationPayload.confirmation).action_digest
     ) {
       throw new Error("安全连续推进必须携带当前精确动作确认。")
     }
@@ -463,33 +811,24 @@
 
   function confirmationScope(session, sessionDeviceId) {
     if (!session) throw new Error("当前没有可确认的会话。");
+    if (session.scopeState?.state !== "active") {
+      throw new Error("当前确认作用域缺失、已消费或已经变化失效，请重新观察。");
+    }
     const gateScope = session.risk?.confirmationGate?.scope || {};
-    const canonicalRevision = session.revision === null || session.revision === undefined
-      ? null
-      : Number(session.revision);
-    const gateRevision = gateScope.revision === null || gateScope.revision === undefined
-      ? canonicalRevision
-      : Number(gateScope.revision);
-    if (
-      (gateScope.taskId && gateScope.taskId !== session.taskId)
-      || (gateScope.deviceId && gateScope.deviceId !== session.deviceId)
-      || (gateScope.subgoalId && gateScope.subgoalId !== session.currentSubgoal?.id)
-      || (gateScope.observationId && gateScope.observationId !== session.visualAction?.observationId)
-      || (gateScope.fingerprint && gateScope.fingerprint !== session.visualAction?.fingerprint)
-      || gateRevision !== canonicalRevision
-      || String(sessionDeviceId || "") !== String(session.deviceId || "")
-    ) {
-      throw new Error("任务、revision、子目标、风险或设备已经变化，请重新确认。");
+    if (String(sessionDeviceId || "") !== String(session.deviceId || "")) {
+      throw new Error("确认设备已经变化，请重新确认。");
     }
     return {
-      session_id: String(gateScope.sessionId || session.sessionId || ""),
-      task_id: String(gateScope.taskId || session.taskId || ""),
-      device_id: String(gateScope.deviceId || sessionDeviceId || ""),
-      revision: gateRevision,
-      subgoal_id: String(gateScope.subgoalId || session.currentSubgoal?.id || ""),
-      risk_ids: [...(gateScope.riskIds || session.risk?.riskIds || [])].map(String).sort(),
-      observation_id: String(gateScope.observationId || session.visualAction?.observationId || ""),
-      fingerprint: String(gateScope.fingerprint || session.visualAction?.fingerprint || ""),
+      session_id: gateScope.sessionId,
+      task_id: gateScope.taskId,
+      device_id: gateScope.deviceId,
+      revision: gateScope.revision,
+      subgoal_id: gateScope.subgoalId,
+      risk_ids: [...gateScope.riskIds].map(String).sort(),
+      observation_id: gateScope.observationId,
+      fingerprint: gateScope.fingerprint,
+      decision_node_id: gateScope.decisionNodeId,
+      action_digest: gateScope.actionDigest,
     };
   }
 
@@ -503,6 +842,8 @@
       risk_ids: [...scope.risk_ids].sort(),
       observation_id: scope.observation_id,
       fingerprint: scope.fingerprint,
+      decision_node_id: scope.decision_node_id,
+      action_digest: scope.action_digest,
     });
   }
 
@@ -526,8 +867,11 @@
     if (externalImpacts.has(session.risk.currentExternalImpact) && !scope.risk_ids.length) {
       throw new Error("外部状态或未知影响步骤缺少 risk_ids，拒绝确认。");
     }
-    if (phase === "action" && (!scope.observation_id || !scope.fingerprint)) {
-      throw new Error("当前动作确认缺少 observation_id 或 fingerprint。");
+    if (phase === "action" && (
+      !scope.observation_id || !scope.fingerprint
+      || !scope.decision_node_id || !scope.action_digest
+    )) {
+      throw new Error("当前动作确认缺少 observation_id、fingerprint、decision_node_id 或 action_digest。");
     }
     return { scope, phase, consumed: false };
   }
@@ -550,6 +894,8 @@
     if (grant.phase !== "risk") {
       confirmation.observation_id = grant.scope.observation_id;
       confirmation.fingerprint = grant.scope.fingerprint;
+      confirmation.decision_node_id = grant.scope.decision_node_id;
+      confirmation.action_digest = grant.scope.action_digest;
     }
     return {
       confirmed: true,

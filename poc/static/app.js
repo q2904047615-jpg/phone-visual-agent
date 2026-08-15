@@ -139,6 +139,27 @@ function confidenceLabel(value) {
   return Number.isFinite(number) ? `${Math.round(number * 100)}%` : "—";
 }
 
+function targetRegionLabel(value) {
+  const region = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const parts = [];
+  if (region.kind) parts.push(`kind=${region.kind}`);
+  if (region.element_id) parts.push(`element_id=${region.element_id}`);
+  if (region.destination_element_id) parts.push(`destination_element_id=${region.destination_element_id}`);
+  return parts.join(" · ") || "结构化区域已绑定";
+}
+
+function publicEvidenceSummary(value) {
+  const count = Array.isArray(value) ? value.filter(Boolean).length : 0;
+  return count ? `已保存 ${count} 项本地证据（路径不在控制台显示）` : "—";
+}
+
+function controllerGateLabel(gate) {
+  const value = gate || {};
+  return value.reason || value.policyVersion || value.canonicalClass
+    ? `${value.allowed ? "允许" : "阻止"} · ${value.reason || value.canonicalClass || value.policyVersion}`
+    : "旧记录未提供";
+}
+
 function planState(subgoal, view) {
   if (subgoal.id === view.currentSubgoal.id) return "current";
   if (["done", "completed", "succeeded"].includes(subgoal.status)) return "done";
@@ -186,10 +207,6 @@ function renderGoalAndPlan() {
     return;
   }
 
-  const gateScope = view.risk.confirmationGate.scope || {};
-  const gateScopeText = gateScope.taskId
-    ? `scope ${gateScope.sessionId || view.sessionId || "—"} / ${gateScope.taskId} / ${gateScope.deviceId || "—"} / r${gateScope.revision ?? "—"} / ${gateScope.subgoalId || "—"}`
-    : "";
   goalElement.className = "goal-summary";
   goalElement.innerHTML = `
     <div class="goal-title-row">
@@ -206,8 +223,8 @@ function renderGoalAndPlan() {
       ${view.completionConditions.map(item => `<span>完成 · ${escapeHtml(item)}</span>`).join("")}
       <span>确认门 · ${escapeHtml(view.risk.confirmationGate.state)} · required=${view.risk.confirmationGate.required ? "true" : "false"} · external_allowed=${view.risk.confirmationGate.externalStateActionAllowed ? "true" : "false"}</span>
       <span>影响等级 · ${escapeHtml(view.risk.currentExternalImpact)}</span>
-      <span>本地策略 · ${view.controllerGate.allowed ? "允许" : "阻止"} · ${escapeHtml(view.controllerGate.reason || "尚未判定")}</span>
-      ${gateScopeText ? `<span>${escapeHtml(gateScopeText)}</span>` : ""}
+      <span>本地策略 · ${escapeHtml(controllerGateLabel(view.controllerGate))}</span>
+      <span>确认作用域 · ${escapeHtml(view.scopeState.state)} · ${escapeHtml(view.scopeState.reason || "—")}</span>
       ${view.risk.actions.map(item => `<span>风险 ${escapeHtml(item.id)} · ${escapeHtml(item.description)}</span>`).join("")}
     </div>`;
 
@@ -240,24 +257,78 @@ function renderTrace() {
   const view = sessionView();
   const trace = document.querySelector("#traceList");
   const count = document.querySelector("#traceCount");
-  count.textContent = `${view?.history.length || 0} 条`;
+  count.textContent = `${view?.executionTrace.length || 0} 个轮次`;
   if (!view) {
     trace.className = "trace-list empty-state";
     trace.textContent = "还没有执行记录。每次观察、确认、动作和验证都会显示在这里。";
     return;
   }
-  const rows = view.history.slice().reverse().map(item => `
-    <article class="trace-item">
+  const transitionNames = {
+    advance: "推进",
+    replan: "重规划",
+    advance_or_replan: "推进 / 重规划",
+    blocked: "阻止",
+    stopped: "停止",
+    awaiting_confirmation: "等待动作确认",
+    awaiting_risk_confirmation: "等待风险确认",
+    observing: "观察中",
+    unknown: "旧记录未提供",
+  };
+  const outcomeNames = {
+    matched: "符合预期",
+    mismatched: "不符合预期",
+    uncertain: "结果不确定",
+    not_executed: "尚未执行",
+    awaiting_next_action: "等待下一动作",
+    terminal: "终态检查点",
+    unknown: "旧记录未提供",
+  };
+  const scopeNames = {
+    active: "当前有效",
+    consumed: "已消费",
+    stale: "已失效",
+    invalidated: "已停止并失效",
+    missing: "缺少作用域",
+    none: "无需确认",
+    unknown: "旧记录未提供",
+  };
+  const rows = view.executionTrace.slice().reverse().map(item => {
+    const gate = item.controllerGate || {};
+    const verification = item.verification || {};
+    const transition = item.transition || {};
+    const scopeState = item.scopeState || { state: "none", reason: "" };
+    const gateText = gate.reason || gate.policyVersion || gate.canonicalClass
+      ? `${gate.allowed ? "允许" : "阻止"}${gate.canonicalClass ? ` · ${gate.canonicalClass}` : ""}`
+      : "旧记录未提供";
+    const observationText = item.observation?.id || item.observation?.fingerprint
+      ? `${item.observation.id || "—"} / ${item.observation.fingerprint || "—"}`
+      : "旧记录未提供";
+    const afterObservationText = verification.afterObservationId || verification.afterFingerprint
+      ? `${verification.afterObservationId || "—"} / ${verification.afterFingerprint || "—"}`
+      : "—";
+    const transitionLabel = transitionNames[transition.kind] || transition.kind || "旧记录未提供";
+    return `
+    <article class="trace-item ${item.phase === "current" ? "current-trace" : ""}" data-trace-phase="${escapeHtml(item.phase)}">
       <div class="trace-marker"></div>
       <div>
-        <div class="trace-title"><strong>步骤 ${escapeHtml(item.stepNumber)} · ${escapeHtml(actionLabel(item.action))}</strong><time>${item.physicalActions} 个物理动作</time></div>
-        <p>${escapeHtml(item.reason)}</p>
-        <small>目标：${escapeHtml(item.action.semanticTarget)} · 验证：${escapeHtml(item.completionEvidence.join("；") || "已保存动作后画面")}</small>
-        <small>证据：${escapeHtml(item.evidence.join("；") || "—")}</small>
+        <div class="trace-title"><strong>步骤 ${escapeHtml(item.stepNumber)} · revision ${escapeHtml(item.graphRevision ?? "—")}</strong><time>physical_actions ${escapeHtml(item.physicalActions)}</time></div>
+        <p><b>当前子目标</b> ${escapeHtml(item.subgoal || "—")}${item.subgoalId ? ` · ${escapeHtml(item.subgoalId)}` : ""}</p>
+        <div class="trace-grid">
+          <span><b>动作前观察</b>${escapeHtml(observationText)}</span>
+          <span><b>Qwen 唯一动作</b>${escapeHtml(item.action?.status || "unknown")} · ${escapeHtml(actionLabel(item.action))} · ${escapeHtml(item.action?.semanticTarget || "—")}</span>
+          <span><b>Controller gate</b>${escapeHtml(gateText)}${gate.reason ? ` · ${escapeHtml(gate.reason)}` : ""}</span>
+          <span><b>动作后验证</b>${escapeHtml(outcomeNames[verification.outcome] || verification.outcome || "旧记录未提供")} · ${escapeHtml(afterObservationText)}</span>
+          <span><b>任务图去向</b>${escapeHtml(transitionLabel)}${transition.trigger ? ` · ${escapeHtml(transition.trigger)}` : ""}${transition.toRevision !== null && transition.toRevision !== undefined ? ` · r${escapeHtml(transition.fromRevision ?? "—")}→r${escapeHtml(transition.toRevision)}` : ""}</span>
+          <span class="scope-state ${escapeHtml(scopeState.state)}"><b>确认作用域</b>${escapeHtml(scopeNames[scopeState.state] || scopeState.state)}${scopeState.reason ? ` · ${escapeHtml(scopeState.reason)}` : ""}</span>
+        </div>
+        ${(verification.errors || []).length ? `<small>验证/阻止原因：${escapeHtml(verification.errors.join("；"))}</small>` : ""}
+        ${transition.reason ? `<small>推进/重规划原因：${escapeHtml(transition.reason)}</small>` : ""}
+        ${(verification.evidence || item.evidence || []).length ? `<small>证据：${escapeHtml(publicEvidenceSummary(verification.evidence || item.evidence))}</small>` : ""}
       </div>
-    </article>`).join("");
+    </article>`;
+  }).join("");
   trace.className = "trace-list";
-  trace.innerHTML = rows || `<article class="trace-item observation-only"><div class="trace-marker"></div><div><div class="trace-title"><strong>目标已理解，初始画面已观察</strong><time>0 个物理动作</time></div><p>正在等待当前一步确认。</p></div></article>`;
+  trace.innerHTML = rows || `<article class="trace-item observation-only"><div class="trace-marker"></div><div><div class="trace-title"><strong>目标已理解，初始画面已观察</strong><time>physical_actions 0</time></div><p>正在等待当前一步确认。</p></div></article>`;
 }
 
 function renderScene() {
@@ -276,8 +347,13 @@ function renderScene() {
     <span><b>页面</b><em>${escapeHtml(view.scene.summary)}</em></span>
     <span><b>稳定性</b><em>${view.scene.stable ? "稳定" : "不稳定"}</em></span>
     <span><b>置信度</b><em>${escapeHtml(confidenceLabel(view.scene.confidence))}</em></span>
+    <span><b>任务图 / 子目标</b><em>r${escapeHtml(view.taskGraph.revision ?? "—")} · ${escapeHtml(view.currentSubgoal.id || "—")}</em></span>
+    <span><b>observation_id</b><em>${escapeHtml(view.executionTrace.at(-1)?.observation?.id || "—")}</em></span>
+    <span><b>fingerprint</b><em>${escapeHtml(view.executionTrace.at(-1)?.observation?.fingerprint || "—")}</em></span>
     <span><b>累计动作</b><em>${escapeHtml(view.physicalActions)}</em></span>
-    <span><b>证据</b><em>${escapeHtml(view.evidence.join("；") || "—")}</em></span>`;
+    <span><b>确认作用域</b><em>${escapeHtml(view.scopeState.state)} · ${escapeHtml(view.scopeState.reason || "—")}</em></span>
+    <span><b>停止状态</b><em>${escapeHtml(view.stopState.stopped ? `${view.stopState.status} · ${view.stopState.reason}` : "active")}</em></span>
+    <span><b>证据</b><em>${escapeHtml(publicEvidenceSummary(view.evidence))}</em></span>`;
 }
 
 function renderAction() {
@@ -298,13 +374,11 @@ function renderAction() {
   const action = view.visualAction;
   const riskPhase = view.status === "awaiting_risk_confirmation"
     || view.risk.confirmationGate.phase === "risk";
+  const staleScope = ["awaiting_confirmation", "awaiting_risk_confirmation"].includes(view.status)
+    && view.scopeState.state !== "active";
   const highAttention = view.risk.hasCurrentRisk || view.risk.accountEffectPossible;
   const riskSummary = view.risk.currentActions.map(item => `${item.id}：${item.description}`).join("；");
-  const actionMetadata = [
-    "qwen-visual-decision-v2",
-    "qwen-visual-decision-v3",
-    "qwen-visual-decision-v4",
-  ].includes(action.protocol)
+  const actionMetadata = String(action.protocol || "").startsWith("qwen-visual-decision-v")
     ? `<div class="action-metadata">
          <span>${escapeHtml(action.protocolVersion || "qwen-v2")}</span>
          <span>status ${escapeHtml(action.status)}</span>
@@ -330,23 +404,27 @@ function renderAction() {
            <p>${escapeHtml(action.reason)}</p>${actionMetadata}`
         : view.status === "paused_after_action"
       ? `<h3>上一步已完成并重新观察</h3><p>网页将依据新画面决定是否发起下一次单动作请求。</p>`
-      : `<div class="next-action-title"><span>${escapeHtml(action.actionType ? actionLabel(action) : decisionStatusNames[action.status] || "等待唯一动作")}</span>${riskPhase ? '<b class="risk-tag">需要风险范围确认</b>' : view.status === "awaiting_confirmation" ? `<b class="${highAttention ? "risk-tag" : "safe-tag"}">需要当前动作确认</b>` : '<b class="safe-tag">受限单步</b>'}</div>
+      : `<div class="next-action-title"><span>${escapeHtml(action.actionType ? actionLabel(action) : decisionStatusNames[action.status] || "等待唯一动作")}</span>${staleScope ? '<b class="risk-tag">旧确认已失效</b>' : riskPhase ? '<b class="risk-tag">需要风险范围确认</b>' : view.status === "awaiting_confirmation" ? `<b class="${highAttention ? "risk-tag" : "safe-tag"}">需要当前动作确认</b>` : '<b class="safe-tag">受限单步</b>'}</div>
          <h3>${escapeHtml(view.currentSubgoal.label)}</h3>
          <div class="action-target">语义目标 · ${escapeHtml(action.semanticTarget)}${action.elementId ? ` · element_id ${escapeHtml(action.elementId)}` : ""}</div>
          <div class="action-facts">
-           <span><b>目标区域</b>${escapeHtml(Protocol.displayValue(action.targetRegion))}</span>
+           <span><b>目标区域</b>${escapeHtml(targetRegionLabel(action.targetRegion))}</span>
            <span><b>预期变化</b>${escapeHtml(Protocol.displayValue(action.expectedChange))}</span>
            <span><b>动作置信度</b>${escapeHtml(confidenceLabel(action.confidence))}</span>
-           <span><b>本地策略</b>${view.controllerGate.allowed ? "允许" : "阻止"} · ${escapeHtml(view.controllerGate.reason || "尚未判定")}</span>
+           <span><b>本地策略</b>${escapeHtml(controllerGateLabel(view.controllerGate))}</span>
          </div>
          <p>${escapeHtml(action.reason || riskSummary || "等待 Qwen 生成唯一下一视觉动作。")}</p>
          ${riskSummary ? `<small>当前风险：${escapeHtml(riskSummary)}</small>` : ""}
          ${actionMetadata}
-         <small>确认绑定当前任务、revision、子目标、risk_ids、observation_id 和 fingerprint；动作后必须重新观察。</small>`);
+          <small>${staleScope ? `当前作用域不可执行：${escapeHtml(view.scopeState.reason || "任务或画面已变化")}；必须重新观察。` : "后端 scope 与当前权威任务、观察和动作字段一致；本次只允许一个动作，之后必须重新观察。"}</small>`);
 
   const disabled = state.busy || state.paused ? "disabled" : "";
   if (view.isTerminal || ["finished", "blocked"].includes(action.status)) {
     controls.innerHTML = "";
+  } else if (staleScope) {
+    controls.innerHTML = `
+      <button id="nextSupervisedAgent" class="primary-button" ${disabled}>旧确认已失效 · 重新观察</button>
+      <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
   } else if (view.risk.requiresConfirmation || view.status === "awaiting_confirmation") {
     controls.innerHTML = `
       <button id="reviewAction" class="${riskPhase || highAttention ? "risk-button" : "primary-button"}" ${disabled}>${riskPhase ? "查看风险范围并确认" : "确认当前动作"}</button>
@@ -802,10 +880,10 @@ function openRiskDialog() {
   document.querySelector("#riskExpected").textContent = Protocol.displayValue(view.visualAction.expectedChange);
   document.querySelector("#riskDevice").textContent = lockedSessionDeviceId();
   document.querySelector("#riskWarning").textContent = riskPhase
-    ? `本次仅允许 Qwen 针对 session=${view.sessionId}、task=${view.taskId}、revision=${view.revision ?? "—"}、subgoal=${view.currentSubgoal.id}、risk_ids=${view.risk.riskIds.join(",") || "—"} 观察并提出一个动作；此确认本身不会触发机械臂。具体动作产生后仍需再次确认。`
+    ? "后端风险 scope 与当前权威任务字段一致；本次只允许 Qwen 观察并提出一个动作，不触发机械臂。具体动作产生后仍需再次确认。"
     : highAttention
-    ? `确认只授权 session=${view.sessionId}、task=${view.taskId}、revision=${view.revision ?? "—"}、subgoal=${view.currentSubgoal.id}、risk_ids=${view.risk.riskIds.join(",") || "—"}、observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 的当前一步；任何字段变化都必须重新确认。`
-    : `确认只授权 session=${view.sessionId}、observation_id=${view.visualAction.observationId || "—"}、fingerprint=${view.visualAction.fingerprint || "—"} 对应的一个动作。执行后必须重新观察。`;
+    ? "后端动作 scope 与当前权威任务、观察和动作字段一致；本次只授权当前一个动作，任何字段变化都必须重新确认。"
+    : "后端动作 scope 与当前权威任务、观察和动作字段一致；本次只授权一个动作，执行后必须重新观察。";
   document.querySelector("#confirmRiskAction").className = highAttention ? "danger-confirm" : "primary-button";
   document.querySelector("#riskDialog").showModal();
 }

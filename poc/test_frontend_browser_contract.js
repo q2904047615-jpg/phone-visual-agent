@@ -54,6 +54,8 @@ function externalActionSession() {
     ...session.risk_confirmation_scope,
     observation_id: "obs_0123456789abcdef0123456789abcdef",
     fingerprint: "51277d0d9e6f986b00dc",
+    decision_node_id: "qwen_visual_revision_1",
+    action_digest: "a".repeat(64),
   };
   session.confirmation_ready = true;
   return session;
@@ -99,6 +101,8 @@ function safeActionSession(decisionStatus = "action") {
       risk_ids: [],
       observation_id: "obs_0123456789abcdef0123456789abcdef",
       fingerprint: "51277d0d9e6f986b00dc",
+      decision_node_id: "qwen_visual_revision_1",
+      action_digest: "a".repeat(64),
     } : null,
     confirmation_ready: decisionStatus === "action",
     physical_actions: 0,
@@ -455,7 +459,7 @@ test("browser renders controller evidence and confirms one exact observation", {
     assert.match(goalText, /2026-08-11-deepseek-task-graph-v3/);
     assert.match(goalText, /revision 1/);
     assert.match(goalText, /会话 · session-browser-action/);
-    assert.match(goalText, /scope session-browser-action \/ task-map-001 \/ phone-01 \/ r1 \/ locate_target/);
+    assert.match(goalText, /确认作用域 · active · 后端 scope 与当前权威任务、观察和动作字段一致/);
     assert.match(goalText, /phone-01/);
     assert.match(goalText, /地图 \(maps\)/);
     assert.match(goalText, /不要发起导航/);
@@ -491,9 +495,8 @@ test("browser renders controller evidence and confirms one exact observation", {
 
     await page.locator("#reviewAction").click();
     const warning = await page.locator("#riskWarning").innerText();
-    assert.match(warning, /session=session-browser-action/);
-    assert.match(warning, /obs_0123456789abcdef0123456789abcdef/);
-    assert.match(warning, /51277d0d9e6f986b00dc/);
+    assert.match(warning, /后端动作 scope 与当前权威任务、观察和动作字段一致/);
+    assert.doesNotMatch(warning, /action_digest|fingerprint=/);
     const confirmResponse = page.waitForResponse(
       response => response.url().endsWith("/confirm"),
       { timeout: 5000 },
@@ -513,6 +516,8 @@ test("browser renders controller evidence and confirms one exact observation", {
         risk_ids: [],
         observation_id: "obs_0123456789abcdef0123456789abcdef",
         fingerprint: "51277d0d9e6f986b00dc",
+        decision_node_id: "qwen_visual_revision_1",
+        action_digest: "a".repeat(64),
       },
     });
     assert.match(await page.locator("#sceneMeta").innerText(), /累计动作\s*1/);
@@ -575,11 +580,11 @@ test("external-state graph requires risk approval before exact action confirmati
     assert.match(goalText, /确认门 · awaiting_risk_confirmation/);
     assert.match(goalText, /required=true/);
     assert.match(goalText, /风险 save_place · 保存目标地点/);
-    assert.match(goalText, /scope session-browser-external \/ task-map-001 \/ phone-01 \/ r1 \/ save_target/);
+    assert.match(goalText, /确认作用域 · active · 后端 scope 与当前权威任务、观察和动作字段一致/);
     assert.match(await page.locator("#actionContent").innerText(), /Qwen 唯一动作尚未产生/);
     await page.locator("#reviewAction").click();
-    assert.match(await page.locator("#riskWarning").innerText(), /session=session-browser-external/);
-    assert.match(await page.locator("#riskWarning").innerText(), /此确认本身不会触发机械臂/);
+    assert.match(await page.locator("#riskWarning").innerText(), /后端风险 scope 与当前权威任务字段一致/);
+    assert.match(await page.locator("#riskWarning").innerText(), /不触发机械臂/);
     const approvalResponse = page.waitForResponse(
       response => response.url().endsWith("/approve-risk"),
       { timeout: 5000 },
@@ -602,9 +607,7 @@ test("external-state graph requires risk approval before exact action confirmati
     });
     assert.equal(requests.confirm.length, 0);
     await page.locator("#reviewAction").click();
-    assert.match(await page.locator("#riskWarning").innerText(), /session=session-browser-external/);
-    assert.match(await page.locator("#riskWarning").innerText(), /obs_0123456789abcdef0123456789abcdef/);
-    assert.match(await page.locator("#riskWarning").innerText(), /51277d0d9e6f986b00dc/);
+    assert.match(await page.locator("#riskWarning").innerText(), /后端动作 scope 与当前权威任务、观察和动作字段一致/);
     assert.equal(requests.confirm.length, 0);
     assert.equal(await page.locator("#autoSupervisedAgent").count(), 0);
   } finally {

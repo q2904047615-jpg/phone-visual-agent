@@ -289,8 +289,17 @@ h3 { margin-bottom: 0; }
 .trace-title strong { font-size: 10px; }
 .trace-title time { color: var(--muted); font-size: 8px; }
 .trace-item p { margin: 4px 0; color: #b4bed5; font-size: 9px; line-height: 1.55; }
-.trace-item small { color: #65708c; font-size: 8px; }
+.trace-item small { display: block; margin-top: 5px; color: #65708c; font-size: 8px; line-height: 1.5; overflow-wrap: anywhere; }
 .observation-only .trace-marker { border-color: var(--blue); }
+.trace-item.current-trace { margin: 2px -7px; padding: 10px 7px; border: 1px solid rgba(125, 165, 255, .18); border-radius: 10px; background: rgba(125, 165, 255, .035); }
+.trace-item.current-trace .trace-marker { border-color: var(--blue); }
+.trace-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; margin-top: 6px; }
+.trace-grid span { min-width: 0; padding: 6px 7px; border-radius: 8px; color: #c5cee3; background: rgba(255, 255, 255, .025); font-size: 8px; line-height: 1.45; overflow-wrap: anywhere; }
+.trace-grid b { display: block; margin-bottom: 2px; color: var(--muted); font-size: 7px; text-transform: uppercase; letter-spacing: .03em; }
+.trace-grid .scope-state.active { color: var(--accent); background: rgba(126, 230, 196, .05); }
+.trace-grid .scope-state.stale,
+.trace-grid .scope-state.invalidated,
+.trace-grid .scope-state.missing { color: var(--warning); background: rgba(255, 202, 104, .055); }
 
 .preview-panel { padding-bottom: 15px; }
 .preview-wrap { position: relative; min-height: 390px; overflow: hidden; display: grid; place-items: center; border: 1px solid rgba(255, 255, 255, .06); border-radius: 14px; background: #03050a; }
@@ -395,6 +404,7 @@ dialog h2 { margin-bottom: 11px; font-size: 21px; }
   .command-actions .primary-button { width: 100%; }
   .preview-wrap { min-height: 280px; }
   .scene-meta { grid-template-columns: 1fr; }
+  .trace-grid, .action-facts { grid-template-columns: 1fr; }
   .capability-form { grid-template-columns: 1fr; }
   .capability-form .capability-goal, .capability-form button { grid-column: auto; }
   .capability-evidence { grid-template-columns: repeat(2, minmax(0, 1fr)); }

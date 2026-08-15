@@ -2368,7 +2368,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         status = GenericSceneObserver(FakeProvider(scene_payload())).status()
         self.assertEqual(status["compact_output_tokens"], 1200)
         self.assertEqual(status["observation_timeout_seconds"], 60.0)
-        self.assertEqual(status["max_compact_elements"], 12)
+        self.assertEqual(status["max_compact_elements"], 6)
         self.assertEqual(status["current_stage"], "idle")
 
 

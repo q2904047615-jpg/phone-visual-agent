@@ -39,7 +39,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v17"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v18"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1200
@@ -49,7 +49,7 @@ SYSTEM_UI_AUDIT_TOKENS = 600
 ORIENTATION_AUDIT_TOKENS = 500
 MIN_SYSTEM_UI_AUDIT_CONFIDENCE = 0.80
 OBSERVATION_TIMEOUT_SECONDS = 60.0
-MAX_COMPACT_ELEMENTS = 12
+MAX_COMPACT_ELEMENTS = 6
 
 STAGE_LABELS = {
     "idle": "空闲",
@@ -1078,11 +1078,13 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 用最短JSON报告：当前前台App、页面类型、最上层弹层，以及与目标直接相关的可见控件。
 规则：
 1. 桌面写 launcher；不确定写 unknown。不得把目标App当成当前App。
-2. elements最多{MAX_COMPACT_ELEMENTS}个，只保留目标相关控件、关闭/返回、当前输入框和必要导航。
+2. elements最多{MAX_COMPACT_ELEMENTS}个。必须先报告目标相关控件和当前输入框，
+   再报告关闭/返回与必要导航；省略新闻、商品、图片、标签组等无关内容。
 3. bounds使用0..1000的[left,top,right,bottom]，必须只框真实清晰控件。
 4. role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
 5. meaning用lower_snake_case。与目标直接相关的控件在states中写goal_relevant:true。
-6. evidence只抄画面短文字或明确外观。看不清就降低confidence或省略元素。
+6. 每个element的evidence最多一条不超过40个字的画面短文字或明确外观。
+   summary不超过60个字。看不清就降低confidence或省略元素。
 7. 禁止action、plan、step、tap、swipe、command、coordinates等动作字段。
    overlays只允许简短字符串名称；任何带边界、角色或ID的可交互候选必须放入elements，
    不得把对象放入overlays。

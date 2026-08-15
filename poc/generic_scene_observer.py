@@ -39,7 +39,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v21"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v22"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1200
@@ -213,6 +213,9 @@ class GenericSceneObserver:
                 "max_compact_elements": MAX_COMPACT_ELEMENTS,
                 "last_scene_enum_values": dict(
                     self.last_diagnostics.get("scene_enum_values") or {}
+                ),
+                "last_input_structure_shape": dict(
+                    self.last_diagnostics.get("input_structure_shape") or {}
                 ),
                 "last_orientation_audit_diagnostics": dict(
                     self.last_orientation_audit_diagnostics
@@ -720,6 +723,10 @@ class GenericSceneObserver:
             base["scene_enum_values"] = _scene_enum_values(
                 self.last_raw_response
             )
+            if input_structure_audit_used:
+                base["input_structure_shape"] = _input_structure_diagnostic_shape(
+                    self.last_raw_response
+                )
             self.last_diagnostics = base
             raise
         finally:
@@ -2590,6 +2597,33 @@ def _is_incomplete_optional_keyboard_mode_switch(value: Any) -> bool:
         "target_mode",
     }
     return isinstance(value, dict) and set(value) < required
+
+
+def _input_structure_diagnostic_shape(raw: str) -> dict[str, Any]:
+    """Return bounded field names and types without retaining observed text."""
+
+    try:
+        payload = _extract_json_object(raw)
+    except Exception:
+        return {"parseable": False}
+    result: dict[str, Any] = {
+        "parseable": True,
+        "top_level_keys": sorted(str(key)[:80] for key in payload),
+    }
+    keyboard = payload.get("keyboard")
+    result["keyboard_type"] = type(keyboard).__name__
+    if not isinstance(keyboard, dict):
+        return result
+    result["keyboard_keys"] = sorted(str(key)[:80] for key in keyboard)
+    mode_switch = keyboard.get("mode_switch")
+    result["mode_switch_type"] = type(mode_switch).__name__
+    if isinstance(mode_switch, dict):
+        result["mode_switch_keys"] = sorted(str(key)[:80] for key in mode_switch)
+        result["mode_switch_value_types"] = {
+            str(key)[:80]: type(value).__name__
+            for key, value in sorted(mode_switch.items(), key=lambda item: str(item[0]))
+        }
+    return result
 
 
 def _keyboard_mode_implied_by_label(label: str) -> str | None:

@@ -15,6 +15,7 @@ from generic_scene_observer import (
     _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES,
     _MAX_JSON_STRUCTURAL_REPAIR_CHARS,
     _camera_layout_orientation,
+    _input_structure_diagnostic_shape,
     _parse_scene_after_unique_structural_edit,
     _parse_scene,
     _scene_enum_values,
@@ -2224,13 +2225,36 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         audit["application_inputs"][0]["visible_editable_cues"] = ["caret"]
 
+        observer = GenericSceneObserver(SequenceProvider([empty, empty, audit]))
         with self.assertRaisesRegex(VisionAgentError, "mode_switch.*字段"):
-            GenericSceneObserver(
-                SequenceProvider([empty, empty, audit])
-            ).observe(
+            observer.observe(
                 frames=stable_frames(),
                 goal_context={"objective": "让当前唯一空白输入框显示 agent，不提交"},
             )
+        self.assertEqual(
+            ["action", "bounds", "confidence", "current_mode", "label"],
+            observer.status()["last_input_structure_shape"]["mode_switch_keys"],
+        )
+        self.assertNotIn(
+            "agent",
+            json.dumps(
+                observer.status()["last_input_structure_shape"],
+                ensure_ascii=False,
+            ),
+        )
+
+    def test_input_structure_shape_never_retains_observed_text(self) -> None:
+        audit = input_audit_payload(
+            application_inputs=[audited_application_input(text="privatevalue")],
+        )
+
+        shape = _input_structure_diagnostic_shape(
+            json.dumps(audit, ensure_ascii=False)
+        )
+
+        self.assertTrue(shape["parseable"])
+        self.assertEqual("NoneType", shape["mode_switch_type"])
+        self.assertNotIn("privatevalue", json.dumps(shape, ensure_ascii=False))
 
     def test_text_entry_does_not_discard_incomplete_switch_without_direct_latin(self) -> None:
         empty = scene_payload()

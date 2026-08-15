@@ -2419,6 +2419,49 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
         self.assertEqual([440, 0, 1000, 420], observer.last_diagnostics["targeted_roi_bounds"])
         self.assertEqual("refresh", scene.unique_trusted_goal_element().element_id)
+        targeted_prompt = json.dumps(provider.messages_seen[1], ensure_ascii=False)
+        self.assertIn("一个element只能紧框一个", targeted_prompt)
+        self.assertIn("相邻非目标图标", targeted_prompt)
+
+    def test_low_confidence_clipped_goal_element_still_refines(self) -> None:
+        first = scene_payload()
+        first["elements"] = [
+            {
+                "element_id": "uncertain_refresh",
+                "role": "icon",
+                "meaning": "reload",
+                "label": "圆形箭头图标",
+                "bounds": [750, 0, 850, 50],
+                "confidence": 0.65,
+                "states": {"goal_relevant": True, "fully_visible": False},
+                "evidence": ["局部图中疑似刷新控件"],
+            }
+        ]
+        refined = scene_payload()
+        refined["elements"] = [
+            {
+                "element_id": "refresh",
+                "role": "button",
+                "meaning": "reload",
+                "label": "刷新",
+                "bounds": [820, 10, 875, 55],
+                "confidence": 0.96,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["完整圆形箭头与相邻书签图标可区分"],
+            }
+        ]
+        provider = SequenceProvider([first, refined])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "顶部右侧圆形箭头对应的页面重新加载已完成"},
+        )
+
+        self.assertEqual(2, provider.calls)
+        self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
+        self.assertEqual([440, 0, 1000, 420], observer.last_diagnostics["targeted_roi_bounds"])
+        self.assertEqual("refresh", scene.unique_trusted_goal_element().element_id)
 
     def test_text_entry_does_not_discard_incomplete_switch_without_direct_latin(self) -> None:
         empty = scene_payload()

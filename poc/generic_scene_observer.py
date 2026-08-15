@@ -39,7 +39,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v24"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v25"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1200
@@ -1173,6 +1173,12 @@ def _targeted_prompt(
 应用入口可形成高可信观察，即使应用尚未打开。模糊、遮挡或不唯一时仍必须降低，禁止虚增。
 目标相关控件确实不存在时返回空elements，但只要页面事实清楚稳定，场景confidence仍应保持高值；
 不得因为系统级动作没有屏内按钮、或因为未找到目标控件，就把清晰页面写成低置信。
+若目标是图标且高清局部内存在两个或以上相邻图标，必须逐个区分图标语义：一个element只能紧框一个
+完整图标，绝不能把工具栏、图标组或相邻图标合成同一bounds。目标图标与相邻非目标图标可明确区分时，
+只把目标写goal_relevant:true，相邻图标写false或省略；证据必须说明看见的目标字面图形以及与相邻图标
+的区别。fully_visible只评价目标图标自身在完整原图中的四边是否都可见，不能因为工具栏贴近画面边缘就
+把完整图标写false，也不能因为高清局部放大而把原图中真实被裁切的图标写true。无法逐个紧框、无法
+区分语义或目标自身任一边被裁切时，不得输出可操作目标。
     输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
     输入框文字与键盘规则：{INPUT_VALUE_OBSERVATION_RULE}
 如果能清楚看见相关横向边框、框内文字和右侧独立搜索/提交按钮，但仍无法判断边框是否可编辑，
@@ -2944,8 +2950,24 @@ def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
         return False
     if scene.confidence < 0.72:
         return True
-    if any(element.states.get("goal_relevant") is True for element in scene.elements):
+    goal_elements = [
+        element
+        for element in scene.elements
+        if element.states.get("goal_relevant") is True
+    ]
+    if any(
+        element.confidence >= 0.72
+        and element.states.get("fully_visible") is not False
+        for element in goal_elements
+    ):
         return False
+    if goal_elements:
+        # A compact pass may notice only a clipped or low-confidence target.
+        # That is evidence to inspect more closely, never evidence to act on or
+        # a reason to skip the existing goal-directed refinement. Input goals
+        # keep their stricter dedicated structure audit instead of spending
+        # this generic refinement on a clipped field shell.
+        return not _goal_requests_input(context)
     if scene.screen_id == "unknown":
         return True
 

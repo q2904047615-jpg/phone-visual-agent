@@ -804,6 +804,39 @@ class UniversalActionController:
         )
         if len(after_targets) == 1 and after_targets[0].states != before_target.states:
             return
+        result_markers = (
+            "verification",
+            "status",
+            "result",
+            "outcome",
+            "feedback",
+            "验证",
+            "状态",
+            "结果",
+            "反馈",
+        )
+        new_structured_results = tuple(
+            element
+            for element in after.elements
+            if element.role in {"text", "button", "icon"}
+            and element.states.get("goal_relevant") is True
+            and element.states.get("fully_visible") is True
+            and float(element.confidence) >= self.min_confidence
+            and bool(str(element.label or "").strip())
+            and bool(element.evidence)
+            and any(
+                marker in str(element.meaning or "").casefold()
+                for marker in result_markers
+            )
+            and not any(
+                prior.role == element.role
+                and prior.meaning == element.meaning
+                and prior.label == element.label
+                for prior in before.elements
+            )
+        )
+        if len(new_structured_results) == 1:
+            return
         expected = resolved.expected_effect
         if self._element_state_transition_expected(expected, before):
             return

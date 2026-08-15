@@ -1003,6 +1003,42 @@ class UISceneTests(unittest.TestCase):
         with self.assertRaisesRegex(UniversalActionError, "长按后缺少"):
             UniversalActionController().verify_after_action(resolved, before, unrelated)
 
+        structured_result = scene(
+            replace(
+                item,
+                role="container",
+                bounds=(0.1, 0.5, 0.9, 0.75),
+            ),
+            element(
+                "status",
+                "verification_status",
+                role="text",
+                states={"goal_relevant": True, "fully_visible": True},
+            ),
+            fingerprint="after-result",
+        )
+        UniversalActionController().verify_after_action(
+            resolved,
+            before,
+            structured_result,
+        )
+
+        unrelated_goal_text = scene(
+            element(
+                "other",
+                "help_copy",
+                role="text",
+                states={"goal_relevant": True, "fully_visible": True},
+            ),
+            fingerprint="after-unrelated-text",
+        )
+        with self.assertRaisesRegex(UniversalActionError, "长按后缺少"):
+            UniversalActionController().verify_after_action(
+                resolved,
+                before,
+                unrelated_goal_text,
+            )
+
         overlay = UIScene(
             app_id="calculator",
             screen_id="home",

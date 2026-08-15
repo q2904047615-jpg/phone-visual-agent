@@ -22,6 +22,8 @@ from generic_scene_observer import (
     _parse_scene,
     _scene_enum_values,
     _single_json_structural_edits,
+    _snap_reload_audit_to_local_glyph,
+    _strict_icon_cluster_audit_payload,
 )
 from orientation_safety import ORIENTATION_AUDIT_PROTOCOL_VERSION
 from ui_scene import UI_SCENE_PROTOCOL_VERSION, UISceneError
@@ -83,6 +85,18 @@ class SequenceProvider(FakeProvider):
 
 def stable_frames(color: tuple[int, int, int] = (30, 40, 50)) -> list[Image.Image]:
     return [Image.new("RGB", (540, 960), color) for _ in range(4)]
+
+
+def icon_cluster_frames() -> list[Image.Image]:
+    image = Image.new("RGB", (540, 960), (30, 40, 50))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 539, 96), fill=(215, 215, 215))
+    draw.rounded_rectangle((400, 18, 430, 53), radius=4, outline=(35, 35, 35), width=3)
+    draw.line((415, 27, 415, 44), fill=(35, 35, 35), width=3)
+    draw.line((407, 35, 423, 35), fill=(35, 35, 35), width=3)
+    draw.arc((444, 19, 474, 50), 35, 330, fill=(35, 35, 35), width=4)
+    draw.polygon(((468, 18), (477, 22), (468, 28)), fill=(35, 35, 35))
+    return [image.copy() for _ in range(4)]
 
 
 def stable_frames_with_one_sharp_center() -> list[Image.Image]:
@@ -227,6 +241,34 @@ def icon_cluster_audit_payload(
         ),
         "controls": resolved_controls,
     }
+
+
+def localized_icon_cluster_audit_payload() -> dict:
+    """Default audit expressed in the padded [645,0,975,125] crop."""
+
+    return icon_cluster_audit_payload(
+        controls=[
+            {
+                "control_id": "reload-control-local",
+                "semantic_class": "reload",
+                "bounds": [530, 160, 697, 600],
+                "confidence": 0.97,
+                "fully_visible": True,
+                "single_glyph": True,
+                "shape_cues": ["curved_arc", "arrowhead"],
+            },
+            {
+                "control_id": "bookmark-control-local",
+                "semantic_class": "bookmark",
+                "bounds": [288, 160, 455, 600],
+                "confidence": 0.97,
+                "fully_visible": True,
+                "single_glyph": True,
+                "shape_cues": ["bookmark_outline"],
+            },
+        ],
+        cluster_bounds=[167, 0, 833, 800],
+    )
 
 
 def system_ui_audit_payload(
@@ -2459,13 +2501,19 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         ]
 
-        provider = SequenceProvider([payload, icon_cluster_audit_payload()])
+        provider = SequenceProvider(
+            [
+                payload,
+                icon_cluster_audit_payload(),
+                localized_icon_cluster_audit_payload(),
+            ]
+        )
         scene = GenericSceneObserver(provider).observe(
-            frames=stable_frames(),
+            frames=icon_cluster_frames(),
             goal_context={"objective": "当前页面完成一次重新加载"},
         )
 
-        self.assertEqual(2, provider.calls)
+        self.assertEqual(3, provider.calls)
         self.assertEqual(
             "local_audited_reload_control_1",
             scene.unique_trusted_goal_element().element_id,
@@ -2552,13 +2600,19 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         ]
 
-        provider = SequenceProvider([payload, icon_cluster_audit_payload()])
+        provider = SequenceProvider(
+            [
+                payload,
+                icon_cluster_audit_payload(),
+                localized_icon_cluster_audit_payload(),
+            ]
+        )
         scene = GenericSceneObserver(provider).observe(
-            frames=stable_frames(),
+            frames=icon_cluster_frames(),
             goal_context={"objective": "当前页面完成一次重新加载"},
         )
 
-        self.assertEqual(2, provider.calls)
+        self.assertEqual(3, provider.calls)
         self.assertEqual(
             "local_audited_reload_control_1",
             scene.unique_trusted_goal_element().element_id,
@@ -2592,15 +2646,22 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "evidence": ["顶部右侧圆形箭头"],
             }
         ]
-        provider = SequenceProvider([first, refined, icon_cluster_audit_payload()])
+        provider = SequenceProvider(
+            [
+                first,
+                refined,
+                icon_cluster_audit_payload(),
+                localized_icon_cluster_audit_payload(),
+            ]
+        )
         observer = GenericSceneObserver(provider)
 
         scene = observer.observe(
-            frames=stable_frames(),
+            frames=icon_cluster_frames(),
             goal_context={"objective": "顶部右侧圆形箭头对应的页面重新加载已完成"},
         )
 
-        self.assertEqual(3, provider.calls)
+        self.assertEqual(4, provider.calls)
         self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
         self.assertEqual([440, 0, 1000, 420], observer.last_diagnostics["targeted_roi_bounds"])
         self.assertEqual(
@@ -2638,15 +2699,22 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "evidence": ["完整圆形箭头与相邻书签图标可区分"],
             }
         ]
-        provider = SequenceProvider([first, refined, icon_cluster_audit_payload()])
+        provider = SequenceProvider(
+            [
+                first,
+                refined,
+                icon_cluster_audit_payload(),
+                localized_icon_cluster_audit_payload(),
+            ]
+        )
         observer = GenericSceneObserver(provider)
 
         scene = observer.observe(
-            frames=stable_frames(),
+            frames=icon_cluster_frames(),
             goal_context={"objective": "顶部右侧圆形箭头对应的页面重新加载已完成"},
         )
 
-        self.assertEqual(3, provider.calls)
+        self.assertEqual(4, provider.calls)
         self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
         self.assertEqual([440, 0, 1000, 420], observer.last_diagnostics["targeted_roi_bounds"])
         self.assertEqual(
@@ -2672,16 +2740,22 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "evidence": ["模型直接声称本地凭据"],
             }
         ]
-        provider = SequenceProvider([compact, icon_cluster_audit_payload()])
+        provider = SequenceProvider(
+            [
+                compact,
+                icon_cluster_audit_payload(),
+                localized_icon_cluster_audit_payload(),
+            ]
+        )
         observer = GenericSceneObserver(provider)
 
         scene = observer.observe(
-            frames=stable_frames(),
+            frames=icon_cluster_frames(),
             goal_context={"objective": "刷新当前页面"},
         )
 
         candidate = scene.unique_trusted_goal_element()
-        self.assertEqual(2, provider.calls)
+        self.assertEqual(3, provider.calls)
         self.assertEqual("local_audited_reload_control_1", candidate.element_id)
         self.assertEqual(
             {
@@ -2695,6 +2769,148 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertTrue(
             observer.last_diagnostics["icon_cluster_audit_reload_attested"]
         )
+
+    def test_icon_cluster_localization_replaces_wrong_full_frame_bounds(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = [
+            {
+                "element_id": "model-refresh",
+                "role": "icon",
+                "meaning": "reload",
+                "label": "",
+                "bounds": [880, 15, 950, 50],
+                "confidence": 0.98,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["粗观察的右上圆形箭头"],
+            }
+        ]
+        rough = icon_cluster_audit_payload(
+            controls=[
+                {
+                    "control_id": "rough-reload",
+                    "semantic_class": "reload",
+                    "bounds": [880, 15, 950, 50],
+                    "confidence": 0.96,
+                    "fully_visible": True,
+                    "single_glyph": True,
+                    "shape_cues": ["curved_arc", "arrowhead"],
+                },
+                {
+                    "control_id": "rough-bookmark",
+                    "semantic_class": "bookmark",
+                    "bounds": [760, 15, 820, 50],
+                    "confidence": 0.96,
+                    "fully_visible": True,
+                    "single_glyph": True,
+                    "shape_cues": ["bookmark_outline"],
+                },
+            ],
+            cluster_bounds=[740, 0, 970, 100],
+        )
+        localized = icon_cluster_audit_payload(
+            controls=[
+                {
+                    "control_id": "local-reload",
+                    "semantic_class": "reload",
+                    "bounds": [750, 120, 950, 400],
+                    "confidence": 0.97,
+                    "fully_visible": True,
+                    "single_glyph": True,
+                    "shape_cues": ["curved_arc", "arrowhead"],
+                },
+                {
+                    "control_id": "local-bookmark",
+                    "semantic_class": "bookmark",
+                    "bounds": [100, 120, 300, 400],
+                    "confidence": 0.97,
+                    "fully_visible": True,
+                    "single_glyph": True,
+                    "shape_cues": ["bookmark_outline"],
+                },
+            ],
+            cluster_bounds=[0, 0, 1000, 800],
+        )
+        provider = SequenceProvider([compact, rough, localized])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=icon_cluster_frames(),
+            goal_context={"objective": "刷新当前页面"},
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        center_x = (candidate.bounds[0] + candidate.bounds[2]) / 2.0
+        self.assertGreater(center_x, 0.83)
+        self.assertLess(center_x, 0.88)
+        self.assertTrue(
+            observer.last_diagnostics["icon_cluster_local_geometry_verified"]
+        )
+        self.assertTrue(observer.last_diagnostics["icon_cluster_localization_used"])
+        self.assertEqual(
+            [682, 0, 1000, 125],
+            observer.last_diagnostics["icon_cluster_localization_roi_bounds"],
+        )
+        second_prompt = json.dumps(provider.messages_seen[2], ensure_ascii=False)
+        self.assertIn("coordinate system is local to this crop", second_prompt)
+
+    def test_icon_cluster_localization_failure_never_reuses_rough_bounds(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = []
+        rough = icon_cluster_audit_payload()
+        localized_failure = icon_cluster_audit_payload(
+            controls=[],
+            cluster_complete=False,
+        )
+        provider = SequenceProvider([compact, compact, rough, localized_failure])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "点击顶部右侧刷新页面"},
+        )
+
+        self.assertIsNone(scene.unique_trusted_goal_element())
+        self.assertTrue(observer.last_diagnostics["icon_cluster_localization_used"])
+        self.assertFalse(
+            observer.last_diagnostics["icon_cluster_audit_reload_attested"]
+        )
+
+    def test_local_ordinal_binding_snaps_every_control_not_only_reload(self) -> None:
+        payload = icon_cluster_audit_payload(
+            controls=[
+                {
+                    "control_id": "shifted-bookmark",
+                    "semantic_class": "bookmark",
+                    "bounds": [700, 120, 780, 400],
+                    "confidence": 0.95,
+                    "fully_visible": True,
+                    "single_glyph": True,
+                    "shape_cues": ["bookmark_outline"],
+                },
+                {
+                    "control_id": "shifted-reload",
+                    "semantic_class": "reload",
+                    "bounds": [900, 120, 990, 400],
+                    "confidence": 0.95,
+                    "fully_visible": True,
+                    "single_glyph": True,
+                    "shape_cues": ["curved_arc", "arrowhead"],
+                },
+            ],
+            cluster_bounds=[645, 0, 1000, 500],
+        )
+
+        snapped, reload_bounds = _snap_reload_audit_to_local_glyph(
+            icon_cluster_frames()[0],
+            payload,
+            search_bounds=(645, 0, 975, 125),
+        )
+
+        self.assertIsNotNone(snapped)
+        bookmark_bounds = snapped["controls"][0]["bounds"]
+        self.assertLess(bookmark_bounds[2], reload_bounds[0])
+        self.assertGreater((reload_bounds[0] + reload_bounds[2]) / 2.0, 830)
+        self.assertLess((reload_bounds[0] + reload_bounds[2]) / 2.0, 880)
 
     def test_overlapping_reload_and_bookmark_cluster_fails_closed(self) -> None:
         compact = scene_payload()
@@ -2889,6 +3105,17 @@ class GenericSceneObserverTests(unittest.TestCase):
                 frames=stable_frames(),
                 goal_context={"objective": "点击顶部右侧刷新页面"},
             )
+
+    def test_icon_cluster_audit_repairs_only_redundant_control_envelope(self) -> None:
+        payload = icon_cluster_audit_payload(
+            cluster_bounds=[800, 10, 900, 60],
+        )
+
+        parsed = _strict_icon_cluster_audit_payload(
+            json.dumps(payload, ensure_ascii=False)
+        )
+
+        self.assertEqual([740.0, 20.0, 875.0, 75.0], parsed["cluster_bounds"])
 
     def test_text_entry_does_not_discard_incomplete_switch_without_direct_latin(self) -> None:
         empty = scene_payload()

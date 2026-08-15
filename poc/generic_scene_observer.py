@@ -8,11 +8,12 @@ import time
 from dataclasses import replace
 from typing import Any, Iterator
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from observation_images import (
     VisualObstruction,
     consensus_top_edge_obstructions,
+    map_roi_bounds_to_full,
     measure_frame_sharpness,
     measure_local_stability,
 )
@@ -41,7 +42,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v26"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v27"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
@@ -66,6 +67,8 @@ STAGE_LABELS = {
     "parsing_targeted_refinement": "解析目标精查结果",
     "waiting_icon_cluster_audit": "等待图标簇只读审计",
     "parsing_icon_cluster_audit": "解析图标簇只读审计",
+    "waiting_icon_cluster_localization": "等待图标簇局部定位复核",
+    "parsing_icon_cluster_localization": "解析图标簇局部定位复核",
     "waiting_input_structure_audit": "等待输入结构只读审计",
     "parsing_input_structure_audit": "解析输入结构只读审计",
     "waiting_system_ui_audit": "等待系统界面只读审计",
@@ -249,6 +252,10 @@ class GenericSceneObserver:
         icon_cluster_audit_used = False
         icon_cluster_audit_candidate_count = 0
         icon_cluster_audit_reload_attested = False
+        icon_cluster_localization_used = False
+        icon_cluster_localization_roi_bounds: tuple[int, int, int, int] | None = None
+        icon_cluster_local_geometry_verified = False
+        icon_cluster_local_geometry_bounds: tuple[int, int, int, int] | None = None
         input_structure_audit_used = False
         system_ui_audit_used = False
         system_ui_audit_retry_used = False
@@ -537,15 +544,82 @@ class GenericSceneObserver:
                 )
                 self.last_raw_response = raw
                 self._set_stage("parsing_icon_cluster_audit")
+                rough_audit = _strict_icon_cluster_audit_payload(raw)
+                icon_cluster_localization_roi_bounds = (
+                    _attestable_icon_cluster_bounds(
+                        rough_audit,
+                        roi_bounds=icon_cluster_audit_roi_bounds,
+                    )
+                )
+                final_audit_raw = raw
+                if icon_cluster_localization_roi_bounds is not None:
+                    icon_cluster_localization_used = True
+                    icon_cluster_frame = _crop_normalized(
+                        frame,
+                        icon_cluster_localization_roi_bounds,
+                    )
+                    self._set_stage("waiting_icon_cluster_localization")
+                    final_audit_raw = model_chat(
+                        [
+                            _json_only_system_message(),
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": _icon_cluster_localization_prompt(),
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": _image_data_url(icon_cluster_frame)
+                                        },
+                                    },
+                                ],
+                            },
+                        ],
+                        max_tokens=ICON_CLUSTER_AUDIT_TOKENS,
+                    )
+                    self.last_raw_response = final_audit_raw
+                    self._set_stage("parsing_icon_cluster_localization")
+                    localized_audit = _strict_icon_cluster_audit_payload(
+                        final_audit_raw
+                    )
+                    mapped_audit = _map_icon_cluster_audit_to_full_frame(
+                        localized_audit,
+                        icon_cluster_localization_roi_bounds,
+                    )
+                    snapped_audit, icon_cluster_local_geometry_bounds = (
+                        _snap_reload_audit_to_local_glyph(
+                            frame,
+                            mapped_audit,
+                            search_bounds=icon_cluster_localization_roi_bounds,
+                        )
+                    )
+                    icon_cluster_local_geometry_verified = (
+                        snapped_audit is not None
+                    )
+                    final_audit_raw = json.dumps(
+                        snapped_audit or mapped_audit,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
                 (
                     scene,
                     icon_cluster_audit_candidate_count,
                     icon_cluster_audit_reload_attested,
                 ) = _apply_icon_cluster_audit(
                     scene,
-                    raw,
+                    final_audit_raw,
                     fingerprint=fingerprint,
-                    roi_bounds=icon_cluster_audit_roi_bounds,
+                    localization_verified=(
+                        icon_cluster_localization_used
+                        and icon_cluster_local_geometry_verified
+                    ),
+                    roi_bounds=(
+                        icon_cluster_localization_roi_bounds
+                        or icon_cluster_audit_roi_bounds
+                    ),
                 )
 
             if system_ui_audit_required:
@@ -684,6 +758,12 @@ class GenericSceneObserver:
                     "icon_cluster_audit_reload_attested": (
                         icon_cluster_audit_reload_attested
                     ),
+                    "icon_cluster_localization_used": (
+                        icon_cluster_localization_used
+                    ),
+                    "icon_cluster_local_geometry_verified": (
+                        icon_cluster_local_geometry_verified
+                    ),
                     "local_stability": stability.to_dict(),
                     "selected_frame_index": selected_frame_index,
                     "stable_tail_start_index": stable_tail_start,
@@ -724,6 +804,20 @@ class GenericSceneObserver:
                 ),
                 "icon_cluster_audit_reload_attested": (
                     icon_cluster_audit_reload_attested
+                ),
+                "icon_cluster_localization_used": icon_cluster_localization_used,
+                "icon_cluster_local_geometry_verified": (
+                    icon_cluster_local_geometry_verified
+                ),
+                "icon_cluster_local_geometry_bounds": (
+                    list(icon_cluster_local_geometry_bounds)
+                    if icon_cluster_local_geometry_bounds is not None
+                    else None
+                ),
+                "icon_cluster_localization_roi_bounds": (
+                    list(icon_cluster_localization_roi_bounds)
+                    if icon_cluster_localization_roi_bounds is not None
+                    else None
                 ),
                 "icon_cluster_audit_roi_bounds": (
                     list(icon_cluster_audit_roi_bounds)
@@ -1342,6 +1436,39 @@ Return exactly one JSON object with no duplicate keys and no Markdown:
 Top-level fields and control fields must match the schema exactly. controls may
 be empty only when no trustworthy cluster is visible; then cluster_complete must
 be false and cluster_bounds must be null.
+"""
+
+
+def _icon_cluster_localization_prompt() -> str:
+    return f"""
+You are the second, independent read-only localization check for one compact
+icon cluster. Image 1 is a pixel-exact crop around the cluster selected from the
+complete phone frame by the previous broad audit. The local controller adds a
+small context margin so edge glyphs are not falsely treated as clipped. Its coordinate system is local to this crop:
+left/top=0 and right/bottom=1000. The local controller will map your bounds back
+to the complete frame; never copy or guess full-frame coordinates.
+
+Enumerate every adjacent glyph actually visible in this crop. Do not infer a
+glyph from the goal or its position. semantic_class=reload requires one single
+glyph that visibly contains both curved_arc and arrowhead. Bookmark/star/ribbon
+and expand/four-corner glyphs are confounders. Each bounds must tightly contain
+exactly one glyph and exclude neighbors. If the crop does not contain the whole
+cluster, the glyph is too blurry to localize, or a control cannot be separated,
+set cluster_complete=false and do not claim reload.
+
+Never plan, suggest, authorize or perform an action. Only these shape_cues are
+allowed: curved_arc, arrowhead, circular_outline, star, ribbon_outline,
+bookmark_outline, four_corner_brackets, expand_arrows, other.
+
+Return exactly one JSON object with no duplicate keys and no Markdown:
+{{"protocol_version":"{ICON_CLUSTER_AUDIT_VERSION}",
+"cluster_complete":true,"cluster_bounds":[0,0,1000,1000],
+"controls":[{{"control_id":"control-1","semantic_class":"reload|bookmark|expand|other",
+"bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true,
+"single_glyph":true,"shape_cues":["curved_arc","arrowhead"]}}]}}
+Top-level and control fields must match this schema exactly. controls may be
+empty only when no trustworthy complete cluster is visible; then
+cluster_complete=false and cluster_bounds=null.
 """
 
 
@@ -2342,10 +2469,6 @@ def _strict_icon_cluster_audit_payload(raw: str) -> dict[str, Any]:
             raise VisionAgentError("图标簇审计 semantic_class 不在允许列表。")
         if not _valid_1000_bounds(control.get("bounds")):
             raise VisionAgentError("图标簇审计 control bounds 无效。")
-        control_bounds = tuple(float(part) for part in control["bounds"])
-        cluster_tuple = tuple(float(part) for part in cluster_bounds)
-        if not _bounds_inside(control_bounds, cluster_tuple, tolerance=0.0):
-            raise VisionAgentError("图标簇审计 control 越出 cluster_bounds。")
         confidence = control.get("confidence")
         if (
             isinstance(confidence, bool)
@@ -2368,6 +2491,26 @@ def _strict_icon_cluster_audit_payload(raw: str) -> dict[str, Any]:
             or not set(cues).issubset(_ICON_CLUSTER_SHAPE_CUES)
         ):
             raise VisionAgentError("图标簇审计 shape_cues 无效、重复或越出允许列表。")
+    cluster_tuple = tuple(float(part) for part in cluster_bounds)
+    if any(
+        not _bounds_inside(
+            tuple(float(part) for part in control["bounds"]),
+            cluster_tuple,
+            tolerance=0.0,
+        )
+        for control in controls
+    ):
+        # cluster_bounds is a redundant envelope, never an action target.  A
+        # unique local repair is therefore possible without moving any model
+        # control: rebuild only the envelope as the exact union of all already
+        # validated control bounds. Compact-size checks still run afterward.
+        payload = dict(payload)
+        payload["cluster_bounds"] = [
+            min(float(control["bounds"][0]) for control in controls),
+            min(float(control["bounds"][1]) for control in controls),
+            max(float(control["bounds"][2]) for control in controls),
+            max(float(control["bounds"][3]) for control in controls),
+        ]
     return payload
 
 
@@ -2378,6 +2521,325 @@ def _bounds_intersection_area(
     width = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
     height = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
     return width * height
+
+
+def _attestable_icon_cluster_bounds(
+    payload: dict[str, Any],
+    *,
+    roi_bounds: tuple[int, int, int, int] | None,
+) -> tuple[int, int, int, int] | None:
+    """Return a compact full-frame cluster ROI eligible for local re-check."""
+
+    controls = payload["controls"]
+    reload_controls = [
+        control for control in controls if control["semantic_class"] == "reload"
+    ]
+    candidate = reload_controls[0] if len(reload_controls) == 1 else None
+    if payload["cluster_complete"] is not True or candidate is None:
+        return None
+    cluster_bounds = tuple(float(part) for part in payload["cluster_bounds"])
+    width = cluster_bounds[2] - cluster_bounds[0]
+    height = cluster_bounds[3] - cluster_bounds[1]
+    if not (40.0 <= width <= 400.0 and 20.0 <= height <= 250.0):
+        return None
+    if roi_bounds is not None and not _bounds_inside(
+        cluster_bounds,
+        tuple(float(part) for part in roi_bounds),
+        tolerance=20.0,
+    ):
+        return None
+    candidate_bounds = tuple(float(part) for part in candidate["bounds"])
+    if not (
+        float(candidate["confidence"]) >= 0.90
+        and candidate["fully_visible"] is True
+        and candidate["single_glyph"] is True
+        and {"curved_arc", "arrowhead"}.issubset(candidate["shape_cues"])
+        and not _ICON_CLUSTER_RELOAD_FORBIDDEN_CUES.intersection(
+            candidate["shape_cues"]
+        )
+    ):
+        return None
+    if any(
+        _bounds_intersection_area(
+            candidate_bounds,
+            tuple(float(part) for part in other["bounds"]),
+        )
+        > 0.0
+        for other in controls
+        if other is not candidate
+    ):
+        return None
+    outer_bounds = (
+        tuple(float(part) for part in roi_bounds)
+        if roi_bounds is not None
+        else (0.0, 0.0, 1000.0, 1000.0)
+    )
+    horizontal_padding = max(20.0, width * 0.25)
+    vertical_padding = max(20.0, height * 0.25)
+    expanded = (
+        max(outer_bounds[0], cluster_bounds[0] - horizontal_padding),
+        max(outer_bounds[1], cluster_bounds[1] - vertical_padding),
+        min(outer_bounds[2], cluster_bounds[2] + horizontal_padding),
+        min(outer_bounds[3], cluster_bounds[3] + vertical_padding),
+    )
+    if expanded[2] - expanded[0] < width or expanded[3] - expanded[1] < height:
+        return None
+    return tuple(round(part) for part in expanded)
+
+
+def _map_icon_cluster_audit_to_full_frame(
+    payload: dict[str, Any],
+    roi_bounds: tuple[int, int, int, int],
+) -> dict[str, Any]:
+    """Map the second audit's crop-local 0..1000 geometry to the full frame."""
+
+    value = dict(payload)
+    if payload["cluster_bounds"] is not None:
+        value["cluster_bounds"] = list(
+            map_roi_bounds_to_full(
+                tuple(round(float(part)) for part in payload["cluster_bounds"]),
+                roi_bounds,
+            )
+        )
+    mapped_controls: list[dict[str, Any]] = []
+    for control in payload["controls"]:
+        mapped = dict(control)
+        mapped["bounds"] = list(
+            map_roi_bounds_to_full(
+                tuple(round(float(part)) for part in control["bounds"]),
+                roi_bounds,
+            )
+        )
+        mapped_controls.append(mapped)
+    value["controls"] = mapped_controls
+    return value
+
+
+def _snap_reload_audit_to_local_glyph(
+    frame: Image.Image,
+    payload: dict[str, Any],
+    *,
+    search_bounds: tuple[int, int, int, int],
+) -> tuple[dict[str, Any] | None, tuple[int, int, int, int] | None]:
+    """Bind model semantics to one isolated high-contrast glyph component.
+
+    The model may identify the right icon while returning a loose or shifted
+    box.  This check never invents semantics: it only replaces the sole audited
+    reload box when that box overlaps exactly one isolated pixel component in
+    the already-audited compact cluster.  Ambiguity remains fail-closed.
+    """
+
+    reload_controls = [
+        control
+        for control in payload["controls"]
+        if control["semantic_class"] == "reload"
+    ]
+    if payload["cluster_complete"] is not True or len(reload_controls) != 1:
+        return None, None
+    candidate = reload_controls[0]
+    candidate_bounds = tuple(float(part) for part in candidate["bounds"])
+
+    width, height = frame.size
+    left, top, right, bottom = search_bounds
+    pixel_search = (
+        max(0, min(width - 1, round(left * width / 1000))),
+        max(0, min(height - 1, round(top * height / 1000))),
+        max(1, min(width, round(right * width / 1000))),
+        max(1, min(height, round(bottom * height / 1000))),
+    )
+    if pixel_search[2] - pixel_search[0] < 12 or pixel_search[3] - pixel_search[1] < 12:
+        return None, None
+
+    crop = frame.convert("L").crop(pixel_search)
+    probe = crop.crop((0, 0, crop.width, max(1, crop.height // 3)))
+    histogram = probe.histogram()
+    halfway = max(1, sum(histogram)) / 2.0
+    cumulative = 0
+    background = 0
+    for value, count in enumerate(histogram):
+        cumulative += count
+        if cumulative >= halfway:
+            background = value
+            break
+    mask = crop.point(
+        lambda value: 255 if abs(value - background) >= 28 else 0
+    ).filter(ImageFilter.MaxFilter(3))
+    pixels = mask.load()
+    seen: set[tuple[int, int]] = set()
+    components: list[tuple[int, int, int, int]] = []
+    for y in range(crop.height):
+        for x in range(crop.width):
+            if not pixels[x, y] or (x, y) in seen:
+                continue
+            stack = [(x, y)]
+            seen.add((x, y))
+            xs: list[int] = []
+            ys: list[int] = []
+            while stack:
+                current_x, current_y = stack.pop()
+                xs.append(current_x)
+                ys.append(current_y)
+                for delta_y in (-1, 0, 1):
+                    for delta_x in (-1, 0, 1):
+                        neighbor_x = current_x + delta_x
+                        neighbor_y = current_y + delta_y
+                        neighbor = (neighbor_x, neighbor_y)
+                        if (
+                            0 <= neighbor_x < crop.width
+                            and 0 <= neighbor_y < crop.height
+                            and pixels[neighbor_x, neighbor_y]
+                            and neighbor not in seen
+                        ):
+                            seen.add(neighbor)
+                            stack.append(neighbor)
+            component = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+            component_width = component[2] - component[0]
+            component_height = component[3] - component[1]
+            touches_edge = (
+                component[0] <= 1
+                or component[1] <= 1
+                or component[2] >= crop.width - 1
+                or component[3] >= crop.height - 1
+            )
+            if (
+                len(xs) >= 10
+                and 4 <= component_width <= crop.width * 0.45
+                and 4 <= component_height <= crop.height * 0.70
+                and not touches_edge
+            ):
+                components.append(
+                    (
+                        component[0] + pixel_search[0],
+                        component[1] + pixel_search[1],
+                        component[2] + pixel_search[0],
+                        component[3] + pixel_search[1],
+                    )
+                )
+
+    candidate_pixels = (
+        candidate_bounds[0] * width / 1000.0,
+        candidate_bounds[1] * height / 1000.0,
+        candidate_bounds[2] * width / 1000.0,
+        candidate_bounds[3] * height / 1000.0,
+    )
+    matches: list[tuple[int, int, int, int]] = []
+    components = [
+        component
+        for component in components
+        if not any(
+            component is not other
+            and other[0] <= component[0]
+            and other[1] <= component[1]
+            and other[2] >= component[2]
+            and other[3] >= component[3]
+            and (other[2] - other[0]) * (other[3] - other[1])
+            > (component[2] - component[0]) * (component[3] - component[1])
+            for other in components
+        )
+    ]
+    if components:
+        largest_component_area = max(
+            (component[2] - component[0]) * (component[3] - component[1])
+            for component in components
+        )
+        components = [
+            component
+            for component in components
+            if (component[2] - component[0]) * (component[3] - component[1])
+            >= largest_component_area * 0.40
+        ]
+    for component in components:
+        component_area = max(1, (component[2] - component[0]) * (component[3] - component[1]))
+        overlap = _bounds_intersection_area(
+            tuple(float(part) for part in component),
+            candidate_pixels,
+        )
+        if overlap / component_area >= 0.20:
+            matches.append(component)
+    component: tuple[int, int, int, int] | None = (
+        matches[0] if len(matches) == 1 else None
+    )
+    component_assignments: dict[int, tuple[int, int, int, int]] = {}
+    if (
+        component is None
+        and not matches
+        and len(components) >= 2
+        and len(components) == len(payload["controls"])
+    ):
+        control_bounds = [
+            tuple(float(part) for part in control["bounds"])
+            for control in payload["controls"]
+        ]
+        control_x_span = max(
+            (bounds[0] + bounds[2]) / 2.0 for bounds in control_bounds
+        ) - min((bounds[0] + bounds[2]) / 2.0 for bounds in control_bounds)
+        control_y_span = max(
+            (bounds[1] + bounds[3]) / 2.0 for bounds in control_bounds
+        ) - min((bounds[1] + bounds[3]) / 2.0 for bounds in control_bounds)
+        component_x_span = max(
+            (bounds[0] + bounds[2]) / 2.0 for bounds in components
+        ) - min((bounds[0] + bounds[2]) / 2.0 for bounds in components)
+        component_y_span = max(
+            (bounds[1] + bounds[3]) / 2.0 for bounds in components
+        ) - min((bounds[1] + bounds[3]) / 2.0 for bounds in components)
+        control_axis = "x" if control_x_span >= control_y_span else "y"
+        component_axis = "x" if component_x_span >= component_y_span else "y"
+        if (
+            control_axis == component_axis
+            and max(control_x_span, control_y_span) >= 20.0
+            and max(component_x_span, component_y_span) >= 6.0
+        ):
+            axis = 0 if control_axis == "x" else 1
+            ordered_controls = sorted(
+                payload["controls"],
+                key=lambda item: (
+                    float(item["bounds"][axis])
+                    + float(item["bounds"][axis + 2])
+                )
+                / 2.0,
+            )
+            ordered_components = sorted(
+                components,
+                key=lambda item: (item[axis] + item[axis + 2]) / 2.0,
+            )
+            candidate_index = next(
+                index
+                for index, control in enumerate(ordered_controls)
+                if control is candidate
+            )
+            component = ordered_components[candidate_index]
+            component_assignments = {
+                id(control): ordered_components[index]
+                for index, control in enumerate(ordered_controls)
+            }
+    if component is None:
+        return None, None
+    if not component_assignments:
+        component_assignments[id(candidate)] = component
+
+    def normalize_component(
+        item: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int]:
+        return (
+            max(0, min(1000, round(item[0] * 1000 / width))),
+            max(0, min(1000, round(item[1] * 1000 / height))),
+            max(0, min(1000, round(item[2] * 1000 / width))),
+            max(0, min(1000, round(item[3] * 1000 / height))),
+        )
+
+    normalized = normalize_component(component)
+    if not _valid_1000_bounds(normalized):
+        return None, None
+    value = dict(payload)
+    controls: list[dict[str, Any]] = []
+    for control in payload["controls"]:
+        item = dict(control)
+        assigned = component_assignments.get(id(control))
+        if assigned is not None:
+            item["bounds"] = list(normalize_component(assigned))
+        controls.append(item)
+    value["controls"] = controls
+    return value, normalized
 
 
 def _is_literal_reload_element(item: dict[str, Any]) -> bool:
@@ -2401,6 +2863,7 @@ def _apply_icon_cluster_audit(
     raw: str,
     *,
     fingerprint: str,
+    localization_verified: bool,
     roi_bounds: tuple[int, int, int, int] | None,
 ) -> tuple[UIScene, int, bool]:
     """Mint one local reload candidate only from a strict visual cluster audit."""
@@ -2412,7 +2875,8 @@ def _apply_icon_cluster_audit(
     ]
     candidate = reload_controls[0] if len(reload_controls) == 1 else None
     attested = bool(
-        payload["cluster_complete"] is True
+        localization_verified
+        and payload["cluster_complete"] is True
         and candidate is not None
         and float(candidate["confidence"]) >= 0.90
         and candidate["fully_visible"] is True

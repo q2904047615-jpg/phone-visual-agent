@@ -2674,6 +2674,10 @@ def _normalize_known_scene_enums(payload: dict[str, Any]) -> None:
         "current_mode": {"direct_latin", "chinese_pinyin"},
         "target_mode": {"direct_latin", "chinese_pinyin"},
     }
+    explicit_mode_aliases = {
+        "english": "direct_latin",
+        "chinese": "chinese_pinyin",
+    }
     for item in elements:
         if not isinstance(item, dict):
             continue
@@ -2694,6 +2698,12 @@ def _normalize_known_scene_enums(payload: dict[str, Any]) -> None:
             if not isinstance(value, str):
                 continue
             normalized = value.strip().casefold()
+            if field in {
+                "keyboard_input_mode",
+                "current_mode",
+                "target_mode",
+            }:
+                normalized = explicit_mode_aliases.get(normalized, normalized)
             if normalized in allowed:
                 states[field] = normalized
 

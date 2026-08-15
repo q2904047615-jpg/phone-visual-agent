@@ -972,6 +972,84 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(["English"], diagnostics["target_mode"])
         self.assertNotIn("敏感输入文字", json.dumps(diagnostics, ensure_ascii=False))
 
+    def test_known_english_chinese_mode_aliases_normalize_exactly(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "input-top",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "",
+                "bounds": [150, 440, 850, 530],
+                "confidence": 0.98,
+                "states": {
+                    "goal_relevant": True,
+                    "value": "",
+                    "focused": True,
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "English",
+                },
+                "evidence": ["空输入框和英文键盘可见"],
+            },
+            {
+                "element_id": "mode-switch",
+                "role": "button",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "英",
+                "bounds": [720, 880, 800, 940],
+                "confidence": 0.97,
+                "states": {
+                    "goal_relevant": False,
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "English",
+                    "target_mode": "Chinese",
+                },
+                "evidence": ["键面显示英"],
+            },
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="known-mode-aliases",
+            goal_context={"objective": "让当前空白输入框显示 agent"},
+        )
+
+        self.assertEqual(
+            "direct_latin",
+            scene.get_element("input-top").states["keyboard_input_mode"],
+        )
+        switch = scene.get_element("mode-switch")
+        self.assertEqual("direct_latin", switch.states["current_mode"])
+        self.assertEqual("chinese_pinyin", switch.states["target_mode"])
+
+    def test_unknown_keyboard_mode_alias_still_fails_closed(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "input-top",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "",
+                "bounds": [150, 440, 850, 530],
+                "confidence": 0.98,
+                "states": {
+                    "goal_relevant": True,
+                    "value": "",
+                    "focused": True,
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "English_US",
+                },
+                "evidence": ["空输入框可见"],
+            }
+        ]
+
+        with self.assertRaisesRegex(VisionAgentError, "keyboard_input_mode"):
+            _parse_scene(
+                json.dumps(payload, ensure_ascii=False),
+                fingerprint="unknown-mode-alias",
+                goal_context={"objective": "让当前空白输入框显示 agent"},
+            )
+
     def test_clear_goal_binds_unique_nonempty_input_before_focus_inference(self) -> None:
         payload = scene_payload()
         payload["summary"] = '输入框含文字"yi"，右侧有清空图标；软键盘可见'

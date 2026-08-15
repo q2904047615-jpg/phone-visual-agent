@@ -796,6 +796,84 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertFalse(result.allowed)
         self.assertIn("无法证明", result.reason)
 
+    def test_allows_exact_action_like_literal_as_goal_bound_navigation(self) -> None:
+        for label, meaning in (
+            ("长按目标", "select_long_press_target_mode"),
+            ("拖动目标", "select_drag_target_mode"),
+        ):
+            with self.subTest(label=label):
+                scene = _scene(
+                    meaning=meaning,
+                    label=label,
+                    states={"goal_relevant": True},
+                )
+                decision = _decision(scene)
+                result = self.policy.evaluate(
+                    task_context=_context(
+                        entities={
+                            "target_ui_label": label,
+                            "original_goal_visual_context": (
+                                "不得提交、发送、保存或发布任何内容"
+                            ),
+                        },
+                        subgoal_objective="进入本地单项验收模式，使目标入口可见",
+                        subgoal_constraints=(
+                            "不得提交、发送、保存或发布任何内容",
+                        ),
+                        subgoal_completion_conditions=("目标入口可见",),
+                    ),
+                    trusted_observation=decision.trusted_observation,
+                    decision=decision,
+                )
+
+                self.assertTrue(result.allowed)
+                self.assertEqual("goal_bound_tap", result.canonical_class)
+
+    def test_rejects_action_like_label_with_other_destructive_semantics(self) -> None:
+        scene = _scene(
+            meaning="select_long_press_delete_mode",
+            label="长按并删除",
+            states={"goal_relevant": True},
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_ui_label": "长按并删除"},
+                subgoal_objective="进入本地单项验收模式，使目标入口可见",
+                subgoal_completion_conditions=("目标入口可见",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertTrue(
+            "破坏" in result.reason or "外部状态" in result.reason,
+            result.reason,
+        )
+
+    def test_rejects_action_like_label_without_exact_goal_entity_binding(self) -> None:
+        scene = _scene(
+            meaning="select_long_press_target_mode",
+            label="长按目标",
+            states={"goal_relevant": True},
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_ui_label": "拖动目标"},
+                subgoal_objective="进入本地单项验收模式，使目标入口可见",
+                subgoal_completion_conditions=("目标入口可见",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("破坏性语义", result.reason)
+
     def test_rejects_action_missing_from_device_capabilities(self) -> None:
         scene = _scene()
         decision = _decision(scene, action_kind="swipe")

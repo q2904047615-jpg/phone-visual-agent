@@ -2297,6 +2297,10 @@ class PhaseOneNavigationPolicy:
             "页面",
         }
     )
+    LOCAL_ACTION_LABEL_MARKER_GROUPS = (
+        ("长按", "long_press", "longpress"),
+        ("拖动", "drag"),
+    )
 
     def __init__(self, *, min_confidence: float = MIN_TARGET_CONFIDENCE) -> None:
         self.min_confidence = float(min_confidence)
@@ -2321,6 +2325,55 @@ class PhaseOneNavigationPolicy:
 
     def _semantic_class(self, *values: str) -> str:
         return navigation_semantic_class(*values)
+
+    def _is_exact_literal_local_action_label(
+        self,
+        *,
+        task_context: Any,
+        action: Any,
+        element: Any,
+    ) -> bool:
+        """Recognize a quoted gesture word as a UI label, never as authority.
+
+        DeepSeek keeps these literals only in ``target_ui_label``.  This narrow
+        exception lets a normal tap enter that labelled local mode while all
+        other destructive/account semantics remain fail-closed.
+        """
+
+        if str(self._value(action, "action", "")) != "tap_semantic":
+            return False
+        goal = self._value(task_context, "goal", None)
+        if not isinstance(goal, Mapping):
+            return False
+        entities = goal.get("entities")
+        if not isinstance(entities, Mapping):
+            return False
+        literal = str(entities.get("target_ui_label") or "").strip()
+        if not literal or str(element.label or "").strip() != literal:
+            return False
+        if str(action.params.get("label") or "").strip() != literal:
+            return False
+        if str(action.params.get("target") or "").strip() != str(
+            element.meaning or ""
+        ).strip():
+            return False
+        normalized = literal.casefold()
+        matched_groups = tuple(
+            group
+            for group in self.LOCAL_ACTION_LABEL_MARKER_GROUPS
+            if any(marker in normalized for marker in group)
+        )
+        return len(matched_groups) == 1
+
+    @staticmethod
+    def _without_literal_local_action_markers(values: Any) -> tuple[str, ...]:
+        sanitized: list[str] = []
+        for value in PhaseOneNavigationPolicy._structured_strings(values):
+            current = value.casefold()
+            for marker in ("long_press", "longpress", "drag", "长按", "拖动"):
+                current = current.replace(marker, " ")
+            sanitized.append(current)
+        return tuple(sanitized)
 
     @staticmethod
     def _has_unresolved_candidate_conflict(
@@ -2480,6 +2533,11 @@ class PhaseOneNavigationPolicy:
             element.label,
             *element.evidence,
         )
+        literal_local_action_label = self._is_exact_literal_local_action_label(
+            task_context=task_context,
+            action=action,
+            element=element,
+        )
         candidate_terms = self._binding_terms(candidate_values)
         entity_terms = self._binding_terms(entities)
         subgoal_values = (
@@ -2491,7 +2549,10 @@ class PhaseOneNavigationPolicy:
         if (
             not candidate_terms
             or not candidate_terms.intersection(entity_terms)
-            or not candidate_terms.intersection(subgoal_terms)
+            or (
+                not literal_local_action_label
+                and not candidate_terms.intersection(subgoal_terms)
+            )
         ):
             return "通用目标绑定回退无法证明候选同时绑定目标实体与当前子目标。"
         safety_values = (
@@ -2499,7 +2560,21 @@ class PhaseOneNavigationPolicy:
             entities,
             subgoal_values,
         )
-        if self._semantic_class(*self._structured_strings(safety_values)) == "forbidden":
+        if literal_local_action_label:
+            # The raw goal and negative constraints (for example "不得提交")
+            # have already passed the independent risk audit.  Re-scanning
+            # those strings as a positive action would create a false denial.
+            # Keep this exception candidate-local and retain the exact label.
+            safety_values = (
+                candidate_values,
+                {"target_ui_label": entities.get("target_ui_label")},
+            )
+        safety_strings = self._structured_strings(safety_values)
+        if literal_local_action_label:
+            safety_strings = self._without_literal_local_action_markers(
+                safety_strings
+            )
+        if self._semantic_class(*safety_strings) == "forbidden":
             return "通用目标绑定回退检测到外部状态、破坏、账号或交易语义。"
         if action_has_account_effect(action):
             return "通用目标绑定回退检测到账号或外部状态动作。"
@@ -2971,6 +3046,21 @@ class PhaseOneNavigationPolicy:
                 canonical = "external"
             elif action_kind == "input_verified_text":
                 canonical = "input"
+            elif self._is_exact_literal_local_action_label(
+                task_context=task_context,
+                action=action,
+                element=element,
+            ):
+                sanitized = self._without_literal_local_action_markers(
+                    (
+                        element.meaning,
+                        element.label,
+                        str(action.params.get("target") or ""),
+                    )
+                )
+                canonical = self._semantic_class(*sanitized)
+                if canonical == "forbidden":
+                    return self._deny("候选包含外部状态、输入或破坏性语义。")
             else:
                 return self._deny("候选包含外部状态、输入或破坏性语义。")
         if canonical == "refresh":

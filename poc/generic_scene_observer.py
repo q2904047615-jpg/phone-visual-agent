@@ -76,6 +76,7 @@ STAGE_LABELS = {
     "parsing_system_ui_audit": "解析系统界面只读审计",
     "waiting_system_ui_audit_retry": "等待系统界面审计格式修正",
     "waiting_orientation_audit": "等待独立方向只读审计",
+    "waiting_orientation_audit_retry": "等待独立方向证据格式重审",
     "parsing_orientation_audit": "解析独立方向只读审计",
     "completed": "观察完成",
     "failed": "观察安全停止",
@@ -142,21 +143,57 @@ class GenericSceneObserver:
             )
         self._set_stage("waiting_orientation_audit")
         raw = ""
+        model_calls = 0
+        first_rejected_payload: dict[str, Any] | None = None
         try:
+            model_calls += 1
             raw = self._provider_chat(
                 [_json_only_system_message(), {"role": "user", "content": content}],
                 max_tokens=ORIENTATION_AUDIT_TOKENS,
             )
             self._set_stage("parsing_orientation_audit")
-            payload = _parse_orientation_audit(raw)
-            credential = _mint_audited_credential(
-                device_id=device_id,
-                scene_fingerprint=scene_fingerprint,
-                frame=frame,
-                phone_content_rotation=payload["phone_content_rotation"],
-                confidence=payload["confidence"],
-                evidence=tuple(payload["evidence"]),
-            )
+            try:
+                credential = _credential_from_orientation_audit(
+                    raw=raw,
+                    device_id=device_id,
+                    scene_fingerprint=scene_fingerprint,
+                    frame=frame,
+                )
+            except OrientationSafetyError as first_error:
+                if not _orientation_evidence_format_error(first_error):
+                    raise
+                # The rejected response grants no authority. Evidence is
+                # validated before the private seal is registered, and this
+                # one fresh audit is parsed independently without editing or
+                # reusing any rejected evidence.
+                first_rejected_payload = _orientation_audit_diagnostic_payload(raw)
+                self._set_stage("waiting_orientation_audit_retry")
+                model_calls += 1
+                raw = self._provider_chat(
+                    [
+                        _json_only_system_message(),
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": _orientation_audit_retry_prompt(
+                                        first_error
+                                    ),
+                                },
+                                *content[1:],
+                            ],
+                        },
+                    ],
+                    max_tokens=ORIENTATION_AUDIT_TOKENS,
+                )
+                self._set_stage("parsing_orientation_audit")
+                credential = _credential_from_orientation_audit(
+                    raw=raw,
+                    device_id=device_id,
+                    scene_fingerprint=scene_fingerprint,
+                    frame=frame,
+                )
             credential.assert_authorizes(
                 device_id=device_id,
                 scene_fingerprint=scene_fingerprint,
@@ -164,7 +201,7 @@ class GenericSceneObserver:
             )
             self.last_orientation_audit_diagnostics = {
                 "audit_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
-                "model_calls": 1,
+                "model_calls": model_calls,
                 "image_count": 3,
                 "cache_hit": False,
                 "selected_frame_index": selected_index,
@@ -174,11 +211,16 @@ class GenericSceneObserver:
                 "response_payload": _orientation_audit_diagnostic_payload(raw),
                 "audit_accepted": True,
             }
+            if first_rejected_payload is not None:
+                self.last_orientation_audit_diagnostics[
+                    "first_rejected_response_payload"
+                ] = first_rejected_payload
+                self.last_orientation_audit_diagnostics["retry_used"] = True
             return credential
         except Exception as exc:
             self.last_orientation_audit_diagnostics = {
                 "audit_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
-                "model_calls": 1,
+                "model_calls": model_calls,
                 "image_count": 3,
                 "cache_hit": False,
                 "selected_frame_index": selected_index,
@@ -188,6 +230,11 @@ class GenericSceneObserver:
                 "audit_accepted": False,
                 "error_type": classify_qwen_error(exc, raw_response=raw),
             }
+            if first_rejected_payload is not None:
+                self.last_orientation_audit_diagnostics[
+                    "first_rejected_response_payload"
+                ] = first_rejected_payload
+                self.last_orientation_audit_diagnostics["retry_used"] = True
             if isinstance(exc, VisionAgentError):
                 raise
             if isinstance(exc, (OrientationSafetyError, UISceneError, ValueError)):
@@ -1071,12 +1118,57 @@ the phone App/system axes appear inside Image 1 as supplied.
 Judge only the physical phone display. Seller-controller PX/MM text, borders,
 orientation buttons and bottom controls are external chrome and forbidden evidence.
 Black or sparse App content does not reduce confidence when phone/system text or
-structure establishes axes. Do not return coordinates, bounds, actions or plans.
+structure establishes axes. Evidence must contain one or two phone-only facts,
+each at most 60 characters. Describe only visible text orientation or phone UI
+structure. Never mention what a person or controller could do, and never mention
+coordinates, actions, bounds, the seller controller, robot arm, or external control.
 Return exactly this JSON object and no Markdown:
 {{"protocol_version":"{ORIENTATION_AUDIT_PROTOCOL_VERSION}",
 "phone_content_rotation":"upright|rotated_90|rotated_180|rotated_270|unknown",
 "confidence":0.0,"evidence":["one or two short phone-only facts"]}}
 """.strip()
+
+
+def _orientation_audit_retry_prompt(error: Exception) -> str:
+    return f"""
+The preceding independent read-only orientation audit was rejected before any
+physical action because its evidence wording was not a phone-only visual fact.
+Error summary: {str(error)[:180]}
+Re-observe the same three derived orientation views independently. Classify only
+IMAGE 1. Return exactly this JSON object and no Markdown or extra fields:
+{{"protocol_version":"{ORIENTATION_AUDIT_PROTOCOL_VERSION}",
+"phone_content_rotation":"upright|rotated_90|rotated_180|rotated_270|unknown",
+"confidence":0.0,"evidence":["short phone-only visual fact"]}}
+Evidence must contain one or two strings, each at most 60 characters. State only
+the orientation of visible phone text or phone UI structure. Do not mention any
+tap, click, press, swipe, drag, execution, suggestion, coordinate, bound, PX/MM,
+seller controller, robot arm, external control, or possible action. JSON only.
+""".strip()
+
+
+def _orientation_evidence_format_error(error: Exception) -> bool:
+    return str(error) in {
+        "方向凭据只读证据无效。",
+        "方向凭据包含坐标、动作或外部控制端证据。",
+    }
+
+
+def _credential_from_orientation_audit(
+    *,
+    raw: str,
+    device_id: str,
+    scene_fingerprint: str,
+    frame: Image.Image,
+) -> OrientationCredential:
+    payload = _parse_orientation_audit(raw)
+    return _mint_audited_credential(
+        device_id=device_id,
+        scene_fingerprint=scene_fingerprint,
+        frame=frame,
+        phone_content_rotation=payload["phone_content_rotation"],
+        confidence=payload["confidence"],
+        evidence=tuple(payload["evidence"]),
+    )
 
 
 def _orientation_audit_diagnostic_payload(raw: str) -> dict[str, Any]:

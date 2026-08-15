@@ -796,6 +796,78 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         self.assertEqual(3, provider.calls)
 
+    def test_direction_audit_retries_once_for_rejected_evidence_wording(self):
+        provider = SequenceProvider(
+            [
+                {
+                    "protocol_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
+                    "phone_content_rotation": "upright",
+                    "confidence": 0.98,
+                    "evidence": ["点击控制端后可让手机保持正向"],
+                },
+                {
+                    "protocol_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
+                    "phone_content_rotation": "upright",
+                    "confidence": 0.97,
+                    "evidence": ["手机页面文字横向排列且字形正立"],
+                },
+            ]
+        )
+        observer = GenericSceneObserver(provider)
+
+        credential = observer.audit_camera_alignment(
+            frames=stable_frames(),
+            device_id="device-a",
+            scene_fingerprint="scene-a",
+        )
+
+        self.assertEqual(2, provider.calls)
+        self.assertEqual(("手机页面文字横向排列且字形正立",), credential.evidence)
+        diagnostics = observer.last_orientation_audit_diagnostics
+        self.assertTrue(diagnostics["audit_accepted"])
+        self.assertTrue(diagnostics["retry_used"])
+        self.assertEqual(2, diagnostics["model_calls"])
+        self.assertEqual(
+            [3, 3],
+            [
+                sum(
+                    item.get("type") == "image_url"
+                    for item in messages[1]["content"]
+                )
+                for messages in provider.messages_seen
+            ],
+        )
+        serialized = json.dumps(diagnostics, ensure_ascii=False)
+        self.assertNotIn("点击控制端", serialized)
+        retry_prompt = provider.messages_seen[1][1]["content"][0]["text"]
+        self.assertIn("rejected before any", retry_prompt)
+        self.assertIn("physical action", retry_prompt)
+        self.assertIn("each at most 60 characters", retry_prompt)
+
+    def test_direction_audit_second_bad_evidence_fails_without_third_call(self):
+        invalid = {
+            "protocol_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
+            "phone_content_rotation": "upright",
+            "confidence": 0.98,
+            "evidence": ["点击控制端后可让手机保持正向"],
+        }
+        provider = SequenceProvider([invalid, invalid, AssertionError("third call")])
+        observer = GenericSceneObserver(provider)
+
+        with self.assertRaisesRegex(VisionAgentError, "包含坐标、动作"):
+            observer.audit_camera_alignment(
+                frames=stable_frames(),
+                device_id="device-a",
+                scene_fingerprint="scene-a",
+            )
+
+        self.assertEqual(2, provider.calls)
+        self.assertEqual(1, len(provider.responses))
+        diagnostics = observer.last_orientation_audit_diagnostics
+        self.assertFalse(diagnostics["audit_accepted"])
+        self.assertTrue(diagnostics["retry_used"])
+        self.assertEqual(2, diagnostics["model_calls"])
+
     def test_independent_direction_audit_fails_closed_on_unknown_low_or_extra_fields(self):
         cases = (
             ({"phone_content_rotation": "unknown", "confidence": 0.95}, "未知"),

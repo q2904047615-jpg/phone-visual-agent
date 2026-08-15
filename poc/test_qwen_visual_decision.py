@@ -609,6 +609,21 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn("禁止再点击", prompt)
         self.assertIn("已选中tab", prompt)
 
+    def test_prompt_allows_one_bounded_swipe_for_clipped_navigation_list(self) -> None:
+        from qwen_visual_decision import _decision_prompt
+
+        prompt = _decision_prompt(
+            QwenTaskContext.from_dict(self.context),
+            self.observation,
+            decision_number=1,
+            available_action_kinds=frozenset({"swipe", "tap_semantic"}),
+        )
+
+        self.assertIn("目标字面标签或目标区域尚未出现在可信候选中", prompt)
+        self.assertIn("列表边缘存在被裁切的", prompt)
+        self.assertIn('expected_result只写{"content_changed":true}', prompt)
+        self.assertIn("动作后必须重新观察，不能连续执行", prompt)
+
     def test_drag_prompt_uses_flat_endpoint_fields_and_container_destination(self) -> None:
         from qwen_visual_decision import _decision_prompt
 

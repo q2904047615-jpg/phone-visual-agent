@@ -802,6 +802,13 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertTrue(
             _named_visual_identity_anchor(("原来的只读通用动作验收页面可见",))
         )
+        self.assertEqual(
+            "",
+            _named_visual_identity_anchor(("通过页面返回流程回到结果页",)),
+        )
+        self.assertTrue(
+            _named_visual_identity_anchor(("跨境订单结果页面可见",)),
+        )
 
     def test_replan_accepts_named_page_completion_with_grounded_identity(self):
         objective = "原来的只读通用动作验收页面可见"

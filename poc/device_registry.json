@@ -13,6 +13,7 @@
         "drag",
         "home",
         "input_verified_text",
+        "long_press",
         "swipe",
         "tap_semantic",
         "wait_for_change"

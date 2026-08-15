@@ -4121,7 +4121,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
         controller = registry.controller(registry.default_device_id)
 
         self.assertTrue(controller.hardware_capabilities()["input_verified_text"])
-        self.assertFalse(controller.hardware_capabilities()["long_press"])
+        self.assertTrue(controller.hardware_capabilities()["long_press"])
         self.assertTrue(controller.hardware_capabilities()["drag"])
 
     def test_two_devices_have_independent_controllers_and_calibrations(self) -> None:

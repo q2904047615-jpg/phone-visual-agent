@@ -37,6 +37,7 @@ from qwen_visual_decision import QwenVisualDecisionObserver
 from device_exclusivity import InterProcessLease, SHARED_DEVICE_LEASE_DIR
 from universal_agent_orchestrator import (
     DeviceTaskRegistry,
+    POST_ACTION_TRANSITION_PROTOCOL_VERSION,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
     UniversalAgentSessionState,
@@ -727,6 +728,8 @@ class GenericConfirmationScopeRequest(StrictAgentRequest):
     risk_ids: list[StrictStr] = Field(default_factory=list)
     observation_id: StrictStr = Field(min_length=1, max_length=128)
     fingerprint: StrictStr = Field(min_length=1, max_length=256)
+    decision_node_id: StrictStr = Field(min_length=1, max_length=128)
+    action_digest: StrictStr = Field(min_length=64, max_length=64)
 
 
 class GenericRiskConfirmationScopeRequest(StrictAgentRequest):
@@ -1489,6 +1492,9 @@ def device() -> dict[str, Any]:
         "automatic_loop_enabled": False,
         "max_physical_actions_per_confirmation": 1,
         "max_safe_loop_physical_actions": 1,
+        "post_action_transition_protocol": (
+            POST_ACTION_TRANSITION_PROTOCOL_VERSION
+        ),
         "active_sessions": [
             {
                 "session_id": item["session_id"],

@@ -30,6 +30,7 @@ RISK_LEVELS = frozenset({"low", "medium", "high", "critical"})
 REPLAN_TRIGGERS = frozenset(
     {
         "observation_changed",
+        "action_result_matched",
         "action_mismatch",
         "action_result_mismatch",
         "subgoal_completed",
@@ -37,6 +38,9 @@ REPLAN_TRIGGERS = frozenset(
         "constraint_discovered",
         "recovery_needed",
     }
+)
+VERIFIED_ACTION_TRANSITION_PROTOCOL_VERSION = (
+    "2026-08-16-verified-action-transition-v1"
 )
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -424,7 +428,7 @@ class Subgoal:
                 f"关联风险的子目标影响分类必须为 external_state 或 unknown：{self.subgoal_id}"
             )
         if self.status == "completed" and not self.completion_evidence:
-            raise TaskGraphError(f"已完成子目标缺少可见证据：{self.subgoal_id}")
+            raise TaskGraphError(f"已完成子目标缺少完成证据：{self.subgoal_id}")
         if self.status != "completed" and self.completion_evidence:
             raise TaskGraphError(f"未完成子目标不能携带完成证据：{self.subgoal_id}")
 
@@ -439,6 +443,163 @@ class ReplanRecord:
     retained_completed_subgoal_ids: tuple[str, ...]
     added_subgoal_ids: tuple[str, ...]
     skipped_subgoal_ids: tuple[str, ...]
+    consumed_action_transition_receipt_id: str = ""
+
+
+@dataclass(frozen=True)
+class VerifiedActionTransition:
+    """Controller-owned receipt for exactly one confirmed action transition.
+
+    This receipt is deliberately not visual evidence.  It proves which scoped
+    action was consumed and which fresh observation followed it; claims about
+    page state still has to be grounded in ``visible_evidence``.  Only a typed
+    controller-transition reference may complete its bound navigation-only
+    subgoal; it never becomes a visual or external-state fact.
+    """
+
+    receipt_id: str
+    session_id: str
+    task_id: str
+    device_id: str
+    prior_revision: int
+    subgoal_id: str
+    decision_node_id: str
+    action_digest: str
+    rebound_action_digest: str
+    resolved_action_digest: str
+    action_kind: str
+    before_observation_id: str
+    before_fingerprint: str
+    after_observation_id: str
+    after_fingerprint: str
+    physical_actions: int
+    outcome: str
+    errors: tuple[str, ...] = ()
+    controller_completion_evidence: tuple[str, ...] = ()
+    protocol_version: str = VERIFIED_ACTION_TRANSITION_PROTOCOL_VERSION
+
+    def validate(self) -> None:
+        if self.protocol_version != VERIFIED_ACTION_TRANSITION_PROTOCOL_VERSION:
+            raise TaskGraphError(
+                f"动作转换回执协议版本无效：{self.protocol_version}"
+            )
+        _require_text(self.receipt_id, "action_transition.receipt_id")
+        _require_text(self.session_id, "action_transition.session_id")
+        if not ID_PATTERN.fullmatch(self.receipt_id):
+            raise TaskGraphError(
+                f"动作转换回执 receipt_id 无效：{self.receipt_id!r}"
+            )
+        if not TASK_ID_PATTERN.fullmatch(self.task_id):
+            raise TaskGraphError(f"动作转换回执 task_id 无效：{self.task_id!r}")
+        if not DEVICE_ID_PATTERN.fullmatch(self.device_id):
+            raise TaskGraphError(f"动作转换回执 device_id 无效：{self.device_id!r}")
+        if (
+            isinstance(self.prior_revision, bool)
+            or not isinstance(self.prior_revision, int)
+            or self.prior_revision < 1
+        ):
+            raise TaskGraphError("动作转换回执 prior_revision 必须是正整数。")
+        for field_name in (
+            "subgoal_id",
+            "decision_node_id",
+            "action_digest",
+            "rebound_action_digest",
+            "resolved_action_digest",
+            "action_kind",
+            "before_observation_id",
+            "before_fingerprint",
+            "after_observation_id",
+            "after_fingerprint",
+        ):
+            _require_text(getattr(self, field_name), f"action_transition.{field_name}")
+        for field_name in (
+            "action_digest",
+            "rebound_action_digest",
+            "resolved_action_digest",
+        ):
+            if not re.fullmatch(r"[0-9a-f]{64}", getattr(self, field_name)):
+                raise TaskGraphError(
+                    f"动作转换回执 {field_name} 必须是 64 位小写 SHA-256。"
+                )
+        if self.before_observation_id == self.after_observation_id:
+            raise TaskGraphError("动作转换回执必须绑定新的动作后 observation_id。")
+        if (
+            isinstance(self.physical_actions, bool)
+            or not isinstance(self.physical_actions, int)
+            or self.physical_actions != 1
+        ):
+            raise TaskGraphError("动作转换回执必须且只能证明 1 次物理动作。")
+        if self.outcome not in {"matched", "mismatched"}:
+            raise TaskGraphError(f"动作转换回执 outcome 无效：{self.outcome}")
+        _validate_text_list(self.errors, "action_transition.errors", required=False)
+        _validate_text_list(
+            self.controller_completion_evidence,
+            "action_transition.controller_completion_evidence",
+            required=False,
+        )
+        if self.outcome == "matched" and self.errors:
+            raise TaskGraphError("matched 动作转换回执不能同时包含验证错误。")
+        if self.outcome == "mismatched" and not self.errors:
+            raise TaskGraphError("mismatched 动作转换回执必须包含验证错误。")
+        if self.outcome == "matched" and self.before_fingerprint == self.after_fingerprint:
+            raise TaskGraphError("matched 动作转换回执必须绑定变化后的 fingerprint。")
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "protocol_version": self.protocol_version,
+            "receipt_id": self.receipt_id,
+            "session_id": self.session_id,
+            "task_id": self.task_id,
+            "device_id": self.device_id,
+            "prior_revision": self.prior_revision,
+            "subgoal_id": self.subgoal_id,
+            "decision_node_id": self.decision_node_id,
+            "action_digest": self.action_digest,
+            "rebound_action_digest": self.rebound_action_digest,
+            "resolved_action_digest": self.resolved_action_digest,
+            "action_kind": self.action_kind,
+            "before_observation_id": self.before_observation_id,
+            "before_fingerprint": self.before_fingerprint,
+            "after_observation_id": self.after_observation_id,
+            "after_fingerprint": self.after_fingerprint,
+            "physical_actions": self.physical_actions,
+            "outcome": self.outcome,
+            "errors": list(self.errors),
+            "controller_completion_evidence": list(
+                self.controller_completion_evidence
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class ControllerTransitionEvidenceRef:
+    ref_id: str
+    receipt_id: str
+    subgoal_id: str
+    text: str
+    source: str = "controller_transition"
+
+    def validate(self) -> None:
+        if self.source != "controller_transition":
+            raise TaskGraphError("控制器转换证据来源无效。")
+        for field_name in ("ref_id", "receipt_id", "subgoal_id", "text"):
+            _require_text(
+                getattr(self, field_name),
+                f"controller_transition_evidence.{field_name}",
+            )
+        if not self.ref_id.startswith(f"controller_transition:{self.receipt_id}:"):
+            raise TaskGraphError("控制器转换证据 ref_id 未绑定 receipt_id。")
+
+    def to_dict(self) -> dict[str, str]:
+        self.validate()
+        return {
+            "ref_id": self.ref_id,
+            "source": self.source,
+            "receipt_id": self.receipt_id,
+            "subgoal_id": self.subgoal_id,
+            "text": self.text,
+        }
 
 
 @dataclass(frozen=True)
@@ -449,6 +610,10 @@ class ObservedState:
     grounded_visual_facts: tuple[str, ...] = ()
     last_action_outcome: str = "not_applicable"
     blocked_reasons: tuple[str, ...] = ()
+    verified_action_transition: VerifiedActionTransition | None = None
+    controller_transition_evidence_refs: tuple[
+        ControllerTransitionEvidenceRef, ...
+    ] = ()
 
     def validate(self) -> None:
         _require_text(self.scene_id, "observation.scene_id")
@@ -477,6 +642,29 @@ class ObservedState:
             "observation.blocked_reasons",
             required=False,
         )
+        if self.verified_action_transition is not None:
+            self.verified_action_transition.validate()
+            if self.last_action_outcome != self.verified_action_transition.outcome:
+                raise TaskGraphError(
+                    "观察动作结果与 verified_action_transition outcome 不一致。"
+                )
+        for item in self.controller_transition_evidence_refs:
+            item.validate()
+            if (
+                self.verified_action_transition is None
+                or item.receipt_id != self.verified_action_transition.receipt_id
+                or item.subgoal_id != self.verified_action_transition.subgoal_id
+                or item.text
+                not in self.verified_action_transition.controller_completion_evidence
+            ):
+                raise TaskGraphError(
+                    "控制器转换证据未绑定当前 verified action transition。"
+                )
+        if (
+            self.verified_action_transition is None
+            and self.controller_transition_evidence_refs
+        ):
+            raise TaskGraphError("无动作回执时不得携带控制器转换证据。")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -487,6 +675,15 @@ class ObservedState:
             "grounded_visual_facts": list(self.grounded_visual_facts),
             "last_action_outcome": self.last_action_outcome,
             "blocked_reasons": list(self.blocked_reasons),
+            "verified_action_transition": (
+                self.verified_action_transition.to_dict()
+                if self.verified_action_transition is not None
+                else None
+            ),
+            "controller_transition_evidence_refs": [
+                item.to_dict()
+                for item in self.controller_transition_evidence_refs
+            ],
         }
 
 
@@ -1011,6 +1208,15 @@ class DeepSeekTaskGraphPlanner:
             retained_completed_subgoal_ids=completed_ids,
             added_subgoal_ids=added_ids,
             skipped_subgoal_ids=skipped_ids,
+            consumed_action_transition_receipt_id=(
+                observation.verified_action_transition.receipt_id
+                if observation.verified_action_transition is not None
+                and trigger in {
+                    "action_result_matched",
+                    "action_result_mismatch",
+                }
+                else ""
+            ),
         )
         revised = replace(candidate, replan_history=graph.replan_history + (record,))
         revised.validate()
@@ -1026,11 +1232,60 @@ class DeepSeekTaskGraphPlanner:
     ) -> None:
         """Apply every safety and evidence check to one replan candidate."""
 
+        if candidate.revision != graph.revision + 1:
+            raise TaskGraphError(
+                "重规划 revision 必须严格等于上一 revision + 1。"
+            )
+        transition = observation.verified_action_transition
+        if trigger in {"action_result_matched", "action_result_mismatch"}:
+            if transition is None:
+                raise TaskGraphError("动作结果重规划缺少本地 verified action transition。")
+            expected_outcome = (
+                "matched" if trigger == "action_result_matched" else "mismatched"
+            )
+            if transition.outcome != expected_outcome:
+                raise TaskGraphError("重规划触发与本地动作转换回执 outcome 不一致。")
+            previous_current = graph.active_subgoal()
+            if (
+                transition.task_id != graph.task_id
+                or transition.device_id != graph.device_id
+                or transition.prior_revision != graph.revision
+                or transition.subgoal_id != graph.active_subgoal_id
+                or transition.after_observation_id != observation.scene_id
+                or previous_current is None
+            ):
+                raise TaskGraphError("动作转换回执未严格绑定上一任务图及当前观察。")
+            consumed_receipts = {
+                item.consumed_action_transition_receipt_id
+                for item in graph.replan_history
+                if item.consumed_action_transition_receipt_id
+            }
+            if transition.receipt_id in consumed_receipts:
+                raise TaskGraphError("动作转换回执已经消费，禁止跨 revision 重放。")
+        elif trigger == "observation_changed" and transition is not None:
+            raise TaskGraphError("纯观察变化不得携带动作执行回执。")
+
         _validate_external_impact_revision(graph, candidate)
         _validate_preserved_risk_ids(graph, candidate)
         candidate.validate()
         previous_current = graph.active_subgoal()
         candidate_current = candidate.active_subgoal()
+        if (
+            trigger == "action_result_mismatch"
+            and previous_current is not None
+            and next(
+                (
+                    item.status
+                    for item in candidate.subgoals
+                    if item.subgoal_id == previous_current.subgoal_id
+                ),
+                None,
+            )
+            == "completed"
+        ):
+            raise TaskGraphError(
+                "动作结果不匹配时不能完成回执绑定的上一活动子目标。"
+            )
         if (
             trigger == "subgoal_completed"
             and previous_current is not None
@@ -1522,9 +1777,19 @@ def _replan_prompt(
 9. 当 trigger=subgoal_completed 且当前子目标是 read_only 时，本轮必须用 visible_evidence 完成
    该只读子目标及匹配的全局条件，或明确阻塞，或推进到后续非只读子目标；不得继续保留任何
    read_only 活动子目标，避免只读复核再次请求视觉动作或形成循环。
-10. completion_conditions[].evidence 和 subgoals[].completion_evidence 只能选择
-    visible_evidence 中完整、逐字相同的独立短字符串；每个数组最多3项，不得拼接多项、
-    不得复制整个观察对象或 JSON。没有匹配短证据时保持未完成或阻塞，不得自造长证据。
+10. completion_conditions[].evidence 只能选择 visible_evidence 中完整、逐字相同的独立短字符串。
+    subgoals[].completion_evidence 通常也只能选 visible_evidence；唯一例外是当前严格绑定的
+    navigation_only 旧子目标可选择 controller_transition_evidence_refs[].ref_id。每个数组最多3项，
+    不得拼接多项、不得复制整个观察对象或 JSON。没有匹配证据时保持未完成或阻塞。
+11. verified_action_transition 是本地控制器生成、严格绑定上一 revision/子目标/决策/动作和
+    前后观察的动作回执；它与 visible_evidence 分离，不能当作页面可见事实或全局完成证据。
+    outcome=matched 只证明该受控动作已执行并获得匹配验证，不代表任意子目标自动完成。
+12. trigger=action_result_matched 时，可以结合回执和当前 visible_evidence 完成其严格绑定的
+    navigation_only 旧子目标，或推进到不同的剩余状态目标；若证据不足，应明确重写剩余目标
+    或阻塞。不得让同一活动子目标原样存活后再次请求等价动作。external_state/unknown 不能
+    仅凭回执完成，仍必须由当前 visible_evidence 证明真实外部结果。
+13. trigger=action_result_mismatch 时，不得完成回执绑定的旧子目标；必须根据当前画面重规划、
+    阻塞或提出高层澄清。revision 必须严格增加 1。
 """
 
 
@@ -1567,8 +1832,13 @@ def _repair_replan_prompt(
 7. 只返回符合结构的完整 JSON 对象，不要 Markdown。
 8. 当 trigger=subgoal_completed 且原活动子目标是 read_only 时，不得继续返回 read_only 活动
    子目标；只能依据 visible_evidence 完成、阻塞，或推进到后续非只读子目标。
-9. 证据数组只能选择 visible_evidence 中完整、逐字相同的独立短字符串，每个数组最多3项；
-   禁止拼接多项或复制整个观察对象/JSON。没有匹配证据时保持未完成或阻塞。
+9. 全局完成条件证据只能选择 visible_evidence。子目标完成证据通常也只能选择 visible_evidence；
+   严格绑定的 navigation_only 旧子目标可选择 controller_transition_evidence_refs[].ref_id。
+   每个数组最多3项；禁止拼接多项或复制整个观察对象/JSON。
+10. verified_action_transition 是本地控制器回执而不是视觉证据；只能与当前
+    visible_evidence 共同解释其严格绑定的上一 navigation_only 子目标。不能用它伪造
+    external_state/unknown 完成，也不能在 matched 后原样保留旧子目标再提出等价动作。
+11. action_result_mismatch 不得完成回执绑定的旧子目标；revision 必须严格增加 1。
 """
 
 
@@ -1913,6 +2183,10 @@ def _validate_revision(
             "重规划不能删除全局完成条件：" + ", ".join(sorted(missing_conditions))
         )
     evidence = set(observation.visible_evidence)
+    controller_refs = {
+        item.ref_id: item
+        for item in observation.controller_transition_evidence_refs
+    }
     for condition_id, old in old_conditions.items():
         new = new_conditions[condition_id]
         if (
@@ -1989,8 +2263,32 @@ def _validate_revision(
         newly_completed = new.status == "completed" and (
             old is None or old.status != "completed"
         )
-        if newly_completed and not set(new.completion_evidence).issubset(evidence):
-            raise TaskGraphError(f"子目标使用了当前观察之外的完成证据：{subgoal_id}")
+        if newly_completed:
+            claimed = set(new.completion_evidence)
+            controller_claims = claimed.intersection(controller_refs)
+            unknown_claims = claimed - evidence - set(controller_refs)
+            if unknown_claims:
+                raise TaskGraphError(
+                    f"子目标使用了当前观察之外的完成证据：{subgoal_id}"
+                )
+            if controller_claims:
+                if (
+                    old is None
+                    or old.external_impact != "navigation_only"
+                    or previous.active_subgoal_id != subgoal_id
+                    or observation.verified_action_transition is None
+                    or observation.verified_action_transition.outcome != "matched"
+                ):
+                    raise TaskGraphError(
+                        "controller_transition 证据只能完成其严格绑定的上一 "
+                        "navigation_only 活动子目标。"
+                    )
+                for ref_id in controller_claims:
+                    ref = controller_refs[ref_id]
+                    if ref.subgoal_id != subgoal_id:
+                        raise TaskGraphError(
+                            "controller_transition 证据跨子目标使用。"
+                        )
         if newly_completed:
             _require_named_visual_identity_grounding(
                 (new.objective, *new.completion_conditions),

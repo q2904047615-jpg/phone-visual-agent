@@ -3,10 +3,12 @@ import json
 import unittest
 
 from deepseek_task_graph import (
+    ControllerTransitionEvidenceRef,
     DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION,
     DeepSeekTaskGraphPlanner,
     ObservedState,
     TaskGraphError,
+    VerifiedActionTransition,
     _infer_external_risk_types,
     _named_visual_identity_anchor,
 )
@@ -111,6 +113,74 @@ def observation():
         summary="地图已经显示目标地点详情",
         visible_evidence=("页面标题为城市图书馆", "页面显示已收藏状态"),
         last_action_outcome="matched",
+    )
+
+
+def mismatch_observation(graph):
+    return ObservedState(
+        scene_id="scene-2",
+        summary="地图没有显示预期结果",
+        visible_evidence=("页面仍显示原内容",),
+        last_action_outcome="mismatched",
+        blocked_reasons=("预期语义变化未出现",),
+        verified_action_transition=VerifiedActionTransition(
+            receipt_id="receipt-test-mismatch",
+            session_id="session-test",
+            task_id=graph.task_id,
+            device_id=graph.device_id,
+            prior_revision=graph.revision,
+            subgoal_id=graph.active_subgoal_id,
+            decision_node_id="decision-test",
+            action_digest="a" * 64,
+            rebound_action_digest="b" * 64,
+            resolved_action_digest="c" * 64,
+            action_kind="tap_semantic",
+            before_observation_id="scene-1",
+            before_fingerprint="before-fingerprint",
+            after_observation_id="scene-2",
+            after_fingerprint="after-fingerprint",
+            physical_actions=1,
+            outcome="mismatched",
+            errors=("预期语义变化未出现",),
+        ),
+    )
+
+
+def matched_controller_observation(graph, *, receipt_id="receipt-matched"):
+    current = graph.active_subgoal()
+    receipt = VerifiedActionTransition(
+        receipt_id=receipt_id,
+        session_id="session-test",
+        task_id=graph.task_id,
+        device_id=graph.device_id,
+        prior_revision=graph.revision,
+        subgoal_id=current.subgoal_id,
+        decision_node_id="decision-test",
+        action_digest="a" * 64,
+        rebound_action_digest="b" * 64,
+        resolved_action_digest="c" * 64,
+        action_kind="tap_semantic",
+        before_observation_id=f"scene-{graph.revision}",
+        before_fingerprint=f"before-{graph.revision}",
+        after_observation_id=f"scene-{graph.revision + 1}",
+        after_fingerprint=f"after-{graph.revision}",
+        physical_actions=1,
+        outcome="matched",
+        controller_completion_evidence=("控制器确认一次性导航完成",),
+    )
+    ref = ControllerTransitionEvidenceRef(
+        ref_id=f"controller_transition:{receipt_id}:1",
+        receipt_id=receipt_id,
+        subgoal_id=current.subgoal_id,
+        text="控制器确认一次性导航完成",
+    )
+    return ObservedState(
+        scene_id=receipt.after_observation_id,
+        summary="动作后的可信画面",
+        visible_evidence=("动作后的页面可见",),
+        last_action_outcome="matched",
+        verified_action_transition=receipt,
+        controller_transition_evidence_refs=(ref,),
     )
 
 
@@ -263,6 +333,72 @@ def audit_payload_for_graph(payload, *, overrides=None, confidence=0.99):
 
 
 class DeepSeekTaskGraphTests(unittest.TestCase):
+    def test_verified_action_transition_is_separate_and_requires_one_action(self):
+        receipt = VerifiedActionTransition(
+            receipt_id="receipt-test",
+            session_id="session-test",
+            task_id="task-test",
+            device_id="phone-1",
+            prior_revision=1,
+            subgoal_id="locate_target",
+            decision_node_id="decision-test",
+            action_digest="a" * 64,
+            rebound_action_digest="b" * 64,
+            resolved_action_digest="c" * 64,
+            action_kind="tap_semantic",
+            before_observation_id="scene-1",
+            before_fingerprint="before",
+            after_observation_id="scene-2",
+            after_fingerprint="after",
+            physical_actions=1,
+            outcome="matched",
+            controller_completion_evidence=("本地控制器证明",),
+        )
+        observed = ObservedState(
+            scene_id="scene-2",
+            summary="当前页面",
+            visible_evidence=("页面可见事实",),
+            last_action_outcome="matched",
+            verified_action_transition=receipt,
+            controller_transition_evidence_refs=(
+                ControllerTransitionEvidenceRef(
+                    ref_id="controller_transition:receipt-test:1",
+                    receipt_id="receipt-test",
+                    subgoal_id="locate_target",
+                    text="本地控制器证明",
+                ),
+            ),
+        )
+
+        payload = observed.to_dict()
+        self.assertEqual(["页面可见事实"], payload["visible_evidence"])
+        self.assertEqual(
+            ["本地控制器证明"],
+            payload["verified_action_transition"][
+                "controller_completion_evidence"
+            ],
+        )
+        self.assertEqual(
+            "controller_transition:receipt-test:1",
+            payload["controller_transition_evidence_refs"][0]["ref_id"],
+        )
+        with self.assertRaisesRegex(TaskGraphError, "必须且只能证明 1 次"):
+            VerifiedActionTransition(
+                **{**receipt.__dict__, "physical_actions": 0}
+            ).validate()
+
+    def test_action_result_matched_requires_scope_bound_receipt(self):
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(base_payload())).plan(
+            "目标", device_id="phone-1"
+        )
+        with self.assertRaisesRegex(TaskGraphError, "缺少本地"):
+            DeepSeekTaskGraphPlanner(FakeProvider(base_payload())).replan(
+                graph,
+                observation(),
+                trigger="action_result_matched",
+                reason="动作验证匹配",
+            )
+
     def test_protocol_remains_v3(self):
         self.assertEqual(
             DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION,
@@ -2492,7 +2628,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         result = DeepSeekTaskGraphPlanner(FakeProvider(revised)).replan(
             graph,
-            observation(),
+            mismatch_observation(graph),
             trigger="action_result_mismatch",
             reason="物理动作已执行，但新画面未证明预期结果",
         )
@@ -2505,6 +2641,96 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             ("locate_target",), result.replan_history[-1].skipped_subgoal_ids
         )
 
+    def test_typed_controller_transition_completes_only_bound_navigation(self):
+        initial = base_payload()
+        revised = copy.deepcopy(initial)
+        ref_id = "controller_transition:receipt-matched:1"
+        revised["status"] = "awaiting_confirmation"
+        revised["subgoals"][0]["status"] = "completed"
+        revised["subgoals"][0]["completion_evidence"] = [ref_id]
+        revised["subgoals"][1]["status"] = "active"
+        revised["active_subgoal_id"] = "save_target"
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            "目标", device_id="phone-1"
+        )
+
+        result = DeepSeekTaskGraphPlanner(FakeProvider(revised)).replan(
+            graph,
+            matched_controller_observation(graph),
+            trigger="action_result_matched",
+            reason="一次性导航动作已由控制器验证",
+        )
+
+        self.assertEqual("completed", result.subgoals[0].status)
+        self.assertEqual((ref_id,), result.subgoals[0].completion_evidence)
+        self.assertEqual(
+            "receipt-matched",
+            result.replan_history[-1].consumed_action_transition_receipt_id,
+        )
+
+    def test_typed_controller_transition_cannot_complete_external_state(self):
+        initial = active_external_payload()
+        completed = copy.deepcopy(initial)
+        completed["status"] = "completed"
+        completed["active_subgoal_id"] = None
+        completed["subgoals"][1]["status"] = "completed"
+        completed["subgoals"][1]["completion_evidence"] = [
+            "controller_transition:receipt-matched:1"
+        ]
+        completed["completion_conditions"][0]["satisfied"] = True
+        completed["completion_conditions"][0]["evidence"] = [
+            "页面显示已收藏状态"
+        ]
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            "目标", device_id="phone-1"
+        )
+        observed = matched_controller_observation(graph)
+        observed = ObservedState(
+            **{
+                **observed.__dict__,
+                "visible_evidence": ("页面显示已收藏状态",),
+            }
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "navigation_only"):
+            DeepSeekTaskGraphPlanner(FakeProvider(completed)).replan(
+                graph,
+                observed,
+                trigger="action_result_matched",
+                reason="外部动作返回 matched",
+            )
+
+    def test_consumed_action_transition_receipt_cannot_be_replayed(self):
+        initial = base_payload()
+        revised = copy.deepcopy(initial)
+        ref_id = "controller_transition:receipt-reuse:1"
+        revised["status"] = "awaiting_confirmation"
+        revised["subgoals"][0]["status"] = "completed"
+        revised["subgoals"][0]["completion_evidence"] = [ref_id]
+        revised["subgoals"][1]["status"] = "active"
+        revised["active_subgoal_id"] = "save_target"
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            "目标", device_id="phone-1"
+        )
+        revision_two = DeepSeekTaskGraphPlanner(FakeProvider(revised)).replan(
+            graph,
+            matched_controller_observation(graph, receipt_id="receipt-reuse"),
+            trigger="action_result_matched",
+            reason="导航完成",
+        )
+        replay_observed = matched_controller_observation(
+            revision_two,
+            receipt_id="receipt-reuse",
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "已经消费"):
+            DeepSeekTaskGraphPlanner(FakeProvider(active_external_payload())).replan(
+                revision_two,
+                replay_observed,
+                trigger="action_result_matched",
+                reason="重放旧回执",
+            )
+
     def test_replan_repairs_one_low_level_protocol_violation(self):
         graph = DeepSeekTaskGraphPlanner(FakeProvider(base_payload())).plan(
             "目标", device_id="phone-1"
@@ -2516,7 +2742,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         result = DeepSeekTaskGraphPlanner(provider).replan(
             graph,
-            observation(),
+            mismatch_observation(graph),
             trigger="action_result_mismatch",
             reason="动作已执行但预期结果没有出现",
         )
@@ -2540,7 +2766,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
             DeepSeekTaskGraphPlanner(provider).replan(
                 graph,
-                observation(),
+                mismatch_observation(graph),
                 trigger="action_result_mismatch",
                 reason="动作已执行但预期结果没有出现",
             )
@@ -2565,7 +2791,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         provider = FakeProvider(blocked_retry_payload(), blocked_retry_payload())
         result = DeepSeekTaskGraphPlanner(provider).replan(
             graph,
-            observation(),
+            mismatch_observation(graph),
             trigger="action_result_mismatch",
             reason="动作已执行但预期结果没有出现",
         )

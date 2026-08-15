@@ -2,20 +2,28 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import threading
+from types import SimpleNamespace
 from typing import Any, Callable
 import uuid
 
-from deepseek_task_graph import DynamicTaskGraph, ObservedState
+from deepseek_task_graph import (
+    ControllerTransitionEvidenceRef,
+    DynamicTaskGraph,
+    ObservedState,
+    VerifiedActionTransition,
+)
 from device_exclusivity import InterProcessLease
 from generic_action_adapter import GenericActionAdapterError
 from generic_intent import GenericIntentDraft
+from generic_step_planner import GenericStepProposal
 from qwen_visual_decision import QwenTaskContext, TrustedObservation
 from ui_scene import (
     MIN_TARGET_CONFIDENCE,
@@ -26,6 +34,87 @@ from universal_action_controller import (
     action_has_account_effect,
     navigation_semantic_class,
 )
+
+
+POST_ACTION_TRANSITION_PROTOCOL_VERSION = (
+    "2026-08-16-universal-post-action-transition-v1"
+)
+POST_ACTION_OUTCOMES = frozenset({"matched", "mismatched"})
+_TRANSIENT_ACTION_KEYS = frozenset(
+    {
+        "node_id",
+        "element_id",
+        "source_element_id",
+        "destination_element_id",
+        "bounds",
+        "source_bounds",
+        "destination_bounds",
+        "point",
+        "normalized_point",
+        "before_fingerprint",
+        "observation_id",
+        "fingerprint",
+    }
+)
+
+
+def _stable_action_payload(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _stable_action_payload(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in _TRANSIENT_ACTION_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_stable_action_payload(item) for item in value]
+    return value
+
+
+def _action_digest(action: Any) -> str:
+    if action is None:
+        raise UniversalAgentOrchestratorError("动作摘要缺少语义动作。")
+    payload = action.to_dict() if callable(getattr(action, "to_dict", None)) else action
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _action_equivalence_digest(action: Any) -> str:
+    if action is None:
+        raise UniversalAgentOrchestratorError("动作等价摘要缺少语义动作。")
+    payload = action.to_dict() if callable(getattr(action, "to_dict", None)) else action
+    canonical = json.dumps(
+        _stable_action_payload(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _subgoal_progress_signature(subgoal: Any) -> str:
+    if subgoal is None:
+        return ""
+    payload = {
+        "subgoal_id": str(getattr(subgoal, "subgoal_id", "")),
+        "objective": str(getattr(subgoal, "objective", "")),
+        "completion_conditions": list(
+            getattr(subgoal, "completion_conditions", ())
+        ),
+        "external_impact": str(getattr(subgoal, "external_impact", "")),
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 class UniversalAgentOrchestratorError(RuntimeError):
@@ -146,6 +235,16 @@ class AgentEvidenceStore:
             verification,
         )
 
+    def write_post_action_transition(
+        self,
+        step_number: int,
+        transition: Any,
+    ) -> Path:
+        return self.write_json(
+            f"post_action_transition_step_{int(step_number)}.json",
+            transition,
+        )
+
     def write_report(self, report: Any) -> Path:
         return self.write_json("report.json", report)
 
@@ -219,6 +318,10 @@ class ObservationBridge:
         trusted_observation: Any,
         action_outcome: str,
         verification: dict[str, Any],
+        verified_action_transition: VerifiedActionTransition | None = None,
+        controller_transition_evidence_refs: tuple[
+            ControllerTransitionEvidenceRef, ...
+        ] = (),
     ) -> ObservedState:
         graph.validate()
         observation_device = str(
@@ -310,6 +413,10 @@ class ObservationBridge:
             grounded_visual_facts=tuple(grounded_visual_facts),
             last_action_outcome=str(action_outcome or "not_applicable"),
             blocked_reasons=self._text_items(verification.get("blocked_reasons")),
+            verified_action_transition=verified_action_transition,
+            controller_transition_evidence_refs=(
+                controller_transition_evidence_refs
+            ),
         )
         observed.validate()
         return observed
@@ -325,6 +432,8 @@ class ConfirmationAuthority:
     risk_ids: tuple[str, ...]
     observation_id: str
     fingerprint: str
+    decision_node_id: str
+    action_digest: str
     consumed: bool = False
     invalid_reason: str = ""
 
@@ -338,6 +447,8 @@ class ConfirmationAuthority:
             "risk_ids": sorted(self.risk_ids),
             "observation_id": self.observation_id,
             "fingerprint": self.fingerprint,
+            "decision_node_id": self.decision_node_id,
+            "action_digest": self.action_digest,
         }
 
 
@@ -387,6 +498,7 @@ class UniversalAgentSessionState:
     auto_pause_reason: str = ""
     history: list[dict[str, Any]] = field(default_factory=list)
     evidence_paths: list[str] = field(default_factory=list)
+    last_post_action_transition: dict[str, Any] | None = None
     failed_reason: str = ""
     created_at: str = field(
         default_factory=lambda: datetime.now().astimezone().isoformat(
@@ -449,6 +561,14 @@ class UniversalAgentSessionState:
             "evidence": list(dict.fromkeys(self.evidence_paths)),
             "automatic_loop_enabled": self.automatic_loop_enabled,
             "auto_pause_reason": self.auto_pause_reason,
+            "post_action_transition_protocol": (
+                POST_ACTION_TRANSITION_PROTOCOL_VERSION
+            ),
+            "last_post_action_transition": (
+                dict(self.last_post_action_transition)
+                if self.last_post_action_transition is not None
+                else None
+            ),
             "available_action_kinds": sorted(
                 self.adapter.supported_action_kinds()
                 if callable(getattr(self.adapter, "supported_action_kinds", None))
@@ -1126,9 +1246,9 @@ class UniversalAgentOrchestrator:
                 raise UniversalAgentOrchestratorError(
                     "DeepSeek 重规划改变了 task_id 或 device_id。"
                 )
-            if graph.revision <= previous.revision:
+            if graph.revision != previous.revision + 1:
                 raise UniversalAgentOrchestratorError(
-                    "DeepSeek 重规划 revision 没有增加。"
+                    "DeepSeek 重规划 revision 必须严格等于上一 revision + 1。"
                 )
 
     @staticmethod
@@ -1219,6 +1339,8 @@ class UniversalAgentOrchestrator:
             "risk_ids": sorted(current.risk_action_ids),
             "observation_id": str(observation.observation_id),
             "fingerprint": str(observation.fingerprint),
+            "decision_node_id": str(decision.proposal.action.node_id),
+            "action_digest": _action_digest(decision.proposal.action),
         }
 
     def _bind_confirmation(self, session: UniversalAgentSessionState) -> None:
@@ -1232,6 +1354,8 @@ class UniversalAgentOrchestrator:
             risk_ids=tuple(scope["risk_ids"]),
             observation_id=scope["observation_id"],
             fingerprint=scope["fingerprint"],
+            decision_node_id=scope["decision_node_id"],
+            action_digest=scope["action_digest"],
         )
 
     @staticmethod
@@ -1245,6 +1369,8 @@ class UniversalAgentOrchestrator:
             "risk_ids",
             "observation_id",
             "fingerprint",
+            "decision_node_id",
+            "action_digest",
         }
         if not isinstance(value, Mapping) or set(value) != required:
             raise UniversalAgentOrchestratorError(
@@ -1256,6 +1382,16 @@ class UniversalAgentOrchestrator:
         revision = value.get("revision")
         if isinstance(revision, bool) or not isinstance(revision, int):
             raise UniversalAgentOrchestratorError("确认作用域 revision 格式无效。")
+        decision_node_id = str(value.get("decision_node_id") or "").strip()
+        action_digest = str(value.get("action_digest") or "").strip()
+        if not decision_node_id:
+            raise UniversalAgentOrchestratorError(
+                "确认作用域 decision_node_id 不能为空。"
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", action_digest):
+            raise UniversalAgentOrchestratorError(
+                "确认作用域 action_digest 必须是 64 位小写 SHA-256。"
+            )
         return {
             "session_id": str(value.get("session_id") or ""),
             "task_id": str(value.get("task_id") or ""),
@@ -1265,6 +1401,8 @@ class UniversalAgentOrchestrator:
             "risk_ids": sorted(str(item) for item in risk_ids),
             "observation_id": str(value.get("observation_id") or ""),
             "fingerprint": str(value.get("fingerprint") or ""),
+            "decision_node_id": decision_node_id,
+            "action_digest": action_digest,
         }
 
     def _bind_risk_confirmation(self, session: UniversalAgentSessionState) -> None:
@@ -1351,17 +1489,92 @@ class UniversalAgentOrchestrator:
         session: UniversalAgentSessionState,
         *,
         result: Any,
+        before_observation: Any,
         new_observation: Any,
     ) -> None:
         previous_graph = session.task_graph
         assert previous_graph is not None
         action_outcome = str(getattr(result, "action_outcome", "matched"))
+        if action_outcome not in POST_ACTION_OUTCOMES:
+            raise UniversalAgentOrchestratorError(
+                f"动作后验证返回了不支持的 outcome：{action_outcome}。"
+            )
         matched = action_outcome == "matched"
         verification_errors = tuple(
             str(item)
             for item in getattr(result, "verification_errors", ())
             if str(item).strip()
         )
+        if matched and verification_errors:
+            raise UniversalAgentOrchestratorError(
+                "动作后验证同时返回 matched 与 verification_errors。"
+            )
+        if not matched and not verification_errors:
+            raise UniversalAgentOrchestratorError(
+                "动作后验证返回 mismatched 但没有结构化错误。"
+            )
+        previous_current = previous_graph.active_subgoal()
+        previous_decision = session.qwen_decision
+        authority = session.confirmation_authority
+        if (
+            previous_current is None
+            or previous_decision is None
+            or previous_decision.proposal.action is None
+            or authority is None
+        ):
+            raise UniversalAgentOrchestratorError(
+                "动作后重规划缺少上一子目标、决策或确认权威。"
+            )
+        wait_transition = (
+            result.resolved_action.kind == "wait_for_change"
+            and int(result.physical_actions) == 0
+        )
+        receipt: VerifiedActionTransition | None = None
+        controller_refs: tuple[ControllerTransitionEvidenceRef, ...] = ()
+        if not wait_transition:
+            receipt = VerifiedActionTransition(
+                receipt_id=f"receipt_{uuid.uuid4().hex}",
+                session_id=session.session_id,
+                task_id=previous_graph.task_id,
+                device_id=previous_graph.device_id,
+                prior_revision=previous_graph.revision,
+                subgoal_id=previous_current.subgoal_id,
+                decision_node_id=authority.decision_node_id,
+                action_digest=authority.action_digest,
+                rebound_action_digest=_action_digest(result.rebound_action),
+                resolved_action_digest=_action_digest(result.resolved_action),
+                action_kind=str(previous_decision.proposal.action.action),
+                before_observation_id=str(before_observation.observation_id),
+                before_fingerprint=str(result.before_scene.fingerprint),
+                after_observation_id=str(new_observation.observation_id),
+                after_fingerprint=str(new_observation.fingerprint),
+                physical_actions=int(result.physical_actions),
+                outcome=action_outcome,
+                errors=verification_errors,
+                controller_completion_evidence=tuple(
+                    str(item)
+                    for item in getattr(
+                        result, "controller_completion_evidence", ()
+                    )
+                    if str(item).strip()
+                ),
+            )
+            receipt.validate()
+            if previous_current.external_impact == "navigation_only":
+                controller_refs = tuple(
+                    ControllerTransitionEvidenceRef(
+                        ref_id=(
+                            f"controller_transition:{receipt.receipt_id}:{index}"
+                        ),
+                        receipt_id=receipt.receipt_id,
+                        subgoal_id=receipt.subgoal_id,
+                        text=text,
+                    )
+                    for index, text in enumerate(
+                        receipt.controller_completion_evidence,
+                        start=1,
+                    )
+                )
         verification = {
             "matched": matched,
             "action_outcome": action_outcome,
@@ -1371,6 +1584,15 @@ class UniversalAgentOrchestrator:
             "visible_evidence": [result.after_scene.summary],
             "blocked_reasons": list(verification_errors),
             "after_frame_paths": list(result.after_frame_paths),
+            "controller_completion_evidence": list(
+                receipt.controller_completion_evidence if receipt is not None else ()
+            ),
+            "verified_action_transition": (
+                receipt.to_dict() if receipt is not None else None
+            ),
+            "transition_kind": (
+                "wait_observation" if wait_transition else "physical_action"
+            ),
         }
         self._remember(
             session,
@@ -1382,17 +1604,58 @@ class UniversalAgentOrchestrator:
         observed = self.bridge.observed_state(
             graph=previous_graph,
             trusted_observation=new_observation,
-            action_outcome=action_outcome,
+            action_outcome=("not_applicable" if wait_transition else action_outcome),
             verification=verification,
+            verified_action_transition=receipt,
+            controller_transition_evidence_refs=controller_refs,
         )
+        previous_signature = _subgoal_progress_signature(previous_current)
+        transition_record = {
+            "protocol_version": POST_ACTION_TRANSITION_PROTOCOL_VERSION,
+            "receipt": receipt.to_dict() if receipt is not None else None,
+            "transition_kind": (
+                "wait_observation" if wait_transition else "physical_action"
+            ),
+            "prior_subgoal_signature": previous_signature,
+            "prior_action_equivalence_digest": _action_equivalence_digest(
+                previous_decision.proposal.action
+            ),
+            "disposition": "replanning",
+        }
+
+        def persist_transition() -> None:
+            session.last_post_action_transition = dict(transition_record)
+            self._remember(
+                session,
+                session.evidence_store.write_post_action_transition(
+                    max(1, session.step_number - 1),
+                    transition_record,
+                ),
+            )
+
+        persist_transition()
+        # The consumed decision and every authority derived from the old frame
+        # become unusable before any model replan attempt.
+        session.qwen_decision = None
+        session.controller_decision = None
+        session.confirmation_authority = None
+        session.risk_confirmation_authority = None
+        session.confirmed_risk_ids = ()
         try:
             revised = self.deepseek_planner.replan(
                 previous_graph,
                 observed,
                 trigger=(
-                    "observation_changed" if matched else "action_result_mismatch"
+                    "observation_changed"
+                    if wait_transition
+                    else "action_result_matched"
+                    if matched
+                    else "action_result_mismatch"
                 ),
                 reason=(
+                    "wait_for_change 未产生物理动作；仅依据新的可信画面重规划。"
+                    if wait_transition
+                    else
                     "一个动作已经执行并由新的可信画面验证。"
                     if matched
                     else "动作已执行，但新画面没有证明预期语义变化，必须重规划。"
@@ -1406,14 +1669,23 @@ class UniversalAgentOrchestrator:
         except Exception as exc:
             session.status = "blocked"
             session.failed_reason = f"DeepSeek 重规划失败：{exc}"
-            session.confirmation_authority = None
+            transition_record["disposition"] = "blocked_replan_failure"
+            transition_record["diagnostic"] = session.failed_reason
+            persist_transition()
             return
 
         session.task_graph = revised
         session.goal_draft = self.bridge.goal_draft(revised)
-        session.confirmation_authority = None
-        session.risk_confirmation_authority = None
-        session.confirmed_risk_ids = ()
+        revised_current = revised.active_subgoal()
+        transition_record["revised_revision"] = revised.revision
+        transition_record["revised_subgoal_id"] = (
+            revised_current.subgoal_id if revised_current is not None else None
+        )
+        transition_record["revised_subgoal_signature"] = (
+            _subgoal_progress_signature(revised_current)
+        )
+        if receipt is not None:
+            transition_record["receipt_consumed_revision"] = revised.revision
         self._remember(
             session,
             session.evidence_store.write_task_graph(revised),
@@ -1421,23 +1693,56 @@ class UniversalAgentOrchestrator:
         )
         if revised.status == "completed":
             session.status = "succeeded"
+            transition_record["disposition"] = "task_completed"
+            persist_transition()
             return
+        if controller_refs:
+            prior_in_revised = next(
+                (
+                    item
+                    for item in revised.subgoals
+                    if item.subgoal_id == previous_current.subgoal_id
+                ),
+                None,
+            )
+            if prior_in_revised is None or prior_in_revised.status != "completed":
+                session.status = "blocked"
+                session.failed_reason = (
+                    "本地一次性 controller_transition 完成证据已满足，"
+                    "但重规划未完成其绑定的 navigation_only 子目标；"
+                    "禁止继续产生动作或第二确认。"
+                )
+                transition_record["disposition"] = (
+                    "blocked_unconsumed_controller_completion"
+                )
+                transition_record["diagnostic"] = session.failed_reason
+                persist_transition()
+                return
         current = revised.active_subgoal()
         impact = current.external_impact if current is not None else "unknown"
         if current is None:
             session.status = "blocked"
             session.failed_reason = "重规划后的任务图没有活动子目标。"
+            transition_record["disposition"] = "blocked_missing_active_subgoal"
+            persist_transition()
             return
         if impact in {"external_state", "unknown"}:
             session.status = "awaiting_risk_confirmation"
             session.failed_reason = ""
+            transition_record["disposition"] = "advanced_to_risk_confirmation"
             self._bind_risk_confirmation(session)
+            persist_transition()
             return
         if impact == "read_only":
             try:
                 reviewed = self.deepseek_planner.replan(
                     revised,
-                    observed,
+                    replace(
+                        observed,
+                        last_action_outcome="not_applicable",
+                        verified_action_transition=None,
+                        controller_transition_evidence_refs=(),
+                    ),
                     trigger="subgoal_completed",
                     reason=(
                         "当前 read_only 子目标只能用已经采集的当前可信画面"
@@ -1459,10 +1764,15 @@ class UniversalAgentOrchestrator:
             except Exception as exc:
                 session.status = "blocked"
                 session.failed_reason = f"只读完成复核失败：{exc}"
+                transition_record["disposition"] = "blocked_read_only_review"
+                transition_record["diagnostic"] = session.failed_reason
+                persist_transition()
                 return
             if reviewed.status == "completed":
                 session.status = "succeeded"
                 session.failed_reason = ""
+                transition_record["disposition"] = "task_completed_after_read_only_review"
+                persist_transition()
                 return
             reviewed_current = reviewed.active_subgoal()
             reviewed_impact = (
@@ -1473,11 +1783,18 @@ class UniversalAgentOrchestrator:
             if reviewed_current is None:
                 session.status = "blocked"
                 session.failed_reason = "只读复核后的任务图没有活动子目标。"
+                transition_record["disposition"] = "blocked_read_only_no_active"
+                transition_record["diagnostic"] = session.failed_reason
+                persist_transition()
                 return
             if reviewed_impact in {"external_state", "unknown"}:
                 session.status = "awaiting_risk_confirmation"
                 session.failed_reason = ""
                 self._bind_risk_confirmation(session)
+                transition_record["disposition"] = (
+                    "advanced_to_risk_confirmation_after_read_only"
+                )
+                persist_transition()
                 return
             if reviewed_impact == "read_only":
                 session.status = "blocked"
@@ -1485,11 +1802,19 @@ class UniversalAgentOrchestrator:
                     "当前可信画面没有让 DeepSeek 完成 read_only 子目标；"
                     "禁止为只读验证请求物理动作。"
                 )
+                transition_record["disposition"] = "blocked_read_only_incomplete"
+                transition_record["diagnostic"] = session.failed_reason
+                persist_transition()
                 return
             # A read-only checkpoint may be completed while the overall task still
             # has a later navigation-only subgoal. Reuse the same trusted frames;
             # do not capture again and do not execute anything without a new scope.
             revised = reviewed
+            transition_record["revised_revision"] = revised.revision
+            transition_record["revised_subgoal_id"] = revised.active_subgoal_id
+            transition_record["revised_subgoal_signature"] = (
+                _subgoal_progress_signature(revised.active_subgoal())
+            )
 
         frames = list(result.after_frames)
         context = revised.to_qwen_context()
@@ -1520,6 +1845,14 @@ class UniversalAgentOrchestrator:
                         "要求 DeepSeek 复核整个任务。"
                     ),
                 )
+                transition_record["disposition"] = (
+                    "task_completed_after_qwen_review"
+                    if session.status == "succeeded"
+                    else "blocked_completion_review"
+                )
+                if session.failed_reason:
+                    transition_record["diagnostic"] = session.failed_reason
+                persist_transition()
             except Exception as exc:
                 session.status = "blocked"
                 session.failed_reason = f"完成候选复核失败：{exc}"
@@ -1527,6 +1860,9 @@ class UniversalAgentOrchestrator:
                     allowed=False,
                     reason=session.failed_reason,
                 )
+                transition_record["disposition"] = "blocked_completion_review"
+                transition_record["diagnostic"] = session.failed_reason
+                persist_transition()
                 return
             return
         if decision.proposal.status != "action":
@@ -1541,6 +1877,37 @@ class UniversalAgentOrchestrator:
                 reason=session.failed_reason,
             )
             session.confirmation_authority = None
+            transition_record["disposition"] = "blocked_qwen_no_action"
+            transition_record["diagnostic"] = session.failed_reason
+            persist_transition()
+            return
+        new_equivalence_digest = _action_equivalence_digest(
+            decision.proposal.action
+        )
+        transition_record["next_action_equivalence_digest"] = (
+            new_equivalence_digest
+        )
+        if (
+            bool(controller_refs)
+            and matched
+            and transition_record.get("revised_subgoal_signature")
+            == previous_signature
+            and new_equivalence_digest
+            == transition_record["prior_action_equivalence_digest"]
+        ):
+            session.status = "blocked"
+            session.failed_reason = (
+                "一次性 controller_transition 完成证据已满足，"
+                "但同一活动子目标仍提出等价动作；禁止生成第二确认。"
+            )
+            session.controller_decision = NavigationPolicyDecision(
+                allowed=False,
+                reason=session.failed_reason,
+            )
+            session.confirmation_authority = None
+            transition_record["disposition"] = "blocked_equivalent_repeat"
+            transition_record["diagnostic"] = session.failed_reason
+            persist_transition()
             return
         policy_decision = self.policy.evaluate(
             task_context=QwenTaskContext.from_dict(context),
@@ -1560,9 +1927,17 @@ class UniversalAgentOrchestrator:
             session.status = "blocked"
             session.failed_reason = policy_decision.reason
             session.confirmation_authority = None
+            transition_record["disposition"] = "blocked_policy"
+            transition_record["diagnostic"] = session.failed_reason
+            persist_transition()
             return
         session.status = "awaiting_confirmation"
         self._bind_confirmation(session)
+        transition_record["disposition"] = "advanced_to_new_confirmation"
+        transition_record["next_confirmation_scope"] = (
+            session.confirmation_authority.scope()
+        )
+        persist_transition()
 
     def refresh_decision(self, session: UniversalAgentSessionState) -> Any:
         """Capture a fresh trusted scene and replace the pending decision.
@@ -1602,6 +1977,7 @@ class UniversalAgentOrchestrator:
                 f"当前 {impact} 子目标缺少有效风险确认。"
             )
 
+        prior_observation = session.trusted_observation
         authority = session.confirmation_authority
         if authority is not None:
             authority.consumed = True
@@ -1635,6 +2011,91 @@ class UniversalAgentOrchestrator:
                     observation,
                 ),
             )
+
+            if (
+                prior_observation is not None
+                and str(getattr(prior_observation, "fingerprint", ""))
+                != str(observation.fingerprint)
+            ):
+                observed = self.bridge.observed_state(
+                    graph=graph,
+                    trusted_observation=observation,
+                    action_outcome="not_applicable",
+                    verification={
+                        "visible_evidence": [scene.summary],
+                        "blocked_reasons": [],
+                    },
+                )
+                revised = self.deepseek_planner.replan(
+                    graph,
+                    observed,
+                    trigger="observation_changed",
+                    reason=(
+                        "只读重新观察发现页面指纹变化；必须先修订高层状态，"
+                        "再允许 Qwen 规划下一动作。"
+                    ),
+                )
+                self._validate_graph_identity(
+                    revised,
+                    device_id=session.device_id,
+                    previous=graph,
+                )
+                session.task_graph = revised
+                session.goal_draft = self.bridge.goal_draft(revised)
+                session.qwen_decision = None
+                session.controller_decision = None
+                session.confirmed_risk_ids = ()
+                session.risk_confirmation_authority = None
+                graph = revised
+                goal = session.goal_draft
+                self._remember(
+                    session,
+                    session.evidence_store.write_task_graph(revised),
+                    session.evidence_store.write_risk_audit(revised),
+                )
+                if revised.status == "completed":
+                    session.status = "succeeded"
+                    session.failed_reason = ""
+                    terminal_decision = SimpleNamespace(
+                        proposal=GenericStepProposal(
+                            status="finished",
+                            reason="DeepSeek 已依据新的可信画面确认任务完成。",
+                            completion_evidence=observed.visible_evidence[:3],
+                        )
+                    )
+                    if session.physical_actions != before_actions:
+                        raise UniversalAgentOrchestratorError(
+                            "重新观察路径错误地改变了物理动作计数。"
+                        )
+                    self._write_terminal_snapshot(session)
+                    return terminal_decision
+                current = revised.active_subgoal()
+                impact = (
+                    current.external_impact if current is not None else "unknown"
+                )
+                if current is None:
+                    session.status = "blocked"
+                    session.failed_reason = "页面变化重规划后没有活动子目标。"
+                    blocked_decision = SimpleNamespace(
+                        proposal=GenericStepProposal(
+                            status="blocked",
+                            reason=session.failed_reason,
+                        )
+                    )
+                    self._write_terminal_snapshot(session)
+                    return blocked_decision
+                if impact in {"external_state", "unknown"}:
+                    session.status = "awaiting_risk_confirmation"
+                    session.failed_reason = ""
+                    self._bind_risk_confirmation(session)
+                    risk_decision = SimpleNamespace(
+                        proposal=GenericStepProposal(
+                            status="blocked",
+                            reason="页面变化后必须重新确认当前风险范围。",
+                        )
+                    )
+                    self._write_terminal_snapshot(session)
+                    return risk_decision
 
             if session.confirmed_risk_ids:
                 context = graph.to_qwen_context(
@@ -1819,22 +2280,123 @@ class UniversalAgentOrchestrator:
             raise
 
         physical_actions = int(result.physical_actions)
-        if physical_actions < 0 or physical_actions > 1:
+        wait_transition = result.resolved_action.kind == "wait_for_change"
+        if physical_actions != 1 and not (wait_transition and physical_actions == 0):
             session.physical_actions += max(0, physical_actions)
             session.status = "failed"
             session.failed_reason = (
-                f"单次确认返回了非法物理动作数：{physical_actions}。"
+                "已确认动作必须产生一次物理动作，或仅 wait_for_change 产生零动作；"
+                f"实际返回：{physical_actions}。"
             )
             raise UniversalAgentOrchestratorError(session.failed_reason)
         session.physical_actions += physical_actions
+
+        requested_action = decision.proposal.action
+        rebound_params = dict(getattr(result.rebound_action, "params", {}) or {})
+        resolved_kind = str(getattr(result.resolved_action, "kind", ""))
+        resolved_target_binding_ok = True
+        if resolved_kind in {
+            "tap_semantic",
+            "dismiss_overlay",
+            "input_verified_text",
+            "long_press",
+        }:
+            resolved_target_binding_ok = (
+                str(getattr(result.resolved_action, "target_element_id", "") or "")
+                == str(rebound_params.get("element_id") or "")
+            )
+        elif resolved_kind == "drag":
+            resolved_target_binding_ok = (
+                str(getattr(result.resolved_action, "target_element_id", "") or "")
+                == str(rebound_params.get("source_element_id") or "")
+                and str(
+                    getattr(result.resolved_action, "destination_element_id", "")
+                    or ""
+                )
+                == str(rebound_params.get("destination_element_id") or "")
+            )
+        if (
+            requested_action is None
+            or _action_digest(requested_action) != authority.action_digest
+            or _action_digest(result.requested_action) != authority.action_digest
+            or str(getattr(result.requested_action, "node_id", ""))
+            != authority.decision_node_id
+            or str(getattr(result.rebound_action, "node_id", ""))
+            != authority.decision_node_id
+            or str(getattr(result.resolved_action, "node_id", ""))
+            != authority.decision_node_id
+            or str(getattr(result.resolved_action, "kind", ""))
+            != str(getattr(result.rebound_action, "action", ""))
+            or not resolved_target_binding_ok
+            or dict(getattr(result.resolved_action, "expected_effect", {}) or {})
+            != dict(
+                getattr(result.rebound_action, "params", {}).get(
+                    "expected_effect", {}
+                )
+                or {}
+            )
+        ):
+            session.status = "failed"
+            session.failed_reason = (
+                "执行结果没有严格绑定 confirmed/requested/rebound/resolved 动作链。"
+            )
+            raise UniversalAgentOrchestratorError(session.failed_reason)
+        if (
+            getattr(result, "controller_completion_evidence", ())
+            and result.resolved_action.expected_effect.get(
+                "goal_complete_on_success"
+            )
+            is not True
+        ):
+            session.status = "failed"
+            session.failed_reason = (
+                "控制器完成证据缺少 resolved expected_effect 的一次性完成声明。"
+            )
+            raise UniversalAgentOrchestratorError(session.failed_reason)
         self._remember(
             session,
             result.evidence,
             result.after_frame_paths,
         )
         session.status = "verifying"
+        action_outcome = str(getattr(result, "action_outcome", ""))
+        verification_errors = tuple(
+            str(item)
+            for item in getattr(result, "verification_errors", ())
+            if str(item).strip()
+        )
+        if action_outcome not in POST_ACTION_OUTCOMES:
+            session.status = "failed"
+            session.failed_reason = f"动作结果 outcome 无效：{action_outcome}。"
+            raise UniversalAgentOrchestratorError(session.failed_reason)
+        if (action_outcome == "matched") == bool(verification_errors):
+            session.status = "failed"
+            session.failed_reason = (
+                "动作结果 outcome 与 verification_errors 不一致。"
+            )
+            raise UniversalAgentOrchestratorError(session.failed_reason)
         if (
-            getattr(result, "action_outcome", "matched") == "matched"
+            result.before_scene.fingerprint != observation.fingerprint
+            or result.resolved_action.before_fingerprint != observation.fingerprint
+        ):
+            session.status = "failed"
+            session.failed_reason = "动作结果没有绑定确认时的 before fingerprint。"
+            raise UniversalAgentOrchestratorError(session.failed_reason)
+        after_frames = tuple(getattr(result, "after_frames", ()))
+        after_paths = tuple(
+            str(item).strip() for item in getattr(result, "after_frame_paths", ())
+        )
+        if (
+            len(after_frames) < 4
+            or len(after_paths) != len(after_frames)
+            or any(not item for item in after_paths)
+            or len(set(after_paths)) != len(after_paths)
+        ):
+            session.status = "failed"
+            session.failed_reason = "动作后可信观察缺少完整且唯一的原始帧证据。"
+            raise UniversalAgentOrchestratorError(session.failed_reason)
+        if (
+            action_outcome == "matched"
             and
             result.resolved_action.kind != "wait_for_change"
             and result.after_scene.fingerprint == observation.fingerprint
@@ -1848,15 +2410,25 @@ class UniversalAgentOrchestrator:
             raise UniversalAgentOrchestratorError(session.failed_reason)
 
         new_observation = self.trusted_observation_factory(
-            frames=list(result.after_frames),
+            frames=list(after_frames),
             device_id=session.device_id,
             scene=result.after_scene,
             observation_id=f"obs_{uuid.uuid4().hex}",
         )
         if (
+            str(getattr(new_observation, "device_id", "")) != session.device_id
+            or str(getattr(new_observation, "fingerprint", ""))
+            != result.after_scene.fingerprint
+            or str(getattr(getattr(new_observation, "scene", None), "fingerprint", ""))
+            != result.after_scene.fingerprint
+        ):
+            session.status = "failed"
+            session.failed_reason = "动作后可信观察未严格绑定 device/after scene fingerprint。"
+            raise UniversalAgentOrchestratorError(session.failed_reason)
+        if (
             new_observation.observation_id == observation.observation_id
             or (
-                getattr(result, "action_outcome", "matched") == "matched"
+                action_outcome == "matched"
                 and
                 result.resolved_action.kind != "wait_for_change"
                 and new_observation.fingerprint == observation.fingerprint
@@ -1866,7 +2438,7 @@ class UniversalAgentOrchestrator:
             session.failed_reason = "动作后可信观察 observation/fingerprint 未更新。"
             raise UniversalAgentOrchestratorError(session.failed_reason)
         session.trusted_observation = new_observation
-        session.trusted_frames = tuple(result.after_frames)
+        session.trusted_frames = after_frames
         session.step_number += 1
         self._remember(
             session,
@@ -1881,6 +2453,8 @@ class UniversalAgentOrchestrator:
                 "task_revision": graph.revision,
                 "qwen_decision": UniversalAgentSessionState._serialize(decision),
                 "execution": result.to_dict(),
+                "before_observation_id": observation.observation_id,
+                "before_fingerprint": observation.fingerprint,
                 "after_observation_id": new_observation.observation_id,
                 "after_fingerprint": new_observation.fingerprint,
             }
@@ -1890,6 +2464,7 @@ class UniversalAgentOrchestrator:
             self._advance_after_observation(
                 session,
                 result=result,
+                before_observation=observation,
                 new_observation=new_observation,
             )
             self._write_terminal_snapshot(session)

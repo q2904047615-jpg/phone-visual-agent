@@ -66,6 +66,7 @@ class GenericActionExecutionResult:
     )
     after_frame_paths: tuple[str, ...] = ()
     observation_errors: tuple[str, ...] = ()
+    controller_completion_evidence: tuple[str, ...] = ()
     before_frames: tuple[Image.Image, ...] = field(
         default_factory=tuple,
         repr=False,
@@ -81,6 +82,11 @@ class GenericActionExecutionResult:
         # list-shaped object that the promotion validator must reject.
         object.__setattr__(self, "after_frames", tuple(self.after_frames))
         object.__setattr__(self, "before_frames", tuple(self.before_frames))
+        object.__setattr__(
+            self,
+            "controller_completion_evidence",
+            tuple(self.controller_completion_evidence),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -102,6 +108,9 @@ class GenericActionExecutionResult:
             "after_frame_count": len(self.after_frames),
             "after_frame_paths": list(self.after_frame_paths),
             "observation_errors": list(self.observation_errors),
+            "controller_completion_evidence": list(
+                self.controller_completion_evidence
+            ),
             "before_frame_count": len(self.before_frames),
             "before_frame_paths": list(self.before_frame_paths),
             "orientation_credential": (
@@ -859,6 +868,21 @@ class GenericSingleActionAdapter:
                 ),
             ) from exc
 
+        controller_completion_evidence: tuple[str, ...] = ()
+        if not verification_errors:
+            try:
+                controller_completion_evidence = (
+                    self.controller.completion_evidence_after_action(
+                        resolved,
+                        before,
+                        after,
+                    )
+                )
+            except UniversalActionError as exc:
+                verification_errors = verification_errors + (
+                    f"控制器完成证据复核失败：{exc}",
+                )
+
         return GenericActionExecutionResult(
             requested_action=requested_action,
             rebound_action=rebound,
@@ -876,6 +900,7 @@ class GenericSingleActionAdapter:
             after_frames=after_frames,
             after_frame_paths=after_frame_paths,
             observation_errors=observation_errors,
+            controller_completion_evidence=controller_completion_evidence,
             before_frames=before_frames,
             before_frame_paths=before_paths,
             orientation_credential=orientation_credential,

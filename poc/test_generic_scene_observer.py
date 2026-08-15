@@ -2256,6 +2256,97 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("NoneType", shape["mode_switch_type"])
         self.assertNotIn("privatevalue", json.dumps(shape, ensure_ascii=False))
 
+    def test_non_input_goal_discards_malformed_peripheral_keyboard_switch(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "refresh",
+                "role": "button",
+                "meaning": "refresh",
+                "label": "刷新",
+                "bounds": [850, 20, 920, 90],
+                "confidence": 0.98,
+                "states": {"goal_relevant": True},
+                "evidence": ["当前页面顶部刷新控件"],
+            },
+            {
+                "element_id": "bad-switch",
+                "role": "button",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "英",
+                "bounds": [690, 890, 790, 930],
+                "confidence": 0.92,
+                "states": {
+                    "goal_relevant": False,
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+                "evidence": ["方向与键面文字冲突"],
+            },
+        ]
+
+        scene = GenericSceneObserver(FakeProvider(payload)).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "当前页面完成一次重新加载"},
+        )
+
+        self.assertEqual("refresh", scene.unique_trusted_goal_element().element_id)
+        self.assertEqual(["refresh"], [item.element_id for item in scene.elements])
+
+    def test_input_goal_keeps_malformed_keyboard_switch_fail_closed(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "bad-switch",
+                "role": "button",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "英",
+                "bounds": [690, 890, 790, 930],
+                "confidence": 0.92,
+                "states": {
+                    "goal_relevant": True,
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "direct_latin",
+                    "target_mode": "direct_latin",
+                },
+                "evidence": ["方向与键面文字冲突"],
+            }
+        ]
+
+        with self.assertRaisesRegex(VisionAgentError, "keyboard_input_mode_switch"):
+            GenericSceneObserver(FakeProvider(payload)).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "让当前输入框显示 agent"},
+            )
+
+    def test_non_input_goal_cannot_hide_action_field_on_keyboard_switch(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "bad-switch",
+                "role": "button",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "英",
+                "bounds": [690, 890, 790, 930],
+                "confidence": 0.92,
+                "states": {
+                    "goal_relevant": False,
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "direct_latin",
+                    "target_mode": "chinese_pinyin",
+                    "action": "tap",
+                },
+                "evidence": ["协议外动作字段"],
+            }
+        ]
+
+        with self.assertRaises(VisionAgentError):
+            GenericSceneObserver(FakeProvider(payload)).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "当前页面完成一次重新加载"},
+            )
+
     def test_text_entry_does_not_discard_incomplete_switch_without_direct_latin(self) -> None:
         empty = scene_payload()
         empty["elements"] = []

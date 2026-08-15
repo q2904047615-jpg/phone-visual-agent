@@ -39,7 +39,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v22"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v23"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1200
@@ -1528,6 +1528,7 @@ def _parse_scene(
             camera_alignment_override.validate()
             payload["camera_alignment"] = camera_alignment_override.to_dict()
         _normalize_compact_scene_payload(payload)
+        _normalize_non_target_keyboard_switch(payload, goal_context or {})
         _normalize_known_scene_enums(payload)
         _normalize_tab_navigation_safety(payload, goal_context or {})
         _normalize_prefilled_input_structure(payload, goal_context or {})
@@ -2718,6 +2719,83 @@ def _normalize_compact_scene_payload(payload: dict[str, Any]) -> None:
         # not converted into a clickable role and therefore cannot be targeted.
 
     payload["elements"] = accepted
+
+
+def _normalize_non_target_keyboard_switch(
+    payload: dict[str, Any],
+    goal_context: dict[str, Any],
+) -> None:
+    """Discard keyboard-switch candidates only for goals unrelated to input.
+
+    An unrelated peripheral switch cannot help complete a refresh, navigation,
+    or content goal. Removing it cannot authorize an action, while retaining a
+    malformed direction can block every other valid candidate. Input and
+    keyboard-mode goals keep the element for strict validation and planning.
+    Any action-like or protocol-extra field also keeps the element so the scene
+    parser fails closed instead of hiding it.
+    """
+
+    if _goal_requests_input(goal_context) or _goal_requests_keyboard_mode_switch(
+        goal_context
+    ):
+        return
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return
+    exact_fields = {
+        "element_id",
+        "role",
+        "meaning",
+        "label",
+        "bounds",
+        "confidence",
+        "states",
+        "evidence",
+    }
+    action_like = {
+        "action",
+        "actions",
+        "plan",
+        "step",
+        "steps",
+        "tap",
+        "swipe",
+        "command",
+        "coordinates",
+    }
+
+    def contains_action_like_key(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                str(key).strip().casefold() in action_like
+                or contains_action_like_key(part)
+                for key, part in value.items()
+            )
+        if isinstance(value, list):
+            return any(contains_action_like_key(part) for part in value)
+        return False
+
+    kept: list[Any] = []
+    for item in elements:
+        if not isinstance(item, dict):
+            kept.append(item)
+            continue
+        states = item.get("states")
+        claimed_switch = (
+            str(item.get("meaning") or "").strip() == "switch_keyboard_input_mode"
+            or (
+                isinstance(states, dict)
+                and states.get("keyboard_input_mode_switch") is True
+            )
+        )
+        safely_discardable = (
+            claimed_switch
+            and set(item) == exact_fields
+            and not contains_action_like_key(item)
+        )
+        if not safely_discardable:
+            kept.append(item)
+    payload["elements"] = kept
 
 
 def _normalize_known_scene_enums(payload: dict[str, Any]) -> None:

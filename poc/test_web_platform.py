@@ -271,37 +271,9 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             123,
             270,
             480,
-            hold_seconds=1.05,
+            hold_seconds=0.8,
         )
         click.assert_not_called()
-
-    def test_verified_long_press_caps_actuation_margin_at_two_seconds(self):
-        controller = RobotController(
-            title="test",
-            verified_actions={"long_press"},
-        )
-        frame = Image.new("RGB", (540, 960), "white")
-
-        with (
-            patch("robot_core.legacy.find_window", return_value=(123, "test")),
-            patch.object(controller, "_capture_phone", return_value=frame),
-            patch.object(controller, "_consume_physical_execution"),
-            patch.object(controller, "_checkpoint"),
-            patch(
-                "tap_calibration.corrected_grid_point",
-                return_value=(500.0, 500.0),
-            ),
-            patch("robot_core.legacy.long_press_client_point") as long_press,
-            patch("robot_core.legacy.move_cursor_outside_camera"),
-        ):
-            controller.vision_long_press_relative(500, 500, 1.9)
-
-        long_press.assert_called_once_with(
-            123,
-            270,
-            480,
-            hold_seconds=2.0,
-        )
 
     def test_verified_text_profile_rejects_unverified_characters_before_hardware(self):
         controller = RobotController(

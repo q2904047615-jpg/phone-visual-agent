@@ -114,6 +114,7 @@ class FakeRobot:
         self.actions = []
         self.device_id = "test-device"
         self._armed = None
+        self._long_press_receipt = None
 
     def arm_physical_execution(self, credential, *, action, scene_fingerprint):
         credential.assert_authorizes(
@@ -168,7 +169,24 @@ class FakeRobot:
     def vision_long_press_relative(self, x, y, hold_seconds):
         self._consume("long_press")
         self.actions.append(("long_press", x, y, hold_seconds))
+        self._long_press_receipt = {
+            "version": "2026-08-16-seller-gui-contact-barrier-v1",
+            "channel": "right_button_stationary_touch",
+            "seller_event_barrier_confirmed": True,
+            "round_trip_position_confirmed": True,
+            "hold_started_after_barrier": True,
+            "requested_hold_seconds": hold_seconds,
+            "barrier_offset_pixels": 3,
+            "changed_pixels": 240,
+            "returned_pixels": 0,
+            "barrier_elapsed_ms": 35.0,
+        }
         return (x, y)
+
+    def consume_last_long_press_receipt(self):
+        receipt = self._long_press_receipt
+        self._long_press_receipt = None
+        return receipt
 
     def vision_drag_relative(self, start_x, start_y, end_x, end_y):
         self._consume("drag")

@@ -57,6 +57,7 @@ class GenericActionExecutionResult:
     action_outcome: str = "matched"
     verification_errors: tuple[str, ...] = ()
     robot_result: Any = None
+    hardware_receipt: dict[str, Any] | None = None
     evidence: tuple[str, ...] = ()
     after_frames: tuple[Image.Image, ...] = field(
         default_factory=tuple,
@@ -92,6 +93,11 @@ class GenericActionExecutionResult:
             "action_outcome": self.action_outcome,
             "verification_errors": list(self.verification_errors),
             "robot_result": self.robot_result,
+            "hardware_receipt": (
+                dict(self.hardware_receipt)
+                if self.hardware_receipt is not None
+                else None
+            ),
             "evidence": list(self.evidence),
             "after_frame_count": len(self.after_frames),
             "after_frame_paths": list(self.after_frame_paths),
@@ -684,6 +690,7 @@ class GenericSingleActionAdapter:
 
         physical_actions = 0
         robot_result: Any = None
+        hardware_receipt: dict[str, Any] | None = None
         try:
             if resolved.kind in {"tap_semantic", "dismiss_overlay"}:
                 if resolved.normalized_point is None:
@@ -751,6 +758,25 @@ class GenericSingleActionAdapter:
                 y = max(0, min(1000, round(resolved.normalized_point[1] * 1000)))
                 physical_actions = 1
                 robot_result = method(x, y, resolved.hold_seconds)
+                receipt_consumer = getattr(
+                    self.robot,
+                    "consume_last_long_press_receipt",
+                    None,
+                )
+                if not callable(receipt_consumer):
+                    raise GenericActionAdapterError(
+                        "机械臂没有提供长按事件栅栏凭据。",
+                        physical_actions=physical_actions,
+                        evidence=before_paths,
+                    )
+                raw_receipt = receipt_consumer()
+                if not isinstance(raw_receipt, dict):
+                    raise GenericActionAdapterError(
+                        "机械臂没有返回长按事件栅栏凭据。",
+                        physical_actions=physical_actions,
+                        evidence=before_paths,
+                    )
+                hardware_receipt = dict(raw_receipt)
             elif resolved.kind == "drag":
                 if (
                     resolved.normalized_point is None
@@ -837,6 +863,7 @@ class GenericSingleActionAdapter:
             ),
             verification_errors=verification_errors,
             robot_result=robot_result,
+            hardware_receipt=hardware_receipt,
             evidence=before_paths + all_after_paths,
             after_frames=after_frames,
             after_frame_paths=after_frame_paths,

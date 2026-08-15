@@ -543,6 +543,7 @@ class RobotController:
         # the seller window capture routine at the same time. On Windows that
         # occasionally returns a transient, truncated client bitmap.
         self.capture_lock = threading.RLock()
+        self._last_long_press_receipt: dict[str, Any] | None = None
         default_actions = {
             "tap_semantic",
             "dismiss_overlay",
@@ -582,6 +583,11 @@ class RobotController:
                 "reveal_system_navigation",
             )
         }
+
+    def consume_last_long_press_receipt(self) -> dict[str, Any] | None:
+        receipt = self._last_long_press_receipt
+        self._last_long_press_receipt = None
+        return dict(receipt) if receipt is not None else None
 
     def _require_verified_action(self, action: str, label: str) -> None:
         if action not in self.verified_actions:
@@ -725,6 +731,7 @@ class RobotController:
         """Long-press one calibrated visual target without changing its point."""
 
         self._require_verified_action("long_press", "长按")
+        self._last_long_press_receipt = None
         if not 0.5 <= float(hold_seconds) <= 2.0:
             raise ValueError("通用长按时间必须在0.5～2.0秒之间。")
         if not (0 <= x <= 1000 and 0 <= y <= 1000):
@@ -751,12 +758,15 @@ class RobotController:
             ),
         )
         self._checkpoint()
-        legacy.long_press_client_point(
+        receipt = legacy.long_press_client_point(
             hwnd,
             point[0],
             point[1],
             hold_seconds=float(hold_seconds),
         )
+        if not isinstance(receipt, dict):
+            raise RuntimeError("控制端没有返回长按事件栅栏凭据。")
+        self._last_long_press_receipt = dict(receipt)
         legacy.move_cursor_outside_camera(hwnd)
         return point
 

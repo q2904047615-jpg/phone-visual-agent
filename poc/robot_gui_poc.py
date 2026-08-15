@@ -85,6 +85,13 @@ CLICK_COUNT_INPUT_X = 308
 CONTROL_Y_FROM_BOTTOM = 18
 BASELINE_TOOLBAR_HEIGHT = 50
 DEFAULT_DOUYIN_TEMPLATE = TEMPLATE_DIR / "douyin_home.png"
+SELLER_POSITION_OVERLAY_WIDTH = 180
+SELLER_POSITION_OVERLAY_HEIGHT = 45
+SELLER_POSITION_DIFF_CHANNEL_THRESHOLD = 12
+SELLER_POSITION_CHANGED_PIXEL_MIN = 120
+SELLER_POSITION_RETURN_PIXEL_MAX = 24
+SELLER_POSITION_BARRIER_OFFSET = 3
+SELLER_POSITION_BARRIER_TIMEOUT = 2.5
 
 
 @dataclass(frozen=True)
@@ -721,14 +728,83 @@ def click_client_point(
     user32.SetCursorPos(old_cursor.x, old_cursor.y)
 
 
+def _capture_seller_position_overlay(hwnd: int) -> np.ndarray:
+    """Capture only the seller's PX/MM label without sampling the phone view."""
+
+    left, top, width, height = client_geometry(hwnd)
+    crop_width = min(SELLER_POSITION_OVERLAY_WIDTH, width)
+    crop_height = min(SELLER_POSITION_OVERLAY_HEIGHT, height)
+    if crop_width <= 0 or crop_height <= 0:
+        raise RuntimeError("控制端坐标状态条当前不可见。")
+    owner = _root_window_at(left + crop_width // 2, top + crop_height // 2)
+    if owner != int(hwnd):
+        raise RuntimeError("控制端坐标状态条被其他窗口遮挡。")
+    image = ImageGrab.grab(
+        bbox=(left, top, left + crop_width, top + crop_height),
+        all_screens=True,
+    ).convert("RGB")
+    return np.asarray(image, dtype=np.int16).copy()
+
+
+def _seller_position_changed_pixels(
+    baseline: np.ndarray,
+    current: np.ndarray,
+) -> int:
+    if baseline.shape != current.shape or baseline.ndim != 3:
+        raise RuntimeError("控制端坐标状态条尺寸在动作期间发生变化。")
+    delta = np.abs(current - baseline).max(axis=2)
+    return int((delta > SELLER_POSITION_DIFF_CHANNEL_THRESHOLD).sum())
+
+
+def _wait_for_seller_position_state(
+    hwnd: int,
+    baseline: np.ndarray,
+    *,
+    expect_changed: bool,
+    timeout: float = SELLER_POSITION_BARRIER_TIMEOUT,
+) -> tuple[int, float]:
+    started = time.monotonic()
+    deadline = started + max(0.1, float(timeout))
+    last_count = 0
+    while time.monotonic() < deadline:
+        _check_escape("用户按下 Esc，已停止长按并准备释放触控笔。")
+        current = _capture_seller_position_overlay(hwnd)
+        last_count = _seller_position_changed_pixels(baseline, current)
+        if expect_changed:
+            if last_count >= SELLER_POSITION_CHANGED_PIXEL_MIN:
+                return last_count, time.monotonic() - started
+        elif last_count <= SELLER_POSITION_RETURN_PIXEL_MAX:
+            return last_count, time.monotonic() - started
+        time.sleep(0.02)
+    state = "变化" if expect_changed else "恢复"
+    raise RuntimeError(
+        f"控制端没有在限定时间内确认坐标状态条{state}，已拒绝无确认长按。"
+    )
+
+
+def _stable_seller_position_baseline(hwnd: int) -> np.ndarray:
+    deadline = time.monotonic() + 1.0
+    previous = _capture_seller_position_overlay(hwnd)
+    while time.monotonic() < deadline:
+        time.sleep(0.03)
+        current = _capture_seller_position_overlay(hwnd)
+        if (
+            _seller_position_changed_pixels(previous, current)
+            <= SELLER_POSITION_RETURN_PIXEL_MAX
+        ):
+            return current
+        previous = current
+    raise RuntimeError("控制端坐标状态条在长按前不稳定。")
+
+
 def long_press_client_point(
     hwnd: int,
     x: int,
     y: int,
     *,
     hold_seconds: float,
-) -> None:
-    """Hold one stationary seller touch contact via the right-button channel."""
+) -> dict[str, object]:
+    """Hold contact only after the seller GUI processes a down/move barrier."""
 
     _, _, width, height = client_geometry(hwnd)
     camera_height = seller_camera_height(width, height)
@@ -749,16 +825,51 @@ def long_press_client_point(
     time.sleep(0.1)
     user32.SetCursorPos(point.x, point.y)
     _check_escape("用户按下 Esc，已取消长按。")
+    baseline = _stable_seller_position_baseline(hwnd)
+    offset = (
+        SELLER_POSITION_BARRIER_OFFSET
+        if x + SELLER_POSITION_BARRIER_OFFSET < width
+        else -SELLER_POSITION_BARRIER_OFFSET
+    )
     pressed = False
+    changed_pixels = 0
+    returned_pixels = 0
+    barrier_seconds = 0.0
     try:
         user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
         pressed = True
+        barrier_started = time.monotonic()
+        user32.SetCursorPos(point.x + offset, point.y)
+        changed_pixels, _ = _wait_for_seller_position_state(
+            hwnd,
+            baseline,
+            expect_changed=True,
+        )
+        user32.SetCursorPos(point.x, point.y)
+        returned_pixels, _ = _wait_for_seller_position_state(
+            hwnd,
+            baseline,
+            expect_changed=False,
+        )
+        barrier_seconds = time.monotonic() - barrier_started
         sleep_interruptible(float(hold_seconds))
     finally:
         if pressed:
             user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
             time.sleep(0.12)
         user32.SetCursorPos(old_cursor.x, old_cursor.y)
+    return {
+        "version": "2026-08-16-seller-gui-contact-barrier-v1",
+        "channel": "right_button_stationary_touch",
+        "seller_event_barrier_confirmed": True,
+        "round_trip_position_confirmed": True,
+        "hold_started_after_barrier": True,
+        "requested_hold_seconds": float(hold_seconds),
+        "barrier_offset_pixels": abs(int(offset)),
+        "changed_pixels": int(changed_pixels),
+        "returned_pixels": int(returned_pixels),
+        "barrier_elapsed_ms": round(barrier_seconds * 1000.0, 3),
+    }
 
 
 def drag_client_path(

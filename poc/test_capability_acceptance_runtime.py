@@ -17,6 +17,7 @@ from orientation_safety import (
 from capability_acceptance import (
     CapabilityAcceptanceError,
     CapabilityRegistryPromoter,
+    validate_acceptance_report,
 )
 from capability_acceptance_runtime import CapabilityAcceptanceManager
 from generic_action_adapter import GenericActionAdapterError
@@ -167,6 +168,22 @@ class FakeTrialResult:
             if action == "long_press"
             else None
         )
+        self.hardware_receipt = (
+            {
+                "version": "2026-08-16-seller-gui-contact-barrier-v1",
+                "channel": "right_button_stationary_touch",
+                "seller_event_barrier_confirmed": True,
+                "round_trip_position_confirmed": True,
+                "hold_started_after_barrier": True,
+                "requested_hold_seconds": 0.8,
+                "barrier_offset_pixels": 3,
+                "changed_pixels": 240,
+                "returned_pixels": 0,
+                "barrier_elapsed_ms": 35.0,
+            }
+            if action == "long_press"
+            else None
+        )
         self.before_frame_paths = tuple(
             self._frame(run_dir / f"confirm_before_{index}.jpg", "black")
             for index in range(1, 5)
@@ -209,6 +226,7 @@ class FakeTrialResult:
             "observation_errors": [],
             "verification_errors": [],
             "robot_result": self.robot_result,
+            "hardware_receipt": self.hardware_receipt,
             "before_frame_paths": list(self.before_frame_paths),
             "after_frame_paths": list(self.after_frame_paths),
             "orientation_credential": self.orientation_credential.to_dict(),
@@ -756,6 +774,47 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
         )
         self.assertIsNotNone(trial.promotion_authority)
 
+    def test_long_press_report_rejects_missing_or_tampered_event_barrier(self):
+        self.proposed_action = "long_press"
+        trial = self.manager.start(
+            device_id="device-a",
+            candidate_action="long_press",
+            text="长按一个安全项目并观察上下文菜单。",
+        )
+        self.manager.confirm(
+            "trial-001",
+            trial.session.snapshot()["confirmation_scope"],
+        )
+        original = json.loads(trial.report_path.read_text(encoding="utf-8"))
+        mutations = (
+            lambda report: report["execution"].pop("hardware_receipt"),
+            lambda report: report["execution"]["hardware_receipt"].__setitem__(
+                "hold_started_after_barrier", False
+            ),
+            lambda report: report["execution"]["hardware_receipt"].__setitem__(
+                "changed_pixels", 119
+            ),
+            lambda report: report["execution"]["hardware_receipt"].__setitem__(
+                "returned_pixels", 25
+            ),
+            lambda report: report["execution"]["hardware_receipt"].__setitem__(
+                "requested_hold_seconds", 0.7
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                report = json.loads(json.dumps(original))
+                mutate(report)
+                trial.report_path.write_text(
+                    json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    CapabilityAcceptanceError,
+                    "事件栅栏|保压时长",
+                ):
+                    validate_acceptance_report(trial.report_path)
+
     def test_report_separates_confirmed_and_execution_fresh_fingerprints(self):
         trial = self.manager.start(
             device_id="device-a",
@@ -953,7 +1012,8 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertNotIn("promotion_authority", persisted_before_promotion)
         self.assertNotIn("source_nonce", persisted_before_promotion)
-        self.assertNotIn("receipt", persisted_before_promotion)
+        self.assertNotIn('"promotion_receipt"', persisted_before_promotion)
+        self.assertNotIn('"receipt":', persisted_before_promotion)
         self.assertNotIn("secret", persisted_before_promotion)
 
         result = self.manager.promote(

@@ -428,8 +428,51 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
             )
         )
 
-    if action == "long_press" and not pixel_point(robot_result):
-        return "长按验收缺少机械臂返回的实际像素落点。"
+    if action == "long_press":
+        if not pixel_point(robot_result):
+            return "长按验收缺少机械臂返回的实际像素落点。"
+        receipt = execution.get("hardware_receipt")
+        if not isinstance(receipt, dict):
+            return "长按验收缺少控制端事件栅栏凭据。"
+        required_true = (
+            "seller_event_barrier_confirmed",
+            "round_trip_position_confirmed",
+            "hold_started_after_barrier",
+        )
+        if (
+            receipt.get("version")
+            != "2026-08-16-seller-gui-contact-barrier-v1"
+            or receipt.get("channel") != "right_button_stationary_touch"
+            or any(receipt.get(field) is not True for field in required_true)
+        ):
+            return "长按验收的控制端事件栅栏凭据无效。"
+        receipt_hold = receipt.get("requested_hold_seconds")
+        if (
+            resolved.hold_seconds is None
+            or isinstance(receipt_hold, bool)
+            or not isinstance(receipt_hold, (int, float))
+            or abs(float(receipt_hold) - float(resolved.hold_seconds)) > 1e-6
+        ):
+            return "长按验收的事件栅栏保压时长与已解析动作不一致。"
+        offset = receipt.get("barrier_offset_pixels")
+        changed = receipt.get("changed_pixels")
+        returned = receipt.get("returned_pixels")
+        elapsed = receipt.get("barrier_elapsed_ms")
+        if (
+            isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or not 1 <= offset <= 3
+            or isinstance(changed, bool)
+            or not isinstance(changed, int)
+            or changed < 120
+            or isinstance(returned, bool)
+            or not isinstance(returned, int)
+            or not 0 <= returned <= 24
+            or isinstance(elapsed, bool)
+            or not isinstance(elapsed, (int, float))
+            or not 0.0 <= float(elapsed) <= 5000.0
+        ):
+            return "长按验收的控制端事件栅栏测量值无效。"
     if action == "drag":
         if (
             not isinstance(robot_result, (list, tuple))

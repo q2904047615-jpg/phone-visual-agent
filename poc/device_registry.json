@@ -10,6 +10,7 @@
       "verified_actions": [
         "back",
         "dismiss_overlay",
+        "drag",
         "home",
         "input_verified_text",
         "swipe",

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
+import numpy as np
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
@@ -260,7 +261,21 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
                 "tap_calibration.corrected_grid_point",
                 return_value=(500.0, 500.0),
             ),
-            patch("robot_core.legacy.long_press_client_point") as long_press,
+            patch(
+                "robot_core.legacy.long_press_client_point",
+                return_value={
+                    "version": "2026-08-16-seller-gui-contact-barrier-v1",
+                    "channel": "right_button_stationary_touch",
+                    "seller_event_barrier_confirmed": True,
+                    "round_trip_position_confirmed": True,
+                    "hold_started_after_barrier": True,
+                    "requested_hold_seconds": 0.8,
+                    "barrier_offset_pixels": 3,
+                    "changed_pixels": 240,
+                    "returned_pixels": 0,
+                    "barrier_elapsed_ms": 35.0,
+                },
+            ) as long_press,
             patch("robot_core.legacy.click_client_point") as click,
             patch("robot_core.legacy.move_cursor_outside_camera"),
         ):
@@ -274,6 +289,48 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             hold_seconds=0.8,
         )
         click.assert_not_called()
+        receipt = controller.consume_last_long_press_receipt()
+        self.assertTrue(receipt["seller_event_barrier_confirmed"])
+        self.assertIsNone(controller.consume_last_long_press_receipt())
+
+    def test_seller_position_overlay_diff_separates_noise_and_move(self):
+        baseline = np.zeros((45, 180, 3), dtype=np.int16)
+        noise = baseline.copy()
+        noise[0:20, 0:20, :] = 12
+        moved = baseline.copy()
+        moved[0:20, 0:20, :] = 13
+
+        self.assertEqual(
+            0,
+            robot_gui_poc._seller_position_changed_pixels(baseline, noise),
+        )
+        self.assertEqual(
+            400,
+            robot_gui_poc._seller_position_changed_pixels(baseline, moved),
+        )
+
+    def test_seller_position_barrier_waits_for_change_then_return(self):
+        baseline = np.zeros((45, 180, 3), dtype=np.int16)
+        moved = baseline.copy()
+        moved[0:20, 0:20, :] = 20
+
+        with patch(
+            "robot_gui_poc._capture_seller_position_overlay",
+            side_effect=[baseline.copy(), moved, moved, baseline.copy()],
+        ):
+            changed, _ = robot_gui_poc._wait_for_seller_position_state(
+                123,
+                baseline,
+                expect_changed=True,
+            )
+            returned, _ = robot_gui_poc._wait_for_seller_position_state(
+                123,
+                baseline,
+                expect_changed=False,
+            )
+
+        self.assertEqual(400, changed)
+        self.assertEqual(0, returned)
 
     def test_verified_text_profile_rejects_unverified_characters_before_hardware(self):
         controller = RobotController(
@@ -4064,7 +4121,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
 
         self.assertTrue(controller.hardware_capabilities()["input_verified_text"])
         self.assertFalse(controller.hardware_capabilities()["long_press"])
-        self.assertFalse(controller.hardware_capabilities()["drag"])
+        self.assertTrue(controller.hardware_capabilities()["drag"])
 
     def test_two_devices_have_independent_controllers_and_calibrations(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import threading
 import time
@@ -42,7 +43,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v27"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v28"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
@@ -1813,6 +1814,7 @@ def _parse_scene(
         _normalize_tab_navigation_safety(payload, goal_context or {})
         _normalize_prefilled_input_structure(payload, goal_context or {})
         _normalize_local_text_clear_structure(payload, goal_context or {})
+        _normalize_exact_target_ui_label_relevance(payload, goal_context or {})
         _normalize_unique_input_focus(payload)
         _drop_out_of_range_non_goal_elements(payload)
         return UIScene.from_dict(
@@ -3632,6 +3634,64 @@ def _normalize_compact_scene_payload(payload: dict[str, Any]) -> None:
         # not converted into a clickable role and therefore cannot be targeted.
 
     payload["elements"] = accepted
+
+
+def _normalize_exact_target_ui_label_relevance(
+    payload: dict[str, Any],
+    goal_context: dict[str, Any],
+) -> None:
+    """Use one exact user-provided visible label to resolve model over-selection.
+
+    This never invents an element or changes geometry.  A missing or duplicate
+    exact label leaves the scene untouched so ambiguity remains fail-closed.
+    """
+
+    entities = goal_context.get("entities")
+    if not isinstance(entities, dict):
+        return
+    target_label = str(entities.get("target_ui_label") or "").strip()
+    elements = payload.get("elements")
+    if not target_label or not isinstance(elements, list):
+        return
+    matches = [
+        item
+        for item in elements
+        if isinstance(item, dict)
+        and str(item.get("label") or "").strip() == target_label
+    ]
+    if len(matches) != 1:
+        return
+    target = matches[0]
+    for item in elements:
+        if not isinstance(item, dict):
+            continue
+        states = item.get("states")
+        if not isinstance(states, dict):
+            continue
+        states["goal_relevant"] = item is target
+    target_states = target.get("states")
+    bounds = target.get("bounds")
+    overlays = payload.get("overlays")
+    if (
+        isinstance(target_states, dict)
+        and "fully_visible" not in target_states
+        and isinstance(bounds, list)
+        and len(bounds) == 4
+        and all(
+            isinstance(value, (int, float)) and math.isfinite(float(value))
+            for value in bounds
+        )
+        and 5.0 <= float(bounds[0]) < float(bounds[2]) <= 995.0
+        and 5.0 <= float(bounds[1]) < float(bounds[3]) <= 995.0
+        and isinstance(overlays, list)
+        and not overlays
+        and isinstance(target.get("evidence"), list)
+        and bool(target["evidence"])
+    ):
+        # ``fully_visible`` only means the reported target box is wholly in
+        # the original frame and unobscured by a reported overlay.  It does not
+        # attest meaning, clickability or action safety.
+        target_states["fully_visible"] = True
 
 
 def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:

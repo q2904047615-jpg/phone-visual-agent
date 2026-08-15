@@ -365,6 +365,88 @@ class GenericSceneObserverTests(unittest.TestCase):
                         camera_layout_orientation="portrait",
                     )
 
+    def test_exact_target_ui_label_resolves_model_over_selection(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "target",
+                "role": "button",
+                "meaning": "long_press_target_area",
+                "label": "长按我 · 不要移动",
+                "bounds": [90, 470, 910, 690],
+                "confidence": 0.99,
+                "states": {"goal_relevant": True},
+                "evidence": ["黄色虚线区域"],
+            },
+            {
+                "element_id": "instruction",
+                "role": "text",
+                "meaning": "action_instruction",
+                "label": "动作：长按黄色区域 800 毫秒",
+                "bounds": [110, 390, 890, 450],
+                "confidence": 0.99,
+                "states": {"goal_relevant": True},
+                "evidence": ["操作说明文字"],
+            },
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="exact-label",
+            goal_context={
+                "entities": {"target_ui_label": "长按我 · 不要移动"}
+            },
+            camera_layout_orientation="portrait",
+        )
+
+        self.assertEqual("target", scene.unique_trusted_goal_element().element_id)
+        self.assertTrue(scene.elements[0].states["fully_visible"])
+        self.assertFalse(scene.elements[1].states["goal_relevant"])
+
+    def test_edge_touching_exact_label_does_not_mint_full_visibility(self) -> None:
+        payload = scene_payload()
+        payload["elements"][0].update(
+            {
+                "label": "边缘目标",
+                "bounds": [0, 600, 260, 760],
+                "states": {"goal_relevant": True},
+            }
+        )
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="edge-label",
+            goal_context={"entities": {"target_ui_label": "边缘目标"}},
+            camera_layout_orientation="portrait",
+        )
+
+        self.assertNotIn("fully_visible", scene.elements[0].states)
+
+    def test_duplicate_exact_target_ui_labels_remain_ambiguous(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": f"target-{index}",
+                "role": "button",
+                "meaning": "drag_target_entry",
+                "label": "拖动目标",
+                "bounds": [100, 300 + index * 200, 900, 420 + index * 200],
+                "confidence": 0.99,
+                "states": {"goal_relevant": True},
+                "evidence": ["同名目标"],
+            }
+            for index in range(2)
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="duplicate-label",
+            goal_context={"entities": {"target_ui_label": "拖动目标"}},
+            camera_layout_orientation="portrait",
+        )
+
+        self.assertIsNone(scene.unique_trusted_goal_element())
+
     def test_camera_alignment_drops_forbidden_peripheral_evidence_only_when_safe_remains(self) -> None:
         payload = scene_payload()
         payload["camera_alignment"]["evidence"] = [

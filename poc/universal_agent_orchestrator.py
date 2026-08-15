@@ -2340,7 +2340,10 @@ class PhaseOneNavigationPolicy:
         other destructive/account semantics remain fail-closed.
         """
 
-        if str(self._value(action, "action", "")) != "tap_semantic":
+        if str(self._value(action, "action", "")) not in {
+            "tap_semantic",
+            "long_press",
+        }:
             return False
         goal = self._value(task_context, "goal", None)
         if not isinstance(goal, Mapping):
@@ -3058,9 +3061,14 @@ class PhaseOneNavigationPolicy:
                         str(action.params.get("target") or ""),
                     )
                 )
-                canonical = self._semantic_class(*sanitized)
-                if canonical == "forbidden":
+                sanitized_class = self._semantic_class(*sanitized)
+                if sanitized_class == "forbidden":
                     return self._deny("候选包含外部状态、输入或破坏性语义。")
+                canonical = (
+                    "long_press"
+                    if action_kind == "long_press"
+                    else sanitized_class
+                )
             else:
                 return self._deny("候选包含外部状态、输入或破坏性语义。")
         if canonical == "refresh":

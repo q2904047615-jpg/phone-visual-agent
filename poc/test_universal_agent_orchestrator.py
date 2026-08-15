@@ -874,6 +874,51 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertFalse(result.allowed)
         self.assertIn("破坏性语义", result.reason)
 
+    def test_allows_long_press_bound_to_exact_action_like_label(self) -> None:
+        scene = _scene(
+            meaning="long_press_target_area",
+            label="长按我 · 不要移动",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        decision = _decision(scene, action_kind="long_press")
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_ui_label": "长按我 · 不要移动"},
+                subgoal_objective="当前页面可见的本机临时结果状态出现",
+                subgoal_completion_conditions=(
+                    "页面顶部状态区域显示绿色结果状态",
+                ),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+            available_action_kinds=frozenset({"long_press"}),
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("long_press", result.canonical_class)
+
+    def test_long_press_literal_exception_keeps_delete_forbidden(self) -> None:
+        scene = _scene(
+            meaning="long_press_delete_target",
+            label="长按并删除",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        decision = _decision(scene, action_kind="long_press")
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_ui_label": "长按并删除"},
+                subgoal_objective="当前页面可见的本机临时结果状态出现",
+                subgoal_completion_conditions=("结果状态可见",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+            available_action_kinds=frozenset({"long_press"}),
+        )
+
+        self.assertFalse(result.allowed)
+
     def test_rejects_action_missing_from_device_capabilities(self) -> None:
         scene = _scene()
         decision = _decision(scene, action_kind="swipe")

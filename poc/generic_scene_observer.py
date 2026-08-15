@@ -43,7 +43,6 @@ GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v16"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 800
-COMPACT_RETRY_TOKENS = 800
 TARGETED_OUTPUT_TOKENS = 1200
 INPUT_STRUCTURE_AUDIT_TOKENS = 700
 SYSTEM_UI_AUDIT_TOKENS = 600
@@ -210,7 +209,6 @@ class GenericSceneObserver:
                 "last_stage": last_stage,
                 "last_stage_label": STAGE_LABELS.get(last_stage, last_stage),
                 "compact_output_tokens": COMPACT_OUTPUT_TOKENS,
-                "compact_retry_output_tokens": COMPACT_RETRY_TOKENS,
                 "observation_timeout_seconds": OBSERVATION_TIMEOUT_SECONDS,
                 "max_compact_elements": MAX_COMPACT_ELEMENTS,
                 "last_scene_enum_values": dict(
@@ -331,13 +329,9 @@ class GenericSceneObserver:
                     fingerprint=fingerprint,
                 )
 
-            def parse_remote_structural_repair(
-                original: str,
-                suggested: str,
-            ) -> UIScene | None:
-                repaired = _parse_remote_structural_repair_suggestion(
-                    original,
-                    suggested,
+            def parse_unique_structural_repair(value: str) -> UIScene | None:
+                repaired = _parse_scene_after_unique_structural_edit(
+                    value,
                     fingerprint=fingerprint,
                     goal_context=context,
                     allow_invalid_system_ui_unknown=system_ui_audit_required,
@@ -367,39 +361,17 @@ class GenericSceneObserver:
                 )
                 if (
                     first_error_type not in FORMAT_ERROR_TYPES
-                    or not _compact_retry_allowed(first_error)
                     or not _compact_response_has_repairable_syntax_error(
                         self.last_raw_response
                     )
                 ):
                     raise
-                original_raw = self.last_raw_response
-                compact_retry_used = True
-                format_retry_used = True
-                self._set_stage("waiting_compact_retry")
-                retry_messages = [
-                    _json_only_system_message(),
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": _compact_retry_prompt(original_raw),
-                            }
-                        ],
-                    }
-                ]
-                raw = model_chat(
-                    retry_messages,
-                    max_tokens=COMPACT_RETRY_TOKENS,
-                )
-                self.last_raw_response = raw
-                self._set_stage("parsing_compact_retry")
-                scene = parse_remote_structural_repair(original_raw, raw)
+                scene = parse_unique_structural_repair(self.last_raw_response)
                 if scene is None:
                     raise VisionAgentError(
-                        "远程格式建议不是原始响应唯一、严格有效的单结构标点修复。"
+                        "原始 compact 响应不存在唯一、严格有效的单结构标点修复。"
                     )
+                format_retry_used = True
                 local_structural_repair_used = True
 
             if (
@@ -1134,145 +1106,6 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 """
 
 
-def _compact_retry_prompt(raw_response: str) -> str:
-    encoded_raw = json.dumps(raw_response, ensure_ascii=False)
-    encoded_schema = json.dumps(
-        _compact_scene_repair_schema(),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return f"""
-你只是JSON语法修复器，不是页面观察器。不得观察、推理、补造或改变任何语义。
-只允许修复JSON结构标点；不得增删元素、字段或字符串，不得改写任何已有值，不得移动元素、
-改变元素所属列表或把一种字段结构改写成另一种。原始响应缺少字段或不符合schema时不得猜测补齐。
-返回结果仍会由本地完整严格协议校验；无法无损修复就原样返回。
-只输出一个JSON对象，不要Markdown、说明或代码围栏。
-RAW_RESPONSE_JSON_STRING:
-{encoded_raw}
-STRICT_JSON_SCHEMA:
-{encoded_schema}
-""".strip()
-
-
-def _compact_scene_repair_schema() -> dict[str, Any]:
-    number_0_1000 = {"type": "number", "minimum": 0, "maximum": 1000}
-    unknown_or_boolean = {
-        "anyOf": [{"type": "boolean"}, {"const": "unknown"}]
-    }
-    element_schema = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "element_id",
-            "role",
-            "meaning",
-            "label",
-            "bounds",
-            "confidence",
-            "states",
-            "evidence",
-        ],
-        "properties": {
-            "element_id": {"type": "string", "minLength": 1},
-            "role": {"enum": sorted(ALLOWED_ROLES)},
-            "meaning": {"type": "string", "minLength": 1},
-            "label": {"type": "string"},
-            "bounds": {
-                "type": "array",
-                "minItems": 4,
-                "maxItems": 4,
-                "items": number_0_1000,
-            },
-            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            "states": {"type": "object"},
-            "evidence": {"type": "array", "items": {"type": "string"}},
-        },
-    }
-    return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "additionalProperties": False,
-        "required": [
-            "protocol_version",
-            "screen_id",
-            "summary",
-            "system_ui",
-            "camera_alignment",
-            "elements",
-            "overlays",
-            "stable",
-            "confidence",
-            "fingerprint",
-        ],
-        "anyOf": [
-            {"required": ["foreground_app_id"]},
-            {"required": ["app_id"]},
-        ],
-        "properties": {
-            "protocol_version": {"const": UI_SCENE_PROTOCOL_VERSION},
-            "foreground_app_id": {"type": "string", "minLength": 1},
-            "app_id": {"type": "string", "minLength": 1},
-            "screen_id": {"type": "string", "minLength": 1},
-            "summary": {"type": "string"},
-            "system_ui": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "immersive_or_fullscreen",
-                    "navigation_bar_visible",
-                ],
-                "properties": {
-                    "immersive_or_fullscreen": unknown_or_boolean,
-                    "navigation_bar_visible": unknown_or_boolean,
-                },
-            },
-            "camera_alignment": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "camera_layout_orientation",
-                    "phone_content_rotation",
-                    "confidence",
-                    "evidence",
-                ],
-                "properties": {
-                    "camera_layout_orientation": {
-                        "enum": ["portrait", "landscape", "square", "unknown"]
-                    },
-                    "phone_content_rotation": {
-                        "enum": [
-                            "upright",
-                            "rotated_90",
-                            "rotated_180",
-                            "rotated_270",
-                            "unknown",
-                        ]
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 1,
-                    },
-                    "evidence": {
-                        "type": "array",
-                        "maxItems": 2,
-                        "items": {"type": "string"},
-                    },
-                },
-            },
-            "elements": {
-                "type": "array",
-                "maxItems": MAX_COMPACT_ELEMENTS,
-                "items": element_schema,
-            },
-            "overlays": {"type": "array", "items": {"type": "string"}},
-            "stable": {"type": "boolean"},
-            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            "fingerprint": {"type": "string"},
-        },
-    }
-
-
 def _targeted_retry_prompt(
     context: dict[str, Any],
     error: Exception,
@@ -1401,13 +1234,17 @@ _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES = 40
 _MAX_JSON_STRUCTURAL_REPAIR_CHARS = 16000
 
 
+class _DuplicateJSONKeyError(ValueError):
+    pass
+
+
 def _reject_duplicate_json_object_pairs(
     pairs: list[tuple[str, Any]],
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError(f"duplicate JSON key: {key}")
+            raise _DuplicateJSONKeyError(key)
         result[key] = value
     return result
 
@@ -1434,8 +1271,16 @@ def _extract_compact_json_object(raw: str) -> dict[str, Any]:
             value = _load_json_without_duplicate_keys(text[start : end + 1])
         except json.JSONDecodeError as exc:
             raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
+        except _DuplicateJSONKeyError as exc:
+            raise VisionAgentError(
+                f"compact 响应包含重复 JSON 字段：{exc}"
+            ) from exc
         except (TypeError, ValueError) as exc:
             raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
+    except _DuplicateJSONKeyError as exc:
+        raise VisionAgentError(
+            f"compact 响应包含重复 JSON 字段：{exc}"
+        ) from exc
     except (TypeError, ValueError) as exc:
         raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
     if not isinstance(value, dict):
@@ -1534,33 +1379,6 @@ def _parse_scene_after_unique_structural_edit(
         camera_layout_orientation=camera_layout_orientation,
     )
     return result[1] if result is not None else None
-
-
-def _parse_remote_structural_repair_suggestion(
-    original_raw: str,
-    suggested_raw: str,
-    *,
-    fingerprint: str,
-    goal_context: dict[str, Any] | None = None,
-    allow_invalid_system_ui_unknown: bool = False,
-    camera_layout_orientation: str | None = None,
-) -> UIScene | None:
-    """Accept a remote suggestion only when it exactly names the unique edit."""
-
-    try:
-        _extract_compact_json_object(suggested_raw)
-    except VisionAgentError:
-        return None
-    result = _unique_strict_structural_scene_edit(
-        original_raw,
-        fingerprint=fingerprint,
-        goal_context=goal_context,
-        allow_invalid_system_ui_unknown=allow_invalid_system_ui_unknown,
-        camera_layout_orientation=camera_layout_orientation,
-    )
-    if result is None or str(suggested_raw).strip() != result[0]:
-        return None
-    return result[1]
 
 
 def _unique_strict_structural_scene_edit(
@@ -2855,19 +2673,6 @@ def _scene_enum_values(raw: str) -> dict[str, list[str]]:
         for key, values in collected.items()
         if values
     }
-
-
-def _compact_retry_allowed(error: VisionAgentError) -> bool:
-    text = str(error)
-    non_retryable = (
-        "未配置 DASHSCOPE_API_KEY",
-        "HTTP 400",
-        "HTTP 401",
-        "HTTP 403",
-        "HTTP 404",
-        "目标上下文包含",
-    )
-    return not any(marker in text for marker in non_retryable)
 
 
 def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:

@@ -462,12 +462,11 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(0, caught.exception.physical_actions)
         self.assertEqual([], robot.actions)
         self.assertIsNone(robot._armed)
-        self.assertEqual([800, 800], provider.max_tokens_seen)
+        self.assertEqual([800], provider.max_tokens_seen)
 
     def test_public_execute_irreparable_observation_never_calls_robot(self):
-        valid = compact_scene_raw()
         self._assert_public_observation_failure_before_robot(
-            ["not-json", valid]
+            ["not-json"]
         )
 
     def test_public_execute_duplicate_key_observation_never_calls_robot(self):
@@ -478,7 +477,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             1,
         )
         self._assert_public_observation_failure_before_robot(
-            [duplicate, duplicate]
+            [duplicate]
         )
 
     def test_public_execute_ambiguous_observation_never_calls_robot(self):
@@ -489,7 +488,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             side_effect=lambda _raw: iter((first, second)),
         ):
             self._assert_public_observation_failure_before_robot(
-                ['{"bad":}', first]
+                ['{"bad":}']
             )
 
     def test_reports_only_callable_device_actions(self):

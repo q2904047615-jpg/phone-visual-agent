@@ -163,14 +163,6 @@ def extra_brace_scene_response() -> str:
     return malformed
 
 
-def corrected_extra_brace_scene_response() -> str:
-    return extra_brace_scene_response().replace(
-        '"evidence":["浏览器"]}}],"overlays"',
-        '"evidence":["浏览器"]}],"overlays"',
-        1,
-    )
-
-
 def input_audit_payload(
     *,
     application_inputs: list[dict] | None = None,
@@ -1217,30 +1209,19 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         self.assertEqual(scene.foreground_app_id, "calculator")
 
-    def test_irreparable_json_rejects_even_valid_compact_retry(self) -> None:
+    def test_irreparable_json_stops_after_one_compact_call(self) -> None:
         provider = SequenceProvider(["{", scene_payload()])
         observer = GenericSceneObserver(provider)
         with self.assertRaisesRegex(VisionAgentError, "唯一、严格有效"):
             observer.observe(frames=stable_frames())
-        self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [800, 800])
-        retry_content = provider.messages_seen[1][1]["content"]
-        self.assertEqual(len(retry_content), 1)
-        self.assertEqual(retry_content[0]["type"], "text")
-        retry_text = retry_content[0]["text"]
-        self.assertIn("RAW_RESPONSE_JSON_STRING", retry_text)
-        self.assertIn("STRICT_JSON_SCHEMA", retry_text)
-        self.assertIn(json.dumps("{", ensure_ascii=False), retry_text)
-        self.assertIn("不得观察、推理、补造或改变任何语义", retry_text)
-        self.assertIn("不得移动元素", retry_text)
-        self.assertIn("改变元素所属列表", retry_text)
-        self.assertIn("不得增删元素、字段或字符串", retry_text)
-        self.assertNotIn("目标上下文", retry_text)
-        self.assertTrue(observer.last_diagnostics["compact_retry_used"])
-        self.assertEqual(observer.last_diagnostics["model_calls"], 2)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(provider.max_tokens_seen, [800])
+        self.assertEqual(len(provider.responses), 1)
+        self.assertFalse(observer.last_diagnostics["compact_retry_used"])
+        self.assertEqual(observer.last_diagnostics["model_calls"], 1)
         self.assertEqual(
             len(observer.last_diagnostics["model_call_elapsed_seconds"]),
-            2,
+            1,
         )
         self.assertGreaterEqual(observer.last_diagnostics["elapsed_seconds"], 0.0)
 
@@ -1288,24 +1269,22 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         self.assertEqual(1, provider.calls)
 
-    def test_exact_extra_brace_response_is_repaired_after_one_model_retry(self) -> None:
+    def test_exact_extra_brace_response_is_repaired_after_one_model_call(self) -> None:
         malformed = extra_brace_scene_response()
         self.assertEqual(len(malformed), 608)
         self.assertIn('"evidence":["浏览器"]}}],"overlays"', malformed)
-        provider = SequenceProvider(
-            [malformed, corrected_extra_brace_scene_response()]
-        )
+        provider = SequenceProvider([malformed])
         observer = GenericSceneObserver(provider)
 
         scene = observer.observe(frames=stable_frames())
 
         self.assertEqual(scene.foreground_app_id, "launcher")
         self.assertEqual(scene.elements[0].label, "浏览器")
-        self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [800, 800])
-        self.assertTrue(observer.last_diagnostics["compact_retry_used"])
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(provider.max_tokens_seen, [800])
+        self.assertFalse(observer.last_diagnostics["compact_retry_used"])
         self.assertTrue(observer.last_diagnostics["local_structural_repair_used"])
-        self.assertEqual(observer.last_diagnostics["model_calls"], 2)
+        self.assertEqual(observer.last_diagnostics["model_calls"], 1)
         self.assertFalse(observer.status()["hardware_actions_enabled"])
 
     def test_exact_extra_brace_response_has_one_local_strict_candidate(self) -> None:
@@ -1328,60 +1307,29 @@ class GenericSceneObserverTests(unittest.TestCase):
         provider = SequenceProvider([duplicate, valid])
         observer = GenericSceneObserver(provider)
 
-        with self.assertRaisesRegex(VisionAgentError, "duplicate JSON key"):
+        with self.assertRaisesRegex(VisionAgentError, "重复 JSON 字段"):
             observer.observe(frames=stable_frames())
 
         self.assertEqual(provider.calls, 1)
         self.assertFalse(observer.last_diagnostics["repair_retry_success"])
         self.assertFalse(observer.status()["hardware_actions_enabled"])
 
-    def test_duplicate_key_remote_suggestion_fails_closed(self) -> None:
-        corrected = corrected_extra_brace_scene_response()
-        duplicate = corrected.replace(
-            '"summary":',
-            '"summary":"duplicate","summary":',
-            1,
-        )
-        provider = SequenceProvider([extra_brace_scene_response(), duplicate])
-        observer = GenericSceneObserver(provider)
-
-        with self.assertRaisesRegex(VisionAgentError, "唯一、严格有效"):
-            observer.observe(frames=stable_frames())
-
-        self.assertEqual(provider.calls, 2)
-        self.assertFalse(observer.last_diagnostics["repair_retry_success"])
-
-    def test_remote_suggestion_must_exactly_match_unique_candidate(self) -> None:
-        reformatted = json.dumps(
-            json.loads(corrected_extra_brace_scene_response()),
-            ensure_ascii=False,
-        )
-        provider = SequenceProvider(
-            [extra_brace_scene_response(), reformatted]
-        )
-        observer = GenericSceneObserver(provider)
-
-        with self.assertRaisesRegex(VisionAgentError, "唯一、严格有效"):
-            observer.observe(frames=stable_frames())
-
-        self.assertEqual(provider.calls, 2)
-        self.assertFalse(observer.last_diagnostics["repair_retry_success"])
-
     def test_structural_edit_must_still_pass_strict_scene_validation(self) -> None:
         payload = scene_payload()
         payload["unexpected"] = "forbidden"
         valid = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         malformed = valid.replace('}],"overlays"', '}}],"overlays"', 1)
-        provider = SequenceProvider(["not-json", malformed])
+        provider = SequenceProvider([malformed, scene_payload()])
         observer = GenericSceneObserver(provider)
 
         with self.assertRaises(VisionAgentError):
             observer.observe(frames=stable_frames())
 
-        self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [800, 800])
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(provider.max_tokens_seen, [800])
+        self.assertEqual(len(provider.responses), 1)
         self.assertFalse(observer.last_diagnostics["repair_retry_success"])
-        self.assertEqual(observer.last_diagnostics["model_calls"], 2)
+        self.assertEqual(observer.last_diagnostics["model_calls"], 1)
         self.assertFalse(observer.status()["hardware_actions_enabled"])
 
     def test_multiple_strict_structural_edit_candidates_fail_closed(self) -> None:
@@ -1464,7 +1412,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertTrue(observer.last_diagnostics["format_retry_used"])
         self.assertTrue(observer.last_diagnostics["repair_retry_success"])
 
-    def test_observation_never_uses_two_format_repairs(self) -> None:
+    def test_compact_observation_never_uses_remote_format_repair(self) -> None:
         first_retry = scene_payload()
         first_retry["elements"] = []
         first_retry["summary"] = "未知首页"
@@ -1475,9 +1423,10 @@ class GenericSceneObserverTests(unittest.TestCase):
                 frames=stable_frames(),
                 goal_context={"objective": "查找目标按钮"},
             )
-        self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [800, 800])
-        self.assertTrue(observer.last_diagnostics["format_retry_used"])
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(provider.max_tokens_seen, [800])
+        self.assertEqual(len(provider.responses), 1)
+        self.assertFalse(observer.last_diagnostics["format_retry_used"])
         self.assertFalse(observer.last_diagnostics["repair_retry_success"])
 
     def test_single_evidence_string_is_normalized_before_strict_validation(self) -> None:

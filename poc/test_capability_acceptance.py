@@ -1,8 +1,10 @@
 import hashlib
 import json
 from dataclasses import replace
+import os
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 
@@ -1119,6 +1121,69 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 authority=authority,
             )
         self.assertEqual(self.registry_path.read_bytes(), promoted_registry)
+        self.assertIsNone(authority._orientation_credential)
+        self.assertIsNone(authority._execution_result)
+
+    def test_concurrent_promote_has_one_writer_and_no_early_release(self) -> None:
+        replace_entered = threading.Event()
+        allow_replace = threading.Event()
+        replace_calls = 0
+
+        def blocking_replace(source: Path, target: Path) -> None:
+            nonlocal replace_calls
+            replace_calls += 1
+            replace_entered.set()
+            if not allow_replace.wait(timeout=5):
+                raise OSError("timed out waiting to replace registry")
+            os.replace(source, target)
+
+        promoter = CapabilityRegistryPromoter(
+            self.registry_path,
+            replace_file=blocking_replace,
+        )
+        authority = self._preview_live(promoter)
+        confirmation = authority.scope.to_dict()
+        outcomes: list[tuple[str, object]] = []
+        outcomes_lock = threading.Lock()
+
+        def promote_once() -> None:
+            try:
+                outcome = (
+                    "success",
+                    promoter.promote(
+                        self.report_path,
+                        confirmation=confirmation,
+                        authority=authority,
+                    ),
+                )
+            except Exception as exc:
+                outcome = ("failure", exc)
+            with outcomes_lock:
+                outcomes.append(outcome)
+
+        first = threading.Thread(target=promote_once)
+        second = threading.Thread(target=promote_once)
+        first.start()
+        self.assertTrue(replace_entered.wait(timeout=5))
+        second.start()
+        second.join(timeout=2)
+        second_finished_before_release = not second.is_alive()
+        allow_replace.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+
+        self.assertTrue(second_finished_before_release)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(1, replace_calls)
+        self.assertEqual(1, sum(kind == "success" for kind, _ in outcomes))
+        failures = [value for kind, value in outcomes if kind == "failure"]
+        self.assertEqual(1, len(failures))
+        self.assertIsInstance(failures[0], CapabilityAcceptanceError)
+        self.assertRegex(str(failures[0]), "正在使用")
+        payload = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        self.assertEqual(1, payload["devices"][0]["verified_actions"].count("drag"))
+        self.assertTrue(authority.consumed)
         self.assertIsNone(authority._orientation_credential)
         self.assertIsNone(authority._execution_result)
 

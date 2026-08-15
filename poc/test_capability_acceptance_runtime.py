@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from PIL import Image
+import capability_acceptance_runtime as acceptance_runtime
 from orientation_safety import (
     PhysicalExecutionGate,
     _mint_audited_credential,
@@ -699,6 +700,37 @@ class CapabilityAcceptanceManagerTests(unittest.TestCase):
             [call[0] for call in self.orchestrator_calls].count("confirm"),
             1,
         )
+
+    def test_confirm_snapshot_failure_invalidates_live_authority(self):
+        trial = self.manager.start(
+            device_id="device-a",
+            candidate_action="drag",
+            text="拖动一个安全控件",
+        )
+        confirmation = trial.session.snapshot()["confirmation_scope"]
+        registry_before = self.registry_path.read_bytes()
+        write_json = acceptance_runtime._atomic_write_json
+
+        def fail_promotable_snapshot(path, payload):
+            if payload.get("promotion_scope") is not None:
+                raise OSError("simulated trial snapshot failure")
+            return write_json(path, payload)
+
+        with patch.object(
+            acceptance_runtime,
+            "_atomic_write_json",
+            side_effect=fail_promotable_snapshot,
+        ):
+            with self.assertRaisesRegex(OSError, "snapshot failure"):
+                self.manager.confirm("trial-001", confirmation)
+
+        self.assertIsNone(trial.promotion_authority)
+        self.assertIsNone(trial.snapshot()["promotion_scope"])
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "没有可用"):
+            self.manager.promotion_scope("trial-001")
+        with self.assertRaisesRegex(CapabilityAcceptanceError, "没有可用"):
+            self.manager.promote("trial-001", {})
+        self.assertEqual(self.registry_path.read_bytes(), registry_before)
 
     def test_long_press_confirm_records_bounded_duration_and_visual_reobservation(self):
         self.proposed_action = "long_press"

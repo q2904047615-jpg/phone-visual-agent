@@ -691,7 +691,12 @@ class CapabilityAcceptanceManager:
                 orientation_credential=orientation_credential,
                 execution_result=result,
             )
-            _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
+            try:
+                _atomic_write_json(trial.run_dir / "trial.json", trial.snapshot())
+            except Exception:
+                trial.promotion_authority.invalidate()
+                trial.promotion_authority = None
+                raise
             return result
         finally:
             trial.operation_lock.release()

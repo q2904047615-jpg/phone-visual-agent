@@ -7,6 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
+import threading
 from typing import Any, Callable, Mapping
 import uuid
 
@@ -972,6 +973,14 @@ class PromotionAuthority:
         self._execution_result = execution_result
         self._report = json.loads(json.dumps(dict(report), ensure_ascii=False))
         self._source_nonce = object()
+        self._lifecycle_lock = threading.Lock()
+
+    def begin_promotion(self) -> None:
+        if not self._lifecycle_lock.acquire(blocking=False):
+            raise CapabilityAcceptanceError("能力晋级 authority 正在使用。")
+
+    def end_promotion(self) -> None:
+        self._lifecycle_lock.release()
 
     def _live_source(self) -> tuple[OrientationCredential, Any, Mapping[str, Any]]:
         if (
@@ -1018,8 +1027,9 @@ class PromotionAuthority:
         self._report = None
 
     def invalidate(self) -> None:
-        self.consumed = True
-        self.release_source()
+        with self._lifecycle_lock:
+            self.consumed = True
+            self.release_source()
 
 
 class CapabilityRegistryPromoter:
@@ -1184,6 +1194,7 @@ class CapabilityRegistryPromoter:
         confirmation: Mapping[str, Any],
         authority: PromotionAuthority,
     ) -> dict[str, Any]:
+        authority.begin_promotion()
         try:
             return self._promote_bound(
                 report_path,
@@ -1192,6 +1203,7 @@ class CapabilityRegistryPromoter:
             )
         finally:
             authority.release_source()
+            authority.end_promotion()
 
     def _promote_bound(
         self,

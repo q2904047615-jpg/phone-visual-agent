@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import os
 import re
@@ -1366,6 +1367,53 @@ def _image_data_url(image: Image.Image) -> str:
     return f"data:image/jpeg;base64,{encoded}"
 
 
+def _has_only_valid_inline_jpeg_images(messages: list[dict[str, Any]]) -> bool:
+    """Return true only when every visual input is a valid inline JPEG.
+
+    DashScope has occasionally returned its internal ``InvalidParameter`` URL
+    error for an otherwise valid data URL.  Retrying that read-only request is
+    safe only after the exact bytes have been validated locally; malformed or
+    remote URLs must continue to fail closed without this exception.
+    """
+
+    found = False
+    prefix = "data:image/jpeg;base64,"
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            found = True
+            image_url = part.get("image_url")
+            url = image_url.get("url") if isinstance(image_url, dict) else None
+            if not isinstance(url, str) or not url.startswith(prefix):
+                return False
+            try:
+                payload = base64.b64decode(url[len(prefix) :], validate=True)
+            except (ValueError, binascii.Error):
+                return False
+            if len(payload) < 4 or not payload.startswith(b"\xff\xd8"):
+                return False
+            if not payload.endswith(b"\xff\xd9"):
+                return False
+    return found
+
+
+def _is_retryable_dashscope_inline_url_rejection(
+    response: httpx.Response,
+    messages: list[dict[str, Any]],
+) -> bool:
+    if response.status_code != 400 or not _has_only_valid_inline_jpeg_images(messages):
+        return False
+    detail = response.text.lower()
+    return (
+        "internalerror.algo.invalidparameter" in detail
+        and "provided url does not appear to be valid" in detail
+    )
+
+
 class DashScopeVisionProvider:
     """Small OpenAI-compatible adapter for Alibaba Model Studio."""
 
@@ -1479,9 +1527,18 @@ class DashScopeVisionProvider:
             except httpx.HTTPStatusError as exc:
                 last_error = exc
                 status_code = exc.response.status_code
+                retryable_inline_rejection = (
+                    attempt < effective_attempts
+                    and _is_retryable_dashscope_inline_url_rejection(
+                        exc.response,
+                        messages,
+                    )
+                )
                 if (
                     status_code not in self.TRANSIENT_HTTP_STATUS_CODES
-                    or attempt >= effective_attempts
+                    and not retryable_inline_rejection
+                ) or (
+                    attempt >= effective_attempts
                 ):
                     detail = exc.response.text[:500]
                     raise VisionAgentError(

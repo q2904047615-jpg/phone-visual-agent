@@ -1,4 +1,5 @@
 import unittest
+import base64
 from unittest.mock import patch
 
 import httpx
@@ -164,6 +165,83 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
             status["usage_totals"],
             {"prompt_tokens": 20, "completion_tokens": 3, "total_tokens": 35},
         )
+
+    def test_retries_known_dashscope_inline_url_rejection_once(self) -> None:
+        provider = DashScopeVisionProvider(
+            api_key="test-key",
+            max_attempts=2,
+            retry_base_delay=0,
+        )
+        request = httpx.Request(
+            "POST",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        )
+        rejected = httpx.Response(
+            400,
+            request=request,
+            json={
+                "error": {
+                    "message": (
+                        "<400> InternalError.Algo.InvalidParameter: The provided "
+                        "URL does not appear to be valid. Ensure it is correctly "
+                        "formatted."
+                    )
+                }
+            },
+        )
+        inline_jpeg = "data:image/jpeg;base64," + base64.b64encode(
+            b"\xff\xd8valid-test-jpeg\xff\xd9"
+        ).decode("ascii")
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "json"},
+                    {"type": "image_url", "image_url": {"url": inline_jpeg}},
+                ],
+            }
+        ]
+        with patch(
+            "vision_agent.httpx.post",
+            side_effect=[rejected, self._response()],
+        ) as mocked:
+            self.assertEqual(provider._chat(messages, max_tokens=10), '{"ok":true}')
+        self.assertEqual(2, mocked.call_count)
+        self.assertEqual(2, provider.status()["last_network_attempts"])
+
+    def test_does_not_retry_malformed_inline_url_rejection(self) -> None:
+        provider = DashScopeVisionProvider(
+            api_key="test-key",
+            max_attempts=2,
+            retry_base_delay=0,
+        )
+        request = httpx.Request(
+            "POST",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        )
+        rejected = httpx.Response(
+            400,
+            request=request,
+            text=(
+                "InternalError.Algo.InvalidParameter: The provided URL does not "
+                "appear to be valid."
+            ),
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/jpeg;base64,not-base64!"},
+                    }
+                ],
+            }
+        ]
+        with patch("vision_agent.httpx.post", return_value=rejected) as mocked:
+            with self.assertRaisesRegex(Exception, "HTTP 400"):
+                provider._chat(messages, max_tokens=10)
+        self.assertEqual(1, mocked.call_count)
 
 
 if __name__ == "__main__":

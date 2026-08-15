@@ -154,6 +154,7 @@ class ActionAcceptancePageTests(unittest.TestCase):
             "拖动目标",
             "目标文字：agent",
             "input.value === 'agent'",
+            'href="/actions">返回验收模式选择',
         ):
             self.assertIn(marker, page)
         for app_name in ("微信", "抖音", "支付宝"):

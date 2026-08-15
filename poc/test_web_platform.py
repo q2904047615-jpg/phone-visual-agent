@@ -4031,7 +4031,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
         registry = web_app.DeviceControllerRegistry(web_app.DEVICE_REGISTRY_PATH, mock=False)
         controller = registry.controller(registry.default_device_id)
 
-        self.assertFalse(controller.hardware_capabilities()["input_verified_text"])
+        self.assertTrue(controller.hardware_capabilities()["input_verified_text"])
         self.assertFalse(controller.hardware_capabilities()["long_press"])
         self.assertFalse(controller.hardware_capabilities()["drag"])
 

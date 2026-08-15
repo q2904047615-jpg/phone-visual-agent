@@ -13,6 +13,7 @@
     .muted { color: #9fc0d4; }
     .card { margin: 14px 0; padding: 18px; border: 2px solid #36d9ff; border-radius: 18px; background: #0d2034; }
     .mode-link { display: block; margin: 12px 0; padding: 16px; border-radius: 14px; background: #173853; color: #fff; text-decoration: none; font-weight: 700; }
+    .mode-home { display: inline-block; margin: 0 0 10px; color: #bfe9ff; font-weight: 700; }
     .pass { border-color: #5cff9d; background: #103b2a; color: #baffd1; }
     .fail { border-color: #ff6f91; background: #481827; color: #ffd1dc; }
     #result { position: sticky; top: 8px; z-index: 4; }
@@ -35,6 +36,7 @@
 <body>
   <h1>通用动作真机验收页</h1>
   <p class="muted">仅验证一个底层动作，不提交、发送、删除或修改账号数据。</p>
+  <a class="mode-home" href="/actions">返回验收模式选择</a>
   <div id="result" class="card">等待动作</div>
   <main id="content"></main>
   <script>

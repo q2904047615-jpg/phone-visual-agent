@@ -474,7 +474,9 @@ test("browser renders controller evidence and confirms one exact observation", {
     assert.match(actionText, /点击语义控件/);
     assert.match(actionText, /设置/);
     assert.match(actionText, /element_id settings_icon/);
-    assert.match(actionText, /bounds=0.68、0.2、0.86、0.35/);
+    assert.match(actionText, /kind=element/);
+    assert.match(actionText, /element_id=settings_icon/);
+    assert.doesNotMatch(actionText, /bounds=|0\.68|0\.2|0\.86|0\.35/);
     assert.match(actionText, /scene_changed=true/);
     assert.match(actionText, /92%/);
     assert.match(actionText, /可信候选唯一且清晰/);
@@ -521,7 +523,9 @@ test("browser renders controller evidence and confirms one exact observation", {
       },
     });
     assert.match(await page.locator("#sceneMeta").innerText(), /累计动作\s*1/);
-    assert.match(await page.locator("#traceList").innerText(), /after-1.jpg/);
+    const traceText = await page.locator("#traceList").innerText();
+    assert.match(traceText, /已保存 5 项本地证据（路径不在控制台显示）/);
+    assert.doesNotMatch(traceText, /after-1\.jpg|after-2\.jpg|after-3\.jpg|after-4\.jpg/);
     assert.equal(await page.locator("#autoSupervisedAgent").count(), 0);
     assert.equal(requests.auto.length, 0);
 

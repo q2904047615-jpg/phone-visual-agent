@@ -550,7 +550,7 @@ test("redacted real 2bd3 shape keeps unknown history authority and exact replan 
   assert.equal(completed.controllerGate.reason, "");
   assert.equal(completed.verification.outcome, "matched");
   assert.equal(completed.verification.afterObservationId, "obs-redacted-after");
-  assert.equal(completed.transition.kind, "advance_or_replan");
+  assert.equal(completed.transition.kind, "replan");
   assert.equal(completed.transition.toRevision, 2);
   assert.equal(completed.scopeState.state, "unknown");
   assert.equal(terminal.phase, "terminal");
@@ -591,6 +591,39 @@ test("history is consumed only with a complete authoritative receipt", () => {
 
   history.confirmation_receipt.scope.session_id = "different-session";
   assert.equal(Protocol.adaptSession(raw).executionTrace[0].scopeState.state, "unknown");
+});
+
+test("history outcome and terminal session status never invent a transition", () => {
+  const mismatched = phaseTwoTraceSession();
+  mismatched.task_graph.replan_history = [];
+  mismatched.history[0].execution.action_outcome = "mismatched";
+  mismatched.history[0].reason = "结果不符合预期";
+  const mismatchView = Protocol.adaptSession(mismatched);
+  assert.equal(mismatchView.executionTrace[0].verification.outcome, "mismatched");
+  assert.equal(mismatchView.executionTrace[0].transition.kind, "unknown");
+  assert.equal(mismatchView.executionTrace[0].transition.reason, "");
+
+  const blocked = phaseTwoTraceSession();
+  blocked.task_graph.replan_history = [];
+  blocked.status = "blocked";
+  blocked.failed_reason = "当前任务已阻止";
+  blocked.confirmation_scope = null;
+  const blockedView = Protocol.adaptSession(blocked);
+  assert.equal(blockedView.executionTrace[0].transition.kind, "unknown");
+  assert.equal(blockedView.executionTrace.at(-1).phase, "terminal");
+  assert.equal(blockedView.executionTrace.at(-1).transition.kind, "stopped");
+});
+
+test("only an explicit authoritative transition can bypass replan-history binding", () => {
+  const raw = phaseTwoTraceSession();
+  raw.task_graph.replan_history = [];
+  raw.history[0].transition = {
+    kind: "advance",
+    reason: "权威历史记录明确推进到下一子目标",
+  };
+  const transition = Protocol.adaptSession(raw).executionTrace[0].transition;
+  assert.equal(transition.kind, "advance");
+  assert.match(transition.reason, /权威历史记录明确推进/);
 });
 
 test("risk scope rejects action-only authority fields", () => {

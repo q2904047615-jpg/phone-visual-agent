@@ -290,7 +290,7 @@
     };
   }
 
-  function normalizeTransition(entry, verification, replanHistory, currentRevision, sessionStatus, failedReason) {
+  function normalizeTransition(entry, verification, replanHistory) {
     const explicit = asObject(firstDefined(entry.transition, entry.replan));
     const sourceRevision = firstDefined(entry.task_revision, entry.revision, null);
     const nextReplan = replanHistory.find(item => {
@@ -300,25 +300,22 @@
         && String(candidate.scene_id || "")
         && String(candidate.scene_id) === verification.afterObservationId;
     });
-    const replan = Object.keys(explicit).length ? explicit : asObject(nextReplan);
-    const trigger = String(firstDefined(replan.trigger, entry.replan_trigger, ""));
-    let kind = String(firstDefined(replan.outcome, replan.kind, entry.advance_outcome, ""));
-    if (!kind) {
-      if (trigger === "action_result_mismatch" || verification.outcome === "mismatched") kind = "replan";
-      else if (trigger === "subgoal_completed") kind = "advance";
-      else if (trigger) kind = "advance_or_replan";
-      else if (["blocked", "failed"].includes(sessionStatus)) kind = "blocked";
-      else kind = "unknown";
-    }
+    const hasExplicit = Object.keys(explicit).length > 0;
+    const replan = hasExplicit ? explicit : asObject(nextReplan);
+    const trigger = String(firstDefined(replan.trigger, ""));
+    const declaredKind = String(firstDefined(replan.outcome, replan.kind, ""));
+    const allowedKinds = new Set(["advance", "replan", "blocked"]);
+    const kind = allowedKinds.has(declaredKind)
+      ? declaredKind
+      : hasExplicit
+        ? "unknown"
+        : Object.keys(replan).length
+          ? (trigger === "subgoal_completed" ? "advance" : "replan")
+          : "unknown";
     return {
       kind,
       trigger,
-      reason: String(firstDefined(
-        replan.reason,
-        entry.transition_reason,
-        entry.reason,
-        kind === "blocked" ? failedReason : "",
-      )),
+      reason: String(firstDefined(replan.reason, "")),
       fromRevision: sourceRevision,
       toRevision: Number.isInteger(replan.revision) ? replan.revision : null,
       raw: replan,
@@ -399,9 +396,6 @@
           entry,
           verification,
           context.replanHistory || [],
-          context.currentRevision,
-          context.sessionStatus,
-          context.failedReason,
         ),
         scopeState: historicalScope,
         completionEvidence: normalizeStringList(entry.completion_evidence),
@@ -621,9 +615,6 @@
     const history = normalizeHistory(session.history, {
       sessionId: String(firstDefined(session.session_id, session.id, "")),
       replanHistory,
-      currentRevision: revision,
-      sessionStatus: status,
-      failedReason,
     });
     const trustedObservation = asObject(firstDefined(
       session.trusted_observation,

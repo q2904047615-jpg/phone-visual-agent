@@ -4160,6 +4160,18 @@ def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
         return False
     if scene.confidence < 0.72:
         return True
+    entities = context.get("entities")
+    target_label = (
+        str(entities.get("target_ui_label") or "").strip()
+        if isinstance(entities, dict)
+        else ""
+    )
+    if target_label:
+        exact_matches = [
+            element for element in scene.elements if element.label == target_label
+        ]
+        if len(exact_matches) != 1:
+            return True
     goal_elements = [
         element
         for element in scene.elements

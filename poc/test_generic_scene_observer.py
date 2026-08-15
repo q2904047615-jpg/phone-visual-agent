@@ -2070,6 +2070,36 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn("不能因为目标尚未完成而降低", targeted_text)
         self.assertIn("模糊、遮挡或不唯一时仍必须降低", targeted_text)
 
+    def test_unrelated_goal_relevant_element_cannot_suppress_exact_label_refinement(self) -> None:
+        first = scene_payload()
+        first["screen_id"] = "acceptance_modes"
+        first["summary"] = "验收模式列表"
+        first["elements"][0].update(
+            {
+                "meaning": "status_display",
+                "label": "等待动作",
+                "states": {"goal_relevant": True, "fully_visible": True},
+            }
+        )
+        refined = dict(first)
+        refined["summary"] = "底部边缘存在部分可见的后续内容，列表仍在延伸"
+        refined["elements"] = []
+        provider = SequenceProvider([first, refined])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "查看连续闭环结果",
+                "entities": {"target_ui_label": "连续闭环"},
+            },
+        )
+
+        self.assertEqual(2, provider.calls)
+        self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
+        self.assertEqual([], list(scene.elements))
+        self.assertIn("部分可见的后续内容", scene.summary)
+
     def test_all_observation_prompts_recognize_prefilled_inputs_without_authorizing_submit(self) -> None:
         empty = scene_payload()
         empty["elements"] = []

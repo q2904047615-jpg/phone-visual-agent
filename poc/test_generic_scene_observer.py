@@ -2091,6 +2091,47 @@ class GenericSceneObserverTests(unittest.TestCase):
             audit_prompt,
         )
 
+    def test_input_audit_rebinds_unfocused_input_without_full_visibility_evidence(self) -> None:
+        preliminary = scene_payload()
+        preliminary["elements"] = [
+            {
+                "element_id": "model-estimated-input",
+                "role": "input",
+                "meaning": "text_input_field",
+                "label": "",
+                "bounds": [120, 560, 880, 680],
+                "confidence": 1.0,
+                "states": {"value": "", "goal_relevant": True},
+                "evidence": ["空矩形框"],
+            }
+        ]
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="complete-empty-input",
+                    bounds=[130, 450, 870, 540],
+                    text="",
+                    placeholder="",
+                    right_button=None,
+                )
+            ]
+        )
+        provider = SequenceProvider([preliminary, audit])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "当前输入框中的文字为 agent"},
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(candidate)
+        self.assertEqual("local_audited_input_1", candidate.element_id)
+        self.assertEqual((0.13, 0.45, 0.87, 0.54), candidate.bounds)
+        self.assertTrue(candidate.states["fully_visible"])
+        self.assertNotIn("focused", candidate.states)
+        self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
+
     def test_input_audit_never_promotes_ime_preedit_region_to_application_input(self) -> None:
         empty = scene_payload()
         empty["elements"] = []

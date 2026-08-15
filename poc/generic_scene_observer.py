@@ -3070,6 +3070,15 @@ def _should_audit_prefilled_input(scene: UIScene, context: dict[str, Any]) -> bo
     states = trusted_inputs[0].states
     if not isinstance(states.get("value"), str):
         return True
+    # A compact-pass input without explicit full-visibility evidence is not a
+    # safe geometry source.  Run the independent input-structure audit even
+    # before the keyboard is visible so a focus tap is bound to the complete
+    # application field instead of a model-estimated box.
+    if (
+        states.get("fully_visible") is not True
+        and not trusted_inputs[0].element_id.startswith("local_structured_input_")
+    ):
+        return True
     keyboard_is_relevant = states.get("focused") is True or _scene_reports_keyboard(
         scene
     )

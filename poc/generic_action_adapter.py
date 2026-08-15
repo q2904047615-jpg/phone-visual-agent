@@ -1019,7 +1019,30 @@ class GenericSingleActionAdapter:
                     )
                     != "forbidden"
                 )
-                if not (labelled_drag_endpoint or labelled_local_mode_selector) and (
+                labelled_long_press_target = bool(
+                    requested.action == "long_press"
+                    and prefix == ""
+                    and original.label
+                    and current.label == original.label
+                    and original.role == current.role
+                    and current.role != "container"
+                    and current.states == original.states
+                    and navigation_semantic_class(
+                        stripped_gesture_semantics(original.meaning),
+                        stripped_gesture_semantics(original.label),
+                    )
+                    != "forbidden"
+                    and navigation_semantic_class(
+                        stripped_gesture_semantics(current.meaning),
+                        stripped_gesture_semantics(current.label),
+                    )
+                    != "forbidden"
+                )
+                if not (
+                    labelled_drag_endpoint
+                    or labelled_local_mode_selector
+                    or labelled_long_press_target
+                ) and (
                     not original_class
                     or original_class == "forbidden"
                     or current_class != original_class

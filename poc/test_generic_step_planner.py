@@ -1646,7 +1646,13 @@ class GenericActionAdapterTests(unittest.TestCase):
     def test_long_press_uses_independently_audited_target_scenes(self):
         states = {"goal_relevant": True, "fully_visible": True}
 
-        def long_press_scene(fingerprint, bounds, *, passed=False):
+        def long_press_scene(
+            fingerprint,
+            bounds,
+            *,
+            meaning="long_press_target_area",
+            passed=False,
+        ):
             return UIScene(
                 app_id="local.acceptance",
                 screen_id="long-press-board",
@@ -1655,7 +1661,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                     UIElement(
                         element_id="target",
                         role="button",
-                        meaning="long_press_target",
+                        meaning=meaning,
                         label="长按我 · 不要移动",
                         bounds=bounds,
                         confidence=1.0,
@@ -1671,11 +1677,24 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
 
         planned = long_press_scene("planned", (0.09, 0.53, 0.91, 0.76))
-        fresh = long_press_scene("fresh", (0.09, 0.47, 0.91, 0.69))
+        fresh = long_press_scene(
+            "fresh",
+            (0.09, 0.47, 0.91, 0.69),
+            meaning="interaction_zone",
+        )
         audited_bounds = (0.10, 0.48, 0.90, 0.70)
         planned_audited = long_press_scene("planned", audited_bounds)
-        fresh_audited = long_press_scene("fresh", audited_bounds)
-        after = long_press_scene("after", audited_bounds, passed=True)
+        fresh_audited = long_press_scene(
+            "fresh",
+            audited_bounds,
+            meaning="interaction_zone",
+        )
+        after = long_press_scene(
+            "after",
+            audited_bounds,
+            meaning="interaction_zone",
+            passed=True,
+        )
         observer = FakeSceneObserver(
             [fresh, after],
             geometry_scenes=[planned_audited, fresh_audited],
@@ -1724,6 +1743,67 @@ class GenericActionAdapterTests(unittest.TestCase):
             result.before_scene.get_element("target").bounds,
         )
         self.assertEqual(1, result.physical_actions)
+
+    def test_long_press_semantic_rebind_keeps_delete_forbidden(self):
+        states = {"goal_relevant": True, "fully_visible": True}
+        target = UIElement(
+            element_id="target",
+            role="button",
+            meaning="long_press_target_area",
+            label="长按我 · 不要移动",
+            bounds=(0.10, 0.48, 0.90, 0.70),
+            confidence=1.0,
+            states=states,
+            evidence=("黄色虚线框内逐字显示长按目标",),
+        )
+        planned = UIScene(
+            app_id="local.acceptance",
+            screen_id="long-press-board",
+            summary="本地长按验收页面",
+            elements=(target,),
+            stable=True,
+            confidence=1.0,
+            fingerprint="planned",
+            camera_alignment=aligned_camera_facts(),
+        )
+        fresh = replace(
+            planned,
+            elements=(replace(target, meaning="long_press_delete_target"),),
+            fingerprint="fresh",
+        )
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4),
+            observer=FakeSceneObserver([fresh]),
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+
+        with self.assertRaisesRegex(GenericActionAdapterError, "语义"):
+            adapter.execute(
+                requested_action=SemanticAction(
+                    node_id="long-press-risky",
+                    action="long_press",
+                    params={
+                        "element_id": "target",
+                        "target": "long_press_target_area",
+                        "role": "button",
+                        "label": "长按我 · 不要移动",
+                        "states": states,
+                        "duration_ms": 800,
+                        "expected_effect": {"scene_changed": True},
+                    },
+                ),
+                planned_scene=planned,
+                planned_frames=tuple(
+                    Image.new("RGB", (540, 960), "gray") for _ in range(4)
+                ),
+                goal=goal(),
+                confirmed=True,
+            )
+
+        self.assertEqual([], robot.actions)
 
     def test_drag_rebind_accepts_safe_meaning_synonyms_for_exact_labelled_endpoints(self):
         def make_scene(fingerprint, source_meaning, destination_meaning):

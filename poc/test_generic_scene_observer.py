@@ -2347,6 +2347,79 @@ class GenericSceneObserverTests(unittest.TestCase):
                 goal_context={"objective": "当前页面完成一次重新加载"},
             )
 
+    def test_reload_goal_keeps_only_literal_reload_control_relevant(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "field",
+                "role": "input",
+                "meaning": "verification_input",
+                "label": "agent",
+                "bounds": [150, 440, 850, 530],
+                "confidence": 0.98,
+                "states": {"goal_relevant": True, "value": "agent"},
+                "evidence": ["当前页面输入框"],
+            },
+            {
+                "element_id": "refresh",
+                "role": "button",
+                "meaning": "refresh",
+                "label": "",
+                "bounds": [850, 20, 920, 90],
+                "confidence": 0.98,
+                "states": {"goal_relevant": False},
+                "evidence": ["顶部右侧圆形箭头"],
+            },
+        ]
+
+        scene = GenericSceneObserver(FakeProvider(payload)).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "当前页面完成一次重新加载"},
+        )
+
+        self.assertEqual("refresh", scene.unique_trusted_goal_element().element_id)
+        self.assertFalse(scene.get_element("field").states["goal_relevant"])
+
+    def test_reload_goal_uses_explicit_top_right_targeted_refinement(self) -> None:
+        first = scene_payload()
+        first["elements"] = [
+            {
+                "element_id": "field",
+                "role": "input",
+                "meaning": "verification_input",
+                "label": "agent",
+                "bounds": [150, 440, 850, 530],
+                "confidence": 0.98,
+                "states": {"goal_relevant": True, "value": "agent"},
+                "evidence": ["当前页面输入框"],
+            }
+        ]
+        refined = scene_payload()
+        refined["elements"] = [
+            {
+                "element_id": "refresh",
+                "role": "button",
+                "meaning": "refresh",
+                "label": "",
+                "bounds": [850, 20, 920, 90],
+                "confidence": 0.98,
+                "states": {"goal_relevant": True},
+                "evidence": ["顶部右侧圆形箭头"],
+            }
+        ]
+        provider = SequenceProvider([first, refined])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "顶部右侧圆形箭头对应的页面重新加载已完成"},
+        )
+
+        self.assertEqual(2, provider.calls)
+        self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
+        self.assertEqual([440, 0, 1000, 420], observer.last_diagnostics["targeted_roi_bounds"])
+        self.assertEqual("refresh", scene.unique_trusted_goal_element().element_id)
+
     def test_text_entry_does_not_discard_incomplete_switch_without_direct_latin(self) -> None:
         empty = scene_payload()
         empty["elements"] = []

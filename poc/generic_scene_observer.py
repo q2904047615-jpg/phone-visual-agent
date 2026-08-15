@@ -39,7 +39,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v23"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v24"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1200
@@ -1529,6 +1529,7 @@ def _parse_scene(
             payload["camera_alignment"] = camera_alignment_override.to_dict()
         _normalize_compact_scene_payload(payload)
         _normalize_non_target_keyboard_switch(payload, goal_context or {})
+        _normalize_reload_goal_safety(payload, goal_context or {})
         _normalize_known_scene_enums(payload)
         _normalize_tab_navigation_safety(payload, goal_context or {})
         _normalize_prefilled_input_structure(payload, goal_context or {})
@@ -2796,6 +2797,48 @@ def _normalize_non_target_keyboard_switch(
         if not safely_discardable:
             kept.append(item)
     payload["elements"] = kept
+
+
+def _normalize_reload_goal_safety(
+    payload: dict[str, Any],
+    goal_context: dict[str, Any],
+) -> None:
+    """For reload goals, only a literal refresh/reload control may be a target.
+
+    This only revokes model-reported relevance. It never creates an element,
+    changes geometry, or treats static page content as proof that a reload
+    event happened. With no valid reload candidate, the observer's existing
+    targeted-refinement path can inspect an explicitly requested visual region.
+    """
+
+    visible_goal = json.dumps(goal_context, ensure_ascii=False).casefold()
+    if not any(
+        marker in visible_goal
+        for marker in ("重新加载", "刷新页面", "页面刷新", "reload", "refresh")
+    ):
+        return
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return
+    reload_terms = {
+        "refresh",
+        "reload",
+        "refresh_page",
+        "reload_page",
+        "刷新",
+        "重新加载",
+        "刷新页面",
+    }
+    for item in elements:
+        if not isinstance(item, dict):
+            continue
+        states = item.get("states")
+        if not isinstance(states, dict):
+            continue
+        meaning = str(item.get("meaning") or "").strip().casefold()
+        label = str(item.get("label") or "").strip().casefold()
+        is_reload_control = meaning in reload_terms or label in reload_terms
+        states["goal_relevant"] = bool(is_reload_control)
 
 
 def _normalize_known_scene_enums(payload: dict[str, Any]) -> None:

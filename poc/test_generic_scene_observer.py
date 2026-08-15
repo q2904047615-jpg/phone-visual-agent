@@ -318,6 +318,26 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(1, provider.calls)
         self.assertFalse(observer.last_diagnostics["system_ui_audit_used"])
 
+    def test_non_system_ui_goal_downgrades_invalid_fact_values_to_unknown(self) -> None:
+        payload = scene_payload()
+        payload["elements"][0]["states"]["goal_relevant"] = True
+        payload["system_ui"] = {
+            "immersive_or_fullscreen": "not_fullscreen",
+            "navigation_bar_visible": "visible",
+        }
+        provider = FakeProvider(payload)
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "查看数字七"},
+        )
+
+        self.assertEqual("unknown", scene.system_ui.immersive_or_fullscreen)
+        self.assertEqual("unknown", scene.system_ui.navigation_bar_visible)
+        self.assertEqual(1, provider.calls)
+        self.assertFalse(observer.last_diagnostics["system_ui_audit_used"])
+
     def test_system_ui_goal_only_fails_closed_invalid_fact_values(self) -> None:
         payload = scene_payload()
         payload["system_ui"] = {

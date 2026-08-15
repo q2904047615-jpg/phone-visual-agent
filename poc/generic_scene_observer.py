@@ -39,7 +39,7 @@ from ui_scene import (
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v18"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-15-generic-scene-observer-v19"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1200
@@ -322,7 +322,7 @@ class GenericSceneObserver:
                         ),
                         fingerprint=fingerprint,
                         goal_context=context,
-                        allow_invalid_system_ui_unknown=system_ui_audit_required,
+                        allow_invalid_system_ui_unknown=True,
                         camera_layout_orientation=camera_layout_orientation,
                     ),
                     visual_obstructions,
@@ -334,7 +334,7 @@ class GenericSceneObserver:
                     value,
                     fingerprint=fingerprint,
                     goal_context=context,
-                    allow_invalid_system_ui_unknown=system_ui_audit_required,
+                    allow_invalid_system_ui_unknown=True,
                     camera_layout_orientation=camera_layout_orientation,
                 )
                 if repaired is None:
@@ -422,7 +422,7 @@ class GenericSceneObserver:
                             raw,
                             fingerprint=fingerprint,
                             goal_context=context,
-                            allow_invalid_system_ui_unknown=False,
+                            allow_invalid_system_ui_unknown=True,
                             camera_alignment_override=scene.camera_alignment,
                         ),
                         visual_obstructions,
@@ -472,7 +472,7 @@ class GenericSceneObserver:
                             raw,
                             fingerprint=fingerprint,
                             goal_context=context,
-                            allow_invalid_system_ui_unknown=False,
+                            allow_invalid_system_ui_unknown=True,
                             camera_alignment_override=scene.camera_alignment,
                         ),
                         visual_obstructions,

@@ -1789,6 +1789,13 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("qwerty", candidate.states["keyboard_layout"])
         self.assertEqual("direct_latin", candidate.states["keyboard_input_mode"])
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
+        audit_prompt = provider.messages_seen[1][1]["content"][0]["text"]
+        self.assertIn('"input_mode":"unknown","mode_switch":null', audit_prompt)
+        self.assertIn("text-entry verification goal", audit_prompt)
+        self.assertNotIn(
+            '"input_mode":"chinese_pinyin","mode_switch":',
+            audit_prompt,
+        )
 
     def test_input_audit_never_promotes_ime_preedit_region_to_application_input(self) -> None:
         empty = scene_payload()

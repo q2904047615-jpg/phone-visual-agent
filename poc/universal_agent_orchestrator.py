@@ -499,6 +499,7 @@ class UniversalAgentSessionState:
     history: list[dict[str, Any]] = field(default_factory=list)
     evidence_paths: list[str] = field(default_factory=list)
     last_post_action_transition: dict[str, Any] | None = None
+    confirm_stage: str = ""
     failed_reason: str = ""
     created_at: str = field(
         default_factory=lambda: datetime.now().astimezone().isoformat(
@@ -550,6 +551,7 @@ class UniversalAgentSessionState:
             "step_number": self.step_number,
             "physical_actions": self.physical_actions,
             "failed_reason": self.failed_reason,
+            "confirm_stage": self.confirm_stage,
             "task_graph": graph,
             "goal": self._serialize(self.goal_draft),
             "trusted_observation": observation,
@@ -2191,17 +2193,103 @@ class UniversalAgentOrchestrator:
             raise UniversalAgentOrchestratorError(
                 "当前会话已不再拥有该设备，禁止执行。"
             )
+        before_actions = session.physical_actions
+        authority_before = session.confirmation_authority
         try:
             with self.device_registry.device_lock(session.device_id):
-                return self._confirm_one_locked(session, confirmation)
+                try:
+                    return self._confirm_one_locked(session, confirmation)
+                except Exception as exc:
+                    self._finalize_confirm_failure(
+                        session,
+                        exc,
+                        before_actions=before_actions,
+                        authority_before=authority_before,
+                    )
+                    raise
         finally:
             self._release_if_terminal(session)
+
+    def _finalize_confirm_failure(
+        self,
+        session: UniversalAgentSessionState,
+        error: Exception,
+        *,
+        before_actions: int,
+        authority_before: Any,
+    ) -> None:
+        """Best-effort memory/artifact convergence after a consumed confirm.
+
+        The original exception remains authoritative and is always re-raised by
+        the caller.  This method never invokes the adapter or any observation
+        source and never invents unavailable receipt/frame fields.
+        """
+
+        authority = session.confirmation_authority or authority_before
+        authority_consumed = bool(
+            authority is not None and getattr(authority, "consumed", False)
+        )
+        request_actions = max(0, session.physical_actions - int(before_actions))
+        entered_execution = session.confirm_stage in {
+            "executing",
+            "validating_execution_result",
+            "validating_post_action_evidence",
+            "building_trusted_observation",
+            "persisting_post_observation",
+            "replanning",
+        }
+        if not (authority_consumed or entered_execution or request_actions):
+            return
+
+        failed_stage = session.confirm_stage or "confirmation"
+        reason = str(error).strip() or error.__class__.__name__
+        session.status = "failed"
+        session.failed_reason = reason
+        transition: dict[str, Any] = {
+            "protocol_version": POST_ACTION_TRANSITION_PROTOCOL_VERSION,
+            "transition_kind": "post_action_failure",
+            "disposition": "failed",
+            "failed_stage": failed_stage,
+            "error_type": error.__class__.__name__,
+            "error": reason,
+            "authority_consumed": authority_consumed,
+            "physical_actions_before": int(before_actions),
+            "physical_actions": int(session.physical_actions),
+            "request_physical_actions": request_actions,
+            "evidence": list(dict.fromkeys(session.evidence_paths)),
+        }
+        if authority is not None and callable(getattr(authority, "scope", None)):
+            try:
+                transition["authority_scope"] = authority.scope()
+            except Exception:
+                pass
+        session.last_post_action_transition = transition
+        failure_step = max(1, session.step_number)
+        if session.history and authority is not None:
+            latest = session.history[-1]
+            if latest.get("task_revision") == getattr(authority, "revision", None):
+                failure_step = max(1, int(latest.get("step_number") or failure_step))
+        try:
+            self._remember(
+                session,
+                session.evidence_store.write_post_action_transition(
+                    failure_step,
+                    transition,
+                ),
+            )
+        except Exception:
+            pass
+        try:
+            self._write_terminal_snapshot(session)
+        except Exception:
+            pass
 
     def _confirm_one_locked(
         self,
         session: UniversalAgentSessionState,
         confirmation: Mapping[str, Any],
     ) -> Any:
+        session.confirm_stage = "validating_confirmation"
         self._validate_and_consume_confirmation(session, confirmation)
         authority = session.confirmation_authority
         assert authority is not None
@@ -2210,6 +2298,7 @@ class UniversalAgentOrchestrator:
         decision = session.qwen_decision
         assert graph is not None and observation is not None and decision is not None
 
+        session.confirm_stage = "policy_recheck"
         if session.confirmed_risk_ids:
             context = graph.to_qwen_context(
                 confirmed_risk_ids=session.confirmed_risk_ids,
@@ -2242,6 +2331,7 @@ class UniversalAgentOrchestrator:
             self._write_terminal_snapshot(session)
             raise UniversalAgentOrchestratorError(policy_decision.reason)
 
+        session.confirm_stage = "pre_execute_evidence"
         try:
             self._remember(
                 session,
@@ -2259,6 +2349,7 @@ class UniversalAgentOrchestrator:
             raise
 
         session.status = "executing_one_action"
+        session.confirm_stage = "executing"
         try:
             result = session.adapter.execute(
                 requested_action=decision.proposal.action,
@@ -2279,6 +2370,12 @@ class UniversalAgentOrchestrator:
                 pass
             raise
 
+        self._remember(
+            session,
+            getattr(result, "evidence", ()),
+            getattr(result, "after_frame_paths", ()),
+        )
+        session.confirm_stage = "validating_execution_result"
         physical_actions = int(result.physical_actions)
         wait_transition = result.resolved_action.kind == "wait_for_change"
         if physical_actions != 1 and not (wait_transition and physical_actions == 0):
@@ -2353,12 +2450,8 @@ class UniversalAgentOrchestrator:
                 "控制器完成证据缺少 resolved expected_effect 的一次性完成声明。"
             )
             raise UniversalAgentOrchestratorError(session.failed_reason)
-        self._remember(
-            session,
-            result.evidence,
-            result.after_frame_paths,
-        )
         session.status = "verifying"
+        session.confirm_stage = "validating_post_action_evidence"
         action_outcome = str(getattr(result, "action_outcome", ""))
         verification_errors = tuple(
             str(item)
@@ -2409,6 +2502,7 @@ class UniversalAgentOrchestrator:
                 pass
             raise UniversalAgentOrchestratorError(session.failed_reason)
 
+        session.confirm_stage = "building_trusted_observation"
         new_observation = self.trusted_observation_factory(
             frames=list(after_frames),
             device_id=session.device_id,
@@ -2437,6 +2531,7 @@ class UniversalAgentOrchestrator:
             session.status = "failed"
             session.failed_reason = "动作后可信观察 observation/fingerprint 未更新。"
             raise UniversalAgentOrchestratorError(session.failed_reason)
+        session.confirm_stage = "persisting_post_observation"
         session.trusted_observation = new_observation
         session.trusted_frames = after_frames
         session.step_number += 1
@@ -2461,12 +2556,14 @@ class UniversalAgentOrchestrator:
         )
         try:
             session.status = "replanning"
+            session.confirm_stage = "replanning"
             self._advance_after_observation(
                 session,
                 result=result,
                 before_observation=observation,
                 new_observation=new_observation,
             )
+            session.confirm_stage = "completed"
             self._write_terminal_snapshot(session)
             return result
         except EvidenceStoreError as exc:

@@ -2790,6 +2790,17 @@ def _risk_confirmation(session) -> dict:
     return dict(session.snapshot()["risk_confirmation_scope"])
 
 
+def _failure_artifacts(temp: str, *, step_number: int = 1):
+    root = Path(temp)
+    transition = json.loads(
+        (root / f"post_action_transition_step_{step_number}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+    return transition, report
+
+
 class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
     @staticmethod
     def _orchestrator(planner, qwen, adapter):
@@ -3277,11 +3288,119 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 "confirmed/requested/rebound/resolved",
             ):
                 orchestrator.confirm_one(session, _confirmation(session))
+            transition, report = _failure_artifacts(temp)
 
         self.assertEqual(1, adapter.execute_calls)
         self.assertEqual(1, session.physical_actions)
         self.assertEqual([], planner.replan_calls)
         self.assertEqual(1, len(qwen.calls))
+        self.assertEqual("failed", session.status)
+        self.assertEqual("validating_execution_result", transition["failed_stage"])
+        self.assertEqual(1, transition["request_physical_actions"])
+        self.assertEqual(transition, session.last_post_action_transition)
+        self.assertEqual("failed", report["session"]["status"])
+        self.assertEqual(
+            transition,
+            report["session"]["last_post_action_transition"],
+        )
+
+    def test_bad_after_frames_persist_the_same_failed_terminal_state(self) -> None:
+        class BadFramesAdapter(FakeExecutingAdapter):
+            def execute(self, **kwargs):
+                result = super().execute(**kwargs)
+                return replace(
+                    result,
+                    after_frames=result.after_frames[:3],
+                    after_frame_paths=result.after_frame_paths[:3],
+                )
+
+        adapter = BadFramesAdapter(
+            _scene(),
+            _scene(fingerprint="frame-b"),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, planner, _qwen, adapter = self._started(
+                temp,
+                adapter=adapter,
+            )
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError,
+                "原始帧证据",
+            ):
+                orchestrator.confirm_one(session, _confirmation(session))
+            transition, report = _failure_artifacts(temp)
+
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual("failed", session.status)
+        self.assertEqual(
+            "validating_post_action_evidence",
+            transition["failed_stage"],
+        )
+        self.assertEqual(transition, session.last_post_action_transition)
+        self.assertEqual("failed", report["session"]["status"])
+        self.assertEqual(
+            transition,
+            report["session"]["last_post_action_transition"],
+        )
+
+    def test_bad_after_fingerprint_persists_the_same_failed_terminal_state(self) -> None:
+        calls = 0
+
+        def wrong_after_factory(*, frames, device_id, scene, observation_id=None):
+            nonlocal calls
+            calls += 1
+            observed = FakeTrustedObservation(
+                device_id=device_id,
+                scene=scene,
+                observation_id=observation_id or "obs-start",
+            )
+            if calls == 2:
+                observed.fingerprint = "wrong-after-fingerprint"
+            return observed
+
+        initial = _graph()
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_result=replace(initial, revision=2),
+        )
+        qwen = FakeQwenObserver()
+        adapter = FakeExecutingAdapter(
+            _scene(),
+            _scene(fingerprint="frame-b"),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = UniversalAgentOrchestrator(
+                deepseek_planner=planner,
+                qwen_observer=qwen,
+                adapter_factory=lambda _device_id: adapter,
+                trusted_observation_factory=wrong_after_factory,
+            )
+            session = orchestrator.start(
+                session_id="session-bad-after-fp",
+                raw_goal="查看详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            with self.assertRaisesRegex(
+                UniversalAgentOrchestratorError,
+                "after scene fingerprint",
+            ):
+                orchestrator.confirm_one(session, _confirmation(session))
+            transition, report = _failure_artifacts(temp)
+
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual("failed", session.status)
+        self.assertEqual("building_trusted_observation", transition["failed_stage"])
+        self.assertEqual(transition, session.last_post_action_transition)
+        self.assertEqual("failed", report["session"]["status"])
+        self.assertEqual(
+            transition,
+            report["session"]["last_post_action_transition"],
+        )
 
     def test_action_then_read_only_completion_gets_new_deepseek_revision(self) -> None:
         initial = _graph()

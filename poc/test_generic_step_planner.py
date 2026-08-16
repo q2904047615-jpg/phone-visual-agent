@@ -33,6 +33,21 @@ from universal_action_controller import UniversalActionController, UniversalActi
 from vision_agent import VisionAgentError
 
 
+TEST_QWERTY_GEOMETRY = {
+    "type": "qwerty",
+    "anchors": {
+        "q": [115, 704],
+        "p": [875, 704],
+        "a": [157, 773],
+        "l": [832, 773],
+        "z": [241, 844],
+        "m": [747, 844],
+        "backspace": [875, 844],
+    },
+    "source": "input_structure_audit",
+}
+
+
 class FakeTextProvider:
     configured = True
 
@@ -112,6 +127,7 @@ class FakeSceneObserver:
 class FakeRobot:
     def __init__(self):
         self.actions = []
+        self.keyboard_layouts = []
         self.device_id = "test-device"
         self._armed = None
         self._long_press_receipt = None
@@ -163,7 +179,11 @@ class FakeRobot:
         return (500, 950)
 
     def vision_type_text(self, text):
+        raise AssertionError("universal input must not use static keyboard geometry")
+
+    def vision_type_text_with_layout(self, text, keyboard_layout):
         self._consume("input_verified_text")
+        self.keyboard_layouts.append(keyboard_layout)
         self.actions.append(("input", text))
 
     def vision_long_press_relative(self, x, y, hold_seconds):
@@ -847,6 +867,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                             "value": "",
                             "keyboard_layout": "qwerty",
                             "keyboard_input_mode": "direct_latin",
+                            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
                             "goal_relevant": True,
                         },
                     ),
@@ -900,6 +921,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual([("input", "agent")], robot.actions)
+        self.assertEqual(TEST_QWERTY_GEOMETRY, robot.keyboard_layouts[0])
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(2, observer.calls)
 
@@ -933,6 +955,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                             "value": value,
                             "keyboard_layout": "qwerty",
                             "keyboard_input_mode": keyboard_input_mode,
+                            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
                             "goal_relevant": True,
                         },
                     ),
@@ -966,6 +989,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                         "value": "",
                         "keyboard_layout": "qwerty",
                         "keyboard_input_mode": "direct_latin",
+                        "keyboard_geometry": TEST_QWERTY_GEOMETRY,
                         "goal_relevant": True,
                     },
                     "text": "agent",
@@ -998,6 +1022,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                             "value": value,
                             "keyboard_layout": "qwerty",
                             "keyboard_input_mode": "direct_latin",
+                            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
                             "goal_relevant": True,
                         },
                     ),
@@ -1027,6 +1052,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                         "value": "",
                         "keyboard_layout": "qwerty",
                         "keyboard_input_mode": "direct_latin",
+                        "keyboard_geometry": TEST_QWERTY_GEOMETRY,
                         "goal_relevant": True,
                     },
                     "text": "agent",
@@ -1058,6 +1084,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                         "value": "",
                         "keyboard_layout": "qwerty",
                         "keyboard_input_mode": "direct_latin",
+                        "keyboard_geometry": TEST_QWERTY_GEOMETRY,
                         "goal_relevant": True,
                     },
                 ),
@@ -1117,6 +1144,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                         "value": "",
                         "keyboard_layout": "qwerty",
                         "keyboard_input_mode": "direct_latin",
+                        "keyboard_geometry": TEST_QWERTY_GEOMETRY,
                         "goal_relevant": True,
                     },
                 ),

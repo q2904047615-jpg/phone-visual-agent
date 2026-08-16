@@ -4370,7 +4370,7 @@ class ApiEndToEndTests(unittest.TestCase):
         observer = universal.pop("observer")
         self.assertEqual(
             observer["observer_version"],
-            "2026-08-16-generic-scene-observer-v41",
+            "2026-08-17-generic-scene-observer-v42",
         )
         self.assertEqual(observer["supported_app_scope"], "dynamic")
         architecture["universal_agent"] = universal

@@ -990,6 +990,19 @@ class RobotController:
         # calibrated QWERTY letter path and fails closed for every other text.
         self.vision_type_pinyin(text, text)
 
+    def vision_type_text_with_layout(
+        self,
+        text: str,
+        keyboard_layout: dict[str, Any],
+    ) -> None:
+        """Universal-agent input path; never falls back to static geometry."""
+
+        self._require_verified_action("input_verified_text", "输入文字")
+        self._validate_verified_text_characters(text)
+        if not isinstance(keyboard_layout, dict):
+            raise WorkflowNotReady("通用文字输入缺少本轮视觉键盘几何。")
+        self.vision_type_pinyin(text, text, keyboard_layout)
+
     @staticmethod
     def _validate_verified_text_characters(text: str) -> None:
         if not isinstance(text, str) or not re.fullmatch(r"[a-z]{1,30}", text):
@@ -1946,6 +1959,20 @@ class MockRobotController(RobotController):
     def vision_type_text(self, text: str) -> None:
         self._consume_mock_execution("input_verified_text")
         self.executions.append({"action": "type_text", "text": text})
+
+    def vision_type_text_with_layout(
+        self,
+        text: str,
+        keyboard_layout: dict[str, Any],
+    ) -> None:
+        self._consume_mock_execution("input_verified_text")
+        self.executions.append(
+            {
+                "action": "type_text",
+                "text": text,
+                "keyboard_layout": keyboard_layout,
+            }
+        )
 
     def vision_type_pinyin(
         self,

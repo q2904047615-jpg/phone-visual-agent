@@ -285,6 +285,36 @@ class UIElement:
                     "states.keyboard_input_mode 只允许 input 使用，且值必须是 "
                     "direct_latin、chinese_pinyin 或 unknown。"
                 )
+        if "keyboard_geometry" in self.states:
+            geometry = self.states["keyboard_geometry"]
+            expected_anchors = {"q", "p", "a", "l", "z", "m", "backspace"}
+            anchors = geometry.get("anchors") if isinstance(geometry, dict) else None
+            if (
+                self.role != "input"
+                or self.states.get("keyboard_layout") != "qwerty"
+                or self.states.get("focused") is not True
+                or not isinstance(geometry, dict)
+                or set(geometry) != {"type", "anchors", "source"}
+                or geometry.get("type") != "qwerty"
+                or geometry.get("source") != "input_structure_audit"
+                or not isinstance(anchors, dict)
+                or set(anchors) != expected_anchors
+            ):
+                raise UISceneError(
+                    "states.keyboard_geometry 只允许保存输入结构审计绑定的聚焦 QWERTY 几何。"
+                )
+            for key, point in anchors.items():
+                if (
+                    not isinstance(point, (list, tuple))
+                    or len(point) != 2
+                    or any(
+                        isinstance(part, bool)
+                        or not isinstance(part, (int, float))
+                        or not 0 <= float(part) <= 1000
+                        for part in point
+                    )
+                ):
+                    raise UISceneError(f"keyboard_geometry anchor {key} 无效。")
         if "local_text_clear" in self.states:
             if self.role not in {"button", "icon"} or self.states["local_text_clear"] is not True:
                 raise UISceneError(

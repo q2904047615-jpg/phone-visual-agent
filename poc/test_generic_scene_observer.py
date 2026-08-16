@@ -189,18 +189,37 @@ def input_audit_payload(
     ime_preedit_regions: list[dict] | None = None,
     keyboard: dict | None = None,
 ) -> dict:
-    return {
-        "protocol_version": INPUT_STRUCTURE_AUDIT_VERSION,
-        "application_inputs": list(application_inputs or []),
-        "ime_preedit_regions": list(ime_preedit_regions or []),
-        "keyboard": keyboard
+    resolved_keyboard = dict(
+        keyboard
         or {
             "visible": False,
             "bounds": None,
             "layout": "unknown",
             "input_mode": "unknown",
             "mode_switch": None,
-        },
+        }
+    )
+    if (
+        resolved_keyboard.get("visible") is True
+        and str(resolved_keyboard.get("layout") or "").strip().casefold()
+        == "qwerty"
+        and resolved_keyboard.get("input_mode") == "direct_latin"
+        and "qwerty_anchors" not in resolved_keyboard
+    ):
+        resolved_keyboard["qwerty_anchors"] = {
+            "q": [115, 704],
+            "p": [875, 704],
+            "a": [157, 773],
+            "l": [832, 773],
+            "z": [241, 844],
+            "m": [747, 844],
+            "backspace": [875, 844],
+        }
+    return {
+        "protocol_version": INPUT_STRUCTURE_AUDIT_VERSION,
+        "application_inputs": list(application_inputs or []),
+        "ime_preedit_regions": list(ime_preedit_regions or []),
+        "keyboard": resolved_keyboard,
     }
 
 
@@ -2380,6 +2399,51 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertFalse(mode_switch.states["goal_relevant"])
         self.assertEqual("direct_latin", mode_switch.states["target_mode"])
 
+    def test_input_authorization_requires_current_qwerty_anchors(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[audited_application_input(text="", placeholder="输入")],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "qwerty_anchors": None,
+                "mode_switch": None,
+            },
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "QWERTY anchors"):
+            GenericSceneObserver(SequenceProvider([empty, empty, audit])).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "在唯一输入框输入 agent"},
+            )
+
+    def test_input_authorization_binds_locally_validated_qwerty_geometry(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[audited_application_input(text="", placeholder="输入")],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "mode_switch": None,
+            },
+        )
+
+        scene = GenericSceneObserver(SequenceProvider([empty, empty, audit])).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "在唯一输入框输入 agent"},
+        )
+
+        geometry = scene.unique_trusted_goal_element().states["keyboard_geometry"]
+        self.assertEqual("qwerty", geometry["type"])
+        self.assertEqual("input_structure_audit", geometry["source"])
+        self.assertEqual({"q", "p", "a", "l", "z", "m", "backspace"}, set(geometry["anchors"]))
+
     def test_input_audit_normalizes_symbols_layout_without_relaxing_schema(self) -> None:
         empty = scene_payload()
         empty["elements"] = []
@@ -2489,7 +2553,11 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("direct_latin", candidate.states["keyboard_input_mode"])
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
         audit_prompt = provider.messages_seen[1][1]["content"][0]["text"]
-        self.assertIn('"input_mode":"unknown","mode_switch":null', audit_prompt)
+        self.assertIn(
+            '"input_mode":"unknown","qwerty_anchors":',
+            audit_prompt,
+        )
+        self.assertIn('"backspace":[0,0]},"mode_switch":null', audit_prompt)
         self.assertIn("text-entry verification goal", audit_prompt)
         self.assertNotIn(
             '"input_mode":"chinese_pinyin","mode_switch":',

@@ -27,6 +27,7 @@ from universal_action_controller import (
     UniversalActionError,
     navigation_semantic_class,
 )
+from robot_core import WorkflowNotReady, qwerty_keyboard_config_from_anchors
 
 
 class GenericActionAdapterError(RuntimeError):
@@ -220,7 +221,7 @@ class GenericSingleActionAdapter:
             supported.add("back")
         if available("home", "vision_android_home"):
             supported.add("home")
-        if available("input_verified_text", "vision_type_text"):
+        if available("input_verified_text", "vision_type_text_with_layout"):
             supported.add("input_verified_text")
         if available("long_press", "vision_long_press_relative"):
             supported.add("long_press")
@@ -796,23 +797,47 @@ class GenericSingleActionAdapter:
             elif resolved.kind == "input_verified_text":
                 if not resolved.text:
                     raise GenericActionAdapterError("输入动作缺少已校验文字。")
-                method = getattr(self.robot, "vision_type_text", None)
+                method = getattr(self.robot, "vision_type_text_with_layout", None)
                 if not callable(method):
-                    raise GenericActionAdapterError("机械臂不支持经过验证的文字输入。")
+                    raise GenericActionAdapterError(
+                        "机械臂不支持绑定本轮键盘几何的文字输入。"
+                    )
+                try:
+                    input_element = before.get_element(
+                        str(resolved.target_element_id or ""),
+                        min_confidence=self.controller.min_confidence,
+                    )
+                except UISceneError as exc:
+                    raise GenericActionAdapterError(
+                        f"当前文字输入缺少可信输入框：{exc}"
+                    ) from exc
+                keyboard_geometry = input_element.states.get("keyboard_geometry")
+                if (
+                    not isinstance(keyboard_geometry, dict)
+                    or keyboard_geometry.get("type") != "qwerty"
+                    or keyboard_geometry.get("source") != "input_structure_audit"
+                ):
+                    raise GenericActionAdapterError(
+                        "当前文字输入缺少本轮输入结构审计签发的 QWERTY 几何；拒绝使用静态键盘配置。"
+                    )
+                try:
+                    qwerty_keyboard_config_from_anchors(
+                        keyboard_geometry.get("anchors")
+                    )
+                except WorkflowNotReady as exc:
+                    raise GenericActionAdapterError(
+                        f"当前 QWERTY 几何未通过动作前本地复核：{exc}"
+                    ) from exc
                 validator = getattr(self.robot, "validate_verified_text", None)
                 if callable(validator):
                     try:
-                        input_element = before.get_element(
-                            str(resolved.target_element_id or ""),
-                            min_confidence=self.controller.min_confidence,
-                        )
                         validator(resolved.text, dict(input_element.states))
                     except (UISceneError, ValueError, RuntimeError) as exc:
                         raise GenericActionAdapterError(
                             f"当前文字输入不满足设备已验证配置：{exc}"
                         ) from exc
                 physical_actions = 1
-                robot_result = method(resolved.text)
+                robot_result = method(resolved.text, keyboard_geometry)
             elif resolved.kind == "long_press":
                 if resolved.normalized_point is None or resolved.hold_seconds is None:
                     raise GenericActionAdapterError("长按动作缺少已校验落点或时长。")
@@ -1004,7 +1029,7 @@ class GenericSingleActionAdapter:
             return {
                 key: value
                 for key, value in states.items()
-                if key != "goal_relevant"
+                if key not in {"goal_relevant", "keyboard_geometry"}
             }
 
         def rebind_element(prefix: str = "") -> UIElement:

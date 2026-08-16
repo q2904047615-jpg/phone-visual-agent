@@ -1360,6 +1360,17 @@ def _decision_observation_prompt_dict(
     excluded_ids: set[str] = set()
     filtered_candidates: list[dict[str, Any]] = []
     for candidate in value.get("candidates", []):
+        candidate = dict(candidate)
+        states = candidate.get("states")
+        if isinstance(states, Mapping) and "keyboard_geometry" in states:
+            # Current-frame keyboard anchors are a local execution credential,
+            # not part of Qwen's semantic choice surface. Qwen selects only the
+            # trusted element_id; local hydration restores authoritative states.
+            candidate["states"] = {
+                key: item
+                for key, item in states.items()
+                if key != "keyboard_geometry"
+            }
         if constraint_excludes_candidate(
             constraints,
             (

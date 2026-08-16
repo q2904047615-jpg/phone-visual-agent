@@ -936,6 +936,53 @@ class QwenVisualDecisionTests(unittest.TestCase):
             self.observation.scene.elements[0].element_id,
         )
 
+    def test_keyboard_geometry_is_local_credential_not_qwen_prompt_data(self) -> None:
+        from qwen_visual_decision import _decision_observation_prompt_dict
+
+        geometry = {
+            "type": "qwerty",
+            "anchors": {
+                "q": [115, 704], "p": [875, 704],
+                "a": [157, 773], "l": [832, 773],
+                "z": [241, 844], "m": [747, 844],
+                "backspace": [875, 844],
+            },
+            "source": "input_structure_audit",
+        }
+        input_element = UIElement(
+            element_id="audited-input",
+            role="input",
+            meaning="application_text_input",
+            label="输入",
+            bounds=(0.1, 0.1, 0.9, 0.2),
+            confidence=0.98,
+            states={
+                "goal_relevant": True,
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+                "keyboard_geometry": geometry,
+            },
+        )
+        scene = replace(
+            self.observation.scene,
+            elements=(input_element,),
+            fingerprint=self.observation.fingerprint,
+        )
+        observation = replace(self.observation, scene=scene)
+
+        projected = _decision_observation_prompt_dict(
+            QwenTaskContext.from_dict(self.context),
+            observation,
+        )
+
+        self.assertNotIn("keyboard_geometry", projected["candidates"][0]["states"])
+        self.assertEqual(
+            geometry,
+            observation.scene.elements[0].states["keyboard_geometry"],
+        )
+
     def test_page_element_scope_constraint_removes_button_candidate(self) -> None:
         from qwen_visual_decision import _decision_observation_prompt_dict
 

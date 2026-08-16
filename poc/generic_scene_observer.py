@@ -35,6 +35,7 @@ from qwen_runtime_errors import (
     classify_qwen_error,
     failure_diagnostics,
 )
+from robot_core import WorkflowNotReady, qwerty_keyboard_config_from_anchors
 from ui_scene import (
     ALLOWED_ROLES,
     CameraAlignmentFacts,
@@ -49,8 +50,8 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-16-generic-scene-observer-v41"
-INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-17-generic-scene-observer-v42"
+INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-17-input-structure-audit-v3"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1800
@@ -1842,6 +1843,7 @@ Distinguish three different visual structures; never merge them:
 1. application_inputs: editable search/address/form fields in the App content area. Include an empty field only when a complete border plus a visible placeholder, caret, focus highlight, or other literal editable cue is visible.
 2. ime_preedit_regions: the input method's composition/candidate strip. It is never an application input, even when it contains composed text and a trailing icon.
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
+4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
 Determine keyboard.input_mode only from the current whole keyboard image, never from the goal or the JSON example. Visible Chinese composition/candidates, pinyin separators, or a current-mode label such as 中/中文/Pinyin prove chinese_pinyin. A visible current-mode label such as 英/EN/English/ABC/Latin together with a plain Latin QWERTY layout and no Chinese composition/candidate strip proves direct_latin. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
 keyboard.mode_switch.current_mode MUST equal keyboard.input_mode whenever input_mode is known. Treat an unambiguous single-mode label on the key as the current visible mode: 中/中文/Pinyin means chinese_pinyin; 英/EN/English/ABC/Latin means direct_latin. If the label could instead name a destination and the current whole-keyboard state is not independently clear, do not guess a direction; set mode_switch to null.
 For a text-entry verification goal, report the proven current keyboard.input_mode; keyboard.mode_switch is optional and should be null unless its direction is independently unambiguous. Never invent a switch direction merely because the goal asks for text entry.
@@ -1857,8 +1859,8 @@ Return exactly this JSON schema and no other fields:
 "ime_preedit_regions":[{{"region_id":"ime-preedit-1","bounds":[0,0,1000,1000],
 "text":"visible composition text or empty","confidence":0.0}}],
 "keyboard":{{"visible":true,"bounds":[0,0,1000,1000],"layout":"qwerty",
-"input_mode":"unknown","mode_switch":null}}}}
-When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","mode_switch":null}}.
+"input_mode":"unknown","qwerty_anchors":{{"q":[0,0],"p":[0,0],"a":[0,0],"l":[0,0],"z":[0,0],"m":[0,0],"backspace":[0,0]}},"mode_switch":null}}}}
+When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","qwerty_anchors":null,"mode_switch":null}}.
 Return empty arrays when their geometry is not visible. Never merge a clipped structure with a complete structure, and never copy an IME pre-edit region into application_inputs.
 """
 
@@ -3912,13 +3914,18 @@ def _apply_input_structure_audit(
             raise UISceneError("输入结构审计 application_inputs 必须是最多4项的数组。")
         if not isinstance(ime_preedit_regions, list) or len(ime_preedit_regions) > 4:
             raise UISceneError("输入结构审计 ime_preedit_regions 必须是最多4项的数组。")
-        if not isinstance(keyboard, dict) or set(keyboard) != {
+        required_keyboard_fields = {
             "visible",
             "bounds",
             "layout",
             "input_mode",
             "mode_switch",
-        }:
+        }
+        if (
+            not isinstance(keyboard, dict)
+            or not required_keyboard_fields.issubset(keyboard)
+            or set(keyboard) - required_keyboard_fields - {"qwerty_anchors"}
+        ):
             raise UISceneError("输入结构审计 keyboard 字段不符合协议。")
 
         keyboard_visible = keyboard.get("visible")
@@ -4087,6 +4094,19 @@ def _apply_input_structure_audit(
 
         switch_is_goal = _goal_requests_keyboard_mode_switch(goal_context)
         trusted_input = matches[0] if len(matches) == 1 else None
+        qwerty_geometry: dict[str, Any] | None = None
+        raw_qwerty_anchors = keyboard.get("qwerty_anchors")
+        if raw_qwerty_anchors is not None:
+            if (
+                not keyboard_visible
+                or keyboard_layout != "qwerty"
+                or keyboard_bounds is None
+            ):
+                raise UISceneError("QWERTY anchors 必须绑定完整可见的 QWERTY 键盘。")
+            qwerty_geometry = _validated_qwerty_keyboard_geometry(
+                raw_qwerty_anchors,
+                keyboard_bounds=keyboard_bounds,
+            )
         raw_mode_switch = keyboard.get("mode_switch")
         if (
             not switch_is_goal
@@ -4118,6 +4138,18 @@ def _apply_input_structure_audit(
             and mode_switch["current_mode"] != keyboard_input_mode
         ):
             raise UISceneError("模式切换键 current_mode 与键盘 input_mode 冲突。")
+        if (
+            trusted_input is not None
+            and trusted_input["text"] == ""
+            and keyboard_visible
+            and keyboard_layout == "qwerty"
+            and keyboard_input_mode == "direct_latin"
+            and _goal_requests_input(goal_context)
+            and qwerty_geometry is None
+        ):
+            raise UISceneError(
+                "文字输入授权要求本轮输入结构审计提供有效 QWERTY anchors。"
+            )
         if trusted_input is None and (mode_switch is None or not switch_is_goal):
             return scene
 
@@ -4156,6 +4188,8 @@ def _apply_input_structure_audit(
                         "keyboard_input_mode": keyboard_input_mode,
                     }
                 )
+            if qwerty_geometry is not None:
+                states["keyboard_geometry"] = qwerty_geometry
             input_label = trusted_input["text"] or trusted_input["placeholder"]
             input_evidence = list(trusted_input["visible_editable_cues"])
             if trusted_input["text"]:
@@ -4226,6 +4260,48 @@ def _audit_confidence(value: Any, field_name: str) -> float:
     if not 0.0 <= confidence <= 1.0:
         raise UISceneError(f"{field_name} confidence 超出0..1。")
     return confidence
+
+
+def _validated_qwerty_keyboard_geometry(
+    value: Any,
+    *,
+    keyboard_bounds: tuple[float, float, float, float],
+) -> dict[str, Any]:
+    """Mint a locally checked execution profile from current-frame facts."""
+
+    if not isinstance(value, dict):
+        raise UISceneError("QWERTY anchors 必须是对象。")
+    expected = {"q", "p", "a", "l", "z", "m", "backspace"}
+    if set(value) != expected:
+        raise UISceneError("QWERTY anchors 必须精确包含 q/p/a/l/z/m/backspace。")
+    normalized: dict[str, list[int]] = {}
+    for key in sorted(expected):
+        point = value.get(key)
+        if (
+            not isinstance(point, (list, tuple))
+            or len(point) != 2
+            or any(
+                isinstance(part, bool) or not isinstance(part, (int, float))
+                for part in point
+            )
+        ):
+            raise UISceneError(f"QWERTY anchor {key} 格式无效。")
+        x, y = float(point[0]), float(point[1])
+        if not (
+            keyboard_bounds[0] - 20 <= x <= keyboard_bounds[2] + 20
+            and keyboard_bounds[1] - 20 <= y <= keyboard_bounds[3] + 20
+        ):
+            raise UISceneError(f"QWERTY anchor {key} 不在已审计键盘区域内。")
+        normalized[key] = [round(x), round(y)]
+    try:
+        qwerty_keyboard_config_from_anchors(normalized)
+    except WorkflowNotReady as exc:
+        raise UISceneError(f"QWERTY anchors 未通过本地布局校验：{exc}") from exc
+    return {
+        "type": "qwerty",
+        "anchors": normalized,
+        "source": "input_structure_audit",
+    }
 
 
 def _validated_keyboard_mode_switch(

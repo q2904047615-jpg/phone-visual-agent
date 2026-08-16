@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import re
+import statistics
 import threading
 import time
 from dataclasses import replace
@@ -35,6 +36,7 @@ from qwen_runtime_errors import (
     classify_qwen_error,
     failure_diagnostics,
 )
+from ocr_runtime import find_text as find_ocr_text, recognize as recognize_ocr
 from robot_core import WorkflowNotReady, qwerty_keyboard_config_from_anchors
 from ui_scene import (
     ALLOWED_ROLES,
@@ -92,6 +94,61 @@ STAGE_LABELS = {
     "completed": "观察完成",
     "failed": "观察安全停止",
 }
+
+
+def _stable_ocr_literal_bounds(
+    frames: tuple[Image.Image, ...] | list[Image.Image],
+    label: str,
+    *,
+    ocr_recognizer: Any = recognize_ocr,
+    ocr_finder: Any = find_ocr_text,
+) -> tuple[float, float, float, float] | None:
+    """Return a unique three-frame literal-text box, or fail closed."""
+
+    literal = str(label or "").strip()
+    frame_list = list(frames)[-3:]
+    if not literal or len(frame_list) != 3:
+        return None
+    matches = []
+    try:
+        for frame in frame_list:
+            found = list(
+                ocr_finder(
+                    ocr_recognizer(frame.convert("RGB"), "zh-Hans-CN", scale=3.0),
+                    literal,
+                )
+            )
+            if len(found) != 1:
+                return None
+            match = found[0]
+            if (
+                match.width <= 0
+                or match.height <= 0
+                or match.left < 0
+                or match.top < 0
+                or match.left + match.width > frame.width
+                or match.top + match.height > frame.height
+            ):
+                return None
+            matches.append(match)
+    except Exception:
+        return None
+    centers = [match.center for match in matches]
+    if (
+        max(point[0] for point in centers) - min(point[0] for point in centers) > 8
+        or max(point[1] for point in centers) - min(point[1] for point in centers) > 8
+    ):
+        return None
+    width, height = frame_list[-1].size
+    left = float(statistics.median(match.left for match in matches))
+    top = float(statistics.median(match.top for match in matches))
+    right = float(
+        statistics.median(match.left + match.width for match in matches)
+    )
+    bottom = float(
+        statistics.median(match.top + match.height for match in matches)
+    )
+    return (left / width, top / height, right / width, bottom / height)
 
 
 class GenericSceneObserver:
@@ -236,8 +293,14 @@ class GenericSceneObserver:
                     rough_bounds=element.bounds,
                     audited_bounds=audited.full_bounds,
                 )
+            ocr_literal_bounds = None
+            if element.role == "text" and element.label:
+                ocr_literal_bounds = _stable_ocr_literal_bounds(
+                    [frame_list[index] for index in matching_indices],
+                    element.label,
+                )
             replacements[element_id] = (
-                snapped_input_bounds or audited.full_bounds
+                ocr_literal_bounds or snapped_input_bounds or audited.full_bounds
             )
             audit_records.append(
                 {
@@ -250,6 +313,12 @@ class GenericSceneObserver:
                     "local_bounds": list(audited.local_bounds),
                     "full_bounds": list(audited.full_bounds),
                     "local_border_snap_used": snapped_input_bounds is not None,
+                    "local_ocr_literal_snap_used": ocr_literal_bounds is not None,
+                    "ocr_literal_full_bounds": (
+                        list(ocr_literal_bounds)
+                        if ocr_literal_bounds is not None
+                        else None
+                    ),
                     "snapped_full_bounds": (
                         list(snapped_input_bounds)
                         if snapped_input_bounds is not None

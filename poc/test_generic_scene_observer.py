@@ -19,6 +19,7 @@ from generic_scene_observer import (
     _camera_layout_orientation,
     _compact_prompt,
     _goal_requests_input,
+    _stable_ocr_literal_bounds,
     _input_structure_diagnostic_shape,
     _parse_scene_after_unique_structural_edit,
     _parse_scene,
@@ -28,6 +29,7 @@ from generic_scene_observer import (
     _strict_icon_cluster_audit_payload,
     _targeted_prompt,
 )
+from ocr_runtime import OcrMatch
 from orientation_safety import ORIENTATION_AUDIT_PROTOCOL_VERSION
 from ui_scene import UI_SCENE_PROTOCOL_VERSION, UISceneError
 from vision_agent import VisionAgentError
@@ -332,6 +334,67 @@ def audited_application_input(
 
 
 class GenericSceneObserverTests(unittest.TestCase):
+    def test_literal_text_geometry_prefers_unique_three_frame_ocr_consensus(self) -> None:
+        frames = [Image.new("RGB", (810, 1440), "black") for _ in range(3)]
+        results = iter(
+            [
+                [OcrMatch("返回验收模式选择", 93, 132, 225, 31)],
+                [OcrMatch("返回验收模式选择", 94, 131, 225, 31)],
+                [OcrMatch("返回验收模式选择", 93, 132, 226, 31)],
+            ]
+        )
+
+        bounds = _stable_ocr_literal_bounds(
+            frames,
+            "返回验收模式选择",
+            ocr_recognizer=lambda *_args, **_kwargs: {},
+            ocr_finder=lambda *_args, **_kwargs: next(results),
+        )
+
+        self.assertIsNotNone(bounds)
+        assert bounds is not None
+        self.assertAlmostEqual(93 / 810, bounds[0])
+        self.assertAlmostEqual(132 / 1440, bounds[1])
+        self.assertAlmostEqual(319 / 810, bounds[2])
+        self.assertAlmostEqual(163 / 1440, bounds[3])
+
+    def test_literal_text_geometry_rejects_duplicate_or_unstable_ocr(self) -> None:
+        frames = [Image.new("RGB", (810, 1440), "black") for _ in range(3)]
+        duplicate_results = iter(
+            [
+                [
+                    OcrMatch("返回验收模式选择", 93, 132, 225, 31),
+                    OcrMatch("返回验收模式选择", 400, 600, 225, 31),
+                ],
+                [OcrMatch("返回验收模式选择", 93, 132, 225, 31)],
+                [OcrMatch("返回验收模式选择", 93, 132, 225, 31)],
+            ]
+        )
+        self.assertIsNone(
+            _stable_ocr_literal_bounds(
+                frames,
+                "返回验收模式选择",
+                ocr_recognizer=lambda *_args, **_kwargs: {},
+                ocr_finder=lambda *_args, **_kwargs: next(duplicate_results),
+            )
+        )
+
+        unstable_results = iter(
+            [
+                [OcrMatch("返回验收模式选择", 93, 132, 225, 31)],
+                [OcrMatch("返回验收模式选择", 94, 131, 225, 31)],
+                [OcrMatch("返回验收模式选择", 93, 150, 225, 31)],
+            ]
+        )
+        self.assertIsNone(
+            _stable_ocr_literal_bounds(
+                frames,
+                "返回验收模式选择",
+                ocr_recognizer=lambda *_args, **_kwargs: {},
+                ocr_finder=lambda *_args, **_kwargs: next(unstable_results),
+            )
+        )
+
     def test_compact_prompt_forbids_copying_source_pixel_coordinates(self) -> None:
         prompt = _compact_prompt({"objective": "读取当前页面"})
         self.assertIn("禁止复制原图像素坐标", prompt)

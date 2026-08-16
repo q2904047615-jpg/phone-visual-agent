@@ -33,6 +33,7 @@ from vision_model_config import public_model_identity
 
 
 QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-14-qwen-visual-decision-v5"
+QWEN_VISUAL_SELECTION_PROTOCOL_VERSION = "2026-08-16-qwen-visual-selection-v1"
 SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v3"
 MIGRATION_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v2"
 SUPPORTED_TASK_CONTEXT_PROTOCOLS = frozenset(
@@ -41,7 +42,7 @@ SUPPORTED_TASK_CONTEXT_PROTOCOLS = frozenset(
 QWEN_VISUAL_DECISION_MODEL_ROLE = "trusted_observation_single_step_selector"
 DECISION_TIMEOUT_SECONDS = 60.0
 DECISION_OUTPUT_TOKENS = 1800
-DECISION_RETRY_TOKENS = 1200
+DECISION_RETRY_TOKENS = 0
 MIN_DECISION_CONFIDENCE = 0.72
 MIN_TRUSTED_FRAME_SHARPNESS = 4.0
 SINGLE_ELEMENT_ACTIONS = frozenset(
@@ -1090,6 +1091,7 @@ class QwenVisualDecisionObserver:
         value.update(
             {
                 "visual_decision_protocol": QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
+                "visual_selection_protocol": QWEN_VISUAL_SELECTION_PROTOCOL_VERSION,
                 "task_context_protocol": SUPPORTED_TASK_CONTEXT_PROTOCOL,
                 "model_role": QWEN_VISUAL_DECISION_MODEL_ROLE,
                 "hardware_actions_enabled": False,
@@ -1227,7 +1229,7 @@ class QwenVisualDecisionObserver:
             )
             return decision
 
-        prompt = _decision_prompt(
+        prompt = _selection_decision_prompt(
             context,
             trusted_observation,
             decision_number=max(1, int(decision_number)),
@@ -1260,7 +1262,7 @@ class QwenVisualDecisionObserver:
         self.last_raw_response = raw
         self.last_diagnostics = dict(base_diagnostics)
         try:
-            decision = _parse_decision(
+            decision = _parse_model_decision(
                 raw,
                 context=context,
                 observation=trusted_observation,
@@ -1268,121 +1270,49 @@ class QwenVisualDecisionObserver:
             )
             self._metrics["first_pass_success_count"] += 1
             first_pass = True
-            retry_used = False
         except VisionAgentError as first_error:
-            base_diagnostics.update(
+            reason = (
+                "Qwen单次结构化输出不符合可信选择合同；本轮安全阻塞："
+                f"{first_error}"
+            )
+            decision = _local_blocked_decision(
+                context,
+                trusted_observation,
+                reason=reason,
+            )
+            self._metrics["final_blocked_count"] += 1
+            self.last_diagnostics.update(
                 {
-                    "first_output_rejected": True,
-                    "candidate_action_from_first_output": False,
-                    "protocol_retry_used": True,
-                    "first_error_type": classify_qwen_error(
+                    "failed_stage": "parsing_first_decision",
+                    "error": str(first_error),
+                    "error_type": classify_qwen_error(
                         first_error,
                         raw_response=self.last_raw_response,
                     ),
+                    "first_output_rejected": True,
+                    "candidate_action_from_first_output": False,
+                    "protocol_retry_used": False,
+                    "retry_failure_blocked": False,
+                    "decision_status": "blocked",
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                    "safe_stop_reason": (
+                        "单次模型输出非法，输出已丢弃；未发起远程格式重生成，"
+                        "控制器与机械臂均未执行。"
+                    ),
+                    "raw_response_length": len(self.last_raw_response),
+                    "raw_response_excerpt": self.last_raw_response[:1000],
                 }
             )
-            self.last_diagnostics = dict(base_diagnostics)
-            retry_prompt = _decision_retry_prompt(
-                context,
-                trusted_observation,
-                error=first_error,
-                decision_number=max(1, int(decision_number)),
-                available_action_kinds=available_actions,
-            )
-            try:
-                raw = model_chat(
-                    _decision_messages(retry_prompt, image),
-                    max_tokens=DECISION_RETRY_TOKENS,
-                )
-            except VisionAgentError as service_error:
-                reason = f"Qwen格式修复请求失败，本轮安全阻塞：{service_error}"
-                decision = _local_blocked_decision(
-                    context,
-                    trusted_observation,
-                    reason=reason,
-                )
-                self._metrics["final_blocked_count"] += 1
-                self.last_diagnostics.update(
-                    failure_diagnostics(
-                        service_error,
-                        stage="requesting_protocol_retry",
-                        model_calls=int(base_diagnostics["model_calls"]),
-                        elapsed_seconds=time.perf_counter() - started,
-                        safe_stop_reason="格式修复请求失败，原始非法输出已丢弃，控制器与机械臂均未执行。",
-                    )
-                )
-                self.last_diagnostics.update(
-                    {
-                        "decision_status": "blocked",
-                        "first_output_rejected": True,
-                        "candidate_action_from_first_output": False,
-                    }
-                )
-                self.last_diagnostics["raw_response_length"] = len(
-                    self.last_raw_response
-                )
-                self.last_diagnostics["raw_response_excerpt"] = (
-                    self.last_raw_response[:1000]
-                )
-                return decision
-            self.last_raw_response = raw
-            self.last_diagnostics = dict(base_diagnostics)
-            try:
-                decision = _parse_decision(
-                    raw,
-                    context=context,
-                    observation=trusted_observation,
-                    available_action_kinds=available_actions,
-                )
-            except VisionAgentError as retry_error:
-                reason = (
-                    "Qwen修复重试后仍不符合单步可信绑定协议；本轮安全阻塞："
-                    f"{retry_error}"
-                )
-                decision = _local_blocked_decision(
-                    context,
-                    trusted_observation,
-                    reason=reason,
-                )
-                self._metrics["final_blocked_count"] += 1
-                self.last_diagnostics.update(
-                    {
-                        "failed_stage": "parsing_protocol_retry",
-                        "error": str(retry_error),
-                        "error_type": classify_qwen_error(
-                            retry_error,
-                            raw_response=self.last_raw_response,
-                        ),
-                        "retry_failure_blocked": True,
-                        "decision_status": "blocked",
-                        "elapsed_seconds": round(
-                            time.perf_counter() - started,
-                            3,
-                        ),
-                        "safe_stop_reason": (
-                            "两次格式输出均非法，所有输出已丢弃，控制器与机械臂均未执行。"
-                        ),
-                    }
-                )
-                self.last_diagnostics["raw_response_length"] = len(
-                    self.last_raw_response
-                )
-                self.last_diagnostics["raw_response_excerpt"] = (
-                    self.last_raw_response[:1000]
-                )
-                return decision
-            self._metrics["retry_success_count"] += 1
-            first_pass = False
-            retry_used = True
+            return decision
 
         if decision.proposal.status == "blocked":
             self._metrics["final_blocked_count"] += 1
         self.last_diagnostics.update(
             {
                 "model_calls": int(base_diagnostics["model_calls"]),
-                "protocol_retry_used": retry_used,
+                "protocol_retry_used": False,
                 "first_pass_success": first_pass,
-                "repair_retry_success": retry_used,
+                "repair_retry_success": False,
                 "decision_status": decision.proposal.status,
                 "decision_confidence": decision.confidence,
                 "elapsed_seconds": round(time.perf_counter() - started, 3),
@@ -1402,6 +1332,7 @@ class QwenVisualDecisionObserver:
                 max_tokens=max_tokens,
                 timeout=DECISION_TIMEOUT_SECONDS,
                 max_attempts=2,
+                response_format={"type": "json_object"},
             )
         except TypeError as exc:
             text = str(exc)
@@ -1465,6 +1396,112 @@ def _decision_observation_prompt_dict(
                 )
             ]
     return value
+
+
+def _selection_choices(
+    context: QwenTaskContext,
+    observation: TrustedObservation,
+    available_action_kinds: frozenset[str],
+) -> tuple[dict[str, Any], ...]:
+    """Build generic action choices from the trusted scene, never app steps."""
+
+    prompt_observation = _decision_observation_prompt_dict(context, observation)
+    candidates = tuple(
+        item
+        for item in prompt_observation.get("candidates", ())
+        if isinstance(item, Mapping)
+        and str(item.get("element_id") or "").strip()
+    )
+    choices: list[dict[str, Any]] = []
+
+    def append_choice(action: str, **parts: Any) -> None:
+        choices.append(
+            {
+                "choice_id": f"choice_{len(choices) + 1}",
+                "action": action,
+                **parts,
+            }
+        )
+
+    for action in sorted(available_action_kinds):
+        if action in {"back", "home", "reveal_system_navigation", "wait_for_change"}:
+            append_choice(action)
+            continue
+        if action == "swipe":
+            for direction in ("up", "down", "left", "right"):
+                append_choice(action, direction=direction)
+            continue
+        eligible = tuple(
+            item
+            for item in candidates
+            if str(item.get("role") or "") not in {"keyboard_key", "dialog"}
+        )
+        if action == "input_verified_text":
+            eligible = tuple(
+                item for item in eligible if str(item.get("role") or "") == "input"
+            )
+        if action in SINGLE_ELEMENT_ACTIONS:
+            for item in eligible:
+                append_choice(action, element_id=str(item["element_id"]))
+            continue
+        if action == "drag":
+            for source in eligible:
+                for destination in eligible:
+                    if source["element_id"] == destination["element_id"]:
+                        continue
+                    append_choice(
+                        action,
+                        source_element_id=str(source["element_id"]),
+                        destination_element_id=str(destination["element_id"]),
+                    )
+    return tuple(choices)
+
+
+def _selection_decision_prompt(
+    context: QwenTaskContext,
+    observation: TrustedObservation,
+    *,
+    decision_number: int,
+    available_action_kinds: frozenset[str],
+) -> str:
+    """Ask Qwen only for semantic selection; local code binds all authority."""
+
+    observation_prompt = _decision_observation_prompt_dict(context, observation)
+    choices = _selection_choices(context, observation, available_action_kinds)
+    return f"""
+你是通用手机视觉操作 Agent 的 Qwen 单步视觉选择层。必须先做完成判定，再考虑动作。
+你只能根据当前 DeepSeek 子目标、本轮可信画面和本地提供的 choices 选择一个下一动作，
+或判断 finished/blocked。禁止规划后续步骤、编造候选、输出坐标、执行机械臂或批准风险。
+
+任务上下文：
+{json.dumps(context.to_dict(), ensure_ascii=False, separators=(',', ':'))}
+
+本轮可信观察：
+{json.dumps(observation_prompt, ensure_ascii=False, separators=(',', ':'))}
+
+本地合法动作候选：
+{json.dumps(choices, ensure_ascii=False, separators=(',', ':'))}
+
+只返回一个短JSON对象，顶层只允许以下字段：
+{{"status":"action|finished|blocked","choice_id":"action时逐字复制一个choice_id，否则null",
+"expected_result":{{}},"confidence":0.0,"reason":"当前画面依据",
+"completion_evidence_element_ids":[]}}
+
+严格规则：
+1. status=action时choice_id必须逐字来自choices，expected_result必须是非空对象，
+   completion_evidence_element_ids必须为空。即使只有一个choice，也必须由你明确选择；本地不会替你选择。
+2. status=finished时choice_id必须为null、expected_result必须为空；完成证据只能引用可信候选ID或"scene"。
+   当前状态已经满足完成条件时禁止再点击或选择入口。
+3. status=blocked时choice_id必须为null、expected_result必须为空、完成证据必须为空。
+4. global_constraints和current_subgoal.constraints是选择前硬过滤；无法安全满足时blocked。
+5. current_external_impact=read_only时只能finished/blocked，除非目标明确要求等待异步变化且choices含wait_for_change。
+6. expected_result只允许按需使用scene_changed、content_changed、current_video_changed、app_id、screen_id、
+   system_ui或element_state；它必须描述一个动作后可由新画面验证的变化。
+7. input_verified_text的文字由DeepSeek结构化目标和本地控制器逐字绑定，你只选择对应choice_id；
+   不得在输出中重复、改写或补全文字。
+8. choices没有合适动作时blocked；不得返回choices之外的动作名称或element_id。
+9. 这是第{decision_number}轮。不要Markdown，不要identity、page_state、next_action、target_region、bounds或额外字段。
+"""
 
 
 def _decision_prompt(
@@ -1702,6 +1739,134 @@ C. 当前可信画面已经证明目标完成时：
 
 这些只是结构骨架。不得复制不存在的候选、不得使用骨架中的占位文字或零bounds，仍不得增加任何键。
 """
+
+
+def _parse_model_decision(
+    raw: str,
+    *,
+    context: QwenTaskContext,
+    observation: TrustedObservation,
+    available_action_kinds: frozenset[str] | None = None,
+) -> QwenVisualDecision:
+    """Hydrate the model's minimal selection into the existing formal object.
+
+    Full legacy-shaped payloads remain accepted as migration/test input, but
+    production prompts only request the minimal selection envelope.  All
+    authority-bearing identity, candidate semantics and geometry are local.
+    """
+
+    payload = _extract_qwen_json_object(raw)
+    if "protocol_version" in payload or "next_action" in payload:
+        return _parse_decision(
+            raw,
+            context=context,
+            observation=observation,
+            available_action_kinds=available_action_kinds,
+        )
+
+    allowed = {
+        "status",
+        "choice_id",
+        "expected_result",
+        "confidence",
+        "reason",
+        "completion_evidence_element_ids",
+    }
+    unexpected = set(payload) - allowed
+    if unexpected:
+        raise VisionAgentError(
+            "Qwen最小选择包含协议外字段：" + ", ".join(sorted(unexpected))
+        )
+    required = {
+        "status",
+        "choice_id",
+        "expected_result",
+        "confidence",
+        "reason",
+        "completion_evidence_element_ids",
+    }
+    missing = required - set(payload)
+    if missing:
+        raise VisionAgentError(
+            "Qwen最小选择缺少字段：" + ", ".join(sorted(missing))
+        )
+
+    status = str(payload.get("status") or "").strip().lower()
+    if status not in {"action", "finished", "blocked"}:
+        raise VisionAgentError("Qwen最小选择 status 必须是action、finished或blocked。")
+    choices = _selection_choices(
+        context,
+        observation,
+        available_action_kinds or QWEN_PROTOCOL_ACTIONS,
+    )
+    choices_by_id = {str(item["choice_id"]): item for item in choices}
+    choice_id = str(payload.get("choice_id") or "").strip()
+    completion_ids = payload.get("completion_evidence_element_ids")
+    if not isinstance(completion_ids, list) or any(
+        not isinstance(item, str) for item in completion_ids
+    ):
+        raise VisionAgentError(
+            "Qwen最小选择 completion_evidence_element_ids 必须是字符串数组。"
+        )
+    expected_result = payload.get("expected_result")
+    if not isinstance(expected_result, dict):
+        raise VisionAgentError("Qwen最小选择 expected_result 必须是JSON对象。")
+
+    next_action: dict[str, Any] | None = None
+    if status == "action":
+        if choice_id not in choices_by_id:
+            raise VisionAgentError("Qwen最小选择引用了不存在或不允许的 choice_id。")
+        if completion_ids:
+            raise VisionAgentError("action 不能携带完成证据。")
+        if not expected_result:
+            raise VisionAgentError("action 缺少可验证 expected_result。")
+        choice = choices_by_id[choice_id]
+        next_action = {
+            key: value
+            for key, value in choice.items()
+            if key != "choice_id"
+        }
+        next_action["kind"] = next_action.pop("action")
+        if next_action["kind"] == "input_verified_text":
+            next_action["text"] = context.requested_input_text
+        elif next_action["kind"] == "long_press":
+            next_action["duration_ms"] = 800
+    else:
+        if choice_id:
+            raise VisionAgentError("finished/blocked 不能携带 choice_id。")
+        if expected_result:
+            raise VisionAgentError("finished/blocked 的 expected_result 必须为空。")
+        if status == "blocked" and completion_ids:
+            raise VisionAgentError("blocked 不能携带完成证据。")
+
+    scene = observation.scene
+    hydrated = {
+        "protocol_version": QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
+        "task_id": context.task_id,
+        "device_id": context.device_id,
+        "revision": context.revision,
+        "observation_id": observation.observation_id,
+        "fingerprint": observation.fingerprint,
+        "page_state": {
+            "foreground_app_id": scene.foreground_app_id,
+            "screen_id": scene.screen_id,
+            "summary": scene.summary,
+            "overlays": list(scene.overlays),
+        },
+        "status": status,
+        "next_action": next_action,
+        "target_region": None,
+        "expected_result": expected_result,
+        "confidence": payload.get("confidence"),
+        "reason": payload.get("reason"),
+        "completion_evidence_element_ids": completion_ids,
+    }
+    return _parse_decision(
+        json.dumps(hydrated, ensure_ascii=False, separators=(",", ":")),
+        context=context,
+        observation=observation,
+        available_action_kinds=available_action_kinds,
+    )
 
 
 def _parse_decision(

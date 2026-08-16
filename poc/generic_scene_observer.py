@@ -49,11 +49,11 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-16-generic-scene-observer-v40"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-16-generic-scene-observer-v41"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
-COMPACT_OUTPUT_TOKENS = 1200
+COMPACT_OUTPUT_TOKENS = 1800
 TARGETED_OUTPUT_TOKENS = 1200
 INPUT_STRUCTURE_AUDIT_TOKENS = 700
 SYSTEM_UI_AUDIT_TOKENS = 600
@@ -1181,8 +1181,7 @@ class GenericSceneObserver:
                 "timeout": OBSERVATION_TIMEOUT_SECONDS,
                 "max_attempts": 2,
             }
-            if response_format is not None:
-                options["response_format"] = response_format
+            options["response_format"] = response_format or {"type": "json_object"}
             return self.provider._chat(
                 messages,
                 max_tokens=max_tokens,
@@ -1194,7 +1193,22 @@ class GenericSceneObserver:
             text = str(exc)
             if "unexpected keyword" not in text and "keyword argument" not in text:
                 raise
-            return self.provider._chat(messages, max_tokens=max_tokens)
+            fallback_options = dict(options)
+            fallback_options.pop("response_format", None)
+            try:
+                return self.provider._chat(
+                    messages,
+                    max_tokens=max_tokens,
+                    **fallback_options,
+                )
+            except TypeError as fallback_exc:
+                fallback_text = str(fallback_exc)
+                if (
+                    "unexpected keyword" not in fallback_text
+                    and "keyword argument" not in fallback_text
+                ):
+                    raise
+                return self.provider._chat(messages, max_tokens=max_tokens)
 
 
 def _horizontal_overlap_ratio(

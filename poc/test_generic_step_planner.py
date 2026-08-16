@@ -495,7 +495,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(0, caught.exception.physical_actions)
         self.assertEqual([], robot.actions)
         self.assertIsNone(robot._armed)
-        self.assertEqual([1200], provider.max_tokens_seen)
+        self.assertEqual([1800], provider.max_tokens_seen)
 
     def test_public_execute_irreparable_observation_never_calls_robot(self):
         self._assert_public_observation_failure_before_robot(

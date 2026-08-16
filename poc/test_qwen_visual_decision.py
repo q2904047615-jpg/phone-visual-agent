@@ -17,6 +17,7 @@ from qwen_visual_decision import (
     QwenVisualDecisionObserver,
     TrustedObservation,
     _decision_retry_prompt,
+    _selection_choices,
 )
 from ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
 from vision_agent import VisionAgentError
@@ -356,18 +357,46 @@ def blocked_payload(context: dict, observation: TrustedObservation) -> dict:
     return value
 
 
+def minimal_selection_payload(
+    *,
+    status: str,
+    choice_id: str | None = None,
+    expected_result: dict | None = None,
+    completion_evidence_element_ids: list[str] | None = None,
+) -> dict:
+    return {
+        "status": status,
+        "choice_id": choice_id,
+        "expected_result": expected_result or {},
+        "confidence": 0.94,
+        "reason": "当前可信画面与活动子目标支持该选择。",
+        "completion_evidence_element_ids": (
+            completion_evidence_element_ids or []
+        ),
+    }
+
+
 class QwenVisualDecisionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.frames = load_sequence("launcher_stable")
         self.context = task_context()
         self.observation = trusted_observation(self.frames)
 
-    def decide(self, provider, *, context=None, frames=None, observation=None):
+    def decide(
+        self,
+        provider,
+        *,
+        context=None,
+        frames=None,
+        observation=None,
+        available_action_kinds=None,
+    ):
         observer = QwenVisualDecisionObserver(provider)
         decision = observer.decide(
             frames=frames or self.frames,
             task_context=context or self.context,
             trusted_observation=observation or self.observation,
+            available_action_kinds=available_action_kinds,
         )
         return observer, decision
 
@@ -377,6 +406,140 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertTrue(self.observation.local_stability.stable)
         self.assertEqual(self.observation.local_stability.frame_count, 4)
         self.assertEqual(self.observation.scene.fingerprint, self.observation.fingerprint)
+
+    def test_minimal_selection_hydrates_existing_formal_decision(self) -> None:
+        parsed = QwenTaskContext.from_dict(self.context)
+        choices = _selection_choices(
+            parsed,
+            self.observation,
+            frozenset({"tap_semantic"}),
+        )
+        choice = next(
+            item
+            for item in choices
+            if item.get("element_id") == "settings_icon"
+        )
+        provider = FakeProvider(
+            minimal_selection_payload(
+                status="action",
+                choice_id=choice["choice_id"],
+                expected_result={"scene_changed": True},
+            )
+        )
+
+        observer, decision = self.decide(
+            provider,
+            available_action_kinds={"tap_semantic"},
+        )
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("tap_semantic", decision.proposal.action.action)
+        self.assertEqual(
+            "settings_icon",
+            decision.proposal.action.params["element_id"],
+        )
+        self.assertEqual(
+            self.observation.get_candidate("settings_icon").bounds,
+            decision.target_region.bounds,
+        )
+        self.assertEqual(1, provider.calls)
+        self.assertEqual(
+            {"type": "json_object"},
+            provider.last_call_options["response_format"],
+        )
+        prompt = provider.messages[-1]["content"][0]["text"]
+        self.assertIn("choice_id", prompt)
+        self.assertIn("不要identity", prompt)
+        self.assertNotIn('"protocol_version":"逐字复制输入"', prompt)
+
+    def test_minimal_selection_invalid_choice_fails_closed_without_retry(self) -> None:
+        provider = FakeProvider(
+            minimal_selection_payload(
+                status="action",
+                choice_id="invented_choice",
+                expected_result={"scene_changed": True},
+            )
+        )
+
+        observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertEqual(1, provider.calls)
+        self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
+        self.assertIn("choice_id", decision.reason)
+
+    def test_minimal_finished_uses_current_trusted_scene(self) -> None:
+        context = task_context()
+        context["current_external_impact"] = "read_only"
+        context["current_subgoal"]["external_impact"] = "read_only"
+        provider = FakeProvider(
+            minimal_selection_payload(
+                status="finished",
+                completion_evidence_element_ids=["scene"],
+            )
+        )
+
+        _observer, decision = self.decide(provider, context=context)
+
+        self.assertEqual("finished", decision.proposal.status)
+        self.assertEqual(
+            (f"scene:{self.observation.scene.summary}",),
+            decision.proposal.completion_evidence,
+        )
+
+    def test_minimal_input_choice_binds_deepseek_text_locally(self) -> None:
+        context = task_context(task_id="task_minimal_input", revision=3)
+        context["goal"]["entities"] = {"input_text": "agent"}
+        context["current_subgoal"]["objective"] = "在当前输入框输入目标文字"
+        field = UIElement(
+            element_id="query_field",
+            role="input",
+            meaning="current_text_input",
+            label="",
+            bounds=(0.08, 0.12, 0.92, 0.22),
+            confidence=0.97,
+            states={
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+                "goal_relevant": True,
+            },
+            evidence=("英文直输输入框已聚焦",),
+        )
+        observation = trusted_observation(self.frames, elements=(field,))
+        provider = FakeProvider(
+            minimal_selection_payload(
+                status="action",
+                choice_id="choice_1",
+                expected_result={
+                    "element_state": {
+                        "meaning": "current_text_input",
+                        "states": {"value": "agent"},
+                    }
+                },
+            )
+        )
+
+        _observer, decision = self.decide(
+            provider,
+            context=context,
+            observation=observation,
+            available_action_kinds={"input_verified_text"},
+        )
+
+        self.assertEqual("input_verified_text", decision.proposal.action.action)
+        self.assertEqual("agent", decision.proposal.action.params["text"])
+
+    def test_truncated_minimal_json_blocks_after_one_call(self) -> None:
+        provider = RawSequenceProvider(['{"status":"action"'])
+
+        observer, decision = self.decide(provider)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertEqual(1, provider.calls)
+        self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
+        self.assertIn("JSON", decision.reason)
 
     def test_input_action_must_copy_structured_text_exactly(self) -> None:
         context = task_context()
@@ -445,25 +608,13 @@ class QwenVisualDecisionTests(unittest.TestCase):
             evidence=("键盘右下角按键",),
         )
         observation = trusted_observation(self.frames, elements=(field, key))
-        invalid_tap = action_payload(
-            context,
-            observation,
-            element_id="keyboard_done_key",
+        provider = FakeProvider(
+            minimal_selection_payload(
+                status="action",
+                choice_id="choice_1",
+                expected_result={"scene_changed": True},
+            )
         )
-        back = action_payload(context, observation, element_id="query_field")
-        back.update(
-            {
-                "next_action": {"kind": "back"},
-                "target_region": {
-                    "kind": "system_navigation",
-                    "bounds": [0, 0, 1000, 1000],
-                    "description": "Android系统返回键",
-                },
-                "expected_result": {"scene_changed": True},
-                "reason": "返回键将收起当前可见软键盘。",
-            }
-        )
-        provider = SequenceProvider([invalid_tap, back])
 
         observer, decision = self.decide(
             provider,
@@ -471,11 +622,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
             observation=observation,
         )
 
-        self.assertEqual(2, provider.calls)
+        self.assertEqual(1, provider.calls)
         self.assertEqual("action", decision.proposal.status)
         self.assertEqual("back", decision.proposal.action.action)
         self.assertEqual(["back"], observer.last_diagnostics["available_action_kinds"])
-        self.assertTrue(observer.last_diagnostics["protocol_retry_used"])
+        self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
 
     def test_keyboard_dismissal_contract_ignores_non_active_goal_mentions(self) -> None:
         context = task_context(task_id="task_keep_input", revision=20)
@@ -558,15 +709,17 @@ class QwenVisualDecisionTests(unittest.TestCase):
             {"kind": "input_verified_text", "text": "打开蓝牙设置"}
         )
 
+        provider = FakeProvider(payload)
         observer, decision = self.decide(
-            FakeProvider(payload),
+            provider,
             context=context,
             observation=observation,
         )
 
         self.assertEqual("blocked", decision.proposal.status)
         self.assertIn("input_text", decision.proposal.reason)
-        self.assertTrue(observer.last_diagnostics["retry_failure_blocked"])
+        self.assertEqual(1, provider.calls)
+        self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
 
     def test_offline_manifest_uses_full_context_and_multiple_page_types(self) -> None:
         manifest = json.loads(
@@ -986,14 +1139,14 @@ class QwenVisualDecisionTests(unittest.TestCase):
             task_context=self.context,
             trusted_observation=self.observation,
         )
-        self.assertEqual(provider.calls, 2)
+        self.assertEqual(provider.calls, 1)
         self.assertEqual(decision.proposal.status, "blocked")
         self.assertIn("禁止携带候选元素", decision.reason)
         self.assertTrue(observer.last_diagnostics["first_output_rejected"])
         self.assertFalse(
             observer.last_diagnostics["candidate_action_from_first_output"]
         )
-        self.assertTrue(observer.last_diagnostics["retry_failure_blocked"])
+        self.assertFalse(observer.last_diagnostics["retry_failure_blocked"])
         self.assertEqual(observer.status()["final_blocked_rate"], 1.0)
 
     def test_forged_element_id_without_page_elements_is_rejected(self) -> None:
@@ -1180,7 +1333,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual(decision.proposal.status, "finished")
         self.assertEqual(decision.proposal.completion_evidence, ("input_value:.com",))
 
-    def test_read_only_physical_action_repairs_to_visible_completion(self) -> None:
+    def test_read_only_physical_action_is_blocked_without_remote_repair(self) -> None:
         context = task_context()
         context["current_external_impact"] = "read_only"
         context["current_subgoal"]["external_impact"] = "read_only"
@@ -1200,12 +1353,8 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
         _observer, decision = self.decide(provider, context=context)
 
-        self.assertEqual("finished", decision.proposal.status)
-        self.assertEqual(
-            (f"scene:{self.observation.scene.summary}",),
-            decision.proposal.completion_evidence,
-        )
-        self.assertEqual(2, provider.calls)
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertEqual(1, provider.calls)
 
     def test_same_visual_object_duplicates_collapse_without_changing_bounds(self) -> None:
         elements = (
@@ -1321,7 +1470,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             available_action_kinds={"wait_for_change"},
         )
 
-        self.assertEqual(provider.calls, 2)
+        self.assertEqual(provider.calls, 1)
         self.assertEqual(decision.proposal.status, "blocked")
         self.assertIn("没有本地验证动作能力", decision.reason)
         self.assertEqual(
@@ -1344,7 +1493,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         )
         self.assertIn("未形成候选动作", observer.last_diagnostics["safe_stop_reason"])
 
-    def test_disconnect_during_format_retry_discards_first_output(self) -> None:
+    def test_invalid_output_does_not_contact_remote_repair_response(self) -> None:
         invalid = action_payload(self.context, self.observation)
         invalid["target_region"]["bounds"] = [1, 1, 10, 10]
         provider = SequenceProvider(
@@ -1354,11 +1503,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
             ]
         )
         observer, decision = self.decide(provider)
-        self.assertEqual(provider.calls, 2)
+        self.assertEqual(provider.calls, 1)
         self.assertEqual(decision.proposal.status, "blocked")
         self.assertTrue(observer.last_diagnostics["first_output_rejected"])
         self.assertFalse(observer.last_diagnostics["candidate_action_from_first_output"])
-        self.assertEqual(observer.last_diagnostics["error_type"], "service_disconnect")
+        self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
 
     def test_multiple_actions_field_is_rejected(self) -> None:
         bad = action_payload(self.context, self.observation)
@@ -1376,21 +1525,21 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual(decision.proposal.status, "blocked")
         self.assertIn("原始 bounds", decision.reason)
 
-    def test_invalid_first_output_gets_exactly_one_retry(self) -> None:
+    def test_invalid_first_output_is_blocked_without_remote_retry(self) -> None:
         invalid = action_payload(self.context, self.observation)
         invalid["target_region"]["bounds"] = [1, 1, 10, 10]
         valid = action_payload(self.context, self.observation)
         provider = SequenceProvider([invalid, valid])
         observer, decision = self.decide(provider)
-        self.assertEqual(provider.calls, 2)
-        self.assertEqual(decision.proposal.status, "action")
-        self.assertTrue(observer.last_diagnostics["protocol_retry_used"])
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(decision.proposal.status, "blocked")
+        self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
         self.assertFalse(
             observer.last_diagnostics["candidate_action_from_first_output"]
         )
         status = observer.status()
         self.assertEqual(status["first_pass_rate"], 0.0)
-        self.assertEqual(status["repair_retry_rate"], 1.0)
+        self.assertEqual(status["repair_retry_rate"], 0.0)
 
     def test_known_action_field_aliases_are_normalized_before_trust_checks(self) -> None:
         payload = action_payload(self.context, self.observation)
@@ -1964,9 +2113,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 _observer, decision = self.decide(provider, context=context)
 
                 self.assertEqual("blocked", decision.proposal.status)
-                self.assertEqual(2, provider.calls)
-                retry_prompt = provider.messages[-1]["content"][0]["text"]
-                self.assertIn("发生型完成条件", retry_prompt)
+                self.assertEqual(1, provider.calls)
 
     def test_refresh_event_accepts_literal_dynamic_success_evidence(self) -> None:
         context = task_context(task_id="task_refresh_dynamic")
@@ -2067,7 +2214,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 )
 
                 self.assertEqual("blocked", decision.proposal.status)
-                self.assertEqual(2, provider.calls)
+                self.assertEqual(1, provider.calls)
 
     def test_exact_duplicate_json_response_is_accepted(self) -> None:
         payload = action_payload(self.context, self.observation)
@@ -2094,7 +2241,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
         self.assertEqual("blocked", decision.proposal.status)
         self.assertIn("多个互相冲突", decision.reason)
-        self.assertEqual(2, provider.calls)
+        self.assertEqual(1, provider.calls)
 
     def test_action_discards_model_authored_completion_evidence(self) -> None:
         payload = action_payload(self.context, self.observation)

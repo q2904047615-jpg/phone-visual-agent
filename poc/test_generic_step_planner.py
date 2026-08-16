@@ -1696,27 +1696,28 @@ class GenericActionAdapterTests(unittest.TestCase):
             ),
             fingerprint="fresh",
         )
-        adapter = self._adapter(FakeSceneObserver([fresh]), FakeRobot())
+        for action in ("tap_semantic", "dismiss_overlay"):
+            with self.subTest(action=action):
+                adapter = self._adapter(FakeSceneObserver([fresh]), FakeRobot())
+                rebound = adapter._rebind_action(
+                    SemanticAction(
+                        node_id="return-to-list",
+                        action=action,
+                        params={
+                            "element_id": "planned-link",
+                            "target": "back_navigation",
+                            "role": "button",
+                            "label": label,
+                            "states": states,
+                        },
+                    ),
+                    planned,
+                    fresh,
+                )
 
-        rebound = adapter._rebind_action(
-            SemanticAction(
-                node_id="return-to-list",
-                action="tap_semantic",
-                params={
-                    "element_id": "planned-link",
-                    "target": "back_navigation",
-                    "role": "button",
-                    "label": label,
-                    "states": states,
-                },
-            ),
-            planned,
-            fresh,
-        )
-
-        self.assertEqual("fresh-link", rebound.params["element_id"])
-        self.assertEqual("text", rebound.params["role"])
-        self.assertEqual("navigation_link", rebound.params["target"])
+                self.assertEqual("fresh-link", rebound.params["element_id"])
+                self.assertEqual("text", rebound.params["role"])
+                self.assertEqual("navigation_link", rebound.params["target"])
 
     def test_rebind_accepts_fresh_positive_fully_visible_attestation(self):
         planned = scene("planned")

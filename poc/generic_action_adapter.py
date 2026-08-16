@@ -1053,7 +1053,7 @@ class GenericSingleActionAdapter:
             selector_roles = {"button", "tab", "list_item", "text"}
             if (
                 not matches
-                and requested.action == "tap_semantic"
+                and requested.action in {"tap_semantic", "dismiss_overlay"}
                 and prefix == ""
                 and original.label
                 and original.role in selector_roles
@@ -1168,7 +1168,7 @@ class GenericSingleActionAdapter:
                     )
                 )
                 labelled_local_mode_selector = bool(
-                    requested.action == "tap_semantic"
+                    requested.action in {"tap_semantic", "dismiss_overlay"}
                     and prefix == ""
                     and original.label
                     and current.label == original.label

@@ -4,7 +4,7 @@ import json
 import re
 import unittest
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 try:
     from element_geometry_audit import (
@@ -568,6 +568,61 @@ class GenericSceneGeometryAuditIntegrationTests(unittest.TestCase):
         self.assertEqual(1, len(provider.messages))
         self.assertEqual("", audited.get_element("input").label)
         self.assertNotEqual(current.get_element("input").bounds, audited.get_element("input").bounds)
+
+    def test_unlabelled_input_geometry_snaps_to_unique_local_border(self):
+        frame = Image.new("RGB", (810, 1440), "black")
+        draw = ImageDraw.Draw(frame)
+        draw.rounded_rectangle(
+            (89, 540, 725, 982), radius=30, outline=(100, 255, 255), width=5
+        )
+        draw.rounded_rectangle(
+            (122, 717, 690, 847), radius=24, outline=(120, 255, 255), width=7
+        )
+        # A light keyboard-like lower half makes any crop-wide median
+        # background ambiguous; border localization must be polarity-neutral.
+        draw.rectangle((0, 900, 809, 1439), fill="white")
+        current = UIScene(
+            app_id="unknown",
+            screen_id="input-page",
+            summary="一个完整空输入框可见",
+            elements=(
+                UIElement(
+                    element_id="input",
+                    role="input",
+                    meaning="text_input_field",
+                    label="",
+                    bounds=(0.13, 0.50, 0.87, 0.60),
+                    confidence=1.0,
+                    states={"goal_relevant": True, "value": ""},
+                    evidence=("空输入框四边完整可见",),
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint=_local_frame_fingerprint(frame),
+        )
+        # The semantic audit recognizes the unique input but returns a loose,
+        # downward-shifted box. Local pixels may tighten geometry only after
+        # that strict semantic attestation.
+        provider = GeometryAuditProvider([[140, 530, 860, 710]])
+        observer = GenericSceneObserver(provider)
+
+        audited = observer.audit_element_geometry(
+            frames=[frame.copy() for _ in range(4)],
+            scene=current,
+            element_ids=("input",),
+        )
+
+        bounds = audited.get_element("input").bounds
+        self.assertAlmostEqual(122 / 810, bounds[0], delta=0.01)
+        self.assertAlmostEqual(717 / 1440, bounds[1], delta=0.01)
+        self.assertAlmostEqual(690 / 810, bounds[2], delta=0.01)
+        self.assertAlmostEqual(847 / 1440, bounds[3], delta=0.01)
+        diagnostics = observer.last_geometry_audit_diagnostics["audits"][0]
+        self.assertTrue(diagnostics["local_border_snap_used"])
+        self.assertNotEqual(
+            diagnostics["full_bounds"], diagnostics["snapped_full_bounds"]
+        )
 
 
 if __name__ == "__main__":

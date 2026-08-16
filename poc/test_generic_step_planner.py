@@ -904,10 +904,21 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(2, observer.calls)
 
     def test_confirmed_input_accepts_unique_overlapping_post_input_alias(self):
-        def input_scene(fingerprint, element_id, meaning, label, value):
+        def input_scene(
+            fingerprint,
+            element_id,
+            meaning,
+            label,
+            value,
+            *,
+            app_id="browser",
+            screen_id="search",
+            bounds=(0.1, 0.1, 0.9, 0.2),
+            keyboard_input_mode="direct_latin",
+        ):
             return UIScene(
-                app_id="browser",
-                screen_id="search",
+                app_id=app_id,
+                screen_id=screen_id,
                 summary="唯一输入框",
                 elements=(
                     UIElement(
@@ -915,13 +926,13 @@ class GenericActionAdapterTests(unittest.TestCase):
                         role="input",
                         meaning=meaning,
                         label=label,
-                        bounds=(0.1, 0.1, 0.9, 0.2),
+                        bounds=bounds,
                         confidence=0.98,
                         states={
                             "focused": True,
                             "value": value,
                             "keyboard_layout": "qwerty",
-                            "keyboard_input_mode": "direct_latin",
+                            "keyboard_input_mode": keyboard_input_mode,
                             "goal_relevant": True,
                         },
                     ),
@@ -967,6 +978,195 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual([("input", "agent")], robot.actions)
         self.assertEqual("matched", result.action_outcome)
+
+    def test_confirmed_input_accepts_identity_degradation_to_unknown_for_same_input(self):
+        def input_scene(fingerprint, app_id, screen_id, value):
+            return UIScene(
+                app_id=app_id,
+                screen_id=screen_id,
+                summary="本地输入页",
+                elements=(
+                    UIElement(
+                        element_id="audited-input",
+                        role="input",
+                        meaning="target_text_input",
+                        label="验收输入框",
+                        bounds=(0.12, 0.38, 0.87, 0.47),
+                        confidence=0.98,
+                        states={
+                            "focused": True,
+                            "value": value,
+                            "keyboard_layout": "qwerty",
+                            "keyboard_input_mode": "direct_latin",
+                            "goal_relevant": True,
+                        },
+                    ),
+                ),
+                stable=True,
+                confidence=0.98,
+                fingerprint=fingerprint,
+                camera_alignment=aligned_camera_facts(),
+            )
+
+        planned = input_scene("planned", "current_foreground", "通用动作真机验收页", "")
+        fresh = input_scene("before", "current_foreground", "通用动作真机验收页", "")
+        after = input_scene("after", "unknown", "unknown", "agent")
+        robot = FakeRobot()
+
+        result = self._adapter(FakeSceneObserver([fresh, after]), robot).execute(
+            requested_action=SemanticAction(
+                node_id="input-identity-degradation",
+                action="input_verified_text",
+                params={
+                    "element_id": "audited-input",
+                    "target": "target_text_input",
+                    "role": "input",
+                    "label": "验收输入框",
+                    "states": {
+                        "focused": True,
+                        "value": "",
+                        "keyboard_layout": "qwerty",
+                        "keyboard_input_mode": "direct_latin",
+                        "goal_relevant": True,
+                    },
+                    "text": "agent",
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("input", "agent")], robot.actions)
+        self.assertEqual("matched", result.action_outcome)
+
+    def test_confirmed_input_rejects_different_concrete_page_identity(self):
+        before = UIScene(
+            app_id="browser",
+            screen_id="page-a",
+            summary="输入页",
+            elements=(
+                UIElement(
+                    element_id="field",
+                    role="input",
+                    meaning="target_text_input",
+                    label="输入框",
+                    bounds=(0.1, 0.1, 0.9, 0.2),
+                    confidence=0.98,
+                    states={
+                        "focused": True,
+                        "value": "",
+                        "keyboard_layout": "qwerty",
+                        "keyboard_input_mode": "direct_latin",
+                        "goal_relevant": True,
+                    },
+                ),
+            ),
+            stable=True,
+            confidence=0.98,
+            fingerprint="before",
+            camera_alignment=aligned_camera_facts(),
+        )
+        after = replace(
+            before,
+            screen_id="page-b",
+            fingerprint="after",
+            elements=(replace(before.elements[0], states={**before.elements[0].states, "value": "agent"}),),
+        )
+        robot = FakeRobot()
+
+        result = self._adapter(FakeSceneObserver([before, after, after]), robot).execute(
+            requested_action=SemanticAction(
+                node_id="reject-page-switch",
+                action="input_verified_text",
+                params={
+                    "element_id": "field",
+                    "target": "target_text_input",
+                    "role": "input",
+                    "label": "输入框",
+                    "states": before.elements[0].states,
+                    "text": "agent",
+                },
+            ),
+            planned_scene=before,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual("mismatched", result.action_outcome)
+        self.assertTrue(
+            all("App 或页面身份发生变化" in error for error in result.verification_errors)
+        )
+        self.assertEqual(1, result.physical_actions)
+
+    def test_confirmed_input_rejects_unknown_identity_when_keyboard_mode_changes(self):
+        before = UIScene(
+            app_id="browser",
+            screen_id="page-a",
+            summary="输入页",
+            elements=(
+                UIElement(
+                    element_id="field",
+                    role="input",
+                    meaning="target_text_input",
+                    label="输入框",
+                    bounds=(0.1, 0.1, 0.9, 0.2),
+                    confidence=0.98,
+                    states={
+                        "focused": True,
+                        "value": "",
+                        "keyboard_layout": "qwerty",
+                        "keyboard_input_mode": "direct_latin",
+                        "goal_relevant": True,
+                    },
+                ),
+            ),
+            stable=True,
+            confidence=0.98,
+            fingerprint="before",
+            camera_alignment=aligned_camera_facts(),
+        )
+        after = replace(
+            before,
+            app_id="unknown",
+            screen_id="unknown",
+            fingerprint="after",
+            elements=(
+                replace(
+                    before.elements[0],
+                    states={
+                        **before.elements[0].states,
+                        "value": "agent",
+                        "keyboard_input_mode": "chinese_pinyin",
+                    },
+                ),
+            ),
+        )
+        robot = FakeRobot()
+
+        result = self._adapter(FakeSceneObserver([before, after, after]), robot).execute(
+            requested_action=SemanticAction(
+                node_id="reject-mode-drift",
+                action="input_verified_text",
+                params={
+                    "element_id": "field",
+                    "target": "target_text_input",
+                    "role": "input",
+                    "label": "输入框",
+                    "states": before.elements[0].states,
+                    "text": "agent",
+                },
+            ),
+            planned_scene=before,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual("mismatched", result.action_outcome)
+        self.assertTrue(
+            all("App 或页面身份发生变化" in error for error in result.verification_errors)
+        )
+        self.assertEqual(1, result.physical_actions)
 
     def test_execution_result_keeps_exact_four_verified_after_frames(self):
         gray = Image.new("RGB", (540, 960), "gray")
@@ -1600,6 +1800,76 @@ class GenericActionAdapterTests(unittest.TestCase):
             [("planned-second-item",), ("fresh-second-item",)],
             observer.geometry_audit_calls,
         )
+
+    def test_tap_reuses_private_local_geometry_attestation_without_third_audit(self):
+        states = {
+            "goal_relevant": True,
+            "fully_visible": True,
+            "reload_visual_audit": True,
+            "independent_geometry_verified": True,
+            "geometry_audit_source": "icon_cluster_localization",
+        }
+
+        def reload_scene(fingerprint, *, screen_id="page"):
+            return UIScene(
+                app_id="browser",
+                screen_id=screen_id,
+                summary="本地页面",
+                elements=(
+                    UIElement(
+                        element_id="local_audited_reload_control_1",
+                        role="icon",
+                        meaning="reload",
+                        label="",
+                        bounds=(0.80, 0.10, 0.86, 0.16),
+                        confidence=0.97,
+                        states=states,
+                        evidence=("独立图标簇定位与本地几何校验",),
+                    ),
+                ),
+                stable=True,
+                confidence=0.98,
+                fingerprint=fingerprint,
+                camera_alignment=aligned_camera_facts(),
+            )
+
+        planned = reload_scene("planned")
+        fresh = reload_scene("fresh")
+        after = reload_scene("after", screen_id="reloaded")
+        observer = FakeSceneObserver([fresh, after])
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="reload-locally-attested",
+                action="tap_semantic",
+                params={
+                    "element_id": "local_audited_reload_control_1",
+                    "target": "reload",
+                    "role": "icon",
+                    "label": "",
+                    "states": states,
+                    "expected_effect": {"scene_changed": True},
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([], observer.geometry_audit_calls)
+        self.assertEqual([("tap", 830, 130)], robot.actions)
+        self.assertEqual(1, result.physical_actions)
 
     def test_rebind_accepts_tight_loose_audit_boxes_for_same_static_target(self):
         planned = scene(

@@ -541,6 +541,86 @@ class UISceneTests(unittest.TestCase):
                     ),
                 )
 
+    def test_focus_tap_accepts_unique_post_action_input_semantic_alias(self) -> None:
+        before = scene(
+            element(
+                "rough-input",
+                "target_text_input",
+                role="input",
+                states={"goal_relevant": True, "value": ""},
+            ),
+            app_id="browser",
+            screen_id="local-page",
+            fingerprint="before",
+        )
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="focus-input",
+                action="tap_semantic",
+                params={
+                    "element_id": "rough-input",
+                    "target": "target_text_input",
+                    "role": "input",
+                    "states": {"goal_relevant": True, "value": ""},
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "target_text_input",
+                            "states": {"focused": True},
+                        }
+                    },
+                },
+            ),
+            before,
+        )
+        after = scene(
+            element(
+                "audited-input",
+                "application_text_input",
+                role="input",
+                states={"goal_relevant": True, "value": "", "focused": True},
+            ),
+            app_id="browser",
+            screen_id="local-page",
+            fingerprint="after",
+        )
+
+        UniversalActionController().verify_after_action(resolved, before, after)
+
+    def test_non_input_tap_cannot_use_input_semantic_alias(self) -> None:
+        before = scene(
+            element("rough-button", "target_control", role="button"),
+            fingerprint="before",
+        )
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="tap-button",
+                action="tap_semantic",
+                params={
+                    "element_id": "rough-button",
+                    "target": "target_control",
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "target_control",
+                            "states": {"focused": True},
+                        }
+                    },
+                },
+            ),
+            before,
+        )
+        after = scene(
+            element(
+                "unrelated-input",
+                "application_text_input",
+                role="input",
+                states={"focused": True},
+            ),
+            fingerprint="after",
+        )
+
+        with self.assertRaisesRegex(UniversalActionError, "缺少元素状态证据"):
+            UniversalActionController().verify_after_action(resolved, before, after)
+
     def test_verified_input_rejects_nonempty_value_before_resolution(self) -> None:
         current = scene(
             element(

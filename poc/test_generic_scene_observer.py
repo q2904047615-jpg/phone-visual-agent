@@ -17,6 +17,7 @@ from generic_scene_observer import (
     _MAX_JSON_STRUCTURAL_REPAIR_CHARS,
     _camera_layout_orientation,
     _compact_prompt,
+    _goal_requests_input,
     _input_structure_diagnostic_shape,
     _parse_scene_after_unique_structural_edit,
     _parse_scene,
@@ -387,6 +388,143 @@ class GenericSceneObserverTests(unittest.TestCase):
                         goal_context={"objective": "操作目标控件"},
                         camera_layout_orientation="portrait",
                     )
+
+    def test_keyboard_switch_goal_defers_one_invalid_compact_box_to_strict_audit(self) -> None:
+        compact = scene_payload()
+        compact["screen_id"] = "input_page"
+        compact["summary"] = "输入框与软键盘可见"
+        compact["elements"] = [
+            {
+                "element_id": "pixel-coordinate-mode-key",
+                "role": "button",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "中",
+                "bounds": [730, 1130, 830, 1210],
+                "confidence": 0.99,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+                "evidence": ["键盘底部模式键"],
+            }
+        ]
+        refined = scene_payload()
+        refined["screen_id"] = "input_page"
+        refined["summary"] = "输入框与软键盘可见"
+        refined["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(text="", placeholder="")
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "mode_switch": {
+                    "label": "中",
+                    "bounds": [650, 900, 760, 970],
+                    "confidence": 0.97,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+            },
+        )
+        audit["application_inputs"][0]["visible_editable_cues"] = ["caret"]
+        provider = SequenceProvider([compact, refined, audit])
+
+        scene = GenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "把当前键盘切换到英文直输模式"},
+        )
+
+        target = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(target)
+        self.assertEqual("switch_keyboard_input_mode", target.meaning)
+        self.assertEqual((0.65, 0.9, 0.76, 0.97), target.bounds)
+        self.assertEqual(3, provider.calls)
+
+    def test_malformed_invalid_keyboard_switch_is_not_hidden_by_audit_deferral(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = [
+            {
+                "element_id": "unsafe-mode-key",
+                "role": "button",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "中",
+                "bounds": [730, 1130, 830, 1210],
+                "confidence": 0.99,
+                "states": {
+                    "goal_relevant": True,
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                    "action": "tap",
+                },
+                "evidence": ["键盘底部模式键"],
+            }
+        ]
+
+        with self.assertRaises(VisionAgentError):
+            GenericSceneObserver(SequenceProvider([compact])).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "把当前键盘切换到英文直输模式"},
+            )
+
+    def test_visible_keyboard_input_goal_always_uses_independent_structure_audit(self) -> None:
+        compact = scene_payload()
+        compact["summary"] = "唯一输入框已聚焦且软键盘可见"
+        compact["elements"] = [
+            {
+                "element_id": "compact-input",
+                "role": "input",
+                "meaning": "target_text_input",
+                "label": "",
+                "bounds": [120, 420, 880, 540],
+                "confidence": 0.99,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "chinese_pinyin",
+                },
+                "evidence": ["完整输入边框和光标"],
+            }
+        ]
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[120, 420, 880, 540],
+                    text="",
+                    placeholder="",
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 560, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "mode_switch": None,
+            },
+        )
+        audit["application_inputs"][0]["visible_editable_cues"] = ["caret"]
+        provider = SequenceProvider([compact, audit])
+
+        scene = GenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "让当前唯一输入框显示 agent，不提交"},
+        )
+
+        target = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(target)
+        self.assertEqual("local_audited_input_1", target.element_id)
+        self.assertEqual("direct_latin", target.states["keyboard_input_mode"])
+        self.assertEqual(2, provider.calls)
 
     def test_exact_target_ui_label_resolves_model_over_selection(self) -> None:
         payload = scene_payload()
@@ -2829,6 +2967,216 @@ class GenericSceneObserverTests(unittest.TestCase):
             scene.unique_trusted_goal_element().states["reload_visual_audit"]
         )
 
+    def test_attested_reload_survives_rejected_unconsumed_input_audit(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = [
+            {
+                "element_id": "model-reload",
+                "role": "icon",
+                "meaning": "reload",
+                "label": "",
+                "bounds": [820, 20, 875, 75],
+                "confidence": 0.96,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["右上方完整圆形箭头"],
+            }
+        ]
+        invalid_input_audit = input_audit_payload(
+            application_inputs=[audited_application_input(text="agent")],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1210],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "mode_switch": None,
+            },
+        )
+        provider = SequenceProvider(
+            [
+                compact,
+                icon_cluster_audit_payload(),
+                localized_icon_cluster_audit_payload(),
+                invalid_input_audit,
+            ]
+        )
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=icon_cluster_frames(),
+            goal_context={
+                "objective": "重新加载当前页面，使唯一输入框恢复为空",
+            },
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertEqual(4, provider.calls)
+        self.assertEqual("local_audited_reload_control_1", candidate.element_id)
+        self.assertTrue(candidate.states["reload_visual_audit"])
+        self.assertTrue(
+            observer.last_diagnostics[
+                "input_structure_audit_isolated_from_attested_non_input"
+            ]
+        )
+
+    def test_active_reload_focus_does_not_run_later_input_subgoal_audit(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = [
+            {
+                "element_id": "model-reload",
+                "role": "icon",
+                "meaning": "reload",
+                "label": "",
+                "bounds": [820, 20, 875, 75],
+                "confidence": 0.96,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["右上方完整圆形箭头"],
+            }
+        ]
+        provider = SequenceProvider(
+            [
+                compact,
+                icon_cluster_audit_payload(),
+                localized_icon_cluster_audit_payload(),
+            ]
+        )
+        observer = GenericSceneObserver(provider)
+        context = {
+            "objective": "先重新加载页面，再确认输入框为空",
+            "entities": {
+                "original_goal_visual_context": "刷新后让输入框恢复为空",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "reload_page",
+                    "objective": "重新加载当前页面",
+                    "constraints": ["软键盘必须保持不可见"],
+                    "completion_conditions": ["页面内容已重新加载"],
+                    "external_impact": "navigation_only",
+                    "goal_entities": {"input_text": "agent"},
+                },
+            },
+        }
+
+        scene = observer.observe(frames=icon_cluster_frames(), goal_context=context)
+
+        self.assertEqual(3, provider.calls)
+        self.assertEqual(
+            "local_audited_reload_control_1",
+            scene.unique_trusted_goal_element().element_id,
+        )
+        self.assertFalse(observer.last_diagnostics["input_structure_audit_used"])
+
+    def test_active_hide_keyboard_focus_still_requests_input_audit(self) -> None:
+        context = {
+            "objective": "重新加载后输入 agent 并隐藏键盘",
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "hide_keyboard",
+                    "objective": "让当前软键盘保持不可见",
+                    "constraints": [],
+                    "completion_conditions": ["软键盘未显示"],
+                    "external_impact": "navigation_only",
+                    "goal_entities": {"input_text": "agent"},
+                }
+            },
+        }
+
+        self.assertTrue(_goal_requests_input(context))
+
+    def test_active_input_focus_ignores_completed_reload_wording(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = [
+            {
+                "element_id": "model-input",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "",
+                "bounds": [110, 40, 850, 110],
+                "confidence": 0.96,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": False,
+                    "value": "",
+                },
+                "evidence": ["完整输入边框"],
+            }
+        ]
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(text="", placeholder="请输入")
+            ],
+        )
+        provider = SequenceProvider([compact, audit])
+        observer = GenericSceneObserver(provider)
+        context = {
+            "objective": "先重新加载页面，再确认输入框为空",
+            "entities": {
+                "original_goal_visual_context": "刷新后让输入框恢复为空",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "verify_input",
+                    "objective": "确认唯一输入框为空",
+                    "constraints": [],
+                    "completion_conditions": ["输入框可见且文字为空"],
+                    "external_impact": "read_only",
+                    "goal_entities": {},
+                },
+            },
+        }
+
+        scene = observer.observe(frames=stable_frames(), goal_context=context)
+
+        self.assertEqual(2, provider.calls)
+        self.assertFalse(observer.last_diagnostics["icon_cluster_audit_used"])
+        self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
+        self.assertEqual(
+            "local_audited_input_1",
+            scene.unique_trusted_goal_element().element_id,
+        )
+
+    def test_rejected_input_audit_without_attested_reload_remains_fail_closed(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = [
+            {
+                "element_id": "model-reload",
+                "role": "icon",
+                "meaning": "reload",
+                "label": "",
+                "bounds": [820, 20, 875, 75],
+                "confidence": 0.96,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["右上方完整圆形箭头"],
+            }
+        ]
+        invalid_input_audit = input_audit_payload(
+            application_inputs=[audited_application_input(text="agent")],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1210],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "mode_switch": None,
+            },
+        )
+        provider = SequenceProvider(
+            [
+                compact,
+                icon_cluster_audit_payload(
+                    controls=[],
+                    cluster_complete=False,
+                    cluster_bounds=None,
+                ),
+                invalid_input_audit,
+            ]
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "可见键盘必须提供有效 bounds"):
+            GenericSceneObserver(provider).observe(
+                frames=icon_cluster_frames(),
+                goal_context={
+                    "objective": "重新加载当前页面，使唯一输入框恢复为空",
+                },
+            )
+
+        self.assertEqual(3, provider.calls)
+
     def test_input_goal_keeps_malformed_keyboard_switch_fail_closed(self) -> None:
         payload = scene_payload()
         payload["elements"] = [
@@ -3043,6 +3391,8 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "goal_relevant": True,
                     "fully_visible": True,
                     "reload_visual_audit": True,
+                    "independent_geometry_verified": True,
+                    "geometry_audit_source": "icon_cluster_localization",
                 },
                 "evidence": ["模型直接声称本地凭据"],
             }
@@ -3069,6 +3419,8 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "goal_relevant": True,
                 "fully_visible": True,
                 "reload_visual_audit": True,
+                "independent_geometry_verified": True,
+                "geometry_audit_source": "icon_cluster_localization",
             },
             candidate.states,
         )
@@ -3293,6 +3645,8 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "goal_relevant": True,
                     "fully_visible": True,
                     "reload_visual_audit": True,
+                    "independent_geometry_verified": True,
+                    "geometry_audit_source": "icon_cluster_localization",
                 },
                 "evidence": ["模型自称已审计"],
             }
@@ -3312,6 +3666,8 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertFalse(
             any(
                 element.states.get("reload_visual_audit") is True
+                or element.states.get("independent_geometry_verified") is True
+                or "geometry_audit_source" in element.states
                 for element in scene.elements
             )
         )

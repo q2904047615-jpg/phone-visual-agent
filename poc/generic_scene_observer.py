@@ -9,7 +9,7 @@ import time
 from dataclasses import replace
 from typing import Any, Iterator
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageChops, ImageFilter
 
 from element_geometry_audit import (
     ElementGeometryAuditError,
@@ -49,7 +49,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-16-generic-scene-observer-v33"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-16-generic-scene-observer-v39"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
@@ -226,7 +226,17 @@ class GenericSceneObserver:
                     "error_type": classify_qwen_error(exc, raw_response=raw),
                 }
                 raise
-            replacements[element_id] = audited.full_bounds
+            snapped_input_bounds = None
+            if element.role == "input":
+                snapped_input_bounds = _snap_audited_input_to_local_border(
+                    frame,
+                    transform=transform,
+                    rough_bounds=element.bounds,
+                    audited_bounds=audited.full_bounds,
+                )
+            replacements[element_id] = (
+                snapped_input_bounds or audited.full_bounds
+            )
             audit_records.append(
                 {
                     "element_id": element_id,
@@ -237,6 +247,12 @@ class GenericSceneObserver:
                     "pixel_bounds": list(transform.pixel_bounds),
                     "local_bounds": list(audited.local_bounds),
                     "full_bounds": list(audited.full_bounds),
+                    "local_border_snap_used": snapped_input_bounds is not None,
+                    "snapped_full_bounds": (
+                        list(snapped_input_bounds)
+                        if snapped_input_bounds is not None
+                        else None
+                    ),
                     "confidence": audited.confidence,
                 }
             )
@@ -471,6 +487,7 @@ class GenericSceneObserver:
         icon_cluster_local_geometry_verified = False
         icon_cluster_local_geometry_bounds: tuple[int, int, int, int] | None = None
         input_structure_audit_used = False
+        input_structure_audit_isolated_from_attested_non_input = False
         system_ui_audit_used = False
         system_ui_audit_retry_used = False
         system_ui_audit_confidence: float | None = None
@@ -915,16 +932,28 @@ class GenericSceneObserver:
                 )
                 self.last_raw_response = raw
                 self._set_stage("parsing_input_structure_audit")
-                scene = _suppress_obscured_input_evidence(
-                    _apply_input_structure_audit(
-                        scene,
-                        raw,
+                try:
+                    scene = _suppress_obscured_input_evidence(
+                        _apply_input_structure_audit(
+                            scene,
+                            raw,
+                            fingerprint=fingerprint,
+                            goal_context=context,
+                        ),
+                        visual_obstructions,
                         fingerprint=fingerprint,
-                        goal_context=context,
-                    ),
-                    visual_obstructions,
-                    fingerprint=fingerprint,
-                )
+                    )
+                except VisionAgentError:
+                    if not _can_isolate_input_audit_from_attested_non_input(
+                        scene,
+                        context,
+                    ):
+                        raise
+                    # The rejected input payload contributes no fields or
+                    # geometry. A separately localized reload glyph remains a
+                    # valid non-input target even when the broader natural
+                    # language goal also mentions the post-reload field state.
+                    input_structure_audit_isolated_from_attested_non_input = True
 
             missing_goal_evidence = [
                 element.element_id
@@ -1037,6 +1066,9 @@ class GenericSceneObserver:
                     else None
                 ),
                 "input_structure_audit_used": input_structure_audit_used,
+                "input_structure_audit_isolated_from_attested_non_input": (
+                    input_structure_audit_isolated_from_attested_non_input
+                ),
                 "system_ui_audit_used": system_ui_audit_used,
                 "system_ui_audit_retry_used": system_ui_audit_retry_used,
                 "system_ui_audit_confidence": system_ui_audit_confidence,
@@ -1099,6 +1131,9 @@ class GenericSceneObserver:
                         icon_cluster_audit_reload_attested
                     ),
                     "input_structure_audit_used": input_structure_audit_used,
+                    "input_structure_audit_isolated_from_attested_non_input": (
+                        input_structure_audit_isolated_from_attested_non_input
+                    ),
                     "system_ui_audit_used": system_ui_audit_used,
                     "system_ui_audit_retry_used": system_ui_audit_retry_used,
                     "stable_tail_start_index": stable_tail_start,
@@ -1796,6 +1831,7 @@ Determine keyboard.input_mode only from the current whole keyboard image, never 
 keyboard.mode_switch.current_mode MUST equal keyboard.input_mode whenever input_mode is known. Treat an unambiguous single-mode label on the key as the current visible mode: 中/中文/Pinyin means chinese_pinyin; 英/EN/English/ABC/Latin means direct_latin. If the label could instead name a destination and the current whole-keyboard state is not independently clear, do not guess a direction; set mode_switch to null.
 For a text-entry verification goal, report the proven current keyboard.input_mode; keyboard.mode_switch is optional and should be null unless its direction is independently unambiguous. Never invent a switch direction merely because the goal asks for text entry.
 Do not plan, suggest, authorize, or perform any action. All bounds MUST use Image 1 full-frame normalized coordinates 0..1000.
+Here 0 and 1000 are the four edges of Image 1. Never copy Image 1 source-pixel coordinates, regardless of its width or height. If a structure cannot be bounded in this coordinate system, omit it instead of clipping or converting it.
 Use text="" for a visibly empty application field. Copy placeholders and visible_editable_cues literally; do not infer them from the goal. right_button describes a trailing utility control; it is structural evidence only and is never authorized for activation. Set it to null when no separate trailing control is visible.
 Return exactly this JSON schema and no other fields:
 {{"protocol_version":"{INPUT_STRUCTURE_AUDIT_VERSION}",
@@ -2117,6 +2153,10 @@ def _parse_scene(
         _normalize_non_target_keyboard_switch(payload, goal_context or {})
         _normalize_reload_goal_safety(payload, goal_context or {})
         _normalize_known_scene_enums(payload)
+        _defer_single_invalid_keyboard_switch_to_input_audit(
+            payload,
+            goal_context or {},
+        )
         _normalize_tab_navigation_safety(payload, goal_context or {})
         _normalize_prefilled_input_structure(payload, goal_context or {})
         _normalize_local_text_clear_structure(payload, goal_context or {})
@@ -2229,9 +2269,39 @@ def _normalize_tab_navigation_safety(
                 states["goal_relevant"] = False
 
 
+def _active_subgoal_visual_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Return the current graph node's observation focus when it is present."""
+
+    entities = context.get("entities")
+    if not isinstance(entities, dict):
+        return context
+    focus = entities.get("active_subgoal_visual_context")
+    if not isinstance(focus, dict):
+        return context
+    required = {
+        "subgoal_id",
+        "objective",
+        "constraints",
+        "completion_conditions",
+        "external_impact",
+        "goal_entities",
+    }
+    if set(focus) != required:
+        return context
+    if (
+        not str(focus.get("subgoal_id") or "").strip()
+        or not str(focus.get("objective") or "").strip()
+        or not isinstance(focus.get("constraints"), list)
+        or not isinstance(focus.get("completion_conditions"), list)
+        or not isinstance(focus.get("goal_entities"), dict)
+    ):
+        return context
+    return focus
+
+
 def _goal_requests_page_title(context: dict[str, Any]) -> bool:
     text = json.dumps(
-        context,
+        _active_subgoal_visual_context(context),
         ensure_ascii=False,
         separators=(",", ":"),
     ).casefold()
@@ -2757,6 +2827,77 @@ def _valid_1000_bounds(value: Any) -> bool:
     return 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
 
 
+def _defer_single_invalid_keyboard_switch_to_input_audit(
+    payload: dict[str, Any],
+    goal_context: dict[str, Any],
+) -> None:
+    """Omit one unusable preliminary switch so the strict audit can re-read it.
+
+    Compact observation is not an authority source for an out-of-frame target.
+    For an explicit keyboard-mode goal, one otherwise well-formed switch with
+    invalid geometry may be omitted only because the independent full-frame
+    input-structure audit is mandatory for that goal. Geometry is never
+    clipped, scaled, converted from source pixels, or reused. Multiple,
+    malformed, action-bearing, or non-keyboard targets remain fail-closed.
+    """
+
+    if not _goal_requests_keyboard_mode_switch(goal_context):
+        return
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return
+    claimed = []
+    for item in elements:
+        if not isinstance(item, dict):
+            continue
+        states = item.get("states")
+        if str(item.get("meaning") or "").strip() == "switch_keyboard_input_mode" or (
+            isinstance(states, dict)
+            and states.get("keyboard_input_mode_switch") is True
+        ):
+            claimed.append(item)
+    if len(claimed) != 1:
+        return
+    candidate = claimed[0]
+    if _valid_1000_bounds(candidate.get("bounds")):
+        return
+    exact_fields = {
+        "element_id",
+        "role",
+        "meaning",
+        "label",
+        "bounds",
+        "confidence",
+        "states",
+        "evidence",
+    }
+    states = candidate.get("states")
+    allowed_states = {
+        "goal_relevant",
+        "fully_visible",
+        "enabled",
+        "keyboard_input_mode_switch",
+        "current_mode",
+        "target_mode",
+    }
+    modes = {"direct_latin", "chinese_pinyin"}
+    safely_deferred = (
+        set(candidate) == exact_fields
+        and candidate.get("role") in {"button", "icon"}
+        and candidate.get("meaning") == "switch_keyboard_input_mode"
+        and _is_explicit_keyboard_mode_label(str(candidate.get("label") or ""))
+        and isinstance(states, dict)
+        and set(states).issubset(allowed_states)
+        and states.get("goal_relevant") is True
+        and states.get("keyboard_input_mode_switch") is True
+        and states.get("current_mode") in modes
+        and states.get("target_mode") in modes
+        and states.get("current_mode") != states.get("target_mode")
+    )
+    if safely_deferred:
+        payload["elements"] = [item for item in elements if item is not candidate]
+
+
 def _drop_out_of_range_non_goal_elements(payload: dict[str, Any]) -> None:
     """Discard only explicitly non-goal peripheral elements with invalid bounds.
 
@@ -3002,6 +3143,152 @@ def _map_icon_cluster_audit_to_full_frame(
         mapped_controls.append(mapped)
     value["controls"] = mapped_controls
     return value
+
+
+def _snap_audited_input_to_local_border(
+    frame: Image.Image,
+    *,
+    transform: Any,
+    rough_bounds: tuple[float, float, float, float],
+    audited_bounds: tuple[float, float, float, float],
+) -> tuple[float, float, float, float] | None:
+    """Tighten one model-attested input to one complete local border.
+
+    The semantic authority still comes from the strict single-crop model audit.
+    This local pass only replaces its loose geometry when exactly one broad,
+    isolated border component is compatible with the rough or audited box. It
+    uses no App identity, label, command text, screen coordinates, or fixture.
+    Ambiguous and borderless UIs keep the model bounds and therefore retain the
+    normal confirmation-time fail-closed comparison.
+    """
+
+    crop = transform.crop(frame.convert("RGB"))
+    if crop.width < 80 or crop.height < 80:
+        return None
+    gray = crop.convert("L")
+    # A focused field may sit above a light keyboard while the App itself is
+    # dark (or vice versa), so a crop-wide background estimate is unstable.
+    # Local max/min contrast detects the complete border in either polarity
+    # without learning a theme, App, page, or coordinate.
+    local_max = gray.filter(ImageFilter.MaxFilter(5))
+    local_min = gray.filter(ImageFilter.MinFilter(5))
+    edge_strength = ImageChops.subtract(local_max, local_min)
+    mask = edge_strength.point(
+        lambda value: 255 if value >= 25 else 0
+    ).filter(ImageFilter.MaxFilter(3))
+    pixels = mask.load()
+    seen: set[tuple[int, int]] = set()
+    components: list[tuple[int, int, int, int, int]] = []
+    minimum_width = max(80, round(crop.width * 0.25))
+    maximum_height = max(40, round(crop.height * 0.35))
+    for y in range(crop.height):
+        for x in range(crop.width):
+            if not pixels[x, y] or (x, y) in seen:
+                continue
+            stack = [(x, y)]
+            seen.add((x, y))
+            xs: list[int] = []
+            ys: list[int] = []
+            while stack:
+                current_x, current_y = stack.pop()
+                xs.append(current_x)
+                ys.append(current_y)
+                for delta_y in (-1, 0, 1):
+                    for delta_x in (-1, 0, 1):
+                        neighbor_x = current_x + delta_x
+                        neighbor_y = current_y + delta_y
+                        neighbor = (neighbor_x, neighbor_y)
+                        if (
+                            0 <= neighbor_x < crop.width
+                            and 0 <= neighbor_y < crop.height
+                            and pixels[neighbor_x, neighbor_y]
+                            and neighbor not in seen
+                        ):
+                            seen.add(neighbor)
+                            stack.append(neighbor)
+            left = min(xs)
+            top = min(ys)
+            right = max(xs) + 1
+            bottom = max(ys) + 1
+            component_width = right - left
+            component_height = bottom - top
+            area = component_width * component_height
+            touches_edge = (
+                left <= 1
+                or top <= 1
+                or right >= crop.width - 1
+                or bottom >= crop.height - 1
+            )
+            density = len(xs) / max(1, area)
+            if (
+                not touches_edge
+                and component_width >= minimum_width
+                and 20 <= component_height <= maximum_height
+                and component_width / max(1, component_height) >= 2.0
+                and 0.005 <= density <= 0.45
+            ):
+                components.append((left, top, right, bottom, len(xs)))
+    if not components:
+        return None
+
+    full_width, full_height = frame.size
+    crop_left, crop_top, _, _ = transform.pixel_bounds
+
+    def normalized(component: tuple[int, int, int, int, int]) -> tuple[float, float, float, float]:
+        return (
+            (crop_left + component[0]) / full_width,
+            (crop_top + component[1]) / full_height,
+            (crop_left + component[2]) / full_width,
+            (crop_top + component[3]) / full_height,
+        )
+
+    def coverage(
+        left_box: tuple[float, float, float, float],
+        right_box: tuple[float, float, float, float],
+    ) -> float:
+        intersection = _bounds_intersection_area(left_box, right_box)
+        left_area = max(0.0, left_box[2] - left_box[0]) * max(
+            0.0, left_box[3] - left_box[1]
+        )
+        right_area = max(0.0, right_box[2] - right_box[0]) * max(
+            0.0, right_box[3] - right_box[1]
+        )
+        return intersection / max(1e-9, min(left_area, right_area))
+
+    ranked: list[tuple[float, float, float, tuple[float, float, float, float]]] = []
+    for component in components:
+        bounds = normalized(component)
+        audited_coverage = coverage(bounds, audited_bounds)
+        rough_coverage = coverage(bounds, rough_bounds)
+        audited_center_delta = abs(
+            (bounds[1] + bounds[3] - audited_bounds[1] - audited_bounds[3]) / 2.0
+        )
+        score = 3.0 * audited_coverage + 2.0 * rough_coverage - audited_center_delta
+        ranked.append((score, audited_coverage, rough_coverage, bounds))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    best = ranked[0]
+    directly_bound = max(best[1], best[2]) >= 0.15
+    unique_broad_border = False
+    if len(ranked) == 1:
+        horizontal_overlap = max(
+            0.0,
+            min(best[3][2], rough_bounds[2]) - max(best[3][0], rough_bounds[0]),
+        )
+        smaller_width = min(
+            best[3][2] - best[3][0], rough_bounds[2] - rough_bounds[0]
+        )
+        vertical_center_delta = abs(
+            (best[3][1] + best[3][3] - rough_bounds[1] - rough_bounds[3]) / 2.0
+        )
+        unique_broad_border = bool(
+            smaller_width > 0
+            and horizontal_overlap / smaller_width >= 0.65
+            and vertical_center_delta <= 0.30
+        )
+    separated = len(ranked) == 1 or best[0] - ranked[1][0] >= 0.25
+    if not separated or not (directly_bound or unique_broad_border):
+        return None
+    return best[3]
 
 
 def _snap_reload_audit_to_local_glyph(
@@ -3321,6 +3608,8 @@ def _apply_icon_cluster_audit(
                     "goal_relevant": True,
                     "fully_visible": True,
                     "reload_visual_audit": True,
+                    "independent_geometry_verified": True,
+                    "geometry_audit_source": "icon_cluster_localization",
                 },
                 "evidence": [
                     "严格图标簇审计确认完整圆弧、箭头头部且与相邻图标分离"
@@ -3341,7 +3630,23 @@ def _apply_icon_cluster_audit(
 
 
 def _goal_requests_input(context: dict[str, Any]) -> bool:
-    visible = json.dumps(context, ensure_ascii=False).casefold()
+    focused = _active_subgoal_visual_context(context)
+    if focused is context:
+        input_context: dict[str, Any] = context
+    else:
+        # Goal-wide entities remain available to the decision layer, but they
+        # must not activate a future input audit while the current subgoal is
+        # reload/navigation.  The current subgoal's own wording is the audit
+        # trigger; this keeps independent target audits from overwriting one
+        # another across graph nodes.
+        input_context = {
+            "objective": focused.get("objective"),
+            "completion_conditions": focused.get("completion_conditions"),
+        }
+    visible = json.dumps(
+        input_context,
+        ensure_ascii=False,
+    ).casefold()
     return any(
         term in visible
         for term in (
@@ -3363,8 +3668,11 @@ def _goal_requests_input(context: dict[str, Any]) -> bool:
             "输入模式",
             "直输模式",
             "键盘模式",
+            "软键盘",
             "input mode",
             "keyboard mode",
+            "soft keyboard",
+            " ime ",
             "direct_latin",
             "chinese_pinyin",
         )
@@ -3372,6 +3680,7 @@ def _goal_requests_input(context: dict[str, Any]) -> bool:
 
 
 def _goal_requests_system_ui_audit(context: dict[str, Any]) -> bool:
+    context = _active_subgoal_visual_context(context)
     evidence_selectors: dict[str, Any] = {
         "objective": context.get("objective"),
         "target_ui_label": context.get("target_ui_label"),
@@ -3402,7 +3711,10 @@ def _goal_requests_system_ui_audit(context: dict[str, Any]) -> bool:
 
 
 def _goal_requests_reload(context: dict[str, Any]) -> bool:
-    visible = json.dumps(context, ensure_ascii=False).casefold()
+    visible = json.dumps(
+        _active_subgoal_visual_context(context),
+        ensure_ascii=False,
+    ).casefold()
     return any(
         marker in visible
         for marker in (
@@ -3417,7 +3729,10 @@ def _goal_requests_reload(context: dict[str, Any]) -> bool:
 
 
 def _goal_requests_keyboard_mode_switch(context: dict[str, Any]) -> bool:
-    visible = json.dumps(context, ensure_ascii=False).casefold()
+    visible = json.dumps(
+        _active_subgoal_visual_context(context),
+        ensure_ascii=False,
+    ).casefold()
     return any(
         term in visible
         for term in (
@@ -3458,6 +3773,8 @@ def _goal_requests_local_text_clear(context: dict[str, Any]) -> bool:
 def _should_audit_prefilled_input(scene: UIScene, context: dict[str, Any]) -> bool:
     if not _goal_requests_input(context):
         return False
+    if _goal_requests_keyboard_mode_switch(context):
+        return True
     trusted_inputs = tuple(
         item
         for item in scene.elements
@@ -3484,12 +3801,32 @@ def _should_audit_prefilled_input(scene: UIScene, context: dict[str, Any]) -> bo
     )
     if not keyboard_is_relevant:
         return False
-    return not (
-        states.get("fully_visible") is True
-        and states.get("focused") is True
-        and states.get("keyboard_layout") in {"qwerty", "numeric", "symbol"}
-        and states.get("keyboard_input_mode")
-        in {"direct_latin", "chinese_pinyin"}
+    # Compact observation may correctly see the field while misclassifying the
+    # active IME mode. Any visible/focused keyboard on an input goal therefore
+    # requires the independent whole-frame structure audit before planning.
+    return True
+
+
+def _can_isolate_input_audit_from_attested_non_input(
+    scene: UIScene,
+    context: dict[str, Any],
+) -> bool:
+    """Keep a separately attested non-input target; consume no rejected audit."""
+
+    if (
+        not _goal_requests_reload(context)
+        or _goal_requests_keyboard_mode_switch(context)
+    ):
+        return False
+    candidate = scene.unique_trusted_goal_element()
+    return bool(
+        candidate is not None
+        and candidate.role != "input"
+        and candidate.meaning.casefold() == "reload"
+        and candidate.states.get("reload_visual_audit") is True
+        and candidate.states.get("fully_visible") is True
+        and float(candidate.confidence) >= 0.9
+        and any(item.strip() for item in candidate.evidence)
     )
 
 
@@ -4102,6 +4439,8 @@ def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:
         if not isinstance(item, dict) or not isinstance(item.get("states"), dict):
             continue
         item["states"].pop("reload_visual_audit", None)
+        item["states"].pop("independent_geometry_verified", None)
+        item["states"].pop("geometry_audit_source", None)
 
 
 def _normalize_non_target_keyboard_switch(

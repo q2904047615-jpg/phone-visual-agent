@@ -16,7 +16,7 @@ from ui_scene import (
 )
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-14-universal-action-v10"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-16-universal-action-v12"
 
 REVEAL_SYSTEM_NAVIGATION_EFFECT = {
     "system_ui": {"navigation_bar_visible": True}
@@ -589,10 +589,20 @@ class UniversalActionController:
                     min_confidence=self.min_confidence,
                 )
             except UISceneError as exc:
+                before_target_is_input = False
+                if resolved.target_element_id:
+                    try:
+                        before_target_is_input = (
+                            before.get_element(resolved.target_element_id).role
+                            == "input"
+                        )
+                    except UISceneError:
+                        before_target_is_input = False
                 input_aliases = tuple(
                     element
                     for element in after.elements
-                    if resolved.kind == "input_verified_text"
+                    if resolved.kind in {"tap_semantic", "input_verified_text"}
+                    and before_target_is_input
                     and element.role == "input"
                     and float(element.confidence) >= self.min_confidence
                     and all(element.states.get(key) == value for key, value in states.items())
@@ -929,12 +939,6 @@ class UniversalActionController:
             raise UniversalActionError("输入前目标不是 input 元素。")
         if before_input.states.get("goal_relevant") is not True:
             raise UniversalActionError("输入前目标与当前目标缺少可信关联。")
-        if (
-            before.foreground_app_id != after.foreground_app_id
-            or before.screen_id != after.screen_id
-        ):
-            raise UniversalActionError("输入动作后 App 或页面身份发生变化。")
-
         exact_id = tuple(
             element
             for element in after.elements
@@ -979,6 +983,64 @@ class UniversalActionController:
             raise UniversalActionError(
                 f"动作后输入框文字不匹配：实际 {actual!r}，预期 {expected!r}。"
             )
+        after_input = candidates[0]
+        if not self._input_scene_identity_is_stable(
+            before,
+            after,
+            before_input,
+            after_input,
+        ):
+            raise UniversalActionError("输入动作后 App 或页面身份发生变化。")
+
+    @classmethod
+    def _input_scene_identity_is_stable(
+        cls,
+        before: UIScene,
+        after: UIScene,
+        before_input: UIElement,
+        after_input: UIElement,
+    ) -> bool:
+        identity_pairs = (
+            (before.foreground_app_id, after.foreground_app_id),
+            (before.screen_id, after.screen_id),
+        )
+        if all(before_value == after_value for before_value, after_value in identity_pairs):
+            return True
+
+        # A post-input visual read may lose a page label while the keyboard still
+        # covers much of the frame.  Treat only a one-way loss to ``unknown`` as
+        # observational degradation; a different concrete identity is a real
+        # navigation signal and remains fail-closed.
+        if any(
+            before_value != after_value
+            and str(after_value).strip().casefold() != "unknown"
+            for before_value, after_value in identity_pairs
+        ):
+            return False
+        if not cls._input_regions_stably_overlap(
+            before_input.bounds,
+            after_input.bounds,
+        ):
+            return False
+        before_states = before_input.states
+        after_states = after_input.states
+        if before_states.get("focused") is not True or after_states.get("focused") is not True:
+            return False
+        for key in ("keyboard_layout", "keyboard_input_mode"):
+            before_value = before_states.get(key)
+            after_value = after_states.get(key)
+            if (
+                before_value in {None, "unknown"}
+                or after_value in {None, "unknown"}
+                or before_value != after_value
+            ):
+                return False
+        return (
+            before.camera_alignment.camera_layout_orientation
+            == after.camera_alignment.camera_layout_orientation
+            and before.camera_alignment.phone_content_rotation
+            == after.camera_alignment.phone_content_rotation
+        )
 
     @staticmethod
     def _input_regions_stably_overlap(

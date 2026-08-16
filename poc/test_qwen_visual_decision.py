@@ -414,6 +414,125 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual("input_verified_text", decision.proposal.action.action)
         self.assertEqual("agent", decision.proposal.action.params["text"])
 
+    def test_visible_keyboard_dismissal_offers_qwen_only_certified_back(self) -> None:
+        context = task_context(task_id="task_hide_keyboard", revision=19)
+        context["current_subgoal"]["objective"] = "收起当前已显示的软键盘"
+        context["current_subgoal"]["completion_conditions"] = ["软键盘不可见"]
+        field = UIElement(
+            element_id="query_field",
+            role="input",
+            meaning="current_text_input",
+            label="agent",
+            bounds=(0.08, 0.12, 0.92, 0.22),
+            confidence=0.97,
+            states={
+                "focused": True,
+                "value": "agent",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+                "goal_relevant": True,
+            },
+            evidence=("输入光标和QWERTY软键盘可见",),
+        )
+        key = UIElement(
+            element_id="keyboard_done_key",
+            role="keyboard_key",
+            meaning="dismiss_keyboard",
+            label="⌄",
+            bounds=(0.88, 0.86, 0.98, 0.96),
+            confidence=0.95,
+            states={"goal_relevant": True},
+            evidence=("键盘右下角按键",),
+        )
+        observation = trusted_observation(self.frames, elements=(field, key))
+        invalid_tap = action_payload(
+            context,
+            observation,
+            element_id="keyboard_done_key",
+        )
+        back = action_payload(context, observation, element_id="query_field")
+        back.update(
+            {
+                "next_action": {"kind": "back"},
+                "target_region": {
+                    "kind": "system_navigation",
+                    "bounds": [0, 0, 1000, 1000],
+                    "description": "Android系统返回键",
+                },
+                "expected_result": {"scene_changed": True},
+                "reason": "返回键将收起当前可见软键盘。",
+            }
+        )
+        provider = SequenceProvider([invalid_tap, back])
+
+        observer, decision = self.decide(
+            provider,
+            context=context,
+            observation=observation,
+        )
+
+        self.assertEqual(2, provider.calls)
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("back", decision.proposal.action.action)
+        self.assertEqual(["back"], observer.last_diagnostics["available_action_kinds"])
+        self.assertTrue(observer.last_diagnostics["protocol_retry_used"])
+
+    def test_keyboard_dismissal_contract_ignores_non_active_goal_mentions(self) -> None:
+        context = task_context(task_id="task_keep_input", revision=20)
+        context["goal"]["objective"] = "输入agent后收起软键盘"
+        context["current_subgoal"]["objective"] = "点击当前输入框使其聚焦"
+        context["current_subgoal"]["completion_conditions"] = ["输入框已聚焦"]
+        field = UIElement(
+            element_id="query_field",
+            role="input",
+            meaning="current_text_input",
+            label="",
+            bounds=(0.08, 0.12, 0.92, 0.22),
+            confidence=0.97,
+            states={"goal_relevant": True, "focused": False, "value": ""},
+            evidence=("空输入框可见",),
+        )
+        observation = trusted_observation(self.frames, elements=(field,))
+        provider = FakeProvider(
+            action_payload(context, observation, element_id="query_field")
+        )
+
+        observer, decision = self.decide(
+            provider,
+            context=context,
+            observation=observation,
+        )
+
+        self.assertEqual("tap_semantic", decision.proposal.action.action)
+        self.assertIn(
+            "tap_semantic",
+            observer.last_diagnostics["available_action_kinds"],
+        )
+
+    def test_keyboard_key_is_never_an_element_action_target(self) -> None:
+        key = UIElement(
+            element_id="keyboard_candidate",
+            role="keyboard_key",
+            meaning="candidate_shortcut",
+            label=".com",
+            bounds=(0.10, 0.70, 0.28, 0.77),
+            confidence=0.93,
+            states={"goal_relevant": True},
+            evidence=(".com",),
+        )
+        observation = trusted_observation(self.frames, elements=(key,))
+        payload = action_payload(
+            self.context,
+            observation,
+            element_id="keyboard_candidate",
+        )
+        provider = SequenceProvider([payload, payload])
+
+        _observer, decision = self.decide(provider, observation=observation)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("keyboard_key", decision.reason)
+
     def test_input_action_rejects_model_invented_text(self) -> None:
         context = task_context()
         context["goal"]["entities"] = {"input_text": "蓝牙设置"}

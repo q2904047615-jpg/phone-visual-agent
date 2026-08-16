@@ -841,6 +841,61 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             ),
         )
 
+    def test_current_page_input_state_is_not_a_named_page_identity(self):
+        self.assertEqual(
+            "",
+            _named_visual_identity_anchor(
+                (
+                    "当前页面唯一输入框中的内容为 agent",
+                    "当前本地页面唯一输入框已完整显示 agent",
+                    "The current page input value is agent",
+                )
+            ),
+        )
+
+    def test_replan_accepts_grounded_input_state_without_page_title_anchor(self):
+        objective = "当前页面唯一输入框中的内容为 agent"
+        initial = single_subgoal_payload(objective, external_impact="navigation_only")
+        initial["completion_conditions"][0].update(
+            description=objective,
+            evidence_required=["输入框中的文字为 agent"],
+        )
+        initial["subgoals"][0]["completion_conditions"] = [
+            "输入框中的文字为 agent"
+        ]
+        completed = copy.deepcopy(initial)
+        completed["status"] = "completed"
+        completed["completion_conditions"][0].update(
+            satisfied=True,
+            evidence=["输入框中的文字为 agent"],
+        )
+        completed["subgoals"][0].update(
+            status="completed",
+            completion_evidence=["输入框中的文字为 agent"],
+        )
+        completed["active_subgoal_id"] = None
+        provider = FakeProvider(initial, completed)
+        planner = DeepSeekTaskGraphPlanner(provider)
+        graph = planner.plan(objective, device_id="phone-1")
+
+        revised = planner.replan(
+            graph,
+            ObservedState(
+                scene_id="scene-input",
+                summary="输入框显示 agent",
+                visible_evidence=("输入框中的文字为 agent",),
+                grounded_visual_facts=(
+                    '{"meaning":"application_text_input","role":"input",'
+                    '"states":{"value":"agent"}}',
+                ),
+                last_action_outcome="matched",
+            ),
+            trigger="observation_changed",
+            reason="动作后重新观察。",
+        )
+
+        self.assertEqual("completed", revised.status)
+
     def test_replan_accepts_named_page_completion_with_grounded_identity(self):
         objective = "原来的只读通用动作验收页面可见"
         initial = single_subgoal_payload(objective, external_impact="read_only")

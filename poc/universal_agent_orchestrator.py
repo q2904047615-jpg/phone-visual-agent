@@ -283,6 +283,15 @@ class ObservationBridge:
         # this value cannot authorize or specify an action.
         if graph.raw_user_goal.strip():
             entities["original_goal_visual_context"] = graph.raw_user_goal.strip()
+        if active is not None:
+            entities["active_subgoal_visual_context"] = {
+                "subgoal_id": active.subgoal_id,
+                "objective": active.objective,
+                "constraints": list(active.constraints),
+                "completion_conditions": list(active.completion_conditions),
+                "external_impact": active.external_impact,
+                "goal_entities": dict(graph.goal.entities),
+            }
         entities["target_apps"] = [
             {"app_id": item.app_id, "app_name": item.app_name}
             for item in graph.goal.target_apps
@@ -862,9 +871,42 @@ class UniversalAgentOrchestrator:
             "verify",
             "read the",
         )
+        transition_markers = (
+            "刷新",
+            "重新加载",
+            "重新载入",
+            "重新获取",
+            "重新读取",
+            "重新连接",
+            "加载完成",
+            "更新完成",
+            "同步完成",
+            "导航",
+            "跳转",
+            "进入",
+            "返回",
+            "切换",
+            "打开",
+            "启动",
+            "refresh",
+            "reload",
+            "reloaded",
+            "updated",
+            "synchronized",
+            "navigated",
+            "redirected",
+            "entered",
+            "returned",
+            "switched",
+            "opened",
+            "launched",
+            "retrieved",
+            "refetched",
+            "reconnected",
+        )
         return any(marker in text for marker in presence_markers) and not any(
             marker in text for marker in value_verification_markers
-        )
+        ) and not any(marker in text for marker in transition_markers)
 
     @staticmethod
     def _candidate_has_unresolved_conflict(
@@ -3440,7 +3482,7 @@ class PhaseOneNavigationPolicy:
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
-    VERSION = "2026-08-16-universal-action-policy-v14"
+    VERSION = "2026-08-16-universal-action-policy-v15"
     ALLOWED_ACTIONS = frozenset(
         {
             "swipe",
@@ -4549,11 +4591,12 @@ class PhaseOneNavigationPolicy:
                 or element.role not in {"button", "icon"}
                 or element.meaning != "reload"
                 or float(element.confidence) < 0.90
+                or element.states.get("goal_relevant") is not True
                 or element.states.get("fully_visible") is not True
                 or element.states.get("reload_visual_audit") is not True
             ):
                 return self._deny(
-                    "刷新候选缺少本地图标簇审计、完整可见或高置信证据。"
+                    "刷新候选缺少当前目标关联、本地图标簇审计、完整可见或高置信证据。"
                 )
             requested_states = action.params.get("states")
             if not isinstance(requested_states, dict) or requested_states != element.states:

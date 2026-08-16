@@ -828,6 +828,28 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertFalse(result.allowed)
         self.assertIn("本地图标簇审计", result.reason)
 
+    def test_rejects_audited_refresh_explicitly_unrelated_to_current_subgoal(self) -> None:
+        scene = _scene(
+            meaning="reload",
+            label="",
+            role="icon",
+            states={
+                "goal_relevant": False,
+                "fully_visible": True,
+                "reload_visual_audit": True,
+            },
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("当前目标关联", result.reason)
+
     def test_rejects_audited_refresh_that_is_not_fully_visible(self) -> None:
         scene = _scene(
             meaning="reload",
@@ -2452,6 +2474,13 @@ class ObservationBridgeTests(unittest.TestCase):
             "页面显示风景分类详情",
             goal.success_criteria["condition-1"]["description"],
         )
+        focus = goal.entities["active_subgoal_visual_context"]
+        self.assertEqual(graph.active_subgoal_id, focus["subgoal_id"])
+        self.assertEqual(graph.active_subgoal().objective, focus["objective"])
+        self.assertEqual(
+            list(graph.active_subgoal().completion_conditions),
+            focus["completion_conditions"],
+        )
 
     def test_builds_observed_state_only_from_visible_evidence(self) -> None:
         scene = _scene()
@@ -3436,6 +3465,18 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         )
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
+
+    def test_reload_visible_state_is_not_zero_action_presence_completion(self) -> None:
+        subgoal = SimpleNamespace(
+            objective="当前本地页面完成重新载入",
+            completion_conditions=("页面重新载入后的可见状态",),
+        )
+
+        self.assertFalse(
+            UniversalAgentOrchestrator._is_presence_only_read_only_subgoal(
+                subgoal
+            )
+        )
 
     def test_start_consumes_only_the_visible_safe_presence_prefix_before_qwen(self) -> None:
         base = _graph()

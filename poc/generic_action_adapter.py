@@ -164,6 +164,26 @@ class GenericSingleActionAdapter:
         }
     )
 
+    @staticmethod
+    def _has_local_independent_geometry_attestation(
+        scene: UIScene,
+        element_ids: tuple[str, ...],
+    ) -> bool:
+        try:
+            elements = tuple(scene.get_element(element_id) for element_id in element_ids)
+        except UISceneError:
+            return False
+        return bool(
+            elements
+            and all(
+                element.states.get("independent_geometry_verified") is True
+                and element.states.get("geometry_audit_source")
+                == "icon_cluster_localization"
+                and any(item.strip() for item in element.evidence)
+                for element in elements
+            )
+        )
+
     def supported_action_kinds(self) -> frozenset[str]:
         """Return only actions backed by callable methods on this device."""
 
@@ -617,16 +637,26 @@ class GenericSingleActionAdapter:
                     fresh_ids = (
                         str(semantic_rebound.params.get("element_id") or ""),
                     )
-                rebind_planned_scene = audit_geometry(
-                    frames=tuple(planned_frames),
-                    scene=planned_scene,
-                    element_ids=planned_ids,
-                )
-                before = audit_geometry(
-                    frames=before_frames,
-                    scene=before,
-                    element_ids=fresh_ids,
-                )
+                if not (
+                    self._has_local_independent_geometry_attestation(
+                        planned_scene,
+                        planned_ids,
+                    )
+                    and self._has_local_independent_geometry_attestation(
+                        before,
+                        fresh_ids,
+                    )
+                ):
+                    rebind_planned_scene = audit_geometry(
+                        frames=tuple(planned_frames),
+                        scene=planned_scene,
+                        element_ids=planned_ids,
+                    )
+                    before = audit_geometry(
+                        frames=before_frames,
+                        scene=before,
+                        element_ids=fresh_ids,
+                    )
             rebound = self._rebind_action(
                 requested_action,
                 rebind_planned_scene,

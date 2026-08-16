@@ -2090,6 +2090,10 @@ _VISUAL_IDENTITY_CONTAINER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _GENERIC_VISUAL_LOCATION_PATTERN = re.compile(
+    r"^(?:当前|同一|该|目标|原来|原有)(?:本地)?(?:页面|界面|屏幕|视图)"
+    r"(?:中|内|上)?\s*|"
+    r"^(?:the\s+)?(?:current|same|this|target|original)\s+"
+    r"(?:local\s+)?(?:page|screen|view)\b\s*|"
     r"(?:在|位于)\s*(?:当前|同一|该)?(?:页面|界面|屏幕|视图)"
     r"(?:中|内|上)?\s*(?:可见|出现|显示|存在)?|"
     r"(?:visible|present|shown)\s+(?:in|on)\s+(?:the\s+)?"

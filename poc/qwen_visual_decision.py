@@ -2059,7 +2059,67 @@ def _precondition_eligible_action_kinds(
         )
         if context.requested_input_text is None or not focused_inputs:
             eligible.remove("input_verified_text")
+    if _current_subgoal_requests_keyboard_dismissal(context) and (
+        _trusted_scene_proves_visible_keyboard(observation.scene)
+    ):
+        # Android back is the certified device primitive for dismissing a
+        # currently visible soft keyboard.  Keep Qwen as the single-step
+        # selector, but do not offer element taps (especially keyboard keys),
+        # Home, or gestures for this exact structural state transition.
+        eligible.intersection_update({"back"})
     return frozenset(eligible)
+
+
+_KEYBOARD_REFERENCE_PATTERN = re.compile(
+    r"(?:软键盘|键盘|输入法|\b(?:soft\s+)?keyboard\b|\bime\b)",
+    re.IGNORECASE,
+)
+_KEYBOARD_DISMISSAL_PATTERN = re.compile(
+    r"(?:收起|隐藏|关闭|不再显示|不可见|"
+    r"\b(?:hide|hidden|dismiss|close|closed|not\s+visible|no\s+longer\s+visible)\b)",
+    re.IGNORECASE,
+)
+
+
+def _current_subgoal_requests_keyboard_dismissal(
+    context: QwenTaskContext,
+) -> bool:
+    """Match only the active subgoal, never a keyboard mention in the goal."""
+
+    visible = " ".join(
+        [
+            str(context.current_subgoal.get("objective") or ""),
+            *(
+                str(item)
+                for item in context.current_subgoal.get(
+                    "completion_conditions",
+                    [],
+                )
+            ),
+        ]
+    )
+    return bool(
+        _KEYBOARD_REFERENCE_PATTERN.search(visible)
+        and _KEYBOARD_DISMISSAL_PATTERN.search(visible)
+    )
+
+
+def _trusted_scene_proves_visible_keyboard(scene: UIScene) -> bool:
+    """Require the independent input audit's complete visible-keyboard facts."""
+
+    candidates = tuple(
+        element
+        for element in scene.elements
+        if element.role == "input"
+        and float(element.confidence) >= MIN_TARGET_CONFIDENCE
+        and element.states.get("goal_relevant") is True
+        and element.states.get("focused") is True
+        and element.states.get("keyboard_layout")
+        in {"qwerty", "numeric", "symbol", "unknown"}
+        and element.states.get("keyboard_input_mode")
+        in {"direct_latin", "chinese_pinyin", "unknown"}
+    )
+    return len(candidates) == 1
 
 
 def _parse_action(
@@ -2179,6 +2239,10 @@ def _parse_action(
         if not element_id:
             raise GenericStepPlanningError("元素动作缺少可信候选 element_id。")
         element = observation.get_candidate(element_id)
+        if element.role == "keyboard_key":
+            raise GenericStepPlanningError(
+                "keyboard_key 不能作为通用元素动作目标。"
+            )
         if redundant_bounds is not None:
             if (
                 not isinstance(redundant_bounds, (list, tuple))

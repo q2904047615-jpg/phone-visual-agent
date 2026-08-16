@@ -9,8 +9,10 @@ from deepseek_task_graph import (
     ObservedState,
     TaskGraphError,
     VerifiedActionTransition,
+    _compact_identity_text,
     _infer_external_risk_types,
     _named_visual_identity_anchor,
+    _quoted_visual_identity_anchor,
 )
 
 
@@ -839,6 +841,19 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             _named_visual_identity_anchor(
                 ("The current page main title text is visible verbatim",)
             ),
+        )
+
+    def test_quoted_ui_title_requires_its_complete_literal_identity(self):
+        anchor = _quoted_visual_identity_anchor(
+            ("“选择单一验收模式”标题清晰可见",)
+        )
+
+        self.assertEqual("选择单一验收模式", anchor)
+        self.assertFalse(
+            anchor in _compact_identity_text("返回验收模式选择 / page_title")
+        )
+        self.assertTrue(
+            anchor in _compact_identity_text("选择单一验收模式 / page_title")
         )
 
     def test_current_page_input_state_is_not_a_named_page_identity(self):

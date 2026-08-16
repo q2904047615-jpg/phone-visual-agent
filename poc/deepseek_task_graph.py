@@ -2110,6 +2110,14 @@ _GENERIC_VISUAL_LOCATION_PATTERN = re.compile(
     r"(?:current\s+)?(?:page|screen|view)",
     re.IGNORECASE,
 )
+_QUOTED_VISUAL_IDENTITY_PATTERN = re.compile(
+    r"“([^”]{2,80})”|\"([^\"]{2,80})\""
+)
+_QUOTED_VISUAL_IDENTITY_CONTEXT_PATTERN = re.compile(
+    r"标题|文字|标签|按钮|入口|链接|"
+    r"\b(?:title|heading|text|label|button|entry|link)\b",
+    re.IGNORECASE,
+)
 _LEADING_UNNAMED_VISUAL_CONTAINER_PATTERN = re.compile(
     r"^(?:页面|界面|屏幕|视图|面板|卡片)(?:中|内|上)?|"
     r"^(?:the\s+)?(?:page|screen|view|panel|card)\b",
@@ -2207,6 +2215,25 @@ def _named_visual_identity_anchor(texts: tuple[str, ...]) -> str:
     return min(anchors, key=len) if anchors else ""
 
 
+def _quoted_visual_identity_anchor(texts: tuple[str, ...]) -> str:
+    """Return an explicitly quoted UI label that must match verbatim."""
+
+    anchors: list[str] = []
+    for item in texts:
+        value = str(item or "").strip()
+        if not _QUOTED_VISUAL_IDENTITY_CONTEXT_PATTERN.search(value):
+            continue
+        for match in _QUOTED_VISUAL_IDENTITY_PATTERN.finditer(value):
+            literal = next(
+                (group for group in match.groups() if group is not None),
+                "",
+            )
+            anchor = _compact_identity_text(literal)
+            if len(anchor) >= 4 and anchor not in anchors:
+                anchors.append(anchor)
+    return min(anchors, key=len) if anchors else ""
+
+
 def _identity_anchor_is_grounded(anchor: str, facts: tuple[str, ...]) -> bool:
     for fact in facts:
         compact = _compact_identity_text(fact)
@@ -2231,6 +2258,16 @@ def _require_named_visual_identity_grounding(
     *,
     field: str,
 ) -> None:
+    literal_anchor = _quoted_visual_identity_anchor(texts)
+    if literal_anchor and observation.grounded_visual_facts:
+        if not any(
+            literal_anchor in _compact_identity_text(fact)
+            for fact in observation.grounded_visual_facts
+        ):
+            raise TaskGraphError(
+                f"逐字 UI 完成声明缺少完整结构化画面锚点：{field}"
+            )
+        return
     anchor = _named_visual_identity_anchor(texts)
     if not anchor:
         return

@@ -4411,6 +4411,63 @@ class UniversalAgentConfirmFailureTests(unittest.TestCase):
         self.assertEqual(1, session.physical_actions)
         self.assertEqual("failed", session.status)
 
+    def test_pre_action_drift_consumes_scope_then_replans_without_action(self) -> None:
+        initial = _graph()
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_result=replace(initial, revision=2),
+        )
+        adapter = FakeExecutingAdapter(
+            _scene(),
+            _scene(fingerprint="unused-after"),
+            execute_error=GenericActionAdapterError(
+                "确认时本地真实画面已变化",
+                physical_actions=0,
+                evidence=("fresh-before-1.jpg",),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, qwen, adapter = self._started(
+                temp,
+                planner=planner,
+                adapter=adapter,
+            )
+            stale_authority = session.confirmation_authority
+            with self.assertRaisesRegex(
+                GenericActionAdapterError,
+                "真实画面已变化",
+            ):
+                orchestrator.confirm_one(session, _confirmation(session))
+
+            self.assertEqual("needs_reobservation", session.status)
+            self.assertTrue(stale_authority.consumed)
+            self.assertEqual("consumed_before_execution", stale_authority.invalid_reason)
+            self.assertEqual(0, session.physical_actions)
+            self.assertEqual(1, adapter.execute_calls)
+            self.assertEqual(
+                "needs_reobservation",
+                session.last_confirmation_failure["disposition"],
+            )
+            self.assertEqual(
+                session.session_id,
+                orchestrator.device_registry.active_session(session.device_id),
+            )
+
+            adapter.scene = _scene(
+                fingerprint="frame-drifted",
+                meaning="open_alternative",
+                label="打开替代只读入口",
+            )
+            decision = orchestrator.refresh_decision(session)
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual(initial.revision + 1, session.task_graph.revision)
+        self.assertEqual("observation_changed", planner.replan_calls[0][2])
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
     def test_replan_failure_keeps_after_frames_and_blocks_old_plan(self) -> None:
         planner = FakeDeepSeekPlanner(
             _graph(),

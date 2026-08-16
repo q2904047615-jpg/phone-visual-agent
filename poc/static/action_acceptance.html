@@ -28,6 +28,7 @@
     #drop-zone { position: absolute; right: 24px; top: 130px; width: 130px; height: 150px; display: grid; place-items: center; border: 5px dashed #5cff9d; border-radius: 22px; color: #baffd1; text-align: center; }
     #back-detail { min-height: 75vh; display: grid; place-items: center; text-align: center; border: 3px solid #36d9ff; border-radius: 22px; padding: 26px; }
     #tap-target, #sequence-target { width: 100%; padding: 22px; border: 0; border-radius: 18px; background: #ffcf33; color: #172033; font-size: 22px; font-weight: 900; }
+    .replan-target { width: 100%; padding: 22px; border: 0; border-radius: 18px; background: #ffcf33; color: #172033; font-size: 22px; font-weight: 900; }
     #sequence-track { min-height: 135vh; position: relative; border-left: 5px solid #36d9ff; margin: 20px 30px; }
     #sequence-target { position: absolute; left: -24px; bottom: 10vh; width: calc(100vw - 72px); }
     .sequence-complete { min-height: 70vh; display: grid; place-items: center; text-align: center; border: 4px solid #5cff9d; border-radius: 22px; background: #103b2a; }
@@ -74,6 +75,7 @@
         <a class="mode-link" href="/actions?mode=input">输入并核对文字</a>
         <a class="mode-link" href="/actions?mode=long_press">长按目标</a>
         <a class="mode-link" href="/actions?mode=drag">拖动目标</a>
+        <a class="mode-link" href="/actions?mode=replan">异常重规划：页面自行切换只读入口</a>
         <a class="mode-link" href="/actions?mode=sequence">连续闭环：滑动→点击→返回</a></div>`;
     }
 
@@ -169,6 +171,30 @@
       }, {once: true});
     }
 
+    function showReplanReplacement() {
+      history.replaceState({view: 'replan-replacement'}, '', '/actions?mode=replan-replacement');
+      result.className = 'card pass';
+      result.textContent = '页面已自行切换：旧确认应失效';
+      content.innerHTML = `<div class="card"><strong>当前状态：新的安全只读入口</strong>
+        <p>旧入口已消失。必须重新观察并修订任务图后才能继续。</p></div>
+        <button id="replan-replacement-target" class="replan-target" type="button">打开替代只读入口</button>`;
+      document.querySelector('#replan-replacement-target').addEventListener('click', () => {
+        content.innerHTML = `<div class="sequence-complete"><div><h2>异常重规划验收通过</h2>
+          <p>旧入口未执行，新入口由新 revision 单独确认。</p></div></div>`;
+        report('tap_semantic', 'passed', {replanned_replacement_opened: true}, 'stage3-replan');
+      }, {once: true});
+    }
+
+    function showReplan() {
+      history.replaceState({view: 'replan-initial'}, '', '/actions?mode=replan');
+      result.className = 'card';
+      result.textContent = '异常重规划准备：旧入口暂时可见';
+      content.innerHTML = `<div class="card"><strong>当前状态：初始只读入口</strong>
+        <p>120 秒后本页会自行替换入口，不触发任何机械动作。</p></div>
+        <button id="replan-initial-target" class="replan-target" type="button">打开初始只读入口</button>`;
+      setTimeout(showReplanReplacement, 120000);
+    }
+
     function showSequence() {
       history.replaceState({view: 'sequence-list'}, '', '/actions?mode=sequence-list');
       const finish = () => {
@@ -208,7 +234,7 @@
       }, {once: true});
     }
 
-    ({index: showIndex, swipe: showSwipe, tap: showTap, input: showInput, long_press: showLongPress, drag: showDrag, back: showBack, sequence: showSequence}[mode] || showIndex)();
+    ({index: showIndex, swipe: showSwipe, tap: showTap, input: showInput, long_press: showLongPress, drag: showDrag, back: showBack, replan: showReplan, 'replan-replacement': showReplanReplacement, sequence: showSequence}[mode] || showIndex)();
   </script>
 </body>
 </html>

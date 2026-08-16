@@ -2339,7 +2339,11 @@ class UniversalAgentOrchestrator:
             except Exception:
                 pass
             return
-        session.status = "failed"
+        recoverable_reobservation = bool(
+            request_actions == 0 and session.status == "needs_reobservation"
+        )
+        if not recoverable_reobservation:
+            session.status = "failed"
         session.failed_reason = reason
         if request_actions == 0:
             requested_kind = str(
@@ -2363,7 +2367,11 @@ class UniversalAgentOrchestrator:
             transition = {
                 "protocol_version": POST_ACTION_TRANSITION_PROTOCOL_VERSION,
                 "transition_kind": transition_kind,
-                "disposition": "failed",
+                "disposition": (
+                    "needs_reobservation"
+                    if recoverable_reobservation
+                    else "failed"
+                ),
                 "failed_stage": failed_stage,
                 "error_type": error.__class__.__name__,
                 "error": reason,
@@ -2513,7 +2521,11 @@ class UniversalAgentOrchestrator:
         except GenericActionAdapterError as exc:
             session.physical_actions += max(0, int(exc.physical_actions))
             self._remember(session, exc.evidence)
-            session.status = "failed"
+            session.status = (
+                "needs_reobservation"
+                if int(exc.physical_actions) == 0
+                else "failed"
+            )
             session.failed_reason = str(exc)
             try:
                 self._write_terminal_snapshot(session)

@@ -2036,12 +2036,33 @@ class UniversalAgentOrchestrator:
                 ),
             )
             self._remember(session, frame_paths)
-            observation = self.trusted_observation_factory(
-                frames=frames,
-                device_id=session.device_id,
-                scene=scene,
-                observation_id=observation_id,
-            )
+            try:
+                observation = self.trusted_observation_factory(
+                    frames=frames,
+                    device_id=session.device_id,
+                    scene=scene,
+                    observation_id=observation_id,
+                )
+            except Exception as exc:
+                session.status = "blocked"
+                session.failed_reason = f"重新观察证据不足：{exc}"
+                session.qwen_decision = None
+                session.controller_decision = NavigationPolicyDecision(
+                    allowed=False,
+                    reason=session.failed_reason,
+                )
+                if session.physical_actions != before_actions:
+                    raise UniversalAgentOrchestratorError(
+                        "重新观察证据失败路径错误地改变了物理动作计数。"
+                    )
+                blocked_decision = SimpleNamespace(
+                    proposal=GenericStepProposal(
+                        status="blocked",
+                        reason=session.failed_reason,
+                    )
+                )
+                self._write_terminal_snapshot(session)
+                return blocked_decision
             session.trusted_observation = observation
             session.trusted_frames = tuple(frames)
             self._remember(
@@ -2066,20 +2087,43 @@ class UniversalAgentOrchestrator:
                         "blocked_reasons": [],
                     },
                 )
-                revised = self.deepseek_planner.replan(
-                    graph,
-                    observed,
-                    trigger="observation_changed",
-                    reason=(
-                        "只读重新观察发现页面指纹变化；必须先修订高层状态，"
-                        "再允许 Qwen 规划下一动作。"
-                    ),
-                )
-                self._validate_graph_identity(
-                    revised,
-                    device_id=session.device_id,
-                    previous=graph,
-                )
+                try:
+                    revised = self.deepseek_planner.replan(
+                        graph,
+                        observed,
+                        trigger="observation_changed",
+                        reason=(
+                            "只读重新观察发现页面指纹变化；必须先修订高层状态，"
+                            "再允许 Qwen 规划下一动作。"
+                        ),
+                    )
+                    self._validate_graph_identity(
+                        revised,
+                        device_id=session.device_id,
+                        previous=graph,
+                    )
+                except Exception as exc:
+                    session.status = "blocked"
+                    session.failed_reason = f"页面变化重规划失败：{exc}"
+                    session.qwen_decision = None
+                    session.controller_decision = NavigationPolicyDecision(
+                        allowed=False,
+                        reason=session.failed_reason,
+                    )
+                    session.confirmed_risk_ids = ()
+                    session.risk_confirmation_authority = None
+                    if session.physical_actions != before_actions:
+                        raise UniversalAgentOrchestratorError(
+                            "页面变化重规划失败路径错误地改变了物理动作计数。"
+                        )
+                    blocked_decision = SimpleNamespace(
+                        proposal=GenericStepProposal(
+                            status="blocked",
+                            reason=session.failed_reason,
+                        )
+                    )
+                    self._write_terminal_snapshot(session)
+                    return blocked_decision
                 session.task_graph = revised
                 session.goal_draft = self.bridge.goal_draft(revised)
                 session.qwen_decision = None

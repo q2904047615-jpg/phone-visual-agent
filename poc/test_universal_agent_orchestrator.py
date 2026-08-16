@@ -3016,6 +3016,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
             stale_scope = _confirmation(session)
+            stale_authority = session.confirmation_authority
             orchestrator.refresh_decision(session)
             with self.assertRaisesRegex(
                 UniversalAgentOrchestratorError,
@@ -3027,6 +3028,87 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
             stale_scope["fingerprint"],
             session.trusted_observation.fingerprint,
         )
+        self.assertTrue(stale_authority.consumed)
+        self.assertEqual("fresh_observation_requested", stale_authority.invalid_reason)
+        self.assertEqual(initial.revision + 1, session.task_graph.revision)
+        self.assertEqual(
+            session.task_graph.revision,
+            qwen.calls[1]["task_context"]["revision"],
+        )
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_refresh_drift_replan_failure_blocks_before_qwen(self) -> None:
+        initial = self._unknown_app_graph()
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_error=RuntimeError("deepseek unavailable"),
+        )
+        qwen = SequenceQwenObserver("action")
+        adapter = SequenceCaptureAdapter(
+            _scene(),
+            _scene(fingerprint="frame-drifted", label="页面已变化"),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(planner, qwen, adapter)
+            session = orchestrator.start(
+                session_id="session-refresh-replan-unavailable",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            stale_authority = session.confirmation_authority
+
+            decision = orchestrator.refresh_decision(session)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertEqual("blocked", session.status)
+        self.assertIn("deepseek unavailable", session.failed_reason)
+        self.assertTrue(stale_authority.consumed)
+        self.assertEqual("fresh_observation_requested", stale_authority.invalid_reason)
+        self.assertEqual(1, len(planner.replan_calls))
+        self.assertEqual("observation_changed", planner.replan_calls[0][2])
+        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_refresh_insufficient_observation_blocks_before_qwen(self) -> None:
+        initial = self._unknown_app_graph()
+        planner = FakeDeepSeekPlanner(initial)
+        qwen = SequenceQwenObserver("action")
+        adapter = SequenceCaptureAdapter(_scene(), _scene(fingerprint="frame-drifted"))
+        observation_calls = 0
+
+        def insufficient_factory(**kwargs):
+            nonlocal observation_calls
+            observation_calls += 1
+            if observation_calls == 2:
+                raise RuntimeError("四帧不稳定")
+            return _trusted_factory(**kwargs)
+
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = UniversalAgentOrchestrator(
+                deepseek_planner=planner,
+                qwen_observer=qwen,
+                adapter_factory=lambda _device_id: adapter,
+                trusted_observation_factory=insufficient_factory,
+            )
+            session = orchestrator.start(
+                session_id="session-refresh-insufficient-evidence",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            stale_authority = session.confirmation_authority
+
+            decision = orchestrator.refresh_decision(session)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertEqual("blocked", session.status)
+        self.assertIn("四帧不稳定", session.failed_reason)
+        self.assertTrue(stale_authority.consumed)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(1, len(qwen.calls))
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
 

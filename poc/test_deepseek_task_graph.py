@@ -853,6 +853,77 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             ),
         )
 
+    def test_current_page_transition_state_is_not_a_named_page_identity(self):
+        self.assertEqual(
+            "",
+            _named_visual_identity_anchor(
+                (
+                    "当前本地页面完成重新载入",
+                    "页面重新载入后的可见状态",
+                    "The current local page has been reloaded",
+                    "Page state after reload is visible",
+                )
+            ),
+        )
+        self.assertTrue(
+            _named_visual_identity_anchor(("系统设置页面已打开",))
+        )
+        self.assertTrue(
+            _named_visual_identity_anchor(("跨境订单结果页面可见",))
+        )
+
+    def test_replan_accepts_current_page_reload_transition_without_page_anchor(self):
+        objective = "当前本地页面完成重新载入"
+        transition_evidence = "controller_transition:receipt-reload:1"
+        visible_evidence = "页面重新载入后的可见状态"
+        initial = single_subgoal_payload(objective, external_impact="navigation_only")
+        initial["completion_conditions"][0].update(
+            description="当前本地页面已完成重新载入",
+            evidence_required=[visible_evidence],
+        )
+        initial["subgoals"][0]["completion_conditions"] = [visible_evidence]
+        completed = copy.deepcopy(initial)
+        completed["status"] = "completed"
+        completed["completion_conditions"][0].update(
+            satisfied=True,
+            evidence=[visible_evidence],
+        )
+        completed["subgoals"][0].update(
+            status="completed",
+            completion_evidence=[transition_evidence],
+        )
+        completed["active_subgoal_id"] = None
+        provider = FakeProvider(initial, completed)
+        planner = DeepSeekTaskGraphPlanner(provider)
+        graph = planner.plan(objective, device_id="phone-1")
+        matched = matched_controller_observation(
+            graph,
+            receipt_id="receipt-reload",
+        )
+
+        revised = planner.replan(
+            graph,
+            ObservedState(
+                scene_id=matched.scene_id,
+                summary="页面已恢复为空输入框且软键盘不可见",
+                visible_evidence=(visible_evidence,),
+                grounded_visual_facts=(
+                    '{"meaning":"application_text_input","role":"input",'
+                    '"states":{"value":""}}',
+                    '{"overlay":"soft_keyboard","visible":false}',
+                ),
+                last_action_outcome="matched",
+                verified_action_transition=matched.verified_action_transition,
+                controller_transition_evidence_refs=(
+                    matched.controller_transition_evidence_refs
+                ),
+            ),
+            trigger="action_result_matched",
+            reason="动作后重新观察。",
+        )
+
+        self.assertEqual("completed", revised.status)
+
     def test_replan_accepts_grounded_input_state_without_page_title_anchor(self):
         objective = "当前页面唯一输入框中的内容为 agent"
         initial = single_subgoal_payload(objective, external_impact="navigation_only")

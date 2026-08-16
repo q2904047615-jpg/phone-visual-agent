@@ -2100,6 +2100,11 @@ _GENERIC_VISUAL_LOCATION_PATTERN = re.compile(
     r"(?:current\s+)?(?:page|screen|view)",
     re.IGNORECASE,
 )
+_LEADING_UNNAMED_VISUAL_CONTAINER_PATTERN = re.compile(
+    r"^(?:页面|界面|屏幕|视图|面板|卡片)(?:中|内|上)?|"
+    r"^(?:the\s+)?(?:page|screen|view|panel|card)\b",
+    re.IGNORECASE,
+)
 _VISUAL_IDENTITY_GENERIC_TOKENS = (
     "原来的",
     "原有的",
@@ -2172,6 +2177,10 @@ def _named_visual_identity_anchor(texts: tuple[str, ...]) -> str:
     for item in texts:
         value = str(item or "").strip()
         identity_value = _GENERIC_VISUAL_LOCATION_PATTERN.sub(" ", value)
+        if _LEADING_UNNAMED_VISUAL_CONTAINER_PATTERN.search(
+            identity_value.strip()
+        ):
+            continue
         if (
             not identity_value.strip()
             or not _VISUAL_IDENTITY_CONTAINER_PATTERN.search(identity_value)

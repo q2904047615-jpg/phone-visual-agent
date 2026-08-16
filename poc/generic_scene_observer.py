@@ -2977,7 +2977,7 @@ def _defer_single_invalid_keyboard_switch_to_input_audit(
     modes = {"direct_latin", "chinese_pinyin"}
     safely_deferred = (
         set(candidate) == exact_fields
-        and candidate.get("role") in {"button", "icon"}
+        and candidate.get("role") in {"button", "icon", "keyboard_key"}
         and candidate.get("meaning") == "switch_keyboard_input_mode"
         and _is_explicit_keyboard_mode_label(str(candidate.get("label") or ""))
         and isinstance(states, dict)

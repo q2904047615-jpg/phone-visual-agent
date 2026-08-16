@@ -538,6 +538,36 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual((0.65, 0.9, 0.76, 0.97), target.bounds)
         self.assertEqual(3, provider.calls)
 
+    def test_keyboard_switch_goal_defers_invalid_keyboard_key_role(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "pixel-coordinate-mode-key",
+                "role": "keyboard_key",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "英",
+                "bounds": [680, 1130, 790, 1210],
+                "confidence": 0.99,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+                "evidence": ["键盘底部模式键"],
+            }
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="local-fingerprint",
+            goal_context={"objective": "把当前键盘切换到英文直输模式"},
+            camera_layout_orientation="portrait",
+        )
+
+        self.assertEqual((), scene.elements)
+
     def test_malformed_invalid_keyboard_switch_is_not_hidden_by_audit_deferral(self) -> None:
         compact = scene_payload()
         compact["elements"] = [

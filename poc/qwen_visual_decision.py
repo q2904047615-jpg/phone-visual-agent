@@ -1538,14 +1538,19 @@ def _selection_decision_prompt(
 
 只返回一个短JSON对象，顶层只允许以下字段：
 {{"status":"action|finished|blocked","choice_id":"action时逐字复制一个choice_id，否则null",
-"confidence":0.0,"reason":"当前画面依据","completion_evidence_element_ids":[]}}
+"completes_current_subgoal_on_success":false,"confidence":0.0,"reason":"当前画面依据",
+"completion_evidence_element_ids":[]}}
 
 严格规则：
 1. status=action时choice_id必须逐字来自choices，completion_evidence_element_ids必须为空。
    即使只有一个choice，也必须由你明确选择；本地不会替你选择。
+   若且仅若该choice的expected_result经动作后验证即可直接满足current_subgoal的全部完成条件，
+   completes_current_subgoal_on_success=true；仍需后续本地控制器验证，不能凭此字段判定完成。
 2. status=finished时choice_id必须为null；完成证据只能引用可信候选ID或"scene"。
-   当前状态已经满足完成条件时禁止再点击或选择入口。
-3. status=blocked时choice_id必须为null、完成证据必须为空。
+   当前状态已经满足完成条件时禁止再点击或选择入口；
+   completes_current_subgoal_on_success必须为false。
+3. status=blocked时choice_id必须为null、完成证据必须为空，
+   completes_current_subgoal_on_success必须为false。
 4. global_constraints和current_subgoal.constraints是选择前硬过滤；无法安全满足时blocked。
 5. current_external_impact=read_only时只能finished/blocked，除非目标明确要求等待异步变化且choices含wait_for_change。
 6. choices中的action、element_id、direction和expected_result都由本地控制器绑定；禁止复制、改写或另行输出。
@@ -1820,6 +1825,7 @@ def _parse_model_decision(
     allowed = {
         "status",
         "choice_id",
+        "completes_current_subgoal_on_success",
         "confidence",
         "reason",
         "completion_evidence_element_ids",
@@ -1832,6 +1838,7 @@ def _parse_model_decision(
     required = {
         "status",
         "choice_id",
+        "completes_current_subgoal_on_success",
         "confidence",
         "reason",
         "completion_evidence_element_ids",
@@ -1852,6 +1859,13 @@ def _parse_model_decision(
     )
     choices_by_id = {str(item["choice_id"]): item for item in choices}
     choice_id = str(payload.get("choice_id") or "").strip()
+    completes_current_subgoal = payload.get(
+        "completes_current_subgoal_on_success"
+    )
+    if not isinstance(completes_current_subgoal, bool):
+        raise VisionAgentError(
+            "Qwen最小选择 completes_current_subgoal_on_success 必须是布尔值。"
+        )
     completion_ids = payload.get("completion_evidence_element_ids")
     if not isinstance(completion_ids, list) or any(
         not isinstance(item, str) for item in completion_ids
@@ -1871,6 +1885,8 @@ def _parse_model_decision(
         if not isinstance(local_expected_result, Mapping) or not local_expected_result:
             raise VisionAgentError("本地动作选择缺少可验证 expected_result。")
         expected_result = dict(local_expected_result)
+        if completes_current_subgoal:
+            expected_result["goal_complete_on_success"] = True
         next_action = {
             key: value
             for key, value in choice.items()
@@ -1884,6 +1900,10 @@ def _parse_model_decision(
     else:
         if choice_id:
             raise VisionAgentError("finished/blocked 不能携带 choice_id。")
+        if completes_current_subgoal:
+            raise VisionAgentError(
+                "finished/blocked 不能声明动作后完成当前子目标。"
+            )
         if status == "blocked" and completion_ids:
             raise VisionAgentError("blocked 不能携带完成证据。")
 

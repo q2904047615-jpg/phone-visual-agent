@@ -361,11 +361,15 @@ def minimal_selection_payload(
     *,
     status: str,
     choice_id: str | None = None,
+    completes_current_subgoal_on_success: bool = False,
     completion_evidence_element_ids: list[str] | None = None,
 ) -> dict:
     return {
         "status": status,
         "choice_id": choice_id,
+        "completes_current_subgoal_on_success": (
+            completes_current_subgoal_on_success
+        ),
         "confidence": 0.94,
         "reason": "当前可信画面与活动子目标支持该选择。",
         "completion_evidence_element_ids": (
@@ -447,10 +451,67 @@ class QwenVisualDecisionTests(unittest.TestCase):
         )
         prompt = provider.messages[-1]["content"][0]["text"]
         self.assertIn("choice_id", prompt)
+        self.assertIn("completes_current_subgoal_on_success", prompt)
         self.assertIn('"expected_result":{"scene_changed":true}', prompt)
         self.assertIn("禁止复制、改写或另行输出", prompt)
         self.assertIn("不要identity", prompt)
         self.assertNotIn('"protocol_version":"逐字复制输入"', prompt)
+
+    def test_minimal_terminal_selection_binds_only_the_completion_claim(self) -> None:
+        parsed = QwenTaskContext.from_dict(self.context)
+        choices = _selection_choices(
+            parsed,
+            self.observation,
+            frozenset({"tap_semantic"}),
+        )
+        choice = next(
+            item
+            for item in choices
+            if item.get("element_id") == "settings_icon"
+        )
+        provider = FakeProvider(
+            minimal_selection_payload(
+                status="action",
+                choice_id=choice["choice_id"],
+                completes_current_subgoal_on_success=True,
+            )
+        )
+
+        _observer, decision = self.decide(
+            provider,
+            available_action_kinds={"tap_semantic"},
+        )
+
+        self.assertEqual(
+            {
+                "scene_changed": True,
+                "goal_complete_on_success": True,
+            },
+            decision.expected_result,
+        )
+        self.assertEqual(
+            decision.expected_result,
+            decision.proposal.action.params["expected_effect"],
+        )
+
+    def test_minimal_finished_cannot_claim_future_action_completion(self) -> None:
+        context = task_context()
+        context["current_external_impact"] = "read_only"
+        context["current_subgoal"]["external_impact"] = "read_only"
+        provider = FakeProvider(
+            minimal_selection_payload(
+                status="finished",
+                completes_current_subgoal_on_success=True,
+                completion_evidence_element_ids=["scene"],
+            )
+        )
+
+        observer, decision = self.decide(provider, context=context)
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertEqual(1, provider.calls)
+        self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
+        self.assertIn("动作后完成当前子目标", decision.reason)
 
     def test_minimal_selection_invalid_choice_fails_closed_without_retry(self) -> None:
         provider = FakeProvider(
@@ -466,6 +527,20 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual(1, provider.calls)
         self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
         self.assertIn("choice_id", decision.reason)
+
+    def test_minimal_selection_requires_explicit_subgoal_completion_boolean(self) -> None:
+        payload = minimal_selection_payload(
+            status="action",
+            choice_id="choice_1",
+        )
+        payload.pop("completes_current_subgoal_on_success")
+
+        observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertEqual(1, observer.last_diagnostics["model_calls"])
+        self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
+        self.assertIn("completes_current_subgoal_on_success", decision.reason)
 
     def test_minimal_finished_uses_current_trusted_scene(self) -> None:
         context = task_context()

@@ -1114,11 +1114,12 @@ class UniversalActionController:
         before: UIScene,
         after: UIScene,
     ) -> tuple[str, ...]:
-        """Return controller-owned proof that this action completed the goal.
+        """Return controller-owned proof that this action completed its subgoal.
 
-        A model may declare that one action is terminal, but that declaration is
-        never sufficient by itself.  At least one concrete expected effect must
-        also be proven from the before/after scenes.
+        Qwen may declare that one action is terminal for the current DeepSeek
+        subgoal, but that declaration is never sufficient by itself.  At least
+        one concrete expected effect must also be proven from the before/after
+        scenes; DeepSeek remains responsible for advancing the task graph.
         """
 
         expected = resolved.expected_effect

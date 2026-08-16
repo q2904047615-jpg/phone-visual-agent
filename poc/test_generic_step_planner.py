@@ -1884,7 +1884,10 @@ class GenericActionAdapterTests(unittest.TestCase):
                     "role": "icon",
                     "label": "",
                     "states": states,
-                    "expected_effect": {"scene_changed": True},
+                    "expected_effect": {
+                        "scene_changed": True,
+                        "goal_complete_on_success": True,
+                    },
                 },
             ),
             planned_scene=planned,
@@ -1898,6 +1901,12 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual([], observer.geometry_audit_calls)
         self.assertEqual([("tap", 830, 130)], robot.actions)
         self.assertEqual(1, result.physical_actions)
+        self.assertEqual(
+            (
+                "控制器确认动作前后场景指纹发生变化：fresh -> after",
+            ),
+            result.controller_completion_evidence,
+        )
 
     def test_rebind_accepts_tight_loose_audit_boxes_for_same_static_target(self):
         planned = scene(

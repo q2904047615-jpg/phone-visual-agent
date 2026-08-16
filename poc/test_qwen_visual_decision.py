@@ -361,13 +361,11 @@ def minimal_selection_payload(
     *,
     status: str,
     choice_id: str | None = None,
-    expected_result: dict | None = None,
     completion_evidence_element_ids: list[str] | None = None,
 ) -> dict:
     return {
         "status": status,
         "choice_id": choice_id,
-        "expected_result": expected_result or {},
         "confidence": 0.94,
         "reason": "当前可信画面与活动子目标支持该选择。",
         "completion_evidence_element_ids": (
@@ -423,7 +421,6 @@ class QwenVisualDecisionTests(unittest.TestCase):
             minimal_selection_payload(
                 status="action",
                 choice_id=choice["choice_id"],
-                expected_result={"scene_changed": True},
             )
         )
 
@@ -442,6 +439,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             self.observation.get_candidate("settings_icon").bounds,
             decision.target_region.bounds,
         )
+        self.assertEqual({"scene_changed": True}, decision.expected_result)
         self.assertEqual(1, provider.calls)
         self.assertEqual(
             {"type": "json_object"},
@@ -449,6 +447,8 @@ class QwenVisualDecisionTests(unittest.TestCase):
         )
         prompt = provider.messages[-1]["content"][0]["text"]
         self.assertIn("choice_id", prompt)
+        self.assertIn('"expected_result":{"scene_changed":true}', prompt)
+        self.assertIn("禁止复制、改写或另行输出", prompt)
         self.assertIn("不要identity", prompt)
         self.assertNotIn('"protocol_version":"逐字复制输入"', prompt)
 
@@ -457,7 +457,6 @@ class QwenVisualDecisionTests(unittest.TestCase):
             minimal_selection_payload(
                 status="action",
                 choice_id="invented_choice",
-                expected_result={"scene_changed": True},
             )
         )
 
@@ -512,12 +511,6 @@ class QwenVisualDecisionTests(unittest.TestCase):
             minimal_selection_payload(
                 status="action",
                 choice_id="choice_1",
-                expected_result={
-                    "element_state": {
-                        "meaning": "current_text_input",
-                        "states": {"value": "agent"},
-                    }
-                },
             )
         )
 
@@ -530,6 +523,31 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
         self.assertEqual("input_verified_text", decision.proposal.action.action)
         self.assertEqual("agent", decision.proposal.action.params["text"])
+        self.assertEqual(
+            {
+                "element_state": {
+                    "meaning": "current_text_input",
+                    "states": {"value": "agent"},
+                }
+            },
+            decision.expected_result,
+        )
+
+    def test_minimal_selection_rejects_model_authored_expected_result(self) -> None:
+        payload = minimal_selection_payload(
+            status="action",
+            choice_id="choice_1",
+        )
+        payload["expected_result"] = {
+            "element_state": {"query_field": {"focused": True}}
+        }
+
+        observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertEqual(1, observer.last_diagnostics["model_calls"])
+        self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
+        self.assertIn("expected_result", decision.reason)
 
     def test_truncated_minimal_json_blocks_after_one_call(self) -> None:
         provider = RawSequenceProvider(['{"status":"action"'])
@@ -612,7 +630,6 @@ class QwenVisualDecisionTests(unittest.TestCase):
             minimal_selection_payload(
                 status="action",
                 choice_id="choice_1",
-                expected_result={"scene_changed": True},
             )
         )
 
@@ -625,6 +642,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual(1, provider.calls)
         self.assertEqual("action", decision.proposal.status)
         self.assertEqual("back", decision.proposal.action.action)
+        self.assertEqual({"scene_changed": True}, decision.expected_result)
         self.assertEqual(["back"], observer.last_diagnostics["available_action_kinds"])
         self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
 

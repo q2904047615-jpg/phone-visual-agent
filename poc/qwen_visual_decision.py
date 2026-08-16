@@ -33,7 +33,7 @@ from vision_model_config import public_model_identity
 
 
 QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-14-qwen-visual-decision-v5"
-QWEN_VISUAL_SELECTION_PROTOCOL_VERSION = "2026-08-16-qwen-visual-selection-v1"
+QWEN_VISUAL_SELECTION_PROTOCOL_VERSION = "2026-08-16-qwen-visual-selection-v2"
 SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v3"
 MIGRATION_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v2"
 SUPPORTED_TASK_CONTEXT_PROTOCOLS = frozenset(
@@ -1414,22 +1414,37 @@ def _selection_choices(
     )
     choices: list[dict[str, Any]] = []
 
-    def append_choice(action: str, **parts: Any) -> None:
+    def append_choice(
+        action: str,
+        *,
+        expected_result: Mapping[str, Any],
+        **parts: Any,
+    ) -> None:
         choices.append(
             {
                 "choice_id": f"choice_{len(choices) + 1}",
                 "action": action,
+                "expected_result": dict(expected_result),
                 **parts,
             }
         )
 
     for action in sorted(available_action_kinds):
         if action in {"back", "home", "reveal_system_navigation", "wait_for_change"}:
-            append_choice(action)
+            expected_result = (
+                {"system_ui": {"navigation_bar_visible": True}}
+                if action == "reveal_system_navigation"
+                else {"scene_changed": True}
+            )
+            append_choice(action, expected_result=expected_result)
             continue
         if action == "swipe":
             for direction in ("up", "down", "left", "right"):
-                append_choice(action, direction=direction)
+                append_choice(
+                    action,
+                    direction=direction,
+                    expected_result={"content_changed": True},
+                )
             continue
         eligible = tuple(
             item
@@ -1442,7 +1457,34 @@ def _selection_choices(
             )
         if action in SINGLE_ELEMENT_ACTIONS:
             for item in eligible:
-                append_choice(action, element_id=str(item["element_id"]))
+                if action == "input_verified_text":
+                    expected_result = {
+                        "element_state": {
+                            "meaning": str(item.get("meaning") or "").strip(),
+                            "states": {"value": context.requested_input_text},
+                        }
+                    }
+                elif (
+                    action == "tap_semantic"
+                    and str(item.get("role") or "") == "input"
+                    and not bool(
+                        isinstance(item.get("states"), Mapping)
+                        and item["states"].get("focused") is True
+                    )
+                ):
+                    expected_result = {
+                        "element_state": {
+                            "meaning": str(item.get("meaning") or "").strip(),
+                            "states": {"focused": True},
+                        }
+                    }
+                else:
+                    expected_result = {"scene_changed": True}
+                append_choice(
+                    action,
+                    element_id=str(item["element_id"]),
+                    expected_result=expected_result,
+                )
             continue
         if action == "drag":
             for source in eligible:
@@ -1453,6 +1495,7 @@ def _selection_choices(
                         action,
                         source_element_id=str(source["element_id"]),
                         destination_element_id=str(destination["element_id"]),
+                        expected_result={"scene_changed": True},
                     )
     return tuple(choices)
 
@@ -1484,23 +1527,22 @@ def _selection_decision_prompt(
 
 只返回一个短JSON对象，顶层只允许以下字段：
 {{"status":"action|finished|blocked","choice_id":"action时逐字复制一个choice_id，否则null",
-"expected_result":{{}},"confidence":0.0,"reason":"当前画面依据",
-"completion_evidence_element_ids":[]}}
+"confidence":0.0,"reason":"当前画面依据","completion_evidence_element_ids":[]}}
 
 严格规则：
-1. status=action时choice_id必须逐字来自choices，expected_result必须是非空对象，
-   completion_evidence_element_ids必须为空。即使只有一个choice，也必须由你明确选择；本地不会替你选择。
-2. status=finished时choice_id必须为null、expected_result必须为空；完成证据只能引用可信候选ID或"scene"。
+1. status=action时choice_id必须逐字来自choices，completion_evidence_element_ids必须为空。
+   即使只有一个choice，也必须由你明确选择；本地不会替你选择。
+2. status=finished时choice_id必须为null；完成证据只能引用可信候选ID或"scene"。
    当前状态已经满足完成条件时禁止再点击或选择入口。
-3. status=blocked时choice_id必须为null、expected_result必须为空、完成证据必须为空。
+3. status=blocked时choice_id必须为null、完成证据必须为空。
 4. global_constraints和current_subgoal.constraints是选择前硬过滤；无法安全满足时blocked。
 5. current_external_impact=read_only时只能finished/blocked，除非目标明确要求等待异步变化且choices含wait_for_change。
-6. expected_result只允许按需使用scene_changed、content_changed、current_video_changed、app_id、screen_id、
-   system_ui或element_state；它必须描述一个动作后可由新画面验证的变化。
+6. choices中的action、element_id、direction和expected_result都由本地控制器绑定；禁止复制、改写或另行输出。
 7. input_verified_text的文字由DeepSeek结构化目标和本地控制器逐字绑定，你只选择对应choice_id；
    不得在输出中重复、改写或补全文字。
 8. choices没有合适动作时blocked；不得返回choices之外的动作名称或element_id。
-9. 这是第{decision_number}轮。不要Markdown，不要identity、page_state、next_action、target_region、bounds或额外字段。
+9. 这是第{decision_number}轮。不要Markdown，不要identity、page_state、next_action、target_region、
+   expected_result、bounds或额外字段。
 """
 
 
@@ -1767,7 +1809,6 @@ def _parse_model_decision(
     allowed = {
         "status",
         "choice_id",
-        "expected_result",
         "confidence",
         "reason",
         "completion_evidence_element_ids",
@@ -1780,7 +1821,6 @@ def _parse_model_decision(
     required = {
         "status",
         "choice_id",
-        "expected_result",
         "confidence",
         "reason",
         "completion_evidence_element_ids",
@@ -1808,23 +1848,22 @@ def _parse_model_decision(
         raise VisionAgentError(
             "Qwen最小选择 completion_evidence_element_ids 必须是字符串数组。"
         )
-    expected_result = payload.get("expected_result")
-    if not isinstance(expected_result, dict):
-        raise VisionAgentError("Qwen最小选择 expected_result 必须是JSON对象。")
-
     next_action: dict[str, Any] | None = None
+    expected_result: dict[str, Any] = {}
     if status == "action":
         if choice_id not in choices_by_id:
             raise VisionAgentError("Qwen最小选择引用了不存在或不允许的 choice_id。")
         if completion_ids:
             raise VisionAgentError("action 不能携带完成证据。")
-        if not expected_result:
-            raise VisionAgentError("action 缺少可验证 expected_result。")
         choice = choices_by_id[choice_id]
+        local_expected_result = choice.get("expected_result")
+        if not isinstance(local_expected_result, Mapping) or not local_expected_result:
+            raise VisionAgentError("本地动作选择缺少可验证 expected_result。")
+        expected_result = dict(local_expected_result)
         next_action = {
             key: value
             for key, value in choice.items()
-            if key != "choice_id"
+            if key not in {"choice_id", "expected_result"}
         }
         next_action["kind"] = next_action.pop("action")
         if next_action["kind"] == "input_verified_text":
@@ -1834,8 +1873,6 @@ def _parse_model_decision(
     else:
         if choice_id:
             raise VisionAgentError("finished/blocked 不能携带 choice_id。")
-        if expected_result:
-            raise VisionAgentError("finished/blocked 的 expected_result 必须为空。")
         if status == "blocked" and completion_ids:
             raise VisionAgentError("blocked 不能携带完成证据。")
 

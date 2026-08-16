@@ -3820,6 +3820,26 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
             )
         )
 
+    def test_absence_or_dismissal_is_not_zero_action_presence_completion(self) -> None:
+        cases = (
+            ("当前可见软键盘被收起且不可见", "当前画面中无软键盘"),
+            ("关闭当前可见弹层", "弹层已消失"),
+            ("Hide the visible keyboard", "The keyboard is not visible"),
+            ("Dismiss the current dialog", "The dialog is absent"),
+        )
+
+        for objective, completion_condition in cases:
+            with self.subTest(objective=objective):
+                subgoal = SimpleNamespace(
+                    objective=objective,
+                    completion_conditions=(completion_condition,),
+                )
+                self.assertFalse(
+                    UniversalAgentOrchestrator._is_presence_only_read_only_subgoal(
+                        subgoal
+                    )
+                )
+
     def test_start_consumes_only_the_visible_safe_presence_prefix_before_qwen(self) -> None:
         base = _graph()
         initial = replace(

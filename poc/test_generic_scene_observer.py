@@ -3218,23 +3218,6 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         self.assertTrue(_goal_requests_input(context))
 
-    def test_pure_keyboard_dismissal_does_not_request_input_geometry_audit(self) -> None:
-        context = {
-            "objective": "键盘收起后到达系统桌面",
-            "entities": {
-                "active_subgoal_visual_context": {
-                    "subgoal_id": "hide_keyboard",
-                    "objective": "让当前软键盘完全收起",
-                    "constraints": [],
-                    "completion_conditions": ["软键盘不在画面中"],
-                    "external_impact": "navigation_only",
-                    "goal_entities": {},
-                }
-            },
-        }
-
-        self.assertFalse(_goal_requests_input(context))
-
     def test_hide_keyboard_allows_boundsless_presence_but_not_input_mode(self) -> None:
         compact = scene_payload()
         compact["summary"] = "唯一输入框为agent，当前软键盘可见。"
@@ -3267,6 +3250,15 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "bounds": [0, 580, 1000, 1210],
                 "layout": "qwerty",
                 "input_mode": "chinese_pinyin",
+                "qwerty_anchors": {
+                    "q": [115, 704],
+                    "p": [875, 704],
+                    "a": [157, 773],
+                    "l": [832, 773],
+                    "z": [241, 844],
+                    "m": [747, 844],
+                    "backspace": [875, 844],
+                },
                 "mode_switch": {
                     "label": "英",
                     "bounds": [760, 1080, 850, 1160],

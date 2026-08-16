@@ -1663,6 +1663,61 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual("button", result.rebound_action.params["role"])
         self.assertEqual("target_entry", result.rebound_action.params["target"])
 
+    def test_rebind_accepts_exact_text_link_after_button_role_drift(self):
+        states = {"fully_visible": True}
+        label = "返回验收模式选择"
+        planned = UIScene(
+            app_id="unknown",
+            screen_id="unknown",
+            summary="本地验收详情页",
+            elements=(
+                UIElement(
+                    element_id="planned-link",
+                    role="button",
+                    meaning="back_navigation",
+                    label=label,
+                    bounds=(0.118, 0.095, 0.415, 0.125),
+                    confidence=1.0,
+                    states=states,
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    element_id="fresh-link",
+                    role="text",
+                    meaning="navigation_link",
+                    bounds=(0.13, 0.095, 0.43, 0.125),
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        adapter = self._adapter(FakeSceneObserver([fresh]), FakeRobot())
+
+        rebound = adapter._rebind_action(
+            SemanticAction(
+                node_id="return-to-list",
+                action="tap_semantic",
+                params={
+                    "element_id": "planned-link",
+                    "target": "back_navigation",
+                    "role": "button",
+                    "label": label,
+                    "states": states,
+                },
+            ),
+            planned,
+            fresh,
+        )
+
+        self.assertEqual("fresh-link", rebound.params["element_id"])
+        self.assertEqual("text", rebound.params["role"])
+        self.assertEqual("navigation_link", rebound.params["target"])
+
     def test_rebind_accepts_fresh_positive_fully_visible_attestation(self):
         planned = scene("planned")
         fresh_element = replace(

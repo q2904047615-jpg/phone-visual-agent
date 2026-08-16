@@ -1045,7 +1045,12 @@ class GenericSingleActionAdapter:
                 role=original.role,
                 states=stable_rebind_states(dict(original.states)),
             )
-            selector_roles = {"button", "tab", "list_item"}
+            # Text-styled links are routinely described as either ``button``
+            # or ``text`` across two otherwise identical visual reads.  The
+            # exact visible label, stable states, safe navigation class and
+            # geometry checks below remain authoritative, so this only keeps
+            # a uniquely rebound link from failing on model role wording.
+            selector_roles = {"button", "tab", "list_item", "text"}
             if (
                 not matches
                 and requested.action == "tap_semantic"

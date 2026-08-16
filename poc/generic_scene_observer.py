@@ -3664,6 +3664,59 @@ def _goal_requests_input(context: dict[str, Any]) -> bool:
         input_context,
         ensure_ascii=False,
     ).casefold()
+    keyboard_dismissal = (
+        any(term in visible for term in ("软键盘", "keyboard"))
+        and any(
+            term in visible
+            for term in (
+                "收起",
+                "隐藏",
+                "不可见",
+                "未显示",
+                "不在画面",
+                "不再被键盘遮挡",
+                "dismiss",
+                "hide",
+                "hidden",
+                "not visible",
+                "not shown",
+                "absent",
+            )
+        )
+    )
+    focused_entities = focused.get("goal_entities")
+    if not isinstance(focused_entities, dict):
+        focused_entities = context.get("entities")
+    bound_input_text = (
+        isinstance(focused_entities, dict)
+        and isinstance(focused_entities.get("input_text"), str)
+        and bool(focused_entities["input_text"])
+    )
+    input_state_must_be_preserved = any(
+        term in visible
+        for term in (
+            "输入框",
+            "文本框",
+            "搜索框",
+            "编辑框",
+            "字段内容",
+            "内容不变",
+            "input field",
+            "search box",
+            "text field",
+            "editable field",
+            "field value",
+        )
+    )
+    if (
+        keyboard_dismissal
+        and not bound_input_text
+        and not input_state_must_be_preserved
+    ):
+        # A pure keyboard-dismissal checkpoint needs overlay/system facts, not
+        # a full application-input and QWERTY geometry audit.  Keep the audit
+        # when exact input text or field state must survive the dismissal.
+        return False
     return any(
         term in visible
         for term in (

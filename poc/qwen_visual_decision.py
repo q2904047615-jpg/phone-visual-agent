@@ -1132,6 +1132,11 @@ class QwenVisualDecisionObserver:
         available_actions = _normalize_available_action_kinds(
             available_action_kinds
         )
+        available_actions = _precondition_eligible_action_kinds(
+            context,
+            trusted_observation,
+            available_actions,
+        )
         # These are the same read-only frames that established the trusted
         # observation, so apply the observer's one-leading-frame tolerance.
         # Confirmation-time recapture and post-action verification use their
@@ -1531,6 +1536,11 @@ back/home/reveal_system_navigation是无元素、无坐标的系统动作，不�
    {{"element_state":{{"meaning":"逐字复制输入候选meaning","states":{{"value":"逐字复制goal.entities.input_text"}}}}}}；
    element_state和states都必须是JSON对象，绝不能返回字符串、数组或自然语言。
    role=input且states.focused=true时禁止再用tap_semantic重复聚焦；这不会推进子目标。
+   当当前高层子目标需要输入，画面只有一个与目标相关的role=input候选，但它没有
+   states.focused=true时，input_verified_text不会出现在本轮可用动作集合中。若tap_semantic
+   可用，本轮应只绑定该唯一input候选并提出tap_semantic，expected_result为
+   {{"element_state":{{"meaning":"逐字复制输入候选meaning","states":{{"focused":true}}}}}}；动作后
+   必须重新观察，不得在同一轮输入文字。
    对小写英文字母精确输入，候选还必须同时提供states.value=""、keyboard_layout="qwerty"和
    keyboard_input_mode="direct_latin"。QWERTY但keyboard_input_mode="chinese_pinyin"时禁止直接输入；
    若可信观察另有meaning=switch_keyboard_input_mode、keyboard_input_mode_switch=true且明确从
@@ -1618,6 +1628,10 @@ def _decision_retry_prompt(
 - input_verified_text的expected_result必须精确为
   {{"element_state":{{"meaning":"逐字复制输入候选meaning","states":{{"value":"逐字复制goal.entities.input_text"}}}}}}；
   element_state和states都必须是JSON对象，绝不能返回字符串、数组或自然语言。
+- 当高层目标需要输入，但唯一相关role=input候选没有states.focused=true时，
+  input_verified_text会被本地从本轮可用动作集合中移除。若tap_semantic可用，只提出绑定
+  该唯一input候选的聚焦动作，expected_result写其meaning的states.focused=true；动作后
+  重新观察，本轮不得同时输入文字。
 - 这是第{decision_number}轮。不要Markdown，不要解释，不要把JSON转义成字符串。
 - 当前设备只允许动作：{available_actions}；不得返回集合外动作，无法继续就blocked。
 - current_external_impact=read_only 时禁止点击、滑动、返回、输入、长按和拖动；画面已证明结果就
@@ -2021,6 +2035,31 @@ def _normalize_available_action_kinds(
     if not normalized:
         raise VisionAgentError("设备没有任何可供 Qwen 选择的通用动作。")
     return normalized
+
+
+def _precondition_eligible_action_kinds(
+    context: QwenTaskContext,
+    observation: TrustedObservation,
+    available_action_kinds: frozenset[str],
+) -> frozenset[str]:
+    """Hide actions whose controller-owned visual preconditions are absent.
+
+    This does not add an action or infer focus. It only prevents Qwen from
+    proposing verified text input before the trusted scene proves that an
+    input is focused; a separate tap and fresh observation must establish that
+    state first.
+    """
+
+    eligible = set(available_action_kinds)
+    if "input_verified_text" in eligible:
+        focused_inputs = tuple(
+            element
+            for element in observation.scene.elements
+            if element.role == "input" and element.states.get("focused") is True
+        )
+        if context.requested_input_text is None or not focused_inputs:
+            eligible.remove("input_verified_text")
+    return frozenset(eligible)
 
 
 def _parse_action(

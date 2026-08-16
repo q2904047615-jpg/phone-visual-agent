@@ -3493,6 +3493,7 @@ class PhaseOneNavigationPolicy:
     LOCAL_ACTION_LABEL_MARKER_GROUPS = (
         ("长按", "long_press", "longpress"),
         ("拖动", "drag"),
+        ("输入", "input", "type"),
     )
 
     def __init__(self, *, min_confidence: float = MIN_TARGET_CONFIDENCE) -> None:
@@ -3710,7 +3711,16 @@ class PhaseOneNavigationPolicy:
         sanitized: list[str] = []
         for value in PhaseOneNavigationPolicy._structured_strings(values):
             current = value.casefold()
-            for marker in ("long_press", "longpress", "drag", "长按", "拖动"):
+            for marker in (
+                "long_press",
+                "longpress",
+                "drag",
+                "input",
+                "type",
+                "长按",
+                "拖动",
+                "输入",
+            ):
                 current = current.replace(marker, " ")
             sanitized.append(current)
         return tuple(sanitized)

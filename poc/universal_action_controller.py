@@ -589,7 +589,18 @@ class UniversalActionController:
                     min_confidence=self.min_confidence,
                 )
             except UISceneError as exc:
-                raise UniversalActionError(f"动作结果缺少元素状态证据：{exc}") from exc
+                input_aliases = tuple(
+                    element
+                    for element in after.elements
+                    if resolved.kind == "input_verified_text"
+                    and element.role == "input"
+                    and float(element.confidence) >= self.min_confidence
+                    and all(element.states.get(key) == value for key, value in states.items())
+                )
+                if len(input_aliases) != 1:
+                    raise UniversalActionError(
+                        f"动作结果缺少元素状态证据：{exc}"
+                    ) from exc
         if resolved.kind == "input_verified_text":
             self._verify_exact_input_value(resolved, before, after)
         if resolved.kind == "long_press":
@@ -935,7 +946,7 @@ class UniversalActionController:
         if exact_id:
             candidates = exact_id
         else:
-            candidates = tuple(
+            semantic_candidates = tuple(
                 element
                 for element in after.elements
                 if element.role == "input"
@@ -944,6 +955,20 @@ class UniversalActionController:
                 and element.meaning.casefold() == before_input.meaning.casefold()
                 and element.label.casefold() == before_input.label.casefold()
             )
+            if len(semantic_candidates) == 1:
+                candidates = semantic_candidates
+            else:
+                candidates = tuple(
+                    element
+                    for element in after.elements
+                    if element.role == "input"
+                    and float(element.confidence) >= self.min_confidence
+                    and element.states.get("visible") is not False
+                    and self._input_regions_stably_overlap(
+                        before_input.bounds,
+                        element.bounds,
+                    )
+                )
         if len(candidates) != 1:
             raise UniversalActionError("动作后无法唯一绑定原目标输入框。")
         states = candidates[0].states
@@ -954,6 +979,25 @@ class UniversalActionController:
             raise UniversalActionError(
                 f"动作后输入框文字不匹配：实际 {actual!r}，预期 {expected!r}。"
             )
+
+    @staticmethod
+    def _input_regions_stably_overlap(
+        before_bounds: tuple[float, float, float, float],
+        after_bounds: tuple[float, float, float, float],
+    ) -> bool:
+        left = max(before_bounds[0], after_bounds[0])
+        top = max(before_bounds[1], after_bounds[1])
+        right = min(before_bounds[2], after_bounds[2])
+        bottom = min(before_bounds[3], after_bounds[3])
+        intersection = max(0.0, right - left) * max(0.0, bottom - top)
+        before_area = max(0.0, before_bounds[2] - before_bounds[0]) * max(
+            0.0, before_bounds[3] - before_bounds[1]
+        )
+        after_area = max(0.0, after_bounds[2] - after_bounds[0]) * max(
+            0.0, after_bounds[3] - after_bounds[1]
+        )
+        smaller = min(before_area, after_area)
+        return intersection > 0 and smaller > 0 and intersection / smaller >= 0.60
 
     @classmethod
     def scenes_semantically_equivalent(

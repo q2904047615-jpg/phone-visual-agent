@@ -903,6 +903,71 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(2, observer.calls)
 
+    def test_confirmed_input_accepts_unique_overlapping_post_input_alias(self):
+        def input_scene(fingerprint, element_id, meaning, label, value):
+            return UIScene(
+                app_id="browser",
+                screen_id="search",
+                summary="唯一输入框",
+                elements=(
+                    UIElement(
+                        element_id=element_id,
+                        role="input",
+                        meaning=meaning,
+                        label=label,
+                        bounds=(0.1, 0.1, 0.9, 0.2),
+                        confidence=0.98,
+                        states={
+                            "focused": True,
+                            "value": value,
+                            "keyboard_layout": "qwerty",
+                            "keyboard_input_mode": "direct_latin",
+                            "goal_relevant": True,
+                        },
+                    ),
+                ),
+                stable=True,
+                confidence=0.98,
+                fingerprint=fingerprint,
+            )
+
+        planned = input_scene(
+            "planned", "planned-input", "target_text_input", "", ""
+        )
+        fresh = input_scene(
+            "before", "fresh-input", "target_text_input", "", ""
+        )
+        after = input_scene(
+            "after", "audited-input", "application_text_input", "agent", "agent"
+        )
+        robot = FakeRobot()
+        result = self._adapter(FakeSceneObserver([fresh, after]), robot).execute(
+            requested_action=SemanticAction(
+                node_id="input-alias",
+                action="input_verified_text",
+                params={
+                    "element_id": "planned-input",
+                    "target": "target_text_input",
+                    "role": "input",
+                    "label": "",
+                    "states": {
+                        "focused": True,
+                        "value": "",
+                        "keyboard_layout": "qwerty",
+                        "keyboard_input_mode": "direct_latin",
+                        "goal_relevant": True,
+                    },
+                    "text": "agent",
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("input", "agent")], robot.actions)
+        self.assertEqual("matched", result.action_outcome)
+
     def test_execution_result_keeps_exact_four_verified_after_frames(self):
         gray = Image.new("RGB", (540, 960), "gray")
         white = Image.new("RGB", (540, 960), "white")
@@ -1778,6 +1843,57 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
 
         self.assertEqual([], robot.actions)
+
+    def test_rebind_allows_unique_overlapping_input_meaning_alias(self):
+        states = {"goal_relevant": True, "fully_visible": True, "value": ""}
+        planned = UIScene(
+            app_id="unknown",
+            screen_id="input_page",
+            summary="唯一空输入框可见",
+            elements=(
+                UIElement(
+                    element_id="planned_input",
+                    role="input",
+                    meaning="application_text_input",
+                    label="",
+                    bounds=(0.13, 0.51, 0.87, 0.60),
+                    confidence=1.0,
+                    states=states,
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    element_id="fresh_input",
+                    meaning="text_input_field",
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        adapter = self._adapter(FakeSceneObserver([fresh]), FakeRobot())
+
+        rebound = adapter._rebind_action(
+            SemanticAction(
+                node_id="focus-input",
+                action="tap_semantic",
+                params={
+                    "element_id": "planned_input",
+                    "target": "application_text_input",
+                    "role": "input",
+                    "label": "",
+                    "states": states,
+                },
+            ),
+            planned,
+            fresh,
+        )
+
+        self.assertEqual("fresh_input", rebound.params["element_id"])
+        self.assertEqual("text_input_field", rebound.params["target"])
 
     def test_changed_target_region_before_confirmation_stops_without_robot_action(self):
         planned = scene("planned")

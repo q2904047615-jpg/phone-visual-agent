@@ -1148,10 +1148,20 @@ class GenericSingleActionAdapter:
                     )
                     != "forbidden"
                 )
+                stable_input_field = bool(
+                    requested.action in {"tap_semantic", "input_verified_text"}
+                    and prefix == ""
+                    and original.role == "input"
+                    and current.role == "input"
+                    and current.label == original.label
+                    and stable_rebind_states(dict(current.states))
+                    == stable_rebind_states(dict(original.states))
+                )
                 if not (
                     labelled_drag_endpoint
                     or labelled_local_mode_selector
                     or labelled_long_press_target
+                    or stable_input_field
                 ) and (
                     not original_class
                     or original_class == "forbidden"

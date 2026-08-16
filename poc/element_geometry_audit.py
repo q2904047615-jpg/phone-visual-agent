@@ -10,7 +10,7 @@ from PIL import Image
 
 
 ELEMENT_GEOMETRY_AUDIT_PROTOCOL_VERSION = (
-    "2026-08-16-element-geometry-audit-v1"
+    "2026-08-16-element-geometry-audit-v2"
 )
 MIN_GEOMETRY_AUDIT_CONFIDENCE = 0.92
 DEFAULT_ROI_MIN_SPAN = 0.60
@@ -351,12 +351,16 @@ def parse_element_geometry_audit(
         ):
             raise ElementGeometryAuditError("geometry audit match_id 无效或重复。")
         seen_ids.add(match_id)
-        label = item["literal_label"]
         role = item["visual_role"]
-        if not isinstance(label, str) or not label.strip() or len(label.strip()) > 200:
-            raise ElementGeometryAuditError("geometry audit literal_label 无效。")
         if not isinstance(role, str) or role not in ALLOWED_VISUAL_ROLES:
             raise ElementGeometryAuditError("geometry audit visual_role 无效。")
+        label = item["literal_label"]
+        if (
+            not isinstance(label, str)
+            or len(label.strip()) > 200
+            or (not label.strip() and role != "input")
+        ):
+            raise ElementGeometryAuditError("geometry audit literal_label 无效。")
         bounds = _validated_local_bounds(item["bounds"])
         confidence = item["confidence"]
         if not _finite_number(confidence) or not 0.0 <= float(confidence) <= 1.0:
@@ -431,10 +435,12 @@ def select_unique_audited_geometry(
     ):
         raise ElementGeometryAuditError("expected_source_ref 无效。")
     label = str(expected_label or "").strip()
-    if not label:
-        raise ElementGeometryAuditError("v1 geometry audit 只接受非空逐字标签。")
     if expected_role not in ALLOWED_VISUAL_ROLES:
         raise ElementGeometryAuditError("expected_role 无效。")
+    if not label and expected_role != "input":
+        raise ElementGeometryAuditError(
+            "geometry audit 仅对 role=input 允许空逐字标签。"
+        )
     if not _finite_number(minimum_confidence) or not 0.0 <= float(
         minimum_confidence
     ) <= 1.0:
@@ -492,10 +498,10 @@ def element_geometry_audit_prompt(
         raise ElementGeometryAuditError("source_ref 无效。")
     label = str(literal_label or "").strip()
     evidence = str(visible_evidence or "").strip()
-    if not label or len(label) > 200:
-        raise ElementGeometryAuditError("literal_label 无效。")
     if visual_role not in ALLOWED_VISUAL_ROLES:
         raise ElementGeometryAuditError("visual_role 无效。")
+    if len(label) > 200 or (not label and visual_role != "input"):
+        raise ElementGeometryAuditError("literal_label 无效。")
     allowed_labels = tuple(
         dict.fromkeys(
             item.strip()
@@ -547,7 +553,10 @@ def element_geometry_audit_prompt(
         "the only coordinate space. Its left/top is 0 and right/bottom is 1000. "
         "Never infer or return full-frame coordinates, an action, a plan, or a goal. "
         "Enumerate every occurrence inside this crop that exactly matches the supplied "
-        "literal label and visual role. Tight bounds must contain the whole control, "
+        "literal label and visual role. Only when visual_role=input and literal_label is "
+        "empty, enumerate every whole visible input control matching the supplied visual "
+        "evidence and return literal_label as an empty string. Tight bounds must contain "
+        "the whole control, "
         "not merely a broad row or neighboring control. If the crop is unclear, an "
         "occurrence is clipped, or enumeration cannot be completed, report those facts "
         "without guessing. The local controller will map accepted crop-local bounds.\n"

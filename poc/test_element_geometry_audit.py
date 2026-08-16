@@ -257,6 +257,35 @@ class StrictGeometryAuditProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ElementGeometryAuditError, "visual_role"):
             parse_element_geometry_audit(self.render(payload))
 
+    def test_protocol_allows_unlabelled_input_but_not_unlabelled_button(self):
+        payload = audit_payload(
+            match={
+                "visual_role": "input",
+                "literal_label": "",
+                "evidence": ["空输入框四边完整可见"],
+            }
+        )
+        parsed = parse_element_geometry_audit(self.render(payload))
+        self.assertEqual("", parsed.matches[0].literal_label)
+        prompt = element_geometry_audit_prompt(
+            source_ref=SOURCE_REF,
+            literal_label="",
+            visual_role="input",
+            visible_evidence="空输入框四边完整可见",
+        )
+        self.assertIn("visual_role=input and literal_label is empty", prompt)
+
+        payload["matches"][0]["visual_role"] = "button"
+        with self.assertRaisesRegex(ElementGeometryAuditError, "literal_label"):
+            parse_element_geometry_audit(self.render(payload))
+        with self.assertRaisesRegex(ElementGeometryAuditError, "literal_label"):
+            element_geometry_audit_prompt(
+                source_ref=SOURCE_REF,
+                literal_label="",
+                visual_role="button",
+                visible_evidence="空白按钮四边完整可见",
+            )
+
     def test_protocol_allows_non_numeric_boundary_fact_but_rejects_coordinates(self):
         payload = audit_payload(
             match={
@@ -506,6 +535,39 @@ class GenericSceneGeometryAuditIntegrationTests(unittest.TestCase):
                 scene=current,
                 element_ids=("source",),
             )
+
+    def test_unlabelled_input_still_requires_unique_single_crop_audit(self):
+        frame = Image.new("RGB", (810, 1515), "gray")
+        current = UIScene(
+            app_id="local.acceptance",
+            screen_id="input-page",
+            summary="唯一空输入框可见",
+            elements=(
+                UIElement(
+                    element_id="input",
+                    role="input",
+                    meaning="text_input_field",
+                    label="",
+                    bounds=(0.13, 0.51, 0.87, 0.60),
+                    confidence=1.0,
+                    states={"goal_relevant": True, "value": ""},
+                    evidence=("空输入框四边完整可见",),
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint=_local_frame_fingerprint(frame),
+        )
+        provider = GeometryAuditProvider([[120, 180, 880, 320]])
+        audited = GenericSceneObserver(provider).audit_element_geometry(
+            frames=[frame.copy() for _ in range(4)],
+            scene=current,
+            element_ids=("input",),
+        )
+
+        self.assertEqual(1, len(provider.messages))
+        self.assertEqual("", audited.get_element("input").label)
+        self.assertNotEqual(current.get_element("input").bounds, audited.get_element("input").bounds)
 
 
 if __name__ == "__main__":

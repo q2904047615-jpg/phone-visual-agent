@@ -241,6 +241,8 @@ REPAIRABLE_REPLAN_ERROR_FRAGMENTS = (
     "可推进任务图必须且只能有一个活动子目标",
     "active_subgoal_id",
     "read_only 完成复核",
+    "命名页面完成声明缺少结构化画面身份锚点",
+    "子目标使用了当前观察之外的完成证据",
 )
 MISMATCH_BLOCKED_CLARIFICATION = (
     "动作后的新画面未证明预期结果，且当前没有可验证的安全替代路径；"
@@ -1813,6 +1815,12 @@ def _replan_prompt(
     和结果核对状态。控制器回执只证明本轮受控动作及其可见变化，不能把入口冒充结果页面。
 13. trigger=action_result_mismatch 时，不得完成回执绑定的旧子目标；必须根据当前画面重规划、
     阻塞或提出高层澄清。revision 必须严格增加 1。
+14. 任何包含具名页面、卡片、区域或结果身份的 completed/satisfied 声明，其名称必须
+    能从 grounded_visual_facts 的 screen_id、overlay 或可见元素 label/meaning 中找到结构化支持。
+    visible_evidence 或 summary 中的自由文本描述不能单独证明具名身份。若旧路径使用了
+    未被结构化画面支持的具名页面，不得硬完成；应跳过或替换该未完成节点，
+    改为基于 grounded_visual_facts 中实际可见的结构化状态（例如唯一目标输入元素可见）
+    继续高层规划；不得把入口名称、动作成功或场景变化冒充为目标页面身份。
 """
 
 
@@ -1862,6 +1870,14 @@ def _repair_replan_prompt(
     visible_evidence 共同解释其严格绑定的上一 navigation_only 子目标。不能用它伪造
     external_state/unknown 完成，也不能在 matched 后原样保留旧子目标再提出等价动作。
 11. action_result_mismatch 不得完成回执绑定的旧子目标；revision 必须严格增加 1。
+12. 若校验错误指出“命名页面完成声明缺少结构化画面身份锚点”，不得重复该声明，
+    也不得将 summary/visible_evidence 的自由文本当作身份。只能使用 grounded_visual_facts
+    里的 screen_id、overlay 或元素 label/meaning；如仍无支持，应跳过或替换尚未完成的
+    具名页面节点，改为基于当前结构化可见元素的高层状态。不得改写用户最终目标。
+13. 若校验错误指出子目标使用了当前观察之外的完成证据，必须删除该伪证据；不得把
+    subgoal_id、condition_id、目标名称或自行概括的句子当作证据。只能逐字选择
+    visible_evidence，或为严格绑定的上一 navigation_only 子目标选择
+    controller_transition_evidence_refs[].ref_id；没有合格证据就保持未完成、替换路径或阻塞。
 """
 
 

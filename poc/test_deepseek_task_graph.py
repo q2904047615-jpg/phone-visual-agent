@@ -782,6 +782,20 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 trigger="observation_changed",
                 reason="动作后重新观察。",
             )
+        replan_prompts = [
+            call[0]["content"]
+            for call in provider.messages
+            if "高层任务图重规划器" in call[0]["content"]
+        ]
+        self.assertEqual(2, len(replan_prompts))
+        self.assertIn(
+            "其名称必须\n    能从 grounded_visual_facts",
+            replan_prompts[0],
+        )
+        self.assertIn(
+            "应跳过或替换尚未完成的\n    具名页面节点",
+            replan_prompts[1],
+        )
 
     def test_generic_element_presence_is_not_a_named_page_identity(self):
         self.assertEqual(
@@ -2719,6 +2733,43 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             result.replan_history[-1].consumed_action_transition_receipt_id,
         )
 
+    def test_replan_repairs_subgoal_id_used_as_completion_evidence(self):
+        initial = base_payload()
+        invalid = copy.deepcopy(initial)
+        invalid["status"] = "awaiting_confirmation"
+        invalid["subgoals"][0]["status"] = "completed"
+        invalid["subgoals"][0]["completion_evidence"] = ["locate_target"]
+        invalid["subgoals"][1]["status"] = "active"
+        invalid["active_subgoal_id"] = "save_target"
+        repaired = copy.deepcopy(invalid)
+        repaired["subgoals"][0]["completion_evidence"] = [
+            "controller_transition:receipt-matched:1"
+        ]
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            "目标", device_id="phone-1"
+        )
+        provider = FakeProvider(invalid, repaired)
+
+        result = DeepSeekTaskGraphPlanner(provider).replan(
+            graph,
+            matched_controller_observation(graph),
+            trigger="action_result_matched",
+            reason="一次性导航动作已由控制器验证",
+        )
+
+        self.assertEqual("completed", result.subgoals[0].status)
+        self.assertEqual(
+            ("controller_transition:receipt-matched:1",),
+            result.subgoals[0].completion_evidence,
+        )
+        replan_prompts = [
+            call[0]["content"]
+            for call in provider.messages
+            if "高层任务图重规划器" in call[0]["content"]
+        ]
+        self.assertEqual(2, len(replan_prompts))
+        self.assertIn("subgoal_id、condition_id", replan_prompts[-1])
+
     def test_typed_controller_transition_cannot_complete_external_state(self):
         initial = active_external_payload()
         completed = copy.deepcopy(initial)
@@ -3025,7 +3076,9 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         revised["status"] = "awaiting_confirmation"
         graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan("目标", device_id="phone-1")
         with self.assertRaisesRegex(TaskGraphError, "当前观察之外"):
-            DeepSeekTaskGraphPlanner(FakeProvider(revised)).replan(
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(revised, copy.deepcopy(revised))
+            ).replan(
                 graph,
                 observation(),
                 trigger="subgoal_completed",

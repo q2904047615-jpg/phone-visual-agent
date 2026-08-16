@@ -793,6 +793,50 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
         self.assertIn("states.focused=true时禁止再用tap_semantic重复聚焦", prompt)
 
+    def test_unfocused_input_hides_verified_input_until_fresh_focus(self) -> None:
+        from qwen_visual_decision import (
+            _decision_prompt,
+            _decision_retry_prompt,
+            _precondition_eligible_action_kinds,
+        )
+
+        context_payload = copy.deepcopy(self.context)
+        context_payload["goal"]["entities"] = {"input_text": "agent"}
+        context = QwenTaskContext.from_dict(context_payload)
+        field = UIElement(
+            element_id="target_field",
+            role="input",
+            meaning="target_text_input",
+            label="",
+            bounds=(0.1, 0.3, 0.9, 0.4),
+            confidence=0.99,
+            states={"goal_relevant": True, "value": ""},
+            evidence=("唯一空输入框",),
+        )
+        observation = trusted_observation(self.frames, elements=(field,))
+        eligible = _precondition_eligible_action_kinds(
+            context,
+            observation,
+            frozenset({"tap_semantic", "input_verified_text"}),
+        )
+
+        self.assertEqual(frozenset({"tap_semantic"}), eligible)
+        prompt = _decision_prompt(
+            context,
+            observation,
+            decision_number=1,
+            available_action_kinds=eligible,
+        )
+        retry = _decision_retry_prompt(
+            context,
+            observation,
+            error=VisionAgentError("输入框未聚焦"),
+            decision_number=1,
+            available_action_kinds=eligible,
+        )
+        self.assertIn("本轮应只绑定该唯一input候选并提出tap_semantic", prompt)
+        self.assertIn("本轮不得同时输入文字", retry)
+
     def test_forged_mars_element_and_self_authored_page_state_are_rejected(self) -> None:
         forged = action_payload(self.context, self.observation)
         forged["page_state"]["elements"] = [

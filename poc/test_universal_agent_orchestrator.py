@@ -930,6 +930,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         for label, meaning in (
             ("长按目标", "select_long_press_target_mode"),
             ("拖动目标", "select_drag_target_mode"),
+            ("输入并核对文字", "select_input_verify_mode"),
         ):
             with self.subTest(label=label):
                 scene = _scene(
@@ -980,6 +981,31 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertFalse(result.allowed)
         self.assertTrue(
             "破坏" in result.reason or "外部状态" in result.reason,
+            result.reason,
+        )
+
+    def test_rejects_input_like_navigation_label_with_send_semantics(self) -> None:
+        scene = _scene(
+            meaning="select_input_and_send_mode",
+            label="输入并发送",
+            states={"goal_relevant": True},
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_ui_label": "输入并发送"},
+                subgoal_objective="进入本地输入模式，使目标入口可见",
+                subgoal_constraints=("不得发送任何内容",),
+                subgoal_completion_conditions=("目标入口可见",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertTrue(
+            "破坏性语义" in result.reason or "外部状态" in result.reason,
             result.reason,
         )
 

@@ -16,7 +16,17 @@ PAGE_PATH = ROOT / "static" / "touch_calibration.html"
 ACTION_PAGE_PATH = ROOT / "static" / "action_acceptance.html"
 OUTPUT_ROOT = ROOT / "output" / "xy_calibration"
 ROOT_ACTION_MODES = frozenset(
-    {"index", "swipe", "tap", "back", "input", "long_press", "drag", "sequence"}
+    {
+        "index",
+        "swipe",
+        "tap",
+        "back",
+        "input",
+        "long_press",
+        "drag",
+        "replan",
+        "sequence",
+    }
 )
 
 

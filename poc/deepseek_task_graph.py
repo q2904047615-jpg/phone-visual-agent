@@ -1144,6 +1144,7 @@ class DeepSeekTaskGraphPlanner:
                 raw_user_goal=graph.raw_user_goal or graph.goal.objective,
                 validate=False,
             )
+            candidate = _restore_completed_history_evidence(graph, candidate)
             self._validate_replan_candidate(
                 graph,
                 candidate,
@@ -1169,6 +1170,7 @@ class DeepSeekTaskGraphPlanner:
                 raw_user_goal=graph.raw_user_goal or graph.goal.objective,
                 validate=False,
             )
+            candidate = _restore_completed_history_evidence(graph, candidate)
             try:
                 self._validate_replan_candidate(
                     graph,
@@ -1184,7 +1186,7 @@ class DeepSeekTaskGraphPlanner:
                 )
                 if normalized is None:
                     raise
-                candidate = normalized
+                candidate = _restore_completed_history_evidence(graph, normalized)
                 self._validate_replan_candidate(
                     graph,
                     candidate,
@@ -2101,6 +2103,10 @@ _VISUAL_IDENTITY_GENERIC_TOKENS = (
     "控件",
     "元素",
     "入口",
+    "主标题",
+    "标题",
+    "文字",
+    "逐字",
     "显示",
     "出现",
     "可见",
@@ -2124,6 +2130,11 @@ _VISUAL_IDENTITY_GENERIC_TOKENS = (
     "result",
     "process",
     "flow",
+    "main title",
+    "title",
+    "heading",
+    "text",
+    "verbatim",
     "current",
     "target",
     "original",
@@ -2190,6 +2201,36 @@ def _require_named_visual_identity_grounding(
         raise TaskGraphError(
             f"命名页面完成声明缺少结构化画面身份锚点：{field}"
         )
+
+
+def _restore_completed_history_evidence(
+    previous: DynamicTaskGraph,
+    candidate: DynamicTaskGraph,
+) -> DynamicTaskGraph:
+    """Keep controller-owned completion history immutable across model replans.
+
+    A model must still return every completed node with the same status and
+    semantics; deletion, resurrection, or any other field mutation remains a
+    validation error. Only the historical evidence tuple is restored from the
+    trusted previous graph, so omission or paraphrase cannot erase or rewrite
+    controller-accepted history.
+    """
+
+    completed = {
+        item.subgoal_id: item
+        for item in previous.subgoals
+        if item.status == "completed"
+    }
+    restored = tuple(
+        replace(
+            item,
+            completion_evidence=completed[item.subgoal_id].completion_evidence,
+        )
+        if item.subgoal_id in completed and item.status == "completed"
+        else item
+        for item in candidate.subgoals
+    )
+    return replace(candidate, subgoals=restored)
 
 
 def _validate_revision(

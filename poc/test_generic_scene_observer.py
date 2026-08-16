@@ -2072,6 +2072,41 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn("不能因为目标尚未完成而降低", targeted_text)
         self.assertIn("模糊、遮挡或不唯一时仍必须降低", targeted_text)
 
+    def test_goal_element_without_visible_evidence_triggers_targeted_refinement(self) -> None:
+        first = scene_payload()
+        first["screen_id"] = "generic_acceptance"
+        first["elements"][0].update(
+            {
+                "role": "button",
+                "meaning": "back_to_list",
+                "label": "返回验收模式选择",
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": [],
+            }
+        )
+        refined = json.loads(json.dumps(first, ensure_ascii=False))
+        refined["elements"][0]["element_id"] = "return_entry_01"
+        refined["elements"][0]["evidence"] = [
+            "说明文字下方带下划线的白色返回入口，四边完整可见"
+        ]
+        provider = SequenceProvider([first, refined])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "回到验收模式选择列表",
+                "entities": {"target_ui_label": "返回验收模式选择"},
+            },
+        )
+
+        self.assertEqual(2, provider.calls)
+        self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
+        self.assertEqual(
+            ("说明文字下方带下划线的白色返回入口，四边完整可见",),
+            scene.elements[0].evidence,
+        )
+
     def test_unrelated_goal_relevant_element_cannot_suppress_exact_label_refinement(self) -> None:
         first = scene_payload()
         first["screen_id"] = "acceptance_modes"
@@ -3875,6 +3910,48 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         self.assertFalse(observer.last_diagnostics["targeted_refinement_used"])
 
+    def test_title_goal_refines_and_promotes_unique_page_title_identity(self) -> None:
+        compact = scene_payload()
+        compact["screen_id"] = "unknown"
+        compact["elements"] = [
+            {
+                "element_id": "return-link",
+                "role": "button",
+                "meaning": "return_to_previous",
+                "label": "返回",
+                "bounds": [100, 230, 300, 280],
+                "confidence": 1.0,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["页面上方返回文字清晰可见"],
+            }
+        ]
+        refined = json.loads(json.dumps(compact, ensure_ascii=False))
+        refined["elements"] = [
+            {
+                "element_id": "page-title",
+                "role": "text",
+                "meaning": "page_title",
+                "label": "通用动作真机验收页",
+                "bounds": [100, 100, 700, 180],
+                "confidence": 1.0,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["页面顶部唯一大号主标题逐字清晰可见"],
+            }
+        ]
+        provider = SequenceProvider([compact, refined])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"objective": "看清下一页标题"},
+        )
+
+        self.assertEqual(2, provider.calls)
+        self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
+        self.assertEqual("通用动作真机验收页", scene.screen_id)
+        self.assertEqual("page_title", scene.elements[0].meaning)
+        self.assertEqual("通用动作真机验收页", scene.elements[0].label)
+
     def test_high_confidence_goal_element_does_not_refine_only_for_unknown_screen(self) -> None:
         payload = scene_payload()
         payload["foreground_app_id"] = "unknown"
@@ -3899,8 +3976,48 @@ class GenericSceneObserverTests(unittest.TestCase):
         status = GenericSceneObserver(FakeProvider(scene_payload())).status()
         self.assertEqual(status["compact_output_tokens"], 1200)
         self.assertEqual(status["observation_timeout_seconds"], 60.0)
-        self.assertEqual(status["max_compact_elements"], 6)
+        self.assertEqual(status["max_compact_elements"], 4)
         self.assertEqual(status["current_stage"], "idle")
+
+    def test_ordinal_prompts_require_preceding_visible_siblings(self) -> None:
+        context = {"objective": "进入列表中从上往下第二项"}
+        compact = _compact_prompt(context)
+        targeted = _targeted_prompt(
+            context,
+            first_scene={
+                "foreground_app_id": "unknown",
+                "screen_id": "list",
+                "summary": "列表页",
+                "system_ui": {},
+                "overlays": [],
+                "confidence": 1.0,
+            },
+        )
+
+        for prompt in (compact, targeted):
+            self.assertIn("之前所有同列", prompt)
+            self.assertIn("goal_relevant:true", prompt)
+            self.assertIn("不得", prompt)
+
+    def test_title_prompts_prioritize_structured_page_identity(self) -> None:
+        context = {"objective": "读取下一页标题"}
+        compact = _compact_prompt(context)
+        targeted = _targeted_prompt(
+            context,
+            first_scene={
+                "foreground_app_id": "unknown",
+                "screen_id": "unknown",
+                "summary": "当前页面",
+                "system_ui": {},
+                "overlays": [],
+                "confidence": 1.0,
+            },
+        )
+
+        for prompt in (compact, targeted):
+            self.assertIn("meaning=page_title", prompt)
+            self.assertIn("普通正文", prompt)
+            self.assertIn("screen_id", prompt)
 
 
 if __name__ == "__main__":

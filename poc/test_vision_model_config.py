@@ -118,6 +118,19 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
         self.assertEqual(status["response_model"], "qwen3.7-plus-2026-05-26")
         self.assertEqual(status["last_finish_reason"], "stop")
 
+    def test_json_object_mode_is_forwarded_only_when_requested(self) -> None:
+        provider = DashScopeVisionProvider(api_key="test-key", max_attempts=1)
+        with patch("vision_agent.httpx.post", return_value=self._response()) as mocked:
+            provider._chat(
+                [{"role": "user", "content": "json"}],
+                max_tokens=500,
+                response_format={"type": "json_object"},
+            )
+        self.assertEqual(
+            {"type": "json_object"},
+            mocked.call_args.kwargs["json"]["response_format"],
+        )
+
     def test_explicit_model_config_is_atomic(self) -> None:
         config = VisionModelConfig(
             model="qwen3.7-plus-2026-05-26",

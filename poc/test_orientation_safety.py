@@ -87,13 +87,14 @@ class OrientationCredentialTests(unittest.TestCase):
     def test_small_camera_noise_and_exposure_pass_but_rotation_is_rejected(self):
         reference = patterned_frame()
         exposure = ImageEnhance.Brightness(reference).enhance(1.04)
+        darker_exposure = ImageEnhance.Brightness(reference).enhance(0.90)
         noisy = exposure.copy()
         draw = ImageDraw.Draw(noisy)
         for y in range(20, noisy.height, 53):
             for x in range(15, noisy.width, 47):
                 draw.point((x, y), fill=(105, 110, 115))
 
-        for actual in (exposure, noisy):
+        for actual in (exposure, darker_exposure, noisy):
             gate = PhysicalExecutionGate("device-a")
             credential = audited_credential(frame=reference)
             gate.arm(

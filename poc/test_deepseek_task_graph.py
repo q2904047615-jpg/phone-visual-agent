@@ -810,6 +810,23 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             _named_visual_identity_anchor(("跨境订单结果页面可见",)),
         )
 
+    def test_current_page_title_read_is_not_a_named_page_identity(self):
+        self.assertEqual(
+            "",
+            _named_visual_identity_anchor(
+                (
+                    "当前页面主标题逐字可见",
+                    "当前页面主标题文字逐字可见",
+                )
+            ),
+        )
+        self.assertEqual(
+            "",
+            _named_visual_identity_anchor(
+                ("The current page main title text is visible verbatim",)
+            ),
+        )
+
     def test_replan_accepts_named_page_completion_with_grounded_identity(self):
         objective = "原来的只读通用动作验收页面可见"
         initial = single_subgoal_payload(objective, external_impact="read_only")
@@ -2109,6 +2126,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual(1, len(audit_prompts))
         self.assertIn("未提交临时文字", audit_prompts[0])
         self.assertIn("输入并搜索/发送/保存", audit_prompts[0])
+        self.assertIn("本地只读页面的跨页浏览闭环", audit_prompts[0])
+        self.assertIn("翻进", audit_prompts[0])
 
     def test_local_navigation_exception_never_hides_explicit_external_effect(self):
         objective = "新建空白标签页后登录当前账号"
@@ -2963,6 +2982,38 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 trigger="observation_changed",
                 reason="页面变化",
             )
+
+    def test_replan_restores_omitted_completed_history_evidence(self):
+        completed_payload = base_payload()
+        completed_payload["subgoals"][0]["status"] = "completed"
+        completed_payload["subgoals"][0]["completion_evidence"] = ["历史可见证据"]
+        completed_payload["subgoals"][1]["status"] = "active"
+        completed_payload["active_subgoal_id"] = "save_target"
+        completed_payload["status"] = "awaiting_confirmation"
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(base_payload())).plan(
+            "目标",
+            device_id="phone-1",
+        )
+        first = DeepSeekTaskGraphPlanner(FakeProvider(completed_payload)).replan(
+            graph,
+            ObservedState("scene-1", "详情已显示", ("历史可见证据",)),
+            trigger="subgoal_completed",
+            reason="第一子目标完成",
+        )
+        omitted = copy.deepcopy(completed_payload)
+        omitted["subgoals"][0]["completion_evidence"] = []
+
+        revised = DeepSeekTaskGraphPlanner(FakeProvider(omitted)).replan(
+            first,
+            observation(),
+            trigger="observation_changed",
+            reason="页面出现轻微观察差异",
+        )
+
+        self.assertEqual(
+            ("历史可见证据",),
+            revised.subgoals[0].completion_evidence,
+        )
 
     def test_new_completion_claim_requires_current_observation_evidence(self):
         initial = base_payload()

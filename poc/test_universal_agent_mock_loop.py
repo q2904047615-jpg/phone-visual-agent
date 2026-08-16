@@ -111,6 +111,12 @@ class ScriptedObserver:
             evidence=("合成手机界面轴线",),
         )
 
+    def audit_element_geometry(self, *, frames, scene, element_ids):
+        del frames
+        for element_id in element_ids:
+            scene.get_element(element_id)
+        return scene
+
 
 class ScriptedCapture:
     def __init__(self, *, unstable_after: bool = False) -> None:

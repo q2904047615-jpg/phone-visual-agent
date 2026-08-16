@@ -49,7 +49,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-16-generic-scene-observer-v29"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-16-generic-scene-observer-v33"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
@@ -62,7 +62,7 @@ ELEMENT_GEOMETRY_AUDIT_TOKENS = 500
 ORIENTATION_AUDIT_TOKENS = 500
 MIN_SYSTEM_UI_AUDIT_CONFIDENCE = 0.80
 OBSERVATION_TIMEOUT_SECONDS = 60.0
-MAX_COMPACT_ELEMENTS = 6
+MAX_COMPACT_ELEMENTS = 4
 
 STAGE_LABELS = {
     "idle": "空闲",
@@ -162,6 +162,11 @@ class GenericSceneObserver:
             source_ref = f"geom-{source_digest[:24]}"
             prompt = None
             selected_evidence = ""
+            visible_literal_labels = tuple(
+                item.label
+                for item in scene.elements
+                if item.label
+            )
             for evidence in element.evidence:
                 try:
                     prompt = element_geometry_audit_prompt(
@@ -169,6 +174,7 @@ class GenericSceneObserver:
                         literal_label=element.label,
                         visual_role=element.role,
                         visible_evidence=evidence,
+                        visible_literal_labels=visible_literal_labels,
                     )
                     selected_evidence = evidence
                     break
@@ -195,15 +201,31 @@ class GenericSceneObserver:
                     },
                 ],
                 max_tokens=ELEMENT_GEOMETRY_AUDIT_TOKENS,
+                response_format={"type": "json_object"},
             )
+            self.last_raw_response = raw
             self._set_stage("parsing_element_geometry_audit")
-            audited = select_unique_audited_geometry(
-                raw,
-                expected_source_ref=source_ref,
-                expected_label=element.label,
-                expected_role=element.role,
-                transform=transform,
-            )
+            try:
+                audited = select_unique_audited_geometry(
+                    raw,
+                    expected_source_ref=source_ref,
+                    expected_label=element.label,
+                    expected_role=element.role,
+                    transform=transform,
+                    visible_literal_labels=visible_literal_labels,
+                )
+            except Exception as exc:
+                self.last_geometry_audit_diagnostics = {
+                    "scene_fingerprint": scene.fingerprint,
+                    "element_id": element_id,
+                    "source_ref": source_ref,
+                    "json_mode_requested": True,
+                    "response_length": len(raw),
+                    "response_text": raw[:4096],
+                    "audit_accepted": False,
+                    "error_type": classify_qwen_error(exc, raw_response=raw),
+                }
+                raise
             replacements[element_id] = audited.full_bounds
             audit_records.append(
                 {
@@ -417,6 +439,9 @@ class GenericSceneObserver:
                 ),
                 "last_orientation_audit_diagnostics": dict(
                     self.last_orientation_audit_diagnostics
+                ),
+                "last_geometry_audit_diagnostics": dict(
+                    self.last_geometry_audit_diagnostics
                 ),
             }
         )
@@ -901,6 +926,27 @@ class GenericSceneObserver:
                     fingerprint=fingerprint,
                 )
 
+            missing_goal_evidence = [
+                element.element_id
+                for element in scene.elements
+                if element.states.get("goal_relevant") is True
+                and not any(item.strip() for item in element.evidence)
+            ]
+            if missing_goal_evidence:
+                self.last_diagnostics = {
+                    "observer_version": GENERIC_SCENE_OBSERVER_VERSION,
+                    "vision_model": model_identity,
+                    "strategy": "compact_then_targeted_on_demand",
+                    "model_calls": model_calls,
+                    "targeted_refinement_used": targeted_refinement_used,
+                    "missing_goal_evidence_element_ids": missing_goal_evidence,
+                    "fingerprint": fingerprint,
+                }
+                raise VisionAgentError(
+                    "目标相关元素缺少原始可见证据，不能建立可信候选："
+                    + ",".join(missing_goal_evidence)
+                )
+
             target_local_candidate = scene.unique_trusted_goal_element()
             completion_evidence = scene.trusted_completion_evidence()
             if not scene.stable or (
@@ -1092,13 +1138,19 @@ class GenericSceneObserver:
         messages: list[dict[str, Any]],
         *,
         max_tokens: int,
+        response_format: dict[str, str] | None = None,
     ) -> str:
         try:
+            options: dict[str, Any] = {
+                "timeout": OBSERVATION_TIMEOUT_SECONDS,
+                "max_attempts": 2,
+            }
+            if response_format is not None:
+                options["response_format"] = response_format
             return self.provider._chat(
                 messages,
                 max_tokens=max_tokens,
-                timeout=OBSERVATION_TIMEOUT_SECONDS,
-                max_attempts=2,
+                **options,
             )
         except TypeError as exc:
             # Keep simple test providers and local replay providers compatible.
@@ -1514,6 +1566,16 @@ def _compact_prompt(context: dict[str, Any]) -> str:
     接触视口边缘，必须在summary记录“对应边缘存在明确的页面延续标记，内容仍可继续浏览”。只有线条
     确实属于页面内容且连续到边缘时才能报告；装饰线、手机边框和机械臂控制器标线不算。该事实同样
     只是只读滚动线索，不能猜测边缘之外的目标或给出动作建议。
+15. 如果目标用“从上往下第N项/列表第N项/first、second、Nth item”等序数指定同一列表内的
+    可见条目，必须把目标条目及其之前所有同列、同类、完整可见的兄弟条目分别写入elements，
+    每项逐字抄录label并紧框自身；只有目标条目写goal_relevant:true，前序证明项写false。
+    序数必须按这些条目的垂直中心从上到下比较，不能根据文字含义猜测。若N超过elements上限、
+    任一前序项不可见/被遮挡/无法同列绑定，或不能逐项证明顺序，就不得把任何候选标成目标相关，
+    并在summary说明序数证据不足。
+16. 如果目标要求看清、读取或核对当前/下一页的标题、题头、heading或title，必须优先报告唯一清晰
+    的页面主标题：role=text、meaning=page_title、label逐字抄录、goal_relevant:true，并明确
+    fully_visible。清晰主标题可直接作为screen_id；普通正文、卡片说明、按钮文字和浏览器标题栏
+    不能冒充页面主标题。看不清、存在多个同级主标题或标题不完整时保持screen_id=unknown。
 
 只返回下列完整JSON，不要Markdown：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
@@ -1545,6 +1607,10 @@ def _targeted_retry_prompt(
 内容猜成目标或写成动作建议，也不得把它标成可操作目标。
 分步流程、时间线或结构化长页面若有属于页面内容的连续引导轨/连接线明确接触视口边缘，summary必须
 记录“对应边缘存在明确的页面延续标记，内容仍可继续浏览”；装饰线、手机边框和控制器标线不算。
+序数列表目标必须同时返回目标及其之前所有同列、同类、完整可见兄弟项，逐项抄录label和bounds；
+只把按垂直中心排序后位于指定序位的条目标成goal_relevant:true。缺少任一前序证明项时不得猜测。
+标题读取目标必须优先返回唯一页面主标题元素：role=text、meaning=page_title、逐字label、
+goal_relevant:true、fully_visible明确；普通正文、按钮或浏览器标题栏不能冒充主标题。
 格式：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
 "screen_id":"unknown","summary":"短描述","system_ui":{{"immersive_or_fullscreen":"unknown",
@@ -1595,6 +1661,12 @@ summary必须记录“对应边缘存在部分可见的后续内容，列表仍�
 如果当前是分步流程、时间线或结构化长页面，且属于页面内容的连续引导轨、连接线或内容轨道明确延伸
 并接触原图边缘，summary必须记录“对应边缘存在明确的页面延续标记，内容仍可继续浏览”。装饰线、
 手机边框和机械臂控制器标线不算；不得猜测边缘外是什么，也不得把该标记写成可操作目标。
+若目标以序数指定列表条目，必须把目标及其之前所有同列、同类、完整可见兄弟项分别写入elements，
+逐字抄录label并紧框自身；只把按垂直中心从上到下排序后位于指定序位的条目标成goal_relevant:true，
+前序证明项写false。缺少任一前序项、超过4个元素或无法证明同列顺序时不得猜测目标。
+若目标要求读取当前或下一页标题，必须优先返回唯一页面主标题元素，使用role=text、
+meaning=page_title、逐字label、goal_relevant:true并明确fully_visible；普通正文、按钮文字、
+卡片说明和浏览器标题栏都不是页面主标题。
 若目标是图标且高清局部内存在两个或以上相邻图标，必须逐个区分图标语义：一个element只能紧框一个
 完整图标，绝不能把工具栏、图标组或相邻图标合成同一bounds。目标图标与相邻非目标图标可明确区分时，
 只把目标写goal_relevant:true，相邻图标写false或省略；证据必须说明看见的目标字面图形以及与相邻图标
@@ -2049,6 +2121,7 @@ def _parse_scene(
         _normalize_prefilled_input_structure(payload, goal_context or {})
         _normalize_local_text_clear_structure(payload, goal_context or {})
         _normalize_exact_target_ui_label_relevance(payload, goal_context or {})
+        _normalize_page_title_identity(payload, goal_context or {})
         _normalize_unique_input_focus(payload)
         _drop_out_of_range_non_goal_elements(payload)
         return UIScene.from_dict(
@@ -2154,6 +2227,86 @@ def _normalize_tab_navigation_safety(
             states = item.get("states")
             if isinstance(states, dict):
                 states["goal_relevant"] = False
+
+
+def _goal_requests_page_title(context: dict[str, Any]) -> bool:
+    text = json.dumps(
+        context,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).casefold()
+    return any(marker in text for marker in ("标题", "题头", "heading", "title"))
+
+
+def _normalize_page_title_identity(
+    payload: dict[str, Any],
+    goal_context: dict[str, Any],
+) -> None:
+    """Promote only one explicit, strong page-title fact into screen identity."""
+
+    if not _goal_requests_page_title(goal_context):
+        return
+    if str(payload.get("screen_id") or "").strip().casefold() != "unknown":
+        return
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return
+    candidates = []
+    for item in elements:
+        if not isinstance(item, dict):
+            continue
+        meaning = str(item.get("meaning") or "").strip().casefold().replace("_", " ")
+        states = item.get("states")
+        bounds = item.get("bounds")
+        label = str(item.get("label") or "").strip()
+        confidence = item.get("confidence")
+        if (
+            item.get("role") != "text"
+            or meaning not in {"page title", "screen title", "page heading", "heading"}
+            or not isinstance(states, dict)
+            or states.get("goal_relevant") is not True
+            or states.get("fully_visible") is not True
+            or not isinstance(bounds, list)
+            or len(bounds) != 4
+            or not label
+            or len(label) > 120
+            or not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or float(confidence) < 0.90
+        ):
+            continue
+        try:
+            top = float(bounds[1]) / 1000.0
+            height = (float(bounds[3]) - float(bounds[1])) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        if top < 0.0 or top > 0.45 or height <= 0.0 or height > 0.15:
+            continue
+        candidates.append(label)
+    if len(candidates) == 1:
+        payload["screen_id"] = re.sub(r"\s+", " ", candidates[0]).strip()
+
+
+def _scene_has_grounded_page_title(scene: UIScene) -> bool:
+    candidates = []
+    for element in scene.elements:
+        meaning = element.meaning.casefold().replace("_", " ")
+        if (
+            element.role == "text"
+            and meaning in {"page title", "screen title", "page heading", "heading"}
+            and element.label.strip()
+            and float(element.confidence) >= 0.90
+            and element.states.get("goal_relevant") is True
+            and element.states.get("fully_visible") is True
+            and 0.0 <= element.bounds[1] <= 0.45
+            and 0.0 < element.bounds[3] - element.bounds[1] <= 0.15
+        ):
+            candidates.append(element)
+    return bool(
+        len(candidates) == 1
+        and scene.screen_id.casefold() != "unknown"
+        and re.sub(r"\s+", " ", candidates[0].label).strip() == scene.screen_id
+    )
 
 
 def _apply_system_ui_audit(
@@ -4169,6 +4322,8 @@ def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
         return False
     if scene.confidence < 0.72:
         return True
+    if _goal_requests_page_title(context) and not _scene_has_grounded_page_title(scene):
+        return True
     entities = context.get("entities")
     target_label = (
         str(entities.get("target_ui_label") or "").strip()
@@ -4181,6 +4336,8 @@ def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
         ]
         if len(exact_matches) != 1:
             return True
+        if not any(item.strip() for item in exact_matches[0].evidence):
+            return True
     goal_elements = [
         element
         for element in scene.elements
@@ -4189,6 +4346,7 @@ def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
     if any(
         element.confidence >= 0.72
         and element.states.get("fully_visible") is not False
+        and any(item.strip() for item in element.evidence)
         for element in goal_elements
     ):
         return False

@@ -152,6 +152,10 @@ account_or_permission_change | unknown_external_effect
     显示某个模式，属于 navigation_only。修改系统默认输入法、全局键盘设置、账号同步、云端词库或安装/
     启用/停用输入法，仍属于 external_state 或 unknown。输入文字后搜索、发送、保存或发布仍按其
     实际外部效果分类。
+16. 进入、查看并返回本地只读页面的跨页浏览闭环，只要正向目标全部是改变当前查看位置或核验
+    可见内容，并且明确不提交、不发送、不保存、不修改账号、权限、关系、交易或远端数据，就属于
+    navigation_only；不得仅因目标使用“翻进”“退回”“看一眼”等自然措辞返回 unknown。若页面是否
+    本地只读、是否存在外部效果或否定约束的作用范围不清，仍必须返回 unknown。
 
 输入 sources：
 {source_json}

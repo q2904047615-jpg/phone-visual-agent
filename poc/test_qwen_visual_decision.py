@@ -609,6 +609,74 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn("禁止再点击", prompt)
         self.assertIn("已选中tab", prompt)
 
+    def test_prompt_treats_negative_constraints_as_candidate_filter(self) -> None:
+        from qwen_visual_decision import _decision_prompt
+
+        prompt = _decision_prompt(
+            QwenTaskContext.from_dict(self.context),
+            self.observation,
+            decision_number=1,
+            available_action_kinds=frozenset({"tap_semantic", "back"}),
+        )
+
+        self.assertIn("候选选择前的硬过滤条件", prompt)
+        self.assertIn("即使它看起来是最短路径", prompt)
+        self.assertIn("应使用无element_id、无坐标的back", prompt)
+        self.assertIn("绝不能把back伪装成页面元素tap_semantic", prompt)
+
+    def test_negative_constraint_removes_candidate_from_model_surface_only(self) -> None:
+        from qwen_visual_decision import _decision_observation_prompt_dict
+
+        candidate = self.observation.scene.elements[0]
+        context = json.loads(json.dumps(self.context, ensure_ascii=False))
+        context["current_subgoal"]["constraints"] = [
+            f"不要再次使用{candidate.label}入口"
+        ]
+        prompt_observation = _decision_observation_prompt_dict(
+            QwenTaskContext.from_dict(context),
+            self.observation,
+        )
+
+        self.assertNotIn(
+            candidate.element_id,
+            {item["element_id"] for item in prompt_observation["candidates"]},
+        )
+        self.assertEqual(
+            candidate.element_id,
+            self.observation.scene.elements[0].element_id,
+        )
+
+    def test_page_element_scope_constraint_removes_button_candidate(self) -> None:
+        from qwen_visual_decision import _decision_observation_prompt_dict
+
+        context = json.loads(json.dumps(self.context, ensure_ascii=False))
+        context["current_subgoal"]["constraints"] = [
+            "禁止通过任何页面正文链接、按钮或元素跳转"
+        ]
+        prompt_observation = _decision_observation_prompt_dict(
+            QwenTaskContext.from_dict(context),
+            self.observation,
+        )
+
+        self.assertEqual([], prompt_observation["candidates"])
+
+    def test_named_page_button_constraint_keeps_unrelated_list_candidate(self) -> None:
+        from qwen_visual_decision import _decision_observation_prompt_dict
+
+        context = json.loads(json.dumps(self.context, ensure_ascii=False))
+        context["current_subgoal"]["constraints"] = [
+            "不要触碰页面练习按钮、浏览器栏"
+        ]
+        prompt_observation = _decision_observation_prompt_dict(
+            QwenTaskContext.from_dict(context),
+            self.observation,
+        )
+
+        self.assertEqual(
+            [item.element_id for item in self.observation.scene.elements],
+            [item["element_id"] for item in prompt_observation["candidates"]],
+        )
+
     def test_prompt_allows_one_bounded_swipe_for_clipped_navigation_list(self) -> None:
         from qwen_visual_decision import _decision_prompt
 

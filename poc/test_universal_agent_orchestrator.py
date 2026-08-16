@@ -673,6 +673,108 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual("back", result.canonical_class)
 
+    def test_rejects_visible_target_named_by_negative_constraint(self) -> None:
+        scene = _scene(
+            meaning="navigation_link",
+            label="返回验收模式选择",
+            role="text",
+            states={"fully_visible": True, "goal_relevant": True},
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                subgoal_objective="验收模式选择列表页面可见",
+                subgoal_constraints=(
+                    "不要再次使用当前正文里的同名返回入口",
+                ),
+                subgoal_completion_conditions=("验收模式选择列表可见",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("明确排除", result.reason)
+
+    def test_negative_element_constraint_does_not_block_system_back(self) -> None:
+        scene = _scene()
+        decision = _decision(scene, action_kind="back")
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                subgoal_constraints=(
+                    "不要再次使用当前正文里的同名返回入口",
+                ),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("back", result.canonical_class)
+
+    def test_rejects_all_page_element_candidates_when_scope_is_forbidden(self) -> None:
+        scene = _scene(
+            meaning="navigate_back",
+            label="返回验收模式选择",
+            role="button",
+            states={"fully_visible": True, "goal_relevant": True},
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                subgoal_constraints=(
+                    "禁止通过任何页面正文链接、按钮或元素跳转",
+                ),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("明确排除", result.reason)
+
+    def test_named_page_button_constraint_keeps_unrelated_list_target(self) -> None:
+        scene = _scene(
+            meaning="list_option",
+            label="语义点击",
+            role="button",
+            states={"fully_visible": True, "goal_relevant": True},
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                subgoal_objective="进入语义点击选项",
+                subgoal_constraints=("不要触碰页面练习按钮、浏览器栏",),
+                subgoal_completion_conditions=("语义点击选项对应页面可见",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed, result.reason)
+
+    def test_unrelated_negative_constraint_does_not_block_safe_target(self) -> None:
+        scene = _scene(
+            meaning="open_details",
+            label="查看详情",
+            role="button",
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                subgoal_constraints=("不得提交、发送或保存账号数据",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+
     def test_allows_home_for_navigation_only_subgoal(self) -> None:
         scene = _scene()
         decision = _decision(scene, action_kind="home")
@@ -1633,6 +1735,222 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertTrue(result.allowed)
         self.assertEqual("goal_bound_tap", result.canonical_class)
 
+    def test_allows_unique_goal_bound_tap_when_relevance_is_unspecified(self) -> None:
+        scene = _scene(
+            meaning="purple_diamond_choice",
+            label="紫色菱形",
+            role="button",
+            states={"fully_visible": True},
+        )
+        scene = replace(
+            scene,
+            elements=(
+                replace(
+                    scene.elements[0],
+                    evidence=("紫色菱形入口与结构化目标实体一致",),
+                ),
+            ),
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_object": "紫色菱形入口"},
+                subgoal_objective="激活紫色菱形入口以显示后续内容",
+                subgoal_completion_conditions=("后续内容已经可见",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("goal_bound_tap", result.canonical_class)
+
+    def test_negative_safety_constraints_are_not_positive_action_semantics(self) -> None:
+        scene = _scene(
+            meaning="acceptance_mode_option",
+            label="语义点击",
+            role="list_item",
+            states={"fully_visible": True},
+        )
+        target = replace(
+            scene.elements[0],
+            bounds=(0.12, 0.36, 0.88, 0.44),
+            evidence=("验收模式选择列表中的第二项完整可见",),
+        )
+        predecessor = replace(
+            target,
+            element_id="first-mode",
+            label="向上滑动",
+            bounds=(0.12, 0.26, 0.88, 0.34),
+            states={"fully_visible": True, "goal_relevant": False},
+            evidence=("同一列表第一项完整可见",),
+        )
+        scene = replace(scene, elements=(target, predecessor))
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_ui_label": "验收模式选择"},
+                subgoal_objective="验收模式选择列表中的第二项可见",
+                subgoal_constraints=(
+                    "只浏览本地只读内容，不提交、不发送、不保存、不登录，"
+                    "也不修改任何账号、权限、关系、交易或远端数据",
+                ),
+                subgoal_completion_conditions=("验收模式选择列表中的第二项可见",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("goal_bound_tap", result.canonical_class)
+
+    def test_goal_bound_tap_can_bind_container_entity_through_same_scene(self) -> None:
+        scene = _scene(
+            meaning="acceptance_mode_option",
+            label="语义点击",
+            role="list_item",
+            states={"fully_visible": True},
+        )
+        target = replace(
+            scene.elements[0],
+            bounds=(0.12, 0.36, 0.88, 0.44),
+            evidence=("列表中位于‘向上滑动’正下方的第二个条目完整可见",),
+        )
+        predecessor = replace(
+            target,
+            element_id="first-mode",
+            label="向上滑动",
+            bounds=(0.12, 0.26, 0.88, 0.34),
+            states={"fully_visible": True, "goal_relevant": False},
+            evidence=("同一列表第一项完整可见",),
+        )
+        scene = replace(
+            scene,
+            summary="当前显示验收模式选择列表",
+            elements=(target, predecessor),
+        )
+        context = _context(
+            entities={"target_ui_label": "验收模式选择"},
+            subgoal_objective="第二项对应的目标页面可见",
+            subgoal_completion_conditions=("第二项对应的目标页面可见",),
+        )
+
+        allowed = self.policy.evaluate(
+            task_context=context,
+            trusted_observation=_decision(scene).trusted_observation,
+            decision=_decision(scene),
+        )
+        self.assertTrue(allowed.allowed)
+        self.assertEqual("goal_bound_tap", allowed.canonical_class)
+
+        unrelated_scene = replace(
+            scene,
+            elements=(replace(target, evidence=("页面上的帮助入口",)),),
+        )
+        unrelated = self.policy.evaluate(
+            task_context=context,
+            trusted_observation=_decision(unrelated_scene).trusted_observation,
+            decision=_decision(unrelated_scene),
+        )
+        self.assertFalse(unrelated.allowed)
+        self.assertIn("目标实体与当前子目标", unrelated.reason)
+
+        instruction_scene = replace(
+            scene,
+            elements=(
+                replace(target, evidence=("请滑动后选择列表第二项",)),
+                predecessor,
+            ),
+        )
+        instruction = self.policy.evaluate(
+            task_context=context,
+            trusted_observation=_decision(instruction_scene).trusted_observation,
+            decision=_decision(instruction_scene),
+        )
+        self.assertFalse(instruction.allowed)
+        self.assertIn("标签外控制指令", instruction.reason)
+
+    def test_ordinal_goal_rejects_single_self_claimed_second_item(self) -> None:
+        scene = _scene(
+            meaning="acceptance_mode_option",
+            label="向上滑动",
+            role="list_item",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        scene = replace(
+            scene,
+            summary="当前显示验收模式选择列表",
+            elements=(
+                replace(
+                    scene.elements[0],
+                    evidence=("列表中从上往下第二项",),
+                ),
+            ),
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_ui_label": "验收模式选择"},
+                subgoal_objective="验收模式选择列表中的第二项对应页面可见",
+                subgoal_completion_conditions=("第二项对应页面可见",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("前序同列兄弟项", result.reason)
+
+    def test_completed_ordinal_history_does_not_constrain_current_return_subgoal(self) -> None:
+        context = _context(
+            entities={"target_ui_label": "返回验收模式选择"},
+            subgoal_objective="验收模式选择列表页面可见",
+            subgoal_completion_conditions=("验收模式选择列表页面可见",),
+        )
+        context.goal["objective"] = (
+            "当前已经进入列表第二项，读取标题后返回验收模式选择列表"
+        )
+
+        self.assertIsNone(self.policy._vertical_list_ordinal(context))
+
+    def test_ordinal_goal_rejects_first_item_when_second_is_visible(self) -> None:
+        scene = _scene(
+            meaning="acceptance_mode_option",
+            label="向上滑动",
+            role="list_item",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        first = replace(scene.elements[0], bounds=(0.12, 0.26, 0.88, 0.34))
+        second = replace(
+            first,
+            element_id="second-mode",
+            label="语义点击",
+            bounds=(0.12, 0.36, 0.88, 0.44),
+            states={"goal_relevant": False, "fully_visible": True},
+        )
+        scene = replace(
+            scene,
+            summary="当前显示验收模式选择列表",
+            elements=(first, second),
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_ui_label": "验收模式选择"},
+                subgoal_objective="验收模式选择列表中的第二项对应页面可见",
+                subgoal_completion_conditions=("第二项对应页面可见",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("指定序位", result.reason)
+
     def test_goal_bound_unknown_tap_fails_closed_without_every_gate(self) -> None:
         base_scene = _scene(
             meaning="purple_diamond_choice",
@@ -1666,11 +1984,17 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             )
         )
 
-        no_binding_scene = replace(
+        explicitly_unrelated_scene = replace(
             base_scene,
-            elements=(replace(base_element, states={}),),
+            elements=(replace(base_element, states={"goal_relevant": False}),),
         )
-        cases.append(("goal_relevant", safe_context, _decision(no_binding_scene)))
+        cases.append(
+            (
+                "goal_relevant=false",
+                safe_context,
+                _decision(explicitly_unrelated_scene),
+            )
+        )
 
         missing_state_binding = _decision(base_scene)
         missing_state_binding.proposal.action.params.pop("states")
@@ -1688,12 +2012,10 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         second = replace(
             base_element,
             element_id="second-choice",
-            meaning="second_unknown_choice",
-            label="另一个紫色菱形",
             bounds=(0.55, 0.2, 0.85, 0.3),
         )
         multiple_scene = replace(base_scene, elements=(base_element, second))
-        cases.append(("唯一高置信", safe_context, _decision(multiple_scene)))
+        cases.append(("只有一个高置信候选", safe_context, _decision(multiple_scene)))
 
         no_postcondition = _decision(base_scene)
         no_postcondition.proposal.action.params["expected_effect"] = {}
@@ -2814,6 +3136,57 @@ class UniversalAgentStartTests(unittest.TestCase):
 
         self.assertEqual(0, adapter.execute_calls)
 
+    def test_read_only_successor_requires_reobservation_without_releasing_device(self) -> None:
+        initial = self._read_only_locate_graph()
+        initial = replace(
+            initial,
+            subgoals=(
+                initial.subgoals[0],
+                replace(
+                    initial.subgoals[1],
+                    objective="核对另一个只读结果",
+                    completion_conditions=("完成只读核对",),
+                    external_impact="read_only",
+                ),
+            ),
+        )
+        initial.validate()
+        revised = self._advance_locate_graph(initial)
+        planner = FakeDeepSeekPlanner(initial, replan_result=revised)
+        qwen = FakeQwenObserver()
+        adapter = FakeAdapter(
+            _scene(
+                meaning="当前可编辑输入框",
+                label="旧内容",
+                role="input",
+                states={
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                },
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(planner, qwen, adapter)
+            session = orchestrator.start(
+                session_id="session-read-only-reobserve",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            self.assertEqual("needs_reobservation", session.status)
+            self.assertEqual(
+                session.session_id,
+                orchestrator.device_registry.active_session(session.device_id),
+            )
+            self.assertEqual(0, adapter.execute_calls)
+            self.assertEqual(0, session.physical_actions)
+            orchestrator.cancel(session)
+
 
 def _confirmation(session) -> dict:
     return dict(session.snapshot()["confirmation_scope"])
@@ -3035,6 +3408,224 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
             session.task_graph.revision,
             qwen.calls[1]["task_context"]["revision"],
         )
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_start_consumes_only_the_visible_safe_presence_prefix_before_qwen(self) -> None:
+        base = _graph()
+        initial = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="进入验收模式选择列表第二项后查看目标页标题",
+                entities={"target_ui_label": "验收模式选择"},
+            ),
+            subgoals=(
+                replace(
+                    base.subgoals[0],
+                    subgoal_id="list-visible",
+                    objective="验收模式选择列表在当前页面可见",
+                    completion_conditions=("验收模式选择列表可见",),
+                ),
+                Subgoal(
+                    subgoal_id="second-visible",
+                    objective="列表中从上往下第二项可见",
+                    status="pending",
+                    depends_on=("list-visible",),
+                    constraints=(),
+                    completion_conditions=("从上往下第二项可见",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+                Subgoal(
+                    subgoal_id="target-page-visible",
+                    objective="第二项对应的目标页面可见",
+                    status="pending",
+                    depends_on=("second-visible",),
+                    constraints=(),
+                    completion_conditions=("目标页面标题可见",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+            ),
+            active_subgoal_id="list-visible",
+        )
+        initial.validate()
+        list_advanced = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    initial.subgoals[0],
+                    status="completed",
+                    completion_evidence=("验收模式选择列表可见",),
+                ),
+                replace(initial.subgoals[1], status="active"),
+                initial.subgoals[2],
+            ),
+            active_subgoal_id="second-visible",
+        )
+        list_advanced.validate()
+        second_advanced = replace(
+            list_advanced,
+            revision=3,
+            subgoals=(
+                list_advanced.subgoals[0],
+                replace(
+                    list_advanced.subgoals[1],
+                    status="completed",
+                    completion_evidence=("从上往下第二项可见",),
+                ),
+                replace(list_advanced.subgoals[2], status="active"),
+            ),
+            active_subgoal_id="target-page-visible",
+        )
+        second_advanced.validate()
+        planner = SequenceDeepSeekPlanner(initial, list_advanced, second_advanced)
+        qwen = FakeQwenObserver(status="blocked")
+        base_scene = _scene(
+            meaning="acceptance_mode_option",
+            label="语义点击",
+            role="list_item",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        target = replace(
+            base_scene.elements[0],
+            evidence=(
+                "位于第一项正下方，从上往下第二个蓝色圆角矩形条目",
+            ),
+        )
+        scene = replace(
+            base_scene,
+            summary="验收模式选择列表页，包含多个选项按钮",
+            elements=(target,),
+        )
+        adapter = FakeAdapter(scene)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(planner, qwen, adapter).start(
+                session_id="session-visible-prefix",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual(3, session.task_graph.revision)
+        self.assertEqual("target-page-visible", session.task_graph.active_subgoal_id)
+        self.assertEqual(2, len(planner.replan_calls))
+        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(3, qwen.calls[0][1]["revision"])
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_start_advances_visible_navigation_checkpoint_before_qwen(self) -> None:
+        base = _graph()
+        initial = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="进入验收模式选择列表第二项后返回",
+            ),
+            subgoals=(
+                replace(
+                    base.subgoals[0],
+                    subgoal_id="list-visible",
+                    objective="验收模式选择列表可见",
+                    completion_conditions=("验收模式选择列表可见",),
+                ),
+                Subgoal(
+                    subgoal_id="second-item-visible",
+                    objective="验收模式选择列表第二项可见",
+                    status="pending",
+                    depends_on=("list-visible",),
+                    constraints=("仅浏览本地只读页面",),
+                    completion_conditions=("列表第二项可见",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+                Subgoal(
+                    subgoal_id="second-page-visible",
+                    objective="列表第二项对应页面可见",
+                    status="pending",
+                    depends_on=("second-item-visible",),
+                    constraints=("仅浏览本地只读页面",),
+                    completion_conditions=("第二项页面可见",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+            ),
+            active_subgoal_id="list-visible",
+            raw_user_goal="打开本地只读列表第二项后返回",
+        )
+        initial.validate()
+        revised = replace(
+            initial,
+            revision=initial.revision + 1,
+            subgoals=(
+                replace(
+                    initial.subgoals[0],
+                    status="completed",
+                    completion_evidence=("验收模式选择列表可见",),
+                ),
+                replace(
+                    initial.subgoals[1],
+                    status="completed",
+                    completion_evidence=("列表第二项可见",),
+                ),
+                replace(initial.subgoals[2], status="active"),
+            ),
+            active_subgoal_id="second-page-visible",
+        )
+        revised.validate()
+        scene = _scene()
+        title = replace(
+            scene.elements[0],
+            element_id="title",
+            role="text",
+            meaning="acceptance_mode_list_title",
+            label="验收模式选择",
+            bounds=(0.1, 0.08, 0.5, 0.14),
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=("页面标题显示验收模式选择",),
+        )
+        second_item = replace(
+            scene.elements[0],
+            element_id="second-item",
+            role="list_item",
+            meaning="acceptance_mode_entry",
+            label="语义点击",
+            bounds=(0.12, 0.34, 0.88, 0.44),
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=("验收模式选择列表第二项完整可见",),
+        )
+        scene = replace(
+            scene,
+            summary="当前显示验收模式选择列表，第二项完整可见。",
+            elements=(title, second_item),
+        )
+        planner = FakeDeepSeekPlanner(initial, replan_result=revised)
+        qwen = FakeQwenObserver("blocked")
+        adapter = FakeAdapter(scene)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(planner, qwen, adapter).start(
+                session_id="session-visible-navigation",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual("second-page-visible", session.task_graph.active_subgoal_id)
+        self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
+        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(2, qwen.calls[0][1]["revision"])
+        self.assertEqual("second-page-visible", qwen.calls[0][1]["current_subgoal"]["subgoal_id"])
+        self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
 

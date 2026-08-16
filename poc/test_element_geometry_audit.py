@@ -234,6 +234,100 @@ class StrictGeometryAuditProtocolTests(unittest.TestCase):
                 self.render(audit_payload(match={"evidence": ["点击这个按钮"]}))
             )
 
+    def test_protocol_and_prompt_allow_literal_text_link_role(self):
+        payload = audit_payload(
+            match={
+                "visual_role": "text",
+                "literal_label": "返回验收模式选择",
+                "evidence": ["白色下划线文字，位于说明文字下方"],
+            }
+        )
+        parsed = parse_element_geometry_audit(self.render(payload))
+        self.assertEqual("text", parsed.matches[0].visual_role)
+
+        prompt = element_geometry_audit_prompt(
+            source_ref=SOURCE_REF,
+            literal_label="返回验收模式选择",
+            visual_role="text",
+            visible_evidence="白色下划线文字，位于说明文字下方",
+        )
+        self.assertIn("visual_role=text", prompt)
+
+        payload["matches"][0]["visual_role"] = "unknown_role"
+        with self.assertRaisesRegex(ElementGeometryAuditError, "visual_role"):
+            parse_element_geometry_audit(self.render(payload))
+
+    def test_protocol_allows_non_numeric_boundary_fact_but_rejects_coordinates(self):
+        payload = audit_payload(
+            match={
+                "evidence": [
+                    "Text is clearly legible within the button bounds."
+                ]
+            }
+        )
+        parsed = parse_element_geometry_audit(self.render(payload))
+        self.assertEqual(1, len(parsed.matches))
+
+        payload["matches"][0]["evidence"] = ["bounds=[1,2,3,4]"]
+        with self.assertRaisesRegex(ElementGeometryAuditError, "控制信息"):
+            parse_element_geometry_audit(self.render(payload))
+
+    def test_protocol_allows_bounded_descriptive_evidence_but_rejects_overlong_text(self):
+        descriptive = (
+            "Underlined white text located below the description paragraph and "
+            "above the '等待动作' button, visually distinct as a clickable "
+            "navigation link."
+        )
+        self.assertEqual(140, len(descriptive))
+        payload = audit_payload(match={"evidence": [descriptive]})
+        parsed = parse_element_geometry_audit(
+            self.render(payload),
+            visible_literal_labels=("等待动作",),
+        )
+        self.assertEqual((descriptive,), parsed.matches[0].evidence)
+
+        payload["matches"][0]["evidence"] = ["a" * 201]
+        with self.assertRaisesRegex(ElementGeometryAuditError, "过长"):
+            parse_element_geometry_audit(self.render(payload))
+
+    def test_protocol_allows_control_word_inside_exact_literal_label_only(self):
+        payload = audit_payload(
+            match={
+                "literal_label": "语义点击",
+                "evidence": ["文字清晰可辨为“语义点击”，四边完整可见"],
+            }
+        )
+        parsed = parse_element_geometry_audit(self.render(payload))
+        self.assertEqual("语义点击", parsed.matches[0].literal_label)
+
+        payload["matches"][0]["evidence"] = ["请点击文字清晰可辨的“语义点击”"]
+        with self.assertRaisesRegex(ElementGeometryAuditError, "控制信息"):
+            parse_element_geometry_audit(self.render(payload))
+
+    def test_protocol_allows_exact_sibling_label_but_not_extra_control_text(self):
+        payload = audit_payload(
+            match={
+                "literal_label": "语义点击",
+                "evidence": [
+                    "位于‘向上滑动’正下方，文字‘语义点击’清晰可见"
+                ],
+            }
+        )
+        parsed = parse_element_geometry_audit(
+            self.render(payload),
+            visible_literal_labels=("向上滑动", "语义点击"),
+        )
+        self.assertEqual("语义点击", parsed.matches[0].literal_label)
+
+        payload["matches"][0]["evidence"] = [
+            "请滑动到向上滑动后点击语义点击"
+        ]
+        with self.assertRaisesRegex(ElementGeometryAuditError, "控制信息"):
+            parse_element_geometry_audit(
+                self.render(payload),
+                visible_literal_labels=("向上滑动", "语义点击"),
+            )
+
     def test_prompt_exposes_one_crop_local_coordinate_contract_only(self):
         prompt = element_geometry_audit_prompt(
             source_ref=SOURCE_REF,
@@ -248,6 +342,42 @@ class StrictGeometryAuditProtocolTests(unittest.TestCase):
         self.assertNotIn("0.12", prompt)
         self.assertNotIn("0.46", prompt)
 
+    def test_prompt_allows_exact_action_word_label_but_rejects_extra_instruction(self):
+        prompt = element_geometry_audit_prompt(
+            source_ref=SOURCE_REF,
+            literal_label="语义点击",
+            visual_role="list_item",
+            visible_evidence="文字清晰可辨为“语义点击”，四边完整可见",
+        )
+        self.assertIn('literal_label="语义点击"', prompt)
+
+        with self.assertRaisesRegex(ElementGeometryAuditError, "visible_evidence"):
+            element_geometry_audit_prompt(
+                source_ref=SOURCE_REF,
+                literal_label="语义点击",
+                visual_role="list_item",
+                visible_evidence="请点击文字清晰可辨的“语义点击”",
+            )
+
+    def test_prompt_allows_other_exact_scene_label_but_not_control_text(self):
+        prompt = element_geometry_audit_prompt(
+            source_ref=SOURCE_REF,
+            literal_label="语义点击",
+            visual_role="list_item",
+            visible_evidence="列表第二项紧接‘向上滑动’下方，文字清晰可见",
+            visible_literal_labels=("向上滑动", "语义点击"),
+        )
+        self.assertIn('visible_literal_labels=["语义点击", "向上滑动"]', prompt)
+
+        with self.assertRaisesRegex(ElementGeometryAuditError, "visible_evidence"):
+            element_geometry_audit_prompt(
+                source_ref=SOURCE_REF,
+                literal_label="语义点击",
+                visual_role="list_item",
+                visible_evidence="请滑动到向上滑动后点击语义点击",
+                visible_literal_labels=("向上滑动", "语义点击"),
+            )
+
 
 class GeometryAuditProvider:
     configured = True
@@ -255,9 +385,11 @@ class GeometryAuditProvider:
     def __init__(self, local_bounds):
         self.local_bounds = list(local_bounds)
         self.messages = []
+        self.kwargs = []
 
-    def _chat(self, messages, *, max_tokens, **_kwargs):
+    def _chat(self, messages, *, max_tokens, **kwargs):
         self.messages.append(messages)
+        self.kwargs.append(kwargs)
         prompt = messages[-1]["content"][0]["text"]
         source_ref = re.search(r"^source_ref=(.+)$", prompt, re.MULTILINE).group(1)
         label = json.loads(
@@ -341,6 +473,10 @@ class GenericSceneGeometryAuditIntegrationTests(unittest.TestCase):
         )
 
         self.assertEqual(2, len(provider.messages))
+        self.assertEqual(
+            [{"type": "json_object"}, {"type": "json_object"}],
+            [item["response_format"] for item in provider.kwargs],
+        )
         for messages in provider.messages:
             content = messages[-1]["content"]
             self.assertEqual(2, len(content))

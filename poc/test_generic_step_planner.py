@@ -1199,6 +1199,118 @@ class GenericActionAdapterTests(unittest.TestCase):
             result.rebound_action.params["target"],
         )
 
+    def test_rebind_uses_planned_selector_semantics_when_fresh_wording_is_minimal(self):
+        states = {"goal_relevant": True, "fully_visible": True}
+        planned = UIScene(
+            app_id="unknown",
+            screen_id="acceptance_modes",
+            summary="本地模式列表",
+            elements=(
+                UIElement(
+                    element_id="planned-mode",
+                    role="list_item",
+                    meaning="acceptance_mode_option",
+                    label="语义点击",
+                    bounds=(0.12, 0.35, 0.88, 0.43),
+                    confidence=1.0,
+                    states=states,
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    element_id="fresh-mode",
+                    meaning="语义动作控件",
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        robot = FakeRobot()
+
+        result = self._adapter(
+            FakeSceneObserver([fresh, scene("after", screen_id="semantic-mode")]),
+            robot,
+        ).execute(
+            requested_action=SemanticAction(
+                node_id="open-mode",
+                action="tap_semantic",
+                params={
+                    "element_id": "planned-mode",
+                    "target": "acceptance_mode_option",
+                    "role": "list_item",
+                    "label": "语义点击",
+                    "states": states,
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("tap", 500, 390)], robot.actions)
+        self.assertEqual("语义动作控件", result.rebound_action.params["target"])
+
+    def test_rebind_uses_chinese_planned_selector_semantics(self):
+        states = {"goal_relevant": True, "fully_visible": True}
+        planned = UIScene(
+            app_id="unknown",
+            screen_id="acceptance_modes",
+            summary="本地模式列表",
+            elements=(
+                UIElement(
+                    element_id="planned-mode",
+                    role="list_item",
+                    meaning="验收模式选项",
+                    label="语义点击",
+                    bounds=(0.12, 0.35, 0.88, 0.43),
+                    confidence=1.0,
+                    states=states,
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    element_id="fresh-mode",
+                    meaning="语义动作控件",
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        robot = FakeRobot()
+
+        result = self._adapter(
+            FakeSceneObserver([fresh, scene("after", screen_id="semantic-mode")]),
+            robot,
+        ).execute(
+            requested_action=SemanticAction(
+                node_id="open-mode",
+                action="tap_semantic",
+                params={
+                    "element_id": "planned-mode",
+                    "target": "验收模式选项",
+                    "role": "list_item",
+                    "label": "语义点击",
+                    "states": states,
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("tap", 500, 390)], robot.actions)
+        self.assertEqual("语义动作控件", result.rebound_action.params["target"])
+
     def test_rebind_accepts_exact_navigation_label_across_selector_roles(self):
         states = {"goal_relevant": True, "fully_visible": True}
         label = "连续闭环：滑动→点击→返回"
@@ -1296,6 +1408,233 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual([("tap", 300, 400)], robot.actions)
         self.assertTrue(result.rebound_action.params["states"]["fully_visible"])
+
+    def test_rebind_ignores_goal_relevant_context_drift(self):
+        planned = UIScene(
+            app_id="unknown",
+            screen_id="acceptance_modes",
+            summary="本地验收模式列表",
+            elements=(
+                UIElement(
+                    element_id="planned-second-item",
+                    role="list_item",
+                    meaning="验收模式选项",
+                    label="语义点击",
+                    bounds=(0.13, 0.39, 0.87, 0.47),
+                    confidence=1.0,
+                    states={"goal_relevant": True, "fully_visible": True},
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    element_id="fresh-second-item",
+                    states={"goal_relevant": False, "fully_visible": True},
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        robot = FakeRobot()
+
+        result = self._adapter(
+            FakeSceneObserver([fresh, scene("after", screen_id="tap-mode")]),
+            robot,
+        ).execute(
+            requested_action=SemanticAction(
+                node_id="open-second-item",
+                action="tap_semantic",
+                params={
+                    "element_id": "planned-second-item",
+                    "target": "验收模式选项",
+                    "role": "list_item",
+                    "label": "语义点击",
+                    "states": {"goal_relevant": True, "fully_visible": True},
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("tap", 500, 430)], robot.actions)
+        self.assertFalse(result.rebound_action.params["states"]["goal_relevant"])
+
+    def test_tap_uses_independent_geometry_audit_for_overview_jitter(self):
+        planned = UIScene(
+            app_id="unknown",
+            screen_id="acceptance_modes",
+            summary="本地验收模式列表",
+            elements=(
+                UIElement(
+                    element_id="planned-second-item",
+                    role="list_item",
+                    meaning="验收模式选项",
+                    label="语义点击",
+                    bounds=(0.13, 0.39, 0.87, 0.47),
+                    confidence=1.0,
+                    states={"goal_relevant": True, "fully_visible": True},
+                    evidence=("第二项语义点击完整可见",),
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    element_id="fresh-second-item",
+                    bounds=(0.13, 0.50, 0.87, 0.58),
+                    states={"goal_relevant": False, "fully_visible": True},
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        planned_audited = replace(
+            planned,
+            elements=(replace(planned.elements[0], bounds=(0.15, 0.40, 0.85, 0.47)),),
+        )
+        fresh_audited = replace(
+            fresh,
+            elements=(replace(fresh.elements[0], bounds=(0.15, 0.40, 0.85, 0.47)),),
+        )
+        observer = FakeSceneObserver(
+            [fresh, scene("after", screen_id="tap-mode")],
+            geometry_scenes=[planned_audited, fresh_audited],
+        )
+        robot = FakeRobot()
+
+        result = self._adapter(observer, robot).execute(
+            requested_action=SemanticAction(
+                node_id="open-second-item",
+                action="tap_semantic",
+                params={
+                    "element_id": "planned-second-item",
+                    "target": "验收模式选项",
+                    "role": "list_item",
+                    "label": "语义点击",
+                    "states": {"goal_relevant": True, "fully_visible": True},
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("tap", 500, 435)], robot.actions)
+        self.assertEqual(
+            [("planned-second-item",), ("fresh-second-item",)],
+            observer.geometry_audit_calls,
+        )
+
+    def test_rebind_accepts_tight_loose_audit_boxes_for_same_static_target(self):
+        planned = scene(
+            "planned",
+            bounds=(0.11, 0.235, 0.43, 0.27),
+        )
+        fresh = replace(planned, fingerprint="fresh")
+        planned_audited = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    bounds=(0.11, 0.235, 0.43, 0.27),
+                ),
+            ),
+        )
+        fresh_audited = replace(
+            fresh,
+            elements=(
+                replace(
+                    fresh.elements[0],
+                    bounds=(0.0828, 0.225, 0.3372, 0.255),
+                ),
+            ),
+        )
+        after = scene("after", screen_id="acceptance_modes", element_id="after")
+        observer = FakeSceneObserver(
+            [fresh, after],
+            geometry_scenes=[planned_audited, fresh_audited],
+        )
+        robot = FakeRobot()
+
+        result = self._adapter(observer, robot).execute(
+            requested_action=SemanticAction(
+                node_id="return-to-list",
+                action="tap_semantic",
+                params={
+                    "element_id": "e1",
+                    "target": "app_icon",
+                    "role": planned.elements[0].role,
+                    "label": planned.elements[0].label,
+                    "states": dict(planned.elements[0].states),
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("tap", 210, 240)], robot.actions)
+
+    def test_rebind_rejects_non_overlapping_geometry_even_on_verified_static_frame(self):
+        planned = scene("planned", bounds=(0.08, 0.225, 0.34, 0.255))
+        fresh = replace(planned, fingerprint="fresh")
+        planned_audited = planned
+        fresh_audited = replace(
+            fresh,
+            elements=(
+                replace(
+                    fresh.elements[0],
+                    bounds=(0.083, 0.27, 0.337, 0.30),
+                ),
+            ),
+        )
+        observer = FakeSceneObserver(
+            [fresh, scene("after", screen_id="acceptance_modes", element_id="after")],
+            geometry_scenes=[planned_audited, fresh_audited],
+        )
+        robot = FakeRobot()
+
+        with self.assertRaisesRegex(
+            GenericActionAdapterError,
+            "目标区域已明显移动",
+        ) as raised:
+            self._adapter(observer, robot).execute(
+                requested_action=SemanticAction(
+                    node_id="return-text-link",
+                    action="tap_semantic",
+                    params={
+                        "element_id": "e1",
+                        "target": "app_icon",
+                        "role": planned.elements[0].role,
+                        "label": planned.elements[0].label,
+                        "states": dict(planned.elements[0].states),
+                    },
+                ),
+                planned_scene=planned,
+                goal=goal(),
+                confirmed=True,
+                planned_frames=tuple(
+                    Image.new("RGB", (540, 960), "gray") for _ in range(4)
+                ),
+            )
+
+        self.assertEqual(0, raised.exception.physical_actions)
+        self.assertEqual([], robot.actions)
 
     def test_rebind_rejects_fresh_negative_fully_visible_attestation(self):
         planned = scene("planned")

@@ -34,12 +34,14 @@ from universal_action_controller import (
     action_has_account_effect,
     navigation_semantic_class,
 )
+from constraint_target_filter import constraint_excludes_candidate
 
 
 POST_ACTION_TRANSITION_PROTOCOL_VERSION = (
     "2026-08-16-universal-post-action-transition-v1"
 )
 POST_ACTION_OUTCOMES = frozenset({"matched", "mismatched"})
+MAX_VISIBLE_PRESENCE_ADVANCES_PER_OBSERVATION = 4
 _TRANSIENT_ACTION_KEYS = frozenset(
     {
         "node_id",
@@ -911,6 +913,40 @@ class UniversalAgentOrchestrator:
                 )
         return frozenset(term for term in terms if term not in generic)
 
+    @staticmethod
+    def _presence_surface_classes(*values: Any) -> frozenset[str]:
+        """Keep destination/container nouns from collapsing into ordinal overlap."""
+
+        text = " ".join(
+            str(value or "").casefold().replace("_", " ").replace("-", " ")
+            for value in values
+        )
+        classes = {
+            name
+            for name, markers in {
+                "page": ("页面", "网页", " page", "screen", "view"),
+                "title": ("标题", "题头", "title", "heading"),
+                "list": ("列表", "清单", " list"),
+                "input": ("输入框", "文本框", "input field", "textbox"),
+                "menu": ("菜单", " menu"),
+                "dialog": ("对话框", "弹窗", "dialog", "modal"),
+                "destination": (
+                    "对应页面",
+                    "目标页面",
+                    "下一页",
+                    "详情页",
+                    "详情",
+                    "destination page",
+                    "target page",
+                    "next page",
+                    "detail page",
+                    "details",
+                ),
+            }.items()
+            if any(marker in text for marker in markers)
+        }
+        return frozenset(classes)
+
     def _multi_presence_candidates(
         self,
         *,
@@ -1005,19 +1041,19 @@ class UniversalAgentOrchestrator:
             )
         )
 
-    def _try_advance_read_only_presence_subgoal(
+    def _try_advance_visible_presence_subgoal(
         self,
         session: UniversalAgentSessionState,
         *,
         graph: DynamicTaskGraph,
         trusted_observation: Any,
     ) -> DynamicTaskGraph | None:
-        """Use one exact visible candidate to advance one read-only checkpoint."""
+        """Use bounded visible evidence to advance one safe presence checkpoint."""
 
         current = graph.active_subgoal()
         if (
             current is None
-            or current.external_impact != "read_only"
+            or current.external_impact not in {"read_only", "navigation_only"}
             or not self._is_presence_only_read_only_subgoal(current)
         ):
             return None
@@ -1040,20 +1076,96 @@ class UniversalAgentOrchestrator:
             if not candidates:
                 return None
         else:
+            completion_terms = self._presence_binding_terms(
+                *tuple(current.completion_conditions or ())
+            )
+            required_surfaces = self._presence_surface_classes(
+                *tuple(current.completion_conditions or ())
+            )
             candidate = scene.unique_trusted_goal_element(
                 min_confidence=MIN_TARGET_CONFIDENCE,
             )
-            if candidate is None:
-                return None
-            if (
-                candidate.states.get("fully_visible") is not True
-                or self._candidate_has_unresolved_conflict(
-                    trusted_observation,
-                    candidate.element_id,
+            if candidate is not None:
+                candidate_terms = self._presence_binding_terms(
+                    candidate.label,
+                    candidate.meaning,
+                    *candidate.evidence,
                 )
-            ):
+                scene_terms = self._presence_binding_terms(
+                    scene.screen_id,
+                    scene.summary,
+                )
+                candidate_surfaces = self._presence_surface_classes(
+                    candidate.role,
+                    candidate.label,
+                    candidate.meaning,
+                    *candidate.evidence,
+                )
+                scene_surfaces = self._presence_surface_classes(
+                    scene.screen_id,
+                    scene.summary,
+                )
+                if (
+                    not completion_terms
+                    or not (
+                        candidate_terms.intersection(completion_terms)
+                        or scene_terms.intersection(completion_terms)
+                    )
+                    or not required_surfaces.issubset(
+                        candidate_surfaces.union(scene_surfaces)
+                    )
+                    or candidate.states.get("fully_visible") is not True
+                    or self._candidate_has_unresolved_conflict(
+                        trusted_observation,
+                        candidate.element_id,
+                    )
+                ):
+                    return None
+                candidates = (candidate,)
+            elif current.external_impact == "navigation_only":
+                presence_terms = self._presence_binding_terms(presence_text)
+                summary_terms = self._presence_binding_terms(scene.summary)
+                if not presence_terms or not presence_terms.intersection(summary_terms):
+                    return None
+                matched = []
+                for item in scene.elements:
+                    item_terms = self._presence_binding_terms(
+                        item.label,
+                        item.meaning,
+                        *item.evidence,
+                    )
+                    item_surfaces = self._presence_surface_classes(
+                        item.role,
+                        item.label,
+                        item.meaning,
+                        *item.evidence,
+                    )
+                    if (
+                        not presence_terms.intersection(item_terms)
+                        or not required_surfaces.issubset(item_surfaces)
+                    ):
+                        continue
+                    if (
+                        float(item.confidence) < MIN_TARGET_CONFIDENCE
+                        or item.states.get("fully_visible") is not True
+                        or self._candidate_has_unresolved_conflict(
+                            trusted_observation,
+                            item.element_id,
+                        )
+                    ):
+                        return None
+                    left, top, right, bottom = item.bounds
+                    if not (
+                        0.02 <= left < right <= 0.98
+                        and 0.02 <= top < bottom <= 0.98
+                    ):
+                        return None
+                    matched.append(item)
+                if not 1 <= len(matched) <= 4:
+                    return None
+                candidates = tuple(matched)
+            else:
                 return None
-            candidates = (candidate,)
 
         candidate_facts = tuple(
             "当前可信画面的目标元素："
@@ -1070,6 +1182,7 @@ class UniversalAgentOrchestrator:
             action_outcome="not_applicable",
             verification={
                 "visible_evidence": [
+                    scene.summary,
                     *candidate_facts,
                     *(fact for item in candidates for fact in item.evidence),
                 ]
@@ -1081,8 +1194,11 @@ class UniversalAgentOrchestrator:
             trigger="subgoal_completed",
             reason=(
                 f"当前可信画面已经以{len(candidates)}个逐项语义绑定、"
-                "高置信且无冲突的目标元素证明定位类 read_only 子目标；"
-                "只允许推进这一个子目标，不得推断元素值、外部状态或执行动作。"
+                f"高置信且无冲突的目标元素证明定位类 {current.external_impact} 子目标；"
+                f"本轮只能把当前 subgoal_id={current.subgoal_id} 标为 completed，"
+                "其 completion_evidence 必须逐字选择 visible_evidence 中至少一项；"
+                "最多激活一个直接后继，其他节点不得越级完成。不得推断元素值、"
+                "外部状态或执行动作；无法满足这些约束时必须 blocked。"
             ),
         )
         self._validate_graph_identity(
@@ -1092,13 +1208,13 @@ class UniversalAgentOrchestrator:
         )
         if revised.revision != graph.revision + 1:
             raise UniversalAgentOrchestratorError(
-                "只读证据推进必须且只能产生一个新 revision。"
+                "可见状态证据推进必须且只能产生一个新 revision。"
             )
         old_ids = tuple(item.subgoal_id for item in graph.subgoals)
         new_ids = tuple(item.subgoal_id for item in revised.subgoals)
         if old_ids != new_ids:
             raise UniversalAgentOrchestratorError(
-                "只读证据推进不得增加、删除或重排子目标。"
+                "可见状态证据推进不得增加、删除或重排子目标。"
             )
         old_by_id = {item.subgoal_id: item for item in graph.subgoals}
         new_by_id = {item.subgoal_id: item for item in revised.subgoals}
@@ -1109,7 +1225,7 @@ class UniversalAgentOrchestrator:
             or revised.risk_actions != graph.risk_actions
         ):
             raise UniversalAgentOrchestratorError(
-                "只读证据推进不得修改目标、约束、全局完成条件或风险定义。"
+                "可见状态证据推进不得修改目标、约束、全局完成条件或风险定义。"
             )
         for subgoal_id in old_ids:
             old_item = old_by_id[subgoal_id]
@@ -1123,7 +1239,7 @@ class UniversalAgentOrchestrator:
                 or new_item.external_impact != old_item.external_impact
             ):
                 raise UniversalAgentOrchestratorError(
-                    "只读证据推进只能改变子目标状态和完成证据。"
+                    "可见状态证据推进只能改变子目标状态和完成证据。"
                 )
         newly_completed = tuple(
             subgoal_id
@@ -1132,25 +1248,48 @@ class UniversalAgentOrchestrator:
             and new_by_id[subgoal_id].status == "completed"
         )
         completed_current = new_by_id[current.subgoal_id]
-        if (
-            newly_completed != (current.subgoal_id,)
-            or not completed_current.completion_evidence
-        ):
+        completed_before = {
+            item.subgoal_id for item in graph.subgoals if item.status == "completed"
+        }
+        accepted_prefix: list[str] = []
+        prefix_valid = bool(
+            newly_completed and newly_completed[0] == current.subgoal_id
+        )
+        for subgoal_id in newly_completed:
+            old_item = old_by_id[subgoal_id]
+            new_item = new_by_id[subgoal_id]
+            dependencies_ready = all(
+                dependency in completed_before or dependency in accepted_prefix
+                for dependency in old_item.depends_on
+            )
+            if (
+                old_item.external_impact not in {"read_only", "navigation_only"}
+                or not self._is_presence_only_read_only_subgoal(old_item)
+                or not dependencies_ready
+                or not new_item.completion_evidence
+            ):
+                prefix_valid = False
+                break
+            accepted_prefix.append(subgoal_id)
+        if not prefix_valid or not completed_current.completion_evidence:
             raise UniversalAgentOrchestratorError(
-                "只读证据只能完成当前定位子目标，且必须记录可见证据。"
+                "可见状态证据只能完成从当前节点开始、依赖连续满足的安全定位前缀，"
+                "且每个节点必须记录可见证据："
+                f"current={current.subgoal_id}, newly_completed={newly_completed}, "
+                f"current_evidence_count={len(completed_current.completion_evidence)}。"
             )
         for subgoal_id in old_ids:
             old_status = old_by_id[subgoal_id].status
             new_status = new_by_id[subgoal_id].status
-            if subgoal_id == current.subgoal_id:
+            if subgoal_id in newly_completed:
                 continue
             if old_status == "completed" and new_status != "completed":
                 raise UniversalAgentOrchestratorError(
-                    "只读证据推进不得回退已完成子目标。"
+                    "可见状态证据推进不得回退已完成子目标。"
                 )
             if old_status == "pending" and new_status not in {"pending", "active"}:
                 raise UniversalAgentOrchestratorError(
-                    "只读证据推进不得越过后续子目标。"
+                    "可见状态证据推进不得越过后续子目标。"
                 )
         newly_active = tuple(
             subgoal_id
@@ -1160,16 +1299,42 @@ class UniversalAgentOrchestrator:
         )
         if len(newly_active) > 1:
             raise UniversalAgentOrchestratorError(
-                "只读证据推进最多只能激活一个后续子目标。"
+                "可见状态证据推进最多只能激活一个后续子目标。"
             )
         if revised.status != "completed" and (
             len(newly_active) != 1
             or revised.active_subgoal_id != newly_active[0]
         ):
             raise UniversalAgentOrchestratorError(
-                "只读证据推进后必须精确激活一个后续子目标。"
+                "可见状态证据推进后必须精确激活一个后续子目标。"
             )
         return revised
+
+    def _advance_visible_presence_prefix(
+        self,
+        session: UniversalAgentSessionState,
+        *,
+        graph: DynamicTaskGraph,
+        trusted_observation: Any,
+    ) -> tuple[DynamicTaskGraph, int]:
+        """Consume a bounded, independently validated visible-state prefix."""
+
+        current_graph = graph
+        advances = 0
+        while advances < MAX_VISIBLE_PRESENCE_ADVANCES_PER_OBSERVATION:
+            revised = self._try_advance_visible_presence_subgoal(
+                session,
+                graph=current_graph,
+                trusted_observation=trusted_observation,
+            )
+            if revised is None:
+                break
+            self._store_revised_graph(session, revised)
+            current_graph = revised
+            advances += 1
+            if revised.status == "completed":
+                break
+        return current_graph, advances
 
     def _store_revised_graph(
         self,
@@ -3045,18 +3210,21 @@ class UniversalAgentOrchestrator:
                 store.write_trusted_observation(session.step_number, observation),
             )
 
-            if impact == "read_only":
-                initial_read_only = graph.active_subgoal()
-                revised = self._try_advance_read_only_presence_subgoal(
+            if impact in {"read_only", "navigation_only"}:
+                initial_safe = graph.active_subgoal()
+                revised, visible_advances = self._advance_visible_presence_prefix(
                     session,
                     graph=graph,
                     trusted_observation=observation,
                 )
+                if visible_advances:
+                    graph = revised
                 if (
-                    revised is None
-                    and initial_read_only is not None
+                    impact == "read_only"
+                    and not visible_advances
+                    and initial_safe is not None
                     and not self._is_presence_only_read_only_subgoal(
-                        initial_read_only
+                        initial_safe
                     )
                 ):
                     observed = self.bridge.observed_state(
@@ -3084,7 +3252,10 @@ class UniversalAgentOrchestrator:
                         device_id=session.device_id,
                         previous=graph,
                     )
-                if revised is None:
+                    self._store_revised_graph(session, revised)
+                    graph = revised
+                    visible_advances = 1
+                if not visible_advances and impact == "read_only":
                     session.status = "blocked"
                     session.failed_reason = (
                         "当前 read_only 子目标不是可由唯一完整可见元素证明的"
@@ -3092,34 +3263,35 @@ class UniversalAgentOrchestrator:
                     )
                     self._write_terminal_snapshot(session)
                     return session
-                self._store_revised_graph(session, revised)
-                graph = revised
-                if revised.status == "completed":
-                    session.status = "succeeded"
-                    session.failed_reason = ""
-                    self._write_terminal_snapshot(session)
-                    return session
-                current = revised.active_subgoal()
-                impact = current.external_impact if current is not None else "unknown"
-                if current is None:
-                    session.status = "blocked"
-                    session.failed_reason = "只读证据推进后没有活动子目标。"
-                    self._write_terminal_snapshot(session)
-                    return session
-                if impact in {"external_state", "unknown"}:
-                    session.status = "awaiting_risk_confirmation"
-                    session.failed_reason = ""
-                    self._bind_risk_confirmation(session)
-                    self._write_terminal_snapshot(session)
-                    return session
-                if impact == "read_only":
-                    session.status = "blocked"
-                    session.failed_reason = (
-                        "同一可信画面最多推进一个 read_only 子目标；"
-                        "必须重新观察后再继续。"
+                if visible_advances:
+                    if revised.status == "completed":
+                        session.status = "succeeded"
+                        session.failed_reason = ""
+                        self._write_terminal_snapshot(session)
+                        return session
+                    current = revised.active_subgoal()
+                    impact = (
+                        current.external_impact if current is not None else "unknown"
                     )
-                    self._write_terminal_snapshot(session)
-                    return session
+                    if current is None:
+                        session.status = "blocked"
+                        session.failed_reason = "可见状态证据推进后没有活动子目标。"
+                        self._write_terminal_snapshot(session)
+                        return session
+                    if impact in {"external_state", "unknown"}:
+                        session.status = "awaiting_risk_confirmation"
+                        session.failed_reason = ""
+                        self._bind_risk_confirmation(session)
+                        self._write_terminal_snapshot(session)
+                        return session
+                    if impact == "read_only":
+                        session.status = "needs_reobservation"
+                        session.failed_reason = (
+                            "同一可信画面最多推进一个可见状态子目标；"
+                            "必须重新观察后再继续。"
+                        )
+                        self._write_terminal_snapshot(session)
+                        return session
 
             task_context = graph.to_qwen_context()
             decision = self._decide_next_action(
@@ -3268,7 +3440,7 @@ class PhaseOneNavigationPolicy:
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
-    VERSION = "2026-08-15-universal-action-policy-v12"
+    VERSION = "2026-08-16-universal-action-policy-v14"
     ALLOWED_ACTIONS = frozenset(
         {
             "swipe",
@@ -3346,6 +3518,138 @@ class PhaseOneNavigationPolicy:
 
     def _semantic_class(self, *values: str) -> str:
         return navigation_semantic_class(*values)
+
+    @staticmethod
+    def _parse_small_ordinal(value: str) -> int | None:
+        text = str(value or "").strip().casefold()
+        if text.isdigit():
+            number = int(text)
+            return number if 1 <= number <= 99 else None
+        english = {
+            "first": 1,
+            "second": 2,
+            "third": 3,
+            "fourth": 4,
+            "fifth": 5,
+            "sixth": 6,
+            "seventh": 7,
+            "eighth": 8,
+            "ninth": 9,
+            "tenth": 10,
+        }
+        if text in english:
+            return english[text]
+        chinese_digits = {
+            "零": 0,
+            "〇": 0,
+            "一": 1,
+            "二": 2,
+            "两": 2,
+            "三": 3,
+            "四": 4,
+            "五": 5,
+            "六": 6,
+            "七": 7,
+            "八": 8,
+            "九": 9,
+        }
+        if text == "十":
+            return 10
+        if "十" in text:
+            left, right = text.split("十", 1)
+            tens = chinese_digits.get(left, 1 if left == "" else -1)
+            ones = chinese_digits.get(right, 0 if right == "" else -1)
+            number = tens * 10 + ones
+            return number if 1 <= number <= 99 else None
+        if text and all(character in chinese_digits for character in text):
+            number = 0
+            for character in text:
+                number = number * 10 + chinese_digits[character]
+            return number if 1 <= number <= 99 else None
+        match = re.fullmatch(r"(\d+)(?:st|nd|rd|th)", text)
+        if match:
+            number = int(match.group(1))
+            return number if 1 <= number <= 99 else None
+        return None
+
+    @classmethod
+    def _vertical_list_ordinal(cls, task_context: Any) -> int | None:
+        current = cls._value(task_context, "current_subgoal", None)
+        goal = cls._value(task_context, "goal", None)
+        values: list[str] = []
+        if isinstance(current, Mapping):
+            values.extend(cls._structured_strings(current.get("objective")))
+            values.extend(
+                cls._structured_strings(current.get("completion_conditions"))
+            )
+        elif isinstance(goal, Mapping):
+            values.extend(cls._structured_strings(goal.get("objective")))
+        if isinstance(goal, Mapping):
+            entities = goal.get("entities")
+            if isinstance(entities, Mapping):
+                for key in ("target_ordinal", "ordinal", "target_index"):
+                    values.extend(cls._structured_strings(entities.get(key)))
+        text = " ".join(values).casefold()
+        if not re.search(r"(?:列表|清单|\blist\b)", text):
+            return None
+        chinese = re.search(
+            r"第([零〇一二两三四五六七八九十\d]+)(?:项|个|条|行|入口|选项)",
+            text,
+        )
+        if chinese:
+            return cls._parse_small_ordinal(chinese.group(1))
+        english = re.search(
+            r"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d+(?:st|nd|rd|th)?)\s+"
+            r"(?:item|entry|option|row)\b",
+            text,
+        )
+        return cls._parse_small_ordinal(english.group(1)) if english else None
+
+    def _ordinal_binding_error(
+        self,
+        *,
+        task_context: Any,
+        scene: Any,
+        element: Any,
+        action_kind: str,
+    ) -> str:
+        ordinal = self._vertical_list_ordinal(task_context)
+        if ordinal is None or action_kind != "tap_semantic":
+            return ""
+        if element.role not in {"list_item", "button"}:
+            return "序数列表目标必须绑定 list_item 或同列 button。"
+        if element.states.get("fully_visible") is not True:
+            return "序数列表目标必须完整可见。"
+        el, _et, er, _eb = element.bounds
+        element_width = max(1e-9, er - el)
+        peers = []
+        for candidate in scene.elements:
+            if (
+                candidate.role != element.role
+                or float(candidate.confidence) < self.min_confidence
+                or candidate.states.get("visible") is False
+                or candidate.states.get("fully_visible") is not True
+            ):
+                continue
+            cl, ct, cr, cb = candidate.bounds
+            candidate_width = max(1e-9, cr - cl)
+            horizontal_overlap = max(0.0, min(er, cr) - max(el, cl))
+            width_ratio = candidate_width / element_width
+            if (
+                horizontal_overlap / min(element_width, candidate_width) < 0.75
+                or not 0.65 <= width_ratio <= 1.54
+            ):
+                continue
+            peers.append((float(ct + cb) / 2.0, candidate))
+        peers.sort(key=lambda item: (item[0], item[1].element_id))
+        if len(peers) < ordinal:
+            return (
+                "序数列表目标缺少完整可见的前序同列兄弟项："
+                f"需要第{ordinal}项，仅证明{len(peers)}项。"
+            )
+        if peers[ordinal - 1][1].element_id != element.element_id:
+            return "候选按可信几何从上到下排序后不在任务指定序位。"
+        return ""
 
     def _is_exact_literal_local_action_label(
         self,
@@ -3476,6 +3780,40 @@ class PhaseOneNavigationPolicy:
                 )
         return terms
 
+    @classmethod
+    def _explicit_target_exclusion_error(
+        cls,
+        *,
+        task_context: Any,
+        element: Any,
+    ) -> str:
+        """Reject a visible target named inside an explicit negative constraint.
+
+        This is a generic local safety check.  It does not plan an alternative
+        action or recognize any App/page; it only prevents Qwen from selecting
+        an element whose visible semantics overlap a user-provided prohibition.
+        """
+
+        current_subgoal = cls._value(task_context, "current_subgoal", None)
+        constraint_values: list[str] = list(
+            cls._structured_strings(cls._value(task_context, "constraints", ()))
+        )
+        if isinstance(current_subgoal, Mapping):
+            constraint_values.extend(
+                cls._structured_strings(current_subgoal.get("constraints"))
+            )
+        if constraint_excludes_candidate(
+            constraint_values,
+            (
+                cls._value(element, "meaning", ""),
+                cls._value(element, "label", ""),
+                cls._value(element, "evidence", ()),
+            ),
+            candidate_role=str(cls._value(element, "role", "")),
+        ):
+            return "当前候选与任务明确排除的可见目标语义重叠。"
+        return ""
+
     @staticmethod
     def _has_structured_postcondition(expected: Any, scene: Any) -> bool:
         if not isinstance(expected, Mapping) or expected.get("allow_unchanged") is True:
@@ -3512,8 +3850,9 @@ class PhaseOneNavigationPolicy:
             return "通用目标绑定回退只允许 navigation_only 子目标。"
         if element.role not in self.GOAL_BOUND_TAP_ROLES:
             return "通用目标绑定回退要求候选具有明确可点击角色。"
-        if element.states.get("goal_relevant") is not True:
-            return "通用目标绑定回退要求候选明确 goal_relevant=true。"
+        relevance = element.states.get("goal_relevant")
+        if relevance is False:
+            return "通用目标绑定回退拒绝明确 goal_relevant=false 的候选。"
         requested_states = action.params.get("states")
         if not isinstance(requested_states, dict) or requested_states != element.states:
             return "通用目标绑定回退要求动作逐项复用候选 states。"
@@ -3523,15 +3862,39 @@ class PhaseOneNavigationPolicy:
             return "通用目标绑定回退缺少候选冲突证据。"
         if self._has_unresolved_candidate_conflict(conflicts, element.element_id):
             return "通用目标绑定回退候选存在语义冲突或不唯一。"
+        requested_label = str(action.params.get("label") or "").strip().casefold()
+        requested_role = str(action.params.get("role") or "").strip().casefold()
+        requested_target = str(action.params.get("target") or "").strip().casefold()
         eligible = tuple(
             candidate
             for candidate in scene.elements
             if float(candidate.confidence) >= self.min_confidence
             and candidate.states.get("visible") is not False
-            and candidate.states.get("goal_relevant") is True
+            and (
+                candidate.states.get("goal_relevant") is True
+                if relevance is True
+                else candidate.states.get("goal_relevant") is not False
+            )
+            and (
+                not requested_label
+                or candidate.label.strip().casefold() == requested_label
+            )
+            and (
+                not requested_role
+                or candidate.role.strip().casefold() == requested_role
+            )
+            and (
+                not requested_target
+                or requested_target
+                in {
+                    candidate.meaning.strip().casefold(),
+                    candidate.label.strip().casefold(),
+                }
+            )
+            and candidate.states == requested_states
         )
         if len(eligible) != 1 or eligible[0].element_id != element.element_id:
-            return "通用目标绑定回退要求唯一高置信目标相关候选。"
+            return "通用目标绑定回退要求动作完整语义绑定下只有一个高置信候选。"
 
         current_subgoal = self._value(task_context, "current_subgoal", None)
         goal = self._value(task_context, "goal", None)
@@ -3578,16 +3941,20 @@ class PhaseOneNavigationPolicy:
         entity_terms = self._binding_terms(entities)
         subgoal_values = (
             objective,
-            current_subgoal.get("constraints") or (),
             completion_conditions,
         )
         subgoal_terms = self._binding_terms(subgoal_values)
+        scene_terms = self._binding_terms((scene.summary,))
+        subgoal_bound = bool(candidate_terms.intersection(subgoal_terms))
+        entity_bound = bool(candidate_terms.intersection(entity_terms)) or bool(
+            subgoal_bound and scene_terms.intersection(entity_terms)
+        )
         if (
             not candidate_terms
-            or not candidate_terms.intersection(entity_terms)
+            or not entity_bound
             or (
                 not literal_local_action_label
-                and not candidate_terms.intersection(subgoal_terms)
+                and not subgoal_bound
             )
         ):
             return "通用目标绑定回退无法证明候选同时绑定目标实体与当前子目标。"
@@ -3606,10 +3973,23 @@ class PhaseOneNavigationPolicy:
                 {"target_ui_label": entities.get("target_ui_label")},
             )
         safety_strings = self._structured_strings(safety_values)
+        sibling_literal_labels = tuple(
+            candidate.label.strip()
+            for candidate in scene.elements
+            if candidate.element_id != element.element_id
+            and candidate.label.strip()
+        )
+        if sibling_literal_labels:
+            safety_strings = tuple(
+                self._strip_exact_literals(value, sibling_literal_labels)
+                for value in safety_strings
+            )
         if literal_local_action_label:
             safety_strings = self._without_literal_local_action_markers(
                 safety_strings
             )
+        if any(self._contains_control_instruction(value) for value in safety_strings):
+            return "通用目标绑定回退检测到标签外控制指令。"
         if self._semantic_class(*safety_strings) == "forbidden":
             return "通用目标绑定回退检测到外部状态、破坏、账号或交易语义。"
         if action_has_account_effect(action):
@@ -3620,6 +4000,27 @@ class PhaseOneNavigationPolicy:
         ):
             return "通用目标绑定回退缺少可由新画面验证的结构化动作后预期。"
         return ""
+
+    @staticmethod
+    def _strip_exact_literals(value: str, literals: tuple[str, ...]) -> str:
+        result = str(value or "")
+        for literal in sorted(set(literals), key=len, reverse=True):
+            result = result.replace(literal, "")
+        return result
+
+    @staticmethod
+    def _contains_control_instruction(value: str) -> bool:
+        text = str(value or "").casefold()
+        return bool(
+            re.search(
+                r"(?:请|建议|应当|应该|需要|然后|随后|直接|先)"
+                r".{0,12}(?:点击|滑动|拖动|拖拽|长按|提交|发送|保存|登录)"
+                r"|(?:点击|滑动|拖动|拖拽|长按)(?:这个|该|目标|按钮|后|到)"
+                r"|\b(?:please|should|must|then|next)\b.{0,24}"
+                r"\b(?:tap|click|swipe|drag|press|submit|send|save|login)\b",
+                text,
+            )
+        )
 
     def _matches_target_app(self, task_context: Any, element: Any) -> bool:
         """Bind a visible App entry to the formal task target without App rules."""
@@ -3955,6 +4356,22 @@ class PhaseOneNavigationPolicy:
         for field, expected in expected_fields.items():
             if str(action.params.get(field) or "") != expected:
                 return self._deny(f"动作 {field} 没有逐字复用可信候选。")
+
+        exclusion_error = self._explicit_target_exclusion_error(
+            task_context=task_context,
+            element=element,
+        )
+        if exclusion_error:
+            return self._deny(exclusion_error)
+
+        ordinal_error = self._ordinal_binding_error(
+            task_context=task_context,
+            scene=scene,
+            element=element,
+            action_kind=action_kind,
+        )
+        if ordinal_error:
+            return self._deny(ordinal_error)
 
         region = self._value(decision, "target_region", None)
         if region is None:

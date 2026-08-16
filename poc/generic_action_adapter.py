@@ -154,7 +154,15 @@ class GenericSingleActionAdapter:
             "drag",
         }
     )
-    INDEPENDENT_GEOMETRY_AUDIT_KINDS = frozenset({"long_press", "drag"})
+    INDEPENDENT_GEOMETRY_AUDIT_KINDS = frozenset(
+        {
+            "tap_semantic",
+            "dismiss_overlay",
+            "input_verified_text",
+            "long_press",
+            "drag",
+        }
+    )
 
     def supported_action_kinds(self) -> frozenset[str]:
         """Return only actions backed by callable methods on this device."""
@@ -584,7 +592,7 @@ class GenericSingleActionAdapter:
                 )
                 if not callable(audit_geometry):
                     raise GenericActionAdapterError(
-                        "当前观察器没有独立目标几何审计，拒绝拖动动作。"
+                        "当前观察器没有独立目标几何审计，拒绝几何绑定动作。"
                     )
                 semantic_rebound = self._rebind_action(
                     requested_action,
@@ -958,6 +966,17 @@ class GenericSingleActionAdapter:
         if requested.action not in single_element_actions | {"drag"}:
             return requested
 
+        def stable_rebind_states(states: dict[str, Any]) -> dict[str, Any]:
+            # goal_relevant is a task-context annotation produced by the visual
+            # observer, not part of the control's stable identity. A fresh
+            # confirmation observation may legitimately omit or recompute it.
+            # Keep all physical/actionability attestations fail-closed.
+            return {
+                key: value
+                for key, value in states.items()
+                if key != "goal_relevant"
+            }
+
         def rebind_element(prefix: str = "") -> UIElement:
             original_id = str(
                 requested.params.get(f"{prefix}element_id") or ""
@@ -969,7 +988,7 @@ class GenericSingleActionAdapter:
             matches = fresh_scene.find_elements(
                 label=original.label or None,
                 role=original.role,
-                states=dict(original.states),
+                states=stable_rebind_states(dict(original.states)),
             )
             selector_roles = {"button", "tab", "list_item"}
             if (
@@ -981,7 +1000,7 @@ class GenericSingleActionAdapter:
             ):
                 role_agnostic_matches = fresh_scene.find_elements(
                     label=original.label,
-                    states=dict(original.states),
+                    states=stable_rebind_states(dict(original.states)),
                 )
                 if (
                     len(role_agnostic_matches) == 1
@@ -1044,14 +1063,50 @@ class GenericSingleActionAdapter:
                         normalized = normalized.replace(marker, " ")
                     return normalized
 
-                current_selector_tokens = {
+                selector_tokens = {
                     token
                     for token in re.split(
                         r"[^a-z0-9]+",
-                        stripped_gesture_semantics(current.meaning),
+                        " ".join(
+                            (
+                                stripped_gesture_semantics(original.meaning),
+                                stripped_gesture_semantics(current.meaning),
+                            )
+                        ),
                     )
                     if token
                 }
+                selector_semantics = " ".join(
+                    (
+                        stripped_gesture_semantics(original.meaning),
+                        stripped_gesture_semantics(current.meaning),
+                    )
+                )
+                has_selector_semantics = bool(
+                    selector_tokens.intersection(
+                        {
+                            "select",
+                            "selector",
+                            "mode",
+                            "option",
+                            "entry",
+                            "navigate",
+                            "open",
+                        }
+                    )
+                    or any(
+                        marker in selector_semantics
+                        for marker in (
+                            "选择",
+                            "选项",
+                            "模式",
+                            "入口",
+                            "进入",
+                            "打开",
+                            "导航",
+                        )
+                    )
+                )
                 labelled_local_mode_selector = bool(
                     requested.action == "tap_semantic"
                     and prefix == ""
@@ -1059,10 +1114,9 @@ class GenericSingleActionAdapter:
                     and current.label == original.label
                     and original.role in selector_roles
                     and current.role in selector_roles
-                    and current.states == original.states
-                    and current_selector_tokens.intersection(
-                        {"select", "selector", "mode", "option", "entry", "navigate", "open"}
-                    )
+                    and stable_rebind_states(dict(current.states))
+                    == stable_rebind_states(dict(original.states))
+                    and has_selector_semantics
                     and navigation_semantic_class(
                         stripped_gesture_semantics(original.meaning),
                         stripped_gesture_semantics(original.label),
@@ -1081,7 +1135,8 @@ class GenericSingleActionAdapter:
                     and current.label == original.label
                     and original.role == current.role
                     and current.role != "container"
-                    and current.states == original.states
+                    and stable_rebind_states(dict(current.states))
+                    == stable_rebind_states(dict(original.states))
                     and navigation_semantic_class(
                         stripped_gesture_semantics(original.meaning),
                         stripped_gesture_semantics(original.label),
@@ -1103,19 +1158,22 @@ class GenericSingleActionAdapter:
                     or current_class != original_class
                 ):
                     raise GenericActionAdapterError(
-                        "确认时目标语义已经变化，旧确认失效。"
+                        "确认时目标语义已经变化，旧确认失效："
+                        f"{original.meaning} -> {current.meaning}。"
                     )
-            states_match = current.states == original.states
+            original_stable_states = stable_rebind_states(dict(original.states))
+            current_stable_states = stable_rebind_states(dict(current.states))
+            states_match = current_stable_states == original_stable_states
             if (
                 not states_match
-                and "fully_visible" not in original.states
-                and current.states.get("fully_visible") is True
+                and "fully_visible" not in original_stable_states
+                and current_stable_states.get("fully_visible") is True
             ):
                 states_match = {
                     key: value
-                    for key, value in current.states.items()
+                    for key, value in current_stable_states.items()
                     if key != "fully_visible"
-                } == original.states
+                } == original_stable_states
             if current.label != original.label or not states_match:
                 raise GenericActionAdapterError(
                     "确认时目标标签或状态已经变化，旧确认失效。"
@@ -1133,9 +1191,39 @@ class GenericSingleActionAdapter:
             ) * max(0.0, current.bounds[3] - current.bounds[1])
             union = original_area + current_area - intersection
             overlap = intersection / union if union > 0 else 0.0
-            if require_geometry_overlap and overlap < 0.60:
+            smaller_area = min(original_area, current_area)
+            smaller_coverage = (
+                intersection / smaller_area if smaller_area > 0 else 0.0
+            )
+            original_width = max(0.0, original.bounds[2] - original.bounds[0])
+            original_height = max(0.0, original.bounds[3] - original.bounds[1])
+            current_width = max(0.0, current.bounds[2] - current.bounds[0])
+            current_height = max(0.0, current.bounds[3] - current.bounds[1])
+            center_delta_x = abs(
+                (original.bounds[0] + original.bounds[2]) / 2.0
+                - (current.bounds[0] + current.bounds[2]) / 2.0
+            )
+            center_delta_y = abs(
+                (original.bounds[1] + original.bounds[3]) / 2.0
+                - (current.bounds[1] + current.bounds[3]) / 2.0
+            )
+            tight_loose_same_target = bool(
+                intersection > 0
+                and smaller_coverage >= 0.50
+                and center_delta_x
+                <= max(0.03, 0.25 * max(original_width, current_width))
+                and center_delta_y
+                <= max(0.02, 0.50 * max(original_height, current_height))
+            )
+            if (
+                require_geometry_overlap
+                and overlap < 0.60
+                and not tight_loose_same_target
+            ):
                 raise GenericActionAdapterError(
-                    "确认时目标区域已明显移动，旧确认失效。"
+                    "确认时目标区域已明显移动，旧确认失效："
+                    f"iou={overlap:.3f}, smaller_coverage={smaller_coverage:.3f}, "
+                    f"center_delta=({center_delta_x:.3f},{center_delta_y:.3f})。"
                 )
             return current
 

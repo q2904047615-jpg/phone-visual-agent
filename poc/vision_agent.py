@@ -1486,6 +1486,7 @@ class DashScopeVisionProvider:
         *,
         timeout: float | None = None,
         max_attempts: int | None = None,
+        response_format: dict[str, str] | None = None,
     ) -> str:
         if not self.configured:
             raise VisionAgentError(
@@ -1502,6 +1503,8 @@ class DashScopeVisionProvider:
             if max_attempts is None
             else max(1, int(max_attempts))
         )
+        if response_format not in (None, {"type": "json_object"}):
+            raise VisionAgentError("千问视觉 response_format 只允许 json_object。")
         last_error: Exception | None = None
         for attempt in range(1, effective_attempts + 1):
             self.last_network_attempts = attempt
@@ -1517,6 +1520,11 @@ class DashScopeVisionProvider:
                         "messages": messages,
                         "temperature": 0.0,
                         "max_tokens": max_tokens,
+                        **(
+                            {"response_format": response_format}
+                            if response_format is not None
+                            else {}
+                        ),
                         **self.model_config.request_options(),
                     },
                     timeout=effective_timeout,

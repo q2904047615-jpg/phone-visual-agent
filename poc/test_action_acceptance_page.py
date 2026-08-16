@@ -174,6 +174,7 @@ class ActionAcceptancePageTests(unittest.TestCase):
             root_action_location("long_press"),
         )
         self.assertEqual("/actions?mode=drag", root_action_location("drag"))
+        self.assertEqual("/actions?mode=replan", root_action_location("replan"))
         with self.assertRaisesRegex(ValueError, "不支持"):
             root_action_location("account_action")
 

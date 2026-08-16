@@ -29,6 +29,7 @@ ALLOWED_VISUAL_ROLES = frozenset(
         "keyboard_key",
         "image",
         "container",
+        "text",
     }
 )
 
@@ -253,15 +254,31 @@ class AuditedElementGeometry:
 
 _SOURCE_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$")
 _MATCH_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+MAX_GEOMETRY_EVIDENCE_CHARS = 200
 _FORBIDDEN_EVIDENCE = re.compile(
-    r"(?:coordinates?|coords?|bounds?|\bx\s*[=:]|\by\s*[=:]|"
+    r"(?:coordinates?|coords?|bounds?\s*(?:[=:]|\[|\(|-?\d)|"
+    r"\bx\s*[=:]|\by\s*[=:]|"
     r"\b(?:tap|click|press|swipe|drag|execute|suggest)\b|"
     r"点击|滑动|拖动|按下|坐标|执行|建议)",
     re.IGNORECASE,
 )
 
 
-def parse_element_geometry_audit(raw: str) -> ElementGeometryAuditPayload:
+def _evidence_contains_control_info(text: str, *, literal_label: str) -> bool:
+    """Reject control language outside an exact quoted/visible UI label."""
+
+    remainder = str(text or "")
+    label = str(literal_label or "").strip()
+    if label:
+        remainder = remainder.replace(label, "")
+    return _FORBIDDEN_EVIDENCE.search(remainder) is not None
+
+
+def parse_element_geometry_audit(
+    raw: str,
+    *,
+    visible_literal_labels: tuple[str, ...] = (),
+) -> ElementGeometryAuditPayload:
     text = str(raw or "").strip()
     if not text or text.startswith("```"):
         raise ElementGeometryAuditError("geometry audit 必须只返回一个JSON对象。")
@@ -297,6 +314,18 @@ def parse_element_geometry_audit(raw: str) -> ElementGeometryAuditPayload:
     if not isinstance(raw_matches, list) or len(raw_matches) > MAX_GEOMETRY_MATCHES:
         raise ElementGeometryAuditError("geometry audit matches 数量或格式无效。")
 
+    allowed_scene_labels = tuple(
+        dict.fromkeys(
+            item.strip()
+            for item in tuple(visible_literal_labels or ())
+            if isinstance(item, str) and item.strip()
+        )
+    )
+    if (
+        len(allowed_scene_labels) > 8
+        or any(len(item) > 200 for item in allowed_scene_labels)
+    ):
+        raise ElementGeometryAuditError("visible_literal_labels 无效。")
     matches: list[GeometryAuditMatch] = []
     seen_ids: set[str] = set()
     match_fields = {
@@ -346,9 +375,20 @@ def parse_element_geometry_audit(raw: str) -> ElementGeometryAuditPayload:
         ):
             raise ElementGeometryAuditError("geometry audit evidence 格式无效。")
         evidence = tuple(part.strip() for part in raw_evidence)
+        evidence_without_literal_labels = []
+        allowed_labels = tuple(
+            dict.fromkeys((label.strip(), *allowed_scene_labels))
+        )
+        for part in evidence:
+            remainder = part
+            for visible_label in sorted(allowed_labels, key=len, reverse=True):
+                remainder = remainder.replace(visible_label, "")
+            evidence_without_literal_labels.append(remainder)
         if any(
-            not part or len(part) > 120 or _FORBIDDEN_EVIDENCE.search(part)
-            for part in evidence
+            not part
+            or len(part) > MAX_GEOMETRY_EVIDENCE_CHARS
+            or _evidence_contains_control_info(remainder, literal_label="")
+            for part, remainder in zip(evidence, evidence_without_literal_labels)
         ):
             raise ElementGeometryAuditError(
                 "geometry audit evidence 为空、过长或包含控制信息。"
@@ -380,6 +420,7 @@ def select_unique_audited_geometry(
     expected_label: str,
     expected_role: str,
     transform: CropTransform,
+    visible_literal_labels: tuple[str, ...] = (),
     minimum_confidence: float = MIN_GEOMETRY_AUDIT_CONFIDENCE,
     internal_edge_margin: float = DEFAULT_INTERNAL_EDGE_MARGIN,
 ) -> AuditedElementGeometry:
@@ -399,7 +440,10 @@ def select_unique_audited_geometry(
     ) <= 1.0:
         raise ElementGeometryAuditError("minimum_confidence 无效。")
 
-    payload = parse_element_geometry_audit(raw)
+    payload = parse_element_geometry_audit(
+        raw,
+        visible_literal_labels=visible_literal_labels,
+    )
     if payload.source_ref != expected_source_ref:
         raise ElementGeometryAuditError("geometry audit source_ref 与请求不一致。")
     if payload.crop_clear is not True or payload.enumeration_complete is not True:
@@ -440,6 +484,7 @@ def element_geometry_audit_prompt(
     literal_label: str,
     visual_role: str,
     visible_evidence: str,
+    visible_literal_labels: tuple[str, ...] = (),
 ) -> str:
     """Describe one-image, one-coordinate-space read-only localization."""
 
@@ -451,7 +496,32 @@ def element_geometry_audit_prompt(
         raise ElementGeometryAuditError("literal_label 无效。")
     if visual_role not in ALLOWED_VISUAL_ROLES:
         raise ElementGeometryAuditError("visual_role 无效。")
-    if not evidence or len(evidence) > 120 or _FORBIDDEN_EVIDENCE.search(evidence):
+    allowed_labels = tuple(
+        dict.fromkeys(
+            item.strip()
+            for item in (label, *tuple(visible_literal_labels or ()))
+            if isinstance(item, str) and item.strip()
+        )
+    )
+    if (
+        len(allowed_labels) > 8
+        or any(len(item) > 200 for item in allowed_labels)
+    ):
+        raise ElementGeometryAuditError("visible_literal_labels 无效。")
+    evidence_without_literal_labels = evidence
+    for visible_label in sorted(allowed_labels, key=len, reverse=True):
+        evidence_without_literal_labels = evidence_without_literal_labels.replace(
+            visible_label,
+            "",
+        )
+    if (
+        not evidence
+        or len(evidence) > MAX_GEOMETRY_EVIDENCE_CHARS
+        or _evidence_contains_control_info(
+            evidence_without_literal_labels,
+            literal_label="",
+        )
+    ):
         raise ElementGeometryAuditError("visible_evidence 无效。")
     schema = {
         "protocol_version": ELEMENT_GEOMETRY_AUDIT_PROTOCOL_VERSION,
@@ -484,6 +554,7 @@ def element_geometry_audit_prompt(
         f"source_ref={source_ref}\n"
         f"literal_label={json.dumps(label, ensure_ascii=False)}\n"
         f"visual_role={visual_role}\n"
+        f"visible_literal_labels={json.dumps(allowed_labels, ensure_ascii=False)}\n"
         f"visible_evidence={json.dumps(evidence, ensure_ascii=False)}\n"
         "Return exactly one JSON object with no duplicate or extra fields and no Markdown:\n"
         + json.dumps(schema, ensure_ascii=False, separators=(",", ":"))

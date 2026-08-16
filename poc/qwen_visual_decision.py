@@ -12,6 +12,7 @@ from typing import Any, Iterable
 from PIL import Image
 
 from generic_scene_observer import _local_frame_fingerprint, _safe_goal_context
+from constraint_target_filter import constraint_excludes_candidate
 from generic_step_planner import (
     ALLOWED_STEP_ACTIONS,
     GenericStepPlanningError,
@@ -1404,6 +1405,63 @@ class QwenVisualDecisionObserver:
             return self.provider._chat(messages, max_tokens=max_tokens)
 
 
+def _decision_observation_prompt_dict(
+    context: QwenTaskContext,
+    observation: TrustedObservation,
+) -> dict[str, Any]:
+    """Hide explicitly excluded elements from the model's candidate surface.
+
+    The authoritative observation remains unchanged for fingerprinting, local
+    policy and evidence.  This projection only prevents an excluded element
+    from competing for Qwen's single next-action selection.
+    """
+
+    value = observation.prompt_dict()
+    constraints = (
+        context.global_constraints,
+        context.current_subgoal.get("constraints") or (),
+    )
+    excluded_ids: set[str] = set()
+    filtered_candidates: list[dict[str, Any]] = []
+    for candidate in value.get("candidates", []):
+        if constraint_excludes_candidate(
+            constraints,
+            (
+                candidate.get("meaning"),
+                candidate.get("label"),
+                candidate.get("evidence"),
+            ),
+            candidate_role=str(candidate.get("role") or ""),
+        ):
+            element_id = str(candidate.get("element_id") or "").strip()
+            if element_id:
+                excluded_ids.add(element_id)
+            continue
+        filtered_candidates.append(candidate)
+    value["candidates"] = filtered_candidates
+    if excluded_ids:
+        aliases = value.get("candidate_aliases")
+        if isinstance(aliases, dict):
+            value["candidate_aliases"] = {
+                key: target
+                for key, target in aliases.items()
+                if str(key) not in excluded_ids and str(target) not in excluded_ids
+            }
+        conflicts = value.get("candidate_conflicts")
+        if isinstance(conflicts, list):
+            value["candidate_conflicts"] = [
+                conflict
+                for conflict in conflicts
+                if not (
+                    isinstance(conflict, Mapping)
+                    and excluded_ids.intersection(
+                        str(item) for item in conflict.get("element_ids", [])
+                    )
+                )
+            ]
+    return value
+
+
 def _decision_prompt(
     context: QwenTaskContext,
     observation: TrustedObservation,
@@ -1412,16 +1470,18 @@ def _decision_prompt(
     available_action_kinds: frozenset[str],
 ) -> str:
     available_actions = "|".join(sorted(available_action_kinds))
+    observation_prompt = _decision_observation_prompt_dict(context, observation)
     return f"""
 你是通用手机视觉操作 Agent 的 Qwen 单步视觉选择层。DeepSeek 已给出当前动态任务上下文，
-本地只读观察阶段已从本轮稳定画面生成可信候选。你只能在可信候选中选择一个已有 element_id；
+本地只读观察阶段已从本轮稳定画面生成可信候选。单元素动作只能在可信候选中选择一个已有 element_id；
+back/home/reveal_system_navigation是无元素、无坐标的系统动作，不得伪装成候选元素点击；
 你不能创建候选、修改候选文字或 bounds，也不能执行机械臂、批准风险或规划后续步骤。
 
 完整任务上下文：
 {json.dumps(context.to_dict(), ensure_ascii=False, separators=(',', ':'))}
 
 本轮可信观察（唯一可执行证据源）：
-{json.dumps(observation.prompt_dict(), ensure_ascii=False, separators=(',', ':'))}
+{json.dumps(observation_prompt, ensure_ascii=False, separators=(',', ':'))}
 
 当前设备已经本地验证可用的动作：{available_actions}
 
@@ -1455,6 +1515,11 @@ def _decision_prompt(
    completion_evidence_element_ids引用。一个数量指示加一个可见卡片/列表容器足以证明列表已打开时，
    应finished并引用这些候选ID。
 1. 每轮最多一个next_action，禁止actions、steps、plan、后续动作或裸坐标。
+   global_constraints与current_subgoal.constraints是候选选择前的硬过滤条件。若某条否定约束明确排除
+   某个可见元素、区域、角色或语义，即使它看起来是最短路径，也绝不能选择该element_id。不得以目标
+   objective是肯定表达为由覆盖否定约束。若navigation_only子目标要求沿访问层级离开当前页面，所有
+   页面内导航候选又被明确排除，且可信scene证明system_ui.navigation_bar_visible=true、设备能力包含
+   back，则应使用无element_id、无坐标的back；绝不能把back伪装成页面元素tap_semantic。
 2. page_state只是语义描述，禁止elements、bounds或任何可执行候选字段。
 3. tap_semantic/dismiss_overlay/input_verified_text/long_press只能引用可信观察中现有且置信度>=0.72的唯一element_id；
    target/role/label/states必须逐字复制，target_region.bounds必须逐项复制候选原始bounds。
@@ -1522,11 +1587,12 @@ def _decision_retry_prompt(
     available_action_kinds: frozenset[str],
 ) -> str:
     available_actions = "|".join(sorted(available_action_kinds))
+    observation_prompt = _decision_observation_prompt_dict(context, observation)
     return f"""
 上一次输出未通过本地协议，任何候选动作均已丢弃，系统没有执行动作。
 错误：{str(error)[:500]}
 任务上下文：{json.dumps(context.to_dict(), ensure_ascii=False, separators=(',', ':'))}
-可信观察：{json.dumps(observation.prompt_dict(), ensure_ascii=False, separators=(',', ':'))}
+可信观察：{json.dumps(observation_prompt, ensure_ascii=False, separators=(',', ':'))}
 
 最多只允许这一次格式修复。重新独立观察并返回完整JSON：
 - 协议版本必须是{QWEN_VISUAL_DECISION_PROTOCOL_VERSION}。
@@ -1539,6 +1605,9 @@ def _decision_retry_prompt(
   不能作为drag起点；只有紧凑、逐字有标签、fully_visible=true且代表单个源物体的container可以作为
   source_element_id。可信container也可作为drag的destination_element_id；其他情况只能作为finished证据。
 - action只能选择可信候选已有element_id并复制原始字段与bounds；不能新建元素。
+- global_constraints和current_subgoal.constraints中的否定约束必须先过滤候选；被明确排除的元素即使是
+  最短路径也不得选择。navigation_only要求沿访问层级离开当前页面、页面内候选均被排除、导航栏可见
+  且back能力可用时，使用无element_id、无坐标的back，不得返回页面元素tap_semantic。
 - 找不到逐字匹配且唯一的可信候选就blocked；finished只引用可信证据ID或scene。
 - “已刷新/已重新加载/已导航/已重新获取/已同步”等发生型完成条件必须有前后变化、动作回执或被引用
   候选中的明确动态成功文字；单帧静态页面内容、标题或图标不能证明事件已经发生。

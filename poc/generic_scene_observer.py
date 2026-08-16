@@ -151,6 +151,14 @@ def _stable_ocr_literal_bounds(
     return (left / width, top / height, right / width, bottom / height)
 
 
+def _can_use_stable_ocr_literal_bounds(role: str, label: str) -> bool:
+    """Limit literal OCR snapping to text-bearing selector roles."""
+
+    return role in {"text", "button", "tab", "list_item"} and bool(
+        str(label or "").strip()
+    )
+
+
 class GenericSceneObserver:
     """Qwen reports the current scene; it never chooses or executes actions."""
 
@@ -294,7 +302,7 @@ class GenericSceneObserver:
                     audited_bounds=audited.full_bounds,
                 )
             ocr_literal_bounds = None
-            if element.role == "text" and element.label:
+            if _can_use_stable_ocr_literal_bounds(element.role, element.label):
                 ocr_literal_bounds = _stable_ocr_literal_bounds(
                     [frame_list[index] for index in matching_indices],
                     element.label,

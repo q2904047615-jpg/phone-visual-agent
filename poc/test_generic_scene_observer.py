@@ -17,6 +17,7 @@ from generic_scene_observer import (
     _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES,
     _MAX_JSON_STRUCTURAL_REPAIR_CHARS,
     _camera_layout_orientation,
+    _can_use_stable_ocr_literal_bounds,
     _compact_prompt,
     _goal_requests_input,
     _stable_ocr_literal_bounds,
@@ -334,7 +335,14 @@ def audited_application_input(
 
 
 class GenericSceneObserverTests(unittest.TestCase):
-    def test_literal_text_geometry_prefers_unique_three_frame_ocr_consensus(self) -> None:
+    def test_literal_ocr_geometry_is_limited_to_text_bearing_selector_roles(self) -> None:
+        for role in ("text", "button", "tab", "list_item"):
+            self.assertTrue(_can_use_stable_ocr_literal_bounds(role, "入口"))
+        for role in ("input", "icon", "image", "container"):
+            self.assertFalse(_can_use_stable_ocr_literal_bounds(role, "入口"))
+        self.assertFalse(_can_use_stable_ocr_literal_bounds("button", "  "))
+
+    def test_clickable_literal_geometry_prefers_unique_three_frame_ocr_consensus(self) -> None:
         frames = [Image.new("RGB", (810, 1440), "black") for _ in range(3)]
         results = iter(
             [

@@ -989,6 +989,34 @@ class UniversalAgentOrchestrator:
         }
         return frozenset(classes)
 
+    @classmethod
+    def _intrinsic_presence_surface_classes(cls, item: Any) -> frozenset[str]:
+        """Return surface types owned by an element, not words near it."""
+
+        role = str(getattr(item, "role", "") or "").casefold()
+        classes = set(
+            cls._presence_surface_classes(
+                role,
+                getattr(item, "meaning", ""),
+            )
+        )
+        role_classes = {
+            "input": "input",
+            "textbox": "input",
+            "text_input": "input",
+            "list": "list",
+            "list_item": "list",
+            "menu": "menu",
+            "menu_item": "menu",
+            "dialog": "dialog",
+            "modal": "dialog",
+            "title": "title",
+            "heading": "title",
+        }
+        if role in role_classes:
+            classes.add(role_classes[role])
+        return frozenset(classes)
+
     def _multi_presence_candidates(
         self,
         *,
@@ -1137,15 +1165,15 @@ class UniversalAgentOrchestrator:
                     scene.screen_id,
                     scene.summary,
                 )
-                candidate_surfaces = self._presence_surface_classes(
-                    candidate.role,
-                    candidate.label,
-                    candidate.meaning,
-                    *candidate.evidence,
+                candidate_surfaces = self._intrinsic_presence_surface_classes(
+                    candidate
                 )
-                scene_surfaces = self._presence_surface_classes(
+                scene_container_surfaces = self._presence_surface_classes(
                     scene.screen_id,
                     scene.summary,
+                ).intersection({"page"})
+                required_element_surfaces = required_surfaces.difference(
+                    scene_container_surfaces
                 )
                 if (
                     not completion_terms
@@ -1153,9 +1181,7 @@ class UniversalAgentOrchestrator:
                         candidate_terms.intersection(completion_terms)
                         or scene_terms.intersection(completion_terms)
                     )
-                    or not required_surfaces.issubset(
-                        candidate_surfaces.union(scene_surfaces)
-                    )
+                    or not required_element_surfaces.issubset(candidate_surfaces)
                     or candidate.states.get("fully_visible") is not True
                     or self._candidate_has_unresolved_conflict(
                         trusted_observation,
@@ -1169,6 +1195,13 @@ class UniversalAgentOrchestrator:
                 summary_terms = self._presence_binding_terms(scene.summary)
                 if not presence_terms or not presence_terms.intersection(summary_terms):
                     return None
+                scene_container_surfaces = self._presence_surface_classes(
+                    scene.screen_id,
+                    scene.summary,
+                ).intersection({"page"})
+                required_element_surfaces = required_surfaces.difference(
+                    scene_container_surfaces
+                )
                 matched = []
                 for item in scene.elements:
                     item_terms = self._presence_binding_terms(
@@ -1176,15 +1209,18 @@ class UniversalAgentOrchestrator:
                         item.meaning,
                         *item.evidence,
                     )
-                    item_surfaces = self._presence_surface_classes(
-                        item.role,
-                        item.label,
-                        item.meaning,
-                        *item.evidence,
+                    # Container identity (for example, "the current page") is
+                    # a scene-level fact.  The required control type must be
+                    # intrinsic to the candidate itself; a nearby instruction
+                    # merely mentioning an input must not become that input.
+                    intrinsic_item_surfaces = (
+                        self._intrinsic_presence_surface_classes(item)
                     )
                     if (
                         not presence_terms.intersection(item_terms)
-                        or not required_surfaces.issubset(item_surfaces)
+                        or not required_element_surfaces.issubset(
+                            intrinsic_item_surfaces
+                        )
                     ):
                         continue
                     if (

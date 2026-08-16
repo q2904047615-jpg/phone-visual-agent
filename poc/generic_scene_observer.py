@@ -49,7 +49,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-16-generic-scene-observer-v39"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-16-generic-scene-observer-v40"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-14-input-structure-audit-v2"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
@@ -63,6 +63,7 @@ ORIENTATION_AUDIT_TOKENS = 500
 MIN_SYSTEM_UI_AUDIT_CONFIDENCE = 0.80
 OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 4
+AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE = "输入结构只读审计确认软键盘不可见"
 
 STAGE_LABELS = {
     "idle": "空闲",
@@ -3807,6 +3808,25 @@ def _should_audit_prefilled_input(scene: UIScene, context: dict[str, Any]) -> bo
     return True
 
 
+def _goal_requests_keyboard_dismissal(context: dict[str, Any]) -> bool:
+    visible = json.dumps(
+        _active_subgoal_visual_context(context),
+        ensure_ascii=False,
+    ).casefold()
+    keyboard = re.search(
+        r"(?:软键盘|键盘|输入法|\b(?:soft\s+)?keyboard\b|\bime\b)",
+        visible,
+        re.IGNORECASE,
+    )
+    dismissal = re.search(
+        r"(?:收起|隐藏|关闭|不再显示|不可见|未显示|"
+        r"\b(?:hide|hidden|dismiss|close|closed|not\s+visible|no\s+longer\s+visible)\b)",
+        visible,
+        re.IGNORECASE,
+    )
+    return bool(keyboard and dismissal)
+
+
 def _can_isolate_input_audit_from_attested_non_input(
     scene: UIScene,
     context: dict[str, Any],
@@ -3908,15 +3928,31 @@ def _apply_input_structure_audit(
         }:
             raise UISceneError("输入结构审计 keyboard.input_mode 无效。")
         keyboard_bounds: tuple[float, float, float, float] | None = None
+        boundsless_keyboard_dismissal = False
         if keyboard_visible:
-            if not _valid_1000_bounds(keyboard.get("bounds")):
-                raise UISceneError("可见键盘必须提供有效 bounds。")
-            keyboard_bounds = tuple(float(value) for value in keyboard["bounds"])
-            if (
-                keyboard_bounds[2] - keyboard_bounds[0] < 300
-                or keyboard_bounds[3] - keyboard_bounds[1] < 180
-            ):
-                raise UISceneError("可见键盘 bounds 过小，不能建立键盘区域。")
+            valid_keyboard_bounds = _valid_1000_bounds(keyboard.get("bounds"))
+            if valid_keyboard_bounds:
+                keyboard_bounds = tuple(float(value) for value in keyboard["bounds"])
+                valid_keyboard_bounds = bool(
+                    keyboard_bounds[2] - keyboard_bounds[0] >= 300
+                    and keyboard_bounds[3] - keyboard_bounds[1] >= 180
+                )
+            if not valid_keyboard_bounds:
+                if not (
+                    _goal_requests_keyboard_dismissal(goal_context)
+                    and _scene_reports_keyboard(scene)
+                ):
+                    raise UISceneError("可见键盘必须提供有效 bounds。")
+                # A dismissal-only subgoal can safely authorize Android Back
+                # without touching the keyboard.  Keep only dual-source
+                # presence/focus facts; discard all ungrounded keyboard
+                # geometry, mode and switch claims so text input remains
+                # impossible from this observation.
+                keyboard_bounds = None
+                boundsless_keyboard_dismissal = True
+                keyboard_layout = "unknown"
+                keyboard_input_mode = "unknown"
+                keyboard["mode_switch"] = None
         elif keyboard.get("bounds") is not None or keyboard.get("mode_switch") is not None:
             raise UISceneError("不可见键盘不能包含 bounds 或 mode_switch。")
 
@@ -4043,17 +4079,19 @@ def _apply_input_structure_audit(
             and trusted_input is not None
             and keyboard_visible
             and keyboard_layout == "qwerty"
-            and keyboard_input_mode == "direct_latin"
+            and keyboard_input_mode in {"direct_latin", "chinese_pinyin"}
             and _is_incomplete_optional_keyboard_mode_switch(raw_mode_switch)
         ):
             # A text-entry target does not consume the keyboard switch. When
-            # the current input and direct-Latin keyboard state are independently
+            # the current input and a known QWERTY keyboard state are independently
             # proven, discard only an incomplete subset of the optional switch
             # schema. This applies both before input (empty value) and while
             # verifying the exact non-empty result. Action authorization still
-            # requires an empty value in UniversalActionController. Extra fields,
-            # malformed geometry and all switch goals reach strict validation
-            # below and fail closed.
+            # requires an empty value plus direct_latin in
+            # UniversalActionController, so discarding this unused optional object
+            # cannot authorize typing in chinese_pinyin. Extra fields, malformed
+            # geometry and all switch goals reach strict validation below and fail
+            # closed.
             mode_switch = None
         else:
             mode_switch = _validated_keyboard_mode_switch(
@@ -4089,9 +4127,14 @@ def _apply_input_structure_audit(
                 "fully_visible": True,
                 "value": trusted_input["text"],
             }
+            if not keyboard_visible:
+                # Absence is useful task evidence only when the dedicated
+                # full-frame input audit explicitly reports keyboard.visible=false.
+                # An empty preliminary overlays list alone never mints this fact.
+                states["soft_keyboard_visible"] = False
             if trusted_input["placeholder"]:
                 states["placeholder"] = trusted_input["placeholder"]
-            if keyboard_bounds is not None:
+            if keyboard_bounds is not None or boundsless_keyboard_dismissal:
                 states.update(
                     {
                         "focused": True,
@@ -4105,6 +4148,8 @@ def _apply_input_structure_audit(
                 input_evidence.insert(0, f"应用输入框当前文字：{trusted_input['text']}")
             elif trusted_input["placeholder"]:
                 input_evidence.insert(0, f"应用输入框为空，占位提示：{trusted_input['placeholder']}")
+            if not keyboard_visible:
+                input_evidence.append(AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE)
             elements.append(
                 {
                     "element_id": "local_audited_input_1",

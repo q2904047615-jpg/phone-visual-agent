@@ -1748,10 +1748,17 @@ def _parse_decision(
 
         page_state = ModelPageState.from_dict(payload.get("page_state"))
         status = str(payload.get("status") or "").strip().lower()
-        expected_result = _normalize_expected_result(
-            payload.get("expected_result") or {}
-        )
         raw_action = payload.get("next_action")
+        raw_action_kind = ""
+        if isinstance(raw_action, dict):
+            for kind_field in ("kind", "action", "action_type", "type"):
+                if raw_action.get(kind_field):
+                    raw_action_kind = str(raw_action[kind_field]).strip().lower()
+                    break
+        expected_result = _normalize_expected_result(
+            payload.get("expected_result") or {},
+            action_kind=raw_action_kind,
+        )
         nested_target_region = None
         nested_expected_result = None
         if isinstance(raw_action, dict):
@@ -1773,7 +1780,10 @@ def _parse_decision(
                 raise GenericStepPlanningError(
                     "next_action.expected_result 必须是JSON对象。"
                 )
-            normalized_nested = _normalize_expected_result(nested_expected_result)
+            normalized_nested = _normalize_expected_result(
+                nested_expected_result,
+                action_kind=raw_action_kind,
+            )
             if expected_result and expected_result != normalized_nested:
                 raise GenericStepPlanningError(
                     "next_action.expected_result 与顶层 expected_result 冲突。"
@@ -1913,7 +1923,11 @@ def _extract_qwen_json_object(raw: str) -> dict[str, Any]:
     return dict(first)
 
 
-def _normalize_expected_result(value: Any) -> dict[str, Any]:
+def _normalize_expected_result(
+    value: Any,
+    *,
+    action_kind: str = "",
+) -> dict[str, Any]:
     """Normalize model wording into the controller's verifiable effect schema."""
 
     if not isinstance(value, dict):
@@ -1944,6 +1958,21 @@ def _normalize_expected_result(value: Any) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     for raw_key, item in value.items():
         key = aliases.get(str(raw_key), str(raw_key))
+        if (
+            key == "system_ui"
+            and item in (
+                {"overlays": []},
+                {"soft_keyboard_visible": False},
+            )
+            and action_kind in {"back", "home", "dismiss_overlay"}
+        ):
+            # Model-authored overlay/keyboard absence is not itself a
+            # controller-owned system_ui fact.  For dismissal actions retain
+            # only the weaker, independently verifiable scene transition; the
+            # object must match one exact absence shape, and every other nested
+            # field/value still fails closed below.
+            key = "scene_changed"
+            item = True
         if key not in allowed:
             raise GenericStepPlanningError(
                 f"expected_result 包含协议外字段：{raw_key}"

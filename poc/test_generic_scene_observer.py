@@ -7,6 +7,7 @@ from unittest.mock import patch
 from PIL import Image, ImageDraw, ImageFilter
 
 from generic_scene_observer import (
+    AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE,
     GenericSceneObserver,
     ICON_CLUSTER_AUDIT_VERSION,
     INPUT_STRUCTURE_AUDIT_VERSION,
@@ -2534,7 +2535,38 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual((0.13, 0.45, 0.87, 0.54), candidate.bounds)
         self.assertTrue(candidate.states["fully_visible"])
         self.assertNotIn("focused", candidate.states)
+        self.assertIs(candidate.states["soft_keyboard_visible"], False)
+        self.assertIn(AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE, candidate.evidence)
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
+
+    def test_empty_preliminary_overlays_do_not_mint_keyboard_hidden_evidence(self) -> None:
+        preliminary = scene_payload()
+        preliminary["overlays"] = []
+        preliminary["elements"] = [
+            {
+                "element_id": "ordinary-button",
+                "role": "button",
+                "meaning": "open_details",
+                "label": "查看详情",
+                "bounds": [120, 420, 880, 540],
+                "confidence": 1.0,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["查看详情按钮"],
+            }
+        ]
+
+        scene = GenericSceneObserver(SequenceProvider([preliminary])).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "查看页面中的详情入口"},
+        )
+
+        self.assertFalse(
+            any(
+                AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE in element.evidence
+                or element.states.get("soft_keyboard_visible") is False
+                for element in scene.elements
+            )
+        )
 
     def test_input_audit_never_promotes_ime_preedit_region_to_application_input(self) -> None:
         empty = scene_payload()
@@ -2836,6 +2868,43 @@ class GenericSceneObserverTests(unittest.TestCase):
             )
         )
 
+    def test_text_entry_result_discards_live_incomplete_switch_in_chinese_mode(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[audited_application_input(text="codex", placeholder="")],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "mode_switch": {
+                    "label": "英",
+                    "bounds": [650, 900, 760, 970],
+                    "current_mode": "chinese_pinyin",
+                },
+            },
+        )
+        audit["application_inputs"][0]["visible_editable_cues"] = ["caret"]
+
+        scene = GenericSceneObserver(
+            SequenceProvider([empty, empty, audit])
+        ).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "核对当前唯一输入框逐字显示 codex，不提交"},
+        )
+
+        input_element = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(input_element)
+        self.assertEqual("codex", input_element.states["value"])
+        self.assertEqual("chinese_pinyin", input_element.states["keyboard_input_mode"])
+        self.assertFalse(
+            any(
+                item.element_id == "local_audited_keyboard_mode_switch_1"
+                for item in scene.elements
+            )
+        )
+
     def test_switch_goal_rejects_incomplete_mode_switch(self) -> None:
         empty = scene_payload()
         empty["elements"] = []
@@ -3080,6 +3149,78 @@ class GenericSceneObserverTests(unittest.TestCase):
         }
 
         self.assertTrue(_goal_requests_input(context))
+
+    def test_hide_keyboard_allows_boundsless_presence_but_not_input_mode(self) -> None:
+        compact = scene_payload()
+        compact["summary"] = "唯一输入框为agent，当前软键盘可见。"
+        compact["overlays"] = ["软键盘"]
+        compact["elements"] = [
+            {
+                "element_id": "model-input",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "agent",
+                "bounds": [120, 360, 880, 470],
+                "confidence": 0.98,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": False,
+                    "value": "agent",
+                },
+                "evidence": ["输入框边框和光标可见"],
+            }
+        ]
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    text="agent",
+                    placeholder="",
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 580, 1000, 1210],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "mode_switch": {
+                    "label": "英",
+                    "bounds": [760, 1080, 850, 1160],
+                    "current_mode": "chinese_pinyin",
+                },
+            },
+        )
+        context = {
+            "objective": "输入完成后让软键盘不可见",
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "hide_keyboard",
+                    "objective": "使软键盘最终不在画面中",
+                    "constraints": ["保持输入框内容不变"],
+                    "completion_conditions": ["软键盘不可见"],
+                    "external_impact": "navigation_only",
+                    "goal_entities": {"input_text": "agent"},
+                }
+            },
+        }
+
+        scene = GenericSceneObserver(
+            SequenceProvider([compact, audit])
+        ).observe(
+            frames=stable_frames(),
+            goal_context=context,
+        )
+
+        target = scene.unique_trusted_goal_element()
+        self.assertEqual("local_audited_input_1", target.element_id)
+        self.assertTrue(target.states["focused"])
+        self.assertEqual("unknown", target.states["keyboard_layout"])
+        self.assertEqual("unknown", target.states["keyboard_input_mode"])
+        self.assertFalse(
+            any(
+                item.meaning == "switch_keyboard_input_mode"
+                for item in scene.elements
+            )
+        )
 
     def test_active_input_focus_ignores_completed_reload_wording(self) -> None:
         compact = scene_payload()

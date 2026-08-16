@@ -1649,6 +1649,70 @@ class QwenVisualDecisionTests(unittest.TestCase):
             decision.proposal.action.params["expected_effect"],
         )
 
+    def test_overlay_absence_under_system_ui_normalizes_only_for_dismissal(self) -> None:
+        payload = action_payload(self.context, self.observation)
+        payload.update(
+            {
+                "next_action": {"kind": "back"},
+                "target_region": {
+                    "kind": "system_navigation",
+                    "bounds": [0, 0, 1000, 1000],
+                    "description": "Android系统返回键",
+                },
+                "expected_result": {"system_ui": {"overlays": []}},
+            }
+        )
+
+        _observer, decision = self.decide(FakeProvider(payload))
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual("back", decision.proposal.action.action)
+        self.assertEqual({"scene_changed": True}, decision.expected_result)
+
+        invalid = action_payload(self.context, self.observation)
+        invalid["expected_result"] = {"system_ui": {"overlays": []}}
+        _observer, blocked = self.decide(SequenceProvider([invalid, invalid]))
+        self.assertEqual("blocked", blocked.proposal.status)
+        self.assertIn("system_ui", blocked.reason)
+
+        keyboard_payload = action_payload(self.context, self.observation)
+        keyboard_payload.update(
+            {
+                "next_action": {"kind": "back"},
+                "target_region": {
+                    "kind": "system_navigation",
+                    "bounds": [0, 0, 1000, 1000],
+                    "description": "Android系统返回键",
+                },
+                "expected_result": {
+                    "system_ui": {"soft_keyboard_visible": False}
+                },
+            }
+        )
+        _observer, keyboard_decision = self.decide(FakeProvider(keyboard_payload))
+        self.assertEqual("action", keyboard_decision.proposal.status)
+        self.assertEqual({"scene_changed": True}, keyboard_decision.expected_result)
+
+        invalid_keyboard = action_payload(self.context, self.observation)
+        invalid_keyboard["expected_result"] = {
+            "system_ui": {"soft_keyboard_visible": False}
+        }
+        _observer, blocked_keyboard = self.decide(
+            SequenceProvider([invalid_keyboard, invalid_keyboard])
+        )
+        self.assertEqual("blocked", blocked_keyboard.proposal.status)
+        self.assertIn("system_ui", blocked_keyboard.reason)
+
+        true_keyboard = copy.deepcopy(keyboard_payload)
+        true_keyboard["expected_result"] = {
+            "system_ui": {"soft_keyboard_visible": True}
+        }
+        _observer, blocked_true = self.decide(
+            SequenceProvider([true_keyboard, true_keyboard])
+        )
+        self.assertEqual("blocked", blocked_true.proposal.status)
+        self.assertIn("system_ui", blocked_true.reason)
+
     def test_expected_result_conflicting_alias_is_rejected(self) -> None:
         bad = action_payload(self.context, self.observation)
         bad["expected_result"] = {

@@ -3466,6 +3466,348 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
 
+    def test_navigation_presence_binds_page_to_scene_and_input_to_control(self) -> None:
+        initial = UniversalAgentStartTests._read_only_locate_graph()
+        initial = replace(
+            initial,
+            subgoals=(
+                replace(
+                    initial.subgoals[0],
+                    objective="当前本地页面的唯一输入框可见",
+                    completion_conditions=(
+                        "当前本地页面的唯一输入框在画面中可见",
+                    ),
+                    external_impact="navigation_only",
+                ),
+                initial.subgoals[1],
+            ),
+        )
+        initial.validate()
+        revised = UniversalAgentStartTests._advance_locate_graph(initial)
+        planner = FakeDeepSeekPlanner(initial, replan_result=revised)
+        input_element = UIElement(
+            element_id="input-1",
+            role="input",
+            meaning="target_text_input",
+            label="",
+            bounds=(0.13, 0.50, 0.87, 0.60),
+            confidence=1.0,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "value": "",
+            },
+            evidence=("位于目标文字下方的空矩形输入框",),
+        )
+        instruction = UIElement(
+            element_id="instruction-1",
+            role="text",
+            meaning="target_instruction",
+            label="目标文字：agent",
+            bounds=(0.13, 0.45, 0.45, 0.49),
+            confidence=1.0,
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=("输入框上方明确指示目标文字为agent",),
+        )
+        scene = UIScene(
+            app_id="unknown",
+            screen_id="通用动作真机验收页",
+            summary="页面包含目标文字agent的输入任务及一个空输入框。",
+            elements=(input_element, instruction),
+            stable=True,
+            confidence=1.0,
+            fingerprint="live-shape-before-focus",
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                planner,
+                FakeQwenObserver(),
+                FakeAdapter(scene),
+            ).start(
+                session_id="session-live-shape-presence",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual("replace-input", session.task_graph.active_subgoal_id)
+        self.assertEqual(1, len(planner.replan_calls))
+        visible_evidence = planner.replan_calls[0][1].visible_evidence
+        self.assertTrue(any("element_id=input-1" in item for item in visible_evidence))
+        self.assertFalse(any("element_id=instruction-1" in item for item in visible_evidence))
+        self.assertEqual(0, session.physical_actions)
+
+    def test_navigation_presence_rejects_instruction_mention_without_safe_input(self) -> None:
+        initial = UniversalAgentStartTests._read_only_locate_graph()
+        initial = replace(
+            initial,
+            subgoals=(
+                replace(
+                    initial.subgoals[0],
+                    objective="当前页面的唯一输入框可见",
+                    completion_conditions=("当前页面的唯一输入框可见",),
+                    external_impact="navigation_only",
+                ),
+                initial.subgoals[1],
+            ),
+        )
+        initial.validate()
+        instruction = UIElement(
+            element_id="instruction-only",
+            role="text",
+            meaning="target_instruction",
+            label="请在输入框中填写内容",
+            bounds=(0.13, 0.45, 0.55, 0.49),
+            confidence=1.0,
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=("说明文字提到输入框",),
+        )
+        scene = UIScene(
+            app_id="unknown",
+            screen_id="local-page",
+            summary="当前页面显示输入任务说明。",
+            elements=(instruction,),
+            stable=True,
+            confidence=1.0,
+            fingerprint="instruction-without-input",
+        )
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_result=UniversalAgentStartTests._advance_locate_graph(initial),
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                planner,
+                FakeQwenObserver(),
+                FakeAdapter(scene),
+            ).start(
+                session_id="session-no-real-input",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("blocked", session.status)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(1, session.task_graph.revision)
+        self.assertEqual(0, session.physical_actions)
+
+    def test_live_shape_input_goal_succeeds_with_two_actions_in_one_session(self) -> None:
+        initial = UniversalAgentStartTests._read_only_locate_graph()
+        initial = replace(
+            initial,
+            goal=replace(
+                initial.goal,
+                objective="让当前唯一输入框中的内容最终为 agent",
+                entities={"input_text": "agent"},
+            ),
+            completion_conditions=(
+                replace(
+                    initial.completion_conditions[0],
+                    description="当前唯一输入框显示 agent",
+                    evidence_required=("输入框结构化值为 agent",),
+                ),
+            ),
+            subgoals=(
+                replace(
+                    initial.subgoals[0],
+                    subgoal_id="ensure-input-visible",
+                    objective="当前页面的唯一输入框可见",
+                    completion_conditions=("当前页面的唯一输入框可见",),
+                    external_impact="navigation_only",
+                ),
+                replace(
+                    initial.subgoals[1],
+                    subgoal_id="set-input-text",
+                    objective="当前唯一输入框中的内容为 agent",
+                    depends_on=("ensure-input-visible",),
+                    completion_conditions=("输入框结构化值为 agent",),
+                ),
+            ),
+            active_subgoal_id="ensure-input-visible",
+            raw_user_goal=(
+                "让当前页面唯一输入框中的内容最终为 agent；"
+                "不得搜索、提交、发送、保存或发布"
+            ),
+        )
+        initial.validate()
+
+        before = UIScene(
+            app_id="unknown",
+            screen_id="local-input-page",
+            summary="当前页面显示一个空的唯一输入框。",
+            elements=(
+                UIElement(
+                    element_id="candidate-1",
+                    role="input",
+                    meaning="target_text_input",
+                    label="",
+                    bounds=(0.13, 0.50, 0.87, 0.60),
+                    confidence=1.0,
+                    states={
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "value": "",
+                    },
+                    evidence=("页面中央唯一空输入框",),
+                ),
+                UIElement(
+                    element_id="instruction-1",
+                    role="text",
+                    meaning="target_instruction",
+                    label="目标文字：agent",
+                    bounds=(0.13, 0.45, 0.45, 0.49),
+                    confidence=1.0,
+                    states={"goal_relevant": True, "fully_visible": True},
+                    evidence=("输入任务说明",),
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint="input-empty-unfocused",
+        )
+        focused_input = replace(
+            before.elements[0],
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+            },
+        )
+        focused = replace(
+            before,
+            summary="唯一输入框已聚焦，英文直输键盘可见。",
+            elements=(focused_input, before.elements[1]),
+            fingerprint="input-empty-focused",
+        )
+        filled_input = replace(
+            focused_input,
+            states={**focused_input.states, "value": "agent"},
+        )
+        filled = replace(
+            focused,
+            summary="唯一输入框结构化值为 agent。",
+            elements=(filled_input, before.elements[1]),
+            fingerprint="input-filled-agent",
+        )
+
+        presence_advanced = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    initial.subgoals[0],
+                    status="completed",
+                    completion_evidence=(before.summary,),
+                ),
+                replace(initial.subgoals[1], status="active"),
+            ),
+            active_subgoal_id="set-input-text",
+        )
+        presence_advanced.validate()
+        focus_replanned = replace(presence_advanced, revision=3)
+        focus_replanned.validate()
+        completed = replace(
+            focus_replanned,
+            revision=4,
+            status="completed",
+            completion_conditions=(
+                replace(
+                    focus_replanned.completion_conditions[0],
+                    satisfied=True,
+                    evidence=(filled.summary,),
+                ),
+            ),
+            subgoals=(
+                focus_replanned.subgoals[0],
+                replace(
+                    focus_replanned.subgoals[1],
+                    status="completed",
+                    completion_evidence=(filled.summary,),
+                ),
+            ),
+            active_subgoal_id=None,
+        )
+        completed.validate()
+
+        class FocusThenInputQwen:
+            def __init__(self) -> None:
+                self.action_kinds = ["tap_semantic", "input_verified_text"]
+                self.calls = []
+
+            def decide(self, **kwargs):
+                kwargs.pop("available_action_kinds", None)
+                if not self.action_kinds:
+                    raise AssertionError("unexpected Qwen decision call")
+                self.calls.append(kwargs)
+                action_kind = self.action_kinds.pop(0)
+                decision = FakeQwenObserver(action_kind=action_kind).decide(
+                    **kwargs
+                )
+                if action_kind == "input_verified_text":
+                    decision.proposal.action.params["text"] = "agent"
+                return decision
+
+        planner = SequenceDeepSeekPlanner(
+            initial,
+            presence_advanced,
+            focus_replanned,
+            completed,
+        )
+        qwen = FocusThenInputQwen()
+        adapter = SequenceExecutingAdapter(
+            before,
+            (focused, "matched", ()),
+            (filled, "matched", ()),
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(planner, qwen, adapter)
+            session = orchestrator.start(
+                session_id="session-live-shape-two-actions",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            self.assertEqual("awaiting_confirmation", session.status)
+            self.assertEqual(0, session.physical_actions)
+            orchestrator.confirm_one(session, _confirmation(session))
+            self.assertEqual("awaiting_confirmation", session.status)
+            self.assertEqual(1, session.physical_actions)
+            orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual(2, session.physical_actions)
+        self.assertEqual(2, adapter.execute_calls)
+        self.assertEqual(2, len(session.history))
+        self.assertEqual(4, session.task_graph.revision)
+        self.assertIsNone(session.task_graph.active_subgoal_id)
+        self.assertEqual(
+            ["subgoal_completed", "action_result_matched", "action_result_matched"],
+            [call[2] for call in planner.replan_calls],
+        )
+        receipts = [
+            call[1].verified_action_transition for call in planner.replan_calls[1:]
+        ]
+        self.assertTrue(all(receipt is not None for receipt in receipts))
+        self.assertTrue(all(receipt.physical_actions == 1 for receipt in receipts))
+        self.assertNotEqual(receipts[0].receipt_id, receipts[1].receipt_id)
+        self.assertNotEqual(
+            receipts[0].after_observation_id,
+            receipts[1].after_observation_id,
+        )
+        self.assertEqual(
+            ["input-empty-focused", "input-filled-agent"],
+            [item["after_fingerprint"] for item in session.history],
+        )
+
     def test_reload_visible_state_is_not_zero_action_presence_completion(self) -> None:
         subgoal = SimpleNamespace(
             objective="当前本地页面完成重新载入",

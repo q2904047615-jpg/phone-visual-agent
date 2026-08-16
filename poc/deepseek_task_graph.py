@@ -1147,6 +1147,11 @@ class DeepSeekTaskGraphPlanner:
                 validate=False,
             )
             candidate = _restore_completed_history_evidence(graph, candidate)
+            candidate = _canonicalize_literal_visible_evidence_clauses(
+                graph,
+                candidate,
+                observation,
+            )
             self._validate_replan_candidate(
                 graph,
                 candidate,
@@ -1173,6 +1178,11 @@ class DeepSeekTaskGraphPlanner:
                 validate=False,
             )
             candidate = _restore_completed_history_evidence(graph, candidate)
+            candidate = _canonicalize_literal_visible_evidence_clauses(
+                graph,
+                candidate,
+                observation,
+            )
             try:
                 self._validate_replan_candidate(
                     graph,
@@ -2260,6 +2270,83 @@ def _restore_completed_history_evidence(
         for item in candidate.subgoals
     )
     return replace(candidate, subgoals=restored)
+
+
+def _canonicalize_literal_visible_evidence_clauses(
+    previous: DynamicTaskGraph,
+    candidate: DynamicTaskGraph,
+    observation: ObservedState,
+) -> DynamicTaskGraph:
+    """Bind a model's exact visible clause to its full controller-owned fact.
+
+    Models sometimes copy one complete clause from a longer visible summary
+    instead of copying the entire evidence item.  This normalization remains
+    fail-closed: only a sufficiently specific, punctuation-delimited literal
+    clause with exactly one source is replaced by that source.  Paraphrases,
+    identifiers, partial phrases and ambiguous matches remain invalid.
+    """
+
+    visible = tuple(observation.visible_evidence)
+    visible_set = frozenset(visible)
+
+    def normalized(value: str) -> str:
+        return " ".join(str(value or "").strip().casefold().split())
+
+    clause_sources: dict[str, set[str]] = {}
+    for source in visible:
+        for clause in re.split(r"[，,。.;；！？!?]+", source):
+            key = normalized(clause)
+            if key:
+                clause_sources.setdefault(key, set()).add(source)
+
+    def canonicalize(claims: tuple[str, ...]) -> tuple[str, ...]:
+        result: list[str] = []
+        for claim in claims:
+            if claim in visible_set or claim.startswith("controller_transition:"):
+                result.append(claim)
+                continue
+            key = normalized(claim)
+            semantic_chars = re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", key)
+            sources = clause_sources.get(key, set())
+            if len(semantic_chars) >= 6 and len(sources) == 1:
+                result.append(next(iter(sources)))
+            else:
+                result.append(claim)
+        return tuple(dict.fromkeys(result))
+
+    old_conditions = {
+        item.condition_id: item for item in previous.completion_conditions
+    }
+
+    def newly_satisfied(item: CompletionCondition) -> bool:
+        old = old_conditions.get(item.condition_id)
+        return item.satisfied and (old is None or not old.satisfied)
+
+    conditions = tuple(
+        replace(item, evidence=canonicalize(item.evidence))
+        if newly_satisfied(item)
+        else item
+        for item in candidate.completion_conditions
+    )
+    old_subgoals = {item.subgoal_id: item for item in previous.subgoals}
+    subgoals = tuple(
+        replace(
+            item,
+            completion_evidence=canonicalize(item.completion_evidence),
+        )
+        if item.status == "completed"
+        and (
+            item.subgoal_id not in old_subgoals
+            or old_subgoals[item.subgoal_id].status != "completed"
+        )
+        else item
+        for item in candidate.subgoals
+    )
+    return replace(
+        candidate,
+        completion_conditions=conditions,
+        subgoals=subgoals,
+    )
 
 
 def _validate_revision(

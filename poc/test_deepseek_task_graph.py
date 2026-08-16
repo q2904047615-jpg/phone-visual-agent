@@ -3211,6 +3211,114 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 reason="模型认为已经完成",
             )
 
+    def test_replan_canonicalizes_one_complete_literal_visible_clause(self):
+        initial = base_payload()
+        initial["goal"]["objective"] = "软键盘最终不可见"
+        initial["goal"]["entities"] = {}
+        initial["constraints"] = ["不得提交或发送"]
+        initial["risk_actions"] = []
+        initial["completion_conditions"] = [
+            {
+                "condition_id": "keyboard_hidden",
+                "description": "软键盘不可见",
+                "evidence_required": ["软键盘未显示"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ]
+        initial["subgoals"] = [
+            {
+                "subgoal_id": "hide_keyboard",
+                "objective": "软键盘不可见",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["不得提交或发送"],
+                "completion_conditions": ["软键盘未显示"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            }
+        ]
+        initial["active_subgoal_id"] = "hide_keyboard"
+        completed = copy.deepcopy(initial)
+        completed["status"] = "completed"
+        completed["active_subgoal_id"] = None
+        completed["completion_conditions"][0]["satisfied"] = True
+        completed["completion_conditions"][0]["evidence"] = ["软键盘未显示"]
+        completed["subgoals"][0]["status"] = "completed"
+        completed["subgoals"][0]["completion_evidence"] = ["软键盘未显示"]
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            "让软键盘最终不可见",
+            device_id="phone-1",
+        )
+        observed = matched_controller_observation(graph)
+        full_fact = "页面显示输入结果，唯一输入框为 agent，软键盘未显示。"
+        observed = ObservedState(
+            **{
+                **observed.__dict__,
+                "summary": full_fact,
+                "visible_evidence": (full_fact, "应用输入框当前文字：agent"),
+            }
+        )
+        provider = FakeProvider(completed)
+
+        result = DeepSeekTaskGraphPlanner(provider).replan(
+            graph,
+            observed,
+            trigger="action_result_matched",
+            reason="系统返回动作后键盘已经收起",
+        )
+
+        self.assertEqual("completed", result.status)
+        self.assertEqual((full_fact,), result.completion_conditions[0].evidence)
+        self.assertEqual((full_fact,), result.subgoals[0].completion_evidence)
+        graph_messages = [
+            messages
+            for messages in provider.messages
+            if "semantic-risk-audit-v1" not in messages[0]["content"]
+        ]
+        self.assertEqual(1, len(graph_messages))
+
+    def test_replan_does_not_canonicalize_identifier_or_partial_phrase(self):
+        initial = base_payload()
+        revised = copy.deepcopy(initial)
+        revised["subgoals"][0]["status"] = "completed"
+        revised["subgoals"][0]["completion_evidence"] = ["locate_target"]
+        revised["subgoals"][1]["status"] = "active"
+        revised["active_subgoal_id"] = "save_target"
+        revised["status"] = "awaiting_confirmation"
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            "目标",
+            device_id="phone-1",
+        )
+        observed = ObservedState(
+            "scene-2",
+            "页面显示目标地点详情",
+            ("页面显示目标地点详情，软键盘未显示。",),
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "当前观察之外"):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(revised, copy.deepcopy(revised))
+            ).replan(
+                graph,
+                observed,
+                trigger="subgoal_completed",
+                reason="模型使用标识符而非证据",
+            )
+
+        partial = copy.deepcopy(revised)
+        partial["subgoals"][0]["completion_evidence"] = ["目标地点"]
+        with self.assertRaisesRegex(TaskGraphError, "当前观察之外"):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(partial, copy.deepcopy(partial))
+            ).replan(
+                graph,
+                observed,
+                trigger="subgoal_completed",
+                reason="模型只复制了证据片段",
+            )
+
     def test_completed_graph_requires_all_global_evidence(self):
         payload = base_payload()
         payload["status"] = "completed"

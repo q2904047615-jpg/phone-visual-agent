@@ -3044,6 +3044,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         payload["risk_actions"][2]["description"] = "切换到其他联系人"
         payload["risk_actions"][2]["external_effect"] = "改变当前聊天对象"
+        payload["subgoals"][2]["completion_conditions"][0] = "发送按钮未被点击"
         payload["completion_conditions"][2]["evidence_required"] = [
             "发送按钮未被激活或点击",
             "codex 文字可见",
@@ -3072,6 +3073,20 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             with self.subTest(evidence=evidence):
                 payload = purely_forbidden_draft_payload()
                 payload["completion_conditions"][2]["evidence_required"] = [evidence]
+                with self.assertRaisesRegex(TaskGraphError, "低层动作表达"):
+                    DeepSeekTaskGraphPlanner(
+                        FakeProvider(
+                            copy.deepcopy(payload),
+                            copy.deepcopy(payload),
+                            copy.deepcopy(payload),
+                        )
+                    ).plan(payload["goal"]["objective"], device_id="phone-1")
+
+    def test_positive_or_misplaced_click_text_is_not_subgoal_completion(self):
+        for completion in ("发送按钮已点击", "不得点击发送按钮"):
+            with self.subTest(completion=completion):
+                payload = purely_forbidden_draft_payload()
+                payload["subgoals"][2]["completion_conditions"] = [completion]
                 with self.assertRaisesRegex(TaskGraphError, "低层动作表达"):
                     DeepSeekTaskGraphPlanner(
                         FakeProvider(

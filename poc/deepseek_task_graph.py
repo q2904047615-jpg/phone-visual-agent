@@ -252,7 +252,8 @@ READ_ONLY_RISK_CONTROL_STATE_PATTERN = re.compile(
     r"(?:(?:发送|提交|删除|清除|转发|发布|保存|分享|回复|关注|支付|"
     r"send|submit|delete|erase|forward|publish|save|share|reply|follow|pay)\s*)?"
     r"(?:按钮|控件|入口|button|control).{0,12}(?:可见|显示|仍能看见|可核对|"
-    r"未被触发|没有触发|未触发|未被激活|未激活|没有激活|"
+    r"未被触发|没有触发|未触发|未被点击|没有被点击|未点击|"
+    r"未被激活|未激活|没有激活|"
     r"未被启用|未启用|没有启用|"
     r"visible|shown|not\s+triggered|not\s+activated|not\s+enabled)|"
     r"\b(?:stop|stay|remain)\b.{0,28}\bbefore\b.{0,16}\b(?:button|control)\b|"
@@ -455,7 +456,10 @@ class Subgoal:
         )
         _reject_low_level_instruction(self.objective, "subgoals.objective")
         for item in self.completion_conditions:
-            _reject_low_level_instruction(item, "subgoals.completion_conditions")
+            _reject_low_level_completion_evidence(
+                item,
+                "subgoals.completion_conditions",
+            )
         _validate_text_list(
             self.completion_evidence,
             "subgoals.completion_evidence",

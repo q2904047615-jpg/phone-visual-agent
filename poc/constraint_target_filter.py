@@ -61,6 +61,27 @@ _ELEMENT_TARGETING_PROHIBITION = re.compile(
     r"|(?:避免|避开|\b(?:avoid|exclude)\b)",
     re.IGNORECASE,
 )
+_STRONG_ELEMENT_TARGETING_PROHIBITION = re.compile(
+    r"(?:不要|不得|禁止|不可|不能|勿|不再)"
+    r"[^，。；;]{0,32}?"
+    r"(?:点击|点按|触碰|触摸|打开|进入|选择|勾选|切换|使用|访问|启动|按下|长按|滑动|拖动)"
+    r"|\b(?:do\s+not|don't|must\s+not|never)\b"
+    r"[^,.;]{0,48}?"
+    r"\b(?:click|tap|touch|open|enter|select|choose|toggle|use|visit|launch|press|long[- ]press|swipe|drag)\b"
+    r"|(?:避免|避开|\b(?:avoid|exclude)\b)",
+    re.IGNORECASE,
+)
+_STATE_EFFECT_OPERATION_PROHIBITION = re.compile(
+    r"(?:不要|不得|禁止|不可|不能|勿|避免|不再)"
+    r"[^，。；;]{0,16}(?:执行|进行)"
+    r"[^，。；;]{0,28}(?:改变|修改|保存|提交|发送|发布|删除|移除|创建|新增|上传|分享|支付|购买)"
+    r"[^，。；;]{0,28}(?:的)?操作"
+    r"|\b(?:do\s+not|don't|must\s+not|never|avoid)\b"
+    r"[^,.;]{0,24}\b(?:perform|carry\s+out)\b"
+    r"[^,.;]{0,40}\b(?:change|modify|save|submit|send|publish|delete|remove|create|upload|share|pay|purchase)\b"
+    r"[^,.;]{0,32}\b(?:operation|action)s?\b",
+    re.IGNORECASE,
+)
 ELEMENT_BOUND_ROLES = frozenset(
     {"button", "icon", "text", "tab", "image", "list_item", "input", "toggle"}
 )
@@ -125,6 +146,14 @@ def constraint_excludes_candidate(
             and _PAGE_ELEMENT_SCOPE.search(constraint)
         ):
             return True
+        if (
+            _STATE_EFFECT_OPERATION_PROHIBITION.search(constraint)
+            and not _STRONG_ELEMENT_TARGETING_PROHIBITION.search(constraint)
+        ):
+            # In phrases such as "do not perform an operation that may modify
+            # settings", "operation" names the prohibited effect scope; it is
+            # not an instruction to ban a visible element sharing that noun.
+            continue
         if not _ELEMENT_TARGETING_PROHIBITION.search(constraint):
             # State/result constraints such as "do not change any setting"
             # are enforced by the task-risk and action layers.  A shared word

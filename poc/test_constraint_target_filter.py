@@ -24,6 +24,24 @@ class ConstraintTargetFilterTests(unittest.TestCase):
             )
         )
 
+    def test_effect_scoped_operation_keeps_settings_launcher(self) -> None:
+        self.assertFalse(
+            constraint_excludes_candidate(
+                ("不得执行任何可能修改设置的操作",),
+                ("app_launcher", "设置", "设置入口"),
+                candidate_role="icon",
+            )
+        )
+
+    def test_effect_scoped_operation_keeps_gallery_launcher_variation(self) -> None:
+        self.assertFalse(
+            constraint_excludes_candidate(
+                ("不得进行任何可能删除相册内容的操作",),
+                ("app_launcher", "相册", "相册入口"),
+                candidate_role="icon",
+            )
+        )
+
     def test_explicit_open_prohibition_excludes_search_result(self) -> None:
         self.assertTrue(
             constraint_excludes_candidate(
@@ -37,6 +55,24 @@ class ConstraintTargetFilterTests(unittest.TestCase):
         self.assertTrue(
             constraint_excludes_candidate(
                 ("不要再次使用设置入口",),
+                ("app_launcher", "设置", "设置入口"),
+                candidate_role="icon",
+            )
+        )
+
+    def test_explicit_operate_prohibition_excludes_named_entry(self) -> None:
+        self.assertTrue(
+            constraint_excludes_candidate(
+                ("不得操作设置入口",),
+                ("app_launcher", "设置", "设置入口"),
+                candidate_role="icon",
+            )
+        )
+
+    def test_direct_target_clause_overrides_effect_scoped_operation(self) -> None:
+        self.assertTrue(
+            constraint_excludes_candidate(
+                ("不得执行可能修改设置的操作，也不得打开设置入口",),
                 ("app_launcher", "设置", "设置入口"),
                 candidate_role="icon",
             )

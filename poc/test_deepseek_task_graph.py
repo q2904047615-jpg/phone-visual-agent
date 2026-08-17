@@ -2875,6 +2875,77 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         self.assertTrue(all(not item.risk_action_ids for item in graph.subgoals))
 
+    def test_initial_plan_accepts_purely_negative_risk_control_state(self):
+        payload = purely_forbidden_draft_payload()
+        payload["goal"]["target_apps"] = [
+            {"app_id": "current_foreground", "app_name": "当前前台应用"}
+        ]
+        payload["constraints"] = [
+            "不得发送、提交、删除、转发、发布该草稿",
+            "不得选择其他联系人",
+            "不得产生任何账号及外部影响",
+        ]
+        payload["completion_conditions"] = [
+            {
+                "condition_id": "final_state_visible",
+                "description": (
+                    "指定聊天页面在前台可见，底部唯一消息输入框中包含未发送的英文 "
+                    "codex 草稿，且发送按钮未被触发，codex 仍可见"
+                ),
+                "evidence_required": [
+                    "指定聊天页面可见",
+                    "底部唯一消息输入框内容为 codex",
+                    "发送按钮未被触发",
+                    "codex 文字可见",
+                ],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ]
+        payload["risk_actions"] = [payload["risk_actions"][0]]
+        payload["risk_actions"][0]["subgoal_ids"] = [
+            "open_chat",
+            "enter_draft",
+            "verify_before_send",
+        ]
+        for subgoal in payload["subgoals"]:
+            subgoal["risk_action_ids"] = ["send_message"]
+            subgoal["external_impact"] = (
+                "read_only"
+                if subgoal["subgoal_id"] == "verify_before_send"
+                else "external_state"
+            )
+        payload["subgoals"][1]["constraints"] = [payload["constraints"][0]]
+        payload["subgoals"][2]["objective"] = (
+            "确认发送按钮未被触发且 codex 仍可见"
+        )
+        payload["subgoals"][2]["constraints"] = [payload["constraints"][0]]
+        payload["subgoals"][2]["completion_conditions"] = [
+            "发送按钮未被触发",
+            "codex 文字可见",
+        ]
+        normalized_payload = copy.deepcopy(payload)
+        normalized_payload["risk_actions"] = []
+        for index, impact in enumerate(
+            ("navigation_only", "navigation_only", "read_only")
+        ):
+            normalized_payload["subgoals"][index]["risk_action_ids"] = []
+            normalized_payload["subgoals"][index]["external_impact"] = impact
+
+        graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(
+                copy.deepcopy(payload),
+                copy.deepcopy(payload),
+                audit_payloads=[audit_payload_for_graph(normalized_payload)],
+            )
+        ).plan(payload["goal"]["objective"], device_id="phone-1")
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertEqual(
+            ["navigation_only", "navigation_only", "read_only"],
+            [item.external_impact for item in graph.subgoals],
+        )
+
     def test_purely_forbidden_effect_normalization_is_cross_app_and_bilingual(self):
         payload = single_subgoal_payload(
             "The editable text field shows note and remains an unsubmitted draft",

@@ -238,7 +238,9 @@ READ_ONLY_RISK_CONTROL_STATE_PATTERN = re.compile(
     r"(?:(?:停在|保持在).{0,20}(?:按钮|控件|入口).{0,8}(?:之前|前)|"
     r"(?:(?:发送|提交|删除|清除|转发|发布|保存|分享|回复|关注|支付|"
     r"send|submit|delete|erase|forward|publish|save|share|reply|follow|pay)\s*)?"
-    r"(?:按钮|控件|入口|button|control).{0,12}(?:可见|显示|仍能看见|可核对|visible|shown)|"
+    r"(?:按钮|控件|入口|button|control).{0,12}(?:可见|显示|仍能看见|可核对|"
+    r"未被触发|没有触发|未触发|未激活|没有激活|未启用|没有启用|"
+    r"visible|shown|not\s+triggered|not\s+activated|not\s+enabled)|"
     r"\b(?:stop|stay|remain)\b.{0,28}\bbefore\b.{0,16}\b(?:button|control)\b|"
     r"\b(?:button|control)\b.{0,16}\b(?:visible|shown)\b)",
     re.IGNORECASE,

@@ -82,9 +82,32 @@ _STATE_EFFECT_OPERATION_PROHIBITION = re.compile(
     r"[^,.;]{0,32}\b(?:operation|action)s?\b",
     re.IGNORECASE,
 )
+_EXCEPTION_SCOPE = re.compile(
+    r"除(?P<zh>[^，。；;]{1,80}?)之外"
+    r"|\b(?:except|other\s+than)\s+(?P<en>[^,.;]{1,80})",
+    re.IGNORECASE,
+)
+_BLANKET_OPERATION_SCOPE = re.compile(
+    r"(?:任何|所有|一切|其他|其它|其余)(?:的)?(?:操作|动作|行为)"
+    r"|\b(?:any|all|every|other)\s+(?:action|operation)s?\b"
+    r"|\b(?:anything|everything)\b",
+    re.IGNORECASE,
+)
 ELEMENT_BOUND_ROLES = frozenset(
     {"button", "icon", "text", "tab", "image", "list_item", "input", "toggle"}
 )
+
+
+def exception_scope_terms(constraint: str) -> set[str]:
+    """Return the explicitly allowed target terms of a blanket prohibition."""
+
+    if not _BLANKET_OPERATION_SCOPE.search(constraint):
+        return set()
+    match = _EXCEPTION_SCOPE.search(constraint)
+    if match is None:
+        return set()
+    allowed = match.group("zh") or match.group("en") or ""
+    return binding_terms(allowed)
 
 
 def structured_strings(value: Any) -> tuple[str, ...]:
@@ -141,6 +164,12 @@ def constraint_excludes_candidate(
     for constraint in dict.fromkeys(structured_strings(constraints)):
         if not _PROHIBITION.search(constraint):
             continue
+        allowed_terms = exception_scope_terms(constraint)
+        if allowed_terms:
+            if candidate_terms.intersection(allowed_terms):
+                continue
+            if str(candidate_role or "").strip() in ELEMENT_BOUND_ROLES:
+                return True
         if (
             str(candidate_role or "").strip() in ELEMENT_BOUND_ROLES
             and _PAGE_ELEMENT_SCOPE.search(constraint)

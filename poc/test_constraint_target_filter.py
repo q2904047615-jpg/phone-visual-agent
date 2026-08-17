@@ -6,6 +6,41 @@ from constraint_target_filter import constraint_excludes_candidate
 
 
 class ConstraintTargetFilterTests(unittest.TestCase):
+    def test_blanket_exception_keeps_explicitly_allowed_wechat_entry(self) -> None:
+        self.assertFalse(
+            constraint_excludes_candidate(
+                ("不得执行除使微信首页在前台可见并停在首页之外的任何操作",),
+                ("app_launcher_wechat", "微信", "绿色气泡图标"),
+                candidate_role="icon",
+            )
+        )
+
+    def test_blanket_exception_excludes_entry_outside_allowed_scope(self) -> None:
+        self.assertTrue(
+            constraint_excludes_candidate(
+                ("不得执行除使微信首页在前台可见并停在首页之外的任何操作",),
+                ("app_launcher_settings", "设置", "齿轮图标"),
+                candidate_role="icon",
+            )
+        )
+
+    def test_english_blanket_exception_keeps_only_named_entry(self) -> None:
+        constraint = "Do not perform any action except open Settings"
+        self.assertFalse(
+            constraint_excludes_candidate(
+                (constraint,),
+                ("app_launcher_settings", "Settings", "gear icon"),
+                candidate_role="icon",
+            )
+        )
+        self.assertTrue(
+            constraint_excludes_candidate(
+                (constraint,),
+                ("app_launcher_gallery", "Gallery", "photo icon"),
+                candidate_role="icon",
+            )
+        )
+
     def test_state_change_constraint_keeps_settings_launcher(self) -> None:
         self.assertFalse(
             constraint_excludes_candidate(

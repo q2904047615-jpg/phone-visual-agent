@@ -735,6 +735,7 @@ class GenericSceneObserver:
                         ),
                     }
                 ]
+                compact_camera_alignment = scene.camera_alignment
                 try:
                     raw = model_chat(
                         detail_messages,
@@ -766,44 +767,24 @@ class GenericSceneObserver:
                         or targeted_error_type not in FORMAT_ERROR_TYPES
                     ):
                         raise
-                    format_retry_used = True
-                    self._set_stage("waiting_compact_retry")
-                    targeted_retry_messages = [
-                        _json_only_system_message(),
-                        {
-                            "role": "user",
-                            "content": (
-                                [
-                                    {
-                                    "type": "text",
-                                    "text": _targeted_retry_prompt(
-                                        context,
-                                        targeted_error,
-                                        roi_bounds=None,
-                                    ),
-                                    },
-                                    image_part,
-                                ]
-                            ),
-                        }
-                    ]
-                    raw = model_chat(
-                        targeted_retry_messages,
-                        max_tokens=TARGETED_OUTPUT_TOKENS,
+                    scene = _parse_scene_after_unique_structural_edit(
+                        self.last_raw_response,
+                        fingerprint=fingerprint,
+                        goal_context=context,
+                        allow_invalid_system_ui_unknown=True,
+                        camera_alignment_override=compact_camera_alignment,
                     )
-                    self.last_raw_response = raw
-                    self._set_stage("parsing_compact_retry")
+                    if scene is None:
+                        raise VisionAgentError(
+                            "目标精查响应不存在唯一、严格有效的单结构标点修复。"
+                        ) from targeted_error
                     scene = _suppress_obscured_input_evidence(
-                        _parse_scene(
-                            raw,
-                            fingerprint=fingerprint,
-                            goal_context=context,
-                            allow_invalid_system_ui_unknown=True,
-                            camera_alignment_override=scene.camera_alignment,
-                        ),
+                        scene,
                         visual_obstructions,
                         fingerprint=fingerprint,
                     )
+                    format_retry_used = True
+                    local_structural_repair_used = True
 
             if _goal_requests_reload(context):
                 # Reload is a generic navigation semantic, but compact toolbar
@@ -1745,42 +1726,6 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 """
 
 
-def _targeted_retry_prompt(
-    context: dict[str, Any],
-    error: Exception,
-    *,
-    roi_bounds: tuple[int, int, int, int] | None = None,
-) -> str:
-    return f"""
-上一次目标精查输出不是完整、合法的页面观察JSON，控制器没有产生任何候选动作。
-错误摘要：{str(error)[:300]}
-目标上下文：{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
-{_roi_observation_note(roi_bounds)}
-这是本轮观察唯一一次格式修复。请重新独立观察原图，只返回最小完整JSON；没有可靠目标就返回空elements并降低confidence。
-格式修复不能靠删除真实候选通过；原图中清楚可见且与目标直接相关的入口必须改写为elements，
-即使目标最终结果尚未出现。只有重新观察后仍无法确认时才返回空elements。
-目标未出现但列表/信息流边缘有部分可见的后续项时，summary必须记录该边缘滚动线索；不得把被裁切
-内容猜成目标或写成动作建议，也不得把它标成可操作目标。
-分步流程、时间线或结构化长页面若有属于页面内容的连续引导轨/连接线明确接触视口边缘，summary必须
-记录“对应边缘存在明确的页面延续标记，内容仍可继续浏览”；装饰线、手机边框和控制器标线不算。
-序数列表目标必须同时返回目标及其之前所有同列、同类、完整可见兄弟项，逐项抄录label和bounds；
-只把按垂直中心排序后位于指定序位的条目标成goal_relevant:true。缺少任一前序证明项时不得猜测。
-标题读取目标必须优先返回唯一页面主标题元素：role=text、meaning=page_title、逐字label、
-goal_relevant:true、fully_visible明确；普通正文、按钮或浏览器标题栏不能冒充主标题。
-格式：
-{{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
-"screen_id":"unknown","summary":"短描述","system_ui":{{"immersive_or_fullscreen":"unknown",
-"navigation_bar_visible":"unknown"}},"elements":[],"overlays":[],
-"stable":true,"confidence":0.0,"fingerprint":""}}
-元素仅允许element_id、role、meaning、label、bounds、confidence、states、evidence；禁止动作、计划和裸坐标。不要Markdown。
-bounds必须是恰好4个0..1000数值的数组[left,top,right,bottom]；不能是x/y/width/height对象、两个点或嵌套数组。
-overlays只能是字符串数组；可交互候选必须放入elements并使用element_id，不能把对象放入overlays。
-{SYSTEM_UI_OBSERVATION_RULE}
-输入框识别规则：{PREFILLED_INPUT_OBSERVATION_RULE}
-输入框文字与键盘规则：{INPUT_VALUE_OBSERVATION_RULE}
-"""
-
-
 def _targeted_prompt(
     context: dict[str, Any],
     *,
@@ -2129,6 +2074,7 @@ def _parse_scene_after_unique_structural_edit(
     goal_context: dict[str, Any] | None = None,
     allow_invalid_system_ui_unknown: bool = False,
     camera_layout_orientation: str | None = None,
+    camera_alignment_override: CameraAlignmentFacts | None = None,
 ) -> UIScene | None:
     """Accept one punctuation edit only when exactly one strict scene survives."""
 
@@ -2138,6 +2084,7 @@ def _parse_scene_after_unique_structural_edit(
         goal_context=goal_context,
         allow_invalid_system_ui_unknown=allow_invalid_system_ui_unknown,
         camera_layout_orientation=camera_layout_orientation,
+        camera_alignment_override=camera_alignment_override,
     )
     return result[1] if result is not None else None
 
@@ -2149,6 +2096,7 @@ def _unique_strict_structural_scene_edit(
     goal_context: dict[str, Any] | None = None,
     allow_invalid_system_ui_unknown: bool = False,
     camera_layout_orientation: str | None = None,
+    camera_alignment_override: CameraAlignmentFacts | None = None,
 ) -> tuple[str, UIScene] | None:
     accepted: list[tuple[str, UIScene]] = []
     for candidate in _single_json_structural_edits(raw):
@@ -2162,6 +2110,7 @@ def _unique_strict_structural_scene_edit(
                 goal_context=goal_context,
                 allow_invalid_system_ui_unknown=allow_invalid_system_ui_unknown,
                 camera_layout_orientation=camera_layout_orientation,
+                camera_alignment_override=camera_alignment_override,
             )
         except (json.JSONDecodeError, ValueError, VisionAgentError):
             continue

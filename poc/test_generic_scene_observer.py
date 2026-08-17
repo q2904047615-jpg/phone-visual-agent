@@ -2524,22 +2524,41 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(observer.last_diagnostics["model_calls"], 1)
         self.assertIn("未建立可信候选", observer.last_diagnostics["safe_stop_reason"])
 
-    def test_targeted_invalid_json_uses_the_only_format_retry(self) -> None:
+    def test_targeted_single_punctuation_error_uses_local_repair(self) -> None:
         first = scene_payload()
         first["elements"] = []
         first["summary"] = "未知首页"
-        refined = scene_payload()
-        provider = SequenceProvider([first, "{", refined])
+        provider = SequenceProvider([first, extra_brace_scene_response()])
         observer = GenericSceneObserver(provider)
         scene = observer.observe(
             frames=stable_frames(),
             goal_context={"objective": "查找目标按钮"},
         )
         self.assertEqual(scene.elements[0].element_id, "e1")
-        self.assertEqual(provider.calls, 3)
-        self.assertEqual(provider.max_tokens_seen, [1800, 1200, 1200])
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(provider.max_tokens_seen, [1800, 1200])
         self.assertTrue(observer.last_diagnostics["format_retry_used"])
+        self.assertTrue(observer.last_diagnostics["local_structural_repair_used"])
         self.assertTrue(observer.last_diagnostics["repair_retry_success"])
+
+    def test_targeted_unrepairable_json_does_not_sample_again(self) -> None:
+        first = scene_payload()
+        first["elements"] = []
+        first["summary"] = "未知首页"
+        provider = SequenceProvider([first, "{", scene_payload()])
+        observer = GenericSceneObserver(provider)
+
+        with self.assertRaisesRegex(VisionAgentError, "不存在唯一、严格有效"):
+            observer.observe(
+                frames=stable_frames(),
+                goal_context={"objective": "查找目标按钮"},
+            )
+
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(provider.max_tokens_seen, [1800, 1200])
+        self.assertEqual(len(provider.responses), 1)
+        self.assertFalse(observer.last_diagnostics["local_structural_repair_used"])
+        self.assertFalse(observer.last_diagnostics["repair_retry_success"])
 
     def test_compact_observation_never_uses_remote_format_repair(self) -> None:
         first_retry = scene_payload()

@@ -337,6 +337,96 @@ def purely_forbidden_draft_payload():
     }
 
 
+def local_input_preparation_payload():
+    """Reproduce the final stage-three risk graph without App-specific logic."""
+
+    return {
+        "status": "ready",
+        "goal": {
+            "objective": (
+                "进入指定页面，在底部唯一消息输入框中保留未发送的英文 codex 草稿，"
+                "并停在发送按钮之前；不得发送、提交、删除、转发、发布或产生外部影响。"
+            ),
+            "target_apps": [
+                {"app_id": "current_foreground", "app_name": "当前前台应用"}
+            ],
+            "entities": {
+                "target_ui_label": "指定页面",
+                "input_text": "codex",
+            },
+        },
+        "constraints": [
+            "不得发送、提交、删除、转发或发布该草稿",
+            "不得产生任何账号及外部影响",
+        ],
+        "completion_conditions": [
+            {
+                "condition_id": "final_state",
+                "description": (
+                    "指定页面在前台可见，底部唯一消息输入框内容为 codex，"
+                    "且未发送，发送按钮可见但未触发"
+                ),
+                "evidence_required": [
+                    "指定页面可见",
+                    "底部唯一消息输入框内容为 codex",
+                    "未发送草稿",
+                    "发送按钮可见且未触发",
+                ],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ],
+        "risk_actions": [
+            {
+                "risk_id": "send_message",
+                "description": "发送消息",
+                "external_effect": "向外部联系人发送消息并产生通信记录",
+                "risk_type": "message_or_communication",
+                "risk_level": "high",
+                "subgoal_ids": ["navigate", "prepare_input", "type_text"],
+                "confirmation_required": True,
+            }
+        ],
+        "subgoals": [
+            {
+                "subgoal_id": "navigate",
+                "objective": "打开指定页面",
+                "status": "active",
+                "depends_on": [],
+                "constraints": [],
+                "completion_conditions": ["指定页面在前台可见"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "prepare_input",
+                "objective": "底部唯一消息输入框可见且可编辑",
+                "status": "pending",
+                "depends_on": ["navigate"],
+                "constraints": ["不得发送、提交、删除、转发或发布"],
+                "completion_conditions": ["底部唯一消息输入框可见且可编辑"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "type_text",
+                "objective": "当前输入框内容为 codex",
+                "status": "pending",
+                "depends_on": ["prepare_input"],
+                "constraints": ["不得发送、提交、删除、转发或发布"],
+                "completion_conditions": ["当前输入框内容为 codex 且未发送"],
+                "completion_evidence": [],
+                "risk_action_ids": ["send_message"],
+                "external_impact": "navigation_only",
+            },
+        ],
+        "active_subgoal_id": "navigate",
+        "clarification_questions": [],
+    }
+
+
 def audit_sources_for_graph(payload):
     sources = [
         ("raw_goal", "raw_goal", None),
@@ -2945,6 +3035,150 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             ["navigation_only", "navigation_only", "read_only"],
             [item.external_impact for item in graph.subgoals],
         )
+
+    def test_input_preparation_state_removes_shared_purely_forbidden_risk(self):
+        payload = local_input_preparation_payload()
+        normalized_payload = copy.deepcopy(payload)
+        normalized_payload["risk_actions"] = []
+        for subgoal in normalized_payload["subgoals"]:
+            subgoal["risk_action_ids"] = []
+
+        graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(
+                copy.deepcopy(payload),
+                audit_payloads=[audit_payload_for_graph(normalized_payload)],
+            )
+        ).plan(payload["goal"]["objective"], device_id="phone-1")
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertEqual(
+            ["navigation_only", "navigation_only", "navigation_only"],
+            [item.external_impact for item in graph.subgoals],
+        )
+        self.assertTrue(all(not item.risk_action_ids for item in graph.subgoals))
+
+    def test_input_preparation_state_is_cross_app_and_bilingual(self):
+        payload = local_input_preparation_payload()
+        payload["goal"] = {
+            "objective": (
+                "The local notes page is open and the only text field shows note as "
+                "an unsubmitted draft; do not save, submit, publish, or send it."
+            ),
+            "target_apps": [{"app_id": "notes", "app_name": "Notes"}],
+            "entities": {"target_ui_label": "local notes", "input_text": "note"},
+        }
+        payload["constraints"] = ["Do not save, submit, publish, or send the draft."]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "save_draft",
+                "description": "save the draft",
+                "external_effect": "save draft data",
+                "risk_type": "data_mutation",
+                "risk_level": "high",
+                "subgoal_ids": ["prepare_input", "type_text"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["objective"] = "Open the local notes page"
+        payload["subgoals"][0]["completion_conditions"] = [
+            "The local notes page is visible"
+        ]
+        payload["subgoals"][1]["objective"] = (
+            "The only text field is visible and focused"
+        )
+        payload["subgoals"][1]["constraints"] = list(payload["constraints"])
+        payload["subgoals"][1]["completion_conditions"] = [
+            "The only text field is visible and focused"
+        ]
+        payload["subgoals"][2]["objective"] = (
+            "The text field shows note and remains unsubmitted"
+        )
+        payload["subgoals"][2]["constraints"] = list(payload["constraints"])
+        payload["subgoals"][2]["completion_conditions"] = [
+            "The text field shows note and remains unsubmitted"
+        ]
+        payload["subgoals"][2]["risk_action_ids"] = ["save_draft"]
+        payload["completion_conditions"][0]["description"] = (
+            "The local notes page is visible and the text field shows note as an "
+            "unsubmitted draft"
+        )
+        payload["completion_conditions"][0]["evidence_required"] = [
+            "The local notes page is visible",
+            "The text field shows note",
+            "The draft remains unsubmitted",
+        ]
+        normalized_payload = copy.deepcopy(payload)
+        normalized_payload["risk_actions"] = []
+        for subgoal in normalized_payload["subgoals"]:
+            subgoal["risk_action_ids"] = []
+
+        graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(
+                copy.deepcopy(payload),
+                audit_payloads=[audit_payload_for_graph(normalized_payload)],
+            )
+        ).plan(payload["goal"]["objective"], device_id="phone-1")
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertTrue(all(not item.risk_action_ids for item in graph.subgoals))
+
+    def test_input_preparation_state_must_share_canonical_dependency_chain(self):
+        payload = local_input_preparation_payload()
+        payload["subgoals"][1]["depends_on"] = []
+        payload["subgoals"][2]["depends_on"] = ["navigate"]
+
+        with self.assertRaises(TaskGraphError):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(copy.deepcopy(payload), copy.deepcopy(payload))
+            ).plan(payload["goal"]["objective"], device_id="phone-1")
+
+    def test_input_preparation_state_never_hides_positive_saved_result(self):
+        payload = local_input_preparation_payload()
+        payload["goal"]["objective"] = (
+            "进入指定页面，让输入框可见并保存 codex 草稿。"
+        )
+        payload["constraints"] = []
+        payload["completion_conditions"][0]["description"] = "codex 草稿已保存"
+        payload["completion_conditions"][0]["evidence_required"] = ["已保存标记"]
+        payload["risk_actions"][0].update(
+            {
+                "risk_id": "save_draft",
+                "description": "保存 codex 草稿",
+                "external_effect": "草稿数据已保存",
+                "risk_type": "data_mutation",
+                "subgoal_ids": ["prepare_input"],
+            }
+        )
+        payload["subgoals"] = [payload["subgoals"][1]]
+        payload["subgoals"][0].update(
+            {
+                "status": "active",
+                "depends_on": [],
+                "objective": "输入框可见且 codex 草稿已保存",
+                "constraints": [],
+                "completion_conditions": ["codex 草稿已保存"],
+                "risk_action_ids": ["save_draft"],
+                "external_impact": "external_state",
+            }
+        )
+        payload["active_subgoal_id"] = "prepare_input"
+        payload["status"] = "awaiting_confirmation"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            payload["goal"]["objective"], device_id="phone-1"
+        )
+
+        self.assertEqual(("save_draft",), graph.active_subgoal().risk_action_ids)
+        self.assertEqual("external_state", graph.active_subgoal().external_impact)
+
+    def test_input_preparation_state_requires_canonical_input_text(self):
+        payload = local_input_preparation_payload()
+        payload["goal"]["entities"].pop("input_text")
+
+        with self.assertRaises(TaskGraphError):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(copy.deepcopy(payload), copy.deepcopy(payload))
+            ).plan(payload["goal"]["objective"], device_id="phone-1")
 
     def test_purely_forbidden_effect_normalization_is_cross_app_and_bilingual(self):
         payload = single_subgoal_payload(

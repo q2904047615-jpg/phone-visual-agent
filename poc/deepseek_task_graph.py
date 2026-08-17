@@ -219,6 +219,19 @@ LOCAL_EDITABLE_CARRIER_ADJECTIVE_PATTERN = re.compile(
     r"\b(?:input|text|query)\s*(?:field|box)\b))",
     re.IGNORECASE,
 )
+LOCAL_INPUT_PREPARATION_STATE_PATTERN = re.compile(
+    r"(?:"
+    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)"
+    r"[^，。；;]{0,24}(?:可见|显示|存在|可编辑|已聚焦|获得焦点|保持焦点)|"
+    r"(?:可见|显示|存在|可编辑|已聚焦|获得焦点|保持焦点)"
+    r"[^，。；;]{0,24}(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)|"
+    r"\b(?:input|text|query|message)\s*(?:field|box|area)\b"
+    r"[^,.;\r\n]{0,24}\b(?:visible|shown|present|editable|focused)\b|"
+    r"\b(?:visible|shown|present|editable|focused)\b"
+    r"[^,.;\r\n]{0,24}\b(?:input|text|query|message)\s*(?:field|box|area)\b"
+    r")",
+    re.IGNORECASE,
+)
 LOCAL_UNSUBMITTED_WORKFLOW_RISK_PATTERN = re.compile(
     r"(?:(?:未提交|本机临时|本地临时|临时).{0,12}"
     r"(?:文本|文字|输入|草稿|内容)|"
@@ -474,6 +487,11 @@ class Subgoal:
             *scoped_input_texts,
             input_text=input_text,
         )
+        proven_local_input_preparation = _is_local_input_preparation_state(
+            self.objective,
+            *self.completion_conditions,
+            input_text=input_text,
+        )
         proven_local_keyboard_mode = _is_reversible_local_keyboard_mode(
             self.objective,
             *self.constraints,
@@ -490,6 +508,7 @@ class Subgoal:
         if (
             inferred_risk_types
             and not proven_local_input
+            and not proven_local_input_preparation
             and not proven_local_keyboard_mode
             and not proven_read_only_control_state
             and self.external_impact in {
@@ -872,6 +891,14 @@ class DynamicTaskGraph:
                 # refuses every concrete external effect.  Keep the graph
                 # validator aligned with that same formal proof.
                 inferred_types = frozenset()
+            if _is_local_input_preparation_state(
+                subgoal.objective,
+                *subgoal.completion_conditions,
+                input_text=self.goal.entities.get("input_text"),
+            ):
+                # Visibility/editability/focus are reversible carrier states.
+                # Remove only the generic ambiguity; concrete effects remain.
+                inferred_types = inferred_types - {"unknown_external_effect"}
             if _is_reversible_local_keyboard_mode(
                 subgoal.objective,
                 *subgoal.constraints,
@@ -1658,6 +1685,56 @@ def _dependency_ancestor_map(
     return result
 
 
+def _local_input_preparation_subgoal_ids(
+    graph: DynamicTaskGraph,
+    subgoals: dict[str, Subgoal],
+    local_unsubmitted_input_ids: set[str],
+    ancestor_map: dict[str, frozenset[str]],
+) -> set[str]:
+    """Prove reversible input-carrier preparation on the canonical input chain.
+
+    This is a local structural attestation, not a model-declared permission.  A
+    preparation node may only describe a formal input carrier being visible,
+    editable, or focused.  It must be dependency-related to an independently
+    proven canonical unsubmitted-input node, and its positive result must not
+    contain any external effect.  The attestation never authorizes text entry;
+    that remains the separate ``input_verified_text`` action.
+    """
+
+    input_text = graph.goal.entities.get("input_text")
+    if (
+        not isinstance(input_text, str)
+        or not input_text.strip()
+        or not local_unsubmitted_input_ids
+    ):
+        return set()
+
+    def dependency_related(left_id: str, right_id: str) -> bool:
+        return (
+            left_id == right_id
+            or left_id in ancestor_map.get(right_id, frozenset())
+            or right_id in ancestor_map.get(left_id, frozenset())
+        )
+
+    result: set[str] = set()
+    for subgoal in subgoals.values():
+        if subgoal.subgoal_id in local_unsubmitted_input_ids:
+            continue
+        if not _is_local_input_preparation_state(
+            subgoal.objective,
+            *subgoal.completion_conditions,
+            input_text=input_text,
+        ):
+            continue
+        if not any(
+            dependency_related(subgoal.subgoal_id, input_id)
+            for input_id in local_unsubmitted_input_ids
+        ):
+            continue
+        result.add(subgoal.subgoal_id)
+    return result
+
+
 def _risk_is_required_by_positive_result(
     graph: DynamicTaskGraph,
     risk: RiskAction,
@@ -1695,8 +1772,11 @@ def _subgoal_is_safe_without_forbidden_risk(
     graph: DynamicTaskGraph,
     subgoal: Subgoal,
     local_unsubmitted_input_ids: set[str],
+    local_input_preparation_ids: set[str],
 ) -> bool:
-    if subgoal.subgoal_id in local_unsubmitted_input_ids:
+    if subgoal.subgoal_id in (
+        local_unsubmitted_input_ids | local_input_preparation_ids
+    ):
         return True
     if subgoal.external_impact == "read_only":
         return _is_read_only_risk_control_state(
@@ -1721,6 +1801,7 @@ def _purely_forbidden_initial_risks(
     graph: DynamicTaskGraph,
     subgoals: dict[str, Subgoal],
     local_unsubmitted_input_ids: set[str],
+    local_input_preparation_ids: set[str],
 ) -> tuple[set[str], set[str]]:
     removable_ids: set[str] = set()
     safe_subgoal_ids: set[str] = set()
@@ -1754,6 +1835,7 @@ def _purely_forbidden_initial_risks(
                 graph,
                 item,
                 local_unsubmitted_input_ids,
+                local_input_preparation_ids,
             )
             for item in linked
         ):
@@ -1793,12 +1875,19 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
             input_text=graph.goal.entities.get("input_text"),
         )
     }
+    ancestor_map = _dependency_ancestor_map(subgoals)
+    local_input_preparation_ids = _local_input_preparation_subgoal_ids(
+        graph,
+        subgoals,
+        local_unsubmitted_input_ids,
+        ancestor_map,
+    )
     removable_ids, safe_workflow_ids = _purely_forbidden_initial_risks(
         graph,
         subgoals,
         local_unsubmitted_input_ids,
+        local_input_preparation_ids,
     )
-    ancestor_map = _dependency_ancestor_map(subgoals)
 
     def dependency_related(left_id: str, right_id: str) -> bool:
         return (
@@ -1821,7 +1910,9 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
         ):
             continue
         local_input_only = all(
-            item is not None and item.subgoal_id in local_unsubmitted_input_ids
+            item is not None
+            and item.subgoal_id
+            in (local_unsubmitted_input_ids | local_input_preparation_ids)
             for item in linked
         )
         local_input_workflow = bool(
@@ -1837,10 +1928,13 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
                     dependency_related(item.subgoal_id, input_id)
                     for input_id in local_unsubmitted_input_ids
                 )
-                and not _infer_external_risk_types(
-                    item.objective,
-                    *item.constraints,
-                    *item.completion_conditions,
+                and (
+                    item.subgoal_id in local_input_preparation_ids
+                    or not _infer_external_risk_types(
+                        item.objective,
+                        *item.constraints,
+                        *item.completion_conditions,
+                    )
                 )
                 for item in linked
             )
@@ -1862,12 +1956,16 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
             and (
                 LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
                 or item.subgoal_id in local_unsubmitted_input_ids
+                or item.subgoal_id in local_input_preparation_ids
                 or local_input_workflow
             )
-            and not _infer_external_risk_types(
-                item.objective,
-                *item.constraints,
-                *item.completion_conditions,
+            and (
+                item.subgoal_id in local_input_preparation_ids
+                or not _infer_external_risk_types(
+                    item.objective,
+                    *item.constraints,
+                    *item.completion_conditions,
+                )
             )
             for item in linked
             if item is not None
@@ -1887,6 +1985,7 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
                 and (
                     LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
                     or item.subgoal_id in local_unsubmitted_input_ids
+                    or item.subgoal_id in local_input_preparation_ids
                     or item.subgoal_id in safe_workflow_ids
                 )
                 and item.external_impact != "read_only"
@@ -2117,6 +2216,33 @@ def _state_description_binds_canonical_input_text(
             ):
                 return True
     return False
+
+
+def _is_local_input_preparation_state(
+    *values: str,
+    input_text: Any,
+) -> bool:
+    """Recognize only reversible state of a formal local input carrier.
+
+    The canonical literal proves that the graph contains a concrete input task;
+    it is deliberately not treated as permission to type.  Positive clauses may
+    describe only visibility, editability, or focus.  Any concrete external
+    effect (send/save/delete/account/transaction and so on) rejects the proof.
+    """
+
+    if not isinstance(input_text, str) or not input_text.strip():
+        return False
+    texts = tuple(str(value or "") for value in values if str(value or "").strip())
+    if not texts or not LOCAL_INPUT_PREPARATION_STATE_PATTERN.search("；".join(texts)):
+        return False
+    inferred = frozenset().union(
+        *(
+            _infer_external_risk_types(clause)
+            for value in texts
+            for clause in _positive_effect_clauses(value)
+        )
+    )
+    return inferred <= {"unknown_external_effect"}
 
 
 def _is_explicitly_unsubmitted_local_input(

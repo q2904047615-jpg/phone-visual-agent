@@ -1398,6 +1398,91 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual("completed", revised.status)
 
+    def test_replan_accepts_exact_grounded_scene_fact_as_visual_evidence(self):
+        objective = "当前聊天页面保持可见"
+        grounded = (
+            '{"app_id":"current_foreground",'
+            '"screen_id":"chat_conversation","overlays":[]}'
+        )
+        initial = single_subgoal_payload(objective, external_impact="read_only")
+        initial["goal"]["target_apps"] = [
+            {"app_id": "current_foreground", "app_name": "当前前台应用"}
+        ]
+        initial["completion_conditions"][0].update(
+            description=objective,
+            evidence_required=["结构化画面身份保持为当前聊天页面"],
+        )
+        initial["subgoals"][0]["completion_conditions"] = [objective]
+        completed = copy.deepcopy(initial)
+        completed["status"] = "completed"
+        completed["completion_conditions"][0].update(
+            satisfied=True,
+            evidence=[grounded],
+        )
+        completed["subgoals"][0].update(
+            status="completed",
+            completion_evidence=[grounded],
+        )
+        completed["active_subgoal_id"] = None
+        provider = FakeProvider(initial, completed)
+        planner = DeepSeekTaskGraphPlanner(provider)
+        graph = planner.plan(objective, device_id="phone-1")
+
+        revised = planner.replan(
+            graph,
+            ObservedState(
+                scene_id="scene-chat",
+                summary="当前聊天页面",
+                visible_evidence=("当前页面保持稳定",),
+                grounded_visual_facts=(grounded,),
+                last_action_outcome="not_applicable",
+            ),
+            trigger="observation_changed",
+            reason="重新观察当前页面。",
+        )
+
+        self.assertEqual("completed", revised.status)
+
+    def test_replan_rejects_paraphrase_of_grounded_scene_fact(self):
+        objective = "当前聊天页面保持可见"
+        initial = single_subgoal_payload(objective, external_impact="read_only")
+        initial["completion_conditions"][0].update(
+            description=objective,
+            evidence_required=["结构化画面身份保持为当前聊天页面"],
+        )
+        initial["subgoals"][0]["completion_conditions"] = [objective]
+        completed = copy.deepcopy(initial)
+        completed["status"] = "completed"
+        completed["completion_conditions"][0].update(
+            satisfied=True,
+            evidence=["screen_id 表示聊天页面"],
+        )
+        completed["subgoals"][0].update(
+            status="completed",
+            completion_evidence=["screen_id 表示聊天页面"],
+        )
+        completed["active_subgoal_id"] = None
+        provider = FakeProvider(initial, completed, copy.deepcopy(completed))
+        planner = DeepSeekTaskGraphPlanner(provider)
+        graph = planner.plan(objective, device_id="phone-1")
+
+        with self.assertRaisesRegex(TaskGraphError, "当前观察之外的证据"):
+            planner.replan(
+                graph,
+                ObservedState(
+                    scene_id="scene-chat",
+                    summary="当前聊天页面",
+                    visible_evidence=("当前页面保持稳定",),
+                    grounded_visual_facts=(
+                        '{"app_id":"current_foreground",'
+                        '"screen_id":"chat_conversation","overlays":[]}',
+                    ),
+                    last_action_outcome="not_applicable",
+                ),
+                trigger="observation_changed",
+                reason="重新观察当前页面。",
+            )
+
     def test_current_page_goal_repairs_missing_app_to_foreground_context(self):
         invalid = base_payload()
         invalid["goal"]["target_apps"] = []

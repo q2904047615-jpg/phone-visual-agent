@@ -2501,14 +2501,16 @@ def _repair_replan_prompt(
 修复规则：
 1. goal 必须逐字段保持不变；constraints 必须保留已有约束，可追加新发现的约束。
 2. 已 completed 的子目标和已满足的全局条件不得撤销；既有风险不得删除、降级或取消确认。
-3. 只能依据 visible_evidence 新增完成证据；动作结果不匹配时不得假称预期结果已完成。
+3. 只能逐字依据 visible_evidence 或 grounded_visual_facts 新增视觉完成证据；
+   动作结果不匹配时不得假称预期结果已完成。
 4. 可替换、跳过或新增尚未完成的高层子目标，但不能描述按钮、坐标或任何低层动作。
 5. external_state 或 unknown 必须关联风险；成为 active 时必须等待本地确认。
 6. 仍需通过全部本地校验；不要试图改写任务身份、设备、revision 或协议字段。
 7. 只返回符合结构的完整 JSON 对象，不要 Markdown。
 8. 当 trigger=subgoal_completed 且原活动子目标是 read_only 时，不得继续返回 read_only 活动
-   子目标；只能依据 visible_evidence 完成、阻塞，或推进到后续非只读子目标。
-9. 全局完成条件证据只能选择 visible_evidence。子目标完成证据通常也只能选择 visible_evidence；
+   子目标；只能依据 visible_evidence 或 grounded_visual_facts 完成、阻塞，或推进到后续非只读子目标。
+9. 全局完成条件证据只能逐字选择 visible_evidence 或 grounded_visual_facts。子目标完成证据通常也只能
+   逐字选择这两类视觉证据；
    严格绑定的 navigation_only 旧子目标可选择 controller_transition_evidence_refs[].ref_id。
    每个数组最多3项；禁止拼接多项或复制整个观察对象/JSON。
 10. verified_action_transition 是本地控制器回执而不是视觉证据；只能与当前
@@ -3208,7 +3210,14 @@ def _validate_revision(
         raise TaskGraphError(
             "重规划不能删除全局完成条件：" + ", ".join(sorted(missing_conditions))
         )
-    evidence = set(observation.visible_evidence)
+    # Both collections are controller-owned visual evidence.  The grounded
+    # facts carry stable scene/element identities that prose evidence cannot
+    # safely invent; allowing their exact strings also removes the otherwise
+    # contradictory requirement to cite an identity that could not be used as
+    # completion evidence.  Paraphrases remain outside the allow-list.
+    evidence = set(observation.visible_evidence).union(
+        observation.grounded_visual_facts
+    )
     controller_refs = {
         item.ref_id: item
         for item in observation.controller_transition_evidence_refs

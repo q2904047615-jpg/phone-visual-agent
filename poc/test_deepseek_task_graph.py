@@ -3126,6 +3126,112 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             [item.external_impact for item in graph.subgoals],
         )
 
+    def test_local_unsent_input_chain_removes_negated_risk_through_keyboard_dismissal(self):
+        payload = local_input_preparation_payload()
+        payload["goal"]["objective"] = (
+            "在当前页面唯一已聚焦的空白输入框中保留未发送的英文 codex 草稿，"
+            "然后收起软键盘；最终仍停留当前聊天页面并能看见 codex，"
+            "且不得发送、提交、保存、发布、转发、选择联系人或产生任何外部影响。"
+        )
+        payload["constraints"] = [
+            "不得发送、提交、保存、发布、转发该草稿",
+            "不得选择联系人",
+            "不得产生任何账号及外部影响",
+        ]
+        payload["completion_conditions"] = [
+            {
+                "condition_id": "final_state",
+                "description": (
+                    "当前聊天页面可见，且输入框中包含未发送的英文 codex "
+                    "草稿，软键盘已收起。"
+                ),
+                "evidence_required": [
+                    "当前聊天页面在前台可见",
+                    "输入框内容为 codex",
+                    "软键盘未显示",
+                ],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "no_external_effect",
+                "description": (
+                    "确保不发送、提交、保存、发布、转发草稿，"
+                    "不选择联系人，不产生任何账号或外部影响。"
+                ),
+                "external_effect": "无外部影响",
+                "risk_type": "unknown_external_effect",
+                "risk_level": "low",
+                "subgoal_ids": [
+                    "ensure_input",
+                    "ensure_keyboard",
+                    "ensure_stay",
+                ],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "ensure_input",
+                "objective": "当前唯一已聚焦的空白输入框内容为 codex，且未发送。",
+                "status": "active",
+                "depends_on": [],
+                "constraints": list(payload["constraints"]),
+                "completion_conditions": [
+                    "输入框内容为 codex",
+                    "输入框仍处于未发送状态",
+                ],
+                "completion_evidence": [],
+                "risk_action_ids": ["no_external_effect"],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "ensure_keyboard",
+                "objective": "软键盘已收起。",
+                "status": "pending",
+                "depends_on": ["ensure_input"],
+                "constraints": list(payload["constraints"]),
+                "completion_conditions": ["软键盘未显示"],
+                "completion_evidence": [],
+                "risk_action_ids": ["no_external_effect"],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "ensure_stay",
+                "objective": "当前聊天页面在前台可见，且能看到 codex 草稿。",
+                "status": "pending",
+                "depends_on": ["ensure_keyboard"],
+                "constraints": list(payload["constraints"]),
+                "completion_conditions": [
+                    "当前聊天页面在前台可见",
+                    "输入框内容为 codex",
+                ],
+                "completion_evidence": [],
+                "risk_action_ids": ["no_external_effect"],
+                "external_impact": "navigation_only",
+            },
+        ]
+        payload["active_subgoal_id"] = "ensure_input"
+        normalized_payload = copy.deepcopy(payload)
+        normalized_payload["risk_actions"] = []
+        for subgoal in normalized_payload["subgoals"]:
+            subgoal["risk_action_ids"] = []
+
+        graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(
+                copy.deepcopy(payload),
+                audit_payloads=[audit_payload_for_graph(normalized_payload)],
+            )
+        ).plan(payload["goal"]["objective"], device_id="phone-1")
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertTrue(all(not item.risk_action_ids for item in graph.subgoals))
+        self.assertTrue(
+            all(item.external_impact == "navigation_only" for item in graph.subgoals)
+        )
+
     def test_negated_button_state_is_evidence_not_a_low_level_instruction(self):
         payload = purely_forbidden_draft_payload()
         payload["goal"]["objective"] = (

@@ -382,7 +382,7 @@ class Subgoal:
     risk_action_ids: tuple[str, ...]
     external_impact: str
 
-    def validate(self) -> None:
+    def validate(self, *, input_text: Any = "") -> None:
         _validate_id(self.subgoal_id, "子目标 ID")
         _require_text(self.objective, "subgoals.objective")
         if self.status not in SUBGOAL_STATUSES:
@@ -422,15 +422,29 @@ class Subgoal:
             *self.constraints,
             *self.completion_conditions,
         )
-        local_input_text = _input_text_from_state_descriptions(
-            self.objective,
-            *self.completion_conditions,
-        )
-        proven_local_input = _is_explicitly_unsubmitted_local_input(
+        scoped_input_texts = (
             self.objective,
             *self.constraints,
             *self.completion_conditions,
-            input_text=local_input_text,
+        )
+        describes_local_input_state = any(
+            LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(value)
+            for value in scoped_input_texts
+        )
+        if (
+            describes_local_input_state
+            and self.external_impact in {"read_only", "navigation_only"}
+            and not _state_description_binds_canonical_input_text(
+                scoped_input_texts,
+                input_text if isinstance(input_text, str) else "",
+            )
+        ):
+            raise TaskGraphError(
+                f"子目标输入状态未绑定 canonical input_text：{self.subgoal_id}"
+            )
+        proven_local_input = _is_explicitly_unsubmitted_local_input(
+            *scoped_input_texts,
+            input_text=input_text,
         )
         proven_local_keyboard_mode = _is_reversible_local_keyboard_mode(
             self.objective,
@@ -777,7 +791,7 @@ class DynamicTaskGraph:
             risk.validate()
         subgoals = _unique_by_id(self.subgoals, lambda item: item.subgoal_id, "子目标")
         for subgoal in subgoals.values():
-            subgoal.validate()
+            subgoal.validate(input_text=self.goal.entities.get("input_text"))
             if subgoal.subgoal_id in subgoal.depends_on:
                 raise TaskGraphError(f"子目标不能依赖自身：{subgoal.subgoal_id}")
             missing_dependencies = set(subgoal.depends_on) - set(subgoals)
@@ -1868,6 +1882,37 @@ def _explicitly_denies_external_effect(value: str) -> bool:
     )
 
 
+def _state_description_binds_canonical_input_text(
+    values: tuple[str, ...],
+    input_text: str,
+) -> bool:
+    """Prove an exact canonical literal belongs to a formal input-state clause.
+
+    Descriptive words between a state relation and the literal are prose, not
+    alternate candidate values.  The task graph's canonical ``input_text`` is
+    therefore the only value authority.  We only check that this exact literal
+    occurs in the same punctuation-delimited clause as an existing formal input
+    carrier state; we never extract or infer a replacement value from prose.
+    """
+
+    literal = str(input_text or "").strip()
+    if not literal:
+        return False
+    escaped = re.escape(literal)
+    continuation = r"[A-Za-z0-9_.-]"
+    prefix = rf"(?<!{continuation})" if re.match(continuation, literal[0]) else ""
+    suffix = rf"(?!{continuation})" if re.match(continuation, literal[-1]) else ""
+    literal_pattern = re.compile(prefix + escaped + suffix)
+    for value in values:
+        for clause in re.split(r"[。；;\r\n]+", str(value or "")):
+            if (
+                literal_pattern.search(clause)
+                and LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(clause)
+            ):
+                return True
+    return False
+
+
 def _is_explicitly_unsubmitted_local_input(
     *values: str,
     input_text: Any,
@@ -1885,7 +1930,7 @@ def _is_explicitly_unsubmitted_local_input(
         *(_infer_external_risk_types(value) for value in risk_texts)
     )
     return bool(
-        LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(combined)
+        _state_description_binds_canonical_input_text(texts, target_text)
         and LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN.search(combined)
         # Generic wording such as "修改输入框文字" currently produces only
         # unknown_external_effect.  The explicit unsubmitted-input boundary is
@@ -1915,21 +1960,6 @@ def _is_reversible_local_keyboard_mode(*values: str) -> bool:
         and not PERSISTENT_KEYBOARD_SETTING_PATTERN.search(combined)
         and inferred <= {"unknown_external_effect"}
     )
-
-
-def _input_text_from_state_descriptions(*values: str) -> str:
-    for value in values:
-        text = str(value or "")
-        for pattern in (
-            r"(?:为|是|改为|替换为|修改为|显示为)\s*"
-            r"([A-Za-z0-9][A-Za-z0-9_.-]{0,63})",
-            r"\b(?:contains?|shows?|value\s*(?:is|=))\s+"
-            r"([A-Za-z0-9][A-Za-z0-9_.-]{0,63})\b",
-        ):
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return match.group(1)
-    return ""
 
 
 def _retryable_replan_output_error(error: TaskGraphError) -> bool:
@@ -3172,14 +3202,7 @@ def _apply_local_risk_supplements(
     local_input_scopes = (
         _explicit_local_input_audit_scopes(graph, source_groups)
         if graph is not None
-        else {
-            scope_id
-            for scope_id, group in source_groups.items()
-            if _is_explicitly_unsubmitted_local_input(
-                *(item.text for item in group),
-                input_text=_input_text_for_audit_scope(scope_id, sources),
-            )
-        }
+        else set()
     )
     local_input_workflow_scopes = (
         _structured_local_input_workflow_scopes(graph, source_groups)
@@ -3600,18 +3623,6 @@ def _has_reversible_navigation_semantics(value: str) -> bool:
         LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(normalized)
         or REVERSIBLE_NAVIGATION_EFFECT_PATTERN.search(normalized)
     )
-
-
-def _input_text_for_audit_scope(
-    scope_id: str | None,
-    sources: tuple[AuditSource, ...],
-) -> str:
-    # The task graph keeps the literal value in goal entities, while audit
-    # sources deliberately contain only prose. A non-empty visible target value
-    # in that prose is sufficient here; graph normalization separately requires
-    # the canonical input_text entity.
-    group = [item.text for item in sources if item.subgoal_id == scope_id]
-    return _input_text_from_state_descriptions(*group)
 
 
 def _validate_graph_against_risk_audit(

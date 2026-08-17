@@ -642,6 +642,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             "当前页面的输入区域可见后内容为314159",
             external_impact="navigation_only",
         )
+        payload["goal"]["entities"]["input_text"] = "314159"
         payload["subgoals"][0]["subgoal_id"] = "input_visible"
         payload["subgoals"].append(
             {
@@ -699,6 +700,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             "输入区域可见后内容为314159",
             external_impact="navigation_only",
         )
+        initial["goal"]["entities"]["input_text"] = "314159"
         initial["subgoals"][0].update(
             subgoal_id="input_visible",
             objective="输入区域可见",
@@ -1073,6 +1075,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
     def test_replan_accepts_grounded_input_state_without_page_title_anchor(self):
         objective = "当前页面唯一输入框中的内容为 agent"
         initial = single_subgoal_payload(objective, external_impact="navigation_only")
+        initial["goal"]["entities"]["input_text"] = "agent"
         initial["completion_conditions"][0].update(
             description=objective,
             evidence_required=["输入框中的文字为 agent"],
@@ -2646,6 +2649,63 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     "navigation_only",
                     graph.active_subgoal().external_impact,
                 )
+
+    def test_canonical_input_literal_binds_through_descriptive_modifiers(self):
+        samples = (
+            "当前浏览器顶部可编辑的地址输入区域内容为英文 codex",
+            "当前文本框内容为 ASCII codex",
+            "The editable text field shows the literal codex",
+            '当前输入框内容为英文“codex”',
+        )
+        constraints = ["不得搜索、提交、发送、保存或发布。"]
+        for objective in samples:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="navigation_only",
+                )
+                payload["goal"]["objective"] = objective
+                payload["goal"]["entities"]["input_text"] = "codex"
+                payload["constraints"] = list(constraints)
+                payload["subgoals"][0]["constraints"] = list(constraints)
+                payload["subgoals"][0]["completion_conditions"] = [objective]
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    objective + "；" + "；".join(constraints),
+                    device_id="phone-1",
+                )
+
+                self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+                self.assertEqual("codex", graph.goal.entities["input_text"])
+
+    def test_canonical_input_literal_must_bind_same_state_clause_exactly(self):
+        samples = (
+            "当前输入框内容为 codex2",
+            "当前输入框内容为 codex.com",
+            "当前输入框内容为 codec；目标标记 codex 可见",
+            "当前输入框内容为 codec",
+        )
+        constraints = ["不得搜索、提交、发送、保存或发布。"]
+        for objective in samples:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="navigation_only",
+                )
+                payload["goal"]["objective"] = objective
+                payload["goal"]["entities"]["input_text"] = "codex"
+                payload["constraints"] = list(constraints)
+                payload["subgoals"][0]["constraints"] = list(constraints)
+                payload["subgoals"][0]["completion_conditions"] = [objective]
+
+                with self.assertRaisesRegex(
+                    TaskGraphError,
+                    "子目标输入状态未绑定 canonical input_text",
+                ):
+                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                        objective + "；" + "；".join(constraints),
+                        device_id="phone-1",
+                    )
 
     def test_editable_input_carrier_never_hides_saved_result(self):
         objective = "可编辑的地址输入区域内容为 codex，且草稿已保存"

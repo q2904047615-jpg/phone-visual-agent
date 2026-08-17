@@ -1135,6 +1135,56 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertNotIn("可见文字为目标入口", state_text)
         self.assertIn("目标入口", state_text)
 
+    def test_quoted_action_like_label_before_ui_role_is_preserved_only_as_entity(self):
+        variants = (
+            ("语义点击", "入口"),
+            ("拖动项目", "按钮"),
+            ("输入文字", "选项"),
+        )
+        for label, role_noun in variants:
+            with self.subTest(label=label, role_noun=role_noun):
+                payload = single_subgoal_payload(
+                    f"“{label}”{role_noun}对应的本地页面可见",
+                    external_impact="navigation_only",
+                )
+                payload["goal"]["entities"] = {}
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    f"查看“{label}”{role_noun}对应页面后结束。",
+                    device_id="phone-1",
+                )
+
+                self.assertEqual(label, graph.goal.entities["target_ui_label"])
+                state_text = " ".join(
+                    (
+                        graph.goal.objective,
+                        *(item.description for item in graph.completion_conditions),
+                        *(item.objective for item in graph.subgoals),
+                        *(
+                            condition
+                            for item in graph.subgoals
+                            for condition in item.completion_conditions
+                        ),
+                    )
+                )
+                self.assertNotIn(label, state_text)
+                self.assertIn("目标入口", state_text)
+
+    def test_multiple_quoted_action_like_ui_labels_fail_closed(self):
+        payload = single_subgoal_payload(
+            "“语义点击”入口和“拖动项目”按钮均可见",
+            external_impact="navigation_only",
+        )
+        payload["goal"]["entities"] = {}
+
+        with self.assertRaisesRegex(TaskGraphError, "多个动作词字面 UI 标签"):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(payload, copy.deepcopy(payload))
+            ).plan(
+                "核对“语义点击”入口和“拖动项目”按钮。",
+                device_id="phone-1",
+            )
+
     def test_explicit_label_normalizes_presence_only_subgoal_wording(self):
         payload = single_subgoal_payload(
             "目标控件（可见文字为“长按我 · 不要移动”）在当前页面可见",

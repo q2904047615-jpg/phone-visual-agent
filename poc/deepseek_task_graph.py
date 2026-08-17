@@ -3027,26 +3027,42 @@ def _normalize_explicit_ui_label_payload(
     """Keep an explicitly quoted UI label out of high-level state prose.
 
     The original user text is deliberately left untouched for the independent
-    semantic risk audit.  Only a narrow ``visible text/label is \"...\"`` form
-    can mint ``target_ui_label``; this does not authorize an action.
+    semantic risk audit.  Only an explicitly quoted label in either the narrow
+    ``visible text/label is \"...\"`` form or immediately followed by a UI-role
+    noun can mint ``target_ui_label``; this does not authorize an action.
     """
 
-    match = re.search(
-        r"(?:目标(?:入口|控件|元素)?的?)?"
-        r"(?:可见)?(?:文字|标签|名称)\s*(?:是|为|：|:)\s*"
-        r"[“‘\"]([^”’\"\r\n]{1,80})[”’\"]",
-        str(raw_user_goal or ""),
-        re.IGNORECASE,
+    source = str(raw_user_goal or "")
+    patterns = (
+        re.compile(
+            r"(?:目标(?:入口|控件|元素)?的?)?"
+            r"(?:可见)?(?:文字|标签|名称)\s*(?:是|为|：|:)\s*"
+            r"[“‘\"]([^”’\"\r\n]{1,80})[”’\"]",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"[“‘\"]([^”’\"\r\n]{1,80})[”’\"]\s*"
+            r"(?:入口|按钮|选项|标签|控件|元素)",
+            re.IGNORECASE,
+        ),
     )
-    if match is None:
+    action_like_labels: list[str] = []
+    for pattern in patterns:
+        for match in pattern.finditer(source):
+            candidate = match.group(1).strip()
+            try:
+                _reject_low_level_instruction(
+                    candidate,
+                    "goal.entities.target_ui_label",
+                )
+            except TaskGraphError:
+                if candidate not in action_like_labels:
+                    action_like_labels.append(candidate)
+    if not action_like_labels:
         return payload
-    label = match.group(1).strip()
-    try:
-        _reject_low_level_instruction(label, "goal.entities.target_ui_label")
-    except TaskGraphError:
-        pass
-    else:
-        return payload
+    if len(action_like_labels) != 1:
+        raise TaskGraphError("用户目标包含多个动作词字面 UI 标签，无法唯一绑定。")
+    label = action_like_labels[0]
 
     value = json.loads(json.dumps(payload, ensure_ascii=False))
     raw_goal = value.get("goal")

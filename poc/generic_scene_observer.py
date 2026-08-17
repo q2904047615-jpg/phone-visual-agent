@@ -52,7 +52,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v46"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v47"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-17-input-structure-audit-v4"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
@@ -562,6 +562,7 @@ class GenericSceneObserver:
         local_structural_repair_used = False
         targeted_refinement_used = False
         compact_geometry_discarded = False
+        compact_input_geometry_isolated = False
         icon_cluster_audit_used = False
         icon_cluster_audit_candidate_count = 0
         icon_cluster_audit_reload_attested = False
@@ -650,8 +651,14 @@ class GenericSceneObserver:
             ]
 
             def parse_compact_response(value: str) -> UIScene:
-                nonlocal compact_geometry_discarded
+                nonlocal compact_geometry_discarded, compact_input_geometry_isolated
                 payload = _extract_compact_json_object(value)
+                compact_input_geometry_isolated = (
+                    _strip_preliminary_input_geometry_for_dedicated_audit(
+                        payload,
+                        context,
+                    )
+                )
                 compact_geometry_discarded = (
                     _discard_compact_elements_for_targeted_geometry_recovery(
                         payload,
@@ -722,6 +729,7 @@ class GenericSceneObserver:
             if (
                 not system_ui_audit_required
                 and not _goal_requests_keyboard_mode_switch(context)
+                and not compact_input_geometry_isolated
                 and (
                     compact_geometry_discarded
                     or _needs_targeted_refinement(scene, context)
@@ -1044,6 +1052,9 @@ class GenericSceneObserver:
                     "model_calls": model_calls,
                     "targeted_refinement_used": targeted_refinement_used,
                     "compact_geometry_discarded": compact_geometry_discarded,
+                    "compact_input_geometry_isolated": (
+                        compact_input_geometry_isolated
+                    ),
                     "missing_goal_evidence_element_ids": missing_goal_evidence,
                     "fingerprint": fingerprint,
                 }
@@ -1117,6 +1128,7 @@ class GenericSceneObserver:
                 "repair_retry_success": format_retry_used,
                 "targeted_refinement_used": targeted_refinement_used,
                 "compact_geometry_discarded": compact_geometry_discarded,
+                "compact_input_geometry_isolated": compact_input_geometry_isolated,
                 "icon_cluster_audit_used": icon_cluster_audit_used,
                 "icon_cluster_audit_candidate_count": (
                     icon_cluster_audit_candidate_count
@@ -3175,6 +3187,81 @@ def _strip_preliminary_elements_for_keyboard_mode_audit(
         ):
             return
     payload["elements"] = []
+
+
+def _strip_preliminary_input_geometry_for_dedicated_audit(
+    payload: dict[str, Any],
+    goal_context: dict[str, Any],
+) -> bool:
+    """Remove passive compact input proposals before the strict input audit.
+
+    For an active input subgoal, the later full-frame input-structure audit is
+    the sole geometry authority. Compact input boxes are therefore evidence
+    selection hints only and cannot block that audit merely because the vision
+    model used source-pixel or width-scaled coordinates. Only exact passive
+    scene elements are removable; an input carrying an action-like field,
+    malformed states/evidence, or a nonstandard shape remains for strict parsing
+    to reject. Non-input page identity and navigation facts are preserved.
+    """
+
+    if not _goal_requests_input(goal_context):
+        return False
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return False
+    exact_fields = {
+        "element_id",
+        "role",
+        "meaning",
+        "label",
+        "bounds",
+        "confidence",
+        "states",
+        "evidence",
+    }
+    action_like = {
+        "action",
+        "actions",
+        "plan",
+        "step",
+        "steps",
+        "tap",
+        "swipe",
+        "command",
+        "coordinates",
+    }
+
+    def contains_action_like_key(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                str(key).strip().casefold() in action_like
+                or contains_action_like_key(part)
+                for key, part in value.items()
+            )
+        if isinstance(value, list):
+            return any(contains_action_like_key(part) for part in value)
+        return False
+
+    retained: list[Any] = []
+    isolated = False
+    for item in elements:
+        removable_input = (
+            isinstance(item, dict)
+            and set(item) == exact_fields
+            and str(item.get("role") or "").strip() == "input"
+            and isinstance(item.get("bounds"), list)
+            and len(item["bounds"]) == 4
+            and isinstance(item.get("states"), dict)
+            and isinstance(item.get("evidence"), list)
+            and not contains_action_like_key(item)
+        )
+        if removable_input:
+            isolated = True
+            continue
+        retained.append(item)
+    if isolated:
+        payload["elements"] = retained
+    return isolated
 
 
 def _drop_out_of_range_non_goal_elements(

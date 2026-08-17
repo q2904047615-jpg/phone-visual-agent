@@ -2866,24 +2866,121 @@ class GenericSceneObserverTests(unittest.TestCase):
             scene.unique_trusted_goal_element().label,
         )
 
-    def test_input_goal_never_uses_compact_geometry_discard_recovery(self) -> None:
+    def test_input_goal_isolates_compact_geometry_for_dedicated_audit(self) -> None:
         first = scene_payload()
         first["elements"][0]["role"] = "input"
         first["elements"][0]["meaning"] = "message_input"
         first["elements"][0]["states"] = {"goal_relevant": True, "focused": True}
         first["elements"][0]["bounds"] = [60, 1750, 940, 1880]
-        provider = SequenceProvider([first])
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(text="", placeholder="请输入")
+            ]
+        )
+        provider = SequenceProvider([first, audit])
         observer = GenericSceneObserver(provider)
-        with self.assertRaisesRegex(VisionAgentError, "bounds 超出归一化画面"):
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "输入框内容为 codex 且不提交",
+                "entities": {"input_text": "codex"},
+            },
+        )
+        self.assertEqual(provider.calls, 2)
+        self.assertFalse(observer.last_diagnostics["compact_geometry_discarded"])
+        self.assertTrue(observer.last_diagnostics["compact_input_geometry_isolated"])
+        self.assertFalse(observer.last_diagnostics["targeted_refinement_used"])
+        self.assertEqual(
+            "local_audited_input_1",
+            scene.unique_trusted_goal_element().element_id,
+        )
+
+    def test_input_geometry_with_action_field_cannot_be_isolated(self) -> None:
+        first = scene_payload()
+        first["elements"][0].update(
+            {
+                "role": "input",
+                "meaning": "message_input",
+                "bounds": [60, 1750, 940, 1880],
+                "states": {"goal_relevant": True},
+                "tap": True,
+            }
+        )
+        observer = GenericSceneObserver(SequenceProvider([first]))
+
+        with self.assertRaisesRegex(VisionAgentError, "bounds|protocol|动作字段"):
             observer.observe(
                 frames=stable_frames(),
                 goal_context={
-                    "objective": "输入 codex",
+                    "objective": "输入框内容为 codex 且不提交",
                     "entities": {"input_text": "codex"},
                 },
             )
-        self.assertEqual(provider.calls, 1)
-        self.assertFalse(observer.last_diagnostics["compact_geometry_discarded"])
+
+    def test_input_isolation_preserves_page_identity_but_not_peripheral_geometry(self) -> None:
+        compact = scene_payload()
+        compact["foreground_app_id"] = "chat_app"
+        compact["screen_id"] = "draft_chat"
+        compact["elements"] = [
+            {
+                "element_id": "page-title",
+                "role": "text",
+                "meaning": "page_title",
+                "label": "本机草稿页",
+                "bounds": [340, 20, 660, 70],
+                "confidence": 1.0,
+                "states": {"goal_relevant": False, "fully_visible": True},
+                "evidence": ["顶部主标题清晰可见"],
+            },
+            {
+                "element_id": "model-input",
+                "role": "input",
+                "meaning": "message_input_box",
+                "label": "",
+                "bounds": [120, 1380, 680, 1460],
+                "confidence": 1.0,
+                "states": {"goal_relevant": True, "fully_visible": True, "value": ""},
+                "evidence": ["底部输入区域"],
+            },
+            {
+                "element_id": "peripheral-icon",
+                "role": "icon",
+                "meaning": "more_options",
+                "label": "更多",
+                "bounds": [880, 1390, 960, 1450],
+                "confidence": 1.0,
+                "states": {"goal_relevant": False, "fully_visible": True},
+                "evidence": ["输入区域旁的图标"],
+            },
+        ]
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(text="", placeholder="写点什么")
+            ]
+        )
+        provider = SequenceProvider([compact, audit])
+
+        scene = GenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "本机草稿页的底部唯一输入框内容为 codex",
+                "entities": {
+                    "target_ui_label": "本机草稿页",
+                    "input_text": "codex",
+                },
+            },
+        )
+
+        self.assertEqual(2, provider.calls)
+        self.assertEqual("draft_chat", scene.screen_id)
+        self.assertEqual(
+            ["page-title", "local_audited_input_1"],
+            [item.element_id for item in scene.elements],
+        )
+        self.assertEqual(
+            "local_audited_input_1",
+            scene.unique_trusted_goal_element().element_id,
+        )
 
     def test_targeted_delta_preserves_compact_authority_and_merges_only_evidence(self) -> None:
         base = _parse_scene(

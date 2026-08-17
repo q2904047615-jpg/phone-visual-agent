@@ -4400,6 +4400,126 @@ class GenericSceneObserverTests(unittest.TestCase):
             )
         )
 
+    def test_hidden_keyboard_fact_survives_rejected_input_geometry_without_authority(self) -> None:
+        compact = scene_payload()
+        compact["summary"] = "输入框中显示codex，软键盘已收起。"
+        compact["overlays"] = []
+        compact["elements"] = [
+            {
+                "element_id": "model-input",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "codex",
+                "bounds": [120, 820, 880, 900],
+                "confidence": 0.98,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "value": "codex",
+                    "focused": True,
+                },
+                "evidence": ["输入框内逐字显示codex"],
+            }
+        ]
+        audit = input_audit_payload(
+            application_inputs=[
+                {
+                    "structure_id": "app-input-1",
+                    "bounds": [130, 1590, 850, 1690],
+                    "fully_visible": True,
+                    "text": "codex",
+                    "placeholder": "",
+                    "visible_editable_cues": ["caret"],
+                    "confidence": 1.0,
+                    "right_button": None,
+                }
+            ],
+            keyboard={
+                "visible": False,
+                "bounds": None,
+                "layout": "unknown",
+                "input_mode": "unknown",
+                "qwerty_anchors": None,
+                "mode_switch": None,
+            },
+        )
+        context = {
+            "objective": "输入后收起软键盘",
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "hide_keyboard",
+                    "objective": "软键盘已收起",
+                    "constraints": ["保持输入框内容不变"],
+                    "completion_conditions": ["软键盘不可见"],
+                    "external_impact": "navigation_only",
+                    "goal_entities": {"input_text": "codex"},
+                }
+            },
+        }
+
+        scene = GenericSceneObserver(SequenceProvider([compact, audit])).observe(
+            frames=stable_frames(),
+            goal_context=context,
+        )
+
+        self.assertIn("输入结构只读审计确认应用输入框当前文字：codex", scene.summary)
+        self.assertIn(AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE, scene.summary)
+        self.assertTrue(
+            all(item.states.get("goal_relevant") is False for item in scene.elements)
+        )
+        self.assertIsNone(scene.unique_trusted_goal_element())
+
+    def test_hidden_keyboard_only_attestation_rejects_structured_keyboard_conflict(self) -> None:
+        compact = scene_payload()
+        compact["summary"] = "输入框中显示codex。"
+        compact["overlays"] = ["软键盘"]
+        compact["elements"] = [
+            {
+                "element_id": "model-input",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "codex",
+                "bounds": [120, 820, 880, 900],
+                "confidence": 0.98,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "value": "codex",
+                },
+                "evidence": ["输入框内逐字显示codex"],
+            }
+        ]
+        audit = input_audit_payload(
+            application_inputs=[{"invalid": "geometry is ignored"}],
+            keyboard={
+                "visible": False,
+                "bounds": None,
+                "layout": "unknown",
+                "input_mode": "unknown",
+                "qwerty_anchors": None,
+                "mode_switch": None,
+            },
+        )
+        context = {
+            "objective": "输入后收起软键盘",
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "hide_keyboard",
+                    "objective": "软键盘已收起",
+                    "constraints": [],
+                    "completion_conditions": ["软键盘不可见"],
+                    "external_impact": "navigation_only",
+                    "goal_entities": {"input_text": "codex"},
+                }
+            },
+        }
+
+        with self.assertRaisesRegex(VisionAgentError, "输入结构只读审计"):
+            GenericSceneObserver(SequenceProvider([compact, audit])).observe(
+                frames=stable_frames(),
+                goal_context=context,
+            )
+
     def test_active_input_focus_ignores_completed_reload_wording(self) -> None:
         compact = scene_payload()
         compact["elements"] = [

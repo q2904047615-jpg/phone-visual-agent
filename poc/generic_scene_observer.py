@@ -52,7 +52,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v48"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v49"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-17-input-structure-audit-v4"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
@@ -1084,17 +1084,25 @@ class GenericSceneObserver:
                             visual_obstructions,
                             fingerprint=fingerprint,
                         )
-                except VisionAgentError:
-                    if not _can_isolate_input_audit_from_attested_non_input(
-                        scene,
-                        context,
-                    ):
-                        raise
-                    # The rejected input payload contributes no fields or
-                    # geometry. A separately localized reload glyph remains a
-                    # valid non-input target even when the broader natural
-                    # language goal also mentions the post-reload field state.
-                    input_structure_audit_isolated_from_attested_non_input = True
+                except VisionAgentError as audit_error:
+                    try:
+                        scene = _apply_hidden_keyboard_only_attestation(
+                            input_audit_base_scene,
+                            raw,
+                            fingerprint=fingerprint,
+                            goal_context=context,
+                        )
+                    except VisionAgentError:
+                        if not _can_isolate_input_audit_from_attested_non_input(
+                            scene,
+                            context,
+                        ):
+                            raise audit_error
+                        # The rejected input payload contributes no fields or
+                        # geometry. A separately localized reload glyph remains a
+                        # valid non-input target even when the broader natural
+                        # language goal also mentions the post-reload field state.
+                        input_structure_audit_isolated_from_attested_non_input = True
 
             missing_goal_evidence = [
                 element.element_id
@@ -4954,6 +4962,161 @@ def _apply_input_structure_audit(
         )
     except (UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"输入结构只读审计结果不符合协议：{exc}") from exc
+
+
+def _apply_hidden_keyboard_only_attestation(
+    scene: UIScene,
+    raw: str,
+    *,
+    fingerprint: str,
+    goal_context: dict[str, Any],
+) -> UIScene:
+    """Keep only a strict hidden-keyboard fact when input geometry is invalid.
+
+    This path is completion-only.  It never consumes application input bounds
+    or adjacent-control geometry.  It accepts only one fully visible input whose
+    exact text equals the controller-owned canonical input text, then stores the
+    value and hidden-keyboard facts as non-geometric summary evidence.  Every
+    preliminary element loses goal relevance, so no action can be authorized
+    from model-estimated geometry.
+    """
+
+    try:
+        if not _goal_requests_keyboard_dismissal(goal_context):
+            raise UISceneError("当前子目标不是软键盘收起验证。")
+        payload = _extract_json_object(raw)
+        if set(payload) != {
+            "protocol_version",
+            "application_inputs",
+            "ime_preedit_regions",
+            "keyboard",
+        }:
+            raise UISceneError("输入结构审计包含协议外字段。")
+        if payload.get("protocol_version") != INPUT_STRUCTURE_AUDIT_VERSION:
+            raise UISceneError("输入结构审计协议版本不匹配。")
+        application_inputs = payload.get("application_inputs")
+        ime_preedit_regions = payload.get("ime_preedit_regions")
+        if (
+            not isinstance(application_inputs, list)
+            or len(application_inputs) > 4
+            or not isinstance(ime_preedit_regions, list)
+            or len(ime_preedit_regions) > 4
+        ):
+            raise UISceneError("输入结构审计数组字段无效。")
+        keyboard = payload.get("keyboard")
+        if not isinstance(keyboard, dict) or set(keyboard) not in (
+            {"visible", "bounds", "layout", "input_mode", "mode_switch"},
+            {
+                "visible",
+                "bounds",
+                "layout",
+                "input_mode",
+                "qwerty_anchors",
+                "mode_switch",
+            },
+        ):
+            raise UISceneError("输入结构审计 keyboard 字段不符合协议。")
+        if not (
+            keyboard.get("visible") is False
+            and keyboard.get("bounds") is None
+            and keyboard.get("layout") == "unknown"
+            and keyboard.get("input_mode") == "unknown"
+            and keyboard.get("mode_switch") is None
+            and keyboard.get("qwerty_anchors") is None
+        ):
+            raise UISceneError("软键盘不可见事实不完整。")
+        focused = _active_subgoal_visual_context(goal_context)
+        entities = (
+            focused.get("goal_entities")
+            if focused is not goal_context
+            else goal_context.get("entities")
+        )
+        canonical_text = (
+            str(entities.get("input_text") or "").strip()
+            if isinstance(entities, dict)
+            else ""
+        )
+        if not canonical_text or len(application_inputs) != 1 or ime_preedit_regions:
+            raise UISceneError("软键盘收起验证缺少唯一 canonical 输入值。")
+        input_item = application_inputs[0]
+        if not isinstance(input_item, dict) or set(input_item) != {
+            "structure_id",
+            "bounds",
+            "fully_visible",
+            "text",
+            "placeholder",
+            "visible_editable_cues",
+            "confidence",
+            "right_button",
+        }:
+            raise UISceneError("应用输入结构字段不符合协议。")
+        rejected_bounds = input_item.get("bounds")
+        cues = input_item.get("visible_editable_cues")
+        right_button = input_item.get("right_button")
+        if (
+            not str(input_item.get("structure_id") or "").strip()
+            or not isinstance(rejected_bounds, list)
+            or len(rejected_bounds) != 4
+            or any(
+                isinstance(part, bool) or not isinstance(part, (int, float))
+                for part in rejected_bounds
+            )
+            or input_item.get("fully_visible") is not True
+            or input_item.get("text") != canonical_text
+            or not isinstance(input_item.get("placeholder"), str)
+            or not isinstance(cues, list)
+            or not cues
+            or len(cues) > 4
+            or any(not isinstance(part, str) or not part.strip() for part in cues)
+            or _audit_confidence(input_item.get("confidence"), "应用输入结构") < 0.9
+            or (
+                right_button is not None
+                and (
+                    not isinstance(right_button, dict)
+                    or not set(right_button) <= {"label", "bounds", "confidence"}
+                )
+            )
+        ):
+            raise UISceneError("应用输入值只读事实不完整。")
+        keyboard_pattern = re.compile(
+            r"(?:软键盘|输入法|键盘|keyboard|ime)",
+            re.IGNORECASE,
+        )
+        if any(keyboard_pattern.search(item) for item in scene.overlays) or any(
+            keyboard_pattern.search(
+                " ".join((item.role, item.meaning, item.label, *item.evidence))
+            )
+            for item in scene.elements
+        ):
+            raise UISceneError("基础场景仍包含结构化可见键盘，证据冲突。")
+        value = scene.to_dict()
+        elements: list[dict[str, Any]] = []
+        for item in value.get("elements") or []:
+            item = dict(item)
+            states = dict(item.get("states") or {})
+            states["goal_relevant"] = False
+            item["states"] = states
+            elements.append(item)
+        value["elements"] = elements
+        summary_facts = (
+            f"输入结构只读审计确认应用输入框当前文字：{canonical_text}",
+            AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE,
+        )
+        summary = str(value.get("summary") or "").strip()
+        for fact in summary_facts:
+            if fact not in summary:
+                summary = f"{summary}；{fact}" if summary else fact
+        value["summary"] = summary
+        return UIScene.from_dict(
+            value,
+            coordinate_scale=1.0,
+            stable_override=True,
+            fingerprint_override=fingerprint,
+        )
+    except (UISceneError, ValueError, TypeError) as exc:
+        raise VisionAgentError(
+            f"软键盘收起只读事实不符合隔离合同：{exc}"
+        ) from exc
 
 
 def _audit_confidence(value: Any, field_name: str) -> float:

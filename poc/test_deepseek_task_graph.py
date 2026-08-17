@@ -2527,6 +2527,96 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             all(item.external_impact == "navigation_only" for item in corrected.values())
         )
 
+    def test_current_temporary_draft_empty_state_removes_invented_external_risk(self):
+        raw_goal = (
+            "将当前页面唯一临时草稿区域恢复为空白状态，完成时停留原页面并保持键盘可见；"
+            "不得产生任何账号或外部影响。"
+        )
+        objective = "当前页面唯一临时草稿区域内容为空，且页面保持原样，键盘可见"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="external_state",
+        )
+        payload["goal"]["objective"] = raw_goal
+        payload["goal"]["target_apps"] = [
+            {"app_id": "current_foreground", "app_name": "当前前台应用"}
+        ]
+        payload["goal"]["entities"] = {
+            "target_ui_label": "唯一临时草稿区域"
+        }
+        payload["constraints"] = ["不得产生任何账号或外部影响"]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "accidental_external_effect",
+                "description": "过程中可能误触发送、保存或发布等操作",
+                "external_effect": "可能发送消息、发布内容或保存数据",
+                "risk_type": "unknown_external_effect",
+                "risk_level": "medium",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        payload["subgoals"][0]["completion_conditions"] = [objective]
+        payload["subgoals"][0]["risk_action_ids"] = [
+            "accidental_external_effect"
+        ]
+
+        normalized = copy.deepcopy(payload)
+        normalized["risk_actions"] = []
+        normalized["subgoals"][0]["risk_action_ids"] = []
+        normalized["subgoals"][0]["external_impact"] = "navigation_only"
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(
+                payload,
+                audit_payloads=[audit_payload_for_graph(normalized)],
+            )
+        )
+
+        graph = planner.plan(raw_goal, device_id="phone-1")
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+        self.assertEqual((), graph.active_subgoal().risk_action_ids)
+        self.assertNotIn("input_text", graph.goal.entities)
+
+    def test_saved_or_cloud_draft_empty_state_remains_external(self):
+        raw_goal = (
+            "将当前页面已保存的云端草稿恢复为空白；不得产生其他外部影响。"
+        )
+        objective = "当前页面已保存的云端草稿内容为空"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="external_state",
+        )
+        payload["goal"]["objective"] = raw_goal
+        payload["goal"]["target_apps"] = [
+            {"app_id": "current_foreground", "app_name": "当前前台应用"}
+        ]
+        payload["constraints"] = ["不得产生其他外部影响"]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "mutate_saved_draft",
+                "description": "修改已保存的云端草稿",
+                "external_effect": "云端草稿数据被修改",
+                "risk_type": "data_mutation",
+                "risk_level": "high",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        payload["subgoals"][0]["completion_conditions"] = [objective]
+        payload["subgoals"][0]["risk_action_ids"] = ["mutate_saved_draft"]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            raw_goal,
+            device_id="phone-1",
+        )
+
+        self.assertEqual("external_state", graph.active_subgoal().external_impact)
+        self.assertEqual(("mutate_saved_draft",), graph.active_subgoal().risk_action_ids)
+
     def test_symbolic_local_input_inherits_global_effect_boundary(self):
         for input_text in ("12+34", "12÷3"):
             with self.subTest(input_text=input_text):

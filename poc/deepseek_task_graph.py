@@ -232,6 +232,22 @@ LOCAL_INPUT_PREPARATION_STATE_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+LOCAL_TEMPORARY_DRAFT_CLEAR_STATE_PATTERN = re.compile(
+    r"(?:(?:当前页面|当前前台|当前应用|本机|本地).{0,28}"
+    r"(?:唯一)?(?:未发送|未提交|临时|草稿).{0,24}"
+    r"(?:为空|空白|无内容|内容为空)|"
+    r"(?:唯一)?(?:未发送|未提交|临时|草稿).{0,24}"
+    r"(?:为空|空白|无内容|内容为空).{0,28}"
+    r"(?:当前页面|当前前台|当前应用|本机|本地)|"
+    r"\b(?:current|local)\b.{0,32}\b(?:temporary|unsubmitted|unsent|draft)\b"
+    r".{0,24}\b(?:empty|blank|cleared)\b)",
+    re.IGNORECASE,
+)
+PERSISTENT_DRAFT_STATE_PATTERN = re.compile(
+    r"(?:已保存|云端|云同步|服务器|账号草稿|历史记录|文件|数据库|"
+    r"\b(?:saved|cloud|synced|server|account|history|file|database)\b)",
+    re.IGNORECASE,
+)
 LOCAL_UNSUBMITTED_WORKFLOW_RISK_PATTERN = re.compile(
     r"(?:(?:未提交|本机临时|本地临时|临时).{0,12}"
     r"(?:文本|文字|输入|草稿|内容)|"
@@ -1568,10 +1584,11 @@ def _initial_prompt(raw_goal: str) -> str:
    如果 goal.entities.target_ui_label 是具名入口/分类，而最终完成条件要求另一个结果文字或状态，
    必须再拆分为“具名入口在列表中可见”与“入口对应的目标页面可见”两个 navigation_only 状态，
    最后才是 read_only 结果核对。入口可见绝不能证明其对应页面或最终结果已经可见。
-   只改变当前可见输入框中的未提交临时文字，也可归入 navigation_only，但必须同时满足：目标文字
-   明确非空；用户直接禁止了该上下文中的搜索、提交、发送、保存或发布等效果；句中没有任何未被
-   否定的外部效果。输入并搜索/发送/保存、未明确禁止提交效果、或含义不清时仍必须标为
-   external_state 或 unknown。
+   只改变当前可见输入框中的未提交临时文字，也可归入 navigation_only。写入文字时目标文字必须
+   明确非空；将当前唯一未发送/未提交临时草稿恢复为空白时，必须把空白状态写成明确结果而不能
+   虚构空字符串 input_text。两者都要求用户直接禁止该上下文中的搜索、提交、发送、保存或发布等
+   效果，且句中没有任何未被否定的外部效果。输入并搜索/发送/保存、清除云端或已保存数据、未明确
+   禁止提交效果、或含义不清时仍必须标为 external_state 或 unknown。
    不能证明属于这些安全类别时必须标为 unknown，不能为了免确认而猜成安全类别。
 7. 风险类型只用通信、内容发布、账号关系、成员关系、权限角色、数据修改/删除、交易支付、
    账号权限或未知外部影响等跨 App 语义，不得描述 App 页面路径。
@@ -1891,6 +1908,11 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
             input_text=graph.goal.entities.get("input_text"),
         )
     }
+    local_temporary_clear_ids = {
+        item.subgoal_id
+        for item in graph.subgoals
+        if _is_explicit_local_temporary_draft_clear(graph, item)
+    }
     ancestor_map = _dependency_ancestor_map(subgoals)
     local_input_preparation_ids = _local_input_preparation_subgoal_ids(
         graph,
@@ -1914,6 +1936,21 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
 
     for risk in graph.risk_actions:
         linked = tuple(subgoals.get(item) for item in risk.subgoal_ids)
+        if (
+            risk.risk_type
+            in {
+                "unknown_external_effect",
+                "message_or_communication",
+                "content_publication",
+                "data_mutation",
+                "data_deletion",
+            }
+            and risk.subgoal_ids
+            and set(risk.subgoal_ids) <= local_temporary_clear_ids
+        ):
+            removable_ids.add(risk.risk_id)
+            safe_workflow_ids.update(risk.subgoal_ids)
+            continue
         if (
             risk.risk_type not in {
                 "unknown_external_effect",
@@ -2002,6 +2039,7 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
                     LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
                     or item.subgoal_id in local_unsubmitted_input_ids
                     or item.subgoal_id in local_input_preparation_ids
+                    or item.subgoal_id in local_temporary_clear_ids
                     or item.subgoal_id in safe_workflow_ids
                 )
                 and item.external_impact != "read_only"
@@ -2146,7 +2184,8 @@ def _explicitly_denies_external_effect(value: str) -> bool:
     normalized = "".join(str(value or "").strip().lower().split())
     return bool(
         re.search(
-            r"(?:(?:无|没有|不涉及|不会产生|不改变)(?:任何)?(?:外部)?(?:状态)?"
+            r"(?:(?:无|没有|不涉及|不会产生|不得产生|禁止产生|不改变)(?:任何)?"
+            r"(?:账号或)?(?:外部)?(?:状态)?"
             r"(?:影响|变更|变化)|不影响(?:账号数据|外部系统|外部状态))",
             normalized,
         )
@@ -2936,6 +2975,52 @@ def _restore_completed_history_evidence(
     return replace(candidate, subgoals=restored)
 
 
+def _is_explicit_local_temporary_draft_clear(
+    graph: DynamicTaskGraph,
+    subgoal: Subgoal,
+) -> bool:
+    """Recognize only an explicitly local, reversible empty-draft result."""
+
+    if (
+        len(graph.goal.target_apps) != 1
+        or graph.goal.target_apps[0].app_id != "current_foreground"
+        or str(graph.goal.entities.get("input_text") or "").strip()
+    ):
+        return False
+    state_texts = (subgoal.objective, *subgoal.completion_conditions)
+    combined_state = "；".join(state_texts)
+    if (
+        not LOCAL_TEMPORARY_DRAFT_CLEAR_STATE_PATTERN.search(combined_state)
+        or PERSISTENT_DRAFT_STATE_PATTERN.search(combined_state)
+    ):
+        return False
+    boundary_texts = (
+        graph.raw_user_goal or graph.goal.objective,
+        graph.goal.objective,
+        *graph.constraints,
+        *subgoal.constraints,
+    )
+    if not any(_explicitly_denies_external_effect(item) for item in boundary_texts):
+        return False
+    positive = tuple(
+        clause
+        for value in (*boundary_texts, *state_texts)
+        for clause in _positive_effect_clauses(value)
+    )
+    return not any(_infer_external_risk_types(item) for item in positive)
+
+
+def _explicit_local_temporary_clear_audit_scopes(
+    graph: DynamicTaskGraph,
+) -> frozenset[str | None]:
+    ids = {
+        item.subgoal_id
+        for item in graph.subgoals
+        if _is_explicit_local_temporary_draft_clear(graph, item)
+    }
+    return frozenset({*ids, None} if ids else ())
+
+
 def _explicit_local_input_audit_scopes(
     graph: DynamicTaskGraph,
     source_groups: dict[str | None, list[AuditSource]],
@@ -3592,6 +3677,11 @@ def _apply_local_risk_supplements(
         if graph is not None
         else frozenset()
     )
+    local_temporary_clear_scopes = (
+        _explicit_local_temporary_clear_audit_scopes(graph)
+        if graph is not None
+        else frozenset()
+    )
     read_only_risk_control_scopes = (
         {
             subgoal.subgoal_id
@@ -3699,6 +3789,20 @@ def _apply_local_risk_supplements(
                 reason=(
                     assessment.reason
                     + "；本地校验确认只改变未提交输入框临时文字且相关提交效果被直接禁止"
+                ),
+            )
+        if (
+            assessment.external_impact in {"external_state", "unknown"}
+            and assessment.subgoal_id in local_temporary_clear_scopes
+            and not inferred
+        ):
+            assessment = replace(
+                assessment,
+                external_impact="navigation_only",
+                risk_types=(),
+                reason=(
+                    assessment.reason
+                    + "；本地校验确认仅把当前唯一未提交临时草稿恢复为空白且禁止任何外部效果"
                 ),
             )
         if (

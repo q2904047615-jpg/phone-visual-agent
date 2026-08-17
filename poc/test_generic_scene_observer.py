@@ -566,7 +566,14 @@ class GenericSceneObserverTests(unittest.TestCase):
                     _parse_scene(
                         json.dumps(payload, ensure_ascii=False),
                         fingerprint="local-fingerprint",
-                        goal_context={"objective": "操作目标控件"},
+                        goal_context=(
+                            {
+                                "objective": "在当前输入框输入 codex",
+                                "entities": {"input_text": "codex"},
+                            }
+                            if role == "input"
+                            else {"objective": "操作目标控件"}
+                        ),
                         camera_layout_orientation="portrait",
                     )
 
@@ -2782,7 +2789,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         observer = GenericSceneObserver(provider)
         with self.assertRaisesRegex(
             VisionAgentError,
-            "目标精查响应不存在唯一、严格有效的单结构标点修复",
+            "bounds 超出归一化画面",
         ):
             observer.observe(
                 frames=stable_frames(),
@@ -2790,6 +2797,74 @@ class GenericSceneObserverTests(unittest.TestCase):
             )
         self.assertEqual(provider.calls, 2)
         self.assertTrue(observer.last_diagnostics["compact_geometry_discarded"])
+
+    def test_targeted_literal_target_discards_only_future_invalid_input_geometry(self) -> None:
+        base_payload = scene_payload()
+        base_payload["foreground_app_id"] = "wechat"
+        base_payload["screen_id"] = "unknown"
+        base_payload["summary"] = "微信对话页"
+        base_payload["elements"] = []
+        context = {
+            "objective": "从当前页面进入文件传输助手后保留未发送草稿",
+            "entities": {
+                "target_ui_label": "文件传输助手",
+                "input_text": "codex",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "navigate_to_file_transfer",
+                    "objective": "文件传输助手页面在前台可见",
+                    "constraints": ["不得选择其他联系人"],
+                    "completion_conditions": ["文件传输助手页面在前台可见"],
+                    "external_impact": "navigation_only",
+                    "goal_entities": {
+                        "target_ui_label": "文件传输助手",
+                        "input_text": "codex",
+                    },
+                },
+            },
+        }
+        targeted = targeted_delta_payload(
+            elements=[
+                {
+                    "element_id": "page-title",
+                    "role": "text",
+                    "meaning": "page_title",
+                    "label": "文件传输助手",
+                    "bounds": [340, 15, 660, 55],
+                    "confidence": 1.0,
+                    "states": {"fully_visible": True},
+                    "evidence": ["页面顶部中央清晰显示文件传输助手"],
+                },
+                {
+                    "element_id": "future-input",
+                    "role": "input",
+                    "meaning": "message_text_field",
+                    "label": "",
+                    "bounds": [180, 1670, 680, 1790],
+                    "confidence": 1.0,
+                    "states": {"fully_visible": True, "value": ""},
+                    "evidence": ["后续子目标的底部输入框"],
+                },
+            ]
+        )
+
+        base = _parse_scene(
+            json.dumps(base_payload, ensure_ascii=False),
+            fingerprint="local-fingerprint",
+            goal_context=context,
+            camera_layout_orientation="portrait",
+        )
+        scene = _parse_targeted_scene_delta(
+            json.dumps(targeted, ensure_ascii=False),
+            base_scene=base,
+            fingerprint="local-fingerprint",
+            goal_context=context,
+        )
+
+        self.assertEqual(["page-title"], [item.element_id for item in scene.elements])
+        self.assertEqual(
+            "文件传输助手",
+            scene.unique_trusted_goal_element().label,
+        )
 
     def test_input_goal_never_uses_compact_geometry_discard_recovery(self) -> None:
         first = scene_payload()

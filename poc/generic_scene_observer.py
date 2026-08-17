@@ -52,7 +52,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-17-generic-scene-observer-v45"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v46"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-17-input-structure-audit-v4"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
@@ -777,6 +777,9 @@ class GenericSceneObserver:
                     if (
                         format_retry_used
                         or targeted_error_type not in FORMAT_ERROR_TYPES
+                        or not _targeted_response_has_repairable_syntax_error(
+                            self.last_raw_response
+                        )
                     ):
                         raise
                     scene = _parse_targeted_delta_after_unique_structural_edit(
@@ -1764,7 +1767,10 @@ def _targeted_prompt(
 
 重新检查原图中与目标直接相关的文字、图标、输入框、列表项和最上层弹层。
 只保留最多4个最相关元素；目标元素必须states.goal_relevant=true。看不清或不唯一就不要输出，
-并降低confidence。坐标0..1000，只框元素自身。禁止任何动作、计划或建议字段。
+并降低confidence。bounds的x和y必须分别按原图宽、高独立归一化到0..1000：
+左/上边为0，右/下边为1000。竖图不是以宽度1000等比缩放后的长方形坐标系；
+任何y>1000都说明坐标系错了，必须省略该元素，不得截断或换算。只框元素自身。
+禁止任何动作、计划或建议字段。
 目标相关元素既包括已经满足完成条件的可见结果，也包括画面上清楚可见、能使该结果进入视野
 的入口控件；这里只报告控件事实，不建议也不授权使用它。
 置信度只评价当前画面观察本身是否可靠，不能因为目标尚未完成而降低；例如清晰桌面上唯一目标
@@ -2009,6 +2015,22 @@ def _compact_response_has_repairable_syntax_error(raw: str) -> bool:
     except VisionAgentError as exc:
         cause = exc.__cause__
         return cause is None or isinstance(cause, json.JSONDecodeError)
+    return False
+
+
+def _targeted_response_has_repairable_syntax_error(raw: str) -> bool:
+    """Return true only when the targeted response itself is invalid JSON.
+
+    A schema, enum, evidence, or geometry rejection is not a punctuation error
+    and must retain its original fail-closed diagnostic. Trying structural edits
+    on valid JSON can otherwise hide the actual protocol violation behind the
+    misleading message that no unique punctuation repair exists.
+    """
+
+    try:
+        _extract_targeted_delta_json_object(raw)
+    except VisionAgentError as exc:
+        return isinstance(exc.__cause__, json.JSONDecodeError)
     return False
 
 
@@ -2428,7 +2450,7 @@ def _parse_scene(
         _normalize_exact_target_ui_label_relevance(payload, goal_context or {})
         _normalize_page_title_identity(payload, goal_context or {})
         _normalize_unique_input_focus(payload)
-        _drop_out_of_range_non_goal_elements(payload)
+        _drop_out_of_range_non_goal_elements(payload, goal_context or {})
         return UIScene.from_dict(
             payload,
             coordinate_scale=1000.0,
@@ -3155,13 +3177,19 @@ def _strip_preliminary_elements_for_keyboard_mode_audit(
     payload["elements"] = []
 
 
-def _drop_out_of_range_non_goal_elements(payload: dict[str, Any]) -> None:
+def _drop_out_of_range_non_goal_elements(
+    payload: dict[str, Any],
+    goal_context: dict[str, Any] | None = None,
+) -> None:
     """Discard only explicitly non-goal peripheral elements with invalid bounds.
 
-    Model-authored goal candidates, inputs, and elements without an explicit
-    ``goal_relevant: false`` assertion remain strict and still fail closed.
-    Dropping a non-goal peripheral can only remove information; it never creates
-    a target or converts pixel coordinates into actionable coordinates.
+    Model-authored goal candidates and elements without an explicit
+    ``goal_relevant: false`` assertion remain strict and still fail closed. An
+    invalid input remains strict for an active input subgoal, but may be removed
+    after a unique literal target has locally made it an explicit non-goal
+    peripheral for the current non-input subgoal. Dropping such a peripheral can
+    only remove information; it never creates a target or converts pixel
+    coordinates into actionable coordinates.
     """
 
     elements = payload.get("elements")
@@ -3173,10 +3201,14 @@ def _drop_out_of_range_non_goal_elements(payload: dict[str, Any]) -> None:
             retained.append(item)
             continue
         states = item.get("states")
+        role = str(item.get("role") or "").strip()
         safe_to_discard = (
             isinstance(states, dict)
             and states.get("goal_relevant") is False
-            and str(item.get("role") or "").strip() != "input"
+            and (
+                role != "input"
+                or not _goal_requests_input(goal_context or {})
+            )
         )
         if not safe_to_discard:
             retained.append(item)

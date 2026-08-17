@@ -13,6 +13,8 @@ from deepseek_task_graph import (
     _infer_external_risk_types,
     _named_visual_identity_anchor,
     _quoted_visual_identity_anchor,
+    _require_named_visual_identity_grounding,
+    named_visual_identity_is_grounded,
 )
 
 
@@ -1200,6 +1202,45 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 ("当前设置页面的搜索输入框可见且可交互",)
             ),
         )
+
+    def test_chinese_chat_page_is_grounded_by_structured_english_screen_id(self):
+        self.assertTrue(
+            named_visual_identity_is_grounded(
+                ("当前聊天页面的输入框中显示未发送的英文 codex 草稿",),
+                (
+                    '{"app_id":"current_foreground",'
+                    '"screen_id":"chat_page","overlays":[]}',
+                ),
+            )
+        )
+        self.assertFalse(
+            named_visual_identity_is_grounded(
+                ("当前聊天页面的输入框中显示未发送的英文 codex 草稿",),
+                (
+                    '{"app_id":"current_foreground",'
+                    '"screen_id":"search_page","overlays":[]}',
+                ),
+            )
+        )
+
+    def test_semantic_screen_alias_does_not_weaken_verbatim_title_grounding(self):
+        observation = ObservedState(
+            scene_id="scene-chat",
+            summary="聊天页面",
+            visible_evidence=("其他标题可见",),
+            grounded_visual_facts=(
+                '{"app_id":"current_foreground",'
+                '"screen_id":"chat_page","overlays":[]}',
+            ),
+            last_action_outcome="not_applicable",
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "逐字 UI 完成声明"):
+            _require_named_visual_identity_grounding(
+                ("聊天页面的“订单详情”标题清晰可见",),
+                observation,
+                field="completion_conditions.title_visible",
+            )
 
     def test_current_page_transition_state_is_not_a_named_page_identity(self):
         self.assertEqual(

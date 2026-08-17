@@ -2824,9 +2824,29 @@ _VISUAL_IDENTITY_GENERIC_TOKENS = (
     "is",
 )
 
+# Structured scene IDs are intentionally stable lower-case identifiers, while
+# user goals may name the same generic screen category in Chinese.  Keep this
+# bridge deliberately small and semantic: it may ground a container category,
+# but it must never replace the stricter verbatim-title check above.
+_VISUAL_IDENTITY_SEMANTIC_ALIASES = {
+    "conversation": (
+        re.compile(r"聊天|会话"),
+        re.compile(r"(?<![a-z0-9])(?:chat|conversation)(?![a-z0-9])", re.I),
+    ),
+}
+
 
 def _compact_identity_text(value: str) -> str:
     return "".join(re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", value.casefold()))
+
+
+def _visual_identity_semantic_keys(value: str) -> frozenset[str]:
+    text = str(value or "").casefold()
+    return frozenset(
+        key
+        for key, patterns in _VISUAL_IDENTITY_SEMANTIC_ALIASES.items()
+        if any(pattern.search(text) for pattern in patterns)
+    )
 
 
 def _named_visual_identity_anchor(texts: tuple[str, ...]) -> str:
@@ -2886,11 +2906,14 @@ def _quoted_visual_identity_anchor(texts: tuple[str, ...]) -> str:
 
 
 def _identity_anchor_is_grounded(anchor: str, facts: tuple[str, ...]) -> bool:
+    anchor_semantics = _visual_identity_semantic_keys(anchor)
     for fact in facts:
         compact = _compact_identity_text(fact)
         if not compact:
             continue
         if anchor in compact:
+            return True
+        if anchor_semantics.intersection(_visual_identity_semantic_keys(fact)):
             return True
         longest = SequenceMatcher(
             None,

@@ -1061,6 +1061,7 @@ class DeepSeekTaskGraphPlanner:
                 validate=False,
             )
             graph = _normalize_initial_local_navigation(graph)
+            graph = _normalize_unique_active_frontier(graph)
             graph.validate()
         except TaskGraphError as exc:
             if not _retryable_initial_output_error(exc):
@@ -1079,6 +1080,7 @@ class DeepSeekTaskGraphPlanner:
                 validate=False,
             )
             graph = _normalize_initial_local_navigation(graph)
+            graph = _normalize_unique_active_frontier(graph)
             try:
                 graph.validate()
             except TaskGraphError as repair_error:
@@ -1101,6 +1103,7 @@ class DeepSeekTaskGraphPlanner:
                     validate=False,
                 )
                 graph = _normalize_initial_local_navigation(graph)
+                graph = _normalize_unique_active_frontier(graph)
                 graph.validate()
         try:
             self._audit_and_validate_graph(graph)
@@ -1116,6 +1119,7 @@ class DeepSeekTaskGraphPlanner:
                 validate=False,
             )
             graph = _normalize_initial_local_navigation(graph)
+            graph = _normalize_unique_active_frontier(graph)
             graph.validate()
             self._audit_and_validate_graph(graph)
         if (
@@ -1156,6 +1160,7 @@ class DeepSeekTaskGraphPlanner:
                 candidate,
                 observation,
             )
+            candidate = _normalize_unique_active_frontier(candidate)
             self._validate_replan_candidate(
                 graph,
                 candidate,
@@ -1187,6 +1192,7 @@ class DeepSeekTaskGraphPlanner:
                 candidate,
                 observation,
             )
+            candidate = _normalize_unique_active_frontier(candidate)
             try:
                 self._validate_replan_candidate(
                     graph,
@@ -1574,7 +1580,6 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
                 "message_or_communication",
                 "content_publication",
             }
-            or risk.risk_level != "low"
             or not linked
             or any(item is None for item in linked)
         ):
@@ -1583,12 +1588,19 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
             item is not None and item.subgoal_id in local_unsubmitted_input_ids
             for item in linked
         )
-        if not local_input_only and not _explicitly_denies_external_effect(
+        if local_input_only:
+            pass
+        elif risk.risk_level != "low" or not _explicitly_denies_external_effect(
             risk.external_effect
         ):
             continue
         if all(
-            item.external_impact in {"read_only", "navigation_only", "external_state"}
+            item.external_impact in {
+                "read_only",
+                "navigation_only",
+                "external_state",
+                "unknown",
+            }
             and (
                 LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
                 or item.subgoal_id in local_unsubmitted_input_ids
@@ -1673,6 +1685,59 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
         ),
         subgoals=normalized_subgoals,
         active_subgoal_id=active_subgoal_id,
+    )
+
+
+def _normalize_unique_active_frontier(graph: DynamicTaskGraph) -> DynamicTaskGraph:
+    """Repair active markers only when the dependency graph has one safe frontier.
+
+    DeepSeek may occasionally leave a downstream node active while its dependency
+    is still unfinished, or activate both the current and its direct successor.
+    The dependency DAG already determines the only runnable node in that case.
+    Independent runnable roots remain ambiguous and are deliberately left for the
+    strict validator to reject.
+    """
+
+    if graph.status not in {"ready", "running", "awaiting_confirmation"}:
+        return graph
+    completed_ids = {
+        item.subgoal_id for item in graph.subgoals if item.status == "completed"
+    }
+    frontier = tuple(
+        item
+        for item in graph.subgoals
+        if item.status in {"pending", "active"}
+        and all(dependency in completed_ids for dependency in item.depends_on)
+    )
+    if len(frontier) != 1:
+        return graph
+    selected = frontier[0]
+    if (
+        selected.external_impact not in {"read_only", "navigation_only"}
+        or selected.risk_action_ids
+    ):
+        return graph
+    active_ids = tuple(
+        item.subgoal_id for item in graph.subgoals if item.status == "active"
+    )
+    if (
+        active_ids == (selected.subgoal_id,)
+        and graph.active_subgoal_id == selected.subgoal_id
+    ):
+        return graph
+    normalized_subgoals = tuple(
+        replace(item, status="active")
+        if item.subgoal_id == selected.subgoal_id
+        else replace(item, status="pending")
+        if item.status == "active"
+        else item
+        for item in graph.subgoals
+    )
+    return replace(
+        graph,
+        status=("ready" if graph.status == "awaiting_confirmation" else graph.status),
+        subgoals=normalized_subgoals,
+        active_subgoal_id=selected.subgoal_id,
     )
 
 
@@ -2222,11 +2287,23 @@ def _named_visual_identity_anchor(texts: tuple[str, ...]) -> str:
             or not _VISUAL_IDENTITY_CONTAINER_PATTERN.search(identity_value)
         ):
             continue
-        cleaned = identity_value.casefold()
+        container = _VISUAL_IDENTITY_CONTAINER_PATTERN.search(identity_value)
+        # A named container's identity is the modifier before "page/screen/view".
+        # State predicates after the container (for example an input being visible)
+        # are completion facts, not part of the page name.
+        identity_name = (
+            identity_value[: container.start()]
+            if container is not None
+            else identity_value
+        )
+        cleaned = identity_name.casefold()
         for token in _VISUAL_IDENTITY_GENERIC_TOKENS:
             cleaned = cleaned.replace(token, " ")
         anchor = _compact_identity_text(cleaned)
-        if len(anchor) >= 4 and anchor not in anchors:
+        has_stable_length = len(anchor) >= 4 or len(
+            re.findall(r"[\u4e00-\u9fff]", anchor)
+        ) >= 2
+        if has_stable_length and anchor not in anchors:
             anchors.append(anchor)
     # Short referential phrases such as "上一页" or "详情页" are not stable
     # page identities. Longer names must be grounded in structured scene facts.

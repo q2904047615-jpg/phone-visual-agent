@@ -547,14 +547,10 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertIn("当前输入框内容为 X", provider.messages[0][0]["content"])
         self.assertIn("本机临时结果区域显示该表达式的答案", provider.messages[0][0]["content"])
 
-    def test_initial_plan_allows_one_bounded_repair_for_a_different_error_category(self):
+    def test_initial_plan_repairs_unique_frontier_without_remote_retry(self):
         first = base_payload()
         first["subgoals"][1]["status"] = "active"
-        second = base_payload()
-        second["risk_actions"][0]["subgoal_ids"] = ["locate_target", "save_target"]
-        second["subgoals"][0]["risk_action_ids"] = ["save_place"]
-        repaired = base_payload()
-        provider = FakeProvider(first, second, repaired)
+        provider = FakeProvider(first)
 
         graph = DeepSeekTaskGraphPlanner(provider).plan(
             "打开一个本机临时页面",
@@ -566,11 +562,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             call for call in provider.messages
             if "semantic-risk-audit-v1" not in call[0]["content"]
         ]
-        self.assertEqual(3, len(graph_prompts))
-        self.assertIn(
-            "关联风险的子目标影响分类必须为",
-            graph_prompts[-1][0]["content"],
-        )
+        self.assertEqual(1, len(graph_prompts))
 
     def test_initial_plan_normalizes_self_contradictory_local_navigation_risk(self):
         payload = single_subgoal_payload(
@@ -644,6 +636,136 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual("target_state", graph.active_subgoal_id)
         self.assertEqual("active", graph.active_subgoal().status)
+
+    def test_initial_plan_repairs_only_unique_dependency_frontier(self):
+        payload = single_subgoal_payload(
+            "当前页面的输入区域可见后内容为314159",
+            external_impact="navigation_only",
+        )
+        payload["subgoals"][0]["subgoal_id"] = "input_visible"
+        payload["subgoals"].append(
+            {
+                "subgoal_id": "input_value_ready",
+                "objective": "当前输入框内容为314159",
+                "status": "active",
+                "depends_on": ["input_visible"],
+                "constraints": [],
+                "completion_conditions": ["输入框内容为314159"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            }
+        )
+        payload["active_subgoal_id"] = "input_visible"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "让当前页面的输入区域显示314159",
+            device_id="phone-1",
+        )
+
+        self.assertEqual("input_visible", graph.active_subgoal_id)
+        self.assertEqual(
+            ["active", "pending"],
+            [item.status for item in graph.subgoals],
+        )
+
+    def test_initial_plan_does_not_choose_between_independent_frontiers(self):
+        payload = single_subgoal_payload(
+            "确认两个独立区域",
+            external_impact="read_only",
+        )
+        payload["subgoals"].append(
+            {
+                "subgoal_id": "other_root",
+                "objective": "另一个独立区域可见",
+                "status": "active",
+                "depends_on": [],
+                "constraints": [],
+                "completion_conditions": ["另一个独立区域可见"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "read_only",
+            }
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "只能有一个活动子目标"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload, payload, payload)).plan(
+                "确认两个独立区域",
+                device_id="phone-1",
+            )
+
+    def test_replan_repairs_downstream_active_marker_from_unique_frontier(self):
+        initial = single_subgoal_payload(
+            "输入区域可见后内容为314159",
+            external_impact="navigation_only",
+        )
+        initial["subgoals"][0].update(
+            subgoal_id="input_visible",
+            objective="输入区域可见",
+            completion_conditions=["输入区域可见"],
+        )
+        initial["subgoals"].extend(
+            [
+                {
+                    "subgoal_id": "input_focused",
+                    "objective": "输入区域已聚焦",
+                    "status": "pending",
+                    "depends_on": ["input_visible"],
+                    "constraints": [],
+                    "completion_conditions": ["输入区域已聚焦"],
+                    "completion_evidence": [],
+                    "risk_action_ids": [],
+                    "external_impact": "navigation_only",
+                },
+                {
+                    "subgoal_id": "input_value_ready",
+                    "objective": "输入框内容为314159",
+                    "status": "pending",
+                    "depends_on": ["input_focused"],
+                    "constraints": [],
+                    "completion_conditions": ["输入框内容为314159"],
+                    "completion_evidence": [],
+                    "risk_action_ids": [],
+                    "external_impact": "navigation_only",
+                },
+            ]
+        )
+        initial["active_subgoal_id"] = "input_visible"
+        revised = copy.deepcopy(initial)
+        revised["status"] = "running"
+        revised["subgoals"][0].update(
+            status="completed",
+            completion_evidence=["输入区域可见"],
+        )
+        revised["subgoals"][1]["status"] = "active"
+        revised["subgoals"][2]["status"] = "active"
+        revised["active_subgoal_id"] = "input_focused"
+        planner = DeepSeekTaskGraphPlanner(FakeProvider(initial, revised))
+        graph = planner.plan(
+            "让当前页面的输入区域显示314159",
+            device_id="phone-1",
+        )
+
+        result = planner.replan(
+            graph,
+            ObservedState(
+                scene_id="scene-input-visible",
+                summary="输入区域可见",
+                visible_evidence=("输入区域可见",),
+                grounded_visual_facts=(
+                    '{"meaning":"application_text_input","role":"input"}',
+                ),
+                last_action_outcome="not_applicable",
+            ),
+            trigger="subgoal_completed",
+            reason="可信画面已经证明输入区域可见。",
+        )
+
+        self.assertEqual("input_focused", result.active_subgoal_id)
+        self.assertEqual(
+            ["completed", "active", "pending"],
+            [item.status for item in result.subgoals],
+        )
 
     def test_initial_plan_never_normalizes_real_external_effect_risk(self):
         payload = single_subgoal_payload(
@@ -868,6 +990,12 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     "当前本地页面唯一输入框已完整显示 agent",
                     "The current page input value is agent",
                 )
+            ),
+        )
+        self.assertEqual(
+            "设置",
+            _named_visual_identity_anchor(
+                ("当前设置页面的搜索输入框可见且可交互",)
             ),
         )
 
@@ -2275,6 +2403,75 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             all(item.external_impact == "navigation_only" for item in corrected.values())
         )
         self.assertTrue(all(not item.risk_types for item in corrected.values()))
+
+    def test_explicit_unsubmitted_input_ignores_model_risk_severity(self):
+        raw_goal = (
+            "让当前输入框内容为314159并保持未提交；"
+            "不要搜索、提交、发送、保存或发布。"
+        )
+        payload = single_subgoal_payload(
+            "当前输入框内容为314159且保持未提交",
+            external_impact="external_state",
+        )
+        payload["goal"]["entities"]["input_text"] = "314159"
+        payload["constraints"] = ["不要搜索、提交、发送、保存或发布。"]
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        payload["risk_actions"] = [
+            {
+                "risk_id": "model_input_risk",
+                "description": "模型认为输入可能改变数据",
+                "external_effect": "未知外部效果",
+                "risk_type": "data_mutation",
+                "risk_level": "high",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["risk_action_ids"] = ["model_input_risk"]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            raw_goal,
+            device_id="phone-1",
+        )
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+
+    def test_explicit_unsubmitted_input_never_downgrades_real_save_effect(self):
+        objective = (
+            "当前输入框内容为314159并保持未提交；草稿已保存；"
+            "不要搜索、提交、发送或发布。"
+        )
+        payload = single_subgoal_payload(
+            "当前输入框内容为314159并保持未提交",
+            external_impact="external_state",
+        )
+        payload["goal"]["entities"]["input_text"] = "314159"
+        payload["subgoals"][0]["completion_conditions"] = [
+            "输入框内容为314159",
+            "草稿已保存",
+        ]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "save_effect",
+                "description": "保存草稿",
+                "external_effect": "草稿已保存到外部数据",
+                "risk_type": "data_mutation",
+                "risk_level": "high",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["risk_action_ids"] = ["save_effect"]
+        payload["status"] = "awaiting_confirmation"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            objective,
+            device_id="phone-1",
+        )
+
+        self.assertEqual("external_state", graph.active_subgoal().external_impact)
+        self.assertEqual(("save_effect",), graph.active_subgoal().risk_action_ids)
 
     def test_generic_modify_word_is_safe_only_inside_explicit_unsubmitted_input(self):
         raw_goal = (

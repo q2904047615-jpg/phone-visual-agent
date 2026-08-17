@@ -20,6 +20,7 @@ from generic_scene_observer import (
     _can_use_stable_ocr_literal_bounds,
     _compact_prompt,
     _goal_requests_input,
+    _input_structure_audit_prompt,
     _stable_ocr_literal_bounds,
     _input_structure_diagnostic_shape,
     _parse_scene_after_unique_structural_edit,
@@ -335,6 +336,26 @@ def audited_application_input(
 
 
 class GenericSceneObserverTests(unittest.TestCase):
+    def test_input_audit_prompt_defines_exact_nullable_mode_switch_contract(self) -> None:
+        prompt = _input_structure_audit_prompt(
+            {"objective": "切换当前键盘输入模式"},
+            roi_bounds=None,
+        )
+
+        self.assertIn(INPUT_STRUCTURE_AUDIT_VERSION, prompt)
+        self.assertIn('"mode_switch":null', prompt)
+        self.assertIn(
+            '{"label":"中","bounds":[0,0,1000,1000],"confidence":0.0,'
+            '"current_mode":"chinese_pinyin","target_mode":"direct_latin"}',
+            prompt,
+        )
+        self.assertIn(
+            '{"label":"英","bounds":[0,0,1000,1000],"confidence":0.0,'
+            '"current_mode":"direct_latin","target_mode":"chinese_pinyin"}',
+            prompt,
+        )
+        self.assertIn("Never omit confidence or target_mode", prompt)
+
     def test_literal_ocr_geometry_is_limited_to_text_bearing_selector_roles(self) -> None:
         for role in ("text", "button", "tab", "list_item"):
             self.assertTrue(_can_use_stable_ocr_literal_bounds(role, "入口"))

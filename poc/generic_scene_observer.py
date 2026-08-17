@@ -2514,6 +2514,36 @@ def _normalize_targeted_delta_evidence_shorthand(payload: Any) -> None:
             element["evidence"] = [text] if text else []
 
 
+def _normalize_targeted_delta_xywh_bounds_shorthand(payload: Any) -> None:
+    """Normalize only an exact, finite crop-scale x/y/w/h bounds object."""
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
+        return
+    for element in payload["elements"]:
+        if not isinstance(element, dict):
+            continue
+        bounds = element.get("bounds")
+        if not isinstance(bounds, dict) or set(bounds) != {"x", "y", "w", "h"}:
+            continue
+        values = tuple(bounds[key] for key in ("x", "y", "w", "h"))
+        if (
+            any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in values)
+            or any(not math.isfinite(float(value)) for value in values)
+        ):
+            continue
+        x, y, width, height = (float(value) for value in values)
+        if (
+            x < 0
+            or y < 0
+            or width <= 0
+            or height <= 0
+            or x + width > 1000
+            or y + height > 1000
+        ):
+            continue
+        element["bounds"] = [x, y, x + width, y + height]
+
+
 def _extract_targeted_delta_json_object(raw: str) -> dict[str, Any]:
     text = str(raw or "").strip()
     if text.startswith("```"):
@@ -2550,6 +2580,7 @@ def _parse_targeted_scene_delta(
     base_scene.validate()
     payload = _extract_targeted_delta_json_object(raw)
     _normalize_targeted_delta_evidence_shorthand(payload)
+    _normalize_targeted_delta_xywh_bounds_shorthand(payload)
     if not _matches_targeted_delta_schema(payload):
         raise VisionAgentError(
             "目标精查结果不符合最小增量协议；只允许 protocol_version、"

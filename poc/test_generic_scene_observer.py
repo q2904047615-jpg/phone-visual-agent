@@ -3171,6 +3171,63 @@ class GenericSceneObserverTests(unittest.TestCase):
                     fingerprint="local-fingerprint",
                 )
 
+    def test_targeted_delta_normalizes_only_exact_valid_xywh_bounds_shorthand(self) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="local-fingerprint",
+        )
+        element = dict(scene_payload()["elements"][0])
+        element.update(
+            {
+                "element_id": "draft_input_box",
+                "role": "input",
+                "meaning": "unique_temporary_draft_area",
+                "label": "lxs,",
+                "bounds": {"x": 145, "y": 535, "w": 560, "h": 45},
+                "confidence": 1.0,
+                "states": {
+                    "fully_visible": True,
+                    "goal_relevant": True,
+                    "value": "lxs,",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                },
+                "evidence": "输入框逐字显示 lxs,",
+            }
+        )
+
+        parsed = _parse_targeted_scene_delta(
+            json.dumps(
+                targeted_delta_payload(elements=[element], confidence=1.0),
+                ensure_ascii=False,
+            ),
+            base_scene=base,
+            fingerprint="local-fingerprint",
+        )
+
+        self.assertEqual((0.145, 0.535, 0.705, 0.58), parsed.elements[0].bounds)
+        self.assertEqual("lxs,", parsed.elements[0].states["value"])
+
+        for invalid_bounds in (
+            {"x": 145, "y": 535, "w": 560},
+            {"x": 145, "y": 535, "w": 560, "h": 45, "right": 705},
+            {"x": 145, "y": 535, "w": -1, "h": 45},
+            {"x": 900, "y": 535, "w": 560, "h": 45},
+            {"x": True, "y": 535, "w": 560, "h": 45},
+        ):
+            with self.subTest(bounds=invalid_bounds), self.assertRaisesRegex(
+                VisionAgentError,
+                "最小增量协议",
+            ):
+                invalid = targeted_delta_payload(
+                    elements=[{**element, "bounds": invalid_bounds}]
+                )
+                _parse_targeted_scene_delta(
+                    json.dumps(invalid, ensure_ascii=False),
+                    base_scene=base,
+                    fingerprint="local-fingerprint",
+                )
+
     def test_targeted_delta_rejects_legacy_scene_and_authority_fields(self) -> None:
         base = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),

@@ -4415,6 +4415,7 @@ class ApiEndToEndTests(unittest.TestCase):
                         "home",
                         "reveal_system_navigation",
                         "input_verified_text",
+                        "clear_verified_text",
                         "long_press",
                         "drag",
                     ],

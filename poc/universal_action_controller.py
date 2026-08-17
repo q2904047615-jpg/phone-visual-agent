@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from semantic_executor import SemanticAction
+from operation_specs import editable_character_count
 from ui_scene import (
     MIN_TARGET_CONFIDENCE,
     UIElement,
@@ -241,6 +242,7 @@ class ResolvedSemanticAction:
     normalized_point: tuple[float, float] | None = None
     normalized_end_point: tuple[float, float] | None = None
     text: str | None = None
+    delete_count: int | None = None
     direction: str | None = None
     hold_seconds: float | None = None
     path_distance: float | None = None
@@ -291,6 +293,7 @@ class UniversalActionController:
                     "tap_semantic",
                     "dismiss_overlay",
                     "input_verified_text",
+                    "clear_verified_text",
                     "long_press",
                 }
                 or target_local_candidate is None
@@ -371,6 +374,54 @@ class UniversalActionController:
                 kind="input_verified_text",
                 normalized_point=element.center,
                 text=text,
+                target_element_id=element.element_id,
+                before_fingerprint=scene.fingerprint,
+                expected_effect=expected_effect,
+            )
+        if action.action == "clear_verified_text":
+            element = self._resolve_target(action, scene, required_role="input")
+            observed_value = element.states.get("value")
+            if element.states.get("focused") is not True:
+                raise UniversalActionError("清空文字前必须有当前画面证明输入框已聚焦。")
+            if not isinstance(observed_value, str) or not observed_value:
+                raise UniversalActionError("清空文字要求当前画面提供精确非空 states.value。")
+            delete_count = editable_character_count(observed_value)
+            if not 1 <= delete_count <= 100:
+                raise UniversalActionError("清空文字的已验证字符数必须在1～100之间。")
+            if element.states.get("keyboard_layout") != "qwerty":
+                raise UniversalActionError("清空文字要求当前画面确认 QWERTY 键盘。")
+            if element.states.get("goal_relevant") is not True:
+                raise UniversalActionError("清空文字目标必须由当前画面证明与当前目标相关。")
+            eligible_inputs = tuple(
+                candidate
+                for candidate in scene.elements
+                if candidate.role == "input"
+                and float(candidate.confidence) >= self.min_confidence
+                and candidate.states.get("visible") is not False
+                and candidate.states.get("goal_relevant") is True
+                and candidate.states.get("focused") is True
+                and isinstance(candidate.states.get("value"), str)
+                and bool(candidate.states.get("value"))
+                and candidate.states.get("keyboard_layout") == "qwerty"
+            )
+            if len(eligible_inputs) != 1 or eligible_inputs[0].element_id != element.element_id:
+                raise UniversalActionError(
+                    "清空文字要求当前画面只有一个符合安全条件的非空目标输入框。"
+                )
+            expected_state = expected_effect.get("element_state")
+            if not isinstance(expected_state, dict):
+                raise UniversalActionError("清空文字必须声明输入框空值后置条件。")
+            if (
+                str(expected_state.get("meaning") or "") != element.meaning
+                or expected_state.get("states") != {"value": ""}
+            ):
+                raise UniversalActionError("清空文字的后置条件必须精确绑定原输入框空值。")
+            return ResolvedSemanticAction(
+                node_id=action.node_id,
+                kind="clear_verified_text",
+                normalized_point=element.center,
+                text="",
+                delete_count=delete_count,
                 target_element_id=element.element_id,
                 before_fingerprint=scene.fingerprint,
                 expected_effect=expected_effect,
@@ -601,7 +652,9 @@ class UniversalActionController:
                 input_aliases = tuple(
                     element
                     for element in after.elements
-                    if resolved.kind in {"tap_semantic", "input_verified_text"}
+                    if resolved.kind in {
+                        "tap_semantic", "input_verified_text", "clear_verified_text"
+                    }
                     and before_target_is_input
                     and element.role == "input"
                     and float(element.confidence) >= self.min_confidence
@@ -611,7 +664,7 @@ class UniversalActionController:
                     raise UniversalActionError(
                         f"动作结果缺少元素状态证据：{exc}"
                     ) from exc
-        if resolved.kind == "input_verified_text":
+        if resolved.kind in {"input_verified_text", "clear_verified_text"}:
             self._verify_exact_input_value(resolved, before, after)
         if resolved.kind == "long_press":
             self._verify_long_press_result(resolved, before, after)
@@ -926,8 +979,13 @@ class UniversalActionController:
     ) -> None:
         expected = resolved.text
         target_id = str(resolved.target_element_id or "").strip()
-        if not expected or not target_id:
+        if expected is None or not target_id:
             raise UniversalActionError("输入动作缺少精确文字或目标输入框身份。")
+        if resolved.kind == "input_verified_text" and not expected:
+            raise UniversalActionError("输入动作缺少精确文字或目标输入框身份。")
+        if resolved.kind == "clear_verified_text":
+            if expected != "" or resolved.delete_count is None:
+                raise UniversalActionError("清空动作缺少空值或精确退格次数。")
         try:
             before_input = before.get_element(
                 target_id,

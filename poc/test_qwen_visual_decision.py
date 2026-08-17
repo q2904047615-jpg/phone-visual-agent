@@ -608,6 +608,48 @@ class QwenVisualDecisionTests(unittest.TestCase):
             decision.expected_result,
         )
 
+    def test_minimal_clear_choice_uses_local_empty_postcondition_without_text(self) -> None:
+        context = task_context(task_id="task_minimal_clear", revision=4)
+        context["current_subgoal"]["objective"] = "恢复唯一错误草稿输入框为空"
+        field = UIElement(
+            element_id="draft_field",
+            role="input",
+            meaning="draft_input",
+            label="",
+            bounds=(0.08, 0.12, 0.92, 0.22),
+            confidence=0.97,
+            states={
+                "focused": True,
+                "value": "lxs,",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+                "goal_relevant": True,
+            },
+            evidence=("唯一输入框中逐字可见 lxs,",),
+        )
+        observation = trusted_observation(self.frames, elements=(field,))
+
+        _observer, decision = self.decide(
+            FakeProvider(
+                minimal_selection_payload(status="action", choice_id="choice_1")
+            ),
+            context=context,
+            observation=observation,
+            available_action_kinds={"clear_verified_text"},
+        )
+
+        self.assertEqual("clear_verified_text", decision.proposal.action.action)
+        self.assertNotIn("text", decision.proposal.action.params)
+        self.assertEqual(
+            {
+                "element_state": {
+                    "meaning": "draft_input",
+                    "states": {"value": ""},
+                }
+            },
+            decision.expected_result,
+        )
+
     def test_minimal_selection_rejects_model_authored_expected_result(self) -> None:
         payload = minimal_selection_payload(
             status="action",

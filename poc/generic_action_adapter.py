@@ -368,6 +368,7 @@ class GenericSingleActionAdapter:
             "back",
             "home",
             "input_verified_text",
+            "clear_verified_text",
             "long_press",
             "drag",
         }
@@ -377,6 +378,7 @@ class GenericSingleActionAdapter:
             "tap_semantic",
             "dismiss_overlay",
             "input_verified_text",
+            "clear_verified_text",
             "long_press",
             "drag",
         }
@@ -386,6 +388,7 @@ class GenericSingleActionAdapter:
             "tap_semantic",
             "dismiss_overlay",
             "input_verified_text",
+            "clear_verified_text",
             "long_press",
             "drag",
         }
@@ -449,6 +452,11 @@ class GenericSingleActionAdapter:
             supported.add("home")
         if available("input_verified_text", "vision_type_text_with_layout"):
             supported.add("input_verified_text")
+        if (
+            bool(declared.get("input_verified_text", True))
+            and callable(getattr(self.robot, "vision_clear_text", None))
+        ):
+            supported.add("clear_verified_text")
         if available("long_press", "vision_long_press_relative"):
             supported.add("long_press")
         if available("drag", "vision_drag_relative"):
@@ -995,9 +1003,14 @@ class GenericSingleActionAdapter:
                     scene_fingerprint=before.fingerprint,
                     frame_size=orientation_credential.frame_size,
                 )
+                hardware_action = (
+                    "input_verified_text"
+                    if resolved.kind == "clear_verified_text"
+                    else resolved.kind
+                )
                 arm(
                     orientation_credential,
-                    action=resolved.kind,
+                    action=hardware_action,
                     scene_fingerprint=before.fingerprint,
                 )
             except (OrientationSafetyError, RuntimeError, ValueError) as exc:
@@ -1047,13 +1060,18 @@ class GenericSingleActionAdapter:
             elif resolved.kind == "home":
                 physical_actions = 1
                 robot_result = self.robot.vision_android_home()
-            elif resolved.kind == "input_verified_text":
-                if not resolved.text:
+            elif resolved.kind in {"input_verified_text", "clear_verified_text"}:
+                if resolved.kind == "input_verified_text" and not resolved.text:
                     raise GenericActionAdapterError("输入动作缺少已校验文字。")
-                method = getattr(self.robot, "vision_type_text_with_layout", None)
+                method_name = (
+                    "vision_type_text_with_layout"
+                    if resolved.kind == "input_verified_text"
+                    else "vision_clear_text"
+                )
+                method = getattr(self.robot, method_name, None)
                 if not callable(method):
                     raise GenericActionAdapterError(
-                        "机械臂不支持绑定本轮键盘几何的文字输入。"
+                        "机械臂不支持绑定本轮键盘几何的文字输入或清空。"
                     )
                 try:
                     input_element = before.get_element(
@@ -1100,7 +1118,7 @@ class GenericSingleActionAdapter:
                         f"当前 QWERTY 几何未通过动作前本地复核：{exc}"
                     ) from exc
                 validator = getattr(self.robot, "validate_verified_text", None)
-                if callable(validator):
+                if resolved.kind == "input_verified_text" and callable(validator):
                     try:
                         validator(resolved.text, dict(input_element.states))
                     except (UISceneError, ValueError, RuntimeError) as exc:
@@ -1108,7 +1126,15 @@ class GenericSingleActionAdapter:
                             f"当前文字输入不满足设备已验证配置：{exc}"
                         ) from exc
                 physical_actions = 1
-                robot_result = method(resolved.text, execution_keyboard_geometry)
+                if resolved.kind == "input_verified_text":
+                    robot_result = method(resolved.text, execution_keyboard_geometry)
+                else:
+                    if resolved.delete_count is None:
+                        raise GenericActionAdapterError("清空动作缺少已验证退格次数。")
+                    robot_result = method(
+                        execution_keyboard_geometry,
+                        resolved.delete_count,
+                    )
             elif resolved.kind == "long_press":
                 if resolved.normalized_point is None or resolved.hold_seconds is None:
                     raise GenericActionAdapterError("长按动作缺少已校验落点或时长。")
@@ -1287,6 +1313,7 @@ class GenericSingleActionAdapter:
             "tap_semantic",
             "dismiss_overlay",
             "input_verified_text",
+            "clear_verified_text",
             "long_press",
         }
         if requested.action not in single_element_actions | {"drag"}:
@@ -1480,7 +1507,9 @@ class GenericSingleActionAdapter:
                     != "forbidden"
                 )
                 stable_input_field = bool(
-                    requested.action in {"tap_semantic", "input_verified_text"}
+                    requested.action in {
+                        "tap_semantic", "input_verified_text", "clear_verified_text"
+                    }
                     and prefix == ""
                     and original.role == "input"
                     and current.role == "input"

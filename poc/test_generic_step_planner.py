@@ -198,6 +198,11 @@ class FakeRobot:
         self.keyboard_layouts.append(keyboard_layout)
         self.actions.append(("input", text))
 
+    def vision_clear_text(self, keyboard_layout, delete_count):
+        self._consume("input_verified_text")
+        self.keyboard_layouts.append(keyboard_layout)
+        self.actions.append(("clear", delete_count))
+
     def vision_long_press_relative(self, x, y, hold_seconds):
         self._consume("long_press")
         self.actions.append(("long_press", x, y, hold_seconds))
@@ -676,6 +681,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertIn("tap_semantic", supported)
         self.assertIn("reveal_system_navigation", supported)
         self.assertIn("input_verified_text", supported)
+        self.assertIn("clear_verified_text", supported)
         self.assertIn("long_press", supported)
         self.assertIn("drag", supported)
         self.assertIn("back", supported)
@@ -1084,6 +1090,77 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(0, caught.exception.physical_actions)
         self.assertEqual([], blocked_robot.actions)
         self.assertEqual(2, observer.calls)
+
+    def test_confirmed_clear_uses_exact_observed_count_and_fresh_qwerty_geometry(self):
+        def input_scene(fingerprint, element_id, value):
+            return UIScene(
+                app_id="browser",
+                screen_id="draft",
+                summary="唯一已聚焦输入框",
+                elements=(
+                    UIElement(
+                        element_id=element_id,
+                        role="input",
+                        meaning="draft_input",
+                        label="",
+                        bounds=(0.1, 0.1, 0.9, 0.2),
+                        confidence=0.97,
+                        states={
+                            "focused": True,
+                            "value": value,
+                            "keyboard_layout": "qwerty",
+                            "keyboard_input_mode": "direct_latin",
+                            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+                            "goal_relevant": True,
+                        },
+                    ),
+                ),
+                stable=True,
+                confidence=0.97,
+                fingerprint=fingerprint,
+            )
+
+        planned = input_scene("planned", "planned-field", "lxs,")
+        fresh = input_scene("before", "fresh-field", "lxs,")
+        after = input_scene("after", "after-field", "")
+        robot = FakeRobot()
+        snapped_anchors = {
+            key: list(value)
+            for key, value in TEST_QWERTY_GEOMETRY["anchors"].items()
+        }
+
+        result = self._adapter(
+            FakeSceneObserver([fresh, after]),
+            robot,
+            qwerty_row_snapper=lambda _frames, _anchors: snapped_anchors,
+            require_local_qwerty_row_snap=True,
+        ).execute(
+            requested_action=SemanticAction(
+                node_id="clear-wrong-draft",
+                action="clear_verified_text",
+                params={
+                    "element_id": "planned-field",
+                    "target": "draft_input",
+                    "role": "input",
+                    "label": "",
+                    "states": dict(planned.elements[0].states),
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "draft_input",
+                            "states": {"value": ""},
+                        }
+                    },
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("clear", 4)], robot.actions)
+        self.assertEqual("stable_local_ocr", robot.keyboard_layouts[0]["row_snap_source"])
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("matched", result.action_outcome)
 
     def test_confirmed_input_accepts_unique_overlapping_post_input_alias(self):
         def input_scene(

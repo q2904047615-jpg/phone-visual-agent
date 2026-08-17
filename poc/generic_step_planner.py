@@ -21,6 +21,7 @@ ALLOWED_STEP_ACTIONS = frozenset(
         "home",
         "wait_for_change",
         "input_verified_text",
+        "clear_verified_text",
         "long_press",
         "drag",
     }
@@ -60,6 +61,7 @@ class GenericStepProposal:
                 "tap_semantic",
                 "dismiss_overlay",
                 "input_verified_text",
+                "clear_verified_text",
                 "long_press",
             }:
                 element_id = str(self.action.params.get("element_id") or "").strip()
@@ -74,6 +76,17 @@ class GenericStepProposal:
                     raise GenericStepPlanningError("输入动作 text 不得包含换行。")
                 if scene.get_element(str(self.action.params["element_id"])).role != "input":
                     raise GenericStepPlanningError("输入动作必须绑定 input 元素。")
+            if self.action.action == "clear_verified_text":
+                unexpected = set(self.action.params) - {
+                    "element_id", "target", "role", "label", "states",
+                    "expected_effect",
+                }
+                if unexpected:
+                    raise GenericStepPlanningError(
+                        "清空动作包含协议外参数：" + ", ".join(sorted(unexpected))
+                    )
+                if scene.get_element(str(self.action.params["element_id"])).role != "input":
+                    raise GenericStepPlanningError("清空动作必须绑定 input 元素。")
             if self.action.action == "long_press":
                 duration_ms = self.action.params.get("duration_ms", 800)
                 if (

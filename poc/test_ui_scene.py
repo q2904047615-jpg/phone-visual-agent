@@ -541,6 +541,100 @@ class UISceneTests(unittest.TestCase):
                     ),
                 )
 
+    def test_verified_clear_binds_exact_nonempty_value_and_verifies_empty(self) -> None:
+        states = {
+            "focused": True,
+            "value": "lxs,",
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "goal_relevant": True,
+        }
+        before = scene(
+            element("field", "draft_input", role="input", states=states),
+            fingerprint="before",
+        )
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="clear-draft",
+                action="clear_verified_text",
+                params={
+                    "element_id": "field",
+                    "target": "draft_input",
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "draft_input",
+                            "states": {"value": ""},
+                        }
+                    },
+                },
+            ),
+            before,
+        )
+
+        self.assertEqual("clear_verified_text", resolved.kind)
+        self.assertEqual(4, resolved.delete_count)
+        after = scene(
+            element(
+                "field-after",
+                "draft_input",
+                role="input",
+                states={**states, "value": ""},
+            ),
+            fingerprint="after",
+        )
+        UniversalActionController().verify_after_action(resolved, before, after)
+
+        with self.assertRaisesRegex(UniversalActionError, "状态证据|文字不匹配"):
+            UniversalActionController().verify_after_action(
+                resolved,
+                before,
+                scene(
+                    element(
+                        "field-after",
+                        "draft_input",
+                        role="input",
+                        states={**states, "value": "lxs"},
+                    ),
+                    fingerprint="wrong-after",
+                ),
+            )
+
+    def test_verified_clear_rejects_empty_or_ambiguous_inputs(self) -> None:
+        base = {
+            "focused": True,
+            "value": "",
+            "keyboard_layout": "qwerty",
+            "goal_relevant": True,
+        }
+        action = SemanticAction(
+            node_id="clear-draft",
+            action="clear_verified_text",
+            params={
+                "element_id": "field-a",
+                "target": "draft_input",
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "draft_input",
+                        "states": {"value": ""},
+                    }
+                },
+            },
+        )
+        with self.assertRaisesRegex(UniversalActionError, "精确非空"):
+            UniversalActionController().resolve_one(
+                action,
+                scene(element("field-a", "draft_input", role="input", states=base)),
+            )
+        nonempty = {**base, "value": "wrong"}
+        with self.assertRaisesRegex(UniversalActionError, "只有一个"):
+            UniversalActionController().resolve_one(
+                action,
+                scene(
+                    element("field-a", "draft_input", role="input", states=nonempty),
+                    element("field-b", "other_input", role="input", states=nonempty),
+                ),
+            )
+
     def test_focus_tap_accepts_unique_post_action_input_semantic_alias(self) -> None:
         before = scene(
             element(

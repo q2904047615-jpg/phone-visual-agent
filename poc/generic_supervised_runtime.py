@@ -560,6 +560,7 @@ class GenericSupervisedSession:
                         "back",
                         "home",
                         "input_verified_text",
+                        "clear_verified_text",
                         "long_press",
                         "drag",
                     }

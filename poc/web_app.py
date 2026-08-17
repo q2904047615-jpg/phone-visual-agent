@@ -1445,6 +1445,7 @@ def device() -> dict[str, Any]:
                 "home",
                 "reveal_system_navigation",
                 "input_verified_text",
+                "clear_verified_text",
                 "long_press",
                 "drag",
             ],

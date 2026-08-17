@@ -118,6 +118,14 @@ def _decision(
     elif action_kind == "input_verified_text":
         params["text"] = "蓝牙设置"
         params["states"] = dict(element.states)
+    elif action_kind == "clear_verified_text":
+        params["states"] = dict(element.states)
+        params["expected_effect"] = {
+            "element_state": {
+                "meaning": element.meaning,
+                "states": {"value": ""},
+            }
+        }
     elif action_kind == "long_press":
         params["duration_ms"] = 800
     action = SemanticAction(node_id="node-1", action=action_kind, params=params)
@@ -140,7 +148,10 @@ def _decision(
             kind=(
                 "element"
                 if action_kind
-                in {"tap_semantic", "dismiss_overlay", "input_verified_text", "long_press"}
+                in {
+                    "tap_semantic", "dismiss_overlay", "input_verified_text",
+                    "clear_verified_text", "long_press",
+                }
                 else "system_navigation"
                 if action_kind in {"back", "home", "reveal_system_navigation"}
                 else "screen"
@@ -148,13 +159,19 @@ def _decision(
             element_id=(
                 element.element_id
                 if action_kind
-                in {"tap_semantic", "dismiss_overlay", "input_verified_text", "long_press"}
+                in {
+                    "tap_semantic", "dismiss_overlay", "input_verified_text",
+                    "clear_verified_text", "long_press",
+                }
                 else ""
             ),
             bounds=(
                 element.bounds
                 if action_kind
-                in {"tap_semantic", "dismiss_overlay", "input_verified_text", "long_press"}
+                in {
+                    "tap_semantic", "dismiss_overlay", "input_verified_text",
+                    "clear_verified_text", "long_press",
+                }
                 else (0.0, 0.0, 1.0, 1.0)
             ),
         ),
@@ -600,6 +617,46 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         self.assertTrue(result.allowed)
         self.assertEqual("swipe", result.canonical_class)
+
+    def test_allows_only_exact_nonempty_focused_input_clear(self) -> None:
+        states = {
+            "focused": True,
+            "value": "lxs,",
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "goal_relevant": True,
+        }
+        scene = _scene(
+            meaning="draft_input",
+            label="",
+            role="input",
+            states=states,
+        )
+        decision = _decision(scene, action_kind="clear_verified_text")
+
+        allowed = self.policy.evaluate(
+            task_context=_context(subgoal_objective="恢复唯一错误草稿输入框为空"),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+            available_action_kinds=frozenset({"clear_verified_text"}),
+        )
+        self.assertTrue(allowed.allowed)
+        self.assertEqual("clear_verified_text", allowed.canonical_class)
+
+        empty_scene = replace(
+            scene,
+            elements=(replace(scene.elements[0], states={**states, "value": ""}),),
+        )
+        denied = self.policy.evaluate(
+            task_context=_context(subgoal_objective="恢复唯一错误草稿输入框为空"),
+            trusted_observation=_decision(
+                empty_scene, action_kind="clear_verified_text"
+            ).trusted_observation,
+            decision=_decision(empty_scene, action_kind="clear_verified_text"),
+            available_action_kinds=frozenset({"clear_verified_text"}),
+        )
+        self.assertFalse(denied.allowed)
+        self.assertIn("非空", denied.reason)
 
     def test_allows_structured_system_navigation_reveal(self) -> None:
         scene = _scene(

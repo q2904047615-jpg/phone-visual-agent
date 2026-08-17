@@ -2985,6 +2985,7 @@ class UniversalAgentOrchestrator:
             "tap_semantic",
             "dismiss_overlay",
             "input_verified_text",
+            "clear_verified_text",
             "long_press",
         }:
             resolved_target_binding_ok = (
@@ -3726,6 +3727,7 @@ class PhaseOneNavigationPolicy:
             "tap_semantic",
             "dismiss_overlay",
             "input_verified_text",
+            "clear_verified_text",
             "long_press",
             "drag",
         }
@@ -4649,13 +4651,18 @@ class PhaseOneNavigationPolicy:
             return self._deny(f"当前可信观察不能唯一解析候选：{exc}")
         if element.role in self.FORBIDDEN_ROLES:
             return self._deny(f"候选角色 {element.role} 不允许进入通用动作。")
-        if action_kind == "input_verified_text":
+        if action_kind in {"input_verified_text", "clear_verified_text"}:
             if element.role != "input" or element.states.get("focused") is not True:
-                return self._deny("输入动作要求最新画面证明 input 候选已聚焦。")
+                return self._deny("输入或清空动作要求最新画面证明 input 候选已聚焦。")
             if element.states.get("goal_relevant") is not True:
                 return self._deny("输入动作要求最新画面证明 input 候选与当前目标相关。")
-            if element.states.get("value") != "":
+            if action_kind == "input_verified_text" and element.states.get("value") != "":
                 return self._deny("精确文字输入只允许从最新画面确认的空输入框开始。")
+            if action_kind == "clear_verified_text" and (
+                not isinstance(element.states.get("value"), str)
+                or not element.states.get("value")
+            ):
+                return self._deny("精确文字清空要求最新画面确认非空输入值。")
             if element.states.get("keyboard_layout") != "qwerty":
                 return self._deny("精确文字输入要求最新画面确认 QWERTY 键盘。")
             if element.states.get("keyboard_input_mode") != "direct_latin":
@@ -4671,21 +4678,41 @@ class PhaseOneNavigationPolicy:
                 and candidate.states.get("visible") is not False
                 and candidate.states.get("goal_relevant") is True
                 and candidate.states.get("focused") is True
-                and candidate.states.get("value") == ""
+                and (
+                    candidate.states.get("value") == ""
+                    if action_kind == "input_verified_text"
+                    else isinstance(candidate.states.get("value"), str)
+                    and bool(candidate.states.get("value"))
+                )
                 and candidate.states.get("keyboard_layout") == "qwerty"
                 and candidate.states.get("keyboard_input_mode") == "direct_latin"
             )
             if len(eligible_inputs) != 1 or eligible_inputs[0].element_id != element.element_id:
                 return self._deny("输入动作要求唯一符合安全条件的目标输入框。")
-            text = action.params.get("text")
-            if (
-                not isinstance(text, str)
-                or not text
-                or len(text) > 100
-                or "\n" in text
-                or "\r" in text
-            ):
-                return self._deny("输入文字格式无效。")
+            if action_kind == "input_verified_text":
+                text = action.params.get("text")
+                if (
+                    not isinstance(text, str)
+                    or not text
+                    or len(text) > 100
+                    or "\n" in text
+                    or "\r" in text
+                ):
+                    return self._deny("输入文字格式无效。")
+            else:
+                if impact != "navigation_only":
+                    return self._deny("精确文字清空只允许 navigation_only 子目标。")
+                expected = action.params.get("expected_effect")
+                if not isinstance(expected, dict) or expected.get("element_state") != {
+                    "meaning": element.meaning,
+                    "states": {"value": ""},
+                }:
+                    return self._deny("精确文字清空缺少绑定原输入框的空值后置条件。")
+                return NavigationPolicyDecision(
+                    True,
+                    "允许按当前精确非空值清空唯一已聚焦目标输入框。",
+                    "clear_verified_text",
+                )
         elif (
             action_kind == "tap_semantic"
             and element.role == "input"
@@ -4864,7 +4891,7 @@ class PhaseOneNavigationPolicy:
         if canonical == "forbidden":
             if impact == "external_state" and external_allowed:
                 canonical = "external"
-            elif action_kind == "input_verified_text":
+            elif action_kind in {"input_verified_text", "clear_verified_text"}:
                 canonical = "input"
             elif self._is_exact_literal_local_action_label(
                 task_context=task_context,
@@ -4920,7 +4947,7 @@ class PhaseOneNavigationPolicy:
             if not isinstance(requested_states, dict) or requested_states != element.states:
                 return self._deny("刷新动作没有逐项复用本地审计 states。")
         if not canonical:
-            if action_kind == "input_verified_text":
+            if action_kind in {"input_verified_text", "clear_verified_text"}:
                 canonical = "input"
             elif action_kind == "long_press":
                 canonical = "long_press"

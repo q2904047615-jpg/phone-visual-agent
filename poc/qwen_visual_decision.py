@@ -46,7 +46,10 @@ DECISION_RETRY_TOKENS = 0
 MIN_DECISION_CONFIDENCE = 0.72
 MIN_TRUSTED_FRAME_SHARPNESS = 4.0
 SINGLE_ELEMENT_ACTIONS = frozenset(
-    {"tap_semantic", "dismiss_overlay", "input_verified_text", "long_press"}
+    {
+        "tap_semantic", "dismiss_overlay", "input_verified_text",
+        "clear_verified_text", "long_press",
+    }
 )
 QWEN_PROTOCOL_ACTIONS = frozenset(ALLOWED_STEP_ACTIONS)
 
@@ -923,6 +926,11 @@ class QwenVisualDecision:
                         raise GenericStepPlanningError(
                             "输入文字没有逐字复用DeepSeek结构化 input_text。"
                         )
+                if action.action == "clear_verified_text":
+                    if element.role != "input":
+                        raise GenericStepPlanningError("清空动作必须绑定 input 候选。")
+                    if action.params.get("text") is not None:
+                        raise GenericStepPlanningError("清空动作不能携带模型生成的文字。")
                 if action.action == "long_press":
                     duration_ms = action.params.get("duration_ms", 800)
                     if (
@@ -1462,10 +1470,27 @@ def _selection_choices(
             for item in candidates
             if str(item.get("role") or "") not in {"keyboard_key", "dialog"}
         )
-        if action == "input_verified_text":
+        if action in {"input_verified_text", "clear_verified_text"}:
             eligible = tuple(
                 item for item in eligible if str(item.get("role") or "") == "input"
             )
+            if action == "input_verified_text":
+                eligible = tuple(
+                    item for item in eligible
+                    if isinstance(item.get("states"), Mapping)
+                    and item["states"].get("focused") is True
+                    and item["states"].get("value") == ""
+                )
+            else:
+                eligible = tuple(
+                    item for item in eligible
+                    if isinstance(item.get("states"), Mapping)
+                    and item["states"].get("focused") is True
+                    and isinstance(item["states"].get("value"), str)
+                    and bool(item["states"].get("value"))
+                    and item["states"].get("keyboard_layout") == "qwerty"
+                    and item["states"].get("goal_relevant") is True
+                )
         if action in SINGLE_ELEMENT_ACTIONS:
             for item in eligible:
                 if action == "input_verified_text":
@@ -1473,6 +1498,13 @@ def _selection_choices(
                         "element_state": {
                             "meaning": str(item.get("meaning") or "").strip(),
                             "states": {"value": context.requested_input_text},
+                        }
+                    }
+                elif action == "clear_verified_text":
+                    expected_result = {
+                        "element_state": {
+                            "meaning": str(item.get("meaning") or "").strip(),
+                            "states": {"value": ""},
                         }
                     }
                 elif (
@@ -2321,6 +2353,19 @@ def _precondition_eligible_action_kinds(
         )
         if context.requested_input_text is None or not focused_inputs:
             eligible.remove("input_verified_text")
+    if "clear_verified_text" in eligible:
+        clearable_inputs = tuple(
+            element
+            for element in observation.scene.elements
+            if element.role == "input"
+            and element.states.get("focused") is True
+            and isinstance(element.states.get("value"), str)
+            and bool(element.states.get("value"))
+            and element.states.get("keyboard_layout") == "qwerty"
+            and element.states.get("goal_relevant") is True
+        )
+        if len(clearable_inputs) != 1:
+            eligible.remove("clear_verified_text")
     if _current_subgoal_requests_keyboard_dismissal(context) and (
         _trusted_scene_proves_visible_keyboard(observation.scene)
     ):
@@ -2461,6 +2506,9 @@ def _parse_action(
         "dismiss_overlay": {"element_id", "target", "role", "label", "states"},
         "input_verified_text": {
             "element_id", "target", "role", "label", "states", "text",
+        },
+        "clear_verified_text": {
+            "element_id", "target", "role", "label", "states",
         },
         "long_press": {
             "element_id", "target", "role", "label", "states", "duration_ms",

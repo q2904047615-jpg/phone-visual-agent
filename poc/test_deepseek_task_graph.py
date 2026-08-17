@@ -2324,6 +2324,72 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             all(item.external_impact == "navigation_only" for item in corrected.values())
         )
 
+    def test_symbolic_local_input_inherits_global_effect_boundary(self):
+        for input_text in ("12+34", "12÷3"):
+            with self.subTest(input_text=input_text):
+                raw_goal = (
+                    f"在本机工具中算出 {input_text} 并停留查看；"
+                    "不得保存、分享、发送或改变任何账号状态。"
+                )
+                objective = f"当前输入框内容为 {input_text}"
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="navigation_only",
+                )
+                payload["goal"]["entities"]["input_text"] = input_text
+                payload["constraints"] = [
+                    "不得保存、分享、发送或改变任何账号状态。"
+                ]
+                payload["subgoals"][0]["constraints"] = []
+                audit = audit_payload_for_graph(
+                    payload,
+                    overrides={
+                        "raw_goal": {
+                            "external_impact": "external_state",
+                            "risk_types": ["data_mutation"],
+                        },
+                        "goal.objective": {
+                            "external_impact": "external_state",
+                            "risk_types": ["data_mutation"],
+                        },
+                        "subgoals.target_state.objective": {
+                            "external_impact": "external_state",
+                            "risk_types": ["data_mutation"],
+                        },
+                        "subgoals.target_state.completion_conditions.0": {
+                            "external_impact": "external_state",
+                            "risk_types": ["data_mutation"],
+                        },
+                    },
+                )
+                planner = DeepSeekTaskGraphPlanner(
+                    FakeProvider(payload, audit_payloads=[audit])
+                )
+
+                graph = planner.plan(raw_goal, device_id="phone-1")
+
+                self.assertEqual(
+                    "navigation_only",
+                    graph.active_subgoal().external_impact,
+                )
+                corrected = {
+                    item.source_id: item
+                    for item in planner.last_risk_audit.assessments
+                    if item.source_id
+                    in {
+                        "raw_goal",
+                        "goal.objective",
+                        "subgoals.target_state.objective",
+                    }
+                }
+                self.assertTrue(
+                    all(
+                        item.external_impact == "navigation_only"
+                        and not item.risk_types
+                        for item in corrected.values()
+                    )
+                )
+
     def test_unsubmitted_input_without_explicit_effect_boundary_stays_external(self):
         objective = "顶部搜索输入框中的文字为 Agent123"
         payload = single_subgoal_payload(

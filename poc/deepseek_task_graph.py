@@ -2421,6 +2421,32 @@ def _restore_completed_history_evidence(
     return replace(candidate, subgoals=restored)
 
 
+def _explicit_local_input_audit_scopes(
+    graph: DynamicTaskGraph,
+    source_groups: dict[str | None, list[AuditSource]],
+) -> set[str | None]:
+    """Bind canonical input text and global safety constraints to each subgoal."""
+
+    input_text = graph.goal.entities.get("input_text")
+    global_context = (
+        graph.raw_user_goal or graph.goal.objective,
+        graph.goal.objective,
+        *graph.constraints,
+    )
+    scopes: set[str | None] = set()
+    for subgoal in graph.subgoals:
+        group = source_groups.get(subgoal.subgoal_id, ())
+        if _is_explicitly_unsubmitted_local_input(
+            *global_context,
+            *(item.text for item in group),
+            input_text=input_text,
+        ):
+            scopes.add(subgoal.subgoal_id)
+    if scopes:
+        scopes.add(None)
+    return scopes
+
+
 def _canonicalize_literal_visible_evidence_clauses(
     previous: DynamicTaskGraph,
     candidate: DynamicTaskGraph,
@@ -2979,14 +3005,18 @@ def _apply_local_risk_supplements(
         if graph is not None
         else frozenset()
     )
-    local_input_scopes = {
-        scope_id
-        for scope_id, group in source_groups.items()
-        if _is_explicitly_unsubmitted_local_input(
-            *(item.text for item in group),
-            input_text=_input_text_for_audit_scope(scope_id, sources),
-        )
-    }
+    local_input_scopes = (
+        _explicit_local_input_audit_scopes(graph, source_groups)
+        if graph is not None
+        else {
+            scope_id
+            for scope_id, group in source_groups.items()
+            if _is_explicitly_unsubmitted_local_input(
+                *(item.text for item in group),
+                input_text=_input_text_for_audit_scope(scope_id, sources),
+            )
+        }
+    )
     current_foreground_keyboard_scope = bool(
         graph is not None
         and len(graph.goal.target_apps) == 1

@@ -127,7 +127,7 @@ def _persist_qwen_failure_diagnostic(
     return target
 
 
-def _observer_failure_diagnostic_evidence(
+def persist_observer_failure_diagnostic(
     observer: Any,
     *,
     evidence_dir: Path | None,
@@ -456,7 +456,7 @@ class GenericSingleActionAdapter:
                 goal_context=goal.to_dict(),
             )
         except RuntimeError as exc:
-            diagnostic_paths = _observer_failure_diagnostic_evidence(
+            diagnostic_paths = persist_observer_failure_diagnostic(
                 self.observer,
                 evidence_dir=evidence_dir,
                 prefix=prefix,
@@ -619,7 +619,7 @@ class GenericSingleActionAdapter:
                 )
             except RuntimeError as exc:
                 last_error = exc
-                diagnostic_paths = _observer_failure_diagnostic_evidence(
+                diagnostic_paths = persist_observer_failure_diagnostic(
                     self.observer,
                     evidence_dir=evidence_dir,
                     prefix=f"{evidence_prefix}_after_attempt_{attempt}",
@@ -726,7 +726,7 @@ class GenericSingleActionAdapter:
                         goal_context=goal.to_dict(),
                     )
                 except RuntimeError as exc:
-                    diagnostic_paths = _observer_failure_diagnostic_evidence(
+                    diagnostic_paths = persist_observer_failure_diagnostic(
                         self.observer,
                         evidence_dir=evidence_dir,
                         prefix=f"{evidence_prefix}_confirmation",

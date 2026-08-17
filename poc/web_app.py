@@ -29,7 +29,11 @@ from capability_acceptance_runtime import CapabilityAcceptanceManager
 from capability_acceptance_planner import CapabilityAcceptanceTaskGraphPlanner
 from intent_provider import DeepSeekIntentProvider, IntentProviderError
 from generic_intent import GenericIntentError, GenericIntentParser
-from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
+from generic_action_adapter import (
+    GenericActionAdapterError,
+    GenericSingleActionAdapter,
+    persist_observer_failure_diagnostic,
+)
 from generic_scene_observer import GenericSceneObserver
 from generic_step_planner import GenericStepPlanner, GenericStepPlanningError
 from deepseek_task_graph import DeepSeekTaskGraphPlanner, TaskGraphError
@@ -1692,6 +1696,20 @@ def observe_generic_scene(
                 goal_context=body.goal,
             )
         except VisionAgentError as exc:
+            failure_dir = WEB_OUTPUT_DIR / (
+                "generic_scene_failure_"
+                + datetime.now().strftime("%Y%m%d_%H%M%S_")
+                + uuid.uuid4().hex[:8]
+            )
+            try:
+                persist_observer_failure_diagnostic(
+                    runtime.generic_scene_observer,
+                    evidence_dir=failure_dir,
+                    prefix="generic_scene_preview",
+                    error=exc,
+                )
+            except Exception:
+                pass
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {
         "mode": "generic_scene_preview",

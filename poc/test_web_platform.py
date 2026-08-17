@@ -5141,6 +5141,9 @@ class ApiEndToEndTests(unittest.TestCase):
             fingerprint="local-frame",
         )
         before_executions = len(web_app.runtime.controller.executions)
+        before_failures = set(
+            web_app.WEB_OUTPUT_DIR.glob("generic_scene_failure_*")
+        )
         with (
             patch.object(
                 web_app.runtime.vision_provider,
@@ -5167,6 +5170,89 @@ class ApiEndToEndTests(unittest.TestCase):
             len(web_app.runtime.controller.executions),
             before_executions,
         )
+        self.assertEqual(
+            before_failures,
+            set(web_app.WEB_OUTPUT_DIR.glob("generic_scene_failure_*")),
+        )
+
+    def test_generic_scene_preview_failure_persists_redacted_raw_response(self) -> None:
+        observer = web_app.runtime.generic_scene_observer
+        raw = (
+            '{"api_key":"preview-secret",'
+            '"image":"data:image/jpeg;base64,QUJD",'
+            '"unexpected":true}'
+        )
+        before_failures = set(
+            web_app.WEB_OUTPUT_DIR.glob("generic_scene_failure_*")
+        )
+        with (
+            patch.object(
+                web_app.runtime.vision_provider,
+                "status",
+                return_value={"configured": True},
+            ),
+            patch.object(observer, "last_raw_response", raw),
+            patch.object(
+                observer,
+                "last_diagnostics",
+                {
+                    "failed_stage": "parsing_targeted_refinement",
+                    "error_type": "schema_validation",
+                },
+            ),
+            patch.object(
+                observer,
+                "observe",
+                side_effect=VisionAgentError("目标精查结果不符合最小增量协议"),
+            ),
+        ):
+            response = self.client.post(
+                "/api/agent/generic-scene",
+                headers=self.headers,
+                json={"goal": {"objective": "只读核对当前输入区域"}},
+            )
+
+        self.assertEqual(422, response.status_code, response.text)
+        new_failures = (
+            set(web_app.WEB_OUTPUT_DIR.glob("generic_scene_failure_*"))
+            - before_failures
+        )
+        self.assertEqual(1, len(new_failures))
+        artifacts = list(next(iter(new_failures)).glob("*_qwen_failure.json"))
+        self.assertEqual(1, len(artifacts))
+        artifact = json.loads(artifacts[0].read_text(encoding="utf-8"))
+        serialized = json.dumps(artifact, ensure_ascii=False)
+        self.assertNotIn("preview-secret", serialized)
+        self.assertNotIn("data:image", serialized)
+        self.assertIn("[REDACTED_SECRET]", serialized)
+        self.assertIn("[REDACTED_IMAGE_DATA_URL]", serialized)
+
+    def test_generic_scene_preview_diagnostic_failure_preserves_original_422(self) -> None:
+        with (
+            patch.object(
+                web_app.runtime.vision_provider,
+                "status",
+                return_value={"configured": True},
+            ),
+            patch.object(
+                web_app.runtime.generic_scene_observer,
+                "observe",
+                side_effect=VisionAgentError("原始只读观察错误"),
+            ),
+            patch.object(
+                web_app,
+                "persist_observer_failure_diagnostic",
+                side_effect=OSError("disk unavailable"),
+            ),
+        ):
+            response = self.client.post(
+                "/api/agent/generic-scene",
+                headers=self.headers,
+                json={"goal": {"objective": "只读核对当前输入区域"}},
+            )
+
+        self.assertEqual(422, response.status_code, response.text)
+        self.assertIn("原始只读观察错误", response.text)
 
     def test_generic_supervised_api_starts_unexecuted_and_requires_confirmation(self) -> None:
         orchestrator, planner, qwen, adapter = self._universal_api_orchestrator()

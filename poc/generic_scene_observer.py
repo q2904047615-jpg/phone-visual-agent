@@ -4842,7 +4842,14 @@ def _normalize_known_scene_enums(payload: dict[str, Any]) -> None:
         if not isinstance(states, dict):
             continue
         role = str(item.get("role") or "").strip()
-        if role != "input" and states.get("goal_relevant") is not True:
+        if role == "keyboard_key":
+            # A regular key can never own whole-keyboard layout or input-mode
+            # facts and is excluded from the semantic action surface. Revoking
+            # these misplaced fields cannot authorize the key or create a new
+            # target, even when the model overstates its goal relevance.
+            states.pop("keyboard_layout", None)
+            states.pop("keyboard_input_mode", None)
+        elif role != "input" and states.get("goal_relevant") is not True:
             # Qwen sometimes emits a non-interactive keyboard container and
             # attaches global keyboard facts to it. Those peripheral facts are
             # not actionable and the scene protocol intentionally allows them

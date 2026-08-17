@@ -1760,6 +1760,79 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertNotIn("keyboard_input_mode", container.states)
         self.assertEqual("qwerty", scene.get_element("input-top").states["keyboard_layout"])
 
+    def test_discards_global_keyboard_facts_from_goal_relevant_regular_key(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "input-top",
+                "role": "input",
+                "meaning": "search_input",
+                "label": "搜索",
+                "bounds": [80, 20, 600, 80],
+                "confidence": 0.96,
+                "states": {
+                    "goal_relevant": True,
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                },
+                "evidence": ["唯一输入框与英文键盘同时可见"],
+            },
+            {
+                "element_id": "letter-w",
+                "role": "keyboard_key",
+                "meaning": "letter_key",
+                "label": "w",
+                "bounds": [100, 700, 180, 780],
+                "confidence": 0.99,
+                "states": {
+                    "goal_relevant": True,
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                },
+                "evidence": ["普通字母键 w"],
+            },
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-goal-relevant-regular-key",
+            goal_context={"objective": "让唯一空白输入框显示 wifi，不提交"},
+        )
+
+        key = scene.get_element("letter-w")
+        self.assertNotIn("keyboard_layout", key.states)
+        self.assertNotIn("keyboard_input_mode", key.states)
+        input_states = scene.get_element("input-top").states
+        self.assertEqual("qwerty", input_states["keyboard_layout"])
+        self.assertEqual("direct_latin", input_states["keyboard_input_mode"])
+
+    def test_goal_relevant_button_cannot_hide_illegal_keyboard_layout(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "unsafe-button",
+                "role": "button",
+                "meaning": "unknown_action",
+                "label": "继续",
+                "bounds": [100, 200, 300, 300],
+                "confidence": 0.98,
+                "states": {
+                    "goal_relevant": True,
+                    "keyboard_layout": "qwerty",
+                },
+                "evidence": ["可动作按钮错误携带全局键盘字段"],
+            }
+        ]
+
+        with self.assertRaisesRegex(VisionAgentError, "keyboard_layout"):
+            _parse_scene(
+                json.dumps(payload, ensure_ascii=False),
+                fingerprint="frame-target-button-illegal-keyboard-layout",
+                goal_context={"objective": "进入下一页面"},
+            )
+
     def test_keyboard_mode_goal_discards_passive_preliminary_container_facts(self) -> None:
         payload = scene_payload()
         payload["elements"] = [

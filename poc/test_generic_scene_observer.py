@@ -834,6 +834,81 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertTrue(scene.elements[0].states["fully_visible"])
         self.assertFalse(scene.elements[1].states["goal_relevant"])
 
+    def test_active_subgoal_target_label_resolves_model_false_relevance(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "target",
+                "role": "button",
+                "meaning": "select_acceptance_mode",
+                "label": "语义点击",
+                "bounds": [150, 380, 850, 460],
+                "confidence": 1.0,
+                "states": {"goal_relevant": False, "fully_visible": True},
+                "evidence": ["列表中唯一逐字匹配的按钮"],
+            },
+            {
+                "element_id": "other",
+                "role": "button",
+                "meaning": "select_acceptance_mode",
+                "label": "系统返回",
+                "bounds": [150, 470, 850, 550],
+                "confidence": 1.0,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["另一个列表按钮"],
+            },
+        ]
+        context = {
+            "entities": {
+                "target_ui_label": "语义点击",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "open_target_page",
+                    "objective": "目标入口对应页面可见",
+                    "constraints": [],
+                    "completion_conditions": ["目标页面可见"],
+                    "external_impact": "navigation_only",
+                    "goal_entities": {"target_ui_label": "语义点击"},
+                },
+            }
+        }
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="active-subgoal-exact-label",
+            goal_context=context,
+            camera_layout_orientation="portrait",
+        )
+
+        self.assertTrue(scene.get_element("target").states["goal_relevant"])
+        self.assertFalse(scene.get_element("other").states["goal_relevant"])
+
+    def test_conflicting_root_and_active_target_labels_do_not_rebind(self) -> None:
+        payload = scene_payload()
+        payload["elements"][0]["label"] = "语义点击"
+        payload["elements"][0]["states"] = {"goal_relevant": False}
+        context = {
+            "entities": {
+                "target_ui_label": "系统返回",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "open_target_page",
+                    "objective": "目标入口对应页面可见",
+                    "constraints": [],
+                    "completion_conditions": ["目标页面可见"],
+                    "external_impact": "navigation_only",
+                    "goal_entities": {"target_ui_label": "语义点击"},
+                },
+            }
+        }
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="conflicting-target-labels",
+            goal_context=context,
+            camera_layout_orientation="portrait",
+        )
+
+        self.assertFalse(scene.elements[0].states["goal_relevant"])
+
     def test_edge_touching_exact_label_does_not_mint_full_visibility(self) -> None:
         payload = scene_payload()
         payload["elements"][0].update(

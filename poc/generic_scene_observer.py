@@ -4617,10 +4617,7 @@ def _normalize_exact_target_ui_label_relevance(
     exact label leaves the scene untouched so ambiguity remains fail-closed.
     """
 
-    entities = goal_context.get("entities")
-    if not isinstance(entities, dict):
-        return
-    target_label = str(entities.get("target_ui_label") or "").strip()
+    target_label = _goal_target_ui_label(goal_context)
     elements = payload.get("elements")
     if not target_label or not isinstance(elements, list):
         return
@@ -4663,6 +4660,26 @@ def _normalize_exact_target_ui_label_relevance(
         # the original frame and unobscured by a reported overlay.  It does not
         # attest meaning, clickability or action safety.
         target_states["fully_visible"] = True
+
+
+def _goal_target_ui_label(context: dict[str, Any]) -> str:
+    """Return one consistent literal target label across graph context views."""
+
+    sources: list[dict[str, Any]] = []
+    focused = _active_subgoal_visual_context(context)
+    if focused is not context:
+        goal_entities = focused.get("goal_entities")
+        if isinstance(goal_entities, dict):
+            sources.append(goal_entities)
+    entities = context.get("entities")
+    if isinstance(entities, dict):
+        sources.append(entities)
+    labels = {
+        str(source.get("target_ui_label") or "").strip()
+        for source in sources
+        if str(source.get("target_ui_label") or "").strip()
+    }
+    return next(iter(labels)) if len(labels) == 1 else ""
 
 
 def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:
@@ -4899,12 +4916,7 @@ def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
         return True
     if _goal_requests_page_title(context) and not _scene_has_grounded_page_title(scene):
         return True
-    entities = context.get("entities")
-    target_label = (
-        str(entities.get("target_ui_label") or "").strip()
-        if isinstance(entities, dict)
-        else ""
-    )
+    target_label = _goal_target_ui_label(context)
     if target_label:
         exact_matches = [
             element for element in scene.elements if element.label == target_label

@@ -16,6 +16,7 @@ from deepseek_task_graph import (
     GraphGoal,
     RiskAction,
     Subgoal,
+    TaskGraphError,
     TargetApp,
 )
 from generic_step_planner import GenericStepProposal
@@ -3244,6 +3245,74 @@ class UniversalAgentStartTests(unittest.TestCase):
                     run_dir=Path(temp),
                 )
 
+        self.assertEqual(0, adapter.execute_calls)
+
+    def test_start_persists_deepseek_failure_before_any_device_observation(self) -> None:
+        class FailingPlanner:
+            last_raw_response = json.dumps(
+                {
+                    "completion_conditions": [
+                        {"evidence_required": ["tap the visible result"]}
+                    ]
+                }
+            )
+
+            def plan(self, *_args, **_kwargs):
+                raise TaskGraphError(
+                    "DeepSeek 高层任务图包含低层动作表达："
+                    "completion_conditions.evidence_required"
+                )
+
+        adapter = FakeAdapter(_scene())
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            with self.assertRaisesRegex(TaskGraphError, "低层动作表达"):
+                self._orchestrator(
+                    FailingPlanner(), FakeQwenObserver(), adapter
+                ).start(
+                    session_id="session-deepseek-failure",
+                    raw_goal="查看本机公开信息",
+                    device_id="device-1",
+                    run_dir=run_dir,
+                )
+            diagnostics = list(run_dir.glob("*_deepseek_failure.json"))
+            session = json.loads((run_dir / "session.json").read_text("utf-8"))
+            report = json.loads((run_dir / "report.json").read_text("utf-8"))
+
+        self.assertEqual(1, len(diagnostics))
+        self.assertEqual("failed", session["status"])
+        self.assertEqual(0, session["physical_actions"])
+        self.assertIn(str(diagnostics[0]), session["evidence"])
+        self.assertIn(str(diagnostics[0]), report["session"]["evidence"])
+        self.assertEqual(0, adapter.capture_calls)
+        self.assertEqual(0, adapter.execute_calls)
+
+    def test_diagnostic_write_failure_does_not_mask_deepseek_error(self) -> None:
+        class FailingPlanner:
+            last_raw_response = "{}"
+
+            def plan(self, *_args, **_kwargs):
+                raise TaskGraphError("original task graph failure")
+
+        adapter = FakeAdapter(_scene())
+        with tempfile.TemporaryDirectory() as temp, patch(
+            "universal_agent_orchestrator.persist_deepseek_failure_diagnostic",
+            side_effect=OSError("diagnostic disk failure"),
+        ):
+            with self.assertRaisesRegex(TaskGraphError, "original task graph failure"):
+                self._orchestrator(
+                    FailingPlanner(), FakeQwenObserver(), adapter
+                ).start(
+                    session_id="session-diagnostic-failure",
+                    raw_goal="查看本机公开信息",
+                    device_id="device-1",
+                    run_dir=Path(temp),
+                )
+            session = json.loads((Path(temp) / "session.json").read_text("utf-8"))
+
+        self.assertEqual("failed", session["status"])
+        self.assertEqual(0, session["physical_actions"])
+        self.assertEqual(0, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
 
     def test_launcher_app_entry_cannot_prove_named_target_app_page(self) -> None:

@@ -16,11 +16,13 @@ import uuid
 
 from deepseek_task_graph import (
     ControllerTransitionEvidenceRef,
+    TaskGraphError,
     DynamicTaskGraph,
     ObservedState,
     VerifiedActionTransition,
     named_visual_identity_is_grounded,
 )
+from deepseek_failure_diagnostics import persist_deepseek_failure_diagnostic
 from device_exclusivity import InterProcessLease
 from generic_action_adapter import GenericActionAdapterError
 from generic_intent import GenericIntentDraft
@@ -1714,6 +1716,27 @@ class UniversalAgentOrchestrator:
                 if text and text not in session.evidence_paths:
                     session.evidence_paths.append(text)
 
+    def _record_deepseek_failure(
+        self,
+        session: UniversalAgentSessionState,
+        error: Exception,
+        *,
+        stage: str,
+    ) -> None:
+        if not isinstance(error, TaskGraphError):
+            return
+        try:
+            paths = persist_deepseek_failure_diagnostic(
+                self.deepseek_planner,
+                evidence_dir=session.run_dir,
+                prefix=f"deepseek_{stage}_step_{session.step_number}",
+                failed_stage=stage,
+                error=error,
+            )
+        except Exception:
+            return
+        self._remember(session, paths)
+
     def _write_terminal_snapshot(self, session: UniversalAgentSessionState) -> None:
         session_path = session.evidence_store.write_session(session)
         self._remember(session, session_path)
@@ -2658,6 +2681,11 @@ class UniversalAgentOrchestrator:
         except Exception as exc:
             session.status = "failed"
             session.failed_reason = str(exc)
+            self._record_deepseek_failure(
+                session,
+                exc,
+                stage="refresh_decision",
+            )
             try:
                 self._write_terminal_snapshot(session)
             except Exception:
@@ -3138,6 +3166,11 @@ class UniversalAgentOrchestrator:
         except Exception as exc:
             session.status = "failed"
             session.failed_reason = str(exc)
+            self._record_deepseek_failure(
+                session,
+                exc,
+                stage="post_action_replan",
+            )
             try:
                 self._write_terminal_snapshot(session)
             except Exception:
@@ -3591,6 +3624,15 @@ class UniversalAgentOrchestrator:
         except Exception as exc:
             session.status = "failed"
             session.failed_reason = str(exc)
+            self._record_deepseek_failure(
+                session,
+                exc,
+                stage=(
+                    "initial_task_graph"
+                    if session.task_graph is None
+                    else "start_replan"
+                ),
+            )
             try:
                 self._write_terminal_snapshot(session)
             except Exception:

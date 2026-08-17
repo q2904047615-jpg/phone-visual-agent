@@ -1399,7 +1399,8 @@ KEYBOARD_MODE_SWITCH_OBSERVATION_RULE = (
     "若键盘底部清楚可见独立的"
     "中/英模式切换键，必须另建role=button元素，meaning写switch_keyboard_input_mode，label逐字抄"
     "可见键面文字，states写keyboard_input_mode_switch:true、current_mode和target_mode；不确定当前"
-    "模式或切换方向时不得编造该元素。字母、数字、退格、回车等普通键仍必须role=keyboard_key。"
+    "模式或切换方向时不得编造该元素。字母、数字、退格、回车等普通键不得进入elements；"
+    "它们不是通用语义动作目标，键盘布局、输入模式和按键几何由后续独立全帧输入结构审计负责。"
 )
 
 LOCAL_TEXT_CLEAR_OBSERVATION_RULE = (

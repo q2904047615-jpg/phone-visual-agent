@@ -430,6 +430,27 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn("810x1515", prompt)
         self.assertIn("任何边界超出0..1000就省略该元素", prompt)
 
+    def test_input_observation_prompts_exclude_regular_keys_from_compact_budget(self) -> None:
+        context = {"objective": "让当前唯一空白输入框显示 wifi，不提交"}
+        compact = _compact_prompt(context)
+        targeted = _targeted_prompt(
+            context,
+            first_scene={
+                "foreground_app_id": "unknown",
+                "screen_id": "search",
+                "summary": "输入页",
+                "system_ui": {},
+                "overlays": [],
+                "confidence": 1.0,
+            },
+        )
+
+        for prompt in (compact, targeted):
+            self.assertIn("普通键不得进入elements", prompt)
+            self.assertIn("独立全帧输入结构审计负责", prompt)
+            self.assertIn("role=button", prompt)
+            self.assertNotIn("普通键仍必须role=keyboard_key", prompt)
+
     def test_observation_prompts_preserve_only_read_only_clipped_list_cue(self) -> None:
         compact = _compact_prompt({"objective": "查看目标结果"})
         targeted = _targeted_prompt(

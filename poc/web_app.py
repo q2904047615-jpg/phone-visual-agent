@@ -1241,7 +1241,7 @@ runtime = Runtime()
 async def lifespan(_app: FastAPI) -> Iterator[None]:
     runtime.start()
     print(f"机械臂网页控制台：http://127.0.0.1:8765/")
-    print(f"本次控制令牌：{CONTROL_TOKEN}")
+    print("控制令牌已生成，仅通过本机受保护的页面初始化接口使用。")
     if os.environ.get("ROBOT_WEB_NO_BROWSER") != "1":
         threading.Timer(
             1.0, lambda: webbrowser.open("http://127.0.0.1:8765/")

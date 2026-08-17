@@ -953,6 +953,76 @@ class GenericSingleActionAdapter:
                 evidence=before_paths,
             )
 
+        prepared_input_method: Callable[..., Any] | None = None
+        prepared_keyboard_geometry: dict[str, Any] | None = None
+        if resolved.kind in {"input_verified_text", "clear_verified_text"}:
+            if resolved.kind == "input_verified_text" and not resolved.text:
+                raise GenericActionAdapterError("输入动作缺少已校验文字。")
+            method_name = (
+                "vision_type_text_with_layout"
+                if resolved.kind == "input_verified_text"
+                else "vision_clear_text"
+            )
+            method = getattr(self.robot, method_name, None)
+            if not callable(method):
+                raise GenericActionAdapterError(
+                    "机械臂不支持绑定本轮键盘几何的文字输入或清空。"
+                )
+            try:
+                input_element = before.get_element(
+                    str(resolved.target_element_id or ""),
+                    min_confidence=self.controller.min_confidence,
+                )
+            except UISceneError as exc:
+                raise GenericActionAdapterError(
+                    f"当前文字输入缺少可信输入框：{exc}"
+                ) from exc
+            keyboard_geometry = input_element.states.get("keyboard_geometry")
+            if (
+                not isinstance(keyboard_geometry, dict)
+                or keyboard_geometry.get("type") != "qwerty"
+                or keyboard_geometry.get("source") != "input_structure_audit"
+            ):
+                raise GenericActionAdapterError(
+                    "当前文字输入缺少本轮输入结构审计签发的 QWERTY 几何；拒绝使用静态键盘配置。"
+                )
+            execution_keyboard_geometry = dict(keyboard_geometry)
+            if self.require_local_qwerty_row_snap:
+                if not callable(self.qwerty_row_snapper):
+                    raise GenericActionAdapterError(
+                        "真机文字输入缺少本地 QWERTY 行中心复核器。"
+                    )
+                snapped_anchors = self.qwerty_row_snapper(
+                    before_frames,
+                    keyboard_geometry.get("anchors"),
+                )
+                if not isinstance(snapped_anchors, dict):
+                    raise GenericActionAdapterError(
+                        "本地 OCR 未能稳定确认 QWERTY 三行中心，拒绝按模型粗坐标输入。"
+                    )
+                execution_keyboard_geometry["anchors"] = snapped_anchors
+                execution_keyboard_geometry["row_snap_source"] = "stable_local_ocr"
+            try:
+                qwerty_keyboard_config_from_anchors(
+                    execution_keyboard_geometry.get("anchors")
+                )
+            except WorkflowNotReady as exc:
+                raise GenericActionAdapterError(
+                    f"当前 QWERTY 几何未通过动作前本地复核：{exc}"
+                ) from exc
+            validator = getattr(self.robot, "validate_verified_text", None)
+            if resolved.kind == "input_verified_text" and callable(validator):
+                try:
+                    validator(resolved.text, dict(input_element.states))
+                except (UISceneError, ValueError, RuntimeError) as exc:
+                    raise GenericActionAdapterError(
+                        f"当前文字输入不满足设备已验证配置：{exc}"
+                    ) from exc
+            if resolved.kind == "clear_verified_text" and resolved.delete_count is None:
+                raise GenericActionAdapterError("清空动作缺少已验证退格次数。")
+            prepared_input_method = method
+            prepared_keyboard_geometry = execution_keyboard_geometry
+
         orientation_credential: OrientationCredential | None = None
         clear_authorization = getattr(
             self.robot, "clear_physical_execution_authorization", None
@@ -1061,78 +1131,20 @@ class GenericSingleActionAdapter:
                 physical_actions = 1
                 robot_result = self.robot.vision_android_home()
             elif resolved.kind in {"input_verified_text", "clear_verified_text"}:
-                if resolved.kind == "input_verified_text" and not resolved.text:
-                    raise GenericActionAdapterError("输入动作缺少已校验文字。")
-                method_name = (
-                    "vision_type_text_with_layout"
-                    if resolved.kind == "input_verified_text"
-                    else "vision_clear_text"
-                )
-                method = getattr(self.robot, method_name, None)
-                if not callable(method):
-                    raise GenericActionAdapterError(
-                        "机械臂不支持绑定本轮键盘几何的文字输入或清空。"
-                    )
-                try:
-                    input_element = before.get_element(
-                        str(resolved.target_element_id or ""),
-                        min_confidence=self.controller.min_confidence,
-                    )
-                except UISceneError as exc:
-                    raise GenericActionAdapterError(
-                        f"当前文字输入缺少可信输入框：{exc}"
-                    ) from exc
-                keyboard_geometry = input_element.states.get("keyboard_geometry")
                 if (
-                    not isinstance(keyboard_geometry, dict)
-                    or keyboard_geometry.get("type") != "qwerty"
-                    or keyboard_geometry.get("source") != "input_structure_audit"
+                    prepared_input_method is None
+                    or prepared_keyboard_geometry is None
                 ):
-                    raise GenericActionAdapterError(
-                        "当前文字输入缺少本轮输入结构审计签发的 QWERTY 几何；拒绝使用静态键盘配置。"
-                    )
-                execution_keyboard_geometry = dict(keyboard_geometry)
-                if self.require_local_qwerty_row_snap:
-                    if not callable(self.qwerty_row_snapper):
-                        raise GenericActionAdapterError(
-                            "真机文字输入缺少本地 QWERTY 行中心复核器。"
-                        )
-                    snapped_anchors = self.qwerty_row_snapper(
-                        before_frames,
-                        keyboard_geometry.get("anchors"),
-                    )
-                    if not isinstance(snapped_anchors, dict):
-                        raise GenericActionAdapterError(
-                            "本地 OCR 未能稳定确认 QWERTY 三行中心，拒绝按模型粗坐标输入。"
-                        )
-                    execution_keyboard_geometry["anchors"] = snapped_anchors
-                    execution_keyboard_geometry["row_snap_source"] = (
-                        "stable_local_ocr"
-                    )
-                try:
-                    qwerty_keyboard_config_from_anchors(
-                        execution_keyboard_geometry.get("anchors")
-                    )
-                except WorkflowNotReady as exc:
-                    raise GenericActionAdapterError(
-                        f"当前 QWERTY 几何未通过动作前本地复核：{exc}"
-                    ) from exc
-                validator = getattr(self.robot, "validate_verified_text", None)
-                if resolved.kind == "input_verified_text" and callable(validator):
-                    try:
-                        validator(resolved.text, dict(input_element.states))
-                    except (UISceneError, ValueError, RuntimeError) as exc:
-                        raise GenericActionAdapterError(
-                            f"当前文字输入不满足设备已验证配置：{exc}"
-                        ) from exc
+                    raise GenericActionAdapterError("文字动作的本地预检结果缺失。")
                 physical_actions = 1
                 if resolved.kind == "input_verified_text":
-                    robot_result = method(resolved.text, execution_keyboard_geometry)
+                    robot_result = prepared_input_method(
+                        resolved.text,
+                        prepared_keyboard_geometry,
+                    )
                 else:
-                    if resolved.delete_count is None:
-                        raise GenericActionAdapterError("清空动作缺少已验证退格次数。")
-                    robot_result = method(
-                        execution_keyboard_geometry,
+                    robot_result = prepared_input_method(
+                        prepared_keyboard_geometry,
                         resolved.delete_count,
                     )
             elif resolved.kind == "long_press":

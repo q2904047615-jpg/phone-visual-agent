@@ -1058,21 +1058,20 @@ class UniversalActionController:
         before_input: UIElement,
         after_input: UIElement,
     ) -> bool:
-        identity_pairs = (
-            (before.foreground_app_id, after.foreground_app_id),
-            (before.screen_id, after.screen_id),
-        )
-        if all(before_value == after_value for before_value, after_value in identity_pairs):
+        if (
+            before.foreground_app_id == after.foreground_app_id
+            and before.screen_id == after.screen_id
+        ):
             return True
 
-        # A post-input visual read may lose a page label while the keyboard still
-        # covers much of the frame.  Treat only a one-way loss to ``unknown`` as
-        # observational degradation; a different concrete identity is a real
-        # navigation signal and remains fail-closed.
-        if any(
-            before_value != after_value
-            and str(after_value).strip().casefold() != "unknown"
-            for before_value, after_value in identity_pairs
+        if not cls._input_app_identity_is_compatible(
+            before.foreground_app_id,
+            after.foreground_app_id,
+        ):
+            return False
+        if not cls._input_screen_identity_is_compatible(
+            before.screen_id,
+            after.screen_id,
         ):
             return False
         if not cls._input_regions_stably_overlap(
@@ -1098,6 +1097,48 @@ class UniversalActionController:
             == after.camera_alignment.camera_layout_orientation
             and before.camera_alignment.phone_content_rotation
             == after.camera_alignment.phone_content_rotation
+        )
+
+    @staticmethod
+    def _input_app_identity_is_compatible(before: str, after: str) -> bool:
+        left = str(before or "").strip().casefold()
+        right = str(after or "").strip().casefold()
+        if left == right:
+            return True
+        placeholders = {
+            "",
+            "unknown",
+            "current_foreground",
+            "foreground_app",
+        }
+        return left in placeholders or right in placeholders
+
+    @staticmethod
+    def _input_screen_identity_is_compatible(before: str, after: str) -> bool:
+        left = str(before or "").strip().casefold()
+        right = str(after or "").strip().casefold()
+        if left == right:
+            return True
+        placeholders = {"", "unknown", "current_screen"}
+        if left in placeholders or right in placeholders:
+            return True
+
+        def family(value: str) -> str:
+            return re.split(r"[_\-\s/]+", value, maxsplit=1)[0]
+
+        stable_input_families = {
+            "chat",
+            "conversation",
+            "compose",
+            "editor",
+            "form",
+            "input",
+            "search",
+        }
+        left_family = family(left)
+        return (
+            left_family in stable_input_families
+            and left_family == family(right)
         )
 
     @staticmethod

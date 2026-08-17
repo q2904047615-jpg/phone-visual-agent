@@ -1129,10 +1129,14 @@ class GenericActionAdapterTests(unittest.TestCase):
             for key, value in TEST_QWERTY_GEOMETRY["anchors"].items()
         }
 
+        def snap_before_orientation_arm(_frames, _anchors):
+            self.assertIsNone(robot._armed)
+            return snapped_anchors
+
         result = self._adapter(
             FakeSceneObserver([fresh, after]),
             robot,
-            qwerty_row_snapper=lambda _frames, _anchors: snapped_anchors,
+            qwerty_row_snapper=snap_before_orientation_arm,
             require_local_qwerty_row_snap=True,
         ).execute(
             requested_action=SemanticAction(

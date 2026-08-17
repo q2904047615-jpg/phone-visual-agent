@@ -599,6 +599,84 @@ class UISceneTests(unittest.TestCase):
                 ),
             )
 
+    def test_verified_clear_accepts_placeholder_app_and_same_screen_family(self) -> None:
+        states = {
+            "focused": True,
+            "value": "lxs,",
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "goal_relevant": True,
+        }
+        before_input = element(
+            "field",
+            "application_text_input",
+            role="input",
+            states=states,
+        )
+        before = UIScene(
+            app_id="com.example.real",
+            screen_id="chat_window",
+            summary="chat with draft",
+            elements=(before_input,),
+            stable=True,
+            confidence=0.98,
+            fingerprint="before",
+        )
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="clear-draft",
+                action="clear_verified_text",
+                params={
+                    "element_id": "field",
+                    "target": "application_text_input",
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {"value": ""},
+                        }
+                    },
+                },
+            ),
+            before,
+        )
+        after_input = replace(
+            before_input,
+            element_id="field-after",
+            bounds=before_input.bounds,
+            states={**states, "value": ""},
+        )
+        after = UIScene(
+            app_id="current_foreground",
+            screen_id="chat_conversation",
+            summary="chat with empty draft",
+            elements=(after_input,),
+            stable=True,
+            confidence=0.98,
+            fingerprint="after",
+        )
+
+        UniversalActionController().verify_after_action(resolved, before, after)
+
+        different_app = replace(after, app_id="com.example.other")
+        with self.assertRaisesRegex(UniversalActionError, "App 或页面身份"):
+            UniversalActionController().verify_after_action(
+                resolved,
+                before,
+                different_app,
+            )
+
+        different_family = replace(
+            after,
+            app_id="com.example.real",
+            screen_id="settings_page",
+        )
+        with self.assertRaisesRegex(UniversalActionError, "App 或页面身份"):
+            UniversalActionController().verify_after_action(
+                resolved,
+                before,
+                different_family,
+            )
+
     def test_verified_clear_rejects_empty_or_ambiguous_inputs(self) -> None:
         base = {
             "focused": True,

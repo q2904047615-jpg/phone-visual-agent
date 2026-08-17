@@ -4297,6 +4297,28 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         self.assertTrue(_goal_requests_input(context))
 
+    def test_temporary_draft_area_is_a_generic_input_audit_goal(self) -> None:
+        context = {
+            "objective": "恢复当前临时草稿区域为空白",
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "clear_draft",
+                    "objective": "当前页面唯一临时草稿区域内容为空白",
+                    "constraints": [],
+                    "completion_conditions": [
+                        "草稿区域显示为空白",
+                        "键盘仍然可见",
+                    ],
+                    "external_impact": "navigation_only",
+                    "goal_entities": {
+                        "target_ui_label": "唯一临时草稿区域"
+                    },
+                }
+            },
+        }
+
+        self.assertTrue(_goal_requests_input(context))
+
     def test_hide_keyboard_allows_boundsless_presence_but_not_input_mode(self) -> None:
         compact = scene_payload()
         compact["summary"] = "唯一输入框为agent，当前软键盘可见。"

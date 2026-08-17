@@ -2366,6 +2366,12 @@ def _precondition_eligible_action_kinds(
         )
         if len(clearable_inputs) != 1:
             eligible.remove("clear_verified_text")
+        elif _current_subgoal_requests_verified_clear(context):
+            # Clearing a currently visible local draft is a certified atomic
+            # action.  Do not offer indirect long-press/selection flows or
+            # keyboard keys when the trusted scene already proves the exact
+            # preconditions for the one-shot clear contract.
+            eligible.intersection_update({"clear_verified_text"})
     if _current_subgoal_requests_keyboard_dismissal(context) and (
         _trusted_scene_proves_visible_keyboard(observation.scene)
     ):
@@ -2386,6 +2392,35 @@ _KEYBOARD_DISMISSAL_PATTERN = re.compile(
     r"\b(?:hide|hidden|dismiss|close|closed|not\s+visible|no\s+longer\s+visible)\b)",
     re.IGNORECASE,
 )
+
+_VERIFIED_CLEAR_PATTERN = re.compile(
+    r"(?:清空|清除|删(?:除|掉)|恢复(?:为|成)?(?:空白|空)|"
+    r"(?:内容|输入框|草稿|文本|文字|值)(?:恢复)?(?:为|成|是)?(?:空白|空)|"
+    r"\b(?:clear|empty|blank|remove|delete)\b)",
+    re.IGNORECASE,
+)
+
+
+def _current_subgoal_requests_verified_clear(
+    context: QwenTaskContext,
+) -> bool:
+    """Recognize only the active subgoal's explicit empty-value request."""
+
+    if context.requested_input_text is not None:
+        return False
+    visible = " ".join(
+        [
+            str(context.current_subgoal.get("objective") or ""),
+            *(
+                str(item)
+                for item in context.current_subgoal.get(
+                    "completion_conditions",
+                    [],
+                )
+            ),
+        ]
+    )
+    return bool(_VERIFIED_CLEAR_PATTERN.search(visible))
 
 
 def _current_subgoal_requests_keyboard_dismissal(

@@ -1223,6 +1223,26 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             )
         )
 
+    def test_chinese_browser_page_is_grounded_by_structured_app_id(self):
+        self.assertTrue(
+            named_visual_identity_is_grounded(
+                ("当前浏览器页面的主标题或错误提示已确认",),
+                (
+                    '{"app_id":"browser","screen_id":'
+                    '"generic_acceptance_page","overlays":[]}',
+                ),
+            )
+        )
+        self.assertFalse(
+            named_visual_identity_is_grounded(
+                ("当前浏览器页面的主标题或错误提示已确认",),
+                (
+                    '{"app_id":"settings","screen_id":'
+                    '"settings_main","overlays":[]}',
+                ),
+            )
+        )
+
     def test_semantic_screen_alias_does_not_weaken_verbatim_title_grounding(self):
         observation = ObservedState(
             scene_id="scene-chat",

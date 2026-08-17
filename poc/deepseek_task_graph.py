@@ -2837,6 +2837,10 @@ _VISUAL_IDENTITY_SEMANTIC_ALIASES = {
         re.compile(r"聊天|会话"),
         re.compile(r"(?<![a-z0-9])(?:chat|conversation)(?![a-z0-9])", re.I),
     ),
+    "browser": (
+        re.compile(r"浏览器"),
+        re.compile(r"(?<![a-z0-9])browser(?![a-z0-9])", re.I),
+    ),
 }
 
 

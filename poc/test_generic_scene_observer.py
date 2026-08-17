@@ -12,6 +12,7 @@ from generic_scene_observer import (
     ICON_CLUSTER_AUDIT_VERSION,
     INPUT_STRUCTURE_AUDIT_VERSION,
     SYSTEM_UI_AUDIT_VERSION,
+    TARGETED_SCENE_DELTA_PROTOCOL_VERSION,
 )
 from generic_scene_observer import (
     _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES,
@@ -24,6 +25,7 @@ from generic_scene_observer import (
     _stable_ocr_literal_bounds,
     _input_structure_diagnostic_shape,
     _parse_scene_after_unique_structural_edit,
+    _parse_targeted_scene_delta,
     _parse_scene,
     _scene_enum_values,
     _single_json_structural_edits,
@@ -62,7 +64,17 @@ class FakeProvider:
             "timeout": timeout,
             "max_attempts": max_attempts,
         }
-        return json.dumps(self.payload, ensure_ascii=False)
+        payload = self.payload
+        if (
+            self.calls == 2
+            and payload.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION
+        ):
+            payload = targeted_delta_payload(
+                elements=payload.get("elements") or [],
+                summary_addendum=str(payload.get("summary") or "")[:120],
+                confidence=float(payload.get("confidence") or 0.0),
+            )
+        return json.dumps(payload, ensure_ascii=False)
 
 
 class SequenceProvider(FakeProvider):
@@ -87,6 +99,19 @@ class SequenceProvider(FakeProvider):
         value = self.responses.pop(0)
         if isinstance(value, BaseException):
             raise value
+        # Existing scene fixtures describe the intended refined facts. Adapt
+        # only the second model response to the production targeted-delta wire
+        # contract so the large historical suite does not duplicate fixtures.
+        if (
+            self.calls == 2
+            and isinstance(value, dict)
+            and value.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION
+        ):
+            value = targeted_delta_payload(
+                elements=value.get("elements") or [],
+                summary_addendum=str(value.get("summary") or "")[:120],
+                confidence=float(value.get("confidence") or 0.0),
+            )
         return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
@@ -182,6 +207,29 @@ def extra_brace_scene_response() -> str:
     payload["elements"][0]["evidence"] = ["浏览器"]
     valid = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     malformed = valid.replace('}],"overlays"', '}}],"overlays"', 1)
+    if malformed == valid:
+        raise AssertionError("测试响应未插入额外右花括号。")
+    return malformed
+
+
+def targeted_delta_payload(
+    *,
+    elements: list[dict] | None = None,
+    summary_addendum: str = "",
+    confidence: float = 0.96,
+) -> dict:
+    return {
+        "protocol_version": TARGETED_SCENE_DELTA_PROTOCOL_VERSION,
+        "summary_addendum": summary_addendum,
+        "elements": list(elements or []),
+        "confidence": confidence,
+    }
+
+
+def extra_brace_targeted_delta_response() -> str:
+    payload = targeted_delta_payload(elements=scene_payload()["elements"])
+    valid = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    malformed = valid.replace('}],"confidence"', '}}],"confidence"', 1)
     if malformed == valid:
         raise AssertionError("测试响应未插入额外右花括号。")
     return malformed
@@ -2528,7 +2576,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         first = scene_payload()
         first["elements"] = []
         first["summary"] = "未知首页"
-        provider = SequenceProvider([first, extra_brace_scene_response()])
+        provider = SequenceProvider([first, extra_brace_targeted_delta_response()])
         observer = GenericSceneObserver(provider)
         scene = observer.observe(
             frames=stable_frames(),
@@ -2536,7 +2584,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         self.assertEqual(scene.elements[0].element_id, "e1")
         self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [1800, 1200])
+        self.assertEqual(provider.max_tokens_seen, [1800, 700])
         self.assertTrue(observer.last_diagnostics["format_retry_used"])
         self.assertTrue(observer.last_diagnostics["local_structural_repair_used"])
         self.assertTrue(observer.last_diagnostics["repair_retry_success"])
@@ -2545,7 +2593,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         first = scene_payload()
         first["elements"] = []
         first["summary"] = "未知首页"
-        provider = SequenceProvider([first, "{", scene_payload()])
+        provider = SequenceProvider([first, "{", targeted_delta_payload()])
         observer = GenericSceneObserver(provider)
 
         with self.assertRaisesRegex(VisionAgentError, "不存在唯一、严格有效"):
@@ -2555,7 +2603,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             )
 
         self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [1800, 1200])
+        self.assertEqual(provider.max_tokens_seen, [1800, 700])
         self.assertEqual(len(provider.responses), 1)
         self.assertFalse(observer.last_diagnostics["local_structural_repair_used"])
         self.assertFalse(observer.last_diagnostics["repair_retry_success"])
@@ -2635,8 +2683,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         first["screen_id"] = "android_home"
         first["summary"] = "安卓桌面"
         first["elements"] = []
-        refined = dict(first)
-        refined["elements"] = [
+        refined = targeted_delta_payload(elements=[
             {
                 "element_id": "e1",
                 "role": "icon",
@@ -2647,7 +2694,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "states": {"goal_relevant": True},
                 "evidence": ["微信"],
             }
-        ]
+        ])
         provider = SequenceProvider([first, refined])
         observer = GenericSceneObserver(provider)
         scene = observer.observe(
@@ -2659,7 +2706,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         )
         self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [1800, 1200])
+        self.assertEqual(provider.max_tokens_seen, [1800, 700])
         self.assertEqual(scene.elements[0].label, "微信")
         self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
         targeted_text = provider.messages_seen[1][1]["content"][0]["text"]
@@ -2668,6 +2715,126 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn("目标相关控件确实不存在时返回空elements", targeted_text)
         self.assertIn("不能因为目标尚未完成而降低", targeted_text)
         self.assertIn("模糊、遮挡或不唯一时仍必须降低", targeted_text)
+
+    def test_targeted_delta_preserves_compact_authority_and_merges_only_evidence(self) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="local-fingerprint",
+        )
+        element = dict(scene_payload()["elements"][0])
+        element.update(
+            {
+                "element_id": "target-1",
+                "meaning": "open_target",
+                "label": "目标",
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["目标按钮四边完整可见"],
+            }
+        )
+        scene = _parse_targeted_scene_delta(
+            json.dumps(
+                targeted_delta_payload(
+                    elements=[element],
+                    summary_addendum="底部存在页面延续标记",
+                    confidence=0.91,
+                ),
+                ensure_ascii=False,
+            ),
+            base_scene=base,
+            fingerprint="local-fingerprint",
+            goal_context={"objective": "查看目标"},
+        )
+
+        self.assertEqual(base.app_id, scene.app_id)
+        self.assertEqual(base.screen_id, scene.screen_id)
+        self.assertEqual(base.system_ui, scene.system_ui)
+        self.assertEqual(base.camera_alignment, scene.camera_alignment)
+        self.assertEqual(base.overlays, scene.overlays)
+        self.assertEqual(base.stable, scene.stable)
+        self.assertEqual("local-fingerprint", scene.fingerprint)
+        self.assertEqual("target-1", scene.elements[0].element_id)
+        self.assertEqual(0.91, scene.confidence)
+        self.assertEqual("计算器首页；底部存在页面延续标记", scene.summary)
+
+    def test_targeted_delta_rejects_legacy_scene_and_authority_fields(self) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="local-fingerprint",
+        )
+        invalid_payloads = [scene_payload()]
+        for field_name in (
+            "foreground_app_id",
+            "screen_id",
+            "system_ui",
+            "camera_alignment",
+            "overlays",
+            "stable",
+            "fingerprint",
+        ):
+            payload = targeted_delta_payload()
+            payload[field_name] = "forbidden"
+            invalid_payloads.append(payload)
+
+        for payload in invalid_payloads:
+            with self.subTest(fields=sorted(payload)), self.assertRaisesRegex(
+                VisionAgentError, "最小增量协议"
+            ):
+                _parse_targeted_scene_delta(
+                    json.dumps(payload, ensure_ascii=False),
+                    base_scene=base,
+                    fingerprint="local-fingerprint",
+                )
+
+    def test_targeted_delta_rejects_duplicates_and_more_than_four_elements(self) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="local-fingerprint",
+        )
+        duplicate = (
+            '{"protocol_version":"'
+            + TARGETED_SCENE_DELTA_PROTOCOL_VERSION
+            + '","summary_addendum":"","elements":[],"confidence":0.9,'
+            '"confidence":0.8}'
+        )
+        with self.assertRaisesRegex(VisionAgentError, "重复 JSON 字段"):
+            _parse_targeted_scene_delta(
+                duplicate,
+                base_scene=base,
+                fingerprint="local-fingerprint",
+            )
+
+        element = scene_payload()["elements"][0]
+        oversized = targeted_delta_payload(
+            elements=[
+                {**element, "element_id": f"e{index}"}
+                for index in range(5)
+            ]
+        )
+        with self.assertRaisesRegex(VisionAgentError, "最小增量协议"):
+            _parse_targeted_scene_delta(
+                json.dumps(oversized, ensure_ascii=False),
+                base_scene=base,
+                fingerprint="local-fingerprint",
+            )
+
+    def test_empty_targeted_delta_is_safe_and_prompt_forbids_scene_repetition(self) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="local-fingerprint",
+        )
+        scene = _parse_targeted_scene_delta(
+            json.dumps(targeted_delta_payload(), ensure_ascii=False),
+            base_scene=base,
+            fingerprint="local-fingerprint",
+        )
+        prompt = _targeted_prompt({}, first_scene=base.to_dict())
+
+        self.assertEqual((), scene.elements)
+        self.assertEqual(base.summary, scene.summary)
+        self.assertIn(TARGETED_SCENE_DELTA_PROTOCOL_VERSION, prompt)
+        self.assertIn("四个字段缺一不可", prompt)
+        self.assertIn("不要重复或返回foreground_app_id", prompt)
+        self.assertNotIn(f'"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}"', prompt)
 
     def test_goal_element_without_visible_evidence_triggers_targeted_refinement(self) -> None:
         first = scene_payload()
@@ -2681,11 +2848,12 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "evidence": [],
             }
         )
-        refined = json.loads(json.dumps(first, ensure_ascii=False))
-        refined["elements"][0]["element_id"] = "return_entry_01"
-        refined["elements"][0]["evidence"] = [
+        refined_element = json.loads(json.dumps(first["elements"][0], ensure_ascii=False))
+        refined_element["element_id"] = "return_entry_01"
+        refined_element["evidence"] = [
             "说明文字下方带下划线的白色返回入口，四边完整可见"
         ]
+        refined = targeted_delta_payload(elements=[refined_element])
         provider = SequenceProvider([first, refined])
         observer = GenericSceneObserver(provider)
 
@@ -2715,9 +2883,9 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "states": {"goal_relevant": True, "fully_visible": True},
             }
         )
-        refined = dict(first)
-        refined["summary"] = "底部边缘存在部分可见的后续内容，列表仍在延伸"
-        refined["elements"] = []
+        refined = targeted_delta_payload(
+            summary_addendum="底部边缘存在部分可见的后续内容，列表仍在延伸"
+        )
         provider = SequenceProvider([first, refined])
         observer = GenericSceneObserver(provider)
 
@@ -4751,7 +4919,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual((0.704, 0.078, 0.836, 0.129), button.bounds)
         self.assertFalse(button.states["goal_relevant"])
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
-        self.assertEqual([1800, 1200, 700], provider.max_tokens_seen)
+        self.assertEqual([1800, 700, 700], provider.max_tokens_seen)
 
     def test_top_obstruction_prevents_audit_crop_from_promoting_hidden_input(self) -> None:
         empty = scene_payload()
@@ -4961,7 +5129,7 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         self.assertEqual(2, provider.calls)
         self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
-        self.assertEqual("通用动作真机验收页", scene.screen_id)
+        self.assertEqual("unknown", scene.screen_id)
         self.assertEqual("page_title", scene.elements[0].meaning)
         self.assertEqual("通用动作真机验收页", scene.elements[0].label)
 
@@ -4988,6 +5156,11 @@ class GenericSceneObserverTests(unittest.TestCase):
     def test_status_exposes_observation_policy(self) -> None:
         status = GenericSceneObserver(FakeProvider(scene_payload())).status()
         self.assertEqual(status["compact_output_tokens"], 1800)
+        self.assertEqual(status["targeted_output_tokens"], 700)
+        self.assertEqual(
+            status["targeted_delta_protocol"],
+            TARGETED_SCENE_DELTA_PROTOCOL_VERSION,
+        )
         self.assertEqual(status["observation_timeout_seconds"], 60.0)
         self.assertEqual(status["max_compact_elements"], 4)
         self.assertEqual(status["current_stage"], "idle")

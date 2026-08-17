@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -122,6 +123,16 @@ class FakeSceneObserver:
     def audit_element_geometry(self, *, frames, scene, element_ids):
         self.geometry_audit_calls.append(tuple(element_ids))
         return self.geometry_scenes.pop(0) if self.geometry_scenes else scene
+
+
+class RawFailureSceneObserver(FakeSceneObserver):
+    def __init__(self, raw_response: str) -> None:
+        super().__init__([RuntimeError("目标精查严格协议拒绝")])
+        self.last_raw_response = raw_response
+        self.last_diagnostics = {
+            "failed_stage": "parsing_targeted_refinement",
+            "error_type": "schema_validation",
+        }
 
 
 class FakeRobot:
@@ -516,6 +527,80 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual([], robot.actions)
         self.assertIsNone(robot._armed)
         self.assertEqual([1800], provider.max_tokens_seen)
+
+    def test_failed_observation_persists_bounded_redacted_qwen_response(self):
+        raw = (
+            '{"api_key":"secret-api-value","Authorization":"Bearer bearer-value",'
+            '"image":"data:image/jpeg;base64,QUJDREVGRw==",'
+            '"url":"https://example.test/path?token=query-secret",'
+            '"text":"visible"} password=plain-secret '
+            + ("x" * 17000)
+        )
+        observer = RawFailureSceneObserver(raw)
+        with tempfile.TemporaryDirectory() as temp:
+            evidence_dir = Path(temp)
+            with self.assertRaises(GenericActionAdapterError) as caught:
+                self._adapter(observer, FakeRobot()).capture_scene(
+                    goal(),
+                    evidence_dir=evidence_dir,
+                    prefix="before_step_1",
+                )
+            diagnostic_paths = [
+                Path(path)
+                for path in caught.exception.evidence
+                if path.endswith("_qwen_failure.json")
+            ]
+            self.assertEqual(1, len(diagnostic_paths))
+            artifact = json.loads(diagnostic_paths[0].read_text(encoding="utf-8"))
+
+        self.assertEqual("parsing_targeted_refinement", artifact["failed_stage"])
+        self.assertEqual("schema_validation", artifact["error_type"])
+        self.assertEqual(len(raw), artifact["raw_response_length"])
+        self.assertEqual(
+            hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+            artifact["raw_response_sha256"],
+        )
+        self.assertTrue(artifact["redacted_response_truncated"])
+        self.assertLessEqual(len(artifact["redacted_raw_response"]), 16000)
+        serialized = json.dumps(artifact, ensure_ascii=False)
+        for secret in (
+            "secret-api-value",
+            "bearer-value",
+            "query-secret",
+            "plain-secret",
+            "QUJDREVGRw==",
+        ):
+            self.assertNotIn(secret, serialized)
+        self.assertNotIn("data:image", serialized)
+        self.assertIn("[REDACTED_SECRET]", serialized)
+        self.assertIn("[REDACTED_IMAGE_DATA_URL]", serialized)
+
+    def test_successful_observation_does_not_write_qwen_failure_artifact(self):
+        with tempfile.TemporaryDirectory() as temp:
+            evidence_dir = Path(temp)
+            self._adapter(FakeSceneObserver([scene("fresh")]), FakeRobot()).capture_scene(
+                goal(),
+                evidence_dir=evidence_dir,
+                prefix="before_step_1",
+            )
+            self.assertEqual([], list(evidence_dir.glob("*_qwen_failure.json")))
+
+    def test_diagnostic_write_failure_preserves_primary_observation_error(self):
+        observer = RawFailureSceneObserver('{"broken":true}')
+        with tempfile.TemporaryDirectory() as temp, patch(
+            "generic_action_adapter._persist_qwen_failure_diagnostic",
+            side_effect=OSError("disk unavailable"),
+        ):
+            with self.assertRaisesRegex(
+                GenericActionAdapterError, "目标精查严格协议拒绝"
+            ):
+                self._adapter(observer, FakeRobot()).capture_scene(
+                    goal(),
+                    evidence_dir=Path(temp),
+                    prefix="before_step_1",
+                )
+
+        self.assertEqual("OSError", observer.last_diagnostics["diagnostic_persistence_error"])
 
     def test_public_execute_irreparable_observation_never_calls_robot(self):
         self._assert_public_observation_failure_before_robot(

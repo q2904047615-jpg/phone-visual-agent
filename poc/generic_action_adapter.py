@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import time
 import re
 import uuid
@@ -28,6 +31,126 @@ from universal_action_controller import (
     navigation_semantic_class,
 )
 from robot_core import WorkflowNotReady, qwerty_keyboard_config_from_anchors
+
+
+QWEN_FAILURE_DIAGNOSTIC_VERSION = "2026-08-17-qwen-failure-diagnostic-v1"
+MAX_REDACTED_QWEN_RESPONSE_CHARS = 16000
+_IMAGE_DATA_URL_RE = re.compile(
+    r"data:image/[^;\s\"']+;base64,[A-Za-z0-9+/=_-]+",
+    re.IGNORECASE,
+)
+_SECRET_FIELD_RE = re.compile(
+    r"(?P<prefix>[\"']?(?:authorization|api[_-]?key|access[_-]?token|"
+    r"refresh[_-]?token|token|secret|password)[\"']?\s*[:=]\s*)"
+    r"(?P<quote>[\"'])(?P<value>.*?)(?P=quote)",
+    re.IGNORECASE,
+)
+_UNQUOTED_SECRET_FIELD_RE = re.compile(
+    r"(?P<prefix>[\"']?(?:authorization|api[_-]?key|access[_-]?token|"
+    r"refresh[_-]?token|token|secret|password)[\"']?\s*[:=]\s*)"
+    r"(?![\"'])(?P<value>[^,}\]\s]+)",
+    re.IGNORECASE,
+)
+_BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+_URL_SECRET_RE = re.compile(
+    r"(?P<prefix>[?&](?:api[_-]?key|access[_-]?token|token|secret|password)=)"
+    r"[^&#\s\"']+",
+    re.IGNORECASE,
+)
+_URL_USERINFO_RE = re.compile(r"(https?://)[^/@\s:]+:[^/@\s]+@", re.IGNORECASE)
+_OPENAI_STYLE_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
+
+
+def _redact_qwen_failure_response(raw: str) -> str:
+    redacted = _IMAGE_DATA_URL_RE.sub("[REDACTED_IMAGE_DATA_URL]", str(raw or ""))
+    redacted = _SECRET_FIELD_RE.sub(
+        lambda match: (
+            f"{match.group('prefix')}{match.group('quote')}"
+            f"[REDACTED_SECRET]{match.group('quote')}"
+        ),
+        redacted,
+    )
+    redacted = _UNQUOTED_SECRET_FIELD_RE.sub(
+        lambda match: f"{match.group('prefix')}[REDACTED_SECRET]",
+        redacted,
+    )
+    redacted = _BEARER_RE.sub("Bearer [REDACTED_SECRET]", redacted)
+    redacted = _URL_SECRET_RE.sub(
+        lambda match: f"{match.group('prefix')}[REDACTED_SECRET]",
+        redacted,
+    )
+    redacted = _URL_USERINFO_RE.sub(r"\1[REDACTED_CREDENTIALS]@", redacted)
+    return _OPENAI_STYLE_SECRET_RE.sub("[REDACTED_SECRET]", redacted)
+
+
+def _persist_qwen_failure_diagnostic(
+    *,
+    evidence_dir: Path | None,
+    prefix: str,
+    raw_response: str,
+    error: Exception,
+    diagnostics: dict[str, Any] | None = None,
+) -> Path | None:
+    """Persist bounded redacted model output without changing failure policy."""
+
+    raw = str(raw_response or "")
+    if evidence_dir is None or not raw:
+        return None
+    output_dir = Path(evidence_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(prefix or ""))[:96]
+    target = output_dir / f"{safe_prefix or 'observation'}_qwen_failure.json"
+    redacted = _redact_qwen_failure_response(raw)
+    bounded = redacted[:MAX_REDACTED_QWEN_RESPONSE_CHARS]
+    public_error = _redact_qwen_failure_response(str(error))[:1000]
+    details = diagnostics if isinstance(diagnostics, dict) else {}
+    payload = {
+        "artifact_version": QWEN_FAILURE_DIAGNOSTIC_VERSION,
+        "failed_stage": str(details.get("failed_stage") or "unknown")[:120],
+        "error_type": str(
+            details.get("error_type")
+            or classify_qwen_error(error, raw_response=raw)
+        )[:120],
+        "error_message": public_error,
+        "raw_response_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        "raw_response_length": len(raw),
+        "redacted_response_truncated": len(redacted) > len(bounded),
+        "redacted_raw_response": bounded,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    temporary = output_dir / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        temporary.write_bytes(encoded)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
+
+
+def _observer_failure_diagnostic_evidence(
+    observer: Any,
+    *,
+    evidence_dir: Path | None,
+    prefix: str,
+    error: Exception,
+) -> tuple[str, ...]:
+    diagnostics = getattr(observer, "last_diagnostics", {})
+    raw_response = getattr(observer, "last_raw_response", "")
+    try:
+        path = _persist_qwen_failure_diagnostic(
+            evidence_dir=evidence_dir,
+            prefix=prefix,
+            raw_response=raw_response,
+            error=error,
+            diagnostics=diagnostics if isinstance(diagnostics, dict) else None,
+        )
+    except Exception as diagnostic_error:
+        if isinstance(diagnostics, dict):
+            diagnostics["diagnostic_persistence_error"] = type(
+                diagnostic_error
+            ).__name__
+        return ()
+    return (str(path),) if path is not None else ()
 
 
 class GenericActionAdapterError(RuntimeError):
@@ -333,9 +456,15 @@ class GenericSingleActionAdapter:
                 goal_context=goal.to_dict(),
             )
         except RuntimeError as exc:
+            diagnostic_paths = _observer_failure_diagnostic_evidence(
+                self.observer,
+                evidence_dir=evidence_dir,
+                prefix=prefix,
+                error=exc,
+            )
             raise GenericActionAdapterError(
                 f"通用页面观察失败：{exc}",
-                evidence=paths,
+                evidence=paths + diagnostic_paths,
             ) from exc
         return scene, frames, paths
 
@@ -490,6 +619,13 @@ class GenericSingleActionAdapter:
                 )
             except RuntimeError as exc:
                 last_error = exc
+                diagnostic_paths = _observer_failure_diagnostic_evidence(
+                    self.observer,
+                    evidence_dir=evidence_dir,
+                    prefix=f"{evidence_prefix}_after_attempt_{attempt}",
+                    error=exc,
+                )
+                all_paths += diagnostic_paths
                 observation_errors.append(
                     f"第{attempt}轮动作后观察失败：{exc}"
                 )
@@ -590,9 +726,15 @@ class GenericSingleActionAdapter:
                         goal_context=goal.to_dict(),
                     )
                 except RuntimeError as exc:
+                    diagnostic_paths = _observer_failure_diagnostic_evidence(
+                        self.observer,
+                        evidence_dir=evidence_dir,
+                        prefix=f"{evidence_prefix}_confirmation",
+                        error=exc,
+                    )
                     raise GenericActionAdapterError(
                         f"确认前目标几何复核失败：{exc}",
-                        evidence=before_paths,
+                        evidence=before_paths + diagnostic_paths,
                     ) from exc
         else:
             before, before_frames, before_paths = self.capture_scene(

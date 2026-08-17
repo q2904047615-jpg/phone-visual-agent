@@ -52,12 +52,13 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-17-generic-scene-observer-v44"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-17-generic-scene-observer-v45"
+TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-17-input-structure-audit-v4"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1800
-TARGETED_OUTPUT_TOKENS = 1200
+TARGETED_OUTPUT_TOKENS = 700
 INPUT_STRUCTURE_AUDIT_TOKENS = 700
 SYSTEM_UI_AUDIT_TOKENS = 600
 ICON_CLUSTER_AUDIT_TOKENS = 700
@@ -524,6 +525,8 @@ class GenericSceneObserver:
                 "last_stage": last_stage,
                 "last_stage_label": STAGE_LABELS.get(last_stage, last_stage),
                 "compact_output_tokens": COMPACT_OUTPUT_TOKENS,
+                "targeted_delta_protocol": TARGETED_SCENE_DELTA_PROTOCOL_VERSION,
+                "targeted_output_tokens": TARGETED_OUTPUT_TOKENS,
                 "observation_timeout_seconds": OBSERVATION_TIMEOUT_SECONDS,
                 "max_compact_elements": MAX_COMPACT_ELEMENTS,
                 "last_scene_enum_values": dict(
@@ -735,7 +738,6 @@ class GenericSceneObserver:
                         ),
                     }
                 ]
-                compact_camera_alignment = scene.camera_alignment
                 try:
                     raw = model_chat(
                         detail_messages,
@@ -746,12 +748,11 @@ class GenericSceneObserver:
                     # A failed refinement must stop the controller. Returning the
                     # earlier ambiguous scene would allow action on stale evidence.
                     scene = _suppress_obscured_input_evidence(
-                        _parse_scene(
+                        _parse_targeted_scene_delta(
                             raw,
+                            base_scene=scene,
                             fingerprint=fingerprint,
                             goal_context=context,
-                            allow_invalid_system_ui_unknown=True,
-                            camera_alignment_override=scene.camera_alignment,
                         ),
                         visual_obstructions,
                         fingerprint=fingerprint,
@@ -767,12 +768,11 @@ class GenericSceneObserver:
                         or targeted_error_type not in FORMAT_ERROR_TYPES
                     ):
                         raise
-                    scene = _parse_scene_after_unique_structural_edit(
+                    scene = _parse_targeted_delta_after_unique_structural_edit(
                         self.last_raw_response,
+                        base_scene=scene,
                         fingerprint=fingerprint,
                         goal_context=context,
-                        allow_invalid_system_ui_unknown=True,
-                        camera_alignment_override=compact_camera_alignment,
                     )
                     if scene is None:
                         raise VisionAgentError(
@@ -1749,18 +1749,18 @@ def _targeted_prompt(
 
 重新检查原图中与目标直接相关的文字、图标、输入框、列表项和最上层弹层。
 只保留最多4个最相关元素；目标元素必须states.goal_relevant=true。看不清或不唯一就不要输出，
-并降低场景confidence。坐标0..1000，只框元素自身。禁止任何动作、计划或建议字段。
+并降低confidence。坐标0..1000，只框元素自身。禁止任何动作、计划或建议字段。
 目标相关元素既包括已经满足完成条件的可见结果，也包括画面上清楚可见、能使该结果进入视野
 的入口控件；这里只报告控件事实，不建议也不授权使用它。
 置信度只评价当前画面观察本身是否可靠，不能因为目标尚未完成而降低；例如清晰桌面上唯一目标
 应用入口可形成高可信观察，即使应用尚未打开。模糊、遮挡或不唯一时仍必须降低，禁止虚增。
-目标相关控件确实不存在时返回空elements，但只要页面事实清楚稳定，场景confidence仍应保持高值；
+目标相关控件确实不存在时返回空elements，但只要页面事实清楚稳定，confidence仍应保持高值；
 不得因为系统级动作没有屏内按钮、或因为未找到目标控件，就把清晰页面写成低置信。
 如果目标尚未出现，而当前画面明确是列表/信息流且原图边缘能看到部分可见的后续列表项或卡片，
-summary必须记录“对应边缘存在部分可见的后续内容，列表仍在延伸”。这只是只读页面事实，不能猜测
+summary_addendum必须记录“对应边缘存在部分可见的后续内容，列表仍在延伸”。这只是只读页面事实，不能猜测
 被裁切项就是目标，不能给动作建议，也不能把被裁切项写成可操作目标。
 如果当前是分步流程、时间线或结构化长页面，且属于页面内容的连续引导轨、连接线或内容轨道明确延伸
-并接触原图边缘，summary必须记录“对应边缘存在明确的页面延续标记，内容仍可继续浏览”。装饰线、
+并接触原图边缘，summary_addendum必须记录“对应边缘存在明确的页面延续标记，内容仍可继续浏览”。装饰线、
 手机边框和机械臂控制器标线不算；不得猜测边缘外是什么，也不得把该标记写成可操作目标。
 若目标以序数指定列表条目，必须把目标及其之前所有同列、同类、完整可见兄弟项分别写入elements，
 逐字抄录label并紧框自身；只把按垂直中心从上到下排序后位于指定序位的条目标成goal_relevant:true，
@@ -1779,23 +1779,21 @@ meaning=page_title、逐字label、goal_relevant:true并明确fully_visible；�
 如果能清楚看见相关横向边框、框内文字和右侧独立搜索/提交按钮，但仍无法判断边框是否可编辑，
 不得因此返回空elements：请分别报告container、其内部text和右侧button的真实边界与证据；
 这三个元素都必须在states中明确写fully_visible:true或false。若画面边缘还有被裁切的相似结构，
-只能在summary说明，不能把它标成目标；优先报告四边完整可见的结构。完整container和text写
+只能在summary_addendum说明，不能把它标成目标；优先报告四边完整可见的结构。完整container和text写
 goal_relevant:true，相邻button写goal_relevant:false。本地只会在三者都fully_visible:true且严格
 几何关系成立时把这组只读事实归一化，绝不会因此激活按钮。
-只返回完整JSON：
-{{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
-"screen_id":"unknown","summary":"目标精查后的当前画面","system_ui":{{"immersive_or_fullscreen":"unknown",
-"navigation_bar_visible":"unknown"}},"elements":[],"overlays":[],
-"stable":true,"confidence":0.0,"fingerprint":""}}
+只返回这个最小目标增量JSON；四个字段缺一不可：
+{{"protocol_version":"{TARGETED_SCENE_DELTA_PROTOCOL_VERSION}","summary_addendum":"",
+"elements":[],"confidence":0.0}}
+summary_addendum最多120个字，只补充快速观察未记录的短只读事实；没有补充就返回空字符串。
+不要重复或返回foreground_app_id、app_id、screen_id、summary、system_ui、camera_alignment、
+overlays、stable、fingerprint；这些字段由快速观察和本地证据保持权威，目标精查无权改写。
 元素仅允许element_id、role、meaning、label、bounds、confidence、states、evidence。不要Markdown。
 role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
 container仅表示承载其他内容的分组、布局区或目标区域；四边独立、可单独识别的色块、卡片、图片或
 控件必须按可见形态写image/list_item/button。可见事实明确区分移动源和目标区域时必须分别建元素，
 不得合成一个container；两者都要逐项写fully_visible:true/false。tab_group、tab_bar和toolbar等
-其他非点击结构只写进summary。
-{SYSTEM_UI_OBSERVATION_RULE}
-overlays只能是字符串数组；任何可交互候选都必须放入elements并使用element_id，
-不得把带bounds、role或ID的对象放入overlays。
+其他非点击结构只写进summary_addendum。任何可交互候选都必须放入elements并使用element_id。
 """
 
 
@@ -2089,6 +2087,35 @@ def _parse_scene_after_unique_structural_edit(
     return result[1] if result is not None else None
 
 
+def _parse_targeted_delta_after_unique_structural_edit(
+    raw: str,
+    *,
+    base_scene: UIScene,
+    fingerprint: str,
+    goal_context: dict[str, Any] | None = None,
+) -> UIScene | None:
+    """Accept one punctuation edit only for one strict targeted delta."""
+
+    accepted: list[UIScene] = []
+    for candidate in _single_json_structural_edits(raw):
+        try:
+            decoded = _load_json_without_duplicate_keys(candidate)
+            if not _matches_targeted_delta_schema(decoded):
+                continue
+            scene = _parse_targeted_scene_delta(
+                candidate,
+                base_scene=base_scene,
+                fingerprint=fingerprint,
+                goal_context=goal_context,
+            )
+        except (json.JSONDecodeError, ValueError, VisionAgentError):
+            continue
+        accepted.append(scene)
+        if len(accepted) > 1:
+            return None
+    return accepted[0] if accepted else None
+
+
 def _unique_strict_structural_scene_edit(
     raw: str,
     *,
@@ -2184,6 +2211,135 @@ def _matches_compact_repair_schema(payload: Any) -> bool:
         ):
             return False
     return True
+
+
+def _matches_targeted_delta_schema(payload: Any) -> bool:
+    """Require the exact small refinement shape before any scene merge."""
+
+    if not isinstance(payload, dict):
+        return False
+    if set(payload) != {
+        "protocol_version",
+        "summary_addendum",
+        "elements",
+        "confidence",
+    }:
+        return False
+    if payload.get("protocol_version") != TARGETED_SCENE_DELTA_PROTOCOL_VERSION:
+        return False
+    summary_addendum = payload.get("summary_addendum")
+    elements = payload.get("elements")
+    confidence = payload.get("confidence")
+    if (
+        not isinstance(summary_addendum, str)
+        or len(summary_addendum.strip()) > 120
+        or not isinstance(elements, list)
+        or len(elements) > MAX_COMPACT_ELEMENTS
+        or isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0.0 <= float(confidence) <= 1.0
+    ):
+        return False
+    element_fields = {
+        "element_id",
+        "role",
+        "meaning",
+        "label",
+        "bounds",
+        "confidence",
+        "states",
+        "evidence",
+    }
+    return all(
+        isinstance(element, dict)
+        and set(element) == element_fields
+        and isinstance(element.get("bounds"), list)
+        and len(element["bounds"]) == 4
+        and isinstance(element.get("states"), dict)
+        and isinstance(element.get("evidence"), list)
+        for element in elements
+    )
+
+
+def _extract_targeted_delta_json_object(raw: str) -> dict[str, Any]:
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        value = _load_json_without_duplicate_keys(text)
+    except json.JSONDecodeError as exc:
+        raise VisionAgentError(
+            f"目标精查返回的 JSON 无法解析：{exc}"
+        ) from exc
+    except _DuplicateJSONKeyError as exc:
+        raise VisionAgentError(
+            f"目标精查响应包含重复 JSON 字段：{exc}"
+        ) from exc
+    except (TypeError, ValueError) as exc:
+        raise VisionAgentError(
+            f"目标精查返回的 JSON 无法解析：{exc}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise VisionAgentError("目标精查返回值必须是 JSON 对象。")
+    return value
+
+
+def _parse_targeted_scene_delta(
+    raw: str,
+    *,
+    base_scene: UIScene,
+    fingerprint: str,
+    goal_context: dict[str, Any] | None = None,
+) -> UIScene:
+    """Merge target-only evidence while preserving compact/local authority."""
+
+    base_scene.validate()
+    payload = _extract_targeted_delta_json_object(raw)
+    if not _matches_targeted_delta_schema(payload):
+        raise VisionAgentError(
+            "目标精查结果不符合最小增量协议；只允许 protocol_version、"
+            "summary_addendum、elements 和 confidence。"
+        )
+
+    addendum = payload["summary_addendum"].strip()
+    summary = base_scene.summary
+    if addendum and addendum not in summary:
+        combined = f"{summary}；{addendum}" if summary else addendum
+        if len(combined) <= 500:
+            summary = combined
+    full_payload = base_scene.to_dict()
+    full_payload["summary"] = summary
+    full_payload["elements"] = payload["elements"]
+    full_payload["confidence"] = min(
+        float(base_scene.confidence),
+        float(payload["confidence"]),
+    )
+    parsed = _parse_scene(
+        json.dumps(full_payload, ensure_ascii=False, separators=(",", ":")),
+        fingerprint=fingerprint,
+        goal_context=goal_context,
+        allow_invalid_system_ui_unknown=True,
+        camera_alignment_override=base_scene.camera_alignment,
+    )
+    merged = replace(
+        parsed,
+        app_id=base_scene.app_id,
+        screen_id=base_scene.screen_id,
+        summary=summary,
+        system_ui=base_scene.system_ui,
+        camera_alignment=base_scene.camera_alignment,
+        overlays=base_scene.overlays,
+        stable=base_scene.stable,
+        fingerprint=fingerprint,
+    )
+    try:
+        merged.validate()
+    except (UISceneError, ValueError, TypeError) as exc:
+        raise VisionAgentError(
+            f"目标精查合并结果不符合场景协议：{exc}"
+        ) from exc
+    return merged
 
 
 def _parse_scene(

@@ -561,6 +561,7 @@ class GenericSceneObserver:
         format_retry_used = False
         local_structural_repair_used = False
         targeted_refinement_used = False
+        compact_geometry_discarded = False
         icon_cluster_audit_used = False
         icon_cluster_audit_candidate_count = 0
         icon_cluster_audit_reload_attested = False
@@ -649,7 +650,14 @@ class GenericSceneObserver:
             ]
 
             def parse_compact_response(value: str) -> UIScene:
+                nonlocal compact_geometry_discarded
                 payload = _extract_compact_json_object(value)
+                compact_geometry_discarded = (
+                    _discard_compact_elements_for_targeted_geometry_recovery(
+                        payload,
+                        context,
+                    )
+                )
                 return _suppress_obscured_input_evidence(
                     _parse_scene(
                         json.dumps(
@@ -714,7 +722,10 @@ class GenericSceneObserver:
             if (
                 not system_ui_audit_required
                 and not _goal_requests_keyboard_mode_switch(context)
-                and _needs_targeted_refinement(scene, context)
+                and (
+                    compact_geometry_discarded
+                    or _needs_targeted_refinement(scene, context)
+                )
             ):
                 targeted_refinement_used = True
                 targeted_roi_bounds = _goal_directed_roi_bounds(context)
@@ -1029,6 +1040,7 @@ class GenericSceneObserver:
                     "strategy": "compact_then_targeted_on_demand",
                     "model_calls": model_calls,
                     "targeted_refinement_used": targeted_refinement_used,
+                    "compact_geometry_discarded": compact_geometry_discarded,
                     "missing_goal_evidence_element_ids": missing_goal_evidence,
                     "fingerprint": fingerprint,
                 }
@@ -1053,6 +1065,7 @@ class GenericSceneObserver:
                     "format_retry_used": format_retry_used,
                     "local_structural_repair_used": local_structural_repair_used,
                     "targeted_refinement_used": targeted_refinement_used,
+                    "compact_geometry_discarded": compact_geometry_discarded,
                     "icon_cluster_audit_used": icon_cluster_audit_used,
                     "icon_cluster_audit_candidate_count": (
                         icon_cluster_audit_candidate_count
@@ -1100,6 +1113,7 @@ class GenericSceneObserver:
                 "first_pass_success": not format_retry_used,
                 "repair_retry_success": format_retry_used,
                 "targeted_refinement_used": targeted_refinement_used,
+                "compact_geometry_discarded": compact_geometry_discarded,
                 "icon_cluster_audit_used": icon_cluster_audit_used,
                 "icon_cluster_audit_candidate_count": (
                     icon_cluster_audit_candidate_count
@@ -1184,6 +1198,7 @@ class GenericSceneObserver:
                     "first_pass_success": False,
                     "repair_retry_success": False,
                     "targeted_refinement_used": targeted_refinement_used,
+                    "compact_geometry_discarded": compact_geometry_discarded,
                     "icon_cluster_audit_used": icon_cluster_audit_used,
                     "icon_cluster_audit_candidate_count": (
                         icon_cluster_audit_candidate_count
@@ -3166,6 +3181,91 @@ def _drop_out_of_range_non_goal_elements(payload: dict[str, Any]) -> None:
         if not safe_to_discard:
             retained.append(item)
     payload["elements"] = retained
+
+
+def _discard_compact_elements_for_targeted_geometry_recovery(
+    payload: dict[str, Any],
+    goal_context: dict[str, Any],
+) -> bool:
+    """Discard a whole passive compact element batch after target overflow.
+
+    No coordinate is converted, clipped, or reused. The caller must force a
+    fresh targeted delta whose complete geometry is validated independently.
+    Input and keyboard-mode goals retain their stricter dedicated contracts.
+    """
+
+    if _goal_requests_input(goal_context) or _goal_requests_keyboard_mode_switch(
+        goal_context
+    ):
+        return False
+    elements = payload.get("elements")
+    if not isinstance(elements, list) or not elements:
+        return False
+    exact_fields = {
+        "element_id",
+        "role",
+        "meaning",
+        "label",
+        "bounds",
+        "confidence",
+        "states",
+        "evidence",
+    }
+    action_like = {
+        "action",
+        "actions",
+        "plan",
+        "step",
+        "steps",
+        "tap",
+        "swipe",
+        "command",
+        "coordinates",
+    }
+
+    def contains_action_like_key(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                str(key).strip().casefold() in action_like
+                or contains_action_like_key(part)
+                for key, part in value.items()
+            )
+        if isinstance(value, list):
+            return any(contains_action_like_key(part) for part in value)
+        return False
+
+    target_overflow = False
+    for item in elements:
+        if (
+            not isinstance(item, dict)
+            or set(item) != exact_fields
+            or contains_action_like_key(item)
+            or not isinstance(item.get("states"), dict)
+            or not isinstance(item.get("evidence"), list)
+        ):
+            return False
+        bounds = item.get("bounds")
+        if (
+            not isinstance(bounds, list)
+            or len(bounds) != 4
+            or not all(
+                isinstance(part, (int, float)) and not isinstance(part, bool)
+                for part in bounds
+            )
+        ):
+            return False
+        left, top, right, bottom = (float(part) for part in bounds)
+        if left < 0 or top < 0 or left >= right or top >= bottom:
+            return False
+        if (
+            (right > 1000 or bottom > 1000)
+            and item["states"].get("goal_relevant") is True
+        ):
+            target_overflow = True
+    if not target_overflow:
+        return False
+    payload["elements"] = []
+    return True
 
 
 _ICON_CLUSTER_CLASSES = frozenset({"reload", "bookmark", "expand", "other"})

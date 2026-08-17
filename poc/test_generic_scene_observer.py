@@ -2716,6 +2716,100 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn("不能因为目标尚未完成而降低", targeted_text)
         self.assertIn("模糊、遮挡或不唯一时仍必须降低", targeted_text)
 
+    def test_goal_overflow_discards_all_compact_geometry_and_forces_targeted(self) -> None:
+        first = scene_payload()
+        first["foreground_app_id"] = "wechat"
+        first["screen_id"] = "wechat_home"
+        first["summary"] = "微信首页聊天列表可见"
+        first["elements"] = [
+            {
+                "element_id": "compact-tab",
+                "role": "tab",
+                "meaning": "nav_wechat",
+                "label": "微信",
+                "bounds": [60, 1750, 290, 1880],
+                "confidence": 1.0,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["底部微信标签"],
+            },
+            {
+                "element_id": "compact-chat",
+                "role": "list_item",
+                "meaning": "chat_entry",
+                "label": "文件传输助手",
+                "bounds": [60, 420, 940, 580],
+                "confidence": 1.0,
+                "states": {"goal_relevant": False, "fully_visible": True},
+                "evidence": ["聊天列表第三项"],
+            },
+        ]
+        refined = targeted_delta_payload(
+            elements=[
+                {
+                    "element_id": "target-chat",
+                    "role": "list_item",
+                    "meaning": "chat_entry",
+                    "label": "文件传输助手",
+                    "bounds": [80, 280, 920, 400],
+                    "confidence": 1.0,
+                    "states": {"goal_relevant": True, "fully_visible": True},
+                    "evidence": ["聊天列表中完整可见的文件传输助手"],
+                }
+            ]
+        )
+        provider = SequenceProvider([first, refined])
+        observer = GenericSceneObserver(provider)
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={
+                "app_id": "wechat",
+                "app_name": "微信",
+                "objective": "打开文件传输助手",
+                "entities": {"target_ui_label": "文件传输助手"},
+            },
+        )
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual([item.element_id for item in scene.elements], ["target-chat"])
+        self.assertTrue(observer.last_diagnostics["compact_geometry_discarded"])
+        self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
+
+    def test_targeted_overflow_after_compact_discard_still_fails_closed(self) -> None:
+        first = scene_payload()
+        first["elements"][0]["states"] = {"goal_relevant": True}
+        first["elements"][0]["bounds"] = [60, 1750, 290, 1880]
+        refined = targeted_delta_payload(elements=[dict(first["elements"][0])])
+        provider = SequenceProvider([first, refined])
+        observer = GenericSceneObserver(provider)
+        with self.assertRaisesRegex(
+            VisionAgentError,
+            "目标精查响应不存在唯一、严格有效的单结构标点修复",
+        ):
+            observer.observe(
+                frames=stable_frames(),
+                goal_context={"objective": "打开目标页面"},
+            )
+        self.assertEqual(provider.calls, 2)
+        self.assertTrue(observer.last_diagnostics["compact_geometry_discarded"])
+
+    def test_input_goal_never_uses_compact_geometry_discard_recovery(self) -> None:
+        first = scene_payload()
+        first["elements"][0]["role"] = "input"
+        first["elements"][0]["meaning"] = "message_input"
+        first["elements"][0]["states"] = {"goal_relevant": True, "focused": True}
+        first["elements"][0]["bounds"] = [60, 1750, 940, 1880]
+        provider = SequenceProvider([first])
+        observer = GenericSceneObserver(provider)
+        with self.assertRaisesRegex(VisionAgentError, "bounds 超出归一化画面"):
+            observer.observe(
+                frames=stable_frames(),
+                goal_context={
+                    "objective": "输入 codex",
+                    "entities": {"input_text": "codex"},
+                },
+            )
+        self.assertEqual(provider.calls, 1)
+        self.assertFalse(observer.last_diagnostics["compact_geometry_discarded"])
+
     def test_targeted_delta_preserves_compact_authority_and_merges_only_evidence(self) -> None:
         base = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),

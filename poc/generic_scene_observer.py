@@ -52,7 +52,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v47"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v48"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-17-input-structure-audit-v4"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
@@ -571,6 +571,7 @@ class GenericSceneObserver:
         icon_cluster_local_geometry_verified = False
         icon_cluster_local_geometry_bounds: tuple[int, int, int, int] | None = None
         input_structure_audit_used = False
+        input_structure_audit_retry_used = False
         input_structure_audit_isolated_from_attested_non_input = False
         system_ui_audit_used = False
         system_ui_audit_retry_used = False
@@ -995,6 +996,7 @@ class GenericSceneObserver:
 
             if _should_audit_prefilled_input(scene, context):
                 input_structure_audit_used = True
+                input_audit_base_scene = scene
                 self._set_stage("waiting_input_structure_audit")
                 audit_content: list[dict[str, Any]] = [
                     {
@@ -1026,6 +1028,36 @@ class GenericSceneObserver:
                         visual_obstructions,
                         fingerprint=fingerprint,
                     )
+                    if (
+                        _goal_has_explicit_input_text(context)
+                        and not _input_audit_established_local_target(scene)
+                    ):
+                        # A valid empty audit grants no geometry authority. One
+                        # independent full-frame retry is allowed for an active
+                        # input goal before Qwen decides. The first empty result
+                        # contributes no fields, bounds or states; two empty
+                        # results still leave the scene fail-closed.
+                        input_structure_audit_retry_used = True
+                        self._set_stage("waiting_input_structure_audit")
+                        raw = model_chat(
+                            [
+                                _json_only_system_message(),
+                                {"role": "user", "content": audit_content},
+                            ],
+                            max_tokens=INPUT_STRUCTURE_AUDIT_TOKENS,
+                        )
+                        self.last_raw_response = raw
+                        self._set_stage("parsing_input_structure_audit")
+                        scene = _suppress_obscured_input_evidence(
+                            _apply_input_structure_audit(
+                                input_audit_base_scene,
+                                raw,
+                                fingerprint=fingerprint,
+                                goal_context=context,
+                            ),
+                            visual_obstructions,
+                            fingerprint=fingerprint,
+                        )
                 except VisionAgentError:
                     if not _can_isolate_input_audit_from_attested_non_input(
                         scene,
@@ -1156,6 +1188,9 @@ class GenericSceneObserver:
                     else None
                 ),
                 "input_structure_audit_used": input_structure_audit_used,
+                "input_structure_audit_retry_used": (
+                    input_structure_audit_retry_used
+                ),
                 "input_structure_audit_isolated_from_attested_non_input": (
                     input_structure_audit_isolated_from_attested_non_input
                 ),
@@ -1222,6 +1257,9 @@ class GenericSceneObserver:
                         icon_cluster_audit_reload_attested
                     ),
                     "input_structure_audit_used": input_structure_audit_used,
+                    "input_structure_audit_retry_used": (
+                        input_structure_audit_retry_used
+                    ),
                     "input_structure_audit_isolated_from_attested_non_input": (
                         input_structure_audit_isolated_from_attested_non_input
                     ),
@@ -4266,6 +4304,35 @@ def _should_audit_prefilled_input(scene: UIScene, context: dict[str, Any]) -> bo
     # active IME mode. Any visible/focused keyboard on an input goal therefore
     # requires the independent whole-frame structure audit before planning.
     return True
+
+
+def _input_audit_established_local_target(scene: UIScene) -> bool:
+    """Return true only for authority minted by the dedicated input audit."""
+
+    candidate = scene.unique_trusted_goal_element()
+    return bool(
+        candidate is not None
+        and candidate.element_id
+        in {
+            "local_audited_input_1",
+            "local_audited_keyboard_mode_switch_1",
+        }
+    )
+
+
+def _goal_has_explicit_input_text(context: dict[str, Any]) -> bool:
+    """Return true only when the graph supplied a concrete text-entry entity."""
+
+    focused = _active_subgoal_visual_context(context)
+    if focused is context:
+        entities = context.get("entities")
+    else:
+        entities = focused.get("goal_entities")
+    return bool(
+        isinstance(entities, dict)
+        and isinstance(entities.get("input_text"), str)
+        and entities["input_text"].strip()
+    )
 
 
 def _goal_requests_keyboard_dismissal(context: dict[str, Any]) -> bool:

@@ -2895,6 +2895,76 @@ class GenericSceneObserverTests(unittest.TestCase):
             scene.unique_trusted_goal_element().element_id,
         )
 
+    def test_empty_input_audit_retries_once_without_using_first_result(self) -> None:
+        first = scene_payload()
+        first["elements"][0]["role"] = "input"
+        first["elements"][0]["meaning"] = "message_input"
+        first["elements"][0]["states"] = {
+            "goal_relevant": True,
+            "focused": True,
+        }
+        first["elements"][0]["bounds"] = [60, 1750, 940, 1880]
+        empty_audit = input_audit_payload(application_inputs=[])
+        recovered_audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="bottom-draft-input",
+                    bounds=[150, 900, 680, 960],
+                    text="",
+                    placeholder="",
+                    right_button=None,
+                )
+            ]
+        )
+        provider = SequenceProvider([first, empty_audit, recovered_audit])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "在底部唯一消息输入框中保留 codex 草稿",
+                "entities": {"input_text": "codex"},
+            },
+        )
+
+        self.assertEqual(3, provider.calls)
+        self.assertEqual(
+            "local_audited_input_1",
+            scene.unique_trusted_goal_element().element_id,
+        )
+        self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
+        self.assertTrue(
+            observer.last_diagnostics["input_structure_audit_retry_used"]
+        )
+        self.assertEqual(
+            provider.messages_seen[1][1]["content"],
+            provider.messages_seen[2][1]["content"],
+        )
+
+    def test_two_empty_input_audits_remain_fail_closed(self) -> None:
+        first = scene_payload()
+        first["elements"][0]["role"] = "input"
+        first["elements"][0]["meaning"] = "message_input"
+        first["elements"][0]["states"] = {"goal_relevant": True}
+        first["elements"][0]["bounds"] = [60, 1750, 940, 1880]
+        empty_audit = input_audit_payload(application_inputs=[])
+        provider = SequenceProvider([first, empty_audit, empty_audit])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "在唯一输入框中保留 codex 草稿",
+                "entities": {"input_text": "codex"},
+            },
+        )
+
+        self.assertEqual(3, provider.calls)
+        self.assertIsNone(scene.unique_trusted_goal_element())
+        self.assertTrue(
+            observer.last_diagnostics["input_structure_audit_retry_used"]
+        )
+
     def test_input_geometry_with_action_field_cannot_be_isolated(self) -> None:
         first = scene_payload()
         first["elements"][0].update(

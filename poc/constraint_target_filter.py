@@ -51,6 +51,16 @@ _PAGE_ELEMENT_SCOPE = re.compile(
     r".{0,24}(?:any|all|every)\s+(?:link|button|element|control)s?\b",
     re.IGNORECASE,
 )
+_ELEMENT_TARGETING_PROHIBITION = re.compile(
+    r"(?:不要|不得|禁止|不可|不能|勿|不再)"
+    r"[^，。；;]{0,32}?"
+    r"(?:点击|点按|触碰|触摸|打开|进入|选择|勾选|切换|操作|使用|访问|启动|按下|长按|滑动|拖动)"
+    r"|\b(?:do\s+not|don't|must\s+not|never)\b"
+    r"[^,.;]{0,48}?"
+    r"\b(?:click|tap|touch|open|enter|select|choose|toggle|operate|use|visit|launch|press|long[- ]press|swipe|drag)\b"
+    r"|(?:避免|避开|\b(?:avoid|exclude)\b)",
+    re.IGNORECASE,
+)
 ELEMENT_BOUND_ROLES = frozenset(
     {"button", "icon", "text", "tab", "image", "list_item", "input", "toggle"}
 )
@@ -115,6 +125,12 @@ def constraint_excludes_candidate(
             and _PAGE_ELEMENT_SCOPE.search(constraint)
         ):
             return True
+        if not _ELEMENT_TARGETING_PROHIBITION.search(constraint):
+            # State/result constraints such as "do not change any setting"
+            # are enforced by the task-risk and action layers.  A shared word
+            # with an App or control label is not enough to make that visible
+            # element itself a forbidden target.
+            continue
         if candidate_terms.intersection(binding_terms(constraint)):
             return True
     return False

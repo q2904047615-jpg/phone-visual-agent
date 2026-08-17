@@ -543,6 +543,9 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertIn("临时标签页也属于 navigation_only", provider.messages[0][0]["content"])
         self.assertIn("goal.entities.target_ui_label", provider.messages[0][0]["content"])
         self.assertIn("字面标签当成动作指令", provider.messages[0][0]["content"])
+        self.assertIn("目标页面不再被遮挡，主要内容可见", provider.messages[0][0]["content"])
+        self.assertIn("当前输入框内容为 X", provider.messages[0][0]["content"])
+        self.assertIn("本机临时结果区域显示该表达式的答案", provider.messages[0][0]["content"])
 
     def test_initial_plan_allows_one_bounded_repair_for_a_different_error_category(self):
         first = base_payload()
@@ -1076,6 +1079,9 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertIn("只保留动作希望达到的可见结果状态", provider.messages[1][0]["content"])
         self.assertIn("逐字保留“不要点击其他控件”", provider.messages[1][0]["content"])
         self.assertIn("页面内容只允许向上移动一次", provider.messages[1][0]["content"])
+        self.assertIn("目标页面不再被遮挡，主要内容可见", provider.messages[1][0]["content"])
+        self.assertIn("当前输入框内容为 X", provider.messages[1][0]["content"])
+        self.assertIn("本机临时结果区域显示该表达式的答案", provider.messages[1][0]["content"])
         self.assertEqual(
             ("不要点击其他控件", "页面内容只允许向上移动一次"),
             graph.constraints,
@@ -2923,6 +2929,69 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             "receipt-matched",
             result.replan_history[-1].consumed_action_transition_receipt_id,
         )
+
+    def test_replan_repairs_matched_controller_transition_left_unconsumed(self):
+        initial = base_payload()
+        unconsumed = copy.deepcopy(initial)
+        repaired = copy.deepcopy(initial)
+        ref_id = "controller_transition:receipt-matched:1"
+        repaired["status"] = "awaiting_confirmation"
+        repaired["subgoals"][0]["status"] = "completed"
+        repaired["subgoals"][0]["completion_evidence"] = [ref_id]
+        repaired["subgoals"][1]["status"] = "active"
+        repaired["active_subgoal_id"] = "save_target"
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            "目标", device_id="phone-1"
+        )
+        provider = FakeProvider(unconsumed, repaired)
+
+        result = DeepSeekTaskGraphPlanner(provider).replan(
+            graph,
+            matched_controller_observation(graph),
+            trigger="action_result_matched",
+            reason="一次性导航动作已由控制器验证",
+        )
+
+        self.assertEqual("completed", result.subgoals[0].status)
+        self.assertEqual((ref_id,), result.subgoals[0].completion_evidence)
+        graph_prompts = [
+            call[0]["content"]
+            for call in provider.messages
+            if "semantic-risk-audit-v1" not in call[0]["content"]
+        ]
+        self.assertEqual(2, len(graph_prompts))
+        self.assertIn(
+            "matched controller_transition 未完成其绑定的 navigation_only 子目标",
+            graph_prompts[-1],
+        )
+        self.assertIn("不得自行生成第二动作", graph_prompts[-1])
+
+    def test_replan_second_unconsumed_matched_transition_stays_blocked(self):
+        initial = base_payload()
+        first = copy.deepcopy(initial)
+        second = copy.deepcopy(initial)
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            "目标", device_id="phone-1"
+        )
+        provider = FakeProvider(first, second)
+
+        with self.assertRaisesRegex(
+            TaskGraphError,
+            "matched controller_transition 未完成其绑定的 navigation_only 子目标",
+        ):
+            DeepSeekTaskGraphPlanner(provider).replan(
+                graph,
+                matched_controller_observation(graph),
+                trigger="action_result_matched",
+                reason="一次性导航动作已由控制器验证",
+            )
+
+        graph_prompts = [
+            call
+            for call in provider.messages
+            if "semantic-risk-audit-v1" not in call[0]["content"]
+        ]
+        self.assertEqual(2, len(graph_prompts))
 
     def test_replan_repairs_subgoal_id_used_as_completion_evidence(self):
         initial = base_payload()

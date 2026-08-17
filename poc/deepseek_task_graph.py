@@ -243,6 +243,7 @@ REPAIRABLE_REPLAN_ERROR_FRAGMENTS = (
     "read_only 完成复核",
     "命名页面完成声明缺少结构化画面身份锚点",
     "子目标使用了当前观察之外的完成证据",
+    "matched controller_transition 未完成其绑定的 navigation_only 子目标",
 )
 MISMATCH_BLOCKED_CLARIFICATION = (
     "动作后的新画面未证明预期结果，且当前没有可验证的安全替代路径；"
@@ -1408,6 +1409,12 @@ def _initial_prompt(raw_goal: str) -> str:
    可见文字；必须将它逐字保存在goal.entities.target_ui_label，不得复制到goal.objective、
    subgoals.objective、completion_conditions或constraints。这些状态字段只能描述目标页面、区域或
    内容可见，不能把字面标签当成动作指令。
+   必须按以下通用语义边界改写，而不是照抄用户动作措辞：
+   - “点击或打开某入口”写成“目标页面在前台可见”；
+   - “关闭遮挡层”写成“目标页面不再被遮挡，主要内容可见”；
+   - “在输入框输入 X”写成“当前输入框内容为 X”，提交边界另存 constraints；
+   - “计算某表达式”写成“本机临时结果区域显示该表达式的答案”。
+   这些只是跨 App 的结果状态例式，不能据此生成固定步骤或控件选择。
 3. 只能有一个 active 子目标；其依赖必须已经 completed（初始图通常无依赖）。
 4. 初始规划没有画面证据，所有完成条件 satisfied=false，任何子目标都不能 completed。
 5. 每个子目标必须用 external_impact 标为 read_only、navigation_only、external_state 或 unknown。
@@ -1470,6 +1477,10 @@ def _repair_initial_prompt(
    保留在 constraints 中，例如逐字保留“不要点击其他控件”，不得删除或改成“不点击”。
    对方向或次数的限制必须改写成动作后的状态变化，例如把“只能向上滑动一次”改写为
    “页面内容只允许向上移动一次”，不得把正向低层动作词放入 constraints。
+   同样必须把“点击或打开某入口”改写为“目标页面在前台可见”，把“关闭遮挡层”改写为
+   “目标页面不再被遮挡，主要内容可见”，把“在输入框输入 X”改写为“当前输入框内容为 X”，
+   把“计算某表达式”改写为“本机临时结果区域显示该表达式的答案”。这些是结果状态例式，
+   不是固定步骤，也不能出现在 Qwen 动作之前的本地编排中。
 6. 如果用户明确指“当前页面”“当前应用”或“当前前台”但未说 App 名称，target_apps 必须使用
    [{{"app_id":"current_foreground","app_name":"当前前台应用"}}]，不得只因缺少 App 名称而阻塞。
 7. 字面 UI 标签若包含点击、滑动、输入、长按、拖动等词，必须逐字放在
@@ -1888,6 +1899,10 @@ def _repair_replan_prompt(
     subgoal_id、condition_id、目标名称或自行概括的句子当作证据。只能逐字选择
     visible_evidence，或为严格绑定的上一 navigation_only 子目标选择
     controller_transition_evidence_refs[].ref_id；没有合格证据就保持未完成、替换路径或阻塞。
+14. 若校验错误指出“matched controller_transition 未完成其绑定的 navigation_only 子目标”，
+    必须把该严格绑定的上一活动子目标标为 completed，并逐字使用对应
+    controller_transition_evidence_refs[].ref_id；不得让该旧子目标继续 active，不得把回执用于
+    其他子目标、全局条件或 external_state/unknown，也不得自行生成第二动作。
 """
 
 
@@ -2515,6 +2530,32 @@ def _validate_revision(
                 (new.objective, *new.completion_conditions),
                 observation,
                 field=f"subgoals.{subgoal_id}",
+            )
+    transition = observation.verified_action_transition
+    if (
+        transition is not None
+        and transition.outcome == "matched"
+        and controller_refs
+        and previous.active_subgoal_id is not None
+    ):
+        old_active = old_subgoals.get(previous.active_subgoal_id)
+        revised_old_active = new_subgoals.get(previous.active_subgoal_id)
+        if (
+            old_active is not None
+            and old_active.external_impact == "navigation_only"
+            and transition.subgoal_id == old_active.subgoal_id
+            and any(
+                ref.subgoal_id == old_active.subgoal_id
+                for ref in controller_refs.values()
+            )
+            and (
+                revised_old_active is None
+                or revised_old_active.status != "completed"
+            )
+        ):
+            raise TaskGraphError(
+                "matched controller_transition 未完成其绑定的 navigation_only 子目标："
+                f"{old_active.subgoal_id}"
             )
 
 

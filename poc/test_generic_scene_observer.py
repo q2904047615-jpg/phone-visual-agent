@@ -567,6 +567,16 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "target_mode": "chinese_pinyin",
                 },
             ),
+            (
+                "input",
+                "",
+                [100, 80, 900, 1130],
+                {
+                    "goal_relevant": True,
+                    "value": "",
+                    "focused": True,
+                },
+            ),
         )
         for role, label, bounds, states in variants:
             with self.subTest(role=role, states=states):
@@ -682,6 +692,28 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "action": "tap",
                 },
                 "evidence": ["键盘底部模式键"],
+            }
+        ]
+
+        with self.assertRaises(VisionAgentError):
+            GenericSceneObserver(SequenceProvider([compact])).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "把当前键盘切换到英文直输模式"},
+            )
+
+    def test_keyboard_mode_goal_does_not_hide_protocol_extra_compact_element(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = [
+            {
+                "element_id": "unsafe-extra-field",
+                "role": "keyboard_key",
+                "meaning": "language_key",
+                "label": "英",
+                "bounds": [730, 1130, 810, 1210],
+                "confidence": 0.99,
+                "states": {"goal_relevant": True},
+                "evidence": ["键盘底部按键"],
+                "raw_coordinate_hint": [730, 1130],
             }
         ]
 
@@ -1632,7 +1664,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertNotIn("keyboard_input_mode", container.states)
         self.assertEqual("qwerty", scene.get_element("input-top").states["keyboard_layout"])
 
-    def test_goal_relevant_non_input_keyboard_facts_still_fail_closed(self) -> None:
+    def test_keyboard_mode_goal_discards_passive_preliminary_container_facts(self) -> None:
         payload = scene_payload()
         payload["elements"] = [
             {
@@ -1650,12 +1682,13 @@ class GenericSceneObserverTests(unittest.TestCase):
             }
         ]
 
-        with self.assertRaisesRegex(VisionAgentError, "bad-goal-container"):
-            _parse_scene(
-                json.dumps(payload, ensure_ascii=False),
-                fingerprint="frame-bad-goal-container",
-                goal_context={"objective": "切换输入模式"},
-            )
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-bad-goal-container",
+            goal_context={"objective": "切换输入模式"},
+        )
+
+        self.assertEqual([], list(scene.elements))
 
     def test_scene_enum_diagnostics_expose_only_keyboard_tokens(self) -> None:
         payload = scene_payload()

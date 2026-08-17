@@ -52,7 +52,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-17-generic-scene-observer-v43"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-17-generic-scene-observer-v44"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-17-input-structure-audit-v3"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
@@ -2274,7 +2274,7 @@ def _parse_scene(
         _normalize_non_target_keyboard_switch(payload, goal_context or {})
         _normalize_reload_goal_safety(payload, goal_context or {})
         _normalize_known_scene_enums(payload)
-        _defer_preliminary_keyboard_switches_to_input_audit(
+        _strip_preliminary_elements_for_keyboard_mode_audit(
             payload,
             goal_context or {},
         )
@@ -2948,18 +2948,19 @@ def _valid_1000_bounds(value: Any) -> bool:
     return 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
 
 
-def _defer_preliminary_keyboard_switches_to_input_audit(
+def _strip_preliminary_elements_for_keyboard_mode_audit(
     payload: dict[str, Any],
     goal_context: dict[str, Any],
 ) -> None:
-    """Make the strict input audit the sole keyboard-switch authority.
+    """Make the strict input audit the sole element authority for mode goals.
 
     An explicit keyboard-mode goal always runs the independent full-frame input
-    structure audit. Preliminary compact candidates therefore cannot authorize
-    or block the switch merely because they used a different role, relevance,
-    label, direction, or coordinate frame. Their fields and geometry are never
-    reused. Action-bearing or protocol-extra objects remain present so strict
-    scene validation still fails closed, as do all unrelated elements.
+    structure audit. Compact elements therefore cannot authorize or block that
+    audit based on any model-authored role, meaning, label, state, or coordinate
+    frame. If every element uses the standard passive scene shape and contains
+    no action-like field, the whole preliminary collection is discarded without
+    reading or reusing any value. Otherwise it remains for strict validation to
+    fail closed. Scene identity, system UI and camera alignment remain intact.
     """
 
     if not _goal_requests_keyboard_mode_switch(goal_context):
@@ -3000,26 +3001,14 @@ def _defer_preliminary_keyboard_switches_to_input_audit(
             return any(contains_action_like_key(part) for part in value)
         return False
 
-    retained: list[Any] = []
     for item in elements:
-        if not isinstance(item, dict):
-            retained.append(item)
-            continue
-        states = item.get("states")
-        claimed_switch = str(item.get("meaning") or "").strip() == (
-            "switch_keyboard_input_mode"
-        ) or (
-            isinstance(states, dict)
-            and states.get("keyboard_input_mode_switch") is True
-        )
-        safely_deferred = (
-            claimed_switch
-            and set(item) == exact_fields
-            and not contains_action_like_key(item)
-        )
-        if not safely_deferred:
-            retained.append(item)
-    payload["elements"] = retained
+        if (
+            not isinstance(item, dict)
+            or set(item) != exact_fields
+            or contains_action_like_key(item)
+        ):
+            return
+    payload["elements"] = []
 
 
 def _drop_out_of_range_non_goal_elements(payload: dict[str, Any]) -> None:

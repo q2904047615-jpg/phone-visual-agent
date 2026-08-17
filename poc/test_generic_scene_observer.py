@@ -502,10 +502,6 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "evidence": ["键盘底部模式键"],
             }
         ]
-        refined = scene_payload()
-        refined["screen_id"] = "input_page"
-        refined["summary"] = "输入框与软键盘可见"
-        refined["elements"] = []
         audit = input_audit_payload(
             application_inputs=[
                 audited_application_input(text="", placeholder="")
@@ -525,9 +521,10 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         )
         audit["application_inputs"][0]["visible_editable_cues"] = ["caret"]
-        provider = SequenceProvider([compact, refined, audit])
+        provider = SequenceProvider([compact, audit])
 
-        scene = GenericSceneObserver(provider).observe(
+        observer = GenericSceneObserver(provider)
+        scene = observer.observe(
             frames=stable_frames(),
             goal_context={"objective": "把当前键盘切换到英文直输模式"},
         )
@@ -536,7 +533,136 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIsNotNone(target)
         self.assertEqual("switch_keyboard_input_mode", target.meaning)
         self.assertEqual((0.65, 0.9, 0.76, 0.97), target.bounds)
-        self.assertEqual(3, provider.calls)
+        self.assertEqual(2, provider.calls)
+        self.assertFalse(observer.last_diagnostics["targeted_refinement_used"])
+        compact_prompt = provider.messages_seen[0][1]["content"][0]["text"]
+        self.assertIn("独立全帧输入结构审计是模式、方向和模式键几何的唯一权威", compact_prompt)
+        self.assertNotIn("必须另建role=button元素", compact_prompt)
+
+    def test_keyboard_switch_goal_defers_all_safe_preliminary_shapes_to_strict_audit(self) -> None:
+        variants = (
+            (
+                "keyboard_key",
+                "英",
+                [680, 1130, 790, 1210],
+                {
+                    "goal_relevant": False,
+                    "keyboard_input_mode_switch": True,
+                },
+            ),
+            (
+                "icon",
+                "",
+                [730, 1130, 810, 1200],
+                {"goal_relevant": True},
+            ),
+            (
+                "button",
+                "英",
+                [730, 890, 810, 940],
+                {
+                    "goal_relevant": True,
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "direct_latin",
+                    "target_mode": "chinese_pinyin",
+                },
+            ),
+        )
+        for role, label, bounds, states in variants:
+            with self.subTest(role=role, states=states):
+                compact = scene_payload()
+                compact["screen_id"] = "input_page"
+                compact["summary"] = "输入框与软键盘可见"
+                compact["elements"] = [
+                    {
+                        "element_id": "preliminary-mode-key",
+                        "role": role,
+                        "meaning": "switch_keyboard_input_mode",
+                        "label": label,
+                        "bounds": bounds,
+                        "confidence": 0.99,
+                        "states": states,
+                        "evidence": ["普通场景初步看到模式键"],
+                    }
+                ]
+                audit = input_audit_payload(
+                    application_inputs=[
+                        audited_application_input(text="", placeholder="")
+                    ],
+                    keyboard={
+                        "visible": True,
+                        "bounds": [0, 360, 1000, 1000],
+                        "layout": "qwerty",
+                        "input_mode": "chinese_pinyin",
+                        "mode_switch": {
+                            "label": "中/英",
+                            "bounds": [650, 900, 760, 970],
+                            "confidence": 0.97,
+                            "current_mode": "chinese_pinyin",
+                            "target_mode": "direct_latin",
+                        },
+                    },
+                )
+                audit["application_inputs"][0]["visible_editable_cues"] = ["caret"]
+                provider = SequenceProvider([compact, audit])
+
+                scene = GenericSceneObserver(provider).observe(
+                    frames=stable_frames(),
+                    goal_context={"objective": "把当前键盘切换到英文直输模式"},
+                )
+
+                target = scene.unique_trusted_goal_element()
+                self.assertEqual(
+                    "local_audited_keyboard_mode_switch_1",
+                    target.element_id,
+                )
+                self.assertEqual((0.65, 0.9, 0.76, 0.97), target.bounds)
+                self.assertEqual("chinese_pinyin", target.states["current_mode"])
+                self.assertEqual("direct_latin", target.states["target_mode"])
+                self.assertEqual(2, provider.calls)
+
+    def test_keyboard_switch_goal_does_not_hide_invalid_strict_audit_geometry(self) -> None:
+        compact = scene_payload()
+        compact["summary"] = "输入框与软键盘可见"
+        compact["elements"] = [
+            {
+                "element_id": "preliminary-mode-key",
+                "role": "keyboard_key",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "英",
+                "bounds": [730, 1130, 810, 1210],
+                "confidence": 0.99,
+                "states": {"goal_relevant": True},
+                "evidence": ["普通场景初步看到模式键"],
+            }
+        ]
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(text="", placeholder="")
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "mode_switch": {
+                    "label": "中/英",
+                    "bounds": [680, 1130, 790, 1210],
+                    "confidence": 0.97,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+            },
+        )
+        audit["application_inputs"][0]["visible_editable_cues"] = ["caret"]
+
+        with self.assertRaisesRegex(VisionAgentError, "mode_switch bounds 无效"):
+            GenericSceneObserver(
+                SequenceProvider([compact, audit])
+            ).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "把当前键盘切换到英文直输模式"},
+            )
 
     def test_malformed_invalid_keyboard_switch_is_not_hidden_by_audit_deferral(self) -> None:
         compact = scene_payload()
@@ -2828,7 +2954,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         )
         scene = GenericSceneObserver(
-            SequenceProvider([empty, empty, audit])
+            SequenceProvider([empty, audit])
         ).observe(
             frames=stable_frames(),
             goal_context={"objective": "切换到英文直输模式 direct_latin"},
@@ -2861,7 +2987,7 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         with self.assertRaisesRegex(VisionAgentError, "current_mode.*冲突"):
             GenericSceneObserver(
-                SequenceProvider([empty, empty, audit])
+                SequenceProvider([empty, audit])
             ).observe(
                 frames=stable_frames(),
                 goal_context={"objective": "切换到英文直输模式"},
@@ -3066,7 +3192,7 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         with self.assertRaisesRegex(VisionAgentError, "mode_switch.*字段"):
             GenericSceneObserver(
-                SequenceProvider([empty, empty, audit])
+                SequenceProvider([empty, audit])
             ).observe(
                 frames=stable_frames(),
                 goal_context={"objective": "切换输入模式到中文拼音"},
@@ -4123,7 +4249,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         )
         scene = GenericSceneObserver(
-            SequenceProvider([empty, empty, audit])
+            SequenceProvider([empty, audit])
         ).observe(
             frames=stable_frames(),
             goal_context={"objective": "切换到英文直输模式"},

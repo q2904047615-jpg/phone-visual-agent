@@ -52,7 +52,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-17-generic-scene-observer-v42"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-17-generic-scene-observer-v43"
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-17-input-structure-audit-v3"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
@@ -710,6 +710,7 @@ class GenericSceneObserver:
 
             if (
                 not system_ui_audit_required
+                and not _goal_requests_keyboard_mode_switch(context)
                 and _needs_targeted_refinement(scene, context)
             ):
                 targeted_refinement_used = True
@@ -1385,21 +1386,34 @@ PREFILLED_INPUT_OBSERVATION_RULE = (
     "上述成组结构的带文字区域仍不得仅因含有文字就被认作输入框。"
 )
 
-INPUT_VALUE_OBSERVATION_RULE = (
+INPUT_VALUE_AND_MODE_OBSERVATION_RULE = (
     "role=input且框内文字清晰可读时，必须在states.value中逐字填写当前可见文字；空框写空字符串，"
     "看不清才省略value，禁止根据目标补写。软键盘可见时还必须在states.keyboard_layout写"
     "qwerty、numeric、symbol或unknown，并在states.keyboard_input_mode写direct_latin、"
     "chinese_pinyin或unknown。QWERTY只描述按键排列，绝不等于英文直输：画面出现中文候选、"
     "拼音分词撇号或明确中文模式时必须写chinese_pinyin；只有明确显示英文/Latin直输模式时才能写"
-    "direct_latin；看不清写unknown。这些都只是画面事实，不授权输入。若键盘底部清楚可见独立的"
+    "direct_latin；看不清写unknown。这些都只是画面事实，不授权输入。"
+)
+
+KEYBOARD_MODE_SWITCH_OBSERVATION_RULE = (
+    "若键盘底部清楚可见独立的"
     "中/英模式切换键，必须另建role=button元素，meaning写switch_keyboard_input_mode，label逐字抄"
     "可见键面文字，states写keyboard_input_mode_switch:true、current_mode和target_mode；不确定当前"
     "模式或切换方向时不得编造该元素。字母、数字、退格、回车等普通键仍必须role=keyboard_key。"
+)
+
+LOCAL_TEXT_CLEAR_OBSERVATION_RULE = (
     "若非空输入框内部或紧邻右侧清楚可见独立的圆形×/清空图标，必须另建role=button或icon元素，"
     "meaning写clear_local_text，states写local_text_clear:true，label必须逐字写图标本身的×/✕/✖/x；"
     "若看不清真实叉号图形或只能自由描述为叉号，就不得标记local_text_clear。只框该图标自身，不能与输入框合并，"
     "也绝不能把键盘退格键/删除键标成local_text_clear。页面右侧的文字‘取消’/cancel是取消编辑或"
     "退出控件，不是本地清空图标；必须meaning=cancel且goal_relevant:false，绝不能标成clear_local_text。"
+)
+
+INPUT_VALUE_OBSERVATION_RULE = (
+    INPUT_VALUE_AND_MODE_OBSERVATION_RULE
+    + KEYBOARD_MODE_SWITCH_OBSERVATION_RULE
+    + LOCAL_TEXT_CLEAR_OBSERVATION_RULE
 )
 
 SYSTEM_UI_OBSERVATION_RULE = (
@@ -1657,6 +1671,19 @@ other vendor robot-controller chrome outside the phone display. JSON only.
 
 
 def _compact_prompt(context: dict[str, Any]) -> str:
+    if _goal_requests_keyboard_mode_switch(context):
+        keyboard_switch_rule = (
+            " 当前子目标明确要求切换键盘输入模式；本轮快速观察不得在elements中报告或定位"
+            "任何模式切换键。后续独立全帧输入结构审计是模式、方向和模式键几何的唯一权威。"
+            "普通输入框和键盘可见事实仍可报告，但不得据此建议动作。"
+        )
+    else:
+        keyboard_switch_rule = KEYBOARD_MODE_SWITCH_OBSERVATION_RULE
+    input_observation_rule = (
+        INPUT_VALUE_AND_MODE_OBSERVATION_RULE
+        + keyboard_switch_rule
+        + LOCAL_TEXT_CLEAR_OBSERVATION_RULE
+    )
     return f"""
 你是通用手机页面观察器，只报告画面事实，不规划也不执行动作。
 用户目标只用于选择需要读清的控件，不能让你幻读：
@@ -1684,7 +1711,7 @@ def _compact_prompt(context: dict[str, Any]) -> str:
    是否存在。清晰稳定的页面即使没有目标控件，也应保持与画面质量一致的高confidence并返回空
    elements；只有模糊、遮挡、过渡或无法判断页面事实时才降低confidence。
 9. {PREFILLED_INPUT_OBSERVATION_RULE}
-10. {INPUT_VALUE_OBSERVATION_RULE}
+10. {input_observation_rule}
 11. {SYSTEM_UI_OBSERVATION_RULE}
 12. {CAMERA_ALIGNMENT_OBSERVATION_RULE}
 13. 如果目标尚未出现，而当前画面明确是列表或信息流，并且原图边缘能看见只露出一部分的后续
@@ -2247,7 +2274,7 @@ def _parse_scene(
         _normalize_non_target_keyboard_switch(payload, goal_context or {})
         _normalize_reload_goal_safety(payload, goal_context or {})
         _normalize_known_scene_enums(payload)
-        _defer_single_invalid_keyboard_switch_to_input_audit(
+        _defer_preliminary_keyboard_switches_to_input_audit(
             payload,
             goal_context or {},
         )
@@ -2921,39 +2948,24 @@ def _valid_1000_bounds(value: Any) -> bool:
     return 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
 
 
-def _defer_single_invalid_keyboard_switch_to_input_audit(
+def _defer_preliminary_keyboard_switches_to_input_audit(
     payload: dict[str, Any],
     goal_context: dict[str, Any],
 ) -> None:
-    """Omit one unusable preliminary switch so the strict audit can re-read it.
+    """Make the strict input audit the sole keyboard-switch authority.
 
-    Compact observation is not an authority source for an out-of-frame target.
-    For an explicit keyboard-mode goal, one otherwise well-formed switch with
-    invalid geometry may be omitted only because the independent full-frame
-    input-structure audit is mandatory for that goal. Geometry is never
-    clipped, scaled, converted from source pixels, or reused. Multiple,
-    malformed, action-bearing, or non-keyboard targets remain fail-closed.
+    An explicit keyboard-mode goal always runs the independent full-frame input
+    structure audit. Preliminary compact candidates therefore cannot authorize
+    or block the switch merely because they used a different role, relevance,
+    label, direction, or coordinate frame. Their fields and geometry are never
+    reused. Action-bearing or protocol-extra objects remain present so strict
+    scene validation still fails closed, as do all unrelated elements.
     """
 
     if not _goal_requests_keyboard_mode_switch(goal_context):
         return
     elements = payload.get("elements")
     if not isinstance(elements, list):
-        return
-    claimed = []
-    for item in elements:
-        if not isinstance(item, dict):
-            continue
-        states = item.get("states")
-        if str(item.get("meaning") or "").strip() == "switch_keyboard_input_mode" or (
-            isinstance(states, dict)
-            and states.get("keyboard_input_mode_switch") is True
-        ):
-            claimed.append(item)
-    if len(claimed) != 1:
-        return
-    candidate = claimed[0]
-    if _valid_1000_bounds(candidate.get("bounds")):
         return
     exact_fields = {
         "element_id",
@@ -2965,31 +2977,49 @@ def _defer_single_invalid_keyboard_switch_to_input_audit(
         "states",
         "evidence",
     }
-    states = candidate.get("states")
-    allowed_states = {
-        "goal_relevant",
-        "fully_visible",
-        "enabled",
-        "keyboard_input_mode_switch",
-        "current_mode",
-        "target_mode",
+    action_like = {
+        "action",
+        "actions",
+        "plan",
+        "step",
+        "steps",
+        "tap",
+        "swipe",
+        "command",
+        "coordinates",
     }
-    modes = {"direct_latin", "chinese_pinyin"}
-    safely_deferred = (
-        set(candidate) == exact_fields
-        and candidate.get("role") in {"button", "icon"}
-        and candidate.get("meaning") == "switch_keyboard_input_mode"
-        and _is_explicit_keyboard_mode_label(str(candidate.get("label") or ""))
-        and isinstance(states, dict)
-        and set(states).issubset(allowed_states)
-        and states.get("goal_relevant") is True
-        and states.get("keyboard_input_mode_switch") is True
-        and states.get("current_mode") in modes
-        and states.get("target_mode") in modes
-        and states.get("current_mode") != states.get("target_mode")
-    )
-    if safely_deferred:
-        payload["elements"] = [item for item in elements if item is not candidate]
+
+    def contains_action_like_key(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                str(key).strip().casefold() in action_like
+                or contains_action_like_key(part)
+                for key, part in value.items()
+            )
+        if isinstance(value, list):
+            return any(contains_action_like_key(part) for part in value)
+        return False
+
+    retained: list[Any] = []
+    for item in elements:
+        if not isinstance(item, dict):
+            retained.append(item)
+            continue
+        states = item.get("states")
+        claimed_switch = str(item.get("meaning") or "").strip() == (
+            "switch_keyboard_input_mode"
+        ) or (
+            isinstance(states, dict)
+            and states.get("keyboard_input_mode_switch") is True
+        )
+        safely_deferred = (
+            claimed_switch
+            and set(item) == exact_fields
+            and not contains_action_like_key(item)
+        )
+        if not safely_deferred:
+            retained.append(item)
+    payload["elements"] = retained
 
 
 def _drop_out_of_range_non_goal_elements(payload: dict[str, Any]) -> None:

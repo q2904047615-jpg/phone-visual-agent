@@ -2756,6 +2756,61 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(0.91, scene.confidence)
         self.assertEqual("计算器首页；底部存在页面延续标记", scene.summary)
 
+    def test_targeted_delta_normalizes_only_single_evidence_string_shorthand(self) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="local-fingerprint",
+        )
+        first = dict(scene_payload()["elements"][0])
+        first.update(
+            {
+                "element_id": "field",
+                "role": "input",
+                "meaning": "editable_text_field",
+                "bounds": [100, 100, 800, 220],
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": "唯一输入区域四边完整可见",
+            }
+        )
+        second = dict(scene_payload()["elements"][0])
+        second.update(
+            {
+                "element_id": "cancel",
+                "meaning": "cancel",
+                "label": "取消",
+                "bounds": [820, 100, 940, 220],
+                "states": {"goal_relevant": False, "fully_visible": True},
+                "evidence": "右侧取消按钮",
+            }
+        )
+        scene = _parse_targeted_scene_delta(
+            json.dumps(
+                targeted_delta_payload(elements=[first, second]),
+                ensure_ascii=False,
+            ),
+            base_scene=base,
+            fingerprint="local-fingerprint",
+        )
+
+        self.assertEqual(
+            ("唯一输入区域四边完整可见",),
+            scene.elements[0].evidence,
+        )
+        self.assertEqual(("右侧取消按钮",), scene.elements[1].evidence)
+
+        for invalid_evidence in ({"text": "事实"}, 7):
+            invalid = targeted_delta_payload(
+                elements=[{**first, "evidence": invalid_evidence}]
+            )
+            with self.subTest(evidence=invalid_evidence), self.assertRaisesRegex(
+                VisionAgentError, "最小增量协议"
+            ):
+                _parse_targeted_scene_delta(
+                    json.dumps(invalid, ensure_ascii=False),
+                    base_scene=base,
+                    fingerprint="local-fingerprint",
+                )
+
     def test_targeted_delta_rejects_legacy_scene_and_authority_fields(self) -> None:
         base = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),

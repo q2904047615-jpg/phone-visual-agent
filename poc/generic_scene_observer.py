@@ -2100,6 +2100,7 @@ def _parse_targeted_delta_after_unique_structural_edit(
     for candidate in _single_json_structural_edits(raw):
         try:
             decoded = _load_json_without_duplicate_keys(candidate)
+            _normalize_targeted_delta_evidence_shorthand(decoded)
             if not _matches_targeted_delta_schema(decoded):
                 continue
             scene = _parse_targeted_scene_delta(
@@ -2261,6 +2262,23 @@ def _matches_targeted_delta_schema(payload: Any) -> bool:
     )
 
 
+def _normalize_targeted_delta_evidence_shorthand(payload: Any) -> None:
+    """Normalize only the existing one-string evidence JSON shorthand."""
+
+    if not isinstance(payload, dict):
+        return
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        evidence = element.get("evidence")
+        if isinstance(evidence, str):
+            text = evidence.strip()
+            element["evidence"] = [text] if text else []
+
+
 def _extract_targeted_delta_json_object(raw: str) -> dict[str, Any]:
     text = str(raw or "").strip()
     if text.startswith("```"):
@@ -2296,6 +2314,7 @@ def _parse_targeted_scene_delta(
 
     base_scene.validate()
     payload = _extract_targeted_delta_json_object(raw)
+    _normalize_targeted_delta_evidence_shorthand(payload)
     if not _matches_targeted_delta_schema(payload):
         raise VisionAgentError(
             "目标精查结果不符合最小增量协议；只允许 protocol_version、"

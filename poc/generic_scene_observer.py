@@ -1028,26 +1028,52 @@ class GenericSceneObserver:
                         visual_obstructions,
                         fingerprint=fingerprint,
                     )
+                    input_retry_roi = _goal_directed_roi_bounds(context)
                     if (
                         _goal_has_explicit_input_text(context)
+                        and input_retry_roi is not None
                         and not _input_audit_established_local_target(scene)
                     ):
                         # A valid empty audit grants no geometry authority. One
-                        # independent full-frame retry is allowed for an active
-                        # input goal before Qwen decides. The first empty result
-                        # contributes no fields, bounds or states; two empty
-                        # results still leave the scene fail-closed.
+                        # independent single-crop retry is allowed only when the
+                        # active goal itself supplies a coarse spatial region.
+                        # The crop owns a local 0..1000 coordinate system and is
+                        # mapped back locally; the first empty result contributes
+                        # no fields, bounds or states. Two empty results still
+                        # leave the scene fail-closed.
                         input_structure_audit_retry_used = True
                         self._set_stage("waiting_input_structure_audit")
+                        retry_content = [
+                            {
+                                "type": "text",
+                                "text": _input_structure_audit_prompt(
+                                    context,
+                                    roi_bounds=input_retry_roi,
+                                    crop_local=True,
+                                ),
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": _image_data_url(
+                                        _crop_normalized(frame, input_retry_roi)
+                                    )
+                                },
+                            },
+                        ]
                         raw = model_chat(
                             [
                                 _json_only_system_message(),
-                                {"role": "user", "content": audit_content},
+                                {"role": "user", "content": retry_content},
                             ],
                             max_tokens=INPUT_STRUCTURE_AUDIT_TOKENS,
                         )
                         self.last_raw_response = raw
                         self._set_stage("parsing_input_structure_audit")
+                        raw = _map_input_structure_crop_audit_to_full(
+                            raw,
+                            roi_bounds=input_retry_roi,
+                        )
                         scene = _suppress_obscured_input_evidence(
                             _apply_input_structure_audit(
                                 input_audit_base_scene,
@@ -1953,11 +1979,41 @@ def _input_structure_audit_prompt(
     context: dict[str, Any],
     *,
     roi_bounds: tuple[int, int, int, int] | None,
+    crop_local: bool = False,
 ) -> str:
+    if crop_local:
+        if roi_bounds is None:
+            raise ValueError("crop-local 输入审计必须绑定 ROI。")
+        image_contract = (
+            "Image 1 is the sole read-only crop of the phone frame at the "
+            f"coarse full-frame ROI {list(roi_bounds)}. Image 1 itself owns a "
+            "crop-local 0..1000 coordinate system. Never return full-frame "
+            "coordinates; local code maps valid crop-local geometry back to "
+            "the full frame."
+        )
+        coordinate_contract = (
+            "All bounds and qwerty anchor points MUST use Image 1 crop-local "
+            "normalized coordinates 0..1000. Here 0 and 1000 are the four "
+            "edges of this crop. Never copy source-pixel or full-frame "
+            "coordinates. If a structure cannot be bounded in this crop-local "
+            "coordinate system, omit it instead of clipping or converting it."
+        )
+    else:
+        image_contract = (
+            "Image 1 is always the complete phone frame. "
+            + _input_audit_detail_note(roi_bounds)
+        )
+        coordinate_contract = (
+            "All bounds MUST use Image 1 full-frame normalized coordinates "
+            "0..1000. Here 0 and 1000 are the four edges of Image 1. Never copy "
+            "Image 1 source-pixel coordinates, regardless of its width or "
+            "height. If a structure cannot be bounded in this coordinate "
+            "system, omit it instead of clipping or converting it."
+        )
     return f"""
 You are a read-only, app-independent UI structure auditor. The normal scene observer did not establish an input target.
 Goal context (evidence selection only): {json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
-Image 1 is always the complete phone frame. {_input_audit_detail_note(roi_bounds)}
+{image_contract}
 Distinguish three different visual structures; never merge them:
 1. application_inputs: editable search/address/form fields in the App content area. Include an empty field only when a complete border plus a visible placeholder, caret, focus highlight, or other literal editable cue is visible.
 2. ime_preedit_regions: the input method's composition/candidate strip. It is never an application input, even when it contains composed text and a trailing icon.
@@ -1970,8 +2026,8 @@ keyboard.mode_switch MUST be either null or an object with exactly these five fi
 {{"label":"中","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"chinese_pinyin","target_mode":"direct_latin"}}
 {{"label":"英","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"direct_latin","target_mode":"chinese_pinyin"}}
 These are shape examples only. Copy the literal visible label and measured bounds from Image 1, set confidence from the visible evidence, and choose the direction from the independently proven current keyboard state. Never copy either example merely to satisfy the goal.
-Do not plan, suggest, authorize, or perform any action. All bounds MUST use Image 1 full-frame normalized coordinates 0..1000.
-Here 0 and 1000 are the four edges of Image 1. Never copy Image 1 source-pixel coordinates, regardless of its width or height. If a structure cannot be bounded in this coordinate system, omit it instead of clipping or converting it.
+Do not plan, suggest, authorize, or perform any action.
+{coordinate_contract}
 Use text="" for a visibly empty application field. Copy placeholders and visible_editable_cues literally; do not infer them from the goal. right_button describes a trailing utility control; it is structural evidence only and is never authorized for activation. Set it to null when no separate trailing control is visible.
 Return exactly this JSON schema and no other fields:
 {{"protocol_version":"{INPUT_STRUCTURE_AUDIT_VERSION}",
@@ -1997,6 +2053,98 @@ def _input_audit_detail_note(
         f"Image 2 is only a magnified read-only crop of Image 1 at {list(roi_bounds)}. "
         "Use it to read details, but never use Image 2 as a coordinate system."
     )
+
+
+def _map_input_structure_crop_audit_to_full(
+    raw: str,
+    *,
+    roi_bounds: tuple[int, int, int, int],
+) -> str:
+    """Map strict crop-local input facts into the full-frame 0..1000 space."""
+
+    payload = _extract_json_object(raw)
+    left, top, right, bottom = roi_bounds
+
+    def map_bounds(value: Any, field_name: str) -> list[int]:
+        if not _valid_1000_bounds(value):
+            raise VisionAgentError(f"{field_name} 不是有效的 crop-local bounds。")
+        local = [float(part) for part in value]
+        internal_edges = (
+            (left > 0 and local[0] < 15)
+            or (top > 0 and local[1] < 15)
+            or (right < 1000 and local[2] > 985)
+            or (bottom < 1000 and local[3] > 985)
+        )
+        if internal_edges:
+            raise VisionAgentError(f"{field_name} 接触 crop 内部边界，不能证明完整可见。")
+        return [
+            round(left + local[0] * (right - left) / 1000.0),
+            round(top + local[1] * (bottom - top) / 1000.0),
+            round(left + local[2] * (right - left) / 1000.0),
+            round(top + local[3] * (bottom - top) / 1000.0),
+        ]
+
+    def map_point(value: Any, field_name: str) -> list[int]:
+        if (
+            not isinstance(value, (list, tuple))
+            or len(value) != 2
+            or any(
+                isinstance(part, bool) or not isinstance(part, (int, float))
+                for part in value
+            )
+            or not all(0 <= float(part) <= 1000 for part in value)
+        ):
+            raise VisionAgentError(f"{field_name} 不是有效的 crop-local point。")
+        return [
+            round(left + float(value[0]) * (right - left) / 1000.0),
+            round(top + float(value[1]) * (bottom - top) / 1000.0),
+        ]
+
+    application_inputs = payload.get("application_inputs")
+    if isinstance(application_inputs, list):
+        for index, item in enumerate(application_inputs):
+            if not isinstance(item, dict):
+                continue
+            if "bounds" in item:
+                item["bounds"] = map_bounds(
+                    item["bounds"],
+                    f"application_inputs[{index}].bounds",
+                )
+            right_button = item.get("right_button")
+            if isinstance(right_button, dict) and "bounds" in right_button:
+                right_button["bounds"] = map_bounds(
+                    right_button["bounds"],
+                    f"application_inputs[{index}].right_button.bounds",
+                )
+
+    ime_regions = payload.get("ime_preedit_regions")
+    if isinstance(ime_regions, list):
+        for index, item in enumerate(ime_regions):
+            if isinstance(item, dict) and "bounds" in item:
+                item["bounds"] = map_bounds(
+                    item["bounds"],
+                    f"ime_preedit_regions[{index}].bounds",
+                )
+
+    keyboard = payload.get("keyboard")
+    if isinstance(keyboard, dict):
+        if keyboard.get("bounds") is not None:
+            keyboard["bounds"] = map_bounds(
+                keyboard["bounds"],
+                "keyboard.bounds",
+            )
+        anchors = keyboard.get("qwerty_anchors")
+        if isinstance(anchors, dict):
+            for key, value in list(anchors.items()):
+                anchors[key] = map_point(value, f"keyboard.qwerty_anchors.{key}")
+        mode_switch = keyboard.get("mode_switch")
+        if isinstance(mode_switch, dict) and "bounds" in mode_switch:
+            mode_switch["bounds"] = map_bounds(
+                mode_switch["bounds"],
+                "keyboard.mode_switch.bounds",
+            )
+
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 _JSON_STRUCTURAL_PUNCTUATION = "{}[],:"

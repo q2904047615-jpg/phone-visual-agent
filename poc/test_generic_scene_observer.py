@@ -22,6 +22,7 @@ from generic_scene_observer import (
     _compact_prompt,
     _goal_requests_input,
     _input_structure_audit_prompt,
+    _map_input_structure_crop_audit_to_full,
     _stable_ocr_literal_bounds,
     _input_structure_diagnostic_shape,
     _parse_scene_after_unique_structural_edit,
@@ -2909,7 +2910,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             application_inputs=[
                 audited_application_input(
                     structure_id="bottom-draft-input",
-                    bounds=[150, 900, 680, 960],
+                    bounds=[150, 786, 680, 905],
                     text="",
                     placeholder="",
                     right_button=None,
@@ -2932,13 +2933,23 @@ class GenericSceneObserverTests(unittest.TestCase):
             "local_audited_input_1",
             scene.unique_trusted_goal_element().element_id,
         )
+        self.assertEqual(
+            (0.15, 0.91, 0.68, 0.96),
+            scene.unique_trusted_goal_element().bounds,
+        )
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
         self.assertTrue(
             observer.last_diagnostics["input_structure_audit_retry_used"]
         )
+        retry_content = provider.messages_seen[2][1]["content"]
         self.assertEqual(
+            1,
+            sum(item.get("type") == "image_url" for item in retry_content),
+        )
+        self.assertIn("crop-local 0..1000", retry_content[0]["text"])
+        self.assertNotEqual(
             provider.messages_seen[1][1]["content"],
-            provider.messages_seen[2][1]["content"],
+            retry_content,
         )
 
     def test_two_empty_input_audits_remain_fail_closed(self) -> None:
@@ -2954,7 +2965,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         scene = observer.observe(
             frames=stable_frames(),
             goal_context={
-                "objective": "在唯一输入框中保留 codex 草稿",
+                "objective": "在底部唯一输入框中保留 codex 草稿",
                 "entities": {"input_text": "codex"},
             },
         )
@@ -2964,6 +2975,19 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertTrue(
             observer.last_diagnostics["input_structure_audit_retry_used"]
         )
+
+    def test_crop_local_input_audit_rejects_internal_edge_contact(self) -> None:
+        payload = input_audit_payload(
+            application_inputs=[
+                audited_application_input(bounds=[0, 700, 600, 900])
+            ]
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "crop 内部边界"):
+            _map_input_structure_crop_audit_to_full(
+                json.dumps(payload, ensure_ascii=False),
+                roi_bounds=(100, 580, 900, 1000),
+            )
 
     def test_input_geometry_with_action_field_cannot_be_isolated(self) -> None:
         first = scene_payload()

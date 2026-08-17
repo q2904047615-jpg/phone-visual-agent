@@ -227,6 +227,116 @@ def active_external_payload():
     return payload
 
 
+def purely_forbidden_draft_payload():
+    return {
+        "status": "ready",
+        "goal": {
+            "objective": (
+                "打开指定聊天页面，在唯一消息输入框中保留未发送的英文 codex 草稿，"
+                "并停在发送按钮之前；不得发送、删除或选择其他联系人。"
+            ),
+            "target_apps": [{"app_id": "chat_app", "app_name": "聊天应用"}],
+            "entities": {
+                "target_ui_label": "指定聊天页面",
+                "input_text": "codex",
+            },
+        },
+        "constraints": [
+            "不得发送、删除或选择其他联系人。",
+            "不得点击发送按钮。",
+        ],
+        "completion_conditions": [
+            {
+                "condition_id": "chat_visible",
+                "description": "指定聊天页面在前台可见",
+                "evidence_required": ["指定聊天页面可见"],
+                "satisfied": False,
+                "evidence": [],
+            },
+            {
+                "condition_id": "draft_visible",
+                "description": "底部唯一消息输入框中包含未发送的英文 codex 草稿",
+                "evidence_required": ["输入框逐字显示 codex"],
+                "satisfied": False,
+                "evidence": [],
+            },
+            {
+                "condition_id": "before_send",
+                "description": "发送按钮可见且 codex 仍可核对",
+                "evidence_required": ["发送按钮可见", "codex 可见"],
+                "satisfied": False,
+                "evidence": [],
+            },
+        ],
+        "risk_actions": [
+            {
+                "risk_id": "send_message",
+                "description": "发送消息给指定联系人",
+                "external_effect": "向指定联系人发送消息并产生通信记录",
+                "risk_type": "message_or_communication",
+                "risk_level": "high",
+                "subgoal_ids": ["open_chat", "enter_draft", "verify_before_send"],
+                "confirmation_required": True,
+            },
+            {
+                "risk_id": "delete_content",
+                "description": "删除输入框中的内容",
+                "external_effect": "删除未发送的草稿内容",
+                "risk_type": "data_deletion",
+                "risk_level": "medium",
+                "subgoal_ids": ["enter_draft"],
+                "confirmation_required": True,
+            },
+            {
+                "risk_id": "select_other_contact",
+                "description": "选择其他联系人",
+                "external_effect": "改变当前聊天对象",
+                "risk_type": "account_relationship_change",
+                "risk_level": "medium",
+                "subgoal_ids": ["open_chat"],
+                "confirmation_required": True,
+            },
+        ],
+        "subgoals": [
+            {
+                "subgoal_id": "open_chat",
+                "objective": "指定聊天页面在前台可见",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["不得选择其他联系人"],
+                "completion_conditions": ["指定聊天页面可见"],
+                "completion_evidence": [],
+                "risk_action_ids": ["select_other_contact"],
+                "external_impact": "external_state",
+            },
+            {
+                "subgoal_id": "enter_draft",
+                "objective": "底部唯一消息输入框中包含未发送的英文 codex 草稿",
+                "status": "pending",
+                "depends_on": ["open_chat"],
+                "constraints": ["不得发送或删除"],
+                "completion_conditions": ["输入框逐字显示 codex"],
+                "completion_evidence": [],
+                "risk_action_ids": ["send_message", "delete_content"],
+                "external_impact": "external_state",
+            },
+            {
+                "subgoal_id": "verify_before_send",
+                "objective": "停在发送按钮之前且 codex 仍可核对",
+                "status": "pending",
+                "depends_on": ["enter_draft"],
+                "constraints": ["不得点击发送按钮"],
+                "completion_conditions": ["发送按钮可见", "codex 可见"],
+                "completion_evidence": [],
+                "risk_action_ids": ["send_message"],
+                "external_impact": "read_only",
+            },
+        ],
+        "active_subgoal_id": "open_chat",
+        "clarification_questions": [],
+    }
+
+
 def audit_sources_for_graph(payload):
     sources = [
         ("raw_goal", "raw_goal", None),
@@ -2738,6 +2848,170 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual(("saved_result",), graph.active_subgoal().risk_action_ids)
         self.assertEqual("external_state", graph.active_subgoal().external_impact)
+
+    def test_initial_plan_removes_only_purely_forbidden_effect_risks(self):
+        payload = purely_forbidden_draft_payload()
+        raw_goal = payload["goal"]["objective"]
+        normalized_payload = copy.deepcopy(payload)
+        normalized_payload["risk_actions"] = []
+        for index, impact in enumerate(
+            ("navigation_only", "navigation_only", "read_only")
+        ):
+            normalized_payload["subgoals"][index]["risk_action_ids"] = []
+            normalized_payload["subgoals"][index]["external_impact"] = impact
+
+        graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(
+                copy.deepcopy(payload),
+                copy.deepcopy(payload),
+                audit_payloads=[audit_payload_for_graph(normalized_payload)],
+            )
+        ).plan(raw_goal, device_id="phone-1")
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertEqual(
+            ["navigation_only", "navigation_only", "read_only"],
+            [item.external_impact for item in graph.subgoals],
+        )
+        self.assertTrue(all(not item.risk_action_ids for item in graph.subgoals))
+
+    def test_purely_forbidden_effect_normalization_is_cross_app_and_bilingual(self):
+        payload = single_subgoal_payload(
+            "The editable text field shows note and remains an unsubmitted draft",
+            external_impact="external_state",
+        )
+        payload["goal"]["target_apps"] = [
+            {"app_id": "notes_app", "app_name": "Notes"}
+        ]
+        payload["goal"]["entities"]["input_text"] = "note"
+        payload["constraints"] = ["Do not submit or delete the draft."]
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        payload["subgoals"][0]["completion_conditions"] = [
+            "The editable text field shows note and remains unsubmitted"
+        ]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "submit_draft",
+                "description": "submit the draft",
+                "external_effect": "submit draft content to an external service",
+                "risk_type": "data_mutation",
+                "risk_level": "high",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            },
+            {
+                "risk_id": "delete_draft",
+                "description": "delete the draft",
+                "external_effect": "delete draft content",
+                "risk_type": "data_deletion",
+                "risk_level": "medium",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            },
+        ]
+        payload["subgoals"][0]["risk_action_ids"] = [
+            "submit_draft",
+            "delete_draft",
+        ]
+
+        graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(copy.deepcopy(payload), copy.deepcopy(payload))
+        ).plan(
+            "Keep note in the editable text field as an unsubmitted draft; "
+            "do not submit or delete the draft.",
+            device_id="phone-1",
+        )
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+
+    def test_purely_forbidden_effect_normalization_keeps_positive_send_result(self):
+        payload = purely_forbidden_draft_payload()
+        payload["goal"]["objective"] = (
+            "在唯一消息输入框中保留 codex，然后发送 codex 消息给指定联系人；不得删除草稿。"
+        )
+        payload["constraints"] = ["不得删除草稿。"]
+        payload["completion_conditions"].append(
+            {
+                "condition_id": "message_sent",
+                "description": "发送 codex 消息给指定联系人已经完成",
+                "evidence_required": ["聊天记录显示发送 codex 消息给指定联系人已经完成"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        )
+        payload["completion_conditions"] = [payload["completion_conditions"][-1]]
+        payload["risk_actions"] = [payload["risk_actions"][0]]
+        payload["risk_actions"][0]["subgoal_ids"] = ["send_draft"]
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "send_draft",
+                "objective": "发送 codex 消息给指定联系人已经完成",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["不得删除草稿"],
+                "completion_conditions": ["发送 codex 消息给指定联系人已经完成"],
+                "completion_evidence": [],
+                "risk_action_ids": ["send_message"],
+                "external_impact": "external_state",
+            }
+        ]
+        payload["active_subgoal_id"] = "send_draft"
+        payload["status"] = "awaiting_confirmation"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            payload["goal"]["objective"],
+            device_id="phone-1",
+        )
+
+        self.assertEqual(("send_message",), graph.active_subgoal().risk_action_ids)
+        self.assertEqual("awaiting_confirmation", graph.status)
+
+    def test_purely_forbidden_effect_normalization_requires_direct_prohibition(self):
+        payload = purely_forbidden_draft_payload()
+        payload["goal"]["objective"] = (
+            "在唯一消息输入框中保留 codex，不要忘记发送 codex 消息给联系人。"
+        )
+        payload["constraints"] = ["不要忘记发送 codex 消息给联系人。"]
+        payload["completion_conditions"] = [payload["completion_conditions"][1]]
+        payload["risk_actions"] = [payload["risk_actions"][0]]
+        payload["risk_actions"][0]["subgoal_ids"] = ["enter_draft"]
+        payload["subgoals"] = [payload["subgoals"][1]]
+        payload["subgoals"][0]["subgoal_id"] = "enter_draft"
+        payload["subgoals"][0]["status"] = "active"
+        payload["subgoals"][0]["depends_on"] = []
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        payload["subgoals"][0]["risk_action_ids"] = ["send_message"]
+        payload["active_subgoal_id"] = "enter_draft"
+        payload["status"] = "awaiting_confirmation"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            payload["goal"]["objective"],
+            device_id="phone-1",
+        )
+
+        self.assertEqual(("send_message",), graph.active_subgoal().risk_action_ids)
+        self.assertEqual("external_state", graph.active_subgoal().external_impact)
+
+    def test_read_only_risk_control_state_never_hides_completed_send_effect(self):
+        payload = single_subgoal_payload(
+            "发送按钮可见，且发送 codex 消息给指定联系人已经完成",
+            external_impact="read_only",
+        )
+        payload["constraints"] = ["不得点击发送按钮"]
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        payload["subgoals"][0]["completion_conditions"] = [
+            "发送按钮可见",
+            "发送 codex 消息给指定联系人已经完成",
+        ]
+
+        with self.assertRaises(TaskGraphError):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(copy.deepcopy(payload), copy.deepcopy(payload))
+            ).plan(
+                "确认发送按钮可见且消息已发送；不得点击发送按钮。",
+                device_id="phone-1",
+            )
 
     def test_unsubmitted_input_workflow_removes_one_shared_false_risk(self):
         raw_goal = (

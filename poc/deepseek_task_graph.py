@@ -206,6 +206,10 @@ LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN = re.compile(
     r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域).{0,20}"
     r"(?:填写|输入|替换|改为|修改).{0,28}"
     r"(?:未提交|草稿|文字|文本|内容|值|字符)|"
+    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域).{0,20}"
+    r"(?:保留|留下).{0,20}(?:未发送|未提交|草稿|文字|文本|内容)|"
+    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域).{0,20}"
+    r"(?:包含|含有|显示).{0,28}(?:未发送|未提交|草稿)|"
     r"\b(?:input|text|query)\s*(?:field|box).{0,28}(?:contains?|shows?|value|text)\b)",
     re.IGNORECASE,
 )
@@ -220,6 +224,28 @@ LOCAL_UNSUBMITTED_WORKFLOW_RISK_PATTERN = re.compile(
     r"(?:文本|文字|输入|草稿|内容)|"
     r"(?:文本|文字|输入|草稿|内容).{0,12}"
     r"(?:未提交|本机临时|本地临时|临时))",
+    re.IGNORECASE,
+)
+RISK_EFFECT_ACTION_PATTERN = re.compile(
+    r"(?:取消关注|发送|提交|删除|清除|移除|转发|发布|选择|保存|分享|回复|"
+    r"联系(?!人)|关注|评论|上传|创建|修改|授权|登录|登出|购买|下单|付款|支付|转账|"
+    r"\b(?:send|submit|delete|erase|remove|forward|publish|post|select|save|"
+    r"share|reply|contact|follow|comment|upload|create|modify|authorize|login|"
+    r"logout|purchase|order|pay|transfer)\b)",
+    re.IGNORECASE,
+)
+READ_ONLY_RISK_CONTROL_STATE_PATTERN = re.compile(
+    r"(?:(?:停在|保持在).{0,20}(?:按钮|控件|入口).{0,8}(?:之前|前)|"
+    r"(?:(?:发送|提交|删除|清除|转发|发布|保存|分享|回复|关注|支付|"
+    r"send|submit|delete|erase|forward|publish|save|share|reply|follow|pay)\s*)?"
+    r"(?:按钮|控件|入口|button|control).{0,12}(?:可见|显示|仍能看见|可核对|visible|shown)|"
+    r"\b(?:stop|stay|remain)\b.{0,28}\bbefore\b.{0,16}\b(?:button|control)\b|"
+    r"\b(?:button|control)\b.{0,16}\b(?:visible|shown)\b)",
+    re.IGNORECASE,
+)
+DIRECT_PROHIBITION_CLAUSE_PATTERN = re.compile(
+    r"^\s*(?:不要|不得|禁止|不能|避免|勿|do\s+not|don't|never)\s*"
+    r"(?!(?:忘记|漏掉|只|仅|forget\b|fail\b))",
     re.IGNORECASE,
 )
 LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN = re.compile(
@@ -451,10 +477,19 @@ class Subgoal:
             *self.constraints,
             *self.completion_conditions,
         )
+        proven_read_only_control_state = (
+            self.external_impact == "read_only"
+            and _is_read_only_risk_control_state(
+                self.objective,
+                self.constraints,
+                self.completion_conditions,
+            )
+        )
         if (
             inferred_risk_types
             and not proven_local_input
             and not proven_local_keyboard_mode
+            and not proven_read_only_control_state
             and self.external_impact in {
             "read_only",
             "navigation_only",
@@ -841,6 +876,15 @@ class DynamicTaskGraph:
                 *subgoal.completion_conditions,
             ):
                 inferred_types = inferred_types - {"unknown_external_effect"}
+            if (
+                subgoal.external_impact == "read_only"
+                and _is_read_only_risk_control_state(
+                    subgoal.objective,
+                    subgoal.constraints,
+                    subgoal.completion_conditions,
+                )
+            ):
+                inferred_types = frozenset()
             linked_types = {
                 risks[risk_id].risk_type for risk_id in subgoal.risk_action_ids
             }
@@ -1612,6 +1656,113 @@ def _dependency_ancestor_map(
     return result
 
 
+def _risk_is_required_by_positive_result(
+    graph: DynamicTaskGraph,
+    risk: RiskAction,
+) -> bool:
+    sources = [graph.goal.objective]
+    for condition in graph.completion_conditions:
+        sources.extend((condition.description, *condition.evidence_required))
+    for subgoal in graph.subgoals:
+        sources.extend((subgoal.objective, *subgoal.completion_conditions))
+    type_pattern = _external_risk_patterns().get(risk.risk_type)
+    if type_pattern is None and risk.risk_type == "unknown_external_effect":
+        type_pattern = EXTERNAL_STATE_CHANGE_PATTERN
+    phrases = tuple(
+        value.strip()
+        for value in (risk.description, risk.external_effect)
+        if len("".join(value.split())) >= 4
+    )
+    for source in sources:
+        for clause in _positive_effect_clauses(source):
+            if type_pattern is not None and _has_unnegated_effect_match(
+                type_pattern,
+                clause,
+            ):
+                return True
+            for phrase in phrases:
+                if _has_unnegated_effect_match(
+                    re.compile(re.escape(phrase), re.IGNORECASE),
+                    clause,
+                ):
+                    return True
+    return False
+
+
+def _subgoal_is_safe_without_forbidden_risk(
+    graph: DynamicTaskGraph,
+    subgoal: Subgoal,
+    local_unsubmitted_input_ids: set[str],
+) -> bool:
+    if subgoal.subgoal_id in local_unsubmitted_input_ids:
+        return True
+    if subgoal.external_impact == "read_only":
+        return _is_read_only_risk_control_state(
+            subgoal.objective,
+            subgoal.constraints,
+            subgoal.completion_conditions,
+        ) or not _infer_external_risk_types(
+            subgoal.objective,
+            *subgoal.completion_conditions,
+        )
+    positive_text = "；".join((subgoal.objective, *subgoal.completion_conditions))
+    return bool(
+        LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(positive_text)
+        or REVERSIBLE_NAVIGATION_EFFECT_PATTERN.search(positive_text)
+    ) and not any(
+        _has_unnegated_effect_match(pattern, positive_text)
+        for pattern in _external_risk_patterns().values()
+    )
+
+
+def _purely_forbidden_initial_risks(
+    graph: DynamicTaskGraph,
+    subgoals: dict[str, Subgoal],
+    local_unsubmitted_input_ids: set[str],
+) -> tuple[set[str], set[str]]:
+    removable_ids: set[str] = set()
+    safe_subgoal_ids: set[str] = set()
+    for risk in graph.risk_actions:
+        linked = tuple(subgoals.get(item) for item in risk.subgoal_ids)
+        if not linked or any(item is None for item in linked):
+            continue
+        anchors = _risk_effect_action_anchors(
+            risk.description,
+            risk.external_effect,
+        )
+        constraints = tuple(graph.constraints) + tuple(
+            constraint
+            for item in linked
+            if item is not None
+            for constraint in item.constraints
+        )
+        if not anchors or not all(
+            any(
+                _text_directly_negates_action_anchor(constraint, anchor)
+                for constraint in constraints
+            )
+            for anchor in anchors
+        ):
+            continue
+        if _risk_is_required_by_positive_result(graph, risk):
+            continue
+        if not all(
+            item is not None
+            and _subgoal_is_safe_without_forbidden_risk(
+                graph,
+                item,
+                local_unsubmitted_input_ids,
+            )
+            for item in linked
+        ):
+            continue
+        removable_ids.add(risk.risk_id)
+        safe_subgoal_ids.update(
+            item.subgoal_id for item in linked if item is not None
+        )
+    return removable_ids, safe_subgoal_ids
+
+
 def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskGraph:
     """Remove only self-contradictory low-risk markers from proven local navigation."""
 
@@ -1640,8 +1791,11 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
             input_text=graph.goal.entities.get("input_text"),
         )
     }
-    removable_ids: set[str] = set()
-    safe_workflow_ids: set[str] = set()
+    removable_ids, safe_workflow_ids = _purely_forbidden_initial_risks(
+        graph,
+        subgoals,
+        local_unsubmitted_input_ids,
+    )
     ancestor_map = _dependency_ancestor_map(subgoals)
 
     def dependency_related(left_id: str, right_id: str) -> bool:
@@ -1882,6 +2036,56 @@ def _explicitly_denies_external_effect(value: str) -> bool:
     )
 
 
+def _risk_effect_action_anchors(*values: str) -> frozenset[str]:
+    return frozenset(
+        match.group(0).casefold()
+        for value in values
+        for match in RISK_EFFECT_ACTION_PATTERN.finditer(str(value or ""))
+    )
+
+
+def _positive_effect_clauses(value: str) -> tuple[str, ...]:
+    return tuple(
+        clause.strip()
+        for clause in re.split(r"[，,。；;\r\n]+", str(value or ""))
+        if clause.strip()
+        and not DIRECT_PROHIBITION_CLAUSE_PATTERN.search(clause)
+    )
+
+
+def _text_directly_negates_action_anchor(value: str, anchor: str) -> bool:
+    for match in re.finditer(re.escape(anchor), str(value or ""), re.IGNORECASE):
+        prefix = str(value or "")[: match.start()].rstrip().lower()
+        if (
+            DIRECT_EFFECT_NEGATION_PATTERN.search(prefix)
+            or COORDINATED_EFFECT_NEGATION_PATTERN.search(prefix)
+            or NEGATED_LOW_LEVEL_INSTRUCTION_PREFIX_PATTERN.search(prefix)
+        ):
+            return True
+    return False
+
+
+def _is_read_only_risk_control_state(
+    objective: str,
+    constraints: tuple[str, ...],
+    completion_conditions: tuple[str, ...],
+) -> bool:
+    positive_text = "；".join((objective, *completion_conditions))
+    anchors = _risk_effect_action_anchors(positive_text)
+    if not anchors or not READ_ONLY_RISK_CONTROL_STATE_PATTERN.search(positive_text):
+        return False
+    residual_positive_effects = READ_ONLY_RISK_CONTROL_STATE_PATTERN.sub(
+        "",
+        positive_text,
+    )
+    if _infer_external_risk_types(residual_positive_effects):
+        return False
+    return all(
+        any(_text_directly_negates_action_anchor(item, anchor) for item in constraints)
+        for anchor in anchors
+    )
+
+
 def _state_description_binds_canonical_input_text(
     values: tuple[str, ...],
     input_text: str,
@@ -1927,7 +2131,11 @@ def _is_explicitly_unsubmitted_local_input(
         for value in texts
     )
     inferred = frozenset().union(
-        *(_infer_external_risk_types(value) for value in risk_texts)
+        *(
+            _infer_external_risk_types(clause)
+            for value in risk_texts
+            for clause in _positive_effect_clauses(value)
+        )
     )
     return bool(
         _state_description_binds_canonical_input_text(texts, target_text)
@@ -3209,6 +3417,21 @@ def _apply_local_risk_supplements(
         if graph is not None
         else frozenset()
     )
+    read_only_risk_control_scopes = (
+        {
+            subgoal.subgoal_id
+            for subgoal in graph.subgoals
+            if subgoal.external_impact == "read_only"
+            and not subgoal.risk_action_ids
+            and _is_read_only_risk_control_state(
+                subgoal.objective,
+                subgoal.constraints,
+                subgoal.completion_conditions,
+            )
+        }
+        if graph is not None
+        else set()
+    )
     local_input_graph_is_risk_free = graph is None or not graph.risk_actions
     current_foreground_keyboard_scope = bool(
         graph is not None
@@ -3258,6 +3481,17 @@ def _apply_local_risk_supplements(
         )
         negated_types = _infer_directly_negated_risk_types(source.text)
         model_types = frozenset(assessment.risk_types)
+        if assessment.subgoal_id in read_only_risk_control_scopes:
+            assessment = replace(
+                assessment,
+                external_impact="read_only",
+                risk_types=(),
+                reason=(
+                    assessment.reason
+                    + "；本地校验确认这里只核对被明确禁止触发的风险控件可见状态"
+                ),
+            )
+            model_types = frozenset()
         if (
             assessment.external_impact == "external_state"
             and model_types
@@ -3378,6 +3612,7 @@ def _apply_local_risk_supplements(
             )
         if (
             inferred
+            and assessment.subgoal_id not in read_only_risk_control_scopes
             and not (
                 scope_is_local_input and local_input_graph_is_risk_free
             )

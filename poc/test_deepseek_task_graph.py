@@ -1832,6 +1832,66 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
 
+    def test_false_positive_audit_cannot_turn_unobscured_page_state_external(self):
+        objectives = (
+            "当前主界面无遮挡，主要内容清晰可见",
+            "遮挡层不再可见且当前页面内容清晰可见",
+        )
+        for objective in objectives:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="navigation_only",
+                )
+                audit = audit_payload_for_graph(
+                    payload,
+                    overrides={
+                        source_id: {
+                            "external_impact": "external_state",
+                            "risk_types": ["unknown_external_effect"],
+                        }
+                        for source_id in {
+                            "raw_goal",
+                            "goal.objective",
+                            "completion_conditions.result_visible.description",
+                            "completion_conditions.result_visible.evidence_required.0",
+                            "subgoals.target_state.objective",
+                            "subgoals.target_state.completion_conditions.0",
+                        }
+                    },
+                )
+                planner = DeepSeekTaskGraphPlanner(
+                    FakeProvider(payload, audit_payloads=[audit])
+                )
+
+                graph = planner.plan(objective, device_id="phone-1")
+
+                self.assertEqual(
+                    "navigation_only",
+                    graph.active_subgoal().external_impact,
+                )
+                self.assertEqual((), graph.active_subgoal().risk_action_ids)
+                self.assertTrue(
+                    all(
+                        item.external_impact == "navigation_only"
+                        and not item.risk_types
+                        for item in planner.last_risk_audit.assessments
+                    )
+                )
+
+    def test_unobscured_page_state_does_not_hide_external_effect(self):
+        objective = "当前主界面无遮挡并登录账号"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "外部状态|通用风险"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                objective,
+                device_id="phone-1",
+            )
+
     def test_false_positive_audit_cannot_turn_local_keyboard_mode_external(self):
         objective = "修改验收页软键盘输入法为英文直输模式"
         payload = single_subgoal_payload(

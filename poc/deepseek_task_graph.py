@@ -189,6 +189,9 @@ LOCAL_TRANSIENT_NAVIGATION_PATTERN = re.compile(
 REVERSIBLE_NAVIGATION_EFFECT_PATTERN = re.compile(
     r"(?:刷新|重新加载|重载|重新获取|重新读取|重新导航|返回|后退|"
     r"切换.{0,10}(?:页面|页签|视图|窗口)|打开.{0,10}(?:页面|视图|详情)|"
+    r"(?:页面|界面|主界面).{0,16}(?:无遮挡|不再被遮挡)|"
+    r"(?:无遮挡|不再被遮挡).{0,16}(?:页面|界面|主界面)|"
+    r"(?:遮挡层|弹层|浮层).{0,12}(?:不再可见|已消失|不存在)|"
     r"\b(?:refresh|reload|re\s*load|re\s*fetch|re\s*retrieve|reacquire|"
     r"navigate|return|back|switch\s+(?:page|tab|view|window)|"
     r"open\s+(?:page|view|details?))\b)",

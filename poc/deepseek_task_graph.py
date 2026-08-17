@@ -209,6 +209,13 @@ LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN = re.compile(
     r"\b(?:input|text|query)\s*(?:field|box).{0,28}(?:contains?|shows?|value|text)\b)",
     re.IGNORECASE,
 )
+LOCAL_UNSUBMITTED_WORKFLOW_RISK_PATTERN = re.compile(
+    r"(?:(?:未提交|本机临时|本地临时|临时).{0,12}"
+    r"(?:文本|文字|输入|草稿|内容)|"
+    r"(?:文本|文字|输入|草稿|内容).{0,12}"
+    r"(?:未提交|本机临时|本地临时|临时))",
+    re.IGNORECASE,
+)
 LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN = re.compile(
     r"(?:不|未|勿|不要|不得|禁止|不能|避免|无需|无须|"
     r"do\s+not|don't|never|without)"
@@ -1560,6 +1567,27 @@ def _initial_repair_error_category(error: TaskGraphError) -> str:
     return text
 
 
+def _dependency_ancestor_map(
+    subgoals: dict[str, Subgoal],
+) -> dict[str, frozenset[str]]:
+    """Return transitive dependency ancestors without assuming a valid DAG."""
+
+    result: dict[str, frozenset[str]] = {}
+    for subgoal_id, subgoal in subgoals.items():
+        found: set[str] = set()
+        pending = list(subgoal.depends_on)
+        while pending:
+            current = pending.pop()
+            if current in found:
+                continue
+            found.add(current)
+            parent = subgoals.get(current)
+            if parent is not None:
+                pending.extend(parent.depends_on)
+        result[subgoal_id] = frozenset(found)
+    return result
+
+
 def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskGraph:
     """Remove only self-contradictory low-risk markers from proven local navigation."""
 
@@ -1569,7 +1597,16 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
     local_unsubmitted_input_ids = {
         item.subgoal_id
         for item in graph.subgoals
-        if _is_explicitly_unsubmitted_local_input(
+        if LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(
+            "；".join(
+                (
+                    item.objective,
+                    *item.constraints,
+                    *item.completion_conditions,
+                )
+            )
+        )
+        and _is_explicitly_unsubmitted_local_input(
             graph.raw_user_goal or graph.goal.objective,
             graph.goal.objective,
             item.objective,
@@ -1580,6 +1617,16 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
         )
     }
     removable_ids: set[str] = set()
+    safe_workflow_ids: set[str] = set()
+    ancestor_map = _dependency_ancestor_map(subgoals)
+
+    def dependency_related(left_id: str, right_id: str) -> bool:
+        return (
+            left_id == right_id
+            or left_id in ancestor_map.get(right_id, frozenset())
+            or right_id in ancestor_map.get(left_id, frozenset())
+        )
+
     for risk in graph.risk_actions:
         linked = tuple(subgoals.get(item) for item in risk.subgoal_ids)
         if (
@@ -1597,10 +1644,32 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
             item is not None and item.subgoal_id in local_unsubmitted_input_ids
             for item in linked
         )
+        local_input_workflow = bool(
+            local_unsubmitted_input_ids
+            and risk.risk_level == "low"
+            and _explicitly_denies_external_effect(risk.external_effect)
+            and LOCAL_UNSUBMITTED_WORKFLOW_RISK_PATTERN.search(risk.description)
+            and _infer_external_risk_types(risk.description)
+            <= {"unknown_external_effect"}
+            and all(
+                item is not None
+                and any(
+                    dependency_related(item.subgoal_id, input_id)
+                    for input_id in local_unsubmitted_input_ids
+                )
+                and not _infer_external_risk_types(
+                    item.objective,
+                    *item.constraints,
+                    *item.completion_conditions,
+                )
+                for item in linked
+            )
+        )
         if local_input_only:
             pass
-        elif risk.risk_level != "low" or not _explicitly_denies_external_effect(
-            risk.external_effect
+        elif not local_input_workflow and (
+            risk.risk_level != "low"
+            or not _explicitly_denies_external_effect(risk.external_effect)
         ):
             continue
         if all(
@@ -1613,6 +1682,7 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
             and (
                 LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
                 or item.subgoal_id in local_unsubmitted_input_ids
+                or local_input_workflow
             )
             and not _infer_external_risk_types(
                 item.objective,
@@ -1623,6 +1693,10 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
             if item is not None
         ):
             removable_ids.add(risk.risk_id)
+            if local_input_workflow:
+                safe_workflow_ids.update(
+                    item.subgoal_id for item in linked if item is not None
+                )
     normalized_subgoals = tuple(
         replace(
             item,
@@ -1633,7 +1707,9 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
                 and (
                     LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
                     or item.subgoal_id in local_unsubmitted_input_ids
+                    or item.subgoal_id in safe_workflow_ids
                 )
+                and item.external_impact != "read_only"
                 else item.external_impact
             ),
             risk_action_ids=tuple(
@@ -2466,15 +2542,57 @@ def _explicit_local_input_audit_scopes(
     scopes: set[str | None] = set()
     for subgoal in graph.subgoals:
         group = source_groups.get(subgoal.subgoal_id, ())
-        if _is_explicitly_unsubmitted_local_input(
+        group_texts = tuple(item.text for item in group)
+        if LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(
+            "；".join(group_texts)
+        ) and _is_explicitly_unsubmitted_local_input(
             *global_context,
-            *(item.text for item in group),
+            *group_texts,
             input_text=input_text,
         ):
             scopes.add(subgoal.subgoal_id)
     if scopes:
         scopes.add(None)
     return scopes
+
+
+def _structured_local_input_workflow_scopes(
+    graph: DynamicTaskGraph,
+    source_groups: dict[str | None, list[AuditSource]],
+) -> frozenset[str | None]:
+    """Extend a proven local input scope only along its dependency chain."""
+
+    if graph.risk_actions:
+        return frozenset()
+    direct_scopes = _explicit_local_input_audit_scopes(graph, source_groups)
+    direct_ids = {item for item in direct_scopes if item is not None}
+    if not direct_ids:
+        return frozenset()
+    subgoals = {item.subgoal_id: item for item in graph.subgoals}
+    ancestor_map = _dependency_ancestor_map(subgoals)
+    scopes: set[str | None] = set()
+    for subgoal in graph.subgoals:
+        group = source_groups.get(subgoal.subgoal_id, [])
+        if (
+            subgoal.external_impact not in {"read_only", "navigation_only"}
+            or subgoal.risk_action_ids
+            or not group
+            or any(_infer_external_risk_types(item.text) for item in group)
+        ):
+            continue
+        if any(
+            subgoal.subgoal_id == input_id
+            or input_id in ancestor_map[subgoal.subgoal_id]
+            or subgoal.subgoal_id in ancestor_map[input_id]
+            for input_id in direct_ids
+        ):
+            scopes.add(subgoal.subgoal_id)
+    if scopes == set(subgoals) and not any(
+        _infer_external_risk_types(item.text)
+        for item in source_groups.get(None, [])
+    ):
+        scopes.add(None)
+    return frozenset(scopes)
 
 
 def _canonicalize_literal_visible_evidence_clauses(
@@ -3047,6 +3165,11 @@ def _apply_local_risk_supplements(
             )
         }
     )
+    local_input_workflow_scopes = (
+        _structured_local_input_workflow_scopes(graph, source_groups)
+        if graph is not None
+        else frozenset()
+    )
     current_foreground_keyboard_scope = bool(
         graph is not None
         and len(graph.goal.target_apps) == 1
@@ -3127,6 +3250,26 @@ def _apply_local_risk_supplements(
                 reason=(
                     assessment.reason
                     + "；本地校验确认只改变未提交输入框临时文字且相关提交效果被直接禁止"
+                ),
+            )
+        if (
+            assessment.external_impact in {"external_state", "unknown"}
+            and model_types <= {"unknown_external_effect", "data_mutation"}
+            and inferred <= {"unknown_external_effect"}
+            and assessment.subgoal_id in local_input_workflow_scopes
+        ):
+            expected_impact = next(
+                item.external_impact
+                for item in graph.subgoals
+                if item.subgoal_id == assessment.subgoal_id
+            )
+            assessment = replace(
+                assessment,
+                external_impact=expected_impact,
+                risk_types=(),
+                reason=(
+                    assessment.reason
+                    + "；本地一致性校验确认该节点只属于已证明未提交输入的同一依赖链"
                 ),
             )
         if (

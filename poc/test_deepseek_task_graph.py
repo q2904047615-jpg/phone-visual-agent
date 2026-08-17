@@ -2611,6 +2611,171 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     graph.active_subgoal().external_impact,
                 )
 
+    def test_unsubmitted_input_workflow_removes_one_shared_false_risk(self):
+        raw_goal = (
+            "选择能留下未提交文字的模式，让唯一文本区域显示英文 codex，"
+            "并停在能核对文字的页面；不得搜索、发送、提交、保存或发布。"
+        )
+        for description in (
+            "仅修改未提交的临时文本，不触发任何外部效果。",
+            "只涉及本地临时草稿且没有外部影响。",
+        ):
+            with self.subTest(description=description):
+                payload = single_subgoal_payload(
+                    "能留下未提交文字的模式被选中，且该模式页面可见。",
+                    external_impact="external_state",
+                )
+                payload["goal"]["entities"] = {
+                    "target_ui_label": "能留下未提交文字的模式",
+                    "input_text": "codex",
+                }
+                payload["constraints"] = [
+                    "不得搜索、发送、提交、保存或发布。",
+                ]
+                payload["risk_actions"] = [
+                    {
+                        "risk_id": "no_external_effect",
+                        "description": description,
+                        "external_effect": "无外部影响",
+                        "risk_type": "unknown_external_effect",
+                        "risk_level": "low",
+                        "subgoal_ids": [
+                            "select_mode",
+                            "enter_text",
+                            "verify_text",
+                        ],
+                        "confirmation_required": True,
+                    }
+                ]
+                payload["subgoals"] = [
+                    {
+                        "subgoal_id": "select_mode",
+                        "objective": "能留下未提交文字的模式被选中，且该模式页面可见。",
+                        "status": "active",
+                        "depends_on": [],
+                        "constraints": list(payload["constraints"]),
+                        "completion_conditions": ["目标模式页面可见"],
+                        "completion_evidence": [],
+                        "risk_action_ids": ["no_external_effect"],
+                        "external_impact": "external_state",
+                    },
+                    {
+                        "subgoal_id": "enter_text",
+                        "objective": "该模式中的唯一文本区域内容为英文 codex。",
+                        "status": "pending",
+                        "depends_on": ["select_mode"],
+                        "constraints": list(payload["constraints"]),
+                        "completion_conditions": ["唯一文本区域内容为英文 codex"],
+                        "completion_evidence": [],
+                        "risk_action_ids": ["no_external_effect"],
+                        "external_impact": "external_state",
+                    },
+                    {
+                        "subgoal_id": "verify_text",
+                        "objective": "停在能核对这段文字的页面，且唯一文本区域显示英文 codex。",
+                        "status": "pending",
+                        "depends_on": ["enter_text"],
+                        "constraints": list(payload["constraints"]),
+                        "completion_conditions": ["当前页面可核对文字"],
+                        "completion_evidence": [],
+                        "risk_action_ids": ["no_external_effect"],
+                        "external_impact": "read_only",
+                    },
+                ]
+                payload["active_subgoal_id"] = "select_mode"
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    raw_goal,
+                    device_id="phone-1",
+                )
+
+                self.assertEqual((), graph.risk_actions)
+                self.assertEqual(
+                    ["navigation_only", "navigation_only", "read_only"],
+                    [item.external_impact for item in graph.subgoals],
+                )
+                self.assertTrue(all(not item.risk_action_ids for item in graph.subgoals))
+
+    def test_unsubmitted_input_workflow_keeps_shared_risk_off_dependency_chain(self):
+        payload = single_subgoal_payload(
+            "当前文本区域内容为 codex 且保持未提交",
+            external_impact="external_state",
+        )
+        payload["goal"]["entities"]["input_text"] = "codex"
+        payload["constraints"] = ["不得搜索、发送、提交、保存或发布。"]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "shared_risk",
+                "description": "仅修改未提交的临时文本，不触发任何外部效果。",
+                "external_effect": "无外部影响",
+                "risk_type": "unknown_external_effect",
+                "risk_level": "low",
+                "subgoal_ids": ["target_state", "unrelated_review"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        payload["subgoals"][0]["risk_action_ids"] = ["shared_risk"]
+        payload["subgoals"].append(
+            {
+                "subgoal_id": "unrelated_review",
+                "objective": "另一个独立区域可见",
+                "status": "pending",
+                "depends_on": [],
+                "constraints": [],
+                "completion_conditions": ["另一个独立区域可见"],
+                "completion_evidence": [],
+                "risk_action_ids": ["shared_risk"],
+                "external_impact": "external_state",
+            }
+        )
+
+        with self.assertRaises(TaskGraphError):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload, payload)).plan(
+                "让当前文本区域显示 codex 并保持未提交；不得发送、提交、保存或发布。",
+                device_id="phone-1",
+            )
+
+    def test_unsubmitted_input_workflow_never_removes_shared_send_effect(self):
+        payload = single_subgoal_payload(
+            "当前文本区域内容为 codex 且保持未提交",
+            external_impact="external_state",
+        )
+        payload["goal"]["entities"]["input_text"] = "codex"
+        payload["constraints"] = ["不得提交、保存或发布。"]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "send_effect",
+                "description": "输入完成后发送文字",
+                "external_effect": "消息将发送给外部联系人",
+                "risk_type": "message_or_communication",
+                "risk_level": "low",
+                "subgoal_ids": ["target_state", "send_text"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        payload["subgoals"][0]["risk_action_ids"] = ["send_effect"]
+        payload["subgoals"].append(
+            {
+                "subgoal_id": "send_text",
+                "objective": "文字已发送给外部联系人",
+                "status": "pending",
+                "depends_on": ["target_state"],
+                "constraints": [],
+                "completion_conditions": ["外部联系人收到文字"],
+                "completion_evidence": [],
+                "risk_action_ids": ["send_effect"],
+                "external_impact": "external_state",
+            }
+        )
+
+        with self.assertRaises(TaskGraphError):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                "让当前文本区域显示 codex 并保持未提交，然后发送文字。",
+                device_id="phone-1",
+            )
+
     def test_editable_region_does_not_downgrade_visible_saved_draft(self):
         objective = "文本区域中包含 codex，且草稿已保存"
         payload = single_subgoal_payload(

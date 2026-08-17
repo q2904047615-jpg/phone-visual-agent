@@ -3981,6 +3981,55 @@ class PhaseOneNavigationPolicy:
         )
         return len(matched_groups) == 1
 
+    def _is_goal_bound_local_capability_entry(
+        self,
+        *,
+        task_context: Any,
+        action: Any,
+        element: Any,
+    ) -> bool:
+        """Identify a tap target whose label names a local capability.
+
+        This classification grants no primitive-action authority.  It only
+        lets the later goal-bound navigation checks distinguish tapping a
+        visible entry named ``input``/``drag``/``long press`` from executing
+        the named action.  The later checks still require unique semantic
+        binding, an empty risk graph, and a verifiable navigation result.
+        """
+
+        if (
+            str(self._value(action, "action", "")) != "tap_semantic"
+            or str(
+                self._value(task_context, "current_external_impact", "")
+            )
+            != "navigation_only"
+            or bool(
+                self._value(task_context, "external_action_allowed", False)
+            )
+            or element.role not in self.GOAL_BOUND_TAP_ROLES
+            or element.states.get("goal_relevant") is not True
+            or element.states.get("fully_visible") is not True
+        ):
+            return False
+        if str(action.params.get("label") or "").strip() != str(
+            element.label or ""
+        ).strip():
+            return False
+        if str(action.params.get("target") or "").strip() != str(
+            element.meaning or ""
+        ).strip():
+            return False
+        requested_states = action.params.get("states")
+        if not isinstance(requested_states, dict) or requested_states != element.states:
+            return False
+        normalized = str(element.label or "").strip().casefold()
+        matched_groups = tuple(
+            group
+            for group in self.LOCAL_ACTION_LABEL_MARKER_GROUPS
+            if any(marker in normalized for marker in group)
+        )
+        return len(matched_groups) == 1
+
     @staticmethod
     def _without_literal_local_action_markers(values: Any) -> tuple[str, ...]:
         sanitized: list[str] = []
@@ -4222,6 +4271,11 @@ class PhaseOneNavigationPolicy:
             action=action,
             element=element,
         )
+        local_capability_entry = self._is_goal_bound_local_capability_entry(
+            task_context=task_context,
+            action=action,
+            element=element,
+        )
         candidate_terms = self._binding_terms(candidate_values)
         entity_terms = self._binding_terms(entities)
         subgoal_values = (
@@ -4257,7 +4311,19 @@ class PhaseOneNavigationPolicy:
                 candidate_values,
                 {"target_ui_label": entities.get("target_ui_label")},
             )
+        elif local_capability_entry:
+            # Goal/subgoal binding and the empty risk graph were proved above.
+            # Inspect only the observed entry here so negative task wording
+            # such as "unsubmitted" cannot masquerade as the tap's effect.
+            safety_values = (candidate_values,)
         safety_strings = self._structured_strings(safety_values)
+        if local_capability_entry:
+            task_literals = self._structured_strings((entities, subgoal_values))
+            if task_literals:
+                safety_strings = tuple(
+                    self._strip_exact_literals(value, task_literals)
+                    for value in safety_strings
+                )
         sibling_literal_labels = tuple(
             candidate.label.strip()
             for candidate in scene.elements
@@ -4269,7 +4335,7 @@ class PhaseOneNavigationPolicy:
                 self._strip_exact_literals(value, sibling_literal_labels)
                 for value in safety_strings
             )
-        if literal_local_action_label:
+        if literal_local_action_label or local_capability_entry:
             safety_strings = self._without_literal_local_action_markers(
                 safety_strings
             )
@@ -4790,6 +4856,11 @@ class PhaseOneNavigationPolicy:
             element.label,
             str(action.params.get("target") or ""),
         )
+        local_capability_entry = self._is_goal_bound_local_capability_entry(
+            task_context=task_context,
+            action=action,
+            element=element,
+        )
         if canonical == "forbidden":
             if impact == "external_state" and external_allowed:
                 canonical = "external"
@@ -4815,6 +4886,20 @@ class PhaseOneNavigationPolicy:
                     if action_kind == "long_press"
                     else sanitized_class
                 )
+            elif local_capability_entry:
+                sanitized = self._without_literal_local_action_markers(
+                    (
+                        element.meaning,
+                        element.label,
+                        str(action.params.get("target") or ""),
+                    )
+                )
+                if self._semantic_class(*sanitized) == "forbidden":
+                    return self._deny("候选包含外部状态、输入或破坏性语义。")
+                # Do not authorize from the sanitized label.  An empty class
+                # deliberately falls through to the complete goal-bound tap
+                # proof below.
+                canonical = ""
             else:
                 return self._deny("候选包含外部状态、输入或破坏性语义。")
         if canonical == "refresh":

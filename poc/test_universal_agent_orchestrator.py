@@ -50,6 +50,7 @@ def _scene(
     confidence: float = 0.96,
     scene_confidence: float = 0.95,
     states: dict | None = None,
+    evidence: tuple[str, ...] = ("画面中可见目标",),
     system_ui=None,
 ) -> UIScene:
     current = UIScene(
@@ -65,7 +66,7 @@ def _scene(
                 bounds=bounds,
                 confidence=confidence,
                 states=states or {},
-                evidence=("画面中可见目标",),
+                evidence=evidence,
             ),
         ),
         stable=True,
@@ -982,6 +983,113 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
                 self.assertTrue(result.allowed)
                 self.assertEqual("goal_bound_tap", result.canonical_class)
+
+    def test_allows_paraphrased_goal_to_open_input_named_capability_entry(self) -> None:
+        scene = _scene(
+            meaning="target_mode_selection",
+            label="输入并核对文字",
+            role="list_item",
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=(
+                "列表项文字清晰可读，语义符合‘能留下未提交文字的模式’及后续核对需求。",
+            ),
+        )
+        decision = _decision(scene, goal_complete_on_success=True)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={
+                    "target_ui_label": "能留下未提交文字的模式",
+                    "input_text": "codex",
+                },
+                subgoal_objective="能留下未提交文字的模式在列表中可见",
+                subgoal_completion_conditions=(
+                    "能留下未提交文字的模式在列表中可见",
+                ),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("goal_bound_tap", result.canonical_class)
+
+    def test_allows_english_capability_entry_with_paraphrased_goal(self) -> None:
+        scene = _scene(
+            meaning="select_type_review_mode",
+            label="Type and review text",
+            role="list_item",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_ui_label": "reviewable text mode"},
+                subgoal_objective="open the reviewable text mode",
+                subgoal_completion_conditions=("reviewable text mode is visible",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("goal_bound_tap", result.canonical_class)
+
+    def test_rejects_input_named_capability_entry_with_risk_graph(self) -> None:
+        scene = _scene(
+            meaning="target_mode_selection",
+            label="输入并核对文字",
+            role="list_item",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        decision = _decision(scene)
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"target_ui_label": "能留下文字的模式"},
+                subgoal_objective="能留下文字的模式在列表中可见",
+                subgoal_completion_conditions=("目标模式在列表中可见",),
+                risk_actions=({"risk_action_id": "risk-1"},),
+                risk_action_ids=("risk-1",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertFalse(result.allowed)
+        self.assertIn("风险动作", result.reason)
+
+    def test_actual_input_role_stays_on_separate_focus_path(self) -> None:
+        scene = _scene(
+            meaning="target_text_input",
+            label="输入文字",
+            role="input",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        decision = _decision(scene)
+
+        context = _context(
+            entities={"target_ui_label": "可编辑文字区域"},
+            subgoal_objective="可编辑文字区域可见",
+            subgoal_completion_conditions=("文字区域可见",),
+        )
+        self.assertFalse(
+            self.policy._is_goal_bound_local_capability_entry(
+                task_context=context,
+                action=decision.proposal.action,
+                element=scene.elements[0],
+            )
+        )
+
+        result = self.policy.evaluate(
+            task_context=context,
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed)
+        self.assertEqual("focus_input", result.canonical_class)
 
     def test_rejects_action_like_label_with_other_destructive_semantics(self) -> None:
         scene = _scene(

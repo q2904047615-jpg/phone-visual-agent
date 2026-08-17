@@ -3036,6 +3036,51 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             [item.external_impact for item in graph.subgoals],
         )
 
+    def test_negated_button_state_is_evidence_not_a_low_level_instruction(self):
+        payload = purely_forbidden_draft_payload()
+        payload["goal"]["objective"] = (
+            "在底部唯一消息输入框中保留未发送的英文 codex 草稿，"
+            "且不发送、不提交、不删除、不转发、不发布、不选择其他联系人。"
+        )
+        payload["risk_actions"][2]["description"] = "切换到其他联系人"
+        payload["risk_actions"][2]["external_effect"] = "改变当前聊天对象"
+        payload["completion_conditions"][2]["evidence_required"] = [
+            "发送按钮未被激活或点击",
+            "codex 文字可见",
+        ]
+        normalized_payload = copy.deepcopy(payload)
+        normalized_payload["risk_actions"] = []
+        for index, impact in enumerate(
+            ("navigation_only", "navigation_only", "read_only")
+        ):
+            normalized_payload["subgoals"][index]["risk_action_ids"] = []
+            normalized_payload["subgoals"][index]["external_impact"] = impact
+
+        graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(
+                copy.deepcopy(payload),
+                audit_payloads=[audit_payload_for_graph(normalized_payload)],
+            )
+        ).plan(payload["goal"]["objective"], device_id="phone-1")
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertEqual("ready", graph.status)
+        self.assertEqual("open_chat", graph.active_subgoal_id)
+
+    def test_positive_or_misplaced_click_text_is_not_completion_evidence(self):
+        for evidence in ("发送按钮已点击", "不得点击发送按钮"):
+            with self.subTest(evidence=evidence):
+                payload = purely_forbidden_draft_payload()
+                payload["completion_conditions"][2]["evidence_required"] = [evidence]
+                with self.assertRaisesRegex(TaskGraphError, "低层动作表达"):
+                    DeepSeekTaskGraphPlanner(
+                        FakeProvider(
+                            copy.deepcopy(payload),
+                            copy.deepcopy(payload),
+                            copy.deepcopy(payload),
+                        )
+                    ).plan(payload["goal"]["objective"], device_id="phone-1")
+
     def test_input_preparation_state_removes_shared_purely_forbidden_risk(self):
         payload = local_input_preparation_payload()
         normalized_payload = copy.deepcopy(payload)

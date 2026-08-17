@@ -252,17 +252,26 @@ READ_ONLY_RISK_CONTROL_STATE_PATTERN = re.compile(
     r"(?:(?:发送|提交|删除|清除|转发|发布|保存|分享|回复|关注|支付|"
     r"send|submit|delete|erase|forward|publish|save|share|reply|follow|pay)\s*)?"
     r"(?:按钮|控件|入口|button|control).{0,12}(?:可见|显示|仍能看见|可核对|"
-    r"未被触发|没有触发|未触发|未激活|没有激活|未启用|没有启用|"
+    r"未被触发|没有触发|未触发|未被激活|未激活|没有激活|"
+    r"未被启用|未启用|没有启用|"
     r"visible|shown|not\s+triggered|not\s+activated|not\s+enabled)|"
     r"\b(?:stop|stay|remain)\b.{0,28}\bbefore\b.{0,16}\b(?:button|control)\b|"
     r"\b(?:button|control)\b.{0,16}\b(?:visible|shown)\b)",
     re.IGNORECASE,
 )
 DIRECT_PROHIBITION_CLAUSE_PATTERN = re.compile(
-    r"^\s*(?:不要|不得|禁止|不能|避免|勿|do\s+not|don't|never)\s*"
+    r"^\s*(?:(?:且|并且|并|and)\s*)?"
+    r"(?:不要|不得|禁止|不能|避免|勿|"
+    r"不(?!要|得|能|应|可|只|仅|忘记)|do\s+not|don't|never)\s*"
     r"(?!(?:忘记|漏掉|只|仅|forget\b|fail\b))",
     re.IGNORECASE,
 )
+CONTACT_SELECTION_ACTION_PATTERN = re.compile(
+    r"(?:(?:选择|切换(?:到|至)?|改变当前).{0,8}(?:其他)?(?:联系人|聊天对象)|"
+    r"\b(?:select|switch|change)\b.{0,16}\b(?:contact|recipient)\b)",
+    re.IGNORECASE,
+)
+CONTACT_SELECTION_ANCHOR = "__contact_selection__"
 LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN = re.compile(
     r"(?:不|未|勿|不要|不得|禁止|不能|避免|无需|无须|"
     r"do\s+not|don't|never|without)"
@@ -375,7 +384,10 @@ class CompletionCondition:
         )
         _validate_text_list(self.evidence_required, "evidence_required", required=True)
         for item in self.evidence_required:
-            _reject_low_level_instruction(item, "completion_conditions.evidence_required")
+            _reject_low_level_completion_evidence(
+                item,
+                "completion_conditions.evidence_required",
+            )
         _validate_text_list(self.evidence, "evidence", required=False)
         if self.satisfied and not self.evidence:
             raise TaskGraphError(f"已满足的完成条件缺少可见证据：{self.condition_id}")
@@ -2138,11 +2150,17 @@ def _explicitly_denies_external_effect(value: str) -> bool:
 
 
 def _risk_effect_action_anchors(*values: str) -> frozenset[str]:
-    return frozenset(
+    anchors = {
         match.group(0).casefold()
         for value in values
         for match in RISK_EFFECT_ACTION_PATTERN.finditer(str(value or ""))
-    )
+    }
+    if any(
+        CONTACT_SELECTION_ACTION_PATTERN.search(str(value or ""))
+        for value in values
+    ):
+        anchors.add(CONTACT_SELECTION_ANCHOR)
+    return frozenset(anchors)
 
 
 def _positive_effect_clauses(value: str) -> tuple[str, ...]:
@@ -2155,7 +2173,12 @@ def _positive_effect_clauses(value: str) -> tuple[str, ...]:
 
 
 def _text_directly_negates_action_anchor(value: str, anchor: str) -> bool:
-    for match in re.finditer(re.escape(anchor), str(value or ""), re.IGNORECASE):
+    pattern = (
+        CONTACT_SELECTION_ACTION_PATTERN
+        if anchor == CONTACT_SELECTION_ANCHOR
+        else re.compile(re.escape(anchor), re.IGNORECASE)
+    )
+    for match in pattern.finditer(str(value or "")):
         prefix = str(value or "")[: match.start()].rstrip().lower()
         if (
             DIRECT_EFFECT_NEGATION_PATTERN.search(prefix)
@@ -3373,6 +3396,26 @@ def _reject_low_level_instruction(
         ):
             continue
         raise TaskGraphError(f"DeepSeek 高层任务图包含低层动作表达：{path}")
+
+
+def _reject_low_level_completion_evidence(value: str, path: str) -> None:
+    """Allow only a negated low-level token inside a visible control state.
+
+    DeepSeek occasionally describes the safe pre-submit state as a button being
+    "not activated or clicked".  That is not an instruction, but accepting all
+    negated low-level prose here would let a misplaced constraint masquerade as
+    completion evidence.  The exception therefore requires both the existing
+    read-only risk-control state grammar and independent negation of every
+    low-level token. Positive action history and direct prohibitions still fail
+    and must be repaired into a high-level state or moved to constraints.
+    """
+
+    try:
+        _reject_low_level_instruction(value, path)
+    except TaskGraphError:
+        if not READ_ONLY_RISK_CONTROL_STATE_PATTERN.search(value):
+            raise
+        _reject_low_level_instruction(value, path, allow_negated=True)
 
 
 def _describes_external_state_change(*values: str) -> bool:

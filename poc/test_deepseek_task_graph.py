@@ -2553,6 +2553,99 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual((), graph.risk_actions)
         self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
 
+    def test_explicit_unsubmitted_editable_region_removes_model_data_risk(self):
+        samples = (
+            (
+                "在文本区域中输入 codex，使其保留为未提交草稿",
+                "codex",
+            ),
+            (
+                "在编辑区域中输入 note，使其保留为未提交文字",
+                "note",
+            ),
+        )
+        for objective, input_text in samples:
+            with self.subTest(objective=objective):
+                raw_goal = (
+                    objective
+                    + "；不得搜索、提交、发送、保存或发布，也不得改变外部状态。"
+                )
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="external_state",
+                )
+                payload["goal"]["entities"]["input_text"] = input_text
+                payload["constraints"] = [
+                    "不得搜索、提交、发送、保存或发布",
+                    "不得改变外部状态",
+                ]
+                payload["subgoals"][0]["constraints"] = list(
+                    payload["constraints"]
+                )
+                payload["subgoals"][0]["completion_conditions"] = [
+                    f"文本区域中包含 {input_text}",
+                ]
+                payload["risk_actions"] = [
+                    {
+                        "risk_id": "model_input_risk",
+                        "description": "模型认为输入可能改变数据",
+                        "external_effect": "可能触发自动保存或网络请求",
+                        "risk_type": "data_mutation",
+                        "risk_level": "medium",
+                        "subgoal_ids": ["target_state"],
+                        "confirmation_required": True,
+                    }
+                ]
+                payload["subgoals"][0]["risk_action_ids"] = [
+                    "model_input_risk"
+                ]
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    raw_goal,
+                    device_id="phone-1",
+                )
+
+                self.assertEqual((), graph.risk_actions)
+                self.assertEqual(
+                    "navigation_only",
+                    graph.active_subgoal().external_impact,
+                )
+
+    def test_editable_region_does_not_downgrade_visible_saved_draft(self):
+        objective = "文本区域中包含 codex，且草稿已保存"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="external_state",
+        )
+        payload["goal"]["entities"]["input_text"] = "codex"
+        payload["constraints"] = ["不得发送或发布"]
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        payload["subgoals"][0]["completion_conditions"] = [
+            "文本区域中包含 codex",
+            "草稿已保存",
+        ]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "save_effect",
+                "description": "保存草稿",
+                "external_effect": "草稿已保存到外部数据",
+                "risk_type": "data_mutation",
+                "risk_level": "medium",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["risk_action_ids"] = ["save_effect"]
+        payload["status"] = "awaiting_confirmation"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            objective + "；不得发送或发布。",
+            device_id="phone-1",
+        )
+
+        self.assertEqual("external_state", graph.active_subgoal().external_impact)
+        self.assertEqual(("save_effect",), graph.active_subgoal().risk_action_ids)
+
     def test_explicit_unsubmitted_input_never_downgrades_real_save_effect(self):
         objective = (
             "当前输入框内容为314159并保持未提交；草稿已保存；"

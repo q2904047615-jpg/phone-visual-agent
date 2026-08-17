@@ -984,7 +984,18 @@ class UniversalAgentOrchestrator:
         classes = {
             name
             for name, markers in {
-                "page": ("页面", "网页", " page", "screen", "view"),
+                "page": (
+                    "页面",
+                    "网页",
+                    "界面",
+                    "首页",
+                    "主界面",
+                    " page",
+                    "screen",
+                    "view",
+                    "interface",
+                    "app home",
+                ),
                 "title": ("标题", "题头", "title", "heading"),
                 "list": ("列表", "清单", " list"),
                 "input": ("输入框", "文本框", "input field", "textbox"),
@@ -1006,6 +1017,65 @@ class UniversalAgentOrchestrator:
             if any(marker in text for marker in markers)
         }
         return frozenset(classes)
+
+    @classmethod
+    def _target_app_identity_terms(cls, *values: Any) -> frozenset[str]:
+        return cls._presence_binding_terms(*values).difference(
+            {"app", "application", "android", "com", "应用", "程序"}
+        )
+
+    @classmethod
+    def _referenced_target_app_pages(
+        cls,
+        *,
+        graph: DynamicTaskGraph,
+        presence_text: str,
+    ) -> tuple[Any, ...]:
+        """Return target Apps whose named page is the claimed visible state.
+
+        A launcher affordance labelled with an App name proves that the App can
+        be opened; it does not prove that the named App page is already in the
+        foreground.  Keep the binding structural and graph-derived so the same
+        rule applies to every App and every natural-language goal.
+        """
+
+        if "page" not in cls._presence_surface_classes(presence_text):
+            return ()
+        presence_terms = cls._presence_binding_terms(presence_text)
+        referenced = []
+        for target_app in graph.goal.target_apps:
+            if str(target_app.app_id or "").strip().casefold() == "current_foreground":
+                continue
+            app_terms = cls._target_app_identity_terms(
+                target_app.app_id,
+                target_app.app_name,
+            )
+            if app_terms and app_terms.intersection(presence_terms):
+                referenced.append(target_app)
+        return tuple(referenced)
+
+    @classmethod
+    def _scene_foreground_matches_target_app_page(
+        cls,
+        *,
+        scene: Any,
+        target_apps: tuple[Any, ...],
+    ) -> bool:
+        foreground = str(getattr(scene, "foreground_app_id", "") or "").strip()
+        if not foreground or foreground.casefold() == "unknown":
+            return False
+        foreground_terms = cls._target_app_identity_terms(foreground)
+        for target_app in target_apps:
+            app_id = str(target_app.app_id or "").strip()
+            if app_id and foreground.casefold() == app_id.casefold():
+                return True
+            app_terms = cls._target_app_identity_terms(
+                target_app.app_id,
+                target_app.app_name,
+            )
+            if foreground_terms and foreground_terms.intersection(app_terms):
+                return True
+        return False
 
     @classmethod
     def _intrinsic_presence_surface_classes(cls, item: Any) -> frozenset[str]:
@@ -1155,6 +1225,15 @@ class UniversalAgentOrchestrator:
                 *tuple(current.completion_conditions or ()),
             )
         )
+        referenced_app_pages = self._referenced_target_app_pages(
+            graph=graph,
+            presence_text=presence_text,
+        )
+        if referenced_app_pages and not self._scene_foreground_matches_target_app_page(
+            scene=scene,
+            target_apps=referenced_app_pages,
+        ):
+            return None
         if self._is_explicit_multi_presence_text(presence_text):
             candidates = self._multi_presence_candidates(
                 subgoal=current,

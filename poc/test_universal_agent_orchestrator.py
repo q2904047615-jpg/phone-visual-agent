@@ -2616,6 +2616,61 @@ class UniversalAgentStartTests(unittest.TestCase):
         )
 
     @staticmethod
+    def _named_app_page_graph(*, app_id: str, app_name: str) -> DynamicTaskGraph:
+        base = _graph()
+        graph = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective=f"确认{app_name}首页可见",
+                target_apps=(TargetApp(app_id=app_id, app_name=app_name),),
+                entities={"target_ui_label": app_name},
+            ),
+            subgoals=(
+                replace(
+                    base.subgoals[0],
+                    subgoal_id="named-app-page-visible",
+                    objective=f"{app_name}首页可见",
+                    completion_conditions=(f"{app_name}应用界面可见",),
+                    external_impact="navigation_only",
+                ),
+                Subgoal(
+                    subgoal_id="safe-followup",
+                    objective="下一安全目标可见",
+                    status="pending",
+                    depends_on=("named-app-page-visible",),
+                    constraints=("只读",),
+                    completion_conditions=("下一安全目标可见",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+            ),
+            active_subgoal_id="named-app-page-visible",
+            raw_user_goal=f"只读确认{app_name}首页",
+        )
+        graph.validate()
+        return graph
+
+    @staticmethod
+    def _advance_named_app_page_graph(graph: DynamicTaskGraph) -> DynamicTaskGraph:
+        revised = replace(
+            graph,
+            revision=graph.revision + 1,
+            subgoals=(
+                replace(
+                    graph.subgoals[0],
+                    status="completed",
+                    completion_evidence=(graph.subgoals[0].completion_conditions[0],),
+                ),
+                replace(graph.subgoals[1], status="active"),
+            ),
+            active_subgoal_id="safe-followup",
+        )
+        revised.validate()
+        return revised
+
+    @staticmethod
     def _read_only_locate_graph() -> DynamicTaskGraph:
         base = _graph()
         graph = replace(
@@ -3190,6 +3245,151 @@ class UniversalAgentStartTests(unittest.TestCase):
                 )
 
         self.assertEqual(0, adapter.execute_calls)
+
+    def test_launcher_app_entry_cannot_prove_named_target_app_page(self) -> None:
+        cases = (
+            ("browser", "浏览器", "open_browser"),
+            ("phone_manager", "手机管家", "open_phone_manager"),
+            ("settings", "设置", "open_settings"),
+        )
+        for app_id, app_name, meaning in cases:
+            with self.subTest(app_id=app_id):
+                graph = self._named_app_page_graph(
+                    app_id=app_id,
+                    app_name=app_name,
+                )
+                planner = FakeDeepSeekPlanner(graph)
+                qwen = FakeQwenObserver()
+                launcher = replace(
+                    _scene(
+                        meaning=meaning,
+                        label=app_name,
+                        states={"goal_relevant": True, "fully_visible": True},
+                    ),
+                    app_id="launcher",
+                    screen_id="home_screen",
+                    summary=f"手机主桌面可见，桌面上有{app_name}入口图标。",
+                )
+                adapter = FakeAdapter(launcher)
+
+                with tempfile.TemporaryDirectory() as temp:
+                    session = self._orchestrator(planner, qwen, adapter).start(
+                        session_id=f"session-launcher-{app_id}",
+                        raw_goal=graph.raw_user_goal,
+                        device_id="device-1",
+                        run_dir=Path(temp),
+                    )
+
+                self.assertEqual("awaiting_confirmation", session.status)
+                self.assertEqual([], planner.replan_calls)
+                self.assertEqual(1, len(qwen.calls))
+                self.assertEqual("action", session.qwen_decision.proposal.status)
+                self.assertEqual(0, session.physical_actions)
+
+    def test_matching_foreground_app_can_prove_named_target_app_page(self) -> None:
+        graph = self._named_app_page_graph(
+            app_id="local_tool",
+            app_name="本地工具",
+        )
+        planner = FakeDeepSeekPlanner(
+            graph,
+            replan_result=self._advance_named_app_page_graph(graph),
+        )
+        page = replace(
+            _scene(
+                meaning="local_tool_home_title",
+                label="本地工具",
+                role="text",
+                states={"goal_relevant": True, "fully_visible": True},
+            ),
+            app_id="local_tool",
+            screen_id="local_tool_home",
+            summary="本地工具首页可见。",
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                planner,
+                FakeQwenObserver(),
+                FakeAdapter(page),
+            ).start(
+                session_id="session-target-app-page",
+                raw_goal=graph.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual("safe-followup", session.task_graph.active_subgoal_id)
+        self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
+        self.assertEqual(0, session.physical_actions)
+
+    def test_shared_generic_app_token_does_not_match_other_foreground(self) -> None:
+        graph = self._named_app_page_graph(
+            app_id="target_app",
+            app_name="目标工具",
+        )
+        other_app_scene = replace(
+            _scene(),
+            app_id="other_app",
+            screen_id="other_app_home",
+            summary="另一个工具首页可见。",
+        )
+
+        self.assertFalse(
+            UniversalAgentOrchestrator._scene_foreground_matches_target_app_page(
+                scene=other_app_scene,
+                target_apps=graph.goal.target_apps,
+            )
+        )
+
+    def test_target_app_does_not_block_launcher_home_presence_checkpoint(self) -> None:
+        base = self._named_app_page_graph(app_id="camera", app_name="相机")
+        graph = replace(
+            base,
+            goal=replace(base.goal, objective="先确认手机主桌面可见"),
+            subgoals=(
+                replace(
+                    base.subgoals[0],
+                    objective="手机主桌面可见",
+                    completion_conditions=("手机主桌面可见",),
+                ),
+                base.subgoals[1],
+            ),
+            raw_user_goal="先确认主桌面再进入相机",
+        )
+        graph.validate()
+        planner = FakeDeepSeekPlanner(
+            graph,
+            replan_result=self._advance_named_app_page_graph(graph),
+        )
+        launcher = replace(
+            _scene(
+                meaning="open_camera",
+                label="相机",
+                states={"goal_relevant": True, "fully_visible": True},
+            ),
+            app_id="launcher",
+            screen_id="home_screen",
+            summary="手机主桌面可见。",
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                planner,
+                FakeQwenObserver(),
+                FakeAdapter(launcher),
+            ).start(
+                session_id="session-launcher-home-checkpoint",
+                raw_goal=graph.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual("safe-followup", session.task_graph.active_subgoal_id)
+        self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
+        self.assertEqual(0, session.physical_actions)
 
     def test_read_only_successor_requires_reobservation_without_releasing_device(self) -> None:
         initial = self._read_only_locate_graph()

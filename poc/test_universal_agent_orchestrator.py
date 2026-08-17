@@ -3286,6 +3286,57 @@ class UniversalAgentStartTests(unittest.TestCase):
                 self.assertEqual("action", session.qwen_decision.proposal.status)
                 self.assertEqual(0, session.physical_actions)
 
+    def test_settings_search_page_cannot_prove_named_launcher_page(self) -> None:
+        base = self._named_app_page_graph(
+            app_id="current_foreground",
+            app_name="当前前台应用",
+        )
+        graph = replace(
+            base,
+            goal=replace(base.goal, objective="让手机主桌面页面成为当前前台"),
+            subgoals=(
+                replace(
+                    base.subgoals[0],
+                    objective="手机主桌面页面可见",
+                    completion_conditions=("手机主桌面页面在前台可见",),
+                ),
+                base.subgoals[1],
+            ),
+            raw_user_goal="让手机主桌面页面成为当前前台",
+        )
+        graph.validate()
+        planner = FakeDeepSeekPlanner(
+            graph,
+            replan_result=self._advance_named_app_page_graph(graph),
+        )
+        settings = replace(
+            _scene(
+                meaning="search_settings",
+                label="搜索系统设置项",
+                role="input",
+                states={"goal_relevant": True, "fully_visible": True},
+            ),
+            app_id="com.android.settings",
+            screen_id="settings_search",
+            summary="设置搜索页面，底部软键盘可见。",
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                planner,
+                FakeQwenObserver(),
+                FakeAdapter(settings),
+            ).start(
+                session_id="session-settings-not-launcher",
+                raw_goal=graph.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(0, session.physical_actions)
+
     def test_matching_foreground_app_can_prove_named_target_app_page(self) -> None:
         graph = self._named_app_page_graph(
             app_id="local_tool",

@@ -19,6 +19,7 @@ from deepseek_task_graph import (
     DynamicTaskGraph,
     ObservedState,
     VerifiedActionTransition,
+    named_visual_identity_is_grounded,
 )
 from device_exclusivity import InterProcessLease
 from generic_action_adapter import GenericActionAdapterError
@@ -1077,6 +1078,58 @@ class UniversalAgentOrchestrator:
                 return True
         return False
 
+    @staticmethod
+    def _scene_page_identity_facts(scene: Any) -> tuple[str, ...]:
+        facts = [
+            json.dumps(
+                {
+                    "app_id": str(getattr(scene, "app_id", "") or ""),
+                    "foreground_app_id": str(
+                        getattr(scene, "foreground_app_id", "") or ""
+                    ),
+                    "screen_id": str(getattr(scene, "screen_id", "") or ""),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        ]
+        for element in tuple(getattr(scene, "elements", ()) or ()):
+            role = str(getattr(element, "role", "") or "").casefold()
+            meaning = str(getattr(element, "meaning", "") or "").casefold()
+            if role not in {"text", "container"}:
+                continue
+            if role != "container" and not any(
+                marker in meaning
+                for marker in ("page", "screen", "view", "home", "title", "heading")
+            ):
+                continue
+            facts.append(
+                json.dumps(
+                    {
+                        "role": role,
+                        "meaning": meaning,
+                        "label": str(getattr(element, "label", "") or ""),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        return tuple(facts)
+
+    @classmethod
+    def _scene_named_presence_is_grounded(
+        cls,
+        *,
+        scene: Any,
+        texts: tuple[str, ...],
+    ) -> bool:
+        return named_visual_identity_is_grounded(
+            texts,
+            cls._scene_page_identity_facts(scene),
+        )
+
     @classmethod
     def _intrinsic_presence_surface_classes(cls, item: Any) -> frozenset[str]:
         """Return surface types owned by an element, not words near it."""
@@ -1225,6 +1278,11 @@ class UniversalAgentOrchestrator:
                 *tuple(current.completion_conditions or ()),
             )
         )
+        if not self._scene_named_presence_is_grounded(
+            scene=scene,
+            texts=(current.objective, *tuple(current.completion_conditions or ())),
+        ):
+            return None
         referenced_app_pages = self._referenced_target_app_pages(
             graph=graph,
             presence_text=presence_text,

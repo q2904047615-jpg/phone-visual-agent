@@ -2347,6 +2347,23 @@ def _identity_anchor_is_grounded(anchor: str, facts: tuple[str, ...]) -> bool:
     return False
 
 
+def named_visual_identity_is_grounded(
+    texts: tuple[str, ...],
+    facts: tuple[str, ...],
+) -> bool:
+    """Return whether a named visual container is grounded by structured facts.
+
+    Unnamed element/state descriptions are outside this page-identity gate. A
+    real named page, screen, view, panel, or card must have at least one
+    structured identity fact; prose summaries are intentionally not sufficient.
+    """
+
+    anchor = _named_visual_identity_anchor(texts)
+    if not anchor:
+        return True
+    return bool(facts and _identity_anchor_is_grounded(anchor, facts))
+
+
 def _require_named_visual_identity_grounding(
     texts: tuple[str, ...],
     observation: ObservedState,

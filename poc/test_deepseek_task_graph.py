@@ -2390,6 +2390,56 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     )
                 )
 
+    def test_risk_bound_active_initial_graph_enters_confirmation_gate(self):
+        for impact, status in (
+            ("external_state", "ready"),
+            ("unknown", "running"),
+        ):
+            with self.subTest(impact=impact, status=status):
+                payload = single_subgoal_payload(
+                    "本机硬件状态处于关闭状态",
+                    external_impact=impact,
+                )
+                payload["status"] = status
+                payload["risk_actions"] = [
+                    {
+                        "risk_id": "hardware_state_change",
+                        "description": "改变本机硬件状态",
+                        "external_effect": "本机硬件状态发生变化",
+                        "risk_type": "unknown_external_effect",
+                        "risk_level": "low",
+                        "subgoal_ids": ["target_state"],
+                        "confirmation_required": True,
+                    }
+                ]
+                payload["subgoals"][0]["risk_action_ids"] = [
+                    "hardware_state_change"
+                ]
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    "使本机硬件状态发生变化",
+                    device_id="phone-1",
+                )
+
+                self.assertEqual("awaiting_confirmation", graph.status)
+                self.assertEqual(
+                    ("hardware_state_change",),
+                    graph.active_subgoal().risk_action_ids,
+                )
+
+    def test_initial_confirmation_status_never_mints_missing_risk(self):
+        payload = single_subgoal_payload(
+            "本机硬件状态处于关闭状态",
+            external_impact="external_state",
+        )
+        payload["status"] = "ready"
+
+        with self.assertRaisesRegex(TaskGraphError, "必须关联风险"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                "改变本机硬件状态",
+                device_id="phone-1",
+            )
+
     def test_unsubmitted_input_without_explicit_effect_boundary_stays_external(self):
         objective = "顶部搜索输入框中的文字为 Agent123"
         payload = single_subgoal_payload(
@@ -2892,20 +2942,23 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         self.assertIn("最初的用户目标", provider.messages[3][0]["content"])
 
-    def test_active_external_state_subgoal_must_await_confirmation(self):
+    def test_active_external_state_subgoal_is_promoted_to_confirmation(self):
         payload = base_payload()
         payload["status"] = "running"
         payload["subgoals"][0]["status"] = "skipped"
         payload["subgoals"][1]["status"] = "active"
         payload["subgoals"][1]["depends_on"] = []
         payload["active_subgoal_id"] = "save_target"
-        with self.assertRaisesRegex(TaskGraphError, "必须等待用户确认"):
-            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
-                "目标",
-                device_id="phone-1",
-            )
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "目标",
+            device_id="phone-1",
+        )
 
-    def test_unknown_impact_cannot_auto_advance(self):
+        self.assertEqual("awaiting_confirmation", graph.status)
+        self.assertEqual("save_target", graph.active_subgoal_id)
+        self.assertEqual(("save_place",), graph.active_subgoal().risk_action_ids)
+
+    def test_unknown_impact_enters_confirmation_without_auto_advance(self):
         payload = base_payload()
         payload["risk_actions"] = [
             {
@@ -2924,11 +2977,15 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         payload["subgoals"][1]["completion_conditions"] = ["目标地点详情可见"]
         payload["subgoals"][1]["external_impact"] = "read_only"
         payload["subgoals"][1]["risk_action_ids"] = []
-        with self.assertRaisesRegex(TaskGraphError, "必须等待用户确认"):
-            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
-                "目标",
-                device_id="phone-1",
-            )
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "目标",
+            device_id="phone-1",
+        )
+
+        self.assertEqual("awaiting_confirmation", graph.status)
+        self.assertEqual("locate_target", graph.active_subgoal_id)
+        self.assertEqual("unknown", graph.active_subgoal().external_impact)
+        self.assertEqual(("unknown_effect",), graph.active_subgoal().risk_action_ids)
 
     def test_read_only_and_navigation_subgoals_are_allowed(self):
         payload = base_payload()

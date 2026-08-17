@@ -1062,6 +1062,7 @@ class DeepSeekTaskGraphPlanner:
             )
             graph = _normalize_initial_local_navigation(graph)
             graph = _normalize_unique_active_frontier(graph)
+            graph = _normalize_initial_confirmation_status(graph)
             graph.validate()
         except TaskGraphError as exc:
             if not _retryable_initial_output_error(exc):
@@ -1081,6 +1082,7 @@ class DeepSeekTaskGraphPlanner:
             )
             graph = _normalize_initial_local_navigation(graph)
             graph = _normalize_unique_active_frontier(graph)
+            graph = _normalize_initial_confirmation_status(graph)
             try:
                 graph.validate()
             except TaskGraphError as repair_error:
@@ -1104,6 +1106,7 @@ class DeepSeekTaskGraphPlanner:
                 )
                 graph = _normalize_initial_local_navigation(graph)
                 graph = _normalize_unique_active_frontier(graph)
+                graph = _normalize_initial_confirmation_status(graph)
                 graph.validate()
         try:
             self._audit_and_validate_graph(graph)
@@ -1120,6 +1123,7 @@ class DeepSeekTaskGraphPlanner:
             )
             graph = _normalize_initial_local_navigation(graph)
             graph = _normalize_unique_active_frontier(graph)
+            graph = _normalize_initial_confirmation_status(graph)
             graph.validate()
             self._audit_and_validate_graph(graph)
         if (
@@ -1739,6 +1743,27 @@ def _normalize_unique_active_frontier(graph: DynamicTaskGraph) -> DynamicTaskGra
         subgoals=normalized_subgoals,
         active_subgoal_id=selected.subgoal_id,
     )
+
+
+def _normalize_initial_confirmation_status(
+    graph: DynamicTaskGraph,
+) -> DynamicTaskGraph:
+    """Promote a fully risk-bound active node to the mandatory confirmation gate."""
+
+    if graph.status not in {"ready", "running"}:
+        return graph
+    active = tuple(item for item in graph.subgoals if item.status == "active")
+    if len(active) != 1 or graph.active_subgoal_id != active[0].subgoal_id:
+        return graph
+    current = active[0]
+    declared_risk_ids = {risk.risk_id for risk in graph.risk_actions}
+    if (
+        current.external_impact not in {"external_state", "unknown"}
+        or not current.risk_action_ids
+        or not set(current.risk_action_ids) <= declared_risk_ids
+    ):
+        return graph
+    return replace(graph, status="awaiting_confirmation")
 
 
 def _explicitly_denies_external_effect(value: str) -> bool:

@@ -4667,6 +4667,12 @@ def _apply_input_structure_audit(
             }:
                 raise UISceneError("应用输入结构字段不符合协议。")
             button = item.get("right_button")
+            if _can_discard_incomplete_separate_right_button(item, button):
+                # The incomplete adjacent control grants no authority and is
+                # spatially disjoint from the application input. Discard only
+                # that optional object; never widen or move the input bounds.
+                item["right_button"] = None
+                button = None
             if button is not None and (
                 not isinstance(button, dict)
                 or set(button) != {"label", "bounds", "confidence"}
@@ -5043,6 +5049,30 @@ def _is_incomplete_optional_keyboard_mode_switch(value: Any) -> bool:
         "target_mode",
     }
     return isinstance(value, dict) and set(value) < required
+
+
+def _can_discard_incomplete_separate_right_button(
+    input_item: Any,
+    value: Any,
+) -> bool:
+    """Discard only a schema-subset control proven outside the input bounds."""
+
+    required = {"label", "bounds", "confidence"}
+    if (
+        not isinstance(input_item, dict)
+        or not isinstance(value, dict)
+        or not set(value) < required
+        or "bounds" not in value
+        or not _valid_1000_bounds(input_item.get("bounds"))
+        or not _valid_1000_bounds(value.get("bounds"))
+    ):
+        return False
+    input_bounds = tuple(float(part) for part in input_item["bounds"])
+    button_bounds = tuple(float(part) for part in value["bounds"])
+    return bool(
+        button_bounds[0] >= input_bounds[2] - 10
+        and _vertical_overlap_ratio(button_bounds, input_bounds) >= 0.8
+    )
 
 
 def _input_structure_diagnostic_shape(raw: str) -> dict[str, Any]:

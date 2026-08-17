@@ -15,6 +15,7 @@ from capability_acceptance import _validate_live_promotion_source
 from generic_action_adapter import (
     GenericActionAdapterError,
     GenericSingleActionAdapter as _GenericSingleActionAdapter,
+    stable_qwerty_ocr_anchors,
 )
 from generic_intent import GenericIntentDraft
 from generic_scene_observer import GenericSceneObserver, _local_frame_fingerprint
@@ -496,14 +497,52 @@ class RevealSystemNavigationControllerTests(unittest.TestCase):
 
 
 class GenericActionAdapterTests(unittest.TestCase):
-    def _adapter(self, observer, robot):
+    def _adapter(self, observer, robot, **kwargs):
         return GenericSingleActionAdapter(
             capture=lambda: Image.new("RGB", (540, 960), "gray"),
             observer=observer,
             robot=robot,
             frame_interval=0,
             post_action_settle=0,
+            **kwargs,
         )
+
+    def test_stable_local_ocr_snaps_qwerty_row_heights(self):
+        payload = {
+            "lines": [
+                {
+                    "words": [
+                        {"text": "q", "top": 1000, "height": 24},
+                        {"text": "w", "top": 1002, "height": 22},
+                        {"text": "e", "top": 1001, "height": 24},
+                        {"text": "c", "top": 1204, "height": 22},
+                        {"text": "v", "top": 1203, "height": 24},
+                        {"text": "b", "top": 1205, "height": 22},
+                    ]
+                }
+            ]
+        }
+        frames = [Image.new("RGB", (810, 1440), "gray") for _ in range(3)]
+        anchors = {
+            "q": [120, 730],
+            "p": [880, 730],
+            "a": [180, 810],
+            "l": [820, 810],
+            "z": [280, 890],
+            "m": [720, 890],
+            "backspace": [880, 890],
+        }
+
+        snapped = stable_qwerty_ocr_anchors(
+            frames,
+            anchors,
+            ocr_recognizer=lambda *_args, **_kwargs: payload,
+        )
+
+        self.assertEqual(703, snapped["q"][1])
+        self.assertEqual(774, snapped["a"][1])
+        self.assertEqual(844, snapped["z"][1])
+        self.assertEqual(844, snapped["backspace"][1])
 
     def _assert_public_observation_failure_before_robot(self, responses):
         provider = RawSceneProvider(responses)
@@ -998,7 +1037,16 @@ class GenericActionAdapterTests(unittest.TestCase):
             },
         )
 
-        result = self._adapter(observer, robot).execute(
+        snapped_anchors = {
+            key: list(value)
+            for key, value in TEST_QWERTY_GEOMETRY["anchors"].items()
+        }
+        result = self._adapter(
+            observer,
+            robot,
+            qwerty_row_snapper=lambda _frames, _anchors: snapped_anchors,
+            require_local_qwerty_row_snap=True,
+        ).execute(
             requested_action=action,
             planned_scene=planned,
             goal=goal(),
@@ -1006,8 +1054,35 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual([("input", "agent")], robot.actions)
-        self.assertEqual(TEST_QWERTY_GEOMETRY, robot.keyboard_layouts[0])
+        self.assertEqual(
+            {
+                **TEST_QWERTY_GEOMETRY,
+                "anchors": snapped_anchors,
+                "row_snap_source": "stable_local_ocr",
+            },
+            robot.keyboard_layouts[0],
+        )
         self.assertEqual(1, result.physical_actions)
+
+        blocked_robot = FakeRobot()
+        blocked_observer = FakeSceneObserver([fresh, after])
+        with self.assertRaisesRegex(
+            GenericActionAdapterError,
+            "本地 OCR 未能稳定确认 QWERTY 三行中心",
+        ) as caught:
+            self._adapter(
+                blocked_observer,
+                blocked_robot,
+                qwerty_row_snapper=lambda _frames, _anchors: None,
+                require_local_qwerty_row_snap=True,
+            ).execute(
+                requested_action=action,
+                planned_scene=planned,
+                goal=goal(),
+                confirmed=True,
+            )
+        self.assertEqual(0, caught.exception.physical_actions)
+        self.assertEqual([], blocked_robot.actions)
         self.assertEqual(2, observer.calls)
 
     def test_confirmed_input_accepts_unique_overlapping_post_input_alias(self):

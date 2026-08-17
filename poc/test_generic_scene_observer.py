@@ -5336,6 +5336,61 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
         self.assertEqual([1800, 700, 700], provider.max_tokens_seen)
 
+    def test_incomplete_disjoint_right_button_is_discarded_without_input_widening(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[190, 530, 720, 590],
+                    text="codex",
+                    right_button={
+                        "label": "发送",
+                        "bounds": [790, 530, 930, 590],
+                    },
+                )
+            ]
+        )
+        scene = GenericSceneObserver(
+            SequenceProvider([empty, empty, audit])
+        ).observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "确认底部输入框中的 codex 草稿仍可见",
+                "entities": {"input_text": "codex"},
+            },
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertEqual("local_audited_input_1", candidate.element_id)
+        self.assertEqual((0.19, 0.53, 0.72, 0.59), candidate.bounds)
+        self.assertEqual("codex", candidate.states["value"])
+        self.assertFalse(
+            any(item.element_id == "local_audited_adjacent_button_1" for item in scene.elements)
+        )
+
+    def test_incomplete_right_button_inside_combined_bounds_remains_invalid(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[190, 530, 930, 590],
+                    text="codex",
+                    right_button={
+                        "label": "发送",
+                        "bounds": [790, 530, 930, 590],
+                    },
+                )
+            ]
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "right_button"):
+            GenericSceneObserver(SequenceProvider([empty, empty, audit])).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "确认输入框中的 codex"},
+            )
+
     def test_top_obstruction_prevents_audit_crop_from_promoting_hidden_input(self) -> None:
         empty = scene_payload()
         empty["elements"] = []

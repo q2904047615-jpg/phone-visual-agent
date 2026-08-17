@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import statistics
 import time
 import re
 import uuid
@@ -14,6 +15,7 @@ from PIL import Image, ImageChops, ImageStat
 
 from generic_intent import GenericIntentDraft
 from generic_scene_observer import GenericSceneObserver
+from ocr_runtime import recognize as recognize_ocr
 from observation_images import measure_local_stability
 from orientation_safety import (
     OrientationCredential,
@@ -59,6 +61,107 @@ _URL_SECRET_RE = re.compile(
 )
 _URL_USERINFO_RE = re.compile(r"(https?://)[^/@\s:]+:[^/@\s]+@", re.IGNORECASE)
 _OPENAI_STYLE_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
+
+
+def stable_qwerty_ocr_anchors(
+    frames: tuple[Image.Image, ...] | list[Image.Image],
+    anchors: dict[str, Any],
+    *,
+    ocr_recognizer: Any = recognize_ocr,
+) -> dict[str, list[int]] | None:
+    """Snap QWERTY row heights to stable local OCR glyph centers.
+
+    Qwen supplies the semantic keyboard contract and coarse row endpoints.
+    Local OCR contributes only the three vertical row centers. It cannot add
+    characters, choose text, or authorize an input action.
+    """
+
+    frame_list = list(frames)[-3:]
+    if len(frame_list) != 3 or not isinstance(anchors, dict):
+        return None
+    try:
+        qwerty_keyboard_config_from_anchors(anchors)
+        original = {
+            key: [round(float(value[0])), round(float(value[1]))]
+            for key, value in anchors.items()
+            if isinstance(value, (list, tuple)) and len(value) == 2
+        }
+        if set(original) != {"q", "p", "a", "l", "z", "m", "backspace"}:
+            return None
+        per_frame_rows: list[tuple[float, float]] = []
+        top_letters = set("qwertyuiop")
+        bottom_letters = set("zxcvbnm")
+        for frame in frame_list:
+            payload = ocr_recognizer(
+                frame.convert("RGB"),
+                "zh-Hans-CN",
+                scale=3.0,
+            )
+            expected_top = frame.height * (
+                (original["q"][1] + original["p"][1]) / 2000.0
+            )
+            expected_bottom = frame.height * (
+                (original["z"][1] + original["m"][1]) / 2000.0
+            )
+            tolerance = frame.height * 0.08
+            top_hits: dict[str, float] = {}
+            bottom_hits: dict[str, float] = {}
+            for line in payload.get("lines") or []:
+                for word in line.get("words") or []:
+                    text = str(word.get("text") or "").strip().casefold()
+                    if len(text) != 1 or not text.isascii() or not text.isalpha():
+                        continue
+                    center_y = float(word.get("top", 0)) + float(
+                        word.get("height", 0)
+                    ) / 2.0
+                    if text in top_letters and abs(center_y - expected_top) <= tolerance:
+                        top_hits[text] = center_y
+                    if (
+                        text in bottom_letters
+                        and abs(center_y - expected_bottom) <= tolerance
+                    ):
+                        bottom_hits[text] = center_y
+            if len(top_hits) < 2 or len(bottom_hits) < 2:
+                return None
+            top_y = float(statistics.median(top_hits.values()))
+            bottom_y = float(statistics.median(bottom_hits.values()))
+            gap = bottom_y - top_y
+            if not frame.height * 0.08 <= gap <= frame.height * 0.22:
+                return None
+            per_frame_rows.append((top_y, bottom_y))
+
+        if (
+            max(item[0] for item in per_frame_rows)
+            - min(item[0] for item in per_frame_rows)
+            > 10
+            or max(item[1] for item in per_frame_rows)
+            - min(item[1] for item in per_frame_rows)
+            > 10
+        ):
+            return None
+        height = frame_list[-1].height
+        top_y = round(1000 * statistics.median(item[0] for item in per_frame_rows) / height)
+        bottom_y = round(
+            1000 * statistics.median(item[1] for item in per_frame_rows) / height
+        )
+        middle_y = round((top_y + bottom_y) / 2.0)
+        if (
+            abs(top_y - original["q"][1]) > 90
+            or abs(middle_y - original["a"][1]) > 90
+            or abs(bottom_y - original["z"][1]) > 90
+        ):
+            return None
+        snapped = {key: list(value) for key, value in original.items()}
+        for key in ("q", "p"):
+            snapped[key][1] = top_y
+        for key in ("a", "l"):
+            snapped[key][1] = middle_y
+        for key in ("z", "m", "backspace"):
+            snapped[key][1] = bottom_y
+        qwerty_keyboard_config_from_anchors(snapped)
+        return snapped
+    except Exception:
+        return None
 
 
 def _redact_qwen_failure_response(raw: str) -> str:
@@ -364,6 +467,12 @@ class GenericSingleActionAdapter:
         post_action_timeout: float = 10.0,
         post_action_max_observations: int = 2,
         confirmation_frame_delta_max: float = 6.0,
+        qwerty_row_snapper: Callable[
+            [tuple[Image.Image, ...] | list[Image.Image], dict[str, Any]],
+            dict[str, Any] | None,
+        ]
+        | None = None,
+        require_local_qwerty_row_snap: bool = False,
         device_id: str,
     ) -> None:
         self.capture = capture
@@ -381,6 +490,8 @@ class GenericSingleActionAdapter:
             0.0,
             float(confirmation_frame_delta_max),
         )
+        self.qwerty_row_snapper = qwerty_row_snapper
+        self.require_local_qwerty_row_snap = bool(require_local_qwerty_row_snap)
         try:
             self.device_id = validate_device_id(device_id)
         except OrientationSafetyError as exc:
@@ -962,9 +1073,27 @@ class GenericSingleActionAdapter:
                     raise GenericActionAdapterError(
                         "当前文字输入缺少本轮输入结构审计签发的 QWERTY 几何；拒绝使用静态键盘配置。"
                     )
+                execution_keyboard_geometry = dict(keyboard_geometry)
+                if self.require_local_qwerty_row_snap:
+                    if not callable(self.qwerty_row_snapper):
+                        raise GenericActionAdapterError(
+                            "真机文字输入缺少本地 QWERTY 行中心复核器。"
+                        )
+                    snapped_anchors = self.qwerty_row_snapper(
+                        before_frames,
+                        keyboard_geometry.get("anchors"),
+                    )
+                    if not isinstance(snapped_anchors, dict):
+                        raise GenericActionAdapterError(
+                            "本地 OCR 未能稳定确认 QWERTY 三行中心，拒绝按模型粗坐标输入。"
+                        )
+                    execution_keyboard_geometry["anchors"] = snapped_anchors
+                    execution_keyboard_geometry["row_snap_source"] = (
+                        "stable_local_ocr"
+                    )
                 try:
                     qwerty_keyboard_config_from_anchors(
-                        keyboard_geometry.get("anchors")
+                        execution_keyboard_geometry.get("anchors")
                     )
                 except WorkflowNotReady as exc:
                     raise GenericActionAdapterError(
@@ -979,7 +1108,7 @@ class GenericSingleActionAdapter:
                             f"当前文字输入不满足设备已验证配置：{exc}"
                         ) from exc
                 physical_actions = 1
-                robot_result = method(resolved.text, keyboard_geometry)
+                robot_result = method(resolved.text, execution_keyboard_geometry)
             elif resolved.kind == "long_press":
                 if resolved.normalized_point is None or resolved.hold_seconds is None:
                     raise GenericActionAdapterError("长按动作缺少已校验落点或时长。")

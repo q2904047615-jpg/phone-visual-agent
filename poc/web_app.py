@@ -33,6 +33,7 @@ from generic_action_adapter import (
     GenericActionAdapterError,
     GenericSingleActionAdapter,
     persist_observer_failure_diagnostic,
+    stable_qwerty_ocr_anchors,
 )
 from generic_scene_observer import GenericSceneObserver
 from generic_step_planner import GenericStepPlanner, GenericStepPlanningError
@@ -996,6 +997,11 @@ class Runtime:
                 observer=self.generic_scene_observer,
                 robot=self.controller_for_device(device_id),
                 controller=UniversalActionController(),
+                qwerty_row_snapper=stable_qwerty_ocr_anchors,
+                require_local_qwerty_row_snap=not isinstance(
+                    self.controller_for_device(device_id),
+                    MockRobotController,
+                ),
                 device_id=device_id,
             ),
             device_registry=self.device_task_registry,
@@ -1078,6 +1084,11 @@ class Runtime:
                 observer=self.generic_scene_observer,
                 robot=provisional_controller,
                 controller=UniversalActionController(),
+                qwerty_row_snapper=stable_qwerty_ocr_anchors,
+                require_local_qwerty_row_snap=not isinstance(
+                    provisional_controller,
+                    MockRobotController,
+                ),
                 device_id=device_id,
             ),
             device_registry=self.device_task_registry,
@@ -1726,6 +1737,11 @@ def _new_generic_action_adapter() -> GenericSingleActionAdapter:
         observer=runtime.generic_scene_observer,
         robot=runtime.controller,
         controller=UniversalActionController(),
+        qwerty_row_snapper=stable_qwerty_ocr_anchors,
+        require_local_qwerty_row_snap=not isinstance(
+            runtime.controller,
+            MockRobotController,
+        ),
         device_id=runtime.device_controllers.default_device_id,
     )
 

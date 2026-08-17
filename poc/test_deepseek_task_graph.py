@@ -2611,6 +2611,74 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     graph.active_subgoal().external_impact,
                 )
 
+    def test_editable_input_carrier_adjective_is_not_a_data_mutation(self):
+        samples = (
+            (
+                "当前浏览器顶部可编辑的地址输入区域内容为 codex",
+                "codex",
+                ["不得打开网址、搜索、提交、发送、保存或发布。"],
+            ),
+            (
+                "The editable text field shows note",
+                "note",
+                ["Do not search, submit, send, save, or publish."],
+            ),
+        )
+        for objective, input_text, constraints in samples:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="navigation_only",
+                )
+                payload["goal"]["objective"] = objective
+                payload["goal"]["entities"]["input_text"] = input_text
+                payload["constraints"] = constraints
+                payload["subgoals"][0]["constraints"] = list(constraints)
+                payload["subgoals"][0]["completion_conditions"] = [objective]
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    objective + "；" + "；".join(constraints),
+                    device_id="phone-1",
+                )
+
+                self.assertEqual((), graph.risk_actions)
+                self.assertEqual(
+                    "navigation_only",
+                    graph.active_subgoal().external_impact,
+                )
+
+    def test_editable_input_carrier_never_hides_saved_result(self):
+        objective = "可编辑的地址输入区域内容为 codex，且草稿已保存"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="external_state",
+        )
+        payload["goal"]["entities"]["input_text"] = "codex"
+        payload["constraints"] = ["不得发送、提交或发布。"]
+        payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+        payload["subgoals"][0]["completion_conditions"] = [objective]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "saved_result",
+                "description": "草稿已保存",
+                "external_effect": "草稿已保存到外部数据",
+                "risk_type": "data_mutation",
+                "risk_level": "medium",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"][0]["risk_action_ids"] = ["saved_result"]
+        payload["status"] = "awaiting_confirmation"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            objective + "；不得发送、提交或发布。",
+            device_id="phone-1",
+        )
+
+        self.assertEqual(("saved_result",), graph.active_subgoal().risk_action_ids)
+        self.assertEqual("external_state", graph.active_subgoal().external_impact)
+
     def test_unsubmitted_input_workflow_removes_one_shared_false_risk(self):
         raw_goal = (
             "选择能留下未提交文字的模式，让唯一文本区域显示英文 codex，"
@@ -2730,11 +2798,18 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             }
         )
 
-        with self.assertRaises(TaskGraphError):
-            DeepSeekTaskGraphPlanner(FakeProvider(payload, payload)).plan(
-                "让当前文本区域显示 codex 并保持未提交；不得发送、提交、保存或发布。",
-                device_id="phone-1",
-            )
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "让当前文本区域显示 codex 并保持未提交；不得发送、提交、保存或发布。",
+            device_id="phone-1",
+        )
+
+        self.assertEqual(
+            ("shared_risk",),
+            tuple(item.risk_id for item in graph.risk_actions),
+        )
+        self.assertTrue(
+            all("shared_risk" in item.risk_action_ids for item in graph.subgoals)
+        )
 
     def test_unsubmitted_input_workflow_never_removes_shared_send_effect(self):
         payload = single_subgoal_payload(

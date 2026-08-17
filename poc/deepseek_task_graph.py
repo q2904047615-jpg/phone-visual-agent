@@ -209,6 +209,12 @@ LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN = re.compile(
     r"\b(?:input|text|query)\s*(?:field|box).{0,28}(?:contains?|shows?|value|text)\b)",
     re.IGNORECASE,
 )
+LOCAL_EDITABLE_CARRIER_ADJECTIVE_PATTERN = re.compile(
+    r"(?:可编辑(?:的)?|editable\s+)"
+    r"(?=[^，。；;]{0,12}(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域|"
+    r"\b(?:input|text|query)\s*(?:field|box)\b))",
+    re.IGNORECASE,
+)
 LOCAL_UNSUBMITTED_WORKFLOW_RISK_PATTERN = re.compile(
     r"(?:(?:未提交|本机临时|本地临时|临时).{0,12}"
     r"(?:文本|文字|输入|草稿|内容)|"
@@ -810,7 +816,11 @@ class DynamicTaskGraph:
                 *subgoal.completion_conditions,
                 input_text=self.goal.entities.get("input_text"),
             ):
-                inferred_types = inferred_types - {"unknown_external_effect"}
+                # The helper already rechecks the whole scoped text after
+                # removing only a carrier's editable-capability adjective and
+                # refuses every concrete external effect.  Keep the graph
+                # validator aligned with that same formal proof.
+                inferred_types = frozenset()
             if _is_reversible_local_keyboard_mode(
                 subgoal.objective,
                 *subgoal.constraints,
@@ -1867,8 +1877,12 @@ def _is_explicitly_unsubmitted_local_input(
         return False
     texts = tuple(str(value or "") for value in values if str(value or "").strip())
     combined = "；".join(texts)
+    risk_texts = tuple(
+        LOCAL_EDITABLE_CARRIER_ADJECTIVE_PATTERN.sub("", value)
+        for value in texts
+    )
     inferred = frozenset().union(
-        *(_infer_external_risk_types(value) for value in texts)
+        *(_infer_external_risk_types(value) for value in risk_texts)
     )
     return bool(
         LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(combined)
@@ -1905,14 +1919,16 @@ def _is_reversible_local_keyboard_mode(*values: str) -> bool:
 
 def _input_text_from_state_descriptions(*values: str) -> str:
     for value in values:
-        match = re.search(
+        text = str(value or "")
+        for pattern in (
             r"(?:为|是|改为|替换为|修改为|显示为)\s*"
             r"([A-Za-z0-9][A-Za-z0-9_.-]{0,63})",
-            str(value or ""),
-            re.IGNORECASE,
-        )
-        if match:
-            return match.group(1)
+            r"\b(?:contains?|shows?|value\s*(?:is|=))\s+"
+            r"([A-Za-z0-9][A-Za-z0-9_.-]{0,63})\b",
+        ):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1)
     return ""
 
 
@@ -3170,6 +3186,7 @@ def _apply_local_risk_supplements(
         if graph is not None
         else frozenset()
     )
+    local_input_graph_is_risk_free = graph is None or not graph.risk_actions
     current_foreground_keyboard_scope = bool(
         graph is not None
         and len(graph.goal.target_apps) == 1
@@ -3240,8 +3257,8 @@ def _apply_local_risk_supplements(
             )
         if (
             assessment.external_impact in {"external_state", "unknown"}
-            and inferred <= {"unknown_external_effect"}
             and scope_is_local_input
+            and local_input_graph_is_risk_free
         ):
             assessment = replace(
                 assessment,
@@ -3339,8 +3356,7 @@ def _apply_local_risk_supplements(
         if (
             inferred
             and not (
-                scope_is_local_input
-                and inferred <= {"unknown_external_effect"}
+                scope_is_local_input and local_input_graph_is_risk_free
             )
             and not (
                 scope_is_local_keyboard_mode

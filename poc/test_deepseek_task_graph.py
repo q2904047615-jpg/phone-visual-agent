@@ -3283,13 +3283,10 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         payload["risk_actions"] = [
             {
                 "risk_id": "no_external_effect",
-                "description": (
-                    "确保不发送、提交、保存、发布、转发草稿，"
-                    "不选择联系人，不产生任何账号或外部影响。"
-                ),
-                "external_effect": "无外部影响",
-                "risk_type": "unknown_external_effect",
-                "risk_level": "low",
+                "description": "可能发送或提交草稿，导致消息对外发送。",
+                "external_effect": "消息可能被发送给聊天对象，产生外部通信影响。",
+                "risk_type": "message_or_communication",
+                "risk_level": "critical",
                 "subgoal_ids": [
                     "ensure_input",
                     "ensure_keyboard",

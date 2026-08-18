@@ -23,6 +23,10 @@ from ocr_runtime import (
     is_available as ocr_available,
     recognize as recognize_ocr,
 )
+from verified_text_transaction import (
+    VerifiedTextTransactionError,
+    plan_next_verified_input,
+)
 
 
 WEB_TEMPLATE_DIR = legacy.TEMPLATE_DIR / "web"
@@ -1011,22 +1015,58 @@ class RobotController:
                 "大写、数字、中文和符号尚未验收。"
             )
 
-    def validate_verified_text(self, text: str, input_states: dict[str, Any]) -> None:
+    def validate_verified_text(
+        self,
+        text: str,
+        input_states: dict[str, Any],
+        *,
+        target_text: str | None = None,
+        input_method: str | None = None,
+        pinyin: str | None = None,
+    ) -> None:
         """Fail before hardware unless the current visual keyboard profile is exact."""
 
         self._require_verified_action("input_verified_text", "输入文字")
-        self._validate_verified_text_characters(text)
+        legacy_direct_profile = target_text is None and input_method is None
+        if legacy_direct_profile:
+            self._validate_verified_text_characters(text)
+            if input_states.get("focused") is not True:
+                raise WorkflowNotReady("当前输入框没有可信聚焦证据。")
+            if input_states.get("value") != "":
+                raise WorkflowNotReady("当前安全文字输入只允许从视觉确认的空输入框开始。")
+            if input_states.get("keyboard_layout") != "qwerty":
+                raise WorkflowNotReady("当前安全文字输入要求画面确认标准 QWERTY 键盘。")
+            if input_states.get("keyboard_input_mode") != "direct_latin":
+                raise WorkflowNotReady(
+                    "当前安全文字输入要求画面确认 direct_latin 英文直输模式；"
+                    "中文拼音 QWERTY 会产生组合文本。"
+                )
+            return
+        if target_text is None:
+            target_text = text
+        try:
+            step = plan_next_verified_input(target_text, input_states.get("value"))
+        except (ValueError, VerifiedTextTransactionError) as exc:
+            raise WorkflowNotReady(f"无法建立精确文字输入事务：{exc}") from exc
+        if input_method is None:
+            input_method = step.kind if step is not None else None
+        if step is None or text != step.segment or input_method != step.kind:
+            raise WorkflowNotReady("设备收到的文字分段与本地精确事务不一致。")
+        if step.kind == "direct_latin":
+            self._validate_verified_text_characters(text)
+        elif step.kind == "chinese_pinyin":
+            if pinyin != step.pinyin:
+                raise WorkflowNotReady("设备收到的拼音与本地确定性结果不一致。")
+        else:
+            raise WorkflowNotReady("数字、空格或符号仍要求独立可见键位审计。")
         if input_states.get("focused") is not True:
             raise WorkflowNotReady("当前输入框没有可信聚焦证据。")
-        if input_states.get("value") != "":
-            raise WorkflowNotReady("当前安全文字输入只允许从视觉确认的空输入框开始。")
         if input_states.get("keyboard_layout") != "qwerty":
             raise WorkflowNotReady("当前安全文字输入要求画面确认标准 QWERTY 键盘。")
-        if input_states.get("keyboard_input_mode") != "direct_latin":
-            raise WorkflowNotReady(
-                "当前安全文字输入要求画面确认 direct_latin 英文直输模式；"
-                "中文拼音 QWERTY 会产生组合文本。"
-            )
+        if input_states.get("keyboard_input_mode") != step.required_mode:
+            raise WorkflowNotReady("当前键盘模式与下一确定性文字分段不一致。")
+        if input_states.get("ime_preedit_text"):
+            raise WorkflowNotReady("当前仍有未完成的输入法组合。")
 
     def vision_type_pinyin(
         self,

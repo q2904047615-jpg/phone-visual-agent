@@ -24,6 +24,7 @@ from generic_scene_observer import (
     _foreground_app_identity_audit_prompt,
     _goal_requests_input,
     _input_structure_audit_prompt,
+    _apply_input_structure_audit,
     _map_input_structure_crop_audit_to_full,
     _stable_ocr_literal_bounds,
     _input_structure_diagnostic_shape,
@@ -3513,7 +3514,10 @@ class GenericSceneObserverTests(unittest.TestCase):
         with self.assertRaisesRegex(VisionAgentError, "QWERTY anchors"):
             GenericSceneObserver(SequenceProvider([empty, empty, audit])).observe(
                 frames=stable_frames(),
-                goal_context={"objective": "在唯一输入框输入 agent"},
+                goal_context={
+                    "objective": "在唯一输入框输入 agent",
+                    "entities": {"input_text": "agent"},
+                },
             )
 
     def test_input_authorization_binds_locally_validated_qwerty_geometry(self) -> None:
@@ -4485,6 +4489,74 @@ class GenericSceneObserverTests(unittest.TestCase):
             all(item.states.get("goal_relevant") is False for item in scene.elements)
         )
         self.assertIsNone(scene.unique_trusted_goal_element())
+
+    def test_input_audit_mints_only_unique_exact_chinese_candidate(self) -> None:
+        base = scene_payload()
+        base_scene = _parse_scene(
+            json.dumps(base, ensure_ascii=False),
+            fingerprint="frame-ime",
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="message-field",
+                    bounds=[80, 120, 920, 210],
+                    text="",
+                )
+            ],
+            ime_preedit_regions=[
+                {
+                    "region_id": "candidate-strip",
+                    "bounds": [40, 380, 960, 470],
+                    "text": "nihao",
+                    "confidence": 0.98,
+                    "candidates": [
+                        {
+                            "text": "你好",
+                            "bounds": [80, 392, 220, 458],
+                            "confidence": 0.98,
+                            "fully_visible": True,
+                        },
+                        {
+                            "text": "拟好",
+                            "bounds": [250, 392, 390, 458],
+                            "confidence": 0.96,
+                            "fully_visible": True,
+                        },
+                    ],
+                }
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 480, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "qwerty_anchors": {
+                    "q": [115, 610], "p": [875, 610],
+                    "a": [157, 700], "l": [832, 700],
+                    "z": [241, 790], "m": [747, 790],
+                    "backspace": [875, 790],
+                },
+                "mode_switch": None,
+            },
+        )
+
+        scene = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="frame-ime",
+            goal_context={
+                "objective": "输入你好但不要发送",
+                "entities": {"input_text": "你好"},
+            },
+        )
+
+        target = scene.unique_trusted_goal_element()
+        self.assertEqual("local_audited_ime_candidate_1", target.element_id)
+        self.assertEqual("你好", target.label)
+        field = scene.get_element("local_audited_input_1")
+        self.assertEqual("nihao", field.states["ime_preedit_text"])
+        self.assertEqual("你好", field.states["ime_exact_candidate_text"])
 
     def test_hidden_keyboard_only_attestation_rejects_structured_keyboard_conflict(self) -> None:
         compact = scene_payload()

@@ -959,7 +959,11 @@ class GenericSingleActionAdapter:
             if resolved.kind == "input_verified_text" and not resolved.text:
                 raise GenericActionAdapterError("输入动作缺少已校验文字。")
             method_name = (
-                "vision_type_text_with_layout"
+                (
+                    "vision_type_pinyin"
+                    if resolved.input_method == "chinese_pinyin"
+                    else "vision_type_text_with_layout"
+                )
                 if resolved.kind == "input_verified_text"
                 else "vision_clear_text"
             )
@@ -1013,7 +1017,13 @@ class GenericSingleActionAdapter:
             validator = getattr(self.robot, "validate_verified_text", None)
             if resolved.kind == "input_verified_text" and callable(validator):
                 try:
-                    validator(resolved.text, dict(input_element.states))
+                    validator(
+                        resolved.input_fragment,
+                        dict(input_element.states),
+                        target_text=resolved.text,
+                        input_method=resolved.input_method,
+                        pinyin=resolved.input_pinyin,
+                    )
                 except (UISceneError, ValueError, RuntimeError) as exc:
                     raise GenericActionAdapterError(
                         f"当前文字输入不满足设备已验证配置：{exc}"
@@ -1138,10 +1148,17 @@ class GenericSingleActionAdapter:
                     raise GenericActionAdapterError("文字动作的本地预检结果缺失。")
                 physical_actions = 1
                 if resolved.kind == "input_verified_text":
-                    robot_result = prepared_input_method(
-                        resolved.text,
-                        prepared_keyboard_geometry,
-                    )
+                    if resolved.input_method == "chinese_pinyin":
+                        robot_result = prepared_input_method(
+                            resolved.input_fragment,
+                            resolved.input_pinyin,
+                            prepared_keyboard_geometry,
+                        )
+                    else:
+                        robot_result = prepared_input_method(
+                            resolved.input_fragment,
+                            prepared_keyboard_geometry,
+                        )
                 else:
                     robot_result = prepared_input_method(
                         prepared_keyboard_geometry,

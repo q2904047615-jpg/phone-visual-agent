@@ -51,14 +51,18 @@ from ui_scene import (
 )
 from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
+from verified_text_transaction import (
+    VerifiedTextTransactionError,
+    plan_next_verified_input,
+)
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v51"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v52"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
     "2026-08-18-foreground-app-identity-audit-v1"
 )
-INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-17-input-structure-audit-v4"
+INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-18-input-structure-audit-v5"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1800
@@ -2127,7 +2131,7 @@ Goal context (evidence selection only): {json.dumps(context, ensure_ascii=False,
 {image_contract}
 Distinguish three different visual structures; never merge them:
 1. application_inputs: editable search/address/form fields in the App content area. Include an empty field only when a complete border plus a visible placeholder, caret, focus highlight, or other literal editable cue is visible.
-2. ime_preedit_regions: the input method's composition/candidate strip. It is never an application input, even when it contains composed text and a trailing icon.
+2. ime_preedit_regions: the input method's composition/candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Enumerate only complete visible candidate words inside each region; candidates are read-only facts and never application inputs.
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
 Determine keyboard.input_mode only from the current whole keyboard image, never from the goal or the JSON example. Visible Chinese composition/candidates, pinyin separators, or a current-mode label such as 中/中文/Pinyin prove chinese_pinyin. A visible current-mode label such as 英/EN/English/ABC/Latin together with a plain Latin QWERTY layout and no Chinese composition/candidate strip proves direct_latin. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
@@ -2147,7 +2151,8 @@ Return exactly this JSON schema and no other fields:
 "visible_editable_cues":["literal visible cue"],"confidence":0.0,
 "right_button":null}}],
 "ime_preedit_regions":[{{"region_id":"ime-preedit-1","bounds":[0,0,1000,1000],
-"text":"visible composition text or empty","confidence":0.0}}],
+"text":"visible composition text or empty","confidence":0.0,
+"candidates":[{{"text":"literal candidate","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true}}]}}],
 "keyboard":{{"visible":true,"bounds":[0,0,1000,1000],"layout":"qwerty",
 "input_mode":"unknown","qwerty_anchors":{{"q":[0,0],"p":[0,0],"a":[0,0],"l":[0,0],"z":[0,0],"m":[0,0],"backspace":[0,0]}},"mode_switch":null}}}}
 When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","qwerty_anchors":null,"mode_switch":null}}.
@@ -2236,6 +2241,15 @@ def _map_input_structure_crop_audit_to_full(
                     item["bounds"],
                     f"ime_preedit_regions[{index}].bounds",
                 )
+                candidates = item.get("candidates")
+                if isinstance(candidates, list):
+                    for candidate_index, candidate in enumerate(candidates):
+                        if isinstance(candidate, dict) and "bounds" in candidate:
+                            candidate["bounds"] = map_bounds(
+                                candidate["bounds"],
+                                "ime_preedit_regions"
+                                f"[{index}].candidates[{candidate_index}].bounds",
+                            )
 
     keyboard = payload.get("keyboard")
     if isinstance(keyboard, dict):
@@ -4675,6 +4689,7 @@ def _input_audit_established_local_target(scene: UIScene) -> bool:
         in {
             "local_audited_input_1",
             "local_audited_keyboard_mode_switch_1",
+            "local_audited_ime_candidate_1",
         }
     )
 
@@ -4849,20 +4864,57 @@ def _apply_input_structure_audit(
             raise UISceneError("不可见键盘不能包含 bounds 或 mode_switch。")
 
         preedit_bounds: list[tuple[float, float, float, float]] = []
+        trusted_preedits: list[dict[str, Any]] = []
         for item in ime_preedit_regions:
-            if not isinstance(item, dict) or set(item) != {
-                "region_id",
-                "bounds",
-                "text",
-                "confidence",
-            }:
+            if not isinstance(item, dict) or set(item) not in (
+                {"region_id", "bounds", "text", "confidence"},
+                {"region_id", "bounds", "text", "confidence", "candidates"},
+            ):
                 raise UISceneError("IME预编辑区字段不符合协议。")
             if not _valid_1000_bounds(item.get("bounds")):
                 raise UISceneError("IME预编辑区 bounds 不符合0..1000协议。")
             confidence = _audit_confidence(item.get("confidence"), "IME预编辑区")
             bounds = tuple(float(value) for value in item["bounds"])
+            raw_candidates = item.get("candidates", [])
+            if not isinstance(raw_candidates, list) or len(raw_candidates) > 8:
+                raise UISceneError("IME候选必须是最多8项的数组。")
+            candidates: list[dict[str, Any]] = []
+            for candidate in raw_candidates:
+                if not isinstance(candidate, dict) or set(candidate) != {
+                    "text", "bounds", "confidence", "fully_visible"
+                }:
+                    raise UISceneError("IME候选字段不符合协议。")
+                candidate_text = str(candidate.get("text") or "").strip()
+                if not candidate_text or len(candidate_text) > 20:
+                    raise UISceneError("IME候选文字格式无效。")
+                if not _valid_1000_bounds(candidate.get("bounds")):
+                    raise UISceneError("IME候选 bounds 无效。")
+                candidate_bounds = tuple(float(value) for value in candidate["bounds"])
+                candidate_confidence = _audit_confidence(
+                    candidate.get("confidence"), "IME候选"
+                )
+                if not isinstance(candidate.get("fully_visible"), bool):
+                    raise UISceneError("IME候选 fully_visible 必须是布尔值。")
+                if not _bounds_inside(candidate_bounds, bounds, tolerance=12):
+                    raise UISceneError("IME候选必须完整位于对应预编辑区内。")
+                if candidate["fully_visible"] and candidate_confidence >= 0.9:
+                    candidates.append(
+                        {
+                            "text": candidate_text,
+                            "bounds": candidate_bounds,
+                            "confidence": candidate_confidence,
+                        }
+                    )
             if confidence >= 0.9:
                 preedit_bounds.append(bounds)
+                trusted_preedits.append(
+                    {
+                        "text": str(item.get("text") or "").strip(),
+                        "bounds": bounds,
+                        "confidence": confidence,
+                        "candidates": candidates,
+                    }
+                )
 
         matches: list[dict[str, Any]] = []
         for item in application_inputs:
@@ -4971,6 +5023,35 @@ def _apply_input_structure_audit(
 
         switch_is_goal = _goal_requests_keyboard_mode_switch(goal_context)
         trusted_input = matches[0] if len(matches) == 1 else None
+        exact_ime_candidate: dict[str, Any] | None = None
+        input_step = None
+        if trusted_input is not None and _goal_has_explicit_input_text(goal_context):
+            focused_context = _active_subgoal_visual_context(goal_context)
+            entities = (
+                focused_context.get("goal_entities")
+                if focused_context is not goal_context
+                else goal_context.get("entities")
+            )
+            target_text = entities.get("input_text") if isinstance(entities, dict) else None
+            try:
+                input_step = plan_next_verified_input(target_text, trusted_input["text"])
+            except (ValueError, VerifiedTextTransactionError):
+                input_step = None
+            if input_step is not None and input_step.kind == "chinese_pinyin":
+                matching_preedits = [
+                    item
+                    for item in trusted_preedits
+                    if re.sub(r"[^a-z]", "", item["text"].casefold())
+                    == input_step.pinyin
+                ]
+                matching_candidates = [
+                    candidate
+                    for item in matching_preedits
+                    for candidate in item["candidates"]
+                    if candidate["text"] == input_step.segment
+                ]
+                if len(matching_preedits) == 1 and len(matching_candidates) == 1:
+                    exact_ime_candidate = matching_candidates[0]
         qwerty_geometry: dict[str, Any] | None = None
         raw_qwerty_anchors = keyboard.get("qwerty_anchors")
         if raw_qwerty_anchors is not None:
@@ -5020,8 +5101,9 @@ def _apply_input_structure_audit(
             and trusted_input["text"] == ""
             and keyboard_visible
             and keyboard_layout == "qwerty"
-            and keyboard_input_mode == "direct_latin"
-            and _goal_requests_input(goal_context)
+            and keyboard_input_mode in {"direct_latin", "chinese_pinyin"}
+            and _goal_has_explicit_input_text(goal_context)
+            and not switch_is_goal
             and qwerty_geometry is None
         ):
             raise UISceneError(
@@ -5046,7 +5128,7 @@ def _apply_input_structure_audit(
             elements.append(element)
         if trusted_input is not None:
             states: dict[str, Any] = {
-                "goal_relevant": not switch_is_goal,
+                "goal_relevant": not switch_is_goal and exact_ime_candidate is None,
                 "fully_visible": True,
                 "value": trusted_input["text"],
             }
@@ -5067,6 +5149,13 @@ def _apply_input_structure_audit(
                 )
             if qwerty_geometry is not None:
                 states["keyboard_geometry"] = qwerty_geometry
+            if exact_ime_candidate is not None and input_step is not None:
+                states.update(
+                    {
+                        "ime_preedit_text": input_step.pinyin,
+                        "ime_exact_candidate_text": input_step.segment,
+                    }
+                )
             input_label = trusted_input["text"] or trusted_input["placeholder"]
             input_evidence = list(trusted_input["visible_editable_cues"])
             if trusted_input["text"]:
@@ -5101,6 +5190,29 @@ def _apply_input_structure_audit(
                         "evidence": ["应用输入结构的相邻独立控件；不具备目标权限"],
                     }
                 )
+        if exact_ime_candidate is not None and input_step is not None:
+            elements.append(
+                {
+                    "element_id": "local_audited_ime_candidate_1",
+                    "role": "button",
+                    "meaning": "ime_exact_candidate",
+                    "label": exact_ime_candidate["text"],
+                    "bounds": [part / 1000.0 for part in exact_ime_candidate["bounds"]],
+                    "confidence": exact_ime_candidate["confidence"],
+                    "states": {
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "ime_candidate": True,
+                        "input_element_id": "local_audited_input_1",
+                        "prior_input_value": input_step.current_text,
+                        "expected_input_value": input_step.expected_value,
+                        "pinyin": input_step.pinyin,
+                    },
+                    "evidence": [
+                        f"输入结构审计确认拼音 {input_step.pinyin} 的唯一逐字候选：{input_step.segment}"
+                    ],
+                }
+            )
         if mode_switch is not None:
             elements.append(
                 {

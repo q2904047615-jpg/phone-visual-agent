@@ -8,6 +8,10 @@ from typing import Any
 
 from semantic_executor import SemanticAction
 from operation_specs import editable_character_count
+from verified_text_transaction import (
+    VerifiedTextTransactionError,
+    plan_from_input_states,
+)
 from ui_scene import (
     MIN_TARGET_CONFIDENCE,
     UIElement,
@@ -17,12 +21,15 @@ from ui_scene import (
 )
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-16-universal-action-v12"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-18-universal-action-v13"
 
 REVEAL_SYSTEM_NAVIGATION_EFFECT = {
     "system_ui": {"navigation_bar_visible": True}
 }
 
+# Certified direct-Latin hardware profile retained for capability promotion.
+# The universal transaction layer may also use Chinese pinyin, but it never
+# broadens this direct key path to digits, uppercase letters or symbols.
 SAFE_VERIFIED_TEXT_RE = re.compile(r"[a-z]{1,30}\Z")
 GESTURE_EDGE_MARGIN = 0.02
 MIN_DRAG_DISTANCE = 0.08
@@ -242,6 +249,11 @@ class ResolvedSemanticAction:
     normalized_point: tuple[float, float] | None = None
     normalized_end_point: tuple[float, float] | None = None
     text: str | None = None
+    input_fragment: str | None = None
+    input_method: str | None = None
+    input_pinyin: str | None = None
+    prior_input_value: str | None = None
+    expected_input_value: str | None = None
     delete_count: int | None = None
     direction: str | None = None
     hold_seconds: float | None = None
@@ -335,24 +347,61 @@ class UniversalActionController:
             )
         if action.action == "input_verified_text":
             text = str(action.params.get("text") or "")
-            if not SAFE_VERIFIED_TEXT_RE.fullmatch(text):
-                raise UniversalActionError(
-                    "当前安全文字输入仅允许1～30个小写英文字母。"
-                )
             element = self._resolve_target(action, scene, required_role="input")
             if element.states.get("focused") is not True:
                 raise UniversalActionError("文字输入前必须有当前画面证明输入框已聚焦。")
-            if element.states.get("value") != "":
-                raise UniversalActionError("精确文字输入只允许从当前画面确认的空输入框开始。")
             if element.states.get("keyboard_layout") != "qwerty":
                 raise UniversalActionError("精确文字输入要求当前画面确认 QWERTY 键盘。")
-            if element.states.get("keyboard_input_mode") != "direct_latin":
-                raise UniversalActionError(
-                    "精确英文输入要求当前画面确认 direct_latin 直输模式；"
-                    "QWERTY 与英文直输不是同一事实。"
-                )
             if element.states.get("goal_relevant") is not True:
                 raise UniversalActionError("文字输入目标必须由当前画面证明与当前目标相关。")
+            try:
+                input_step = plan_from_input_states(text, element.states)
+            except (ValueError, VerifiedTextTransactionError) as exc:
+                raise UniversalActionError(f"无法建立精确文字输入事务：{exc}") from exc
+            if input_step is None:
+                raise UniversalActionError("输入框已经逐字等于目标文字，不得重复输入。")
+            if input_step.kind == "symbol":
+                raise UniversalActionError(
+                    "下一分段需要独立可见的数字、空格或符号键审计，不能按字母键盘猜测。"
+                )
+            if element.states.get("keyboard_input_mode") != input_step.required_mode:
+                raise UniversalActionError(
+                    "当前键盘输入模式与下一确定性文字分段不一致。"
+                )
+            if element.states.get("ime_preedit_text"):
+                raise UniversalActionError("当前仍有未完成的输入法组合，禁止继续键入。")
+            expected_states = (
+                {
+                    "value": input_step.current_text,
+                    "ime_preedit_text": input_step.pinyin,
+                    "ime_exact_candidate_text": input_step.segment,
+                }
+                if input_step.kind == "chinese_pinyin"
+                else {"value": input_step.expected_value}
+            )
+            if (
+                "element_state" not in expected_effect
+                and input_step.kind == "direct_latin"
+                and input_step.current_text == ""
+                and SAFE_VERIFIED_TEXT_RE.fullmatch(input_step.segment)
+            ):
+                # Backward-compatible stage-1 authority: the first certified
+                # profile already bound an empty direct-Latin field and exact
+                # lowercase segment. Derive, rather than guess, its postcondition.
+                expected_effect = {
+                    **expected_effect,
+                    "element_state": {
+                        "meaning": element.meaning,
+                        "states": expected_states,
+                    },
+                }
+            if expected_effect.get("element_state") != {
+                "meaning": element.meaning,
+                "states": expected_states,
+            }:
+                raise UniversalActionError(
+                    "精确文字输入的后置条件没有绑定下一确定性分段。"
+                )
             eligible_inputs = tuple(
                 candidate
                 for candidate in scene.elements
@@ -361,9 +410,10 @@ class UniversalActionController:
                 and candidate.states.get("visible") is not False
                 and candidate.states.get("goal_relevant") is True
                 and candidate.states.get("focused") is True
-                and candidate.states.get("value") == ""
                 and candidate.states.get("keyboard_layout") == "qwerty"
-                and candidate.states.get("keyboard_input_mode") == "direct_latin"
+                and candidate.states.get("keyboard_input_mode")
+                == input_step.required_mode
+                and not candidate.states.get("ime_preedit_text")
             )
             if len(eligible_inputs) != 1 or eligible_inputs[0].element_id != element.element_id:
                 raise UniversalActionError(
@@ -374,6 +424,11 @@ class UniversalActionController:
                 kind="input_verified_text",
                 normalized_point=element.center,
                 text=text,
+                input_fragment=input_step.segment,
+                input_method=input_step.kind,
+                input_pinyin=input_step.pinyin or None,
+                prior_input_value=input_step.current_text,
+                expected_input_value=input_step.expected_value,
                 target_element_id=element.element_id,
                 before_fingerprint=scene.fingerprint,
                 expected_effect=expected_effect,
@@ -627,6 +682,8 @@ class UniversalActionController:
             raise UniversalActionError(
                 f"动作后页面不符合预期：{after.screen_id} != {expected_screen}"
             )
+        if resolved.kind in {"input_verified_text", "clear_verified_text"}:
+            self._verify_exact_input_value(resolved, before, after)
         element_state = expected.get("element_state")
         if element_state is not None:
             if not isinstance(element_state, dict):
@@ -664,8 +721,6 @@ class UniversalActionController:
                     raise UniversalActionError(
                         f"动作结果缺少元素状态证据：{exc}"
                     ) from exc
-        if resolved.kind in {"input_verified_text", "clear_verified_text"}:
-            self._verify_exact_input_value(resolved, before, after)
         if resolved.kind == "long_press":
             self._verify_long_press_result(resolved, before, after)
         if resolved.kind == "drag":
@@ -977,11 +1032,13 @@ class UniversalActionController:
         before: UIScene,
         after: UIScene,
     ) -> None:
-        expected = resolved.text
+        expected = resolved.expected_input_value if resolved.kind == "input_verified_text" else resolved.text
         target_id = str(resolved.target_element_id or "").strip()
         if expected is None or not target_id:
             raise UniversalActionError("输入动作缺少精确文字或目标输入框身份。")
-        if resolved.kind == "input_verified_text" and not expected:
+        if resolved.kind == "input_verified_text" and (
+            not expected or not resolved.input_fragment or not resolved.input_method
+        ):
             raise UniversalActionError("输入动作缺少精确文字或目标输入框身份。")
         if resolved.kind == "clear_verified_text":
             if expected != "" or resolved.delete_count is None:
@@ -1037,7 +1094,16 @@ class UniversalActionController:
         if "value" not in states or not isinstance(states["value"], str):
             raise UniversalActionError("动作后缺少输入框 states.value 精确文字证据。")
         actual = states["value"]
-        if actual != expected:
+        if resolved.input_method == "chinese_pinyin":
+            if actual != resolved.prior_input_value:
+                raise UniversalActionError(
+                    "拼音键入后应用输入值在候选确认前已意外变化。"
+                )
+            if states.get("ime_preedit_text") != resolved.input_pinyin:
+                raise UniversalActionError("动作后缺少逐字一致的拼音组合证据。")
+            if states.get("ime_exact_candidate_text") != resolved.input_fragment:
+                raise UniversalActionError("动作后缺少唯一逐字一致的中文候选。")
+        elif actual != expected:
             raise UniversalActionError(
                 f"动作后输入框文字不匹配：实际 {actual!r}，预期 {expected!r}。"
             )

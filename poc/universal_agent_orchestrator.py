@@ -27,6 +27,7 @@ from device_exclusivity import InterProcessLease
 from generic_action_adapter import GenericActionAdapterError
 from generic_intent import GenericIntentDraft
 from generic_step_planner import GenericStepProposal
+from message_intent import CanonicalMessageIntent, MessageIntentError
 from qwen_visual_decision import QwenTaskContext, TrustedObservation
 from ui_scene import (
     MIN_TARGET_CONFIDENCE,
@@ -36,6 +37,10 @@ from ui_scene import (
 from universal_action_controller import (
     action_has_account_effect,
     navigation_semantic_class,
+)
+from verified_text_transaction import (
+    VerifiedTextTransactionError,
+    plan_next_verified_input,
 )
 from constraint_target_filter import constraint_excludes_candidate
 
@@ -120,6 +125,74 @@ def _subgoal_progress_signature(subgoal: Any) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _risk_intent_material(
+    graph: DynamicTaskGraph,
+    current: Any,
+) -> tuple[str, dict[str, Any]]:
+    risk_ids = tuple(sorted(str(item) for item in current.risk_action_ids))
+    risks = [
+        risk
+        for risk in graph.risk_actions
+        if risk.risk_id in set(risk_ids)
+    ]
+    if {risk.risk_id for risk in risks} != set(risk_ids):
+        raise UniversalAgentOrchestratorError(
+            "风险确认引用了任务图中不存在的风险。"
+        )
+    message_risk = any(
+        risk.risk_type == "message_or_communication" for risk in risks
+    )
+    preview: dict[str, Any] = {
+        "kind": "external_state",
+        "risk_ids": list(risk_ids),
+    }
+    if message_risk:
+        try:
+            intent = CanonicalMessageIntent.from_goal(
+                target_apps=graph.goal.target_apps,
+                entities=graph.goal.entities,
+            )
+        except MessageIntentError as exc:
+            raise UniversalAgentOrchestratorError(
+                f"消息发送风险缺少可逐字确认的收件人或消息原文：{exc}"
+            ) from exc
+        preview = {"kind": "message_or_communication", **intent.preview()}
+    payload = {
+        "protocol_version": "2026-08-18-risk-intent-v1",
+        "task_id": graph.task_id,
+        "device_id": graph.device_id,
+        "revision": graph.revision,
+        "subgoal_id": current.subgoal_id,
+        "risk_ids": list(risk_ids),
+        "risks": [
+            {
+                "risk_id": risk.risk_id,
+                "description": risk.description,
+                "external_effect": risk.external_effect,
+                "risk_type": risk.risk_type,
+                "risk_level": risk.risk_level,
+                "subgoal_ids": list(risk.subgoal_ids),
+            }
+            for risk in risks
+        ],
+        "goal": {
+            "target_apps": [
+                {"app_id": app.app_id, "app_name": app.app_name}
+                for app in graph.goal.target_apps
+            ],
+            "entities": graph.goal.entities,
+        },
+        "preview": preview,
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), preview
 
 
 class UniversalAgentOrchestratorError(RuntimeError):
@@ -484,6 +557,8 @@ class RiskConfirmationAuthority:
     revision: int
     subgoal_id: str
     risk_ids: tuple[str, ...]
+    intent_digest: str
+    intent_preview: dict[str, Any]
     consumed: bool = False
     invalid_reason: str = ""
 
@@ -495,6 +570,7 @@ class RiskConfirmationAuthority:
             "revision": self.revision,
             "subgoal_id": self.subgoal_id,
             "risk_ids": sorted(self.risk_ids),
+            "intent_digest": self.intent_digest,
         }
 
 
@@ -629,6 +705,12 @@ class UniversalAgentSessionState:
                 self.status == "awaiting_risk_confirmation"
                 and self.risk_confirmation_authority is not None
                 and not self.risk_confirmation_authority.consumed
+            ),
+            "risk_confirmation_preview": (
+                dict(self.risk_confirmation_authority.intent_preview)
+                if self.risk_confirmation_authority is not None
+                and not self.risk_confirmation_authority.consumed
+                else None
             ),
             "confirmed_risk_ids": list(self.confirmed_risk_ids),
         }
@@ -1889,6 +1971,7 @@ class UniversalAgentOrchestrator:
         current = graph.active_subgoal()
         if current is None or not current.risk_action_ids:
             raise UniversalAgentOrchestratorError("当前子目标没有可确认风险。")
+        intent_digest, intent_preview = _risk_intent_material(graph, current)
         session.risk_confirmation_authority = RiskConfirmationAuthority(
             session_id=session.session_id,
             task_id=graph.task_id,
@@ -1896,6 +1979,8 @@ class UniversalAgentOrchestrator:
             revision=graph.revision,
             subgoal_id=current.subgoal_id,
             risk_ids=tuple(current.risk_action_ids),
+            intent_digest=intent_digest,
+            intent_preview=intent_preview,
         )
 
     @staticmethod
@@ -1907,6 +1992,7 @@ class UniversalAgentOrchestrator:
             "revision",
             "subgoal_id",
             "risk_ids",
+            "intent_digest",
         }
         if not isinstance(value, Mapping) or set(value) != required:
             raise UniversalAgentOrchestratorError(
@@ -1918,6 +2004,11 @@ class UniversalAgentOrchestrator:
             raise UniversalAgentOrchestratorError("风险确认 risk_ids 必须是数组。")
         if isinstance(revision, bool) or not isinstance(revision, int):
             raise UniversalAgentOrchestratorError("风险确认 revision 格式无效。")
+        intent_digest = str(value.get("intent_digest") or "").strip()
+        if not re.fullmatch(r"[0-9a-f]{64}", intent_digest):
+            raise UniversalAgentOrchestratorError(
+                "风险确认 intent_digest 必须是 64 位小写 SHA-256。"
+            )
         return {
             "session_id": str(value.get("session_id") or ""),
             "task_id": str(value.get("task_id") or ""),
@@ -1925,6 +2016,7 @@ class UniversalAgentOrchestrator:
             "revision": revision,
             "subgoal_id": str(value.get("subgoal_id") or ""),
             "risk_ids": sorted(str(item) for item in risk_ids),
+            "intent_digest": intent_digest,
         }
 
     def _validate_and_consume_confirmation(
@@ -4673,8 +4765,6 @@ class PhaseOneNavigationPolicy:
                 return self._deny("输入或清空动作要求最新画面证明 input 候选已聚焦。")
             if element.states.get("goal_relevant") is not True:
                 return self._deny("输入动作要求最新画面证明 input 候选与当前目标相关。")
-            if action_kind == "input_verified_text" and element.states.get("value") != "":
-                return self._deny("精确文字输入只允许从最新画面确认的空输入框开始。")
             if action_kind == "clear_verified_text" and (
                 not isinstance(element.states.get("value"), str)
                 or not element.states.get("value")
@@ -4682,11 +4772,28 @@ class PhaseOneNavigationPolicy:
                 return self._deny("精确文字清空要求最新画面确认非空输入值。")
             if element.states.get("keyboard_layout") != "qwerty":
                 return self._deny("精确文字输入要求最新画面确认 QWERTY 键盘。")
-            if element.states.get("keyboard_input_mode") != "direct_latin":
-                return self._deny(
-                    "精确英文输入要求最新画面确认 direct_latin 直输模式；"
-                    "中文拼音 QWERTY 必须先切换模式并重新观察。"
-                )
+            input_step = None
+            if action_kind == "input_verified_text":
+                try:
+                    input_step = plan_next_verified_input(
+                        action.params.get("text"),
+                        element.states.get("value"),
+                    )
+                except (ValueError, VerifiedTextTransactionError) as exc:
+                    return self._deny(f"无法建立精确文字输入事务：{exc}")
+                if input_step is None:
+                    return self._deny("输入框已经逐字等于目标文字，不得重复输入。")
+                if input_step.kind == "symbol":
+                    return self._deny("下一字符需要独立可见键位审计，禁止猜测输入。")
+                if (
+                    element.states.get("keyboard_input_mode")
+                    != input_step.required_mode
+                ):
+                    return self._deny("当前键盘模式与下一确定性文字分段不一致。")
+                if element.states.get("ime_preedit_text"):
+                    return self._deny("当前仍有未完成输入法组合，禁止继续键入。")
+            elif element.states.get("keyboard_input_mode") != "direct_latin":
+                return self._deny("精确文字清空要求 direct_latin 键盘证据。")
             eligible_inputs = tuple(
                 candidate
                 for candidate in scene.elements
@@ -4696,13 +4803,23 @@ class PhaseOneNavigationPolicy:
                 and candidate.states.get("goal_relevant") is True
                 and candidate.states.get("focused") is True
                 and (
-                    candidate.states.get("value") == ""
-                    if action_kind == "input_verified_text"
-                    else isinstance(candidate.states.get("value"), str)
-                    and bool(candidate.states.get("value"))
+                    isinstance(candidate.states.get("value"), str)
+                    and (
+                        action_kind == "input_verified_text"
+                        or bool(candidate.states.get("value"))
+                    )
                 )
                 and candidate.states.get("keyboard_layout") == "qwerty"
-                and candidate.states.get("keyboard_input_mode") == "direct_latin"
+                and candidate.states.get("keyboard_input_mode")
+                == (
+                    input_step.required_mode
+                    if input_step is not None
+                    else "direct_latin"
+                )
+                and (
+                    action_kind != "input_verified_text"
+                    or not candidate.states.get("ime_preedit_text")
+                )
             )
             if len(eligible_inputs) != 1 or eligible_inputs[0].element_id != element.element_id:
                 return self._deny("输入动作要求唯一符合安全条件的目标输入框。")
@@ -4781,6 +4898,55 @@ class PhaseOneNavigationPolicy:
         conflicts = self._value(trusted_observation, "candidate_conflicts", ()) or ()
         if self._has_unresolved_candidate_conflict(conflicts, element.element_id):
             return self._deny("当前候选存在语义冲突或不唯一。")
+
+        if (
+            action_kind == "tap_semantic"
+            and element.meaning == "ime_exact_candidate"
+        ):
+            states = element.states
+            if (
+                impact != "navigation_only"
+                or element.role != "button"
+                or states.get("ime_candidate") is not True
+                or states.get("fully_visible") is not True
+                or states.get("goal_relevant") is not True
+                or float(element.confidence) < 0.9
+            ):
+                return self._deny("输入法候选缺少本轮唯一、完整、高置信审计证据。")
+            target_text = self._value(task_context, "requested_input_text", None)
+            if target_text is None:
+                goal_value = self._value(task_context, "goal", {})
+                goal_entities = (
+                    goal_value.get("entities")
+                    if isinstance(goal_value, Mapping)
+                    else None
+                )
+                if isinstance(goal_entities, Mapping):
+                    target_text = goal_entities.get("input_text")
+            prior_value = states.get("prior_input_value")
+            try:
+                input_step = plan_next_verified_input(target_text, prior_value)
+            except (ValueError, VerifiedTextTransactionError) as exc:
+                return self._deny(f"输入法候选无法绑定精确文字事务：{exc}")
+            if (
+                input_step is None
+                or input_step.kind != "chinese_pinyin"
+                or element.label != input_step.segment
+                or states.get("expected_input_value") != input_step.expected_value
+                or states.get("pinyin") != input_step.pinyin
+            ):
+                return self._deny("输入法候选与本地下一中文分段不一致。")
+            expected = action.params.get("expected_effect")
+            if not isinstance(expected, dict) or expected.get("element_state") != {
+                "meaning": "application_text_input",
+                "states": {"value": input_step.expected_value},
+            }:
+                return self._deny("输入法候选缺少绑定应用输入框精确前缀的后置条件。")
+            return NavigationPolicyDecision(
+                True,
+                "允许选择本轮拼音组合中唯一逐字一致的中文候选。",
+                "ime_exact_candidate",
+            )
 
         if action_kind == "tap_semantic" and element.role == "input":
             if element.states.get("focused") is True:

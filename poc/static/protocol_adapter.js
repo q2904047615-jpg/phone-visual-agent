@@ -120,6 +120,7 @@
       fingerprint: String(firstDefined(scope.fingerprint, "")),
       decisionNodeId: String(firstDefined(scope.decision_node_id, "")),
       actionDigest: String(firstDefined(scope.action_digest, "")),
+      intentDigest: String(firstDefined(scope.intent_digest, "")),
     };
   }
 
@@ -413,7 +414,7 @@
     const hasScope = Boolean(
       scope.sessionId || scope.taskId || scope.deviceId || scope.subgoalId
       || scope.observationId || scope.fingerprint || scope.decisionNodeId
-      || scope.actionDigest || scope.riskIds.length
+      || scope.actionDigest || scope.intentDigest || scope.riskIds.length
     );
     const explicitReason = String(firstDefined(
       session.confirmation_invalid_reason,
@@ -434,6 +435,7 @@
       : riskPhase
         ? !scope.sessionId || !scope.taskId || !scope.deviceId
           || !Number.isInteger(scope.revision) || !scope.subgoalId
+          || !scope.intentDigest
         : false;
     if (hasScope) {
       if (scope.sessionId !== context.sessionId) mismatches.push("session_id");
@@ -756,6 +758,7 @@
         riskIds: gateRiskIds,
         actions: riskActions,
         currentActions: currentRiskActions,
+        intentPreview: asObject(session.risk_confirmation_preview),
         confirmationGate: {
           required: gateRequired,
           state: gateState,
@@ -820,6 +823,7 @@
       fingerprint: gateScope.fingerprint,
       decision_node_id: gateScope.decisionNodeId,
       action_digest: gateScope.actionDigest,
+      intent_digest: gateScope.intentDigest,
     };
   }
 
@@ -835,6 +839,7 @@
       fingerprint: scope.fingerprint,
       decision_node_id: scope.decision_node_id,
       action_digest: scope.action_digest,
+      intent_digest: scope.intent_digest,
     });
   }
 
@@ -857,6 +862,9 @@
     }
     if (externalImpacts.has(session.risk.currentExternalImpact) && !scope.risk_ids.length) {
       throw new Error("外部状态或未知影响步骤缺少 risk_ids，拒绝确认。");
+    }
+    if (phase === "risk" && !scope.intent_digest) {
+      throw new Error("当前风险确认缺少绑定目标内容的 intent_digest。");
     }
     if (phase === "action" && (
       !scope.observation_id || !scope.fingerprint
@@ -882,7 +890,9 @@
       subgoal_id: grant.scope.subgoal_id,
       risk_ids: [...grant.scope.risk_ids],
     };
-    if (grant.phase !== "risk") {
+    if (grant.phase === "risk") {
+      confirmation.intent_digest = grant.scope.intent_digest;
+    } else {
       confirmation.observation_id = grant.scope.observation_id;
       confirmation.fingerprint = grant.scope.fingerprint;
       confirmation.decision_node_id = grant.scope.decision_node_id;

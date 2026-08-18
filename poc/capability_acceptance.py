@@ -374,9 +374,20 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
                 isinstance(value, bool) or not isinstance(value, (int, float))
             ):
                 raise CapabilityAcceptanceError(f"验收执行字段 {field} 格式无效。")
+        resolved_kind = str(raw_resolved.get("kind") or "").strip()
+        resolved_text = (
+            raw_resolved.get("text")
+            if isinstance(raw_resolved.get("text"), str)
+            else None
+        )
+        legacy_direct_input = bool(
+            resolved_kind == "input_verified_text"
+            and resolved_text
+            and "input_method" not in raw_resolved
+        )
         resolved = ResolvedSemanticAction(
             node_id=str(raw_resolved.get("node_id") or "acceptance"),
-            kind=str(raw_resolved.get("kind") or "").strip(),
+            kind=resolved_kind,
             normalized_point=_normalized_point(
                 raw_resolved.get("normalized_point"),
                 field="normalized_point",
@@ -385,10 +396,28 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
                 raw_resolved.get("normalized_end_point"),
                 field="normalized_end_point",
             ),
-            text=(
-                raw_resolved.get("text")
-                if isinstance(raw_resolved.get("text"), str)
+            text=resolved_text,
+            input_fragment=(
+                str(raw_resolved.get("input_fragment") or "") or resolved_text
+                if legacy_direct_input or raw_resolved.get("input_fragment") is not None
                 else None
+            ),
+            input_method=(
+                str(raw_resolved.get("input_method") or "")
+                or ("direct_latin" if legacy_direct_input else None)
+            ),
+            input_pinyin=(
+                str(raw_resolved.get("input_pinyin") or "") or None
+            ),
+            prior_input_value=(
+                str(raw_resolved.get("prior_input_value") or "")
+                if raw_resolved.get("prior_input_value") is not None
+                else ("" if legacy_direct_input else None)
+            ),
+            expected_input_value=(
+                str(raw_resolved.get("expected_input_value") or "")
+                if raw_resolved.get("expected_input_value") is not None
+                else (resolved_text if legacy_direct_input else None)
             ),
             direction=(
                 raw_resolved.get("direction")

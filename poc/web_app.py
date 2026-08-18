@@ -747,6 +747,7 @@ class GenericRiskConfirmationScopeRequest(StrictAgentRequest):
     revision: StrictInt = Field(ge=1)
     subgoal_id: StrictStr = Field(min_length=1, max_length=128)
     risk_ids: list[StrictStr] = Field(min_length=1)
+    intent_digest: StrictStr = Field(min_length=64, max_length=64)
 
 
 class GenericRiskApprovalRequest(StrictAgentRequest):

@@ -384,6 +384,26 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.context = task_context()
         self.observation = trusted_observation(self.frames)
 
+    def test_recipient_exact_text_applies_only_to_bound_subgoal(self) -> None:
+        context = task_context()
+        context["goal"]["entities"]["recipient"] = "张三"
+        context["current_subgoal"]["objective"] = "聊天应用在前台可见"
+        parsed = QwenTaskContext.from_dict(context)
+        self.assertNotIn("张三", parsed.exact_text_requirements)
+
+        context["current_subgoal"]["objective"] = "张三的聊天页面在前台可见"
+        context["current_subgoal"]["completion_conditions"] = [
+            "当前聊天标题逐字显示张三"
+        ]
+        parsed = QwenTaskContext.from_dict(context)
+        self.assertNotIn("张三", parsed.exact_text_requirements)
+        self.assertIn("张三", parsed.identity_text_requirements)
+
+        context["current_subgoal"]["objective"] = "打开唯一匹配的张三聊天入口"
+        parsed = QwenTaskContext.from_dict(context)
+        self.assertIn("张三", parsed.exact_text_requirements)
+        self.assertNotIn("张三", parsed.identity_text_requirements)
+
     def decide(
         self,
         provider,
@@ -748,7 +768,12 @@ class QwenVisualDecisionTests(unittest.TestCase):
         payload["next_action"].update(
             {"kind": "input_verified_text", "text": "agent"}
         )
-        payload["expected_result"] = {"content_changed": True}
+        payload["expected_result"] = {
+            "element_state": {
+                "meaning": "搜索输入框",
+                "states": {"value": "agent"},
+            }
+        }
 
         _observer, decision = self.decide(
             FakeProvider(payload),
@@ -774,7 +799,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 "focused": True,
                 "value": "agent",
                 "keyboard_layout": "qwerty",
-                "keyboard_input_mode": "direct_latin",
+                "keyboard_input_mode": "chinese_pinyin",
                 "goal_relevant": True,
             },
             evidence=("输入光标和QWERTY软键盘可见",),
@@ -880,7 +905,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 "focused": True,
                 "value": "",
                 "keyboard_layout": "qwerty",
-                "keyboard_input_mode": "direct_latin",
+                "keyboard_input_mode": "chinese_pinyin",
                 "goal_relevant": True,
             },
             evidence=("输入光标可见",),
@@ -890,6 +915,16 @@ class QwenVisualDecisionTests(unittest.TestCase):
         payload["next_action"].update(
             {"kind": "input_verified_text", "text": "打开蓝牙设置"}
         )
+        payload["expected_result"] = {
+            "element_state": {
+                "meaning": "搜索输入框",
+                "states": {
+                    "value": "",
+                    "ime_preedit_text": "lanyashezhi",
+                    "ime_exact_candidate_text": "蓝牙设置",
+                },
+            }
+        }
 
         provider = FakeProvider(payload)
         observer, decision = self.decide(
@@ -902,6 +937,130 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn("input_text", decision.proposal.reason)
         self.assertEqual(1, provider.calls)
         self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
+
+    def test_exact_ime_candidate_is_a_separate_locally_bound_choice(self) -> None:
+        context = task_context()
+        context["goal"]["entities"] = {"input_text": "你好"}
+        context["current_subgoal"]["objective"] = "在消息输入框输入你好但不要发送"
+        field = UIElement(
+            element_id="field",
+            role="input",
+            meaning="application_text_input",
+            label="消息",
+            bounds=(0.08, 0.12, 0.92, 0.22),
+            confidence=0.97,
+            states={
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "chinese_pinyin",
+                "ime_preedit_text": "nihao",
+                "ime_exact_candidate_text": "你好",
+                "goal_relevant": False,
+            },
+        )
+        candidate = UIElement(
+            element_id="local_audited_ime_candidate_1",
+            role="button",
+            meaning="ime_exact_candidate",
+            label="你好",
+            bounds=(0.08, 0.42, 0.22, 0.48),
+            confidence=0.98,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "ime_candidate": True,
+                "input_element_id": "field",
+                "prior_input_value": "",
+                "expected_input_value": "你好",
+                "pinyin": "nihao",
+            },
+            evidence=("拼音nihao的唯一逐字候选你好",),
+        )
+        observation = trusted_observation(self.frames, elements=(field, candidate))
+        provider = FakeProvider(
+            minimal_selection_payload(status="action", choice_id="choice_2")
+        )
+
+        _observer, decision = self.decide(
+            provider,
+            context=context,
+            observation=observation,
+            available_action_kinds={"tap_semantic", "input_verified_text"},
+        )
+
+        self.assertEqual("tap_semantic", decision.proposal.action.action)
+        self.assertEqual(
+            "local_audited_ime_candidate_1",
+            decision.proposal.action.params["element_id"],
+        )
+        self.assertEqual(
+            {
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {"value": "你好"},
+                }
+            },
+            decision.expected_result,
+        )
+
+    def test_recipient_title_is_identity_evidence_not_input_action_target(self) -> None:
+        context = task_context()
+        context["goal"]["entities"] = {
+            "recipient": "张三",
+            "input_text": "agent",
+        }
+        context["current_subgoal"]["objective"] = "在张三的聊天页输入消息草稿"
+        title = UIElement(
+            element_id="conversation-title",
+            role="text",
+            meaning="conversation_identity",
+            label="张三",
+            bounds=(0.35, 0.03, 0.65, 0.09),
+            confidence=0.98,
+            states={"fully_visible": True, "goal_relevant": False},
+            evidence=("聊天页标题逐字显示张三",),
+        )
+        field = UIElement(
+            element_id="message-field",
+            role="input",
+            meaning="application_text_input",
+            label="消息",
+            bounds=(0.08, 0.12, 0.92, 0.22),
+            confidence=0.97,
+            states={
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+                "goal_relevant": True,
+            },
+        )
+        observation = trusted_observation(self.frames, elements=(title, field))
+        provider = FakeProvider(
+            minimal_selection_payload(status="action", choice_id="choice_1")
+        )
+
+        _observer, decision = self.decide(
+            provider,
+            context=context,
+            observation=observation,
+            available_action_kinds={"input_verified_text"},
+        )
+
+        self.assertEqual("input_verified_text", decision.proposal.action.action)
+        self.assertEqual("message-field", decision.proposal.action.params["element_id"])
+
+        missing_identity = trusted_observation(self.frames, elements=(field,))
+        observer, blocked = self.decide(
+            FakeProvider(minimal_selection_payload(status="action", choice_id="choice_1")),
+            context=context,
+            observation=missing_identity,
+            available_action_kinds={"input_verified_text"},
+        )
+        self.assertEqual("blocked", blocked.proposal.status)
+        self.assertIn("收件人", blocked.proposal.reason)
+        self.assertEqual("identity_missing", observer.last_diagnostics["local_safety_block"])
 
     def test_offline_manifest_uses_full_context_and_multiple_page_types(self) -> None:
         manifest = json.loads(

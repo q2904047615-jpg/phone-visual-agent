@@ -386,6 +386,19 @@ class GraphGoal:
                 )
             if "\n" in input_text or "\r" in input_text:
                 raise TaskGraphError("goal.entities.input_text 不得包含换行。")
+        recipient = self.entities.get("recipient")
+        if recipient is not None:
+            if (
+                not isinstance(recipient, str)
+                or not recipient
+                or len(recipient) > 100
+                or recipient != recipient.strip()
+            ):
+                raise TaskGraphError(
+                    "goal.entities.recipient 必须为1～100个首尾无空白的逐字收件人字符。"
+                )
+            if "\n" in recipient or "\r" in recipient:
+                raise TaskGraphError("goal.entities.recipient 不得包含换行。")
 
 
 @dataclass(frozen=True)
@@ -1604,6 +1617,12 @@ def _initial_prompt(raw_goal: str) -> str:
    不能证明属于这些安全类别时必须标为 unknown，不能为了免确认而猜成安全类别。
 7. 风险类型只用通信、内容发布、账号关系、成员关系、权限角色、数据修改/删除、交易支付、
    账号权限或未知外部影响等跨 App 语义，不得描述 App 页面路径。
+   用户指定已有收件人和文字消息时，必须把收件人逐字写入 goal.entities.recipient，把消息原文
+   逐字写入 goal.entities.input_text；不得翻译、纠错、补标点或改写。打开目标 App、查找并进入
+   已有收件人的聊天页面属于 navigation_only，但相关子目标和完成条件必须逐字包含 canonical
+   recipient，供本地唯一身份核对。只在输入框保留未发送草稿也属于 navigation_only；真正发送
+   才是 external_state，send_message 风险只能关联发送子目标，不能提前污染 App 导航、收件人定位
+   或未提交草稿准备。联系人重名、身份不唯一或缺少消息原文时必须 blocked 并提出澄清问题。
 8. 信息不足时 status=blocked、active_subgoal_id=null，并填写 clarification_questions。
 9. 只返回 JSON 对象，不要 Markdown。
 """
@@ -1653,7 +1672,11 @@ def _repair_initial_prompt(
 7. 字面 UI 标签若包含点击、滑动、输入、长按、拖动等词，必须逐字放在
    goal.entities.target_ui_label，不得出现在goal.objective、subgoals.objective、
    completion_conditions或constraints；状态字段只描述目标页面、区域或内容可见。
-8. 只返回符合结构的完整 JSON 对象，不要 Markdown。
+8. 用户指定已有收件人和文字消息时，goal.entities.recipient 与 input_text 必须分别逐字复制
+   收件人和消息原文。App 导航、已有收件人页面定位和未发送草稿准备使用 navigation_only；
+   只有真正发送子目标使用 external_state 并关联 send_message 风险。收件人定位子目标及其完成
+   条件必须逐字包含 canonical recipient；重名或身份不唯一时 blocked，不得猜测。
+9. 只返回符合结构的完整 JSON 对象，不要 Markdown。
 """
 
 
@@ -2649,7 +2672,7 @@ def _schema_prompt() -> str:
   "goal":{
     "objective":"用户最终想达到的结果",
     "target_apps":[{"app_id":"稳定小写英文ID","app_name":"App名称"}],
-    "entities":{"目标对象或内容":"值","input_text":"仅在确实需要输入时逐字复制用户指定文字；否则省略此键"}
+    "entities":{"目标对象或内容":"值","recipient":"发送文字消息时逐字复制用户指定收件人；否则省略","input_text":"仅在确实需要输入时逐字复制用户指定文字；否则省略此键"}
   },
   "constraints":["全局约束"],
   "completion_conditions":[{

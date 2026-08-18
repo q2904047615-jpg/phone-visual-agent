@@ -30,8 +30,15 @@ function externalSession() {
       revision: 1,
       subgoal_id: "save_target",
       risk_ids: ["save_place"],
+      intent_digest: "d".repeat(64),
     },
     risk_confirmation_ready: true,
+    risk_confirmation_preview: {
+      kind: "message_or_communication",
+      target_apps: [{ app_id: "chat", app_name: "聊天应用" }],
+      recipient: "张三",
+      message_text: "今晚八点见。",
+    },
     physical_actions: 0,
     evidence: [],
     history: [],
@@ -588,6 +595,8 @@ test("external-state graph requires risk approval before exact action confirmati
     assert.match(await page.locator("#actionContent").innerText(), /Qwen 唯一动作尚未产生/);
     await page.locator("#reviewAction").click();
     assert.match(await page.locator("#riskWarning").innerText(), /后端风险 scope 与当前权威任务字段一致/);
+    assert.match(await page.locator("#riskReason").innerText(), /收件人：张三/);
+    assert.match(await page.locator("#riskReason").innerText(), /消息原文：今晚八点见。/);
     assert.match(await page.locator("#riskWarning").innerText(), /不触发机械臂/);
     const approvalResponse = page.waitForResponse(
       response => response.url().endsWith("/approve-risk"),
@@ -607,6 +616,7 @@ test("external-state graph requires risk approval before exact action confirmati
         revision: 1,
         subgoal_id: "save_target",
         risk_ids: ["save_place"],
+        intent_digest: "d".repeat(64),
       },
     });
     assert.equal(requests.confirm.length, 0);

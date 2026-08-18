@@ -810,7 +810,7 @@ class UISceneTests(unittest.TestCase):
             fingerprint="before",
         )
 
-        with self.assertRaisesRegex(UniversalActionError, "空输入框"):
+        with self.assertRaisesRegex(UniversalActionError, "精确前缀"):
             UniversalActionController().resolve_one(
                 SemanticAction(
                     node_id="type-query",
@@ -850,7 +850,7 @@ class UISceneTests(unittest.TestCase):
             },
         )
 
-        with self.assertRaisesRegex(UniversalActionError, "direct_latin"):
+        with self.assertRaisesRegex(UniversalActionError, "输入模式"):
             UniversalActionController().resolve_one(action, current)
 
     def test_input_state_value_and_keyboard_layout_are_typed(self) -> None:
@@ -1010,7 +1010,7 @@ class UISceneTests(unittest.TestCase):
         self.assertEqual(0.8, resolved.hold_seconds)
         self.assertGreaterEqual(resolved.path_distance, 0.08)
 
-    def test_verified_input_rejects_characters_outside_first_hardware_profile(self) -> None:
+    def test_verified_input_segments_mixed_text_without_broadening_key_profile(self) -> None:
         current = scene(
             element(
                 "field",
@@ -1021,26 +1021,42 @@ class UISceneTests(unittest.TestCase):
                     "value": "",
                     "keyboard_layout": "qwerty",
                     "keyboard_input_mode": "direct_latin",
+                    "goal_relevant": True,
                 },
             )
         )
-        for text in ("Agent", "agent1", "中文", "a" * 31):
-            with self.subTest(text=text), self.assertRaisesRegex(
-                UniversalActionError,
-                "1～30个小写英文字母",
-            ):
+        for text, error in (
+            ("Agent", "独立可见"),
+            ("中文", "输入模式"),
+        ):
+            with self.subTest(text=text), self.assertRaisesRegex(UniversalActionError, error):
                 UniversalActionController().resolve_one(
                     SemanticAction(
                         node_id="type",
                         action="input_verified_text",
-                        params={
-                            "element_id": "field",
-                            "target": "查询框",
-                            "text": text,
-                        },
+                        params={"element_id": "field", "target": "查询框", "text": text},
                     ),
                     current,
                 )
+
+        digit_pending = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="type-digit",
+                action="input_verified_text",
+                params={"element_id": "field", "target": "查询框", "text": "agent1"},
+            ),
+            current,
+        )
+        self.assertEqual("agent", digit_pending.input_fragment)
+        long_text = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="type-long",
+                action="input_verified_text",
+                params={"element_id": "field", "target": "查询框", "text": "a" * 31},
+            ),
+            current,
+        )
+        self.assertEqual("a" * 20, long_text.input_fragment)
 
     def test_long_press_requires_safe_bounds_and_visual_postcondition(self) -> None:
         edge = UIElement(

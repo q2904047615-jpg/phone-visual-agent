@@ -32,6 +32,7 @@ function riskApprovalSession() {
       revision: 1,
       subgoal_id: "save_target",
       risk_ids: ["save_place"],
+      intent_digest: "d".repeat(64),
     },
     risk_confirmation_ready: true,
     physical_actions: 0,
@@ -222,6 +223,7 @@ test("real DeepSeek 438cd22 to_qwen_context snapshot keeps v3 gate scope", () =>
     fingerprint: "",
     decisionNodeId: "",
     actionDigest: "",
+    intentDigest: "",
   });
 });
 
@@ -381,6 +383,7 @@ test("risk approval grant excludes observation and cannot execute a physical act
       revision: 1,
       subgoal_id: "save_target",
       risk_ids: ["save_place"],
+      intent_digest: "d".repeat(64),
     },
   });
 });
@@ -633,6 +636,20 @@ test("risk scope rejects action-only authority fields", () => {
   assert.equal(view.scopeState.state, "stale");
   assert.match(view.scopeState.mismatches.join(" "), /risk_scope_extra_action_fields/);
   assert.throws(() => Protocol.createConfirmationGrant(view, "phone-01"), /已经变化|缺失/);
+});
+
+test("risk scope binds the exact intent digest and rejects drift", () => {
+  const raw = riskApprovalSession();
+  const view = Protocol.adaptSession(raw);
+  const grant = Protocol.createConfirmationGrant(view, "phone-01");
+  assert.equal(grant.scope.intent_digest, "d".repeat(64));
+
+  const drifted = clone(raw);
+  drifted.risk_confirmation_scope.intent_digest = "e".repeat(64);
+  assert.throws(
+    () => Protocol.consumeConfirmationGrant(grant, Protocol.adaptSession(drifted)),
+    /已经变化|不一致|失效/,
+  );
 });
 
 test("current Qwen v2 fields win over conflicting legacy fallback data after a v3 graph", () => {

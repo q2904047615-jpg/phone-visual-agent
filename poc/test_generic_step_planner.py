@@ -198,6 +198,11 @@ class FakeRobot:
         self.keyboard_layouts.append(keyboard_layout)
         self.actions.append(("input", text))
 
+    def vision_type_pinyin(self, text, pinyin, keyboard_layout):
+        self._consume("input_verified_text")
+        self.keyboard_layouts.append(keyboard_layout)
+        self.actions.append(("pinyin", text, pinyin))
+
     def vision_clear_text(self, keyboard_layout, delete_count):
         self._consume("input_verified_text")
         self.keyboard_layouts.append(keyboard_layout)
@@ -1040,6 +1045,12 @@ class GenericActionAdapterTests(unittest.TestCase):
                 "label": "搜索",
                 "states": {"focused": True},
                 "text": "agent",
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "搜索输入框",
+                        "states": {"value": "agent"},
+                    }
+                },
             },
         )
 
@@ -1090,6 +1101,81 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(0, caught.exception.physical_actions)
         self.assertEqual([], blocked_robot.actions)
         self.assertEqual(2, observer.calls)
+
+    def test_confirmed_chinese_input_types_pinyin_then_requires_exact_candidate(self):
+        def input_scene(fingerprint, *, ime=False):
+            states = {
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "chinese_pinyin",
+                "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+                "goal_relevant": True,
+            }
+            if ime:
+                states.update(
+                    {
+                        "ime_preedit_text": "nihao",
+                        "ime_exact_candidate_text": "你好",
+                    }
+                )
+            return UIScene(
+                app_id="chat",
+                screen_id="conversation",
+                summary="消息输入框和中文键盘可见",
+                elements=(
+                    UIElement(
+                        element_id="field",
+                        role="input",
+                        meaning="application_text_input",
+                        label="消息",
+                        bounds=(0.1, 0.1, 0.9, 0.2),
+                        confidence=0.97,
+                        states=states,
+                        evidence=("输入框与中文拼音键盘可见",),
+                    ),
+                ),
+                stable=True,
+                confidence=0.96,
+                fingerprint=fingerprint,
+            )
+
+        before = input_scene("before")
+        after = input_scene("after", ime=True)
+        robot = FakeRobot()
+        action = SemanticAction(
+            node_id="input-chinese",
+            action="input_verified_text",
+            params={
+                "element_id": "field",
+                "target": "application_text_input",
+                "role": "input",
+                "label": "消息",
+                "states": before.elements[0].states,
+                "text": "你好",
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "application_text_input",
+                        "states": {
+                            "value": "",
+                            "ime_preedit_text": "nihao",
+                            "ime_exact_candidate_text": "你好",
+                        },
+                    }
+                },
+            },
+        )
+
+        result = self._adapter(FakeSceneObserver([before, after]), robot).execute(
+            requested_action=action,
+            planned_scene=before,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("pinyin", "你好", "nihao")], robot.actions)
+        self.assertEqual("matched", result.action_outcome)
+        self.assertEqual(1, result.physical_actions)
 
     def test_confirmed_clear_uses_exact_observed_count_and_fresh_qwerty_geometry(self):
         def input_scene(fingerprint, element_id, value):
@@ -1234,6 +1320,12 @@ class GenericActionAdapterTests(unittest.TestCase):
                         "goal_relevant": True,
                     },
                     "text": "agent",
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "target_text_input",
+                            "states": {"value": "agent"},
+                        }
+                    },
                 },
             ),
             planned_scene=planned,
@@ -1297,6 +1389,12 @@ class GenericActionAdapterTests(unittest.TestCase):
                         "goal_relevant": True,
                     },
                     "text": "agent",
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "target_text_input",
+                            "states": {"value": "agent"},
+                        }
+                    },
                 },
             ),
             planned_scene=planned,
@@ -1354,6 +1452,12 @@ class GenericActionAdapterTests(unittest.TestCase):
                     "label": "输入框",
                     "states": before.elements[0].states,
                     "text": "agent",
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "target_text_input",
+                            "states": {"value": "agent"},
+                        }
+                    },
                 },
             ),
             planned_scene=before,
@@ -1424,6 +1528,12 @@ class GenericActionAdapterTests(unittest.TestCase):
                     "label": "输入框",
                     "states": before.elements[0].states,
                     "text": "agent",
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "target_text_input",
+                            "states": {"value": "agent"},
+                        }
+                    },
                 },
             ),
             planned_scene=before,

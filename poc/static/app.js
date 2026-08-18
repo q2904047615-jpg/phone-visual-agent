@@ -877,6 +877,18 @@ function openRiskDialog() {
     ? `${actionLabel(view.visualAction)} · ${view.visualAction.semanticTarget}`
     : `${view.currentSubgoal.label} · 等待 Qwen 唯一动作`;
   document.querySelector("#riskReason").textContent = view.risk.currentActions.map(item => `${item.id} [${item.level}]：${item.description}；${item.externalEffect}`).join("\n") || view.visualAction.reason;
+  const intentPreview = view.risk.intentPreview || {};
+  if (riskPhase && intentPreview.kind === "message_or_communication") {
+    const apps = Array.isArray(intentPreview.target_apps)
+      ? intentPreview.target_apps.map(item => item.app_name || item.app_id).filter(Boolean).join("、")
+      : "";
+    document.querySelector("#riskReason").textContent = [
+      apps ? `目标应用：${apps}` : "",
+      `收件人：${intentPreview.recipient || "未提供"}`,
+      `消息原文：${intentPreview.message_text || "未提供"}`,
+      view.risk.currentActions.map(item => `${item.id} [${item.level}]：${item.description}；${item.externalEffect}`).join("\n"),
+    ].filter(Boolean).join("\n");
+  }
   document.querySelector("#riskExpected").textContent = Protocol.displayValue(view.visualAction.expectedChange);
   document.querySelector("#riskDevice").textContent = lockedSessionDeviceId();
   document.querySelector("#riskWarning").textContent = riskPhase

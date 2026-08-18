@@ -537,6 +537,32 @@ def audit_payload_for_graph(payload, *, overrides=None, confidence=0.99):
 
 
 class DeepSeekTaskGraphTests(unittest.TestCase):
+    def test_message_entities_preserve_recipient_and_body_verbatim(self):
+        payload = base_payload()
+        payload["goal"]["entities"].update(
+            {"recipient": "张三", "input_text": "今晚八点见。"}
+        )
+        provider = FakeProvider(payload)
+        graph = DeepSeekTaskGraphPlanner(provider).plan(
+            "准备收件人为张三、内容为今晚八点见。的本地未提交草稿",
+            device_id="phone-1",
+        )
+        self.assertEqual("张三", graph.goal.entities["recipient"])
+        self.assertEqual("今晚八点见。", graph.goal.entities["input_text"])
+        prompt = provider.messages[0][0]["content"]
+        self.assertIn("goal.entities.recipient", prompt)
+        self.assertIn("不能提前污染 App 导航", prompt)
+
+    def test_message_recipient_rejects_whitespace_or_newline(self):
+        for value in (" 张三", "张三 ", "张\n三", ""):
+            with self.subTest(value=value):
+                payload = base_payload()
+                payload["goal"]["entities"]["recipient"] = value
+                with self.assertRaisesRegex(TaskGraphError, "recipient"):
+                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                        "准备消息", device_id="phone-1"
+                    )
+
     def test_verified_action_transition_is_separate_and_requires_one_action(self):
         receipt = VerifiedActionTransition(
             receipt_id="receipt-test",

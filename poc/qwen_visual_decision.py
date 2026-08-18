@@ -24,10 +24,18 @@ from observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
 )
+from message_intent import (
+    subgoal_binds_recipient,
+    subgoal_targets_recipient_control,
+)
 from qwen_runtime_errors import classify_qwen_error, failure_diagnostics
 from semantic_executor import SemanticAction
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 from universal_action_controller import UniversalActionController, UniversalActionError
+from verified_text_transaction import (
+    VerifiedTextTransactionError,
+    plan_next_verified_input,
+)
 from vision_agent import VisionAgentError, _image_data_url
 from vision_model_config import public_model_identity
 
@@ -421,7 +429,46 @@ class QwenTaskContext:
                 text = part.strip()
                 if text not in values:
                     values.append(text)
+        recipient = entities.get("recipient")
+        if recipient is not None:
+            if (
+                not isinstance(recipient, str)
+                or not recipient
+                or len(recipient) > 100
+                or recipient != recipient.strip()
+                or "\n" in recipient
+                or "\r" in recipient
+            ):
+                raise VisionAgentError("goal.entities.recipient 格式无效。")
+            if subgoal_targets_recipient_control(recipient, self.current_subgoal):
+                if recipient not in values:
+                    values.append(recipient)
         return tuple(values)
+
+    @property
+    def identity_text_requirements(self) -> tuple[str, ...]:
+        entities = self.goal.get("entities") or {}
+        if not isinstance(entities, dict):
+            raise VisionAgentError("goal.entities 必须是JSON对象。")
+        recipient = entities.get("recipient")
+        if recipient is None:
+            return ()
+        if (
+            not isinstance(recipient, str)
+            or not recipient
+            or len(recipient) > 100
+            or recipient != recipient.strip()
+        ):
+            raise VisionAgentError("goal.entities.recipient 格式无效。")
+        if (
+            subgoal_binds_recipient(recipient, self.current_subgoal)
+            and not subgoal_targets_recipient_control(
+                recipient,
+                self.current_subgoal,
+            )
+        ):
+            return (recipient,)
+        return ()
 
     @property
     def exact_text_target_roles(self) -> tuple[str, ...]:
@@ -878,6 +925,21 @@ class QwenVisualDecision:
                 context,
                 self.trusted_observation,
             )
+        identity_candidate_ids: set[str] = set()
+        identity_block = _identity_text_candidate_block(
+            context,
+            self.trusted_observation,
+        )
+        if identity_block is not None:
+            if self.proposal.status != "blocked":
+                raise GenericStepPlanningError(
+                    "当前收件人身份缺少本地唯一逐字视觉证据，必须 blocked。"
+                )
+        else:
+            identity_candidate_ids = _required_identity_candidate_ids(
+                context,
+                self.trusted_observation,
+            )
         if self.protocol_version != QWEN_VISUAL_DECISION_PROTOCOL_VERSION:
             raise GenericStepPlanningError("Qwen视觉决策协议版本无效。")
         if not 0.0 <= float(self.confidence) <= 1.0:
@@ -1005,6 +1067,12 @@ class QwenVisualDecision:
             ):
                 raise GenericStepPlanningError(
                     "finished 未引用本地确认的逐字一致候选。"
+                )
+            if identity_candidate_ids and not identity_candidate_ids.issubset(
+                set(self.completion_evidence_element_ids)
+            ):
+                raise GenericStepPlanningError(
+                    "finished 未引用当前收件人的唯一逐字身份候选。"
                 )
             _resolve_completion_evidence(
                 self.completion_evidence_element_ids,
@@ -1222,6 +1290,27 @@ class QwenVisualDecisionObserver:
         )
         if exact_text_block is not None:
             reason, block_code = exact_text_block
+            decision = _local_blocked_decision(
+                context,
+                trusted_observation,
+                reason=reason,
+            )
+            self._metrics["final_blocked_count"] += 1
+            self.last_diagnostics.update(
+                {
+                    "local_safety_block": block_code,
+                    "decision_status": "blocked",
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                }
+            )
+            return decision
+
+        identity_block = _identity_text_candidate_block(
+            context,
+            trusted_observation,
+        )
+        if identity_block is not None:
+            reason, block_code = identity_block
             decision = _local_blocked_decision(
                 context,
                 trusted_observation,
@@ -1479,7 +1568,6 @@ def _selection_choices(
                     item for item in eligible
                     if isinstance(item.get("states"), Mapping)
                     and item["states"].get("focused") is True
-                    and item["states"].get("value") == ""
                 )
             else:
                 eligible = tuple(
@@ -1494,10 +1582,35 @@ def _selection_choices(
         if action in SINGLE_ELEMENT_ACTIONS:
             for item in eligible:
                 if action == "input_verified_text":
+                    try:
+                        input_step = plan_next_verified_input(
+                            context.requested_input_text,
+                            item["states"].get("value"),
+                        )
+                    except (ValueError, VerifiedTextTransactionError):
+                        continue
+                    if (
+                        input_step is None
+                        or input_step.kind == "symbol"
+                        or item["states"].get("keyboard_layout") != "qwerty"
+                        or item["states"].get("keyboard_input_mode")
+                        != input_step.required_mode
+                        or item["states"].get("ime_preedit_text")
+                    ):
+                        continue
+                    expected_states = (
+                        {
+                            "value": input_step.current_text,
+                            "ime_preedit_text": input_step.pinyin,
+                            "ime_exact_candidate_text": input_step.segment,
+                        }
+                        if input_step.kind == "chinese_pinyin"
+                        else {"value": input_step.expected_value}
+                    )
                     expected_result = {
                         "element_state": {
                             "meaning": str(item.get("meaning") or "").strip(),
-                            "states": {"value": context.requested_input_text},
+                            "states": expected_states,
                         }
                     }
                 elif action == "clear_verified_text":
@@ -1505,6 +1618,20 @@ def _selection_choices(
                         "element_state": {
                             "meaning": str(item.get("meaning") or "").strip(),
                             "states": {"value": ""},
+                        }
+                    }
+                elif (
+                    action == "tap_semantic"
+                    and str(item.get("meaning") or "") == "ime_exact_candidate"
+                    and isinstance(item.get("states"), Mapping)
+                    and item["states"].get("ime_candidate") is True
+                ):
+                    expected_result = {
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {
+                                "value": item["states"].get("expected_input_value"),
+                            },
                         }
                     }
                 elif (
@@ -2346,12 +2473,27 @@ def _precondition_eligible_action_kinds(
 
     eligible = set(available_action_kinds)
     if "input_verified_text" in eligible:
-        focused_inputs = tuple(
-            element
-            for element in observation.scene.elements
-            if element.role == "input" and element.states.get("focused") is True
-        )
-        if context.requested_input_text is None or not focused_inputs:
+        eligible_inputs = []
+        if context.requested_input_text is not None:
+            for element in observation.scene.elements:
+                if element.role != "input" or element.states.get("focused") is not True:
+                    continue
+                try:
+                    step = plan_next_verified_input(
+                        context.requested_input_text,
+                        element.states.get("value"),
+                    )
+                except (ValueError, VerifiedTextTransactionError):
+                    continue
+                if (
+                    step is not None
+                    and step.kind != "symbol"
+                    and element.states.get("keyboard_layout") == "qwerty"
+                    and element.states.get("keyboard_input_mode") == step.required_mode
+                    and not element.states.get("ime_preedit_text")
+                ):
+                    eligible_inputs.append(element)
+        if len(eligible_inputs) != 1:
             eligible.remove("input_verified_text")
     if "clear_verified_text" in eligible:
         clearable_inputs = tuple(
@@ -3001,6 +3143,46 @@ def _required_exact_candidate_ids(
             )
         result.add(matches[0])
     return result
+
+
+def _identity_text_candidate_block(
+    context: QwenTaskContext,
+    observation: TrustedObservation,
+) -> tuple[str, str] | None:
+    for required_text in context.identity_text_requirements:
+        matches = _matching_identity_text_candidates(observation, required_text)
+        if not matches:
+            return (f"当前画面不存在收件人逐字身份：{required_text}", "identity_missing")
+        if len(matches) != 1:
+            return (f"当前画面收件人身份不唯一：{required_text}", "identity_ambiguous")
+    return None
+
+
+def _required_identity_candidate_ids(
+    context: QwenTaskContext,
+    observation: TrustedObservation,
+) -> set[str]:
+    result: set[str] = set()
+    for required_text in context.identity_text_requirements:
+        matches = _matching_identity_text_candidates(observation, required_text)
+        if len(matches) != 1:
+            raise GenericStepPlanningError("收件人身份缺少本地唯一逐字候选。")
+        result.add(matches[0])
+    return result
+
+
+def _matching_identity_text_candidates(
+    observation: TrustedObservation,
+    required_text: str,
+) -> list[str]:
+    return [
+        element.element_id
+        for element in observation.scene.elements
+        if float(element.confidence) >= MIN_TARGET_CONFIDENCE
+        and element.states.get("visible") is not False
+        and element.role != "input"
+        and required_text in (element.label, *element.evidence)
+    ]
 
 
 def _matching_exact_text_candidates(

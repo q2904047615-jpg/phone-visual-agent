@@ -116,8 +116,14 @@ def _decision(
             }
         }
     elif action_kind == "input_verified_text":
-        params["text"] = "蓝牙设置"
+        params["text"] = "agent"
         params["states"] = dict(element.states)
+        params["expected_effect"] = {
+            "element_state": {
+                "meaning": element.meaning,
+                "states": {"value": "agent"},
+            }
+        }
     elif action_kind == "clear_verified_text":
         params["states"] = dict(element.states)
         params["expected_effect"] = {
@@ -271,7 +277,11 @@ def _external_graph(*, impact: str = "external_state") -> DynamicTaskGraph:
                 else "处理影响尚不明确的目标状态"
             ),
             target_apps=(TargetApp(app_id="sample", app_name="示例工具"),),
-            entities={"contact": "目标联系人"},
+            entities={
+                "contact": "目标联系人",
+                "recipient": "目标联系人",
+                "input_text": "需求询问",
+            },
         ),
         constraints=("任何外部影响都必须失败关闭",),
         completion_conditions=(
@@ -610,7 +620,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         scene = _scene()
 
         result = self.policy.evaluate(
-            task_context=_context(),
+            task_context=_context(entities={"input_text": "agent"}),
             trusted_observation=_decision(scene).trusted_observation,
             decision=_decision(scene, action_kind="swipe"),
         )
@@ -1358,17 +1368,94 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
                 "goal_relevant": True,
             },
         )
-        chinese_decision = _decision(
-            chinese_scene,
-            action_kind="input_verified_text",
-        )
+        chinese_decision = _decision(chinese_scene, action_kind="input_verified_text")
         denied = self.policy.evaluate(
-            task_context=_context(),
+            task_context=_context(entities={"input_text": "agent"}),
             trusted_observation=chinese_decision.trusted_observation,
             decision=chinese_decision,
         )
         self.assertFalse(denied.allowed)
-        self.assertIn("direct_latin", denied.reason)
+        self.assertIn("键盘模式", denied.reason)
+
+    def test_allows_only_locally_bound_exact_ime_candidate(self) -> None:
+        field = UIElement(
+            element_id="field",
+            role="input",
+            meaning="application_text_input",
+            label="消息",
+            bounds=(0.08, 0.12, 0.92, 0.22),
+            confidence=0.97,
+            states={
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "chinese_pinyin",
+                "ime_preedit_text": "nihao",
+                "ime_exact_candidate_text": "你好",
+                "goal_relevant": False,
+            },
+        )
+        candidate = UIElement(
+            element_id="local_audited_ime_candidate_1",
+            role="button",
+            meaning="ime_exact_candidate",
+            label="你好",
+            bounds=(0.08, 0.42, 0.22, 0.48),
+            confidence=0.98,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "ime_candidate": True,
+                "input_element_id": "field",
+                "prior_input_value": "",
+                "expected_input_value": "你好",
+                "pinyin": "nihao",
+            },
+            evidence=("拼音nihao的唯一逐字候选你好",),
+        )
+        scene = UIScene(
+            app_id="chat",
+            screen_id="conversation",
+            summary="中文候选词可见",
+            elements=(candidate, field),
+            stable=True,
+            confidence=0.96,
+            fingerprint="ime-candidate",
+        )
+        decision = _decision(scene)
+        decision.proposal = GenericStepProposal(
+            status="action",
+            action=SemanticAction(
+                node_id="candidate-step",
+                action="tap_semantic",
+                params={
+                    "element_id": candidate.element_id,
+                    "target": candidate.meaning,
+                    "role": candidate.role,
+                    "label": candidate.label,
+                    "states": dict(candidate.states),
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {"value": "你好"},
+                        }
+                    },
+                },
+            ),
+        )
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"input_text": "你好"},
+                subgoal_objective="在消息输入框输入你好但不要发送",
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+            available_action_kinds=frozenset({"tap_semantic"}),
+        )
+
+        self.assertTrue(result.allowed, result.reason)
+        self.assertEqual("ime_exact_candidate", result.canonical_class)
 
     def test_allows_only_observed_chinese_to_direct_latin_mode_switch(self) -> None:
         input_element = UIElement(
@@ -2912,8 +2999,8 @@ class UniversalAgentStartTests(unittest.TestCase):
             base,
             goal=replace(
                 base.goal,
-                objective="定位当前可见输入框并把内容替换为 Agent123",
-                entities={"input_text": "Agent123"},
+                objective="定位当前可见输入框并把内容替换为 agent",
+                entities={"input_text": "agent"},
             ),
             subgoals=(
                 replace(
@@ -2925,18 +3012,18 @@ class UniversalAgentStartTests(unittest.TestCase):
                 ),
                 Subgoal(
                     subgoal_id="replace-input",
-                    objective="把当前输入框内容替换为 Agent123",
+                    objective="把当前输入框内容替换为 agent",
                     status="pending",
                     depends_on=("locate-input",),
                     constraints=("不要提交、搜索或发送",),
-                    completion_conditions=("输入框显示 Agent123",),
+                    completion_conditions=("输入框显示 agent",),
                     completion_evidence=(),
                     risk_action_ids=(),
                     external_impact="navigation_only",
                 ),
             ),
             active_subgoal_id="locate-input",
-            raw_user_goal="把当前输入框内容替换为 Agent123，不要搜索或提交",
+            raw_user_goal="把当前输入框内容替换为 agent，不要搜索或提交",
         )
         graph.validate()
         return graph
@@ -3250,8 +3337,8 @@ class UniversalAgentStartTests(unittest.TestCase):
             subgoals=(
                 replace(
                     initial.subgoals[0],
-                    objective="验证输入框文字内容是否为 Agent123",
-                    completion_conditions=("输入框文字等于 Agent123",),
+                    objective="验证输入框文字内容是否为 agent",
+                    completion_conditions=("输入框文字等于 agent",),
                 ),
                 initial.subgoals[1],
             ),
@@ -3396,6 +3483,19 @@ class UniversalAgentStartTests(unittest.TestCase):
         self.assertEqual("awaiting_risk_confirmation", session.status)
         self.assertTrue(session.snapshot()["risk_confirmation_ready"])
         self.assertEqual(["risk-1"], session.snapshot()["risk_confirmation_scope"]["risk_ids"])
+        self.assertRegex(
+            session.snapshot()["risk_confirmation_scope"]["intent_digest"],
+            r"^[0-9a-f]{64}$",
+        )
+        self.assertEqual(
+            {
+                "kind": "message_or_communication",
+                "target_apps": [{"app_id": "sample", "app_name": "示例工具"}],
+                "recipient": "目标联系人",
+                "message_text": "需求询问",
+            },
+            session.snapshot()["risk_confirmation_preview"],
+        )
         self.assertEqual(0, len(qwen.calls))
         self.assertEqual(0, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
@@ -4858,6 +4958,20 @@ class UniversalAgentRiskConfirmationTests(unittest.TestCase):
             orchestrator, session, qwen, adapter = self._started(temp)
             scope = _risk_confirmation(session)
             scope["revision"] = 99
+
+            with self.assertRaisesRegex(UniversalAgentOrchestratorError, "不一致"):
+                orchestrator.approve_risks(session, scope)
+
+        self.assertEqual([], qwen.calls)
+        self.assertEqual(0, adapter.capture_calls)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertTrue(session.risk_confirmation_authority.consumed)
+
+    def test_message_intent_digest_drift_is_consumed_without_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, qwen, adapter = self._started(temp)
+            scope = _risk_confirmation(session)
+            scope["intent_digest"] = "0" * 64
 
             with self.assertRaisesRegex(UniversalAgentOrchestratorError, "不一致"):
                 orchestrator.approve_risks(session, scope)

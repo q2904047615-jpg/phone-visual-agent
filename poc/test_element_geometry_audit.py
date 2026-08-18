@@ -12,6 +12,7 @@ try:
         CropTransform,
         ElementGeometryAuditError,
         build_candidate_crop_transform,
+        build_literal_candidate_crop_transform,
         element_geometry_audit_prompt,
         parse_element_geometry_audit,
         select_unique_audited_geometry,
@@ -22,6 +23,7 @@ except ModuleNotFoundError:  # Support ``python -m unittest poc/test_...py``.
         CropTransform,
         ElementGeometryAuditError,
         build_candidate_crop_transform,
+        build_literal_candidate_crop_transform,
         element_geometry_audit_prompt,
         parse_element_geometry_audit,
         select_unique_audited_geometry,
@@ -75,6 +77,36 @@ class CropTransformTests(unittest.TestCase):
         self.assertGreaterEqual(bottom / 1515, actual[3])
         self.assertGreaterEqual(right - left, round(810 * 0.60) - 1)
         self.assertGreaterEqual(bottom - top, round(1515 * 0.60) - 1)
+
+    def test_literal_selector_roi_is_wide_but_excludes_adjacent_rows(self):
+        transform = build_literal_candidate_crop_transform(
+            (810, 1515),
+            (0.13, 0.225, 0.56, 0.265),
+        )
+        left, top, right, bottom = transform.pixel_bounds
+        self.assertGreaterEqual(right - left, round(810 * 0.60) - 1)
+        self.assertEqual(round(1515 * 0.20), bottom - top)
+        self.assertLessEqual(top / 1515, 0.225)
+        self.assertGreaterEqual(bottom / 1515, 0.265)
+        self.assertLess(bottom / 1515, 0.40)
+
+    def test_literal_selector_roi_is_resolution_independent(self):
+        for full_size in ((540, 960), (810, 1515), (1080, 2400)):
+            with self.subTest(full_size=full_size):
+                transform = build_literal_candidate_crop_transform(
+                    full_size,
+                    (0.10, 0.42, 0.38, 0.47),
+                )
+                width, height = full_size
+                self.assertGreaterEqual(
+                    transform.crop_size[0], round(width * 0.60) - 1
+                )
+                self.assertGreaterEqual(
+                    transform.crop_size[1], round(height * 0.20) - 1
+                )
+                self.assertLessEqual(
+                    transform.crop_size[1], round(height * 0.20) + 1
+                )
 
     def test_roi_clamps_near_full_frame_edge(self):
         transform = build_candidate_crop_transform(
@@ -536,6 +568,42 @@ class GenericSceneGeometryAuditIntegrationTests(unittest.TestCase):
                 element_ids=("source",),
             )
 
+    def test_literal_button_uses_shallow_profile_without_changing_other_roles(self):
+        frame = Image.new("RGB", (810, 1515), "gray")
+        current = UIScene(
+            app_id="unknown",
+            screen_id="dense-list",
+            summary="文字入口与相邻列表项可见",
+            elements=(
+                UIElement(
+                    element_id="literal",
+                    role="button",
+                    meaning="return_to_selection",
+                    label="返回验收模式选择",
+                    bounds=(0.13, 0.225, 0.56, 0.265),
+                    confidence=1.0,
+                    states={"goal_relevant": True, "fully_visible": True},
+                    evidence=("白色下划线文字完整可见",),
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint=_local_frame_fingerprint(frame),
+        )
+        observer = GenericSceneObserver(GeometryAuditProvider([[180, 350, 700, 550]]))
+
+        observer.audit_element_geometry(
+            frames=[frame.copy() for _ in range(4)],
+            scene=current,
+            element_ids=("literal",),
+        )
+
+        diagnostics = observer.last_geometry_audit_diagnostics["audits"][0]
+        self.assertEqual("literal_selector", diagnostics["crop_profile"])
+        left, top, right, bottom = diagnostics["pixel_bounds"]
+        self.assertGreaterEqual(right - left, round(810 * 0.60) - 1)
+        self.assertEqual(round(1515 * 0.20), bottom - top)
+
     def test_unlabelled_input_still_requires_unique_single_crop_audit(self):
         frame = Image.new("RGB", (810, 1515), "gray")
         current = UIScene(
@@ -619,6 +687,7 @@ class GenericSceneGeometryAuditIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(690 / 810, bounds[2], delta=0.01)
         self.assertAlmostEqual(847 / 1440, bounds[3], delta=0.01)
         diagnostics = observer.last_geometry_audit_diagnostics["audits"][0]
+        self.assertEqual("broad_structural", diagnostics["crop_profile"])
         self.assertTrue(diagnostics["local_border_snap_used"])
         self.assertNotEqual(
             diagnostics["full_bounds"], diagnostics["snapped_full_bounds"]

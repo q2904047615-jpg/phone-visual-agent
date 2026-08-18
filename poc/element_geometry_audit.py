@@ -15,6 +15,10 @@ ELEMENT_GEOMETRY_AUDIT_PROTOCOL_VERSION = (
 MIN_GEOMETRY_AUDIT_CONFIDENCE = 0.92
 DEFAULT_ROI_MIN_SPAN = 0.60
 DEFAULT_ROI_TARGET_SCALE = 1.50
+LITERAL_ROI_MIN_WIDTH_SPAN = 0.60
+LITERAL_ROI_MIN_HEIGHT_SPAN = 0.20
+LITERAL_ROI_WIDTH_TARGET_SCALE = 1.50
+LITERAL_ROI_HEIGHT_TARGET_SCALE = 3.00
 DEFAULT_INTERNAL_EDGE_MARGIN = 20.0
 MAX_GEOMETRY_MATCHES = 8
 
@@ -172,14 +176,16 @@ class CropTransform:
         return tuple(touched)
 
 
-def build_candidate_crop_transform(
+def _build_candidate_crop_transform(
     full_size: tuple[int, int],
     rough_bounds: tuple[float, float, float, float],
     *,
-    minimum_span: float = DEFAULT_ROI_MIN_SPAN,
-    target_scale: float = DEFAULT_ROI_TARGET_SCALE,
+    minimum_width_span: float,
+    minimum_height_span: float,
+    width_target_scale: float,
+    height_target_scale: float,
 ) -> CropTransform:
-    """Build one broad, candidate-relative ROI without App or pixel patches."""
+    """Build one candidate-relative ROI without App or pixel patches."""
 
     width, height = full_size
     if (
@@ -192,18 +198,34 @@ def build_candidate_crop_transform(
     ):
         raise ElementGeometryAuditError("full frame 尺寸无效。")
     if (
-        not _finite_number(minimum_span)
-        or not 0.0 < float(minimum_span) <= 1.0
-        or not _finite_number(target_scale)
-        or float(target_scale) < 1.0
+        not _finite_number(minimum_width_span)
+        or not 0.0 < float(minimum_width_span) <= 1.0
+        or not _finite_number(minimum_height_span)
+        or not 0.0 < float(minimum_height_span) <= 1.0
+        or not _finite_number(width_target_scale)
+        or float(width_target_scale) < 1.0
+        or not _finite_number(height_target_scale)
+        or float(height_target_scale) < 1.0
     ):
         raise ElementGeometryAuditError("ROI 比例参数无效。")
 
     left, top, right, bottom = _validated_full_bounds(rough_bounds)
     center_x = (left + right) / 2.0
     center_y = (top + bottom) / 2.0
-    roi_width = min(1.0, max(float(minimum_span), (right - left) * float(target_scale)))
-    roi_height = min(1.0, max(float(minimum_span), (bottom - top) * float(target_scale)))
+    roi_width = min(
+        1.0,
+        max(
+            float(minimum_width_span),
+            (right - left) * float(width_target_scale),
+        ),
+    )
+    roi_height = min(
+        1.0,
+        max(
+            float(minimum_height_span),
+            (bottom - top) * float(height_target_scale),
+        ),
+    )
 
     roi_left = min(max(0.0, center_x - roi_width / 2.0), 1.0 - roi_width)
     roi_top = min(max(0.0, center_y - roi_height / 2.0), 1.0 - roi_height)
@@ -217,6 +239,41 @@ def build_candidate_crop_transform(
     return CropTransform(
         full_size=full_size,
         pixel_bounds=(pixel_left, pixel_top, pixel_right, pixel_bottom),
+    )
+
+
+def build_candidate_crop_transform(
+    full_size: tuple[int, int],
+    rough_bounds: tuple[float, float, float, float],
+    *,
+    minimum_span: float = DEFAULT_ROI_MIN_SPAN,
+    target_scale: float = DEFAULT_ROI_TARGET_SCALE,
+) -> CropTransform:
+    """Build the broad ROI used for non-literal and structural controls."""
+
+    return _build_candidate_crop_transform(
+        full_size,
+        rough_bounds,
+        minimum_width_span=minimum_span,
+        minimum_height_span=minimum_span,
+        width_target_scale=target_scale,
+        height_target_scale=target_scale,
+    )
+
+
+def build_literal_candidate_crop_transform(
+    full_size: tuple[int, int],
+    rough_bounds: tuple[float, float, float, float],
+) -> CropTransform:
+    """Build a wide, shallow ROI that isolates one literal text selector row."""
+
+    return _build_candidate_crop_transform(
+        full_size,
+        rough_bounds,
+        minimum_width_span=LITERAL_ROI_MIN_WIDTH_SPAN,
+        minimum_height_span=LITERAL_ROI_MIN_HEIGHT_SPAN,
+        width_target_scale=LITERAL_ROI_WIDTH_TARGET_SCALE,
+        height_target_scale=LITERAL_ROI_HEIGHT_TARGET_SCALE,
     )
 
 

@@ -15,6 +15,7 @@ from PIL import Image, ImageChops, ImageFilter
 from element_geometry_audit import (
     ElementGeometryAuditError,
     build_candidate_crop_transform,
+    build_literal_candidate_crop_transform,
     element_geometry_audit_prompt,
     select_unique_audited_geometry,
 )
@@ -52,7 +53,7 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v50"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v51"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
     "2026-08-18-foreground-app-identity-audit-v1"
@@ -226,7 +227,15 @@ class GenericSceneObserver:
         audit_records: list[dict[str, Any]] = []
         for element_id in requested_ids:
             element = scene.get_element(element_id)
-            transform = build_candidate_crop_transform(frame.size, element.bounds)
+            literal_selector = _can_use_stable_ocr_literal_bounds(
+                element.role,
+                element.label,
+            )
+            transform = (
+                build_literal_candidate_crop_transform(frame.size, element.bounds)
+                if literal_selector
+                else build_candidate_crop_transform(frame.size, element.bounds)
+            )
             source_digest = hashlib.sha256(
                 frame.tobytes()
                 + element.element_id.encode("utf-8")
@@ -309,7 +318,7 @@ class GenericSceneObserver:
                     audited_bounds=audited.full_bounds,
                 )
             ocr_literal_bounds = None
-            if _can_use_stable_ocr_literal_bounds(element.role, element.label):
+            if literal_selector:
                 ocr_literal_bounds = _stable_ocr_literal_bounds(
                     [frame_list[index] for index in matching_indices],
                     element.label,
@@ -325,6 +334,9 @@ class GenericSceneObserver:
                     "label": element.label,
                     "visible_evidence": selected_evidence,
                     "pixel_bounds": list(transform.pixel_bounds),
+                    "crop_profile": (
+                        "literal_selector" if literal_selector else "broad_structural"
+                    ),
                     "local_bounds": list(audited.local_bounds),
                     "full_bounds": list(audited.full_bounds),
                     "local_border_snap_used": snapped_input_bounds is not None,

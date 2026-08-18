@@ -6246,6 +6246,69 @@ class GenericSceneObserverTests(unittest.TestCase):
             len(audit_messages[1]["content"]),
         )
 
+    def test_unknown_foreground_for_named_app_gets_goal_independent_identity_audit(self) -> None:
+        for target_app, audited_app in (
+            ("browser", "browser"),
+            ("settings", "settings"),
+        ):
+            with self.subTest(target_app=target_app):
+                compact = scene_payload()
+                compact["foreground_app_id"] = "unknown"
+                compact["screen_id"] = "app_home"
+                compact["elements"][0].update(
+                    {
+                        "meaning": f"open_{target_app}",
+                        "label": target_app,
+                        "states": {
+                            "goal_relevant": True,
+                            "fully_visible": True,
+                        },
+                        "evidence": ["命名目标入口完整可见"],
+                    }
+                )
+                provider = SequenceProvider(
+                    [
+                        compact,
+                        app_identity_audit_payload(audited_app),
+                    ]
+                )
+                observer = GenericSceneObserver(provider)
+
+                scene = observer.observe(
+                    frames=stable_frames(),
+                    goal_context={
+                        "app_id": target_app,
+                        "objective": "确认命名目标应用当前在前台",
+                    },
+                )
+
+                self.assertEqual(audited_app, scene.foreground_app_id)
+                self.assertEqual(2, provider.calls)
+                audit_text = provider.messages_seen[1][1]["content"][0]["text"]
+                self.assertNotIn(target_app, audit_text)
+                self.assertTrue(
+                    observer.last_diagnostics[
+                        "foreground_app_identity_audit_used"
+                    ]
+                )
+
+    def test_unknown_foreground_without_named_app_does_not_add_identity_call(self) -> None:
+        compact = scene_payload()
+        compact["foreground_app_id"] = "unknown"
+        provider = SequenceProvider([compact])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={},
+        )
+
+        self.assertEqual("unknown", scene.foreground_app_id)
+        self.assertEqual(1, provider.calls)
+        self.assertFalse(
+            observer.last_diagnostics["foreground_app_identity_audit_used"]
+        )
+
     def test_placeholder_foreground_app_audit_is_cross_app_and_low_confidence_fails_closed(self) -> None:
         for audited_app, confidence, expected in (
             ("settings", 0.98, "settings"),

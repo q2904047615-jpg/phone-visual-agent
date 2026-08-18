@@ -389,3 +389,26 @@ Python 完整回归 `1446/1446`；静态编译和差异检查通过。完整回�
 离线结果：completion review、DeepSeek、编排与 web 相关回归 `540/540`，Python 完整回归
 `1447/1447`；完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。静态编译与差异检查
 通过，未改变观察器、模型 schema、动作候选、风险或硬件层。
+
+## 16. 命名目标 App 的诚实 unknown 身份没有进入独立审计
+
+- 提交 `2547283` 加载后，全新会话 `137d2949f3064e1286bff17b969c07f2` 已通过前缀推进、严格
+  浏览器入口精查、独立 geometry 与 fresh 复核，执行 1 次 `tap_semantic` 并形成 matched receipt
+  `receipt_ffb43b88fcf94d1ab3f657ccd9c49101`。动作后 scene 稳定为 `screen_id=news_feed`，但
+  `foreground_app_id=unknown`；DeepSeek 声明浏览器主页完成时被本地命名页面身份门正确阻断。
+- 项目已有完全不接收用户目标的 foreground App identity audit，并严格要求纯 JSON、独立可见身份
+  证据、confidence>=0.90；低置信或审计仍 unknown 会失败关闭。但调用条件只覆盖
+  `current_foreground/current_app` 等非法引用占位符，未覆盖“模型诚实返回 unknown、任务却绑定了
+  真实命名 App”的情况，导致专用安全审计永远没有机会工作。
+- 通用修复：非法身份占位符继续始终审计；foreground 为 unknown 时，仅当根任务 `app_id` 是非空、
+  非 unknown、非引用占位符的真实命名 App 才调用独立身份审计。prompt 不包含目标 App、用户目标、
+  计划或前次答案；审计返回其它 App 会保留其它身份并由命名页面门拒绝，返回 unknown 也继续阻塞。
+- 正向现场样本是 unknown+browser，变化样本为 unknown+settings；反向为 unknown+current_foreground，
+  不增加无意义调用。已有结构化 foreground 不增加调用；低置信、重复键、协议外字段和不安全 evidence
+  继续失败关闭。修复不把目标 App 当当前 App、不修改 screen、候选、动作或风险。
+- 先运行 identity audit 定向与 observer/编排相关回归，再运行本批一次完整回归；全部通过后提交、
+  只重载 Uvicorn，以原 browser 目标创建全新 session。旧 failed session 不复用、不自动补 Home。
+
+离线结果：observer/identity 定向 `199/199`，观察、几何、adapter、通用 mock 与编排相关
+`498/498`，Python 完整回归 `1449/1449`；完整回归只有既知测试子进程 `ResourceWarning`，无断言
+失败。静态编译与差异检查通过，observer 版本更新为 v58。

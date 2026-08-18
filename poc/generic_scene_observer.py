@@ -57,7 +57,7 @@ from verified_text_transaction import (
 )
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v57"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v58"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
     "2026-08-18-foreground-app-identity-audit-v1"
@@ -833,7 +833,7 @@ class GenericSceneObserver:
                     format_retry_used = True
                     local_structural_repair_used = True
 
-            if _is_foreground_app_identity_placeholder(scene.foreground_app_id):
+            if _needs_foreground_app_identity_audit(scene, context):
                 foreground_app_identity_audit_used = True
                 self._set_stage("waiting_foreground_app_identity_audit")
                 raw = model_chat(
@@ -1801,6 +1801,25 @@ _MIN_FOREGROUND_APP_IDENTITY_CONFIDENCE = 0.90
 def _is_foreground_app_identity_placeholder(value: str) -> bool:
     return str(value or "").strip().casefold() in (
         _FOREGROUND_APP_IDENTITY_PLACEHOLDERS
+    )
+
+
+def _needs_foreground_app_identity_audit(
+    scene: UIScene,
+    context: dict[str, Any],
+) -> bool:
+    """Audit unknown identity only when a real named App is task-bound."""
+
+    foreground = str(scene.foreground_app_id or "").strip().casefold()
+    if _is_foreground_app_identity_placeholder(foreground):
+        return True
+    if foreground != "unknown":
+        return False
+    target_app = str(context.get("app_id") or "").strip().casefold()
+    return bool(
+        target_app
+        and target_app != "unknown"
+        and not _is_foreground_app_identity_placeholder(target_app)
     )
 
 

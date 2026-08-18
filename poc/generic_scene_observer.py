@@ -57,7 +57,10 @@ from verified_text_transaction import (
 )
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v59"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v60"
+POST_NAVIGATION_RESULT_OBSERVATION_PHASE = "verified_navigation_result_v1"
+POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
+POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被重新观察"]
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
     "2026-08-18-foreground-app-identity-audit-v1"
@@ -755,6 +758,7 @@ class GenericSceneObserver:
                 not system_ui_audit_required
                 and not _goal_requests_keyboard_mode_switch(context)
                 and not compact_input_geometry_isolated
+                and not _is_verified_navigation_result_observation(context)
                 and (
                     compact_geometry_discarded
                     or _needs_targeted_refinement(scene, context)
@@ -6503,10 +6507,39 @@ def _goal_requests_coordinate_free_system_home(
     )
 
 
+def _is_verified_navigation_result_observation(
+    context: dict[str, Any],
+) -> bool:
+    """Recognize the adapter-owned observation phase after safe navigation.
+
+    This marker carries no execution authority.  It only prevents a second
+    target-refinement pass from searching the destination page for the source
+    control that was just consumed.  The exact locally generated objective and
+    completion condition are required in addition to the typed graph impact.
+    """
+
+    focused = _observation_goal_context(context)
+    if str(focused.get("external_impact") or "").strip() != "navigation_only":
+        return False
+    entities = focused.get("goal_entities")
+    if not isinstance(entities, dict):
+        return False
+    return (
+        entities.get("observation_phase")
+        == POST_NAVIGATION_RESULT_OBSERVATION_PHASE
+        and str(focused.get("objective") or "").strip()
+        == POST_NAVIGATION_RESULT_OBJECTIVE
+        and focused.get("completion_conditions")
+        == POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS
+    )
+
+
 def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
     if not context:
         return False
     focused = _observation_goal_context(context)
+    if _is_verified_navigation_result_observation(context):
+        return False
     if _goal_requests_coordinate_free_system_home(context):
         # System Home has no element geometry.  Asking the target refiner to
         # find a control can conflate an App-local ``主页`` tab with the device

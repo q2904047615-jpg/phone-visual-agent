@@ -633,3 +633,46 @@ goal-conditioned 重观察。
 离线结果：DeepSeek typed receipt 正反合同 `210/210`，编排、Qwen、adapter 与 web 相关回归
 `470/470`，Python 完整回归 `1458/1458`。完整回归只有既知测试子进程 `ResourceWarning`，无断言
 失败。单次模型返回被保留；本地只补严格回执已证明但模型遗漏的 navigation-only 状态转换。
+
+## 22. 动作后观察仍按动作前源控件做目标精查
+
+### 22.1 验收台账与根因证据
+
+- 提交 `499461d` 加载后的 Browser 会话 `e78eee54bb8a4bd48fd023fc5496377e` 先完成 system Home，
+  经新节点重观察后完成一次 Browser 入口点击；会话累计 2 个物理动作。第二动作后的 4 帧已采集，
+  但 adapter 仍把动作前 `open_browser/target_ui_label=浏览器` goal 原样交给 observer。
+- Browser 图标在目标页面中理应消失，目标精查却转而枚举 Browser 内“窗口”tab，并再次输出 y=1850 的
+  非法 bounds；严格 parser 拒绝后会话停止，没有再次点击。该响应本身也明确说“当前无直接浏览器
+  启动入口”，证明精查对象已经过期。
+- `GenericSingleActionAdapter._observe_stable_post_action_scene()` 不区分 before-target 与 after-result；
+  所有动作后观察都使用 `goal.to_dict()`。对于“点击入口 -> 进入新页面”的 navigation transition，源控件
+  不再是动作后证据，继续寻找它会导致任意 App 的入口、列表项、菜单项跨页后出现同类误判。
+
+### 22.2 通用修复、变化样本与边界
+
+- adapter 仅在以下条件全部成立时构造本地 post-navigation observation context：active impact 是
+  navigation_only；resolved kind 属于已支持导航原语；expected_effect 明确
+  `scene_changed=true` 且 `goal_complete_on_success=true`；没有 `element_state` 等持续控件后置条件。
+- 该上下文移除 active goal_entities 的源 `target_ui_label`，把 active objective/condition 改为“观察本次
+  导航后的当前稳定画面”，并写入本地 `observation_phase=verified_navigation_result_v1`。observer 对此阶段
+  只做 compact 全景和既有独立 App/方向审计，不做元素 target refinement；controller 仍验证 fingerprint/
+  expected effect。DeepSeek 完成旧导航后，新 active 节点按第20项再做一次完整 goal-conditioned 重观察。
+- 变化样本为任意 App 入口、列表详情、菜单跳页。反向样本：input/clear/long_press/drag、预期
+  element_state 的持久控件、external_state/unknown、没有 goal_complete_on_success 的滚动探索，均保留原
+  post-action 目标观察，不能借阶段标记跳过结果元素核对。
+- marker 只由本地 adapter 在动作已经发生后生成，不进入 Qwen 动作 authority、确认 scope 或任务图；
+  用户/DeepSeek 同名实体不能让不满足上述 resolved 条件的动作取得该模式。不放宽非法 delta parser。
+
+### 22.3 验证清单与停止条件
+
+- 正测 navigation tap 的确认前 observer 收到原 target，动作后收到移除源 label 的阶段上下文；unknown
+  screen 即使存在 App 内“主页/窗口”tab 也不触发 target refinement。
+- 反测 external impact、element_state、非完成型 swipe/input/long_press/drag 保持原上下文；动作后失败仍
+  记录恰好一次物理动作且不重试。
+- 运行 adapter/observer 定向和 Qwen/编排/web 相关回归，再运行一次完整 Python 回归、静态编译与
+  diff-check；全绿后提交、只重载 Uvicorn，以全新 Browser 会话验收，旧会话不恢复。
+
+离线结果：导航结果观察正反合同 `3/3`，adapter/observer `288/288`，DeepSeek、Qwen、编排、Web 与
+确认作用域相关回归 `658/658`，Python 完整回归 `1461/1461`；5 个变更 Python 文件静态编译和
+diff-check 通过。完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。严格 targeted delta
+parser 未放宽；不满足导航结果合同的动作继续使用原目标做动作后观察。

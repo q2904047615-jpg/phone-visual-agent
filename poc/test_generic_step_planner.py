@@ -15,6 +15,7 @@ from capability_acceptance import _validate_live_promotion_source
 from generic_action_adapter import (
     GenericActionAdapterError,
     GenericSingleActionAdapter as _GenericSingleActionAdapter,
+    _post_action_observation_context,
     stable_qwerty_ocr_anchors,
 )
 from generic_intent import GenericIntentDraft
@@ -32,7 +33,11 @@ from generic_step_planner import (
 from generic_supervised_runtime import GenericSupervisedSession
 from semantic_executor import SemanticAction
 from ui_scene import CameraAlignmentFacts, SystemUIFacts, UIElement, UIScene
-from universal_action_controller import UniversalActionController, UniversalActionError
+from universal_action_controller import (
+    ResolvedSemanticAction,
+    UniversalActionController,
+    UniversalActionError,
+)
 from vision_agent import VisionAgentError
 
 
@@ -97,11 +102,13 @@ class FakeSceneObserver:
         self.calls = 0
         self.geometry_audit_calls = []
         self.geometry_scenes = list(geometry_scenes or ())
+        self.goal_contexts = []
         self.audit_rotation = audit_rotation
         self.audit_confidence = audit_confidence
 
     def observe(self, *, frames, goal_context=None):
         self.calls += 1
+        self.goal_contexts.append(goal_context)
         result = self.scenes.pop(0)
         if isinstance(result, BaseException):
             raise result
@@ -287,6 +294,29 @@ def goal():
         app_name="设置",
         objective="打开蓝牙设置",
         success_criteria={"screen": "蓝牙设置"},
+    )
+
+
+def navigation_goal(*, external_impact="navigation_only"):
+    return GenericIntentDraft(
+        understood=True,
+        app_id="browser",
+        app_name="浏览器",
+        objective="打开浏览器后读取当前页面标题",
+        entities={
+            "active_subgoal_visual_context": {
+                "subgoal_id": "open_browser",
+                "objective": "打开浏览器",
+                "constraints": ["仅使用当前可见入口"],
+                "completion_conditions": ["浏览器结果页面已显示"],
+                "external_impact": external_impact,
+                "goal_entities": {
+                    "target_ui_label": "浏览器",
+                    "target_surface": "device",
+                },
+            }
+        },
+        success_criteria={"screen": "浏览器结果页面"},
     )
 
 
@@ -657,6 +687,150 @@ class GenericActionAdapterTests(unittest.TestCase):
             frame_interval=0,
             post_action_settle=0,
             **kwargs,
+        )
+
+    def test_completed_navigation_observes_result_without_source_target(self):
+        planned = scene("planned")
+        fresh = replace(planned, fingerprint="fresh")
+        after = scene(
+            "after",
+            screen_id="browser_home",
+            app_id="browser",
+            element_id="browser-content",
+        )
+        observer = FakeSceneObserver([fresh, after])
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="open-browser",
+                action="tap_semantic",
+                params={
+                    "element_id": "e1",
+                    "target": "app_icon",
+                    "role": "icon",
+                    "label": "设置",
+                    "states": {},
+                    "expected_effect": {
+                        "scene_changed": True,
+                        "goal_complete_on_success": True,
+                    },
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+            goal=navigation_goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(2, len(observer.goal_contexts))
+        confirmation_focus = observer.goal_contexts[0]["entities"][
+            "active_subgoal_visual_context"
+        ]
+        post_focus = observer.goal_contexts[1]["entities"][
+            "active_subgoal_visual_context"
+        ]
+        self.assertEqual("浏览器", confirmation_focus["goal_entities"]["target_ui_label"])
+        self.assertNotIn("target_ui_label", post_focus["goal_entities"])
+        self.assertEqual(
+            "verified_navigation_result_v1",
+            post_focus["goal_entities"]["observation_phase"],
+        )
+        self.assertEqual("观察本次导航后的当前稳定画面", post_focus["objective"])
+
+    def test_post_navigation_result_context_is_fail_closed(self):
+        safe = ResolvedSemanticAction(
+            node_id="open-browser",
+            kind="tap_semantic",
+            expected_effect={
+                "scene_changed": True,
+                "goal_complete_on_success": True,
+            },
+        )
+        original = navigation_goal().to_dict()
+        self.assertNotEqual(
+            original,
+            _post_action_observation_context(navigation_goal(), safe),
+        )
+
+        unsafe_cases = (
+            (
+                navigation_goal(external_impact="external_state"),
+                safe,
+            ),
+            (
+                navigation_goal(),
+                replace(
+                    safe,
+                    expected_effect={
+                        "scene_changed": True,
+                        "goal_complete_on_success": True,
+                        "element_state": {
+                            "meaning": "toggle",
+                            "states": {"checked": True},
+                        },
+                    },
+                ),
+            ),
+            (navigation_goal(), replace(safe, kind="input_verified_text")),
+            (
+                navigation_goal(),
+                replace(
+                    safe,
+                    kind="swipe",
+                    expected_effect={"scene_changed": True},
+                ),
+            ),
+            (
+                navigation_goal(),
+                replace(
+                    safe,
+                    expected_effect={
+                        "scene_changed": True,
+                        "goal_complete_on_success": True,
+                        "system_ui": {"navigation_bar_visible": True},
+                    },
+                ),
+            ),
+        )
+        for case_goal, resolved in unsafe_cases:
+            with self.subTest(
+                impact=case_goal.entities["active_subgoal_visual_context"][
+                    "external_impact"
+                ],
+                kind=resolved.kind,
+                expected=resolved.expected_effect,
+            ):
+                self.assertEqual(
+                    case_goal.to_dict(),
+                    _post_action_observation_context(case_goal, resolved),
+                )
+
+        spoofed = navigation_goal(external_impact="external_state")
+        spoofed_focus = spoofed.entities["active_subgoal_visual_context"]
+        spoofed_focus["objective"] = "观察本次导航后的当前稳定画面"
+        spoofed_focus["completion_conditions"] = [
+            "当前稳定结果画面已被重新观察"
+        ]
+        spoofed_focus["goal_entities"]["observation_phase"] = (
+            "verified_navigation_result_v1"
+        )
+        sanitized = _post_action_observation_context(spoofed, safe)
+        self.assertNotIn(
+            "observation_phase",
+            sanitized["entities"]["active_subgoal_visual_context"][
+                "goal_entities"
+            ],
         )
 
     def test_stable_local_ocr_snaps_qwerty_row_heights(self):

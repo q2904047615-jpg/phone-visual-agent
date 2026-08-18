@@ -14,6 +14,9 @@ from generic_scene_observer import (
     INPUT_STRUCTURE_AUDIT_VERSION,
     SYSTEM_UI_AUDIT_VERSION,
     TARGETED_SCENE_DELTA_PROTOCOL_VERSION,
+    POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS,
+    POST_NAVIGATION_RESULT_OBJECTIVE,
+    POST_NAVIGATION_RESULT_OBSERVATION_PHASE,
 )
 from generic_scene_observer import (
     _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES,
@@ -411,6 +414,58 @@ def audited_application_input(
 
 
 class GenericSceneObserverTests(unittest.TestCase):
+    def test_verified_navigation_result_uses_one_compact_coordinate_space(self) -> None:
+        payload = scene_payload()
+        payload.update(
+            {
+                "foreground_app_id": "browser",
+                "screen_id": "unknown",
+                "summary": "浏览器结果页底部有主页和窗口标签。",
+                "elements": [],
+                "confidence": 0.98,
+            }
+        )
+        context = {
+            "app_id": "browser",
+            "app_name": "浏览器",
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "open_browser",
+                    "objective": POST_NAVIGATION_RESULT_OBJECTIVE,
+                    "constraints": ["仅导航"],
+                    "completion_conditions": list(
+                        POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS
+                    ),
+                    "external_impact": "navigation_only",
+                    "goal_entities": {
+                        "target_surface": "device",
+                        "observation_phase": (
+                            POST_NAVIGATION_RESULT_OBSERVATION_PHASE
+                        ),
+                    },
+                }
+            },
+        }
+        provider = SequenceProvider([payload])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context=context,
+        )
+
+        self.assertEqual("browser", scene.foreground_app_id)
+        self.assertEqual(1, provider.calls)
+        self.assertFalse(observer.last_diagnostics["targeted_refinement_used"])
+        self.assertFalse(_needs_targeted_refinement(scene, context))
+
+        unmarked = json.loads(json.dumps(context, ensure_ascii=False))
+        unmarked_focus = unmarked["entities"]["active_subgoal_visual_context"]
+        unmarked_focus["objective"] = "打开浏览器"
+        unmarked_focus["completion_conditions"] = ["浏览器结果页可见"]
+        unmarked_focus["goal_entities"].pop("observation_phase")
+        self.assertTrue(_needs_targeted_refinement(scene, unmarked))
+
     def test_input_audit_prompt_defines_exact_nullable_mode_switch_contract(self) -> None:
         prompt = _input_structure_audit_prompt(
             {"objective": "切换当前键盘输入模式"},

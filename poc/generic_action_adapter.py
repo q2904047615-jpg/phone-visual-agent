@@ -14,7 +14,12 @@ from typing import Any, Callable
 from PIL import Image, ImageChops, ImageStat
 
 from generic_intent import GenericIntentDraft
-from generic_scene_observer import GenericSceneObserver
+from generic_scene_observer import (
+    GenericSceneObserver,
+    POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS,
+    POST_NAVIGATION_RESULT_OBJECTIVE,
+    POST_NAVIGATION_RESULT_OBSERVATION_PHASE,
+)
 from ocr_runtime import recognize as recognize_ocr
 from observation_images import measure_local_stability
 from orientation_safety import (
@@ -62,6 +67,83 @@ _URL_SECRET_RE = re.compile(
 )
 _URL_USERINFO_RE = re.compile(r"(https?://)[^/@\s:]+:[^/@\s]+@", re.IGNORECASE)
 _OPENAI_STYLE_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
+
+_POST_NAVIGATION_RESULT_KINDS = frozenset(
+    {"tap_semantic", "swipe", "back", "home"}
+)
+_POST_NAVIGATION_ALLOWED_EFFECT_KEYS = frozenset(
+    {
+        "scene_changed",
+        "content_changed",
+        "current_video_changed",
+        "goal_complete_on_success",
+        "description",
+        "app_id",
+        "screen_id",
+    }
+)
+
+
+def _post_action_observation_context(
+    goal: GenericIntentDraft,
+    resolved: ResolvedSemanticAction,
+) -> dict[str, Any]:
+    """Return a result-focused context only for a proven navigation boundary."""
+
+    context = goal.to_dict()
+    entities = context.get("entities")
+    focus = (
+        entities.get("active_subgoal_visual_context")
+        if isinstance(entities, dict)
+        else None
+    )
+    if isinstance(entities, dict) and isinstance(focus, dict):
+        supplied_goal_entities = focus.get("goal_entities")
+        if isinstance(supplied_goal_entities, dict):
+            # ``observation_phase`` is a reserved local attestation.  Strip any
+            # model/user supplied value before deciding whether this resolved
+            # action is allowed to mint it.
+            sanitized_goal_entities = dict(supplied_goal_entities)
+            sanitized_goal_entities.pop("observation_phase", None)
+            sanitized_focus = dict(focus)
+            sanitized_focus["goal_entities"] = sanitized_goal_entities
+            sanitized_entities = dict(entities)
+            sanitized_entities["active_subgoal_visual_context"] = sanitized_focus
+            context = dict(context)
+            context["entities"] = sanitized_entities
+            entities = sanitized_entities
+            focus = sanitized_focus
+    expected = resolved.expected_effect
+    if (
+        not isinstance(focus, dict)
+        or str(focus.get("external_impact") or "").strip() != "navigation_only"
+        or resolved.kind not in _POST_NAVIGATION_RESULT_KINDS
+        or not isinstance(expected, dict)
+        or expected.get("scene_changed") is not True
+        or expected.get("goal_complete_on_success") is not True
+        or "element_state" in expected
+        or set(expected) - _POST_NAVIGATION_ALLOWED_EFFECT_KEYS
+    ):
+        return context
+
+    goal_entities = focus.get("goal_entities")
+    if not isinstance(goal_entities, dict):
+        return context
+    result_entities = dict(goal_entities)
+    result_entities.pop("target_ui_label", None)
+    result_entities["observation_phase"] = (
+        POST_NAVIGATION_RESULT_OBSERVATION_PHASE
+    )
+    result_focus = dict(focus)
+    result_focus["objective"] = POST_NAVIGATION_RESULT_OBJECTIVE
+    result_focus["completion_conditions"] = list(
+        POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS
+    )
+    result_focus["goal_entities"] = result_entities
+    result_context = dict(context)
+    result_context["entities"] = dict(entities)
+    result_context["entities"]["active_subgoal_visual_context"] = result_focus
+    return result_context
 
 
 def stable_qwerty_ocr_anchors(
@@ -735,6 +817,7 @@ class GenericSingleActionAdapter:
         observation_errors: list[str] = []
         verification_errors: list[str] = []
         last_error: Exception | None = None
+        observation_context = _post_action_observation_context(goal, resolved)
         for attempt in range(1, self.post_action_max_observations + 1):
             attempt_deadline = time.monotonic() + self.post_action_timeout
             try:
@@ -760,7 +843,7 @@ class GenericSingleActionAdapter:
             try:
                 after = self.observer.observe(
                     frames=frames,
-                    goal_context=goal.to_dict(),
+                    goal_context=observation_context,
                 )
             except RuntimeError as exc:
                 last_error = exc

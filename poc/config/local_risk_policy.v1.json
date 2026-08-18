@@ -1,0 +1,13 @@
+{
+  "protocol_version": "2026-08-18-local-risk-policy-v1",
+  "policy_id": "default_low_friction",
+  "version": 1,
+  "confirmation_effect_kinds": [
+    "authentication",
+    "financial_transaction",
+    "sensitive_permission_change",
+    "irreversible_account_deletion",
+    "irreversible_data_deletion"
+  ],
+  "overrides": []
+}

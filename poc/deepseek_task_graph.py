@@ -17,6 +17,7 @@ from deepseek_semantic_risk_audit import (
     SemanticRiskAuditor,
 )
 from generic_intent import GenericIntentError, _parse_json_object
+from task_semantic_ir import SemanticShadowReport, compile_legacy_graph_shadow
 
 
 DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-11-deepseek-task-graph-v3"
@@ -1249,6 +1250,8 @@ class DeepSeekTaskGraphPlanner:
         self.risk_auditor = SemanticRiskAuditor(risk_audit_provider or provider)
         self.last_raw_response = ""
         self.last_risk_audit: SemanticRiskAuditReport | None = None
+        self.last_semantic_shadow: SemanticShadowReport | None = None
+        self.last_semantic_shadow_error = ""
 
     @property
     def risk_audit_call_count(self) -> int:
@@ -1267,6 +1270,7 @@ class DeepSeekTaskGraphPlanner:
         _validate_device_id(device_id)
         resolved_task_id = task_id or uuid.uuid4().hex
         _validate_task_id(resolved_task_id)
+        self._reset_semantic_shadow()
         self._require_provider()
         prompt = _initial_prompt(text)
         graph = self._request_graph(
@@ -1286,6 +1290,7 @@ class DeepSeekTaskGraphPlanner:
         graph = _normalize_initial_premature_completed_status(graph)
         graph = _normalize_unique_active_frontier(graph)
         graph = _normalize_initial_confirmation_status(graph)
+        self._capture_semantic_shadow(graph)
         graph.validate()
         self._audit_and_validate_graph(graph)
         if (
@@ -1309,6 +1314,7 @@ class DeepSeekTaskGraphPlanner:
         if trigger not in REPLAN_TRIGGERS:
             raise TaskGraphError(f"不支持的重规划触发原因：{trigger}")
         _require_text(reason, "replan.reason")
+        self._reset_semantic_shadow()
         self._require_provider()
         prompt = _replan_prompt(graph, observation, trigger=trigger, reason=reason)
         candidate = self._request_graph(
@@ -1326,6 +1332,7 @@ class DeepSeekTaskGraphPlanner:
             observation,
         )
         candidate = _normalize_unique_active_frontier(candidate)
+        self._capture_semantic_shadow(candidate)
         self._validate_replan_candidate(
             graph,
             candidate,
@@ -1371,6 +1378,19 @@ class DeepSeekTaskGraphPlanner:
         revised = replace(candidate, replan_history=graph.replan_history + (record,))
         revised.validate()
         return revised
+
+    def _capture_semantic_shadow(self, graph: DynamicTaskGraph) -> None:
+        """Compile diagnostics only; never influence the formal v3 graph."""
+
+        self._reset_semantic_shadow()
+        try:
+            self.last_semantic_shadow = compile_legacy_graph_shadow(graph)
+        except Exception as exc:  # Shadow migration must remain non-authoritative.
+            self.last_semantic_shadow_error = str(exc)[:1000]
+
+    def _reset_semantic_shadow(self) -> None:
+        self.last_semantic_shadow = None
+        self.last_semantic_shadow_error = ""
 
     def _validate_replan_candidate(
         self,

@@ -106,6 +106,26 @@ def persist_deepseek_failure_diagnostic(
         "redacted_response_truncated": len(redacted) > len(bounded),
         "redacted_raw_response": bounded,
     }
+    shadow = getattr(planner, "last_semantic_shadow", None)
+    if shadow is not None:
+        try:
+            shadow_json = json.dumps(
+                shadow.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            payload["semantic_shadow"] = json.loads(
+                _redact_deepseek_failure_response(shadow_json)
+            )
+        except (AttributeError, TypeError, ValueError):
+            payload["semantic_shadow_error"] = "影子报告无法安全序列化。"
+    shadow_error = str(
+        getattr(planner, "last_semantic_shadow_error", "") or ""
+    ).strip()
+    if shadow_error:
+        payload["semantic_shadow_error"] = _redact_deepseek_failure_response(
+            shadow_error
+        )[:1000]
     encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     temporary = output_dir / f".{target.name}.{uuid.uuid4().hex}.tmp"
     try:

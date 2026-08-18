@@ -71,6 +71,36 @@ class DeepSeekFailureDiagnosticTests(unittest.TestCase):
             self.assertEqual((), paths)
             self.assertEqual([], list(Path(temp).iterdir()))
 
+    def test_includes_non_authoritative_semantic_shadow_diagnostic(self) -> None:
+        shadow = SimpleNamespace(
+            to_dict=lambda: {
+                "authoritative": False,
+                "execution_allowed": False,
+                "semantic_digest": "abc123",
+                "token": "must-not-leak",
+            }
+        )
+        planner = SimpleNamespace(
+            last_raw_response='{"status":"ready"}',
+            last_semantic_shadow=shadow,
+            last_semantic_shadow_error="",
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            paths = persist_deepseek_failure_diagnostic(
+                planner,
+                evidence_dir=Path(temp),
+                prefix="initial",
+                failed_stage="initial_task_graph",
+                error=RuntimeError("formal validation failed"),
+            )
+            artifact = json.loads(Path(paths[0]).read_text(encoding="utf-8"))
+
+        self.assertFalse(artifact["semantic_shadow"]["authoritative"])
+        self.assertFalse(artifact["semantic_shadow"]["execution_allowed"])
+        self.assertEqual("abc123", artifact["semantic_shadow"]["semantic_digest"])
+        self.assertNotIn("must-not-leak", json.dumps(artifact, ensure_ascii=False))
+
 
 if __name__ == "__main__":
     unittest.main()

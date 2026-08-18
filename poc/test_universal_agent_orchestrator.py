@@ -3808,6 +3808,87 @@ class UniversalAgentStartTests(unittest.TestCase):
                 self.assertEqual(1, len(qwen.calls))
                 self.assertEqual(0, session.physical_actions)
 
+    def test_replan_launcher_entry_cannot_complete_named_foreground_app(self) -> None:
+        for app_id, app_name, meaning in (
+            ("wechat", "微信", "open_wechat"),
+            ("settings", "设置", "open_settings"),
+            ("browser", "浏览器", "open_browser"),
+        ):
+            with self.subTest(app_id=app_id):
+                previous = self._named_app_page_graph(
+                    app_id=app_id,
+                    app_name=app_name,
+                )
+                revised = self._advance_named_app_page_graph(previous)
+                launcher = replace(
+                    _scene(
+                        meaning=meaning,
+                        label=app_name,
+                        states={"goal_relevant": True, "fully_visible": True},
+                    ),
+                    app_id="launcher",
+                    screen_id="home_screen",
+                    summary=f"手机桌面显示{app_name}入口图标。",
+                )
+
+                with self.assertRaisesRegex(
+                    UniversalAgentOrchestratorError,
+                    "入口不能证明目标 App 页面已在前台",
+                ):
+                    UniversalAgentOrchestrator._validate_graph_identity(
+                        revised,
+                        device_id="device-1",
+                        previous=previous,
+                        trusted_observation=SimpleNamespace(scene=launcher),
+                    )
+
+    def test_replan_structured_foreground_app_and_launcher_checkpoint_pass(self) -> None:
+        previous = self._named_app_page_graph(
+            app_id="wechat",
+            app_name="微信",
+        )
+        revised = self._advance_named_app_page_graph(previous)
+        wechat_scene = replace(
+            _scene(role="text", meaning="wechat_home_title", label="微信"),
+            app_id="wechat",
+            screen_id="wechat_home",
+            summary="微信应用首页可见。",
+        )
+        UniversalAgentOrchestrator._validate_graph_identity(
+            revised,
+            device_id="device-1",
+            previous=previous,
+            trusted_observation=SimpleNamespace(scene=wechat_scene),
+        )
+
+        launcher_previous = replace(
+            previous,
+            goal=replace(previous.goal, objective="先确认系统主桌面可见"),
+            subgoals=(
+                replace(
+                    previous.subgoals[0],
+                    objective="系统主桌面在前台可见",
+                    completion_conditions=("系统主桌面在前台可见",),
+                ),
+                previous.subgoals[1],
+            ),
+            raw_user_goal="先确认系统主桌面可见，再进入微信",
+        )
+        launcher_previous.validate()
+        launcher_revised = self._advance_named_app_page_graph(launcher_previous)
+        launcher_scene = replace(
+            _scene(meaning="open_wechat", label="微信"),
+            app_id="launcher",
+            screen_id="home_screen",
+            summary="系统主桌面可见。",
+        )
+        UniversalAgentOrchestrator._validate_graph_identity(
+            launcher_revised,
+            device_id="device-1",
+            previous=launcher_previous,
+            trusted_observation=SimpleNamespace(scene=launcher_scene),
+        )
+
     def test_matching_target_app_can_prove_foreground_wording(self) -> None:
         base = self._named_app_page_graph(
             app_id="local_tool",

@@ -1539,6 +1539,7 @@ class UniversalAgentOrchestrator:
             revised,
             device_id=session.device_id,
             previous=graph,
+            trusted_observation=trusted_observation,
         )
         if revised.revision != graph.revision + 1:
             raise UniversalAgentOrchestratorError(
@@ -1721,6 +1722,7 @@ class UniversalAgentOrchestrator:
             revised,
             device_id=session.device_id,
             previous=graph,
+            trusted_observation=trusted_observation,
         )
         self._store_revised_graph(session, revised)
         if revised.status == "completed":
@@ -1746,12 +1748,50 @@ class UniversalAgentOrchestrator:
             "policy_version": PhaseOneNavigationPolicy.VERSION,
         }
 
-    @staticmethod
+    @classmethod
+    def _validate_newly_completed_named_app_surfaces(
+        cls,
+        *,
+        previous: DynamicTaskGraph,
+        revised: DynamicTaskGraph,
+        trusted_observation: Any,
+    ) -> None:
+        scene = getattr(trusted_observation, "scene", None)
+        if scene is None:
+            raise UniversalAgentOrchestratorError(
+                "DeepSeek revision 缺少可复核的可信场景。"
+            )
+        old_by_id = {item.subgoal_id: item for item in previous.subgoals}
+        for item in revised.subgoals:
+            old = old_by_id.get(item.subgoal_id)
+            if item.status != "completed" or (
+                old is not None and old.status == "completed"
+            ):
+                continue
+            presence_text = " ".join(
+                (item.objective, *tuple(item.completion_conditions or ()))
+            )
+            referenced_app_pages = cls._referenced_target_app_pages(
+                graph=previous,
+                presence_text=presence_text,
+            )
+            if referenced_app_pages and not cls._scene_foreground_matches_target_app_page(
+                scene=scene,
+                target_apps=referenced_app_pages,
+            ):
+                raise UniversalAgentOrchestratorError(
+                    "Launcher 或其他页面中的 App 入口不能证明目标 App 页面已在前台："
+                    f"subgoal_id={item.subgoal_id}。"
+                )
+
+    @classmethod
     def _validate_graph_identity(
+        cls,
         graph: DynamicTaskGraph,
         *,
         device_id: str,
         previous: DynamicTaskGraph | None = None,
+        trusted_observation: Any | None = None,
     ) -> None:
         graph.validate()
         if graph.device_id != device_id:
@@ -1766,6 +1806,12 @@ class UniversalAgentOrchestrator:
             if graph.revision != previous.revision + 1:
                 raise UniversalAgentOrchestratorError(
                     "DeepSeek 重规划 revision 必须严格等于上一 revision + 1。"
+                )
+            if trusted_observation is not None:
+                cls._validate_newly_completed_named_app_surfaces(
+                    previous=previous,
+                    revised=graph,
+                    trusted_observation=trusted_observation,
                 )
 
     @staticmethod
@@ -2235,6 +2281,7 @@ class UniversalAgentOrchestrator:
                 revised,
                 device_id=session.device_id,
                 previous=previous_graph,
+                trusted_observation=new_observation,
             )
         except Exception as exc:
             session.status = "blocked"
@@ -2323,6 +2370,7 @@ class UniversalAgentOrchestrator:
                     reviewed,
                     device_id=session.device_id,
                     previous=revised,
+                    trusted_observation=new_observation,
                 )
                 session.task_graph = reviewed
                 session.goal_draft = self.bridge.goal_draft(reviewed)
@@ -2631,6 +2679,7 @@ class UniversalAgentOrchestrator:
                         revised,
                         device_id=session.device_id,
                         previous=graph,
+                        trusted_observation=observation,
                     )
                 except Exception as exc:
                     session.status = "blocked"
@@ -3627,6 +3676,7 @@ class UniversalAgentOrchestrator:
                         revised,
                         device_id=session.device_id,
                         previous=graph,
+                        trusted_observation=observation,
                     )
                     self._store_revised_graph(session, revised)
                     graph = revised

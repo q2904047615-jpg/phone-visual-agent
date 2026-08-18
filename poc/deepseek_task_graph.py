@@ -2766,6 +2766,12 @@ _LEADING_UNNAMED_VISUAL_CONTAINER_PATTERN = re.compile(
     r"^(?:the\s+)?(?:page|screen|view|panel|card)\b",
     re.IGNORECASE,
 )
+_TEMPORAL_REFERENTIAL_VISUAL_CONTAINER_PATTERN = re.compile(
+    r"^(?:已)?(?:读取|查看|确认|核对|观察)?\s*"
+    r"(?:打开|进入|操作|动作|加载|刷新|跳转|切换|返回|退出|完成)"
+    r"(?:操作|动作)?后(?:的)?(?:页面|界面|屏幕|视图)(?:中|内|上)?",
+    re.IGNORECASE,
+)
 _VISUAL_IDENTITY_GENERIC_TOKENS = (
     "原来的",
     "原有的",
@@ -2861,6 +2867,12 @@ def _named_visual_identity_anchor(texts: tuple[str, ...]) -> str:
     anchors: list[str] = []
     for item in texts:
         value = str(item or "").strip()
+        # "打开后页面" and similar temporal references identify the page by
+        # its place in the current action sequence, not by a stable visual
+        # name.  Treating the preceding verbs as a page title makes an exact,
+        # grounded title element impossible to use after navigation.
+        if _TEMPORAL_REFERENTIAL_VISUAL_CONTAINER_PATTERN.search(value):
+            continue
         identity_value = _GENERIC_VISUAL_LOCATION_PATTERN.sub(" ", value)
         if _LEADING_UNNAMED_VISUAL_CONTAINER_PATTERN.search(
             identity_value.strip()

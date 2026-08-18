@@ -1172,6 +1172,70 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             ),
         )
 
+    def test_temporal_result_page_title_is_not_a_named_page_identity(self):
+        referential_phrases = (
+            "已读取打开后页面的主标题或错误提示",
+            "进入后页面的标题已确认",
+            "操作后页面的错误提示可见",
+            "加载后界面的主标题文字可见",
+            "The page shown after opening has a visible title",
+        )
+        for phrase in referential_phrases:
+            with self.subTest(phrase=phrase):
+                self.assertEqual("", _named_visual_identity_anchor((phrase,)))
+
+        for named_page in (
+            "跨境订单结果页面可见",
+            "系统设置页面已打开",
+            "当前浏览器页面的主标题或错误提示已确认",
+        ):
+            with self.subTest(named_page=named_page):
+                self.assertTrue(_named_visual_identity_anchor((named_page,)))
+
+    def test_replan_accepts_exact_title_evidence_for_temporal_result_page(self):
+        objective = "打开后页面的主标题或错误提示内容已确认"
+        title_fact = (
+            '{"label":"通用动作真机验收页","meaning":"page_title",'
+            '"role":"text"}'
+        )
+        initial = single_subgoal_payload(objective, external_impact="read_only")
+        initial["completion_conditions"][0].update(
+            condition_id="title_read",
+            description="已读取打开后页面的主标题或错误提示",
+            evidence_required=["主标题或错误提示内容已确认"],
+        )
+        initial["subgoals"][0]["completion_conditions"] = [
+            "主标题或错误提示内容已确认"
+        ]
+        completed = copy.deepcopy(initial)
+        completed["status"] = "completed"
+        completed["completion_conditions"][0].update(
+            satisfied=True,
+            evidence=[title_fact],
+        )
+        completed["subgoals"][0].update(
+            status="completed",
+            completion_evidence=[title_fact],
+        )
+        completed["active_subgoal_id"] = None
+        planner = DeepSeekTaskGraphPlanner(FakeProvider(initial, completed))
+        graph = planner.plan(objective, device_id="phone-1")
+
+        revised = planner.replan(
+            graph,
+            ObservedState(
+                scene_id="scene-browser",
+                summary="浏览器页面标题可见",
+                visible_evidence=("通用动作真机验收页",),
+                grounded_visual_facts=(title_fact,),
+                last_action_outcome="not_applicable",
+            ),
+            trigger="subgoal_completed",
+            reason="当前可信画面用于只读完成复核。",
+        )
+
+        self.assertEqual("completed", revised.status)
+
     def test_quoted_ui_title_requires_its_complete_literal_identity(self):
         anchor = _quoted_visual_identity_anchor(
             ("“选择单一验收模式”标题清晰可见",)

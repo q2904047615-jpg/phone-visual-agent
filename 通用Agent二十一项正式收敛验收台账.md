@@ -502,3 +502,45 @@ visual shadow 与 TaskSemanticIR 相关回归 `409/409`；Python 完整回归 `1
 Python 完整回归 `1454/1454`；完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。
 严格回执仍只完成其绑定的 navigation-only 转换，普通可见文字无法替代命名页面身份。静态编译与
 差异检查通过后本地提交；未修改 observer、视觉身份、风险、坐标或机械臂层。
+
+## 19. 无坐标系统 Home 被错误送入控件目标精查
+
+### 19.1 验收台账与根因证据
+
+- 提交 `ba28a51` 加载后，全新 Browser 会话 `aa59f302` 在第 1 轮动作前观察即失败，
+  `physical_actions=0`，没有操作手机。当前 active 节点为 `return_home_initial`，objective 是
+  “返回手机桌面”，后续 Browser、标题读取等内容没有进入当前观察焦点。
+- compact 后因 `screen_id=unknown` 触发通用 target refinement；Qwen 把 Browser 内底栏“主页/视频/
+  窗口/免费小说/我的”当成目标控件，输出的 x/y/w/h 中 y 达到 1850。严格 parser 正确拒绝该非
+  0..1000 delta。若把 y 除以 2000 或放宽 schema，反而可能把 Browser 的“主页”标签授权为系统
+  Home，属于危险误修。
+- `home/back/reveal_system_navigation` 在正式 Qwen/action 合同中本来就是无元素、无坐标系统动作；
+  targeted refinement 只能补元素几何，不能提高 base scene confidence，也不能证明系统 Home。
+  因此根因是观察策略没有区分“元素绑定动作”和“明确无坐标系统动作”，不是某个 App 或坐标格式。
+
+### 19.2 同类样本、通用修复与回滚
+
+- 现场样本为 Browser 内存在“主页”标签时的“返回手机桌面”；变化样本为任意 App 内的“回到手机
+  主屏幕”。两者均不得为了找可点击元素调用 targeted refinement。
+- 反向样本为“打开应用主页”“进入首页”“点击主页标签”：这些仍是元素/页面语义，不能被识别成
+  系统 Home，仍按原规则在缺少可信目标时精查或失败关闭。根目标未来提到“最后返回桌面”，但当前
+  active 节点是“打开 Browser”时，也不能跳过当前元素精查。
+- 通用修复：仅当 active_subgoal_visual_context 的 impact 为 navigation_only，且 objective 逐字表达
+  “返回/回到手机桌面或主屏幕”的系统 Home 语义时，`_needs_targeted_refinement()` 直接返回 false。
+  compact scene 原样进入 Qwen；Qwen 仍必须正式提出无元素 home，本地 policy、确认前同帧身份、动作后
+  新观察和 matched receipt 全部保持。低置信 compact 不会被虚假提高，后续门禁仍可 0 动作拒绝。
+- 不解析本次非法 delta、不增加 App/页面/坐标分支，不修改 action authority 或机械臂。回滚只需移除
+  系统 Home 的 refinement 路由判断。
+
+### 19.3 验证清单与停止条件
+
+- 正测 `返回手机桌面`、`回到手机主屏幕` 在 unknown screen 且无目标元素时不触发第二次模型调用；
+  变化样本即使存在 Browser “主页”tab 也不把它当系统 Home 精查目标。
+- 反测 `打开应用主页` 和 active `打开浏览器`（根目标未来含返回桌面）仍触发必要精查；页面标题、输入、
+  命名 App 入口等原 target refinement 测试全部保持。
+- 运行 observer 定向与 Qwen/adapter/编排相关回归，再运行一次完整 Python 回归、静态编译和 diff-check。
+  全绿后提交并只重载 Uvicorn。旧 `aa59f302` 会话不复用；重载后创建全新 Browser 会话。
+
+离线结果：系统 Home 路由正反合同 `4/4`；observer、Qwen、adapter 与通用编排相关回归
+`500/500`；Python 完整回归 `1456/1456`。完整回归只有既知测试子进程 `ResourceWarning`，无断言
+失败。observer 版本更新为 v59；非法目标精查响应仍被严格拒绝，没有新增坐标归一化或控件权限。

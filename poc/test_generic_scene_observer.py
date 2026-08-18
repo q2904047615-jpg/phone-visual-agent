@@ -1060,6 +1060,114 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         self.assertTrue(_needs_targeted_refinement(scene, context))
 
+    def test_explicit_system_home_focus_skips_element_target_refinement(self) -> None:
+        payload = scene_payload()
+        payload.update(
+            {
+                "foreground_app_id": "news_aggregator",
+                "screen_id": "unknown",
+                "summary": "当前为新闻流页面，底部有应用内主页标签。",
+                "elements": [
+                    {
+                        "element_id": "app-home-tab",
+                        "role": "tab",
+                        "meaning": "navigation_tab",
+                        "label": "主页",
+                        "bounds": [80, 900, 240, 980],
+                        "confidence": 0.98,
+                        "states": {
+                            "goal_relevant": True,
+                            "fully_visible": True,
+                        },
+                        "evidence": ["应用底部导航栏的主页标签"],
+                    }
+                ],
+                "confidence": 0.98,
+            }
+        )
+        contexts = (
+            ("返回手机桌面", "手机桌面可见"),
+            ("回到手机主屏幕", "手机主屏幕已显示"),
+        )
+        for index, (objective, condition) in enumerate(contexts):
+            with self.subTest(objective=objective):
+                provider = SequenceProvider([payload])
+                observer = GenericSceneObserver(provider)
+                scene = observer.observe(
+                    frames=stable_frames(),
+                    goal_context={
+                        "app_id": "browser",
+                        "app_name": "浏览器",
+                        "objective": "先返回桌面，然后打开浏览器",
+                        "entities": {
+                            "active_subgoal_visual_context": {
+                                "subgoal_id": f"return_home_{index}",
+                                "objective": objective,
+                                "constraints": ["仅导航"],
+                                "completion_conditions": [condition],
+                                "external_impact": "navigation_only",
+                                "goal_entities": {},
+                            }
+                        },
+                    },
+                )
+
+                self.assertEqual(1, provider.calls)
+                self.assertEqual("unknown", scene.screen_id)
+                self.assertFalse(
+                    observer.last_diagnostics["targeted_refinement_used"]
+                )
+
+    def test_app_home_and_future_home_do_not_skip_current_target_refinement(self) -> None:
+        payload = scene_payload()
+        payload.update(
+            {
+                "foreground_app_id": "unknown",
+                "screen_id": "unknown",
+                "elements": [],
+                "confidence": 0.98,
+            }
+        )
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="unknown-app-page",
+            camera_layout_orientation="portrait",
+        )
+        contexts = (
+            {
+                "objective": "打开应用主页",
+                "entities": {
+                    "active_subgoal_visual_context": {
+                        "subgoal_id": "open_app_home",
+                        "objective": "打开应用主页",
+                        "constraints": [],
+                        "completion_conditions": ["应用主页可见"],
+                        "external_impact": "navigation_only",
+                        "goal_entities": {},
+                    }
+                },
+            },
+            {
+                "app_id": "browser",
+                "app_name": "浏览器",
+                "objective": "先打开浏览器，最后返回手机桌面",
+                "entities": {
+                    "active_subgoal_visual_context": {
+                        "subgoal_id": "open_browser",
+                        "objective": "打开浏览器",
+                        "constraints": [],
+                        "completion_conditions": ["浏览器主界面可见"],
+                        "external_impact": "navigation_only",
+                        "goal_entities": {},
+                    }
+                },
+            },
+        )
+
+        for context in contexts:
+            with self.subTest(objective=context["objective"]):
+                self.assertTrue(_needs_targeted_refinement(scene, context))
+
     def test_launcher_app_name_without_trusted_goal_requires_refinement(self) -> None:
         payload = scene_payload()
         payload.update(

@@ -57,7 +57,7 @@ from verified_text_transaction import (
 )
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v58"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v59"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
     "2026-08-18-foreground-app-identity-audit-v1"
@@ -6460,10 +6460,59 @@ def _scene_enum_values(raw: str) -> dict[str, list[str]]:
     }
 
 
+def _goal_requests_coordinate_free_system_home(
+    context: dict[str, Any],
+) -> bool:
+    """Recognize only an explicit active system-Home transition.
+
+    App-local labels such as ``主页`` or ``首页`` deliberately do not match.
+    The completion condition is required as a second typed graph signal so a
+    compound root goal mentioning a later return cannot suppress refinement
+    for its current element-bound step.
+    """
+
+    focused = _observation_goal_context(context)
+    if str(focused.get("external_impact") or "").strip() != "navigation_only":
+        return False
+    objective = re.sub(
+        r"\s+",
+        "",
+        str(focused.get("objective") or "").strip().casefold(),
+    )
+    conditions = focused.get("completion_conditions")
+    if not objective or not isinstance(conditions, list):
+        return False
+    objective_matches = bool(
+        re.search(
+            r"(?:返回|回到|退回|切回)(?:手机|设备)?(?:的)?(?:桌面|主屏幕)",
+            objective,
+        )
+        or re.search(
+            r"\b(?:return|go|switch)(?:back)?to(?:the)?(?:phone|device)?homescreen\b",
+            objective,
+        )
+    )
+    if not objective_matches:
+        return False
+    return any(
+        re.search(
+            r"(?:手机|设备)?(?:的)?(?:桌面|主屏幕)(?:已)?(?:可见|显示|在前台)",
+            re.sub(r"\s+", "", str(condition or "").strip().casefold()),
+        )
+        for condition in conditions
+    )
+
+
 def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
     if not context:
         return False
     focused = _observation_goal_context(context)
+    if _goal_requests_coordinate_free_system_home(context):
+        # System Home has no element geometry.  Asking the target refiner to
+        # find a control can conflate an App-local ``主页`` tab with the device
+        # Home action.  The compact scene, Qwen system-action proposal and the
+        # normal controller/post-observation gates remain authoritative.
+        return False
     if scene.confidence < 0.72:
         return True
     if _goal_requests_page_title(context) and not _scene_has_grounded_page_title(scene):

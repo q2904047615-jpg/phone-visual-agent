@@ -3901,6 +3901,34 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
                 self.assertEqual("codex", graph.goal.entities["input_text"])
 
+    def test_canonical_input_literal_binds_direct_carrier_display_clause(self):
+        samples = (
+            "搜索输入框中显示 'wifi'",
+            "文本框显示 wifi",
+            "输入区域的值为 wifi",
+            "编辑区域变为 wifi",
+        )
+        constraints = ["不得搜索、提交、发送、保存或发布。"]
+        for objective in samples:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="navigation_only",
+                )
+                payload["goal"]["objective"] = objective
+                payload["goal"]["entities"]["input_text"] = "wifi"
+                payload["constraints"] = list(constraints)
+                payload["subgoals"][0]["constraints"] = list(constraints)
+                payload["subgoals"][0]["completion_conditions"] = [objective]
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    objective + "；" + "；".join(constraints),
+                    device_id="phone-1",
+                )
+
+                self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+                self.assertEqual("wifi", graph.goal.entities["input_text"])
+
     def test_canonical_input_literal_must_bind_same_state_clause_exactly(self):
         samples = (
             "当前输入框内容为 codex2",

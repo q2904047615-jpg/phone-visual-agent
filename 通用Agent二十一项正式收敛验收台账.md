@@ -902,3 +902,40 @@ fact（不作为标题值）提供；本地另要求完成证据必须逐字包�
 离线结果：两种 controller receipt 规范化正例及语义改写/纯视觉反例通过；DeepSeek 与编排根因回归
 `381/381`，observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `889/889`，Python 完整回归
 `1470/1470`。完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。
+
+## 29. canonical 输入正文存在但常见完成状态句式未绑定
+
+### 29.1 验收台账与根因证据
+
+- Browser 正式 session `61f26496f1a046118468e922eacb5741` 已在同一会话完成 Home、从 Launcher
+  打开 Browser、再次 Home 三个 matched 动作，revision `1→6`，最终 `succeeded`、
+  `launcher/home_screen`；每步前后各 4 帧，无自动重试。它证明第 28 项 controller receipt 修复在线
+  生效。
+- 第二个 App 目标“打开设置，在搜索输入框输入 wifi，但不提交/选择结果，最后回桌面”在目录
+  `generic_supervised_20260819_054627_5e5a5e67` 的 initial graph 阶段 0 动作失败。DeepSeek 已正确输出
+  `goal.entities.input_text=wifi`、`input_wifi` 子目标和完成条件 `输入框中显示 'wifi'`，但本地输入状态
+  识别只接受“输入框内容显示/内容为”等带中间名词句式，未接受同义且更常见的“输入框显示 literal”。
+- 主要根因是 canonical literal 与载体状态的中文句式覆盖缺口，不是正文缺失、App、输入硬件、Qwen、
+  坐标或风险分类；本地拒绝没有创建 session、调用视觉模型或产生物理动作。
+
+### 29.2 通用修复、变化样本与边界
+
+- 输入状态载体允许在同一标点子句内直接使用“输入框/文本框/搜索框/文本区域/输入区域/编辑区域 +
+  为、是、变为、改为、修改为、替换为、显示 + canonical literal”。精确正文仍只来自
+  `goal.entities.input_text`，解析器不从 prose 提取或改写文字。
+- `_state_description_binds_canonical_input_text()` 继续要求逐字 literal 位于同一标点子句，并用字符边界
+  拒绝 `wifi2`、`wifi.com`、相似词、跨句拼接和缺失正文。没有 canonical input_text 或载体状态时仍
+  失败关闭。
+- 变化样本覆盖搜索输入框、普通文本框、输入区域和编辑区域四种载体；不增加 Settings/App 名称、固定
+  步骤、键位或坐标。执行阶段仍须由可信 input 元素、fresh 观察、精确前缀事务和动作后 value 核验授权。
+
+### 29.3 验证与停止条件
+
+- 精确现场完成条件和三种同义状态句式应通过；相似正文、跨句 literal、缺 canonical 值继续拒绝。
+- 运行 DeepSeek/编排、输入事务、Qwen/observer/adapter/Web 相关回归及一次完整 Python 回归，静态编译
+  与 diff-check 全绿后本地提交并只重载项目 Uvicorn。旧 0 动作失败不恢复；只用完全相同原始目标建立
+  一个全新 Settings session，任何新失败立即停止真机链。
+
+离线结果：载体直述状态与精确 literal 正反定向通过；DeepSeek 与编排核心 `382/382`，observer、Qwen、
+adapter、DeepSeek、编排和 Web 关联回归 `890/890`，Python 完整回归 `1471/1471`。完整回归只有既知
+测试子进程 `ResourceWarning`，无断言失败。

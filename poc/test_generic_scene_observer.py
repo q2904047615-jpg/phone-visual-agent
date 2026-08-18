@@ -26,6 +26,7 @@ from generic_scene_observer import (
     _compact_prompt,
     _foreground_app_identity_audit_prompt,
     _goal_requests_input,
+    _input_audit_literal_key_targets,
     _input_structure_audit_prompt,
     _apply_input_structure_audit,
     _map_input_structure_crop_audit_to_full,
@@ -485,6 +486,19 @@ class GenericSceneObserverTests(unittest.TestCase):
             prompt,
         )
         self.assertIn("Never omit confidence or target_mode", prompt)
+        self.assertIn("the local, goal-derived whitelist is []", prompt)
+        self.assertIn("Never enumerate a keyboard row", prompt)
+        self.assertEqual(
+            (" ", "."),
+            _input_audit_literal_key_targets(
+                {"entities": {"input_text": "draft message."}}
+            ),
+        )
+        direct_prompt = _input_structure_audit_prompt(
+            {"entities": {"input_text": "wifi"}},
+            roi_bounds=None,
+        )
+        self.assertIn("the local, goal-derived whitelist is []", direct_prompt)
 
     def test_literal_ocr_geometry_is_limited_to_text_bearing_selector_roles(self) -> None:
         for role in ("text", "button", "tab", "list_item"):
@@ -4914,11 +4928,6 @@ class GenericSceneObserverTests(unittest.TestCase):
                         "bounds": [310, 870, 690, 970], "confidence": 0.98,
                         "fully_visible": True,
                     },
-                    {
-                        "value": ".", "label": ".", "key_kind": "character",
-                        "bounds": [720, 870, 800, 970], "confidence": 0.98,
-                        "fully_visible": True,
-                    },
                 ],
                 "layout_switches": [],
             },
@@ -4939,6 +4948,55 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertFalse(
             scene.get_element("local_audited_input_1").states["goal_relevant"]
         )
+
+    def test_input_audit_rejects_literal_key_outside_goal_whitelist(self) -> None:
+        base_scene = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="frame-literal-whitelist",
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="search-field",
+                    bounds=[80, 120, 920, 210],
+                    text="",
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 480, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [115, 610], "p": [875, 610],
+                    "a": [157, 700], "l": [832, 700],
+                    "z": [241, 790], "m": [747, 790],
+                    "backspace": [875, 790],
+                },
+                "mode_switch": None,
+                "case_switch": None,
+                "literal_keys": [
+                    {
+                        "value": "w", "label": "w", "key_kind": "character",
+                        "bounds": [170, 580, 240, 660], "confidence": 0.98,
+                        "fully_visible": True,
+                    }
+                ],
+                "layout_switches": [],
+            },
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "白名单外"):
+            _apply_input_structure_audit(
+                base_scene,
+                json.dumps(audit, ensure_ascii=False),
+                fingerprint="frame-literal-whitelist",
+                goal_context={
+                    "objective": "输入 wifi",
+                    "entities": {"input_text": "wifi"},
+                },
+            )
 
     def test_input_audit_mints_layout_and_case_switches_only_for_next_step(self) -> None:
         base_scene = _parse_scene(

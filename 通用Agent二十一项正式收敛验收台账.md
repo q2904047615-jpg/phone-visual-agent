@@ -1235,3 +1235,37 @@ observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `896/896`，Py
 离线结果：策略层与 Qwen 共享身份规则正反样本 `2/2`，observer、Qwen、adapter、DeepSeek、编排和
 Web 关联回归 `897/897`，Python 完整回归 `1482/1482`。完整回归只有既知测试子进程
 `ResourceWarning`，无断言失败。
+
+## 38. 输入审计枚举整排字母导致确定性截断
+
+### 38.1 验收台账与根因证据
+
+- 提交 `fefc894` 加载后的 Settings session `6ac11cb3c9b3499cbc80087c8733eeed` 已放行正式
+  input candidate 并真实执行一次输入框聚焦，证明第 37 项在线生效；但动作后观察连续两轮都在
+  `parsing_input_structure_audit` 失败，会话以 `physical_actions=1/status=failed` 停止。
+- 两轮 raw response 长度都为 `2678`，分别在字符 `2571/2572` 截断于 `keyboard.literal_keys` 的
+  QWERTY 字母 `u` bounds 中间。prompt 已规定最多八项，但模型仍从 q、w、e、r、t、y、u 逐键枚举，
+  且该任务的 `wifi` 本可完全由 `qwerty_anchors` 处理，不需要任何字母 literal key。
+- 主要根因是 literal key 输出合同没有把“本目标实际需要的非字母字符集合”变成确定性白名单，导致
+  模型把整排键盘当枚举任务；不是坐标、点击、App、机械臂或简单提高 token 就能稳健解决的问题。
+
+### 38.2 同类样本、通用修复与边界
+
+- 现场样本为 direct-latin `wifi`；变化样本为纯字母、中文拼音输入（literal key 白名单均为空）以及
+  `draft message.`（仅允许空格和句号）。反例为模型返回目标白名单外的任意普通字母、功能键或第九个
+  literal key，继续失败关闭。
+- 本地从当前活动子目标的 canonical `input_text` 计算最多八个去重的**非字母、非换行**字符，并把
+  该列表写入只读输入审计 prompt。QWERTY 字母及中文不进入 literal key 列表，统一由既有 anchors/
+  拼音事务处理；模型只能报告白名单中当前完整可见的键，白名单为空时必须返回空数组。
+- 解析器再次校验所有 `literal_keys.value` 均在本地白名单内，模型无法通过增加输出扩大动作候选。
+  不增加 App、键盘布局、固定字符或坐标分支，也不提高输出预算掩盖无界枚举。
+
+### 38.3 验证与停止条件
+
+- 补 prompt 正测和 parser 反测，并保留空格逐步输入及句号白名单提取正测；再运行 observer 相关回归与一次
+  完整 Python 回归。全绿后本地提交、只重载项目 Uvicorn，先用当前键盘做 0 动作只读观察证明
+  输入审计可解析；通过后才允许建立一个新 session 从当前动态状态继续，任一动作失败即停止。
+
+离线结果：prompt、空格正例和白名单外字母反例 `3/3`，observer 与文字事务 `212/212`，observer、
+Qwen、adapter、DeepSeek、编排和 Web 关联回归 `898/898`，Python 完整回归 `1483/1483`。
+完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。

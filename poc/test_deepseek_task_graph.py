@@ -766,6 +766,100 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(graph_prompts))
 
+    def test_initial_plan_normalizes_premature_completed_status_for_one_safe_frontier(self):
+        samples = (
+            ("系统主屏幕在前台可见", "navigation_only"),
+            ("本地工具应用在前台可见", "read_only"),
+        )
+        for objective, external_impact in samples:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact=external_impact,
+                )
+                payload["status"] = "completed"
+                payload["subgoals"][0]["status"] = "pending"
+                provider = FakeProvider(payload)
+
+                graph = DeepSeekTaskGraphPlanner(provider).plan(
+                    objective,
+                    device_id="phone-1",
+                )
+
+                self.assertEqual("running", graph.status)
+                self.assertEqual("target_state", graph.active_subgoal_id)
+                self.assertEqual("active", graph.active_subgoal().status)
+                graph_prompts = [
+                    call
+                    for call in provider.messages
+                    if "semantic-risk-audit-v1" not in call[0]["content"]
+                ]
+                self.assertEqual(1, len(graph_prompts))
+
+    def test_initial_plan_does_not_normalize_completed_status_with_completion_claim(self):
+        payload = single_subgoal_payload(
+            "本地结果可见",
+            external_impact="read_only",
+        )
+        payload["status"] = "completed"
+        payload["completion_conditions"][0]["satisfied"] = True
+        payload["completion_conditions"][0]["evidence"] = ["模型声称结果可见"]
+
+        with self.assertRaises(TaskGraphError):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(payload, copy.deepcopy(payload))
+            ).plan("确认本地结果", device_id="phone-1")
+
+    def test_initial_plan_does_not_normalize_ambiguous_or_risky_completed_frontier(self):
+        ambiguous = single_subgoal_payload(
+            "确认两个独立区域",
+            external_impact="read_only",
+        )
+        ambiguous["status"] = "completed"
+        ambiguous["subgoals"].append(
+            {
+                "subgoal_id": "other_root",
+                "objective": "另一个独立区域可见",
+                "status": "pending",
+                "depends_on": [],
+                "constraints": [],
+                "completion_conditions": ["另一个独立区域可见"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "read_only",
+            }
+        )
+        risky = single_subgoal_payload(
+            "账号资料已更改",
+            external_impact="external_state",
+        )
+        risky["status"] = "completed"
+        risky["risk_actions"] = [
+            {
+                "risk_id": "change_account",
+                "description": "更改账号资料",
+                "external_effect": "修改账号外部状态",
+                "risk_type": "account_change",
+                "risk_level": "high",
+                "subgoal_ids": ["target_state"],
+                "confirmation_required": True,
+            }
+        ]
+        risky["subgoals"][0]["risk_action_ids"] = ["change_account"]
+        clarification = single_subgoal_payload(
+            "目标应用可见",
+            external_impact="navigation_only",
+        )
+        clarification["status"] = "completed"
+        clarification["clarification_questions"] = ["请说明目标应用。"]
+
+        for payload in (ambiguous, risky, clarification):
+            with self.subTest(payload=payload["goal"]["objective"]):
+                with self.assertRaises(TaskGraphError):
+                    DeepSeekTaskGraphPlanner(
+                        FakeProvider(payload, copy.deepcopy(payload))
+                    ).plan("目标", device_id="phone-1")
+
     def test_initial_plan_normalizes_self_contradictory_local_navigation_risk(self):
         payload = single_subgoal_payload(
             "当前浏览器显示空白标签页",

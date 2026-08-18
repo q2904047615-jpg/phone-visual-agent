@@ -1206,6 +1206,7 @@ class DeepSeekTaskGraphPlanner:
                 validate=False,
             )
             graph = _normalize_initial_local_navigation(graph)
+            graph = _normalize_initial_premature_completed_status(graph)
             graph = _normalize_unique_active_frontier(graph)
             graph = _normalize_initial_confirmation_status(graph)
             graph.validate()
@@ -1226,6 +1227,7 @@ class DeepSeekTaskGraphPlanner:
                 validate=False,
             )
             graph = _normalize_initial_local_navigation(graph)
+            graph = _normalize_initial_premature_completed_status(graph)
             graph = _normalize_unique_active_frontier(graph)
             graph = _normalize_initial_confirmation_status(graph)
             try:
@@ -1250,6 +1252,7 @@ class DeepSeekTaskGraphPlanner:
                     validate=False,
                 )
                 graph = _normalize_initial_local_navigation(graph)
+                graph = _normalize_initial_premature_completed_status(graph)
                 graph = _normalize_unique_active_frontier(graph)
                 graph = _normalize_initial_confirmation_status(graph)
                 graph.validate()
@@ -1267,6 +1270,7 @@ class DeepSeekTaskGraphPlanner:
                 validate=False,
             )
             graph = _normalize_initial_local_navigation(graph)
+            graph = _normalize_initial_premature_completed_status(graph)
             graph = _normalize_unique_active_frontier(graph)
             graph = _normalize_initial_confirmation_status(graph)
             graph.validate()
@@ -2108,6 +2112,53 @@ def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskG
         subgoals=normalized_subgoals,
         active_subgoal_id=active_subgoal_id,
     )
+
+
+def _normalize_initial_premature_completed_status(
+    graph: DynamicTaskGraph,
+) -> DynamicTaskGraph:
+    """Repair only a uniquely contradicted initial ``completed`` marker.
+
+    Initial planning has no observation evidence.  When every substantive graph
+    field still describes one safe runnable frontier, ``completed`` cannot be a
+    semantic result; it is the sole inconsistent enum value.  Anything involving
+    completion evidence, ambiguity, risk, clarification or a blocked node remains
+    under the strict validator and remote repair path.
+    """
+
+    if graph.status != "completed":
+        return graph
+    if graph.clarification_questions or graph.risk_actions:
+        return graph
+    if any(
+        condition.satisfied or condition.evidence
+        for condition in graph.completion_conditions
+    ):
+        return graph
+    if any(
+        item.status in {"completed", "blocked", "skipped"}
+        or item.completion_evidence
+        or item.risk_action_ids
+        for item in graph.subgoals
+    ):
+        return graph
+
+    completed_ids: set[str] = set()
+    frontier = tuple(
+        item
+        for item in graph.subgoals
+        if item.status in {"pending", "active"}
+        and all(dependency in completed_ids for dependency in item.depends_on)
+    )
+    if len(frontier) != 1:
+        return graph
+    selected = frontier[0]
+    if (
+        graph.active_subgoal_id != selected.subgoal_id
+        or selected.external_impact not in {"read_only", "navigation_only"}
+    ):
+        return graph
+    return replace(graph, status="running")
 
 
 def _normalize_unique_active_frontier(graph: DynamicTaskGraph) -> DynamicTaskGraph:

@@ -711,10 +711,10 @@ class VerifiedActionTransition:
     """Controller-owned receipt for exactly one confirmed action transition.
 
     This receipt is deliberately not visual evidence.  It proves which scoped
-    action was consumed and which fresh observation followed it; claims about
-    page state still has to be grounded in ``visible_evidence``.  Only a typed
-    controller-transition reference may complete its bound navigation-only
-    subgoal; it never becomes a visual or external-state fact.
+    action was consumed and which fresh observation followed it.  A typed
+    controller-transition reference may complete only its bound navigation-only
+    transition; subsequent page content, global visual state and external-state
+    claims still have to be grounded independently and cannot reuse the receipt.
     """
 
     receipt_id: str
@@ -2856,9 +2856,11 @@ def _repair_replan_prompt(
     external_state/unknown 完成，也不能在 matched 后原样保留旧子目标再提出等价动作。
 11. action_result_mismatch 不得完成回执绑定的旧子目标；revision 必须严格增加 1。
 12. 若校验错误指出“命名页面完成声明缺少结构化画面身份锚点”，不得重复该声明，
-    也不得将 summary/visible_evidence 的自由文本当作身份。只能使用 grounded_visual_facts
-    里的 screen_id、overlay 或元素 label/meaning；如仍无支持，应跳过或替换尚未完成的
-    具名页面节点，改为基于当前结构化可见元素的高层状态。不得改写用户最终目标。
+   也不得将 summary/visible_evidence 的自由文本当作身份。只能使用 grounded_visual_facts
+   里的 screen_id、overlay 或元素 label/meaning。唯一例外是严格绑定上一 active
+   navigation_only 子目标的 controller_transition_evidence_refs：它只可完成该导航转换，
+   不能证明后续页面内容、全局视觉条件或外部结果。如仍无支持，应跳过或替换尚未完成的
+   具名页面节点，改为基于当前结构化可见元素的高层状态。不得改写用户最终目标。
 13. 若校验错误指出子目标使用了当前观察之外的完成证据，必须删除该伪证据；不得把
     subgoal_id、condition_id、目标名称或自行概括的句子当作证据。只能逐字选择
     visual_claim_evidence_refs[].ref_id，或为严格绑定的上一 navigation_only 子目标选择
@@ -3719,7 +3721,7 @@ def _validate_revision(
                         raise TaskGraphError(
                             "controller_transition 证据跨子目标使用。"
                         )
-        if newly_completed:
+        if newly_completed and not controller_claims:
             _require_named_visual_identity_grounding(
                 (new.objective, *new.completion_conditions),
                 observation,

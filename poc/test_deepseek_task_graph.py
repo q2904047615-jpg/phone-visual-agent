@@ -5556,6 +5556,158 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             result.replan_history[-1].consumed_action_transition_receipt_id,
         )
 
+    def test_bound_navigation_receipt_can_complete_named_app_entry_without_brand_text(self):
+        initial = base_payload()
+        initial["goal"].update(
+            objective="打开浏览器后读取页面标题",
+            target_apps=[{"app_id": "browser", "app_name": "浏览器"}],
+            entities={"target_surface": "device"},
+        )
+        initial["risk_actions"] = []
+        initial["completion_conditions"] = [
+            {
+                "condition_id": "title_read",
+                "description": "浏览器打开后页面标题已读取",
+                "evidence_required": ["页面标题可见"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ]
+        initial["subgoals"] = [
+            {
+                "subgoal_id": "open_browser",
+                "objective": "打开浏览器",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["仅导航"],
+                "completion_conditions": ["浏览器主界面可见"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "read_title",
+                "objective": "读取打开后页面标题",
+                "status": "pending",
+                "depends_on": ["open_browser"],
+                "constraints": ["仅读取"],
+                "completion_conditions": ["页面标题已读取"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "read_only",
+            },
+        ]
+        initial["active_subgoal_id"] = "open_browser"
+        revised = copy.deepcopy(initial)
+        ref_id = "controller_transition:receipt-browser:1"
+        revised["status"] = "running"
+        revised["subgoals"][0].update(
+            status="completed",
+            completion_evidence=[ref_id],
+        )
+        revised["subgoals"][1]["status"] = "active"
+        revised["active_subgoal_id"] = "read_title"
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            initial["goal"]["objective"],
+            device_id="phone-1",
+        )
+        observed = matched_controller_observation(
+            graph,
+            receipt_id="receipt-browser",
+        )
+        observed = ObservedState(
+            **{
+                **observed.__dict__,
+                "summary": "新闻流首页可见",
+                "visible_evidence": ("新闻流首页可见",),
+                "grounded_visual_facts": (
+                    '{"app_id":"news_aggregator","screen_id":"unknown"}',
+                ),
+            }
+        )
+
+        result = DeepSeekTaskGraphPlanner(FakeProvider(revised)).replan(
+            graph,
+            observed,
+            trigger="action_result_matched",
+            reason="唯一 App 入口导航已由控制器验证",
+        )
+
+        self.assertEqual("completed", result.subgoals[0].status)
+        self.assertEqual((ref_id,), result.subgoals[0].completion_evidence)
+        self.assertEqual("read_title", result.active_subgoal_id)
+
+    def test_visible_text_cannot_replace_named_app_identity_after_navigation(self):
+        initial = base_payload()
+        initial["goal"].update(
+            objective="打开浏览器后读取页面标题",
+            target_apps=[{"app_id": "browser", "app_name": "浏览器"}],
+            entities={"target_surface": "device"},
+        )
+        initial["risk_actions"] = []
+        initial["completion_conditions"] = [
+            {
+                "condition_id": "title_read",
+                "description": "浏览器打开后页面标题已读取",
+                "evidence_required": ["页面标题可见"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ]
+        initial["subgoals"] = [
+            {
+                "subgoal_id": "open_browser",
+                "objective": "打开浏览器",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["仅导航"],
+                "completion_conditions": ["浏览器主界面可见"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "read_title",
+                "objective": "读取打开后页面标题",
+                "status": "pending",
+                "depends_on": ["open_browser"],
+                "constraints": ["仅读取"],
+                "completion_conditions": ["页面标题已读取"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "read_only",
+            },
+        ]
+        initial["active_subgoal_id"] = "open_browser"
+        revised = copy.deepcopy(initial)
+        revised["status"] = "running"
+        revised["subgoals"][0].update(
+            status="completed",
+            completion_evidence=["新闻流首页可见"],
+        )
+        revised["subgoals"][1]["status"] = "active"
+        revised["active_subgoal_id"] = "read_title"
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            initial["goal"]["objective"],
+            device_id="phone-1",
+        )
+        observed = ObservedState(
+            scene_id="scene-news",
+            summary="新闻流首页可见",
+            visible_evidence=("新闻流首页可见",),
+            grounded_visual_facts=(
+                '{"app_id":"news_aggregator","screen_id":"unknown"}',
+            ),
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "命名页面完成声明缺少"):
+            DeepSeekTaskGraphPlanner(FakeProvider(revised)).replan(
+                graph,
+                observed,
+                trigger="observation_changed",
+                reason="仅有不匹配的视觉分类",
+            )
+
     def test_replan_rejects_unconsumed_controller_transition_without_retry(self):
         initial = base_payload()
         unconsumed = copy.deepcopy(initial)

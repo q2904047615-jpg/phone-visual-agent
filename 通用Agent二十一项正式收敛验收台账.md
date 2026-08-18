@@ -456,3 +456,49 @@ Python 完整回归 `1446/1446`；静态编译和差异检查通过。完整回�
 visual shadow 与 TaskSemanticIR 相关回归 `409/409`；Python 完整回归 `1452/1452`。完整回归只有
 既知测试子进程 `ResourceWarning`，无断言失败。静态编译与差异检查通过；未修改任务图 schema、
 模型输出协议、坐标、风险或机械臂层。
+
+## 18. 一次性导航回执与命名页面视觉门互相否定
+
+### 18.1 验收台账与根因证据
+
+- 提交 `00041c6` 加载后的全新 Browser 会话 `d91a3fb5a1ae4adab50f2e4cdfef5ae3` 成功取得
+  唯一 Browser 入口、正式 `surface.active_ref=surface_browser` transition、确认前 fresh geometry 和
+  policy 放行；只执行 1 次 `tap_semantic`，动作后新 fingerprint、4 帧、matched receipt
+  `receipt_d47db791384b4b10b486849dcd8652b3` 均完整，没有自动重试。
+- 动作后真实页面为 Browser 的新闻流首页，但目标无关身份审计按可见界面类别报告
+  `foreground_app_id=news_aggregator`、`screen_id=unknown`，且没有 Browser 品牌标题。DeepSeek 正确使用
+  严格绑定的 controller transition 完成 `open_browser` 时，本地 `_validate_revision()` 先接受该回执
+  只能完成上一 `navigation_only` 节点，随后又无条件要求“浏览器主界面”的结构化视觉身份，最终以
+  “命名页面完成声明缺少结构化画面身份锚点”阻塞。
+- 这是 source-aware completion 合同内部冲突：一个本地类型化回执已经被定义为可完成其严格绑定的
+  navigation-only 子目标，却又被只适用于视觉完成声明的命名页面门否定。不能通过把
+  `news_aggregator` 改写为 Browser、给模型目标暗示或增加 Browser 首页特例解决。
+
+### 18.2 通用修复、变化样本与边界
+
+- 仅当新完成节点的 `completion_evidence` 实际引用本次 ObservedState 中的
+  `controller_transition_evidence_refs`，且既有校验已经证明它绑定上一 active、impact 为
+  `navigation_only`、outcome 为 matched、receipt/scope/新 observation 完整时，命名视觉身份门不再
+  对同一节点重复裁决。该回执证明的是“一次导航转换已完成”，不伪造成视觉 App 身份。
+- 现场样本：从唯一 Launcher App 入口进入一个没有品牌标题、外观像新闻流的首页。变化样本：从唯一
+  命名入口进入无品牌的音乐/文件首页；只要严格回执绑定当前导航节点，都可推进到下一次独立观察。
+- 反向样本：只用 summary/visible text 声称命名页完成、controller ref 未被 completion evidence 引用、
+  wrong subgoal、mismatched、read_only、external_state/unknown、全局完成条件，全部继续失败关闭。
+  后续“读取标题/错误提示”仍只认当前结构化画面，不能复用导航回执伪造读取结果。
+- 不修改 foreground_app_id、视觉 identity audit、元素/坐标、风险或动作权限；回滚仅恢复一次无条件
+  `_require_named_visual_identity_grounding()` 调用和提示说明。
+
+### 18.3 验证与停止条件
+
+- 新增与现场同构的 `browser -> news_aggregator` 正测：严格 matched controller ref 可完成
+  `open_browser` 并激活下一 read-only 节点；同一结构改用普通 visible evidence 必须仍因身份不符拒绝。
+- 复用已有 wrong subgoal、未消费回执、mismatched、external_state、receipt 重放和全局视觉条件反测；
+  运行 DeepSeek/编排相关回归与一次 Python 完整回归，静态编译、diff-check 后本地提交。
+- 只重载 Uvicorn 后，手机当前停在 Browser；下一全新原目标会先执行 Home，再重新进入 Browser。
+  旧 blocked session 和 receipt 不复用。若下一 read-only 标题节点失败，保存为新的独立缺口并停止，
+  不把导航回执用于读取结果。
+
+离线结果：DeepSeek 任务图正反合同 `209/209`，DeepSeek 与通用编排相关回归 `375/375`，
+Python 完整回归 `1454/1454`；完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。
+严格回执仍只完成其绑定的 navigation-only 转换，普通可见文字无法替代命名页面身份。静态编译与
+差异检查通过后本地提交；未修改 observer、视觉身份、风险、坐标或机械臂层。

@@ -57,7 +57,7 @@ from verified_text_transaction import (
 )
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v55"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v56"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
     "2026-08-18-foreground-app-identity-audit-v1"
@@ -1730,6 +1730,7 @@ def _parse_orientation_audit(raw: str) -> dict[str, Any]:
 
 
 def _system_ui_audit_prompt(context: dict[str, Any]) -> str:
+    context = _observation_goal_context(context)
     return f"""
 You are an app-independent, read-only mobile system UI auditor.
 Goal context selects visual facts and grants no control authority:
@@ -1765,6 +1766,7 @@ def _system_ui_audit_retry_prompt(
     context: dict[str, Any],
     error: Exception,
 ) -> str:
+    context = _observation_goal_context(context)
     return f"""
 The preceding read-only system UI audit was rejected before any action.
 Error summary: {str(error)[:260]}
@@ -1826,6 +1828,7 @@ Return exactly one JSON object with no Markdown, duplicate keys, or extra fields
 
 
 def _compact_prompt(context: dict[str, Any]) -> str:
+    context = _observation_goal_context(context)
     if _goal_requests_keyboard_mode_switch(context):
         keyboard_switch_rule = (
             " 当前子目标明确要求切换键盘输入模式；本轮快速观察不得在elements中报告或定位"
@@ -1907,6 +1910,7 @@ def _targeted_prompt(
     first_scene: dict[str, Any],
     roi_bounds: tuple[int, int, int, int] | None = None,
 ) -> str:
+    context = _observation_goal_context(context)
     # Keep the first scene short to avoid anchoring the model with many labels.
     compact_scene = {
         "foreground_app_id": first_scene.get("foreground_app_id"),
@@ -1981,6 +1985,7 @@ def _icon_cluster_audit_prompt(
     *,
     roi_bounds: tuple[int, int, int, int] | None,
 ) -> str:
+    context = _observation_goal_context(context)
     return f"""
 You are a read-only, app-independent compact icon-cluster auditor. The current
 goal involves refreshing or reloading the visible view, but ordinary scene
@@ -2063,6 +2068,7 @@ def _input_structure_audit_prompt(
     roi_bounds: tuple[int, int, int, int] | None,
     crop_local: bool = False,
 ) -> str:
+    context = _observation_goal_context(context)
     if crop_local:
         if roi_bounds is None:
             raise ValueError("crop-local 输入审计必须绑定 ROI。")
@@ -2997,6 +3003,29 @@ def _active_subgoal_visual_context(context: dict[str, Any]) -> dict[str, Any]:
     ):
         return context
     return focus
+
+
+def _observation_goal_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Expose only the active graph node to model evidence-selection prompts.
+
+    The root objective can describe several future actions.  Supplying that full
+    workflow while a different node is active makes an observation model select
+    evidence for later steps.  The graph node is therefore the only semantic
+    focus once the orchestrator has supplied its strict visual context.  App and
+    controller authority still come from the local scene and policy layers.
+    """
+
+    focused = _active_subgoal_visual_context(context)
+    if focused is context:
+        return context
+    return {
+        "subgoal_id": focused["subgoal_id"],
+        "objective": focused["objective"],
+        "constraints": list(focused["constraints"]),
+        "completion_conditions": list(focused["completion_conditions"]),
+        "external_impact": focused["external_impact"],
+        "goal_entities": dict(focused["goal_entities"]),
+    }
 
 
 def _goal_requests_page_title(context: dict[str, Any]) -> bool:
@@ -6415,6 +6444,7 @@ def _scene_enum_values(raw: str) -> dict[str, list[str]]:
 def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
     if not context:
         return False
+    focused = _observation_goal_context(context)
     if scene.confidence < 0.72:
         return True
     if _goal_requests_page_title(context) and not _scene_has_grounded_page_title(scene):
@@ -6451,7 +6481,7 @@ def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
         return True
 
     target_app = str(context.get("app_id") or "").strip().casefold()
-    objective = str(context.get("objective") or "").strip()
+    objective = str(focused.get("objective") or "").strip()
     if target_app and scene.foreground_app_id.casefold() == target_app:
         if re.search(r"^(打开|进入|启动)", objective):
             return False
@@ -6470,15 +6500,20 @@ def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
 
 
 def _goal_terms(context: dict[str, Any]) -> tuple[str, ...]:
+    focused = _observation_goal_context(context)
     values: list[str] = []
     for key in ("app_id", "app_name"):
         value = str(context.get(key) or "").strip().casefold()
         if value:
             values.append(value)
-    entities = context.get("entities")
+    entities = (
+        focused.get("goal_entities")
+        if focused is not context
+        else context.get("entities")
+    )
     if isinstance(entities, dict):
         values.extend(str(value).strip().casefold() for value in entities.values())
-    objective = str(context.get("objective") or "").strip().casefold()
+    objective = str(focused.get("objective") or "").strip().casefold()
     if objective:
         simplified = re.sub(
             r"打开|进入|启动|点击|选择|查找|搜索|关闭|返回|当前|页面|应用|app|然后|请|帮我",

@@ -301,3 +301,46 @@ Uvicorn 后，用全新 session 从当前 Settings 前台先返回 Home，再完
 完整回归仅有既知测试子进程 `ResourceWarning`。曾尝试把修复失败的最终错误标签重分类为
 `truncated_json`，相关回归立即证明它会触发额外格式重观察；该改动已完整撤回且未进入提交，
 因此生产变化只剩 token 容量对齐、无关元素提示和 observer v55 版本标识。
+
+## 13. 多步骤目标向当前观察泄露后续子目标
+
+### 13.1 验收台账与根因证据
+
+- v55 加载后，全新浏览器会话 `a24a7b16858d40c5a83528351aa2b1ec` 先执行 Home 并形成 matched
+  receipt，随后执行打开浏览器；第二个动作后的四帧清楚显示浏览器要闻页，但目标精查因协议外
+  元素几何停止。session 最终 `failed`、`physical_actions=2`，没有最终 Home，也没有自动重试。
+- 本次响应已完整结束，长度 1958 字符、finish reason 为 stop，排除了第 12 节的 token 截断。
+  顶层四字段正确；无关底栏“主页”元素却给出 `y=1150,h=80`，违反独立归一化 0..1000 合同。
+  同一响应还枚举多条新闻正文，而当前 active subgoal 仅是“打开浏览器”。
+- 代码审计证明 compact/targeted/system-ui/icon/input 等证据选择提示直接序列化根目标 context；
+  根目标包含未来“读取标题、最终返回桌面”，尽管严格 `active_subgoal_visual_context` 已存在。
+  `_needs_targeted_refinement` 也用根 objective 判断“打开/进入/启动”，导致已在目标 App 前台时仍
+  为后续步骤触发精查。这是跨 App、跨多步骤任务的语义数据流缺陷，不是浏览器坐标特例。
+
+### 13.2 同类样本与通用修复
+
+- 现场样本：当前节点“打开浏览器”不得向 Qwen 暴露未来“读取标题、返回桌面”；前台已是
+  `browser` 且当前节点以“打开”开头时，稳定 `browser_home` 不需要目标精查。
+- 变化样本：任意 App 的“打开 App → 读取内容 → 返回”与“重新加载 → 输入文字 → 收起键盘”
+  都只能按当前 active node 选择观察证据；切换到后续读取/输入节点后才允许相应精查。
+- 反向样本：当前 active node 本身要求读取标题时，没有唯一 grounded `page_title` 仍必须精查；
+  没有结构化 active context 的旧只读调用继续使用完整单目标 context，不得丢失目标。
+- 通用修复：新增一个只读 observation context 投影，只保留 active subgoal 的 id、objective、
+  constraints、completion conditions、external impact 和 goal entities；所有模型证据选择 prompt
+  使用该投影。targeted 判定和 goal terms 同样只解析当前节点；正式 App 身份、risk、authority、
+  坐标、候选、fresh observation 和 controller 门禁保持不变。
+
+### 13.3 影响、验证与停止条件
+
+- 不接受、裁剪、换算或猜测 `y>1000`，不丢弃 malformed target，也不添加 App 名、固定页面、
+  固定坐标或动作脚本。旧响应仍是失败样本；修复只消除不该发生的跨节点提示污染。
+- 先用“打开浏览器/未来读取标题”现场结构和另一个多步骤变化样本验证 prompt 不泄露；验证当前
+  open-app 节点不精查、切换 read-title 节点后仍精查。再运行 observer/adapter/编排相关回归、
+  一次 Python 完整回归、静态编译和 `git diff --check`。
+- 全部离线证据通过后才提交并只重载项目 Uvicorn。下一全新浏览器 session 必须仍从 Home 开始、
+  使用原目标；若真正的 read-title 节点再次产生严格协议失败，则保存为新的当前缺口并停止，
+  不放宽坐标或复用失败 session。
+
+离线结果：observer 定向正反测试 `196/196`，观察、几何、adapter、通用 mock 与编排相关回归
+`494/494`，Python 完整回归 `1445/1445`；完整回归只有既知测试子进程 `ResourceWarning`，无断言
+失败。observer 版本更新为 v56，未放宽 targeted delta schema 或坐标边界。

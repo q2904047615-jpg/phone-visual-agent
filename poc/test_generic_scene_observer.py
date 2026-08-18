@@ -26,6 +26,8 @@ from generic_scene_observer import (
     _input_structure_audit_prompt,
     _apply_input_structure_audit,
     _map_input_structure_crop_audit_to_full,
+    _needs_targeted_refinement,
+    _observation_goal_context,
     _stable_ocr_literal_bounds,
     _input_structure_diagnostic_shape,
     _parse_scene_after_unique_structural_edit,
@@ -982,6 +984,81 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         self.assertTrue(scene.get_element("target").states["goal_relevant"])
         self.assertFalse(scene.get_element("other").states["goal_relevant"])
+
+    def test_observation_prompts_expose_only_active_subgoal_not_future_workflow(self) -> None:
+        context = {
+            "app_id": "browser",
+            "app_name": "浏览器",
+            "objective": "先返回桌面，打开浏览器，读取标题，最后返回桌面",
+            "entities": {
+                "original_goal_visual_context": "打开后读取标题并返回桌面",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "open_browser",
+                    "objective": "打开浏览器",
+                    "constraints": ["仅导航"],
+                    "completion_conditions": ["浏览器主界面可见"],
+                    "external_impact": "navigation_only",
+                    "goal_entities": {"target_surface": "device"},
+                },
+            },
+        }
+
+        focused = _observation_goal_context(context)
+        compact = _compact_prompt(context)
+        targeted = _targeted_prompt(context, first_scene=scene_payload())
+
+        self.assertEqual("open_browser", focused["subgoal_id"])
+        self.assertEqual("打开浏览器", focused["objective"])
+        for prompt in (compact, targeted):
+            self.assertIn("打开浏览器", prompt)
+            self.assertNotIn("读取标题", prompt)
+            self.assertNotIn("返回桌面", prompt)
+            self.assertNotIn("original_goal_visual_context", prompt)
+
+    def test_open_app_focus_does_not_refine_for_future_title_goal(self) -> None:
+        payload = scene_payload()
+        payload.update(
+            {
+                "foreground_app_id": "browser",
+                "screen_id": "browser_home",
+                "summary": "当前显示稳定的要闻列表。",
+                "elements": [],
+                "confidence": 0.98,
+            }
+        )
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="browser-home",
+            camera_layout_orientation="portrait",
+        )
+        context = {
+            "app_id": "browser",
+            "app_name": "浏览器",
+            "objective": "先打开浏览器，随后读取页面标题",
+            "entities": {
+                "original_goal_visual_context": "打开浏览器后读取页面标题",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "open_browser",
+                    "objective": "打开浏览器",
+                    "constraints": [],
+                    "completion_conditions": ["浏览器主界面可见"],
+                    "external_impact": "navigation_only",
+                    "goal_entities": {},
+                },
+            },
+        }
+
+        self.assertFalse(_needs_targeted_refinement(scene, context))
+
+        context["entities"]["active_subgoal_visual_context"].update(
+            {
+                "subgoal_id": "read_page_title",
+                "objective": "读取当前页面标题",
+                "completion_conditions": ["已读取页面主标题"],
+                "external_impact": "read_only",
+            }
+        )
+        self.assertTrue(_needs_targeted_refinement(scene, context))
 
     def test_conflicting_root_and_active_target_labels_do_not_rebind(self) -> None:
         payload = scene_payload()

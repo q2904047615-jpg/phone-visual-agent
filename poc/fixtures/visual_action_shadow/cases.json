@@ -1,0 +1,99 @@
+{
+  "protocol_version": "2026-08-18-visual-action-shadow-fixtures-v1",
+  "cases": [
+    {
+      "case_id": "launcher_exact_surface",
+      "surface_kind": "launcher",
+      "entity_role": "target_surface",
+      "entity_value": "聊天工具甲",
+      "element_role": "icon",
+      "element_label": "聊天工具甲",
+      "expected": ["exact_literal_match", "tap_semantic"]
+    },
+    {
+      "case_id": "focused_input_payload",
+      "surface_kind": "app",
+      "entity_role": "input_text",
+      "entity_value": "任意文本 42",
+      "element_role": "input",
+      "element_label": "消息",
+      "expected": ["binds_payload", "input_verified_text"]
+    },
+    {
+      "case_id": "recipient_exact_target",
+      "surface_kind": "app",
+      "entity_role": "recipient",
+      "entity_value": "项目群",
+      "element_role": "list_item",
+      "element_label": "项目群",
+      "expected": ["binds_effect_target", "tap_semantic"]
+    },
+    {
+      "case_id": "paraphrase_and_other_app",
+      "surface_kind": "app",
+      "entity_role": "target_ui_label",
+      "entity_value": "搜索",
+      "element_role": "button",
+      "element_label": "搜索",
+      "expected": ["same_compiler", "tap_semantic"]
+    },
+    {
+      "case_id": "duplicate_literal",
+      "surface_kind": "app",
+      "entity_role": "recipient",
+      "entity_value": "小组",
+      "element_role": "list_item",
+      "element_label": "小组",
+      "duplicate_count": 2,
+      "expected": ["no_element_action"]
+    },
+    {
+      "case_id": "unrelated_goal_relevant",
+      "surface_kind": "app",
+      "entity_role": "target_ui_label",
+      "entity_value": "设置",
+      "element_role": "button",
+      "element_label": "无关按钮",
+      "goal_relevant": true,
+      "expected": ["ignored"]
+    },
+    {
+      "case_id": "low_confidence_or_incomplete",
+      "surface_kind": "app",
+      "entity_role": "target_ui_label",
+      "entity_value": "继续",
+      "element_role": "button",
+      "element_label": "继续",
+      "confidence": 0.4,
+      "fully_visible": false,
+      "expected": ["no_element_action"]
+    },
+    {
+      "case_id": "typed_transition_boundary",
+      "surface_kind": "app",
+      "entity_role": "input_text",
+      "entity_value": "abc",
+      "element_role": "input",
+      "element_label": "输入",
+      "expected": ["specific_state_transition", "scene_changed_only_if_exploratory"]
+    },
+    {
+      "case_id": "long_press_typed_exploration",
+      "surface_kind": "app",
+      "entity_role": "target_ui_label",
+      "entity_value": "对象甲",
+      "element_role": "list_item",
+      "element_label": "对象甲",
+      "expected": ["long_press", "typed_exploratory_transition"]
+    },
+    {
+      "case_id": "drag_unique_typed_endpoints",
+      "surface_kind": "app",
+      "entity_role": "drag_source+drag_destination",
+      "entity_value": "卡片甲+区域乙",
+      "element_role": "list_item+list_item",
+      "element_label": "卡片甲+区域乙",
+      "expected": ["drag", "unique_source", "unique_destination", "typed_transition"]
+    }
+  ]
+}

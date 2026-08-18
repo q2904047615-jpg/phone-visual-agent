@@ -854,6 +854,8 @@ class UniversalAgentOrchestrator:
         self.policy = policy or PhaseOneNavigationPolicy()
         self.bridge = bridge or ObservationBridge()
         self.device_registry = device_registry or DeviceTaskRegistry()
+        self.last_visual_action_shadow: Any | None = None
+        self.last_visual_action_shadow_error: dict[str, Any] | None = None
 
     def _release_if_terminal(self, session: UniversalAgentSessionState) -> None:
         if session.status in DeviceTaskRegistry.TERMINAL_STATUSES:
@@ -886,21 +888,111 @@ class UniversalAgentOrchestrator:
         task_context: Mapping[str, Any],
         trusted_observation: Any,
     ) -> Any:
+        available_actions = self._available_action_kinds(session)
         kwargs = {
             "frames": frames,
             "task_context": task_context,
             "trusted_observation": trusted_observation,
             "decision_number": session.step_number,
-            "available_action_kinds": self._available_action_kinds(session),
+            "available_action_kinds": available_actions,
         }
         try:
-            return self.qwen_observer.decide(**kwargs)
+            decision = self.qwen_observer.decide(**kwargs)
         except TypeError as exc:
             text = str(exc)
             if "available_action_kinds" not in text or "unexpected keyword" not in text:
                 raise
             kwargs.pop("available_action_kinds")
-            return self.qwen_observer.decide(**kwargs)
+            decision = self.qwen_observer.decide(**kwargs)
+        self._capture_visual_action_shadow(
+            task_context=task_context,
+            trusted_observation=trusted_observation,
+            available_action_kinds=available_actions,
+        )
+        return decision
+
+    def _capture_visual_action_shadow(
+        self,
+        *,
+        task_context: Mapping[str, Any],
+        trusted_observation: Any,
+        available_action_kinds: frozenset[str],
+    ) -> None:
+        """Attach shadow-only diagnostics without changing the formal decision."""
+
+        self.last_visual_action_shadow = None
+        self.last_visual_action_shadow_error = None
+        try:
+            semantic_shadow = getattr(
+                self.deepseek_planner,
+                "last_semantic_shadow",
+                None,
+            )
+            semantic_ir = getattr(semantic_shadow, "semantic_ir", None)
+            if semantic_ir is None:
+                return
+            expected = {
+                "task_id": str(task_context.get("task_id") or ""),
+                "device_id": str(task_context.get("device_id") or ""),
+                "revision": task_context.get("revision"),
+            }
+            actual = {
+                "task_id": getattr(semantic_ir, "task_id", None),
+                "device_id": getattr(semantic_ir, "device_id", None),
+                "revision": getattr(semantic_ir, "revision", None),
+            }
+            if actual != expected:
+                self.last_visual_action_shadow_error = {
+                    "protocol_version": "2026-08-18-visual-action-shadow-v1",
+                    "authoritative": False,
+                    "execution_allowed": False,
+                    "status": "shadow_error",
+                    "error_type": "ShadowScopeMismatch",
+                    "error_message": "TaskSemanticIR 与当前正式任务 scope 不一致。",
+                }
+            else:
+                # Lazy import is deliberate: a shadow-only module failure must
+                # not prevent the formal orchestrator from loading or deciding.
+                from visual_action_shadow import compile_visual_action_shadow_safe
+
+                report, error = compile_visual_action_shadow_safe(
+                    trusted_observation.scene,
+                    semantic_ir,
+                    available_action_kinds,
+                )
+                self.last_visual_action_shadow = report
+                self.last_visual_action_shadow_error = error
+        except Exception as exc:  # shadow diagnostics must never alter production
+            self.last_visual_action_shadow = None
+            self.last_visual_action_shadow_error = {
+                "protocol_version": "2026-08-18-visual-action-shadow-v1",
+                "authoritative": False,
+                "execution_allowed": False,
+                "status": "shadow_error",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc)[:500],
+            }
+
+        diagnostics = getattr(self.qwen_observer, "last_diagnostics", None)
+        if not isinstance(diagnostics, dict):
+            return
+        if self.last_visual_action_shadow is not None:
+            report = self.last_visual_action_shadow
+            diagnostics["visual_action_shadow"] = {
+                "protocol_version": report.protocol_version,
+                "authoritative": False,
+                "execution_allowed": False,
+                "status": report.status,
+                "report_digest": report.report_digest,
+                "claim_count": len(report.claims),
+                "relation_count": len(report.relations),
+                "affordance_count": len(report.affordances),
+                "candidate_count": len(report.candidates),
+            }
+        elif self.last_visual_action_shadow_error is not None:
+            diagnostics["visual_action_shadow"] = dict(
+                self.last_visual_action_shadow_error
+            )
 
     @staticmethod
     def _is_presence_only_read_only_subgoal(subgoal: Any) -> bool:

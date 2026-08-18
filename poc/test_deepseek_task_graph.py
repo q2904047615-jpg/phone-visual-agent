@@ -3836,6 +3836,126 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         self.assertTrue(all(not item.risk_action_ids for item in graph.subgoals))
 
+    def test_input_preparation_removes_negated_risk_from_live_mixed_completion(self):
+        payload = local_input_preparation_payload()
+        payload["goal"] = {
+            "objective": (
+                "在当前本地通用动作真机验收页面进入输入验收，找到唯一空白输入框，"
+                "输入草稿 Agent 8，你好。但不要提交或发送，完成后保持在输入框页面"
+            ),
+            "target_apps": [
+                {"app_id": "current_foreground", "app_name": "当前前台应用"}
+            ],
+            "entities": {
+                "target_ui_label": "输入验收",
+                "input_text": "Agent 8，你好。",
+            },
+        }
+        payload["constraints"] = [
+            "不得提交或发送输入内容",
+            "不得点击任何提交、发送、保存或发布按钮",
+            "不得执行任何可能改变外部状态的操作",
+        ]
+        payload["completion_conditions"] = [
+            {
+                "condition_id": "stay_on_input_page",
+                "description": "保持在输入框页面，未提交或发送",
+                "evidence_required": [
+                    "当前仍在输入框页面，且没有提交或发送动作发生"
+                ],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "no_submit_or_send",
+                "description": "用户明确禁止提交或发送输入内容",
+                "external_effect": "不会发送消息或提交数据",
+                "risk_type": "message_or_communication",
+                "risk_level": "low",
+                "subgoal_ids": ["navigate", "prepare_input", "type_text"],
+                "confirmation_required": True,
+            }
+        ]
+        for subgoal in payload["subgoals"]:
+            subgoal["constraints"] = ["不得提交或发送输入内容"]
+            subgoal["risk_action_ids"] = ["no_submit_or_send"]
+            subgoal["external_impact"] = "navigation_only"
+        payload["subgoals"][0]["objective"] = "输入验收页面在前台可见"
+        payload["subgoals"][0]["completion_conditions"] = [
+            "输入验收页面在前台可见"
+        ]
+        payload["subgoals"][1]["objective"] = "唯一空白输入框可见"
+        payload["subgoals"][1]["completion_conditions"] = [
+            "唯一空白输入框可见"
+        ]
+        payload["subgoals"][2]["objective"] = (
+            "当前输入框内容为 Agent 8，你好。"
+        )
+        payload["subgoals"][2]["completion_conditions"] = [
+            "输入框显示文字 Agent 8，你好。"
+        ]
+
+        normalized_payload = copy.deepcopy(payload)
+        normalized_payload["risk_actions"] = []
+        for subgoal in normalized_payload["subgoals"]:
+            subgoal["risk_action_ids"] = []
+
+        graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(
+                copy.deepcopy(payload),
+                audit_payloads=[audit_payload_for_graph(normalized_payload)],
+            )
+        ).plan(payload["goal"]["objective"], device_id="phone-1")
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertEqual(
+            ["navigation_only", "navigation_only", "navigation_only"],
+            [item.external_impact for item in graph.subgoals],
+        )
+        self.assertTrue(all(not item.risk_action_ids for item in graph.subgoals))
+
+    def test_negated_risk_declaration_without_forbid_constraint_stays_fail_closed(self):
+        payload = local_input_preparation_payload()
+        payload["goal"]["objective"] = "让指定联系人收到目标消息并产生通信记录"
+        payload["constraints"] = []
+        payload["completion_conditions"][0]["description"] = (
+            "指定联系人已收到目标消息"
+        )
+        payload["completion_conditions"][0]["evidence_required"] = [
+            "对话中出现目标消息"
+        ]
+        payload["risk_actions"][0].update(
+            {
+                "description": "不会发送消息",
+                "external_effect": "不会产生发送记录",
+                "subgoal_ids": ["type_text"],
+            }
+        )
+        payload["subgoals"] = [payload["subgoals"][2]]
+        payload["subgoals"][0].update(
+            {
+                "status": "active",
+                "depends_on": [],
+                "objective": "指定联系人已收到目标消息",
+                "constraints": [],
+                "completion_conditions": ["对话中出现目标消息"],
+                "risk_action_ids": ["send_message"],
+                "external_impact": "external_state",
+            }
+        )
+        payload["active_subgoal_id"] = "type_text"
+        payload["status"] = "awaiting_confirmation"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            payload["goal"]["objective"], device_id="phone-1"
+        )
+
+        self.assertEqual(("send_message",), graph.active_subgoal().risk_action_ids)
+        self.assertEqual("external_state", graph.active_subgoal().external_impact)
+        self.assertEqual("awaiting_confirmation", graph.status)
+
     def test_input_preparation_state_is_cross_app_and_bilingual(self):
         payload = local_input_preparation_payload()
         payload["goal"] = {

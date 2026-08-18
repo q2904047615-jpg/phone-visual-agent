@@ -1895,7 +1895,15 @@ def _purely_forbidden_initial_risks(
             for anchor in anchors
         ):
             continue
-        if _risk_is_required_by_positive_result(graph, risk):
+        risk_declaration_is_purely_negated = all(
+            _text_directly_negates_action_anchor(risk.description, anchor)
+            or _text_directly_negates_action_anchor(risk.external_effect, anchor)
+            for anchor in anchors
+        )
+        if (
+            _risk_is_required_by_positive_result(graph, risk)
+            and not risk_declaration_is_purely_negated
+        ):
             continue
         if not all(
             item is not None
@@ -2409,11 +2417,19 @@ def _state_description_binds_canonical_input_text(
     prefix = rf"(?<!{continuation})" if re.match(continuation, literal[0]) else ""
     suffix = rf"(?!{continuation})" if re.match(continuation, literal[-1]) else ""
     literal_pattern = re.compile(prefix + escaped + suffix)
+    clause_boundary = re.compile(r"[。；;\r\n]+")
     for value in values:
-        for clause in re.split(r"[。；;\r\n]+", str(value or "")):
-            if (
-                literal_pattern.search(clause)
-                and LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(clause)
+        text = str(value or "")
+        for literal_match in literal_pattern.finditer(text):
+            # The canonical literal may itself contain punctuation.  Locate the
+            # enclosing clause around the complete literal match instead of
+            # splitting through the literal and losing exact-value authority.
+            before = tuple(clause_boundary.finditer(text, 0, literal_match.start()))
+            clause_start = before[-1].end() if before else 0
+            after = clause_boundary.search(text, literal_match.end())
+            clause_end = after.start() if after else len(text)
+            if LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(
+                text[clause_start:clause_end]
             ):
                 return True
     return False

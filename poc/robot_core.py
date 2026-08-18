@@ -588,6 +588,41 @@ class RobotController:
             )
         }
 
+    def hardware_capability_profile(self) -> dict[str, Any]:
+        """Return typed device limits without claiming undocumented ACKs."""
+
+        enabled = self.hardware_capabilities()
+        actions: dict[str, dict[str, Any]] = {}
+        for action, available in enabled.items():
+            actions[action] = {
+                "enabled": bool(available),
+                "one_physical_action_per_receipt": action != "wait_for_change",
+                "fresh_visual_postcondition_required": True,
+                "transport_ack": "gui_event_barrier"
+                if action == "long_press"
+                else "local_call_return",
+                "mechanical_contact_ack": False,
+            }
+        actions["long_press"]["duration_ms"] = {"min": 500, "max": 2000}
+        actions["drag"]["duration_ms"] = {"fixed": 800}
+        actions["input_verified_text"]["text"] = {
+            "canonical_max_chars": 100,
+            "segments": ["direct_latin", "chinese_pinyin", "visible_literal_key"],
+            "newline": False,
+            "unsupported_character_policy": "structured_capability_gap",
+        }
+        actions["clear_verified_text"] = {
+            **actions["input_verified_text"],
+            "enabled": bool(enabled.get("input_verified_text")),
+            "layouts": ["qwerty", "numeric", "symbol", "generic_visible_backspace"],
+            "verified_delete_count": {"min": 1, "max": 100},
+        }
+        return {
+            "protocol_version": "2026-08-18-device-capability-profile-v1",
+            "device_id": self.device_id,
+            "actions": actions,
+        }
+
     def consume_last_long_press_receipt(self) -> dict[str, Any] | None:
         receipt = self._last_long_press_receipt
         self._last_long_press_receipt = None

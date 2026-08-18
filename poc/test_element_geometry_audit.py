@@ -289,7 +289,7 @@ class StrictGeometryAuditProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ElementGeometryAuditError, "visual_role"):
             parse_element_geometry_audit(self.render(payload))
 
-    def test_protocol_allows_unlabelled_input_but_not_unlabelled_button(self):
+    def test_protocol_allows_shape_bound_unlabelled_input_icon_and_button(self):
         payload = audit_payload(
             match={
                 "visual_role": "input",
@@ -305,18 +305,26 @@ class StrictGeometryAuditProtocolTests(unittest.TestCase):
             visual_role="input",
             visible_evidence="空输入框四边完整可见",
         )
-        self.assertIn("visual_role=input and literal_label is empty", prompt)
+        self.assertIn(
+            "literal_label is empty and visual_role is input, icon, or button",
+            prompt,
+        )
 
         payload["matches"][0]["visual_role"] = "button"
+        payload["matches"][0]["evidence"] = ["无文字圆形按钮轮廓完整可见"]
+        parsed_button = parse_element_geometry_audit(self.render(payload))
+        self.assertEqual("button", parsed_button.matches[0].visual_role)
+        button_prompt = element_geometry_audit_prompt(
+            source_ref=SOURCE_REF,
+            literal_label="",
+            visual_role="button",
+            visible_evidence="无文字圆形按钮轮廓完整可见",
+        )
+        self.assertIn("visual_role=button", button_prompt)
+
+        payload["matches"][0]["visual_role"] = "text"
         with self.assertRaisesRegex(ElementGeometryAuditError, "literal_label"):
             parse_element_geometry_audit(self.render(payload))
-        with self.assertRaisesRegex(ElementGeometryAuditError, "literal_label"):
-            element_geometry_audit_prompt(
-                source_ref=SOURCE_REF,
-                literal_label="",
-                visual_role="button",
-                visible_evidence="空白按钮四边完整可见",
-            )
 
     def test_protocol_allows_non_numeric_boundary_fact_but_rejects_coordinates(self):
         payload = audit_payload(
@@ -554,7 +562,14 @@ class GenericSceneGeometryAuditIntegrationTests(unittest.TestCase):
             for expected_part, actual_part in zip(expected, actual):
                 self.assertAlmostEqual(expected_part, actual_part, places=8)
         self.assertEqual(current.elements[0].meaning, audited.elements[0].meaning)
-        self.assertEqual(current.elements[1].states, audited.elements[1].states)
+        self.assertEqual(current.elements[0].meaning, audited.elements[0].meaning)
+        for element in audited.elements:
+            self.assertTrue(element.states["fully_visible"])
+            self.assertTrue(element.states["independent_geometry_verified"])
+            self.assertEqual(
+                "element_geometry_audit",
+                element.states["geometry_audit_source"],
+            )
 
     def test_zero_match_never_returns_the_rough_scene(self):
         frame = Image.new("RGB", (810, 1515), "gray")

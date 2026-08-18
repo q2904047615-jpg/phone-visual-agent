@@ -588,7 +588,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(0, caught.exception.physical_actions)
         self.assertEqual([], robot.actions)
         self.assertIsNone(robot._armed)
-        self.assertEqual([1800], provider.max_tokens_seen)
+        self.assertEqual([2600], provider.max_tokens_seen)
 
     def test_failed_observation_persists_bounded_redacted_qwen_response(self):
         raw = (

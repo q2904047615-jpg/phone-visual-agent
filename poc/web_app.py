@@ -112,6 +112,9 @@ DEVICE_REGISTRY_PATH = Path(
         Path(__file__).with_name("device_registry.json"),
     )
 )
+LEGACY_WORKFLOWS_ENABLED = str(
+    os.environ.get("PHONE_AGENT_ENABLE_LEGACY_WORKFLOWS", "")
+).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def current_code_revision() -> str:
@@ -155,55 +158,26 @@ OPERATION_APP = {
 
 APP_CATALOG = [
     {
-        "id": "wechat",
-        "name": "微信",
-        "icon": "微",
-        "route": "#/apps/wechat",
-        "operations": [
-            {
-                "id": "wechat.send_text",
-                "name": "发送文字到指定聊天",
-                "enabled": True,
-                "needs_confirmation": True,
-            },
-            {
-                "id": "wechat.send_album_image",
-                "name": "发送相册图片到指定聊天",
-                "enabled": True,
-                "needs_confirmation": True,
-            },
-        ],
-    },
-    {
-        "id": "douyin",
-        "name": "抖音",
-        "icon": "抖",
-        "route": "#/apps/douyin",
-        "operations": [
-            {
-                "id": "douyin.search",
-                "name": "搜索视频",
-                "enabled": True,
-                "needs_confirmation": True,
-            },
-            {
-                "id": "douyin.batch_interact",
-                "name": "批量点赞与评论",
-                "enabled": True,
-                "needs_confirmation": True,
-            },
-        ],
-    },
-    {
-        "id": "more",
-        "name": "其他 App",
-        "icon": "＋",
+        "id": "universal-agent",
+        "name": "通用视觉操作 Agent",
+        "icon": "智",
         "route": "#/",
         "operations": [],
-        "enabled": False,
-        "note": "待接入",
+        "enabled": True,
+        "note": "唯一默认入口；按当前画面逐步观察、执行和验证",
     },
 ]
+
+
+def require_legacy_workflows_enabled() -> None:
+    if not LEGACY_WORKFLOWS_ENABLED:
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "固定 App 工作流已退出默认产品路径；请使用 "
+                "/api/agent/generic-supervised/start。"
+            ),
+        )
 
 
 def now_iso() -> str:
@@ -764,8 +738,8 @@ class GenericSupervisedAutoRequest(StrictAgentRequest):
     device_id: StrictStr = Field(min_length=1, max_length=128)
     confirmed: StrictBool = False
     confirmation: GenericConfirmationScopeRequest | None = None
-    max_physical_actions: StrictInt = Field(default=1, ge=1, le=1)
-    max_iterations: StrictInt = Field(default=1, ge=1, le=1)
+    max_physical_actions: StrictInt = Field(default=12, ge=1, le=20)
+    max_iterations: StrictInt = Field(default=24, ge=1, le=40)
 
 
 class CapabilityAcceptanceStartRequest(StrictAgentRequest):
@@ -1108,13 +1082,15 @@ class Runtime:
             )
 
     def start(self) -> None:
-        self.worker.start()
+        if LEGACY_WORKFLOWS_ENABLED:
+            self.worker.start()
 
     def shutdown(self) -> None:
         self.stop.set()
         self.controller.request_stop()
-        self.jobs.put("")
-        self.worker.join(timeout=3)
+        if self.worker.is_alive():
+            self.jobs.put("")
+            self.worker.join(timeout=3)
 
     def _worker_loop(self) -> None:
         while not self.stop.is_set():
@@ -1399,6 +1375,16 @@ def device() -> dict[str, Any]:
     hardware_capabilities = (
         capability_provider() if callable(capability_provider) else {}
     )
+    capability_profile_provider = getattr(
+        runtime.controller,
+        "hardware_capability_profile",
+        None,
+    )
+    hardware_capability_profile = (
+        capability_profile_provider()
+        if callable(capability_profile_provider)
+        else None
+    )
     status["default_device_id"] = runtime.device_controllers.default_device_id
     status["devices"] = [
         {
@@ -1419,7 +1405,7 @@ def device() -> dict[str, Any]:
         # for old queued tasks and must not be reported as the product path.
         "active_orchestrator": "universal_agent",
         "background_compatibility_worker": {
-            "enabled": True,
+            "enabled": LEGACY_WORKFLOWS_ENABLED,
             "mode": runtime.orchestrator_mode,
             "default_user_path": False,
         },
@@ -1430,9 +1416,10 @@ def device() -> dict[str, Any]:
             "goal_preview_enabled": True,
             "scene_preview_enabled": True,
             "hardware_execution_enabled": True,
-            "automatic_loop_enabled": False,
-            "automatic_loop_max_physical_actions": 1,
-            "supervised_single_step_enabled": True,
+            "automatic_loop_enabled": True,
+            "automatic_loop_max_physical_actions": 12,
+            "automatic_loop_max_iterations": 24,
+            "supervised_single_step_enabled": False,
             "enabled_physical_actions": sorted(
                 action
                 for action, enabled in hardware_capabilities.items()
@@ -1451,6 +1438,7 @@ def device() -> dict[str, Any]:
                 "drag",
             ],
             "hardware_capabilities": hardware_capabilities,
+            "hardware_capability_profile": hardware_capability_profile,
             "supported_app_scope": "dynamic",
             "observer": runtime.generic_scene_observer.status(),
         },
@@ -1509,9 +1497,11 @@ def device() -> dict[str, Any]:
         ]
     status["generic_supervised_execution"] = {
         "enabled": True,
-        "automatic_loop_enabled": False,
+        "automatic_loop_enabled": True,
         "max_physical_actions_per_confirmation": 1,
-        "max_safe_loop_physical_actions": 1,
+        "max_safe_loop_physical_actions": 12,
+        "max_safe_loop_iterations": 24,
+        "external_effect_confirmation_count": 1,
         "post_action_transition_protocol": (
             POST_ACTION_TRANSITION_PROTOCOL_VERSION
         ),
@@ -1544,6 +1534,7 @@ def task(task_id: str) -> dict[str, Any]:
 
 @app.post("/api/agent/parse")
 def parse_agent(body: AgentRequest) -> dict[str, Any]:
+    require_legacy_workflows_enabled()
     return runtime.agent.parse(body.text)
 
 
@@ -2170,7 +2161,7 @@ def start_generic_supervised_session(
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Plan with DeepSeek, observe with Qwen and propose zero executed actions."""
+    """Plan once, then autonomously advance only safe read/navigation actions."""
 
     verify_local_request(request, x_control_token)
     active_session_id = (
@@ -2194,6 +2185,7 @@ def start_generic_supervised_session(
         + session_id[:8]
     )
     run_dir.mkdir(parents=True, exist_ok=True)
+    session = None
     try:
         with _supervised_hardware_lock(body.device_id):
             session = runtime.universal_agent_orchestrator.start(
@@ -2204,11 +2196,28 @@ def start_generic_supervised_session(
             )
         with runtime.generic_supervised_session_lock:
             runtime.generic_supervised_sessions[session_id] = session
+        auto_result = {
+            "physical_actions": 0,
+            "iterations": 0,
+            "status": session.status,
+            "pause_reason": "当前没有可自动推进的安全动作。",
+        }
+        if session.status in {"awaiting_confirmation", "needs_reobservation"}:
+            with _supervised_hardware_lock(body.device_id):
+                auto_result = (
+                    runtime.universal_agent_orchestrator.run_autonomous_safe_loop(
+                        session,
+                        max_physical_actions=12,
+                        max_iterations=24,
+                    )
+                )
         report = _write_generic_supervised_report(session)
         return {
-            "mode": "generic_supervised_single_step",
-            "physical_actions": 0,
-            "automatic_loop_enabled": False,
+            "mode": "generic_supervised_autonomous_safe_loop",
+            "physical_actions": auto_result["physical_actions"],
+            "automatic_loop_supported": True,
+            "automatic_loop_enabled": True,
+            "automatic_progress": auto_result,
             "session": session.snapshot(),
             "report": report,
         }
@@ -2220,7 +2229,7 @@ def start_generic_supervised_session(
         TaskGraphError,
         VisionAgentError,
     ) as exc:
-        failure = _generic_supervised_failure(None, exc)
+        failure = _generic_supervised_failure(session, exc)
         failure["evidence"] = [
             str(path) for path in sorted(run_dir.glob("*.jpg"))
         ]
@@ -2247,7 +2256,7 @@ def approve_generic_supervised_risk(
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Approve one graph-bound risk scope, then observe without acting."""
+    """Approve one canonical risk draft and execute at most its one bound action."""
 
     verify_local_request(request, x_control_token)
     with runtime.generic_supervised_session_lock:
@@ -2263,24 +2272,28 @@ def approve_generic_supervised_risk(
             )
         _require_generic_session_device(session, body.confirmation.device_id)
         with _supervised_hardware_lock(session.device_id):
-            decision = runtime.universal_agent_orchestrator.approve_risks(
+            result = runtime.universal_agent_orchestrator.approve_risks(
                 session,
                 body.confirmation.model_dump(),
             )
         request_actions = session.physical_actions - before_actions
-        if request_actions != 0:
+        if request_actions not in {0, 1}:
             raise UniversalAgentOrchestratorError(
-                "风险确认路径错误地触发了物理动作。"
+                "一次风险确认产生了超过一个物理动作。"
             )
         report = _write_generic_supervised_report(session)
-        return {
+        response = {
             "mode": "generic_supervised_single_step",
-            "physical_actions": 0,
+            "physical_actions": request_actions,
             "automatic_loop_enabled": False,
-            "proposal": decision.proposal.to_dict(),
             "session": session.snapshot(),
             "report": report,
         }
+        if hasattr(result, "action_outcome"):
+            response["execution"] = result.to_dict()
+        else:
+            response["proposal"] = result.proposal.to_dict()
+        return response
     except (
         GenericActionAdapterError,
         UniversalActionError,
@@ -2419,7 +2432,7 @@ def run_generic_supervised_safe_loop(
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Compatibility route that consumes one exact confirmation for one action."""
+    """Continue only safe read/navigation work without user action confirmation."""
 
     verify_local_request(request, x_control_token)
     with runtime.generic_supervised_session_lock:
@@ -2440,21 +2453,20 @@ def run_generic_supervised_safe_loop(
         raise
     before_actions = session.physical_actions
     try:
-        if body.confirmed is not True or body.confirmation is None:
+        if body.confirmed is True or body.confirmation is not None:
             raise UniversalAgentOrchestratorError(
-                "执行兼容单步请求前必须确认当前精确动作作用域。"
+                "安全自动推进不接收用户动作确认；外部影响请使用风险确认接口。"
             )
         with _supervised_hardware_lock(session.device_id):
-            result = runtime.universal_agent_orchestrator.run_safe_loop(
+            result = runtime.universal_agent_orchestrator.run_autonomous_safe_loop(
                 session,
-                body.confirmation.model_dump(),
                 max_physical_actions=body.max_physical_actions,
                 max_iterations=body.max_iterations,
             )
         report = _write_generic_supervised_report(session)
         return {
             "mode": "generic_supervised_safe_loop",
-            "automatic_loop_enabled": False,
+            "automatic_loop_enabled": True,
             "execution": result,
             "session": session.snapshot(),
             "report": report,
@@ -2549,6 +2561,7 @@ def start_supervised_session(
 ) -> dict[str, Any]:
     """Observe once and create a paused session; execute no physical action."""
     verify_local_request(request, x_control_token)
+    require_legacy_workflows_enabled()
     _require_supervised_device_ready()
     with runtime.supervised_session_lock:
         active = [
@@ -2651,6 +2664,7 @@ def start_supervised_session(
 
 @app.get("/api/agent/supervised/{session_id}")
 def get_supervised_session(session_id: str) -> dict[str, Any]:
+    require_legacy_workflows_enabled()
     with runtime.supervised_session_lock:
         session = runtime.supervised_sessions.get(session_id)
         if session is None:
@@ -2672,6 +2686,7 @@ def advance_supervised_session(
 ) -> dict[str, Any]:
     """Execute at most the one pending semantic node, then pause again."""
     verify_local_request(request, x_control_token)
+    require_legacy_workflows_enabled()
     _require_supervised_device_ready()
     with runtime.supervised_session_lock:
         session = runtime.supervised_sessions.get(session_id)
@@ -2734,6 +2749,7 @@ def preview_real_observation_step(
 ) -> dict[str, Any]:
     """Use real camera/Qwen observation and return one unexecuted semantic step."""
     verify_local_request(request, x_control_token)
+    require_legacy_workflows_enabled()
     status = runtime.controller.device_status()
     if not status.get("controller_online") or not status.get("camera_online"):
         raise HTTPException(status_code=409, detail="控制端或摄像头离线，无法观察。")
@@ -2791,6 +2807,7 @@ def execute_ensure_app_step(
 ) -> dict[str, Any]:
     """Execute exactly one approved ensure_app action and re-observe once."""
     verify_local_request(request, x_control_token)
+    require_legacy_workflows_enabled()
     if body.confirmed is not True:
         raise HTTPException(status_code=422, detail="必须明确确认本次单步打开 App。")
     status = runtime.controller.device_status()
@@ -2931,6 +2948,7 @@ def execute_observe_step(
 ) -> dict[str, Any]:
     """Observe one already-open target App and execute no physical action."""
     verify_local_request(request, x_control_token)
+    require_legacy_workflows_enabled()
     if body.confirmed is not True:
         raise HTTPException(status_code=422, detail="必须明确确认本次只读页面观察。")
     status = runtime.controller.device_status()
@@ -3094,6 +3112,7 @@ def execute_tap_heart_step(
 ) -> dict[str, Any]:
     """Tap one verified white Douyin heart and verify red without retrying."""
     verify_local_request(request, x_control_token)
+    require_legacy_workflows_enabled()
     if body.confirmed is not True:
         raise HTTPException(status_code=422, detail="必须明确确认本次单步点赞。")
     status = runtime.controller.device_status()
@@ -3340,6 +3359,7 @@ def create_task(
     x_control_token: str | None = Header(default=None),
 ) -> JSONResponse:
     verify_local_request(request, x_control_token)
+    require_legacy_workflows_enabled()
     normalized = normalize_task_request(body)
     validate_task_payload(normalized)
     created = runtime.store.create(
@@ -3357,6 +3377,8 @@ def confirm_task(
     x_control_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
+    require_legacy_workflows_enabled()
+    require_legacy_workflows_enabled()
     device_id = runtime.device_controllers.default_device_id
     active_session = runtime.device_task_registry.active_session(device_id)
     if active_session is not None:
@@ -3423,6 +3445,7 @@ def cancel_task(
     x_control_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
+    require_legacy_workflows_enabled()
     try:
         task_item = runtime.store.get(task_id)
         if task_item["status"] in {"draft", "awaiting_confirmation", "queued"}:

@@ -644,7 +644,10 @@ async function startSupervisedAgent() {
     );
     state.supervisedSession = response.session;
     await finalizeStopIfRequested();
-    toast("动态计划已生成，尚未执行物理动作。");
+    const actions = Number(response.physical_actions || 0);
+    toast(actions
+      ? `安全任务已自动推进 ${actions} 个物理动作，并在每步后重新观察。`
+      : "计划与只读观察已完成；当前没有可自动执行的安全动作。");
     render();
   } catch (error) {
     toast(error.message, true);
@@ -892,7 +895,7 @@ function openRiskDialog() {
   document.querySelector("#riskExpected").textContent = Protocol.displayValue(view.visualAction.expectedChange);
   document.querySelector("#riskDevice").textContent = lockedSessionDeviceId();
   document.querySelector("#riskWarning").textContent = riskPhase
-    ? "后端风险 scope 与当前权威任务字段一致；本次只允许 Qwen 观察并提出一个动作，不触发机械臂。具体动作产生后仍需再次确认。"
+    ? "后端风险 scope 与当前权威任务、收件人/文字草稿一致；确认后最多执行一个由新观察严格绑定的外部影响动作，不再二次弹窗。"
     : highAttention
     ? "后端动作 scope 与当前权威任务、观察和动作字段一致；本次只授权当前一个动作，任何字段变化都必须重新确认。"
     : "后端动作 scope 与当前权威任务、观察和动作字段一致；本次只授权一个动作，执行后必须重新观察。";
@@ -922,7 +925,9 @@ async function advanceSupervisedAgent(grant) {
     state.supervisedSession = response.session;
     await finalizeStopIfRequested();
     toast(riskPhase
-      ? "风险范围已确认，机械臂尚未动作；请核对并再次确认具体动作。"
+      ? (Number(response.physical_actions || 0)
+        ? "风险草稿已确认，唯一外部影响动作已执行并重新观察。"
+        : "风险草稿已确认，但当前画面没有形成可安全执行的唯一动作。")
       : "当前一步已处理，并已重新观察画面。");
     render();
   } catch (error) {

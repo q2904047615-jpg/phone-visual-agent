@@ -785,21 +785,12 @@
     return { ...values, device_id: deviceId };
   }
 
-  function buildAutoRequestPayload(sessionDeviceId, confirmationPayload, values = {}) {
-    if (
-      !confirmationPayload
-      || confirmationPayload.confirmed !== true
-      || !asObject(confirmationPayload.confirmation).observation_id
-      || !asObject(confirmationPayload.confirmation).fingerprint
-      || !asObject(confirmationPayload.confirmation).decision_node_id
-      || !asObject(confirmationPayload.confirmation).action_digest
-    ) {
-      throw new Error("安全连续推进必须携带当前精确动作确认。")
-    }
+  function buildAutoRequestPayload(sessionDeviceId, values = {}) {
     return buildRequestPayload(sessionDeviceId, {
-      ...confirmationPayload,
-      max_physical_actions: 1,
-      max_iterations: 1,
+      confirmed: false,
+      confirmation: null,
+      max_physical_actions: Math.max(1, Math.min(20, Number(values.maxPhysicalActions || 12))),
+      max_iterations: Math.max(1, Math.min(40, Number(values.maxIterations || 24))),
     });
   }
 
@@ -905,8 +896,13 @@
   }
 
   function shouldAutoAdvance(context) {
-    void context;
-    return false;
+    const session = context && context.session;
+    if (!session || context.paused || context.busy || session.isTerminal) return false;
+    if (session.status !== "awaiting_confirmation") return false;
+    if (session.scopeState?.state !== "active") return false;
+    if (!session.visualAction?.isExecutable) return false;
+    if (session.risk?.requiresConfirmation || session.risk?.hasCurrentRisk) return false;
+    return !externalImpacts.has(session.risk?.currentExternalImpact);
   }
 
   async function runAutoAdvanceLoop(options) {

@@ -979,7 +979,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         )
         observation = trusted_observation(self.frames, elements=(field, candidate))
         provider = FakeProvider(
-            minimal_selection_payload(status="action", choice_id="choice_2")
+            minimal_selection_payload(status="action", choice_id="choice_1")
         )
 
         _observer, decision = self.decide(
@@ -1630,7 +1630,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
     def test_missing_or_ambiguous_exact_text_blocks_before_qwen(self) -> None:
         missing_context = task_context(task_id="task_exact_missing", revision=12)
-        missing_context["goal"]["entities"] = {"expected_text": "火星入口"}
+        missing_context["goal"]["entities"] = {"target_ui_label": "火星入口"}
         missing_provider = FakeProvider(action_payload(self.context, self.observation))
         missing_observer, missing_decision = self.decide(
             missing_provider,
@@ -1667,7 +1667,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             observation_id="obs_33333333333333333333333333333333",
         )
         ambiguous_context = task_context(task_id="task_exact_ambiguous", revision=13)
-        ambiguous_context["goal"]["entities"] = {"exact_text": "确定"}
+        ambiguous_context["goal"]["entities"] = {"target_ui_label": "确定"}
         ambiguous_provider = FakeProvider(
             action_payload(
                 ambiguous_context,
@@ -1862,7 +1862,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
     def test_action_cannot_ignore_unique_exact_text_candidate(self) -> None:
         context = task_context(task_id="task_exact_select", revision=14)
-        context["goal"]["entities"] = {"target_text": "设置"}
+        context["goal"]["entities"] = {"target_ui_label": "设置"}
         wrong = action_payload(
             context,
             self.observation,

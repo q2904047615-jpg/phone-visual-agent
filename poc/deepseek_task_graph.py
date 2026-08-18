@@ -45,20 +45,34 @@ VERIFIED_ACTION_TRANSITION_PROTOCOL_VERSION = (
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-LOW_LEVEL_INSTRUCTION_PATTERN = re.compile(
+FORBIDDEN_EXECUTION_INSTRUCTION_PATTERN = re.compile(
     r"(?:"
-    r"点击|轻触|点按|滑动|上划|下划|左划|右划|长按|拖动|"
-    r"(?:在|向)[^，。；;]{0,12}(?:输入框|文本框|搜索框)[^，。；;]{0,8}输入|"
-    r"输入(?:文字|文本|内容|字符|账号|密码|关键词|搜索词|查询词|消息|验证码|"
-    r"姓名|名称|号码|地址|标题|评论|[A-Za-z0-9][^，。；;\s]{0,31})|"
-    r"按下[^，。；;]{0,12}键|"
-    r"按(?:返回|主页|home|音量(?:加|减)?|电源|菜单|多任务)键|"
-    r"裸坐标|坐标|系统命令|shell|powershell|cmd\.exe|adb|main\.exe|"
-    r"\(\s*\d{1,4}\s*[,，]\s*\d{1,4}\s*\)|\bx\s*[:=]\s*\d+|"
-    r"\b(?:tap|click|swipe|long[ _-]?press|drag|type[ _-]?text|input[ _-]?text|"
-    r"coordinate|keycode|press[ _-]?key|system[ _-]?command)\b"
+    r"裸坐标|像素坐标|归一化坐标|坐标点|系统命令|"
+    r"shell|powershell|cmd\.exe|adb|main\.exe|"
+    r"\(\s*\d{1,4}\s*[,，]\s*\d{1,4}\s*\)|"
+    r"\b[xy]\s*[:=]\s*\d+|"
+    r"\b(?:coordinate|keycode|system[ _-]?command|shell[ _-]?command)\b"
     r")",
     re.IGNORECASE,
+)
+NATURAL_ACTION_INTENT_PATTERN = re.compile(
+    r"(?:点击|轻触|点按|滑动|上划|下划|左划|右划|长按|拖动|输入|"
+    r"返回|回到主页|按下|\b(?:tap|click|swipe|long[ _-]?press|drag|"
+    r"type[ _-]?text|input[ _-]?text|press[ _-]?key)\b)",
+    re.IGNORECASE,
+)
+# Kept as an internal compatibility alias.  The validator now rejects only
+# executable control details; natural click/swipe/input/drag intent is legal.
+LOW_LEVEL_INSTRUCTION_PATTERN = FORBIDDEN_EXECUTION_INSTRUCTION_PATTERN
+TARGET_SURFACES = frozenset({"device", "system", "current_surface"})
+AUTHORITATIVE_GOAL_ENTITY_KEYS = frozenset(
+    {
+        "recipient",
+        "input_text",
+        "target_ui_label",
+        "target_surface",
+        "spatial_hint",
+    }
 )
 EXTERNAL_STATE_CHANGE_PATTERN = re.compile(
     r"(?:"
@@ -393,6 +407,11 @@ class GraphGoal:
                 raise TaskGraphError(f"目标 App ID 重复：{app.app_id}")
             app_ids.add(app.app_id)
         _reject_control_fields(self.entities, "goal.entities")
+        target_surface = self.entities.get("target_surface")
+        if target_surface is not None and target_surface not in TARGET_SURFACES:
+            raise TaskGraphError(
+                "goal.entities.target_surface 必须是 device、system 或 current_surface。"
+            )
         input_text = self.entities.get("input_text")
         if input_text is not None:
             if not isinstance(input_text, str) or not input_text or len(input_text) > 100:
@@ -889,8 +908,14 @@ class DynamicTaskGraph:
         if self.status not in GRAPH_STATUSES:
             raise TaskGraphError(f"任务图状态无效：{self.status}")
         self.goal.validate()
-        if self.status != "blocked" and not self.goal.target_apps:
-            raise TaskGraphError("可推进的任务图至少需要一个目标 App。")
+        if (
+            self.status != "blocked"
+            and not self.goal.target_apps
+            and self.goal.entities.get("target_surface") not in TARGET_SURFACES
+        ):
+            raise TaskGraphError(
+                "可推进任务图必须声明目标 App，或声明 device/system/current_surface 目标表面。"
+            )
         _validate_text_list(self.constraints, "constraints", required=False)
         for item in self.constraints:
             _reject_low_level_instruction(item, "constraints", allow_negated=True)
@@ -1244,89 +1269,25 @@ class DeepSeekTaskGraphPlanner:
         _validate_task_id(resolved_task_id)
         self._require_provider()
         prompt = _initial_prompt(text)
-        try:
-            graph = self._request_graph(
-                prompt,
-                task_id=resolved_task_id,
-                device_id=device_id,
-                revision=1,
-                raw_user_goal=text,
-                validate=False,
-            )
-            graph = _normalize_initial_input_goal_objective(graph)
-            graph = _normalize_initial_local_navigation(graph)
-            graph = _normalize_initial_premature_completed_status(graph)
-            graph = _normalize_unique_active_frontier(graph)
-            graph = _normalize_initial_confirmation_status(graph)
-            graph.validate()
-        except TaskGraphError as exc:
-            if not _retryable_initial_output_error(exc):
-                raise
-            initial_error = exc
-            graph = self._request_graph(
-                _repair_initial_prompt(
-                    text,
-                    invalid_response=self.last_raw_response,
-                    validation_error=str(exc),
-                ),
-                task_id=resolved_task_id,
-                device_id=device_id,
-                revision=1,
-                raw_user_goal=text,
-                validate=False,
-            )
-            graph = _normalize_initial_input_goal_objective(graph)
-            graph = _normalize_initial_local_navigation(graph)
-            graph = _normalize_initial_premature_completed_status(graph)
-            graph = _normalize_unique_active_frontier(graph)
-            graph = _normalize_initial_confirmation_status(graph)
-            try:
-                graph.validate()
-            except TaskGraphError as repair_error:
-                if (
-                    not _retryable_initial_output_error(repair_error)
-                    or _initial_repair_error_category(repair_error)
-                    == _initial_repair_error_category(initial_error)
-                ):
-                    raise
-                graph = self._request_graph(
-                    _repair_initial_prompt(
-                        text,
-                        invalid_response=self.last_raw_response,
-                        validation_error=str(repair_error),
-                    ),
-                    task_id=resolved_task_id,
-                    device_id=device_id,
-                    revision=1,
-                    raw_user_goal=text,
-                    validate=False,
-                )
-                graph = _normalize_initial_input_goal_objective(graph)
-                graph = _normalize_initial_local_navigation(graph)
-                graph = _normalize_initial_premature_completed_status(graph)
-                graph = _normalize_unique_active_frontier(graph)
-                graph = _normalize_initial_confirmation_status(graph)
-                graph.validate()
-        try:
-            self._audit_and_validate_graph(graph)
-        except TaskGraphError as exc:
-            if not _retryable_safe_initial_audit_conflict(text, exc):
-                raise
-            graph = self._request_graph(
-                _retry_safe_initial_audit_prompt(text),
-                task_id=resolved_task_id,
-                device_id=device_id,
-                revision=1,
-                raw_user_goal=text,
-                validate=False,
-            )
-            graph = _normalize_initial_input_goal_objective(graph)
-            graph = _normalize_initial_local_navigation(graph)
-            graph = _normalize_initial_premature_completed_status(graph)
-            graph = _normalize_unique_active_frontier(graph)
-            graph = _normalize_initial_confirmation_status(graph)
-            graph.validate()
-            self._audit_and_validate_graph(graph)
+        graph = self._request_graph(
+            prompt,
+            task_id=resolved_task_id,
+            device_id=device_id,
+            revision=1,
+            raw_user_goal=text,
+            validate=False,
+        )
+        # Only deterministic, semantics-preserving local normalization is
+        # allowed.  A malformed or unsafe semantic answer is never repaired by
+        # another remote sample.
+        graph = _normalize_initial_input_goal_objective(graph)
+        graph = _normalize_explicit_target_surface(graph, text)
+        graph = _normalize_initial_local_navigation(graph)
+        graph = _normalize_initial_premature_completed_status(graph)
+        graph = _normalize_unique_active_frontier(graph)
+        graph = _normalize_initial_confirmation_status(graph)
+        graph.validate()
+        self._audit_and_validate_graph(graph)
         if (
             graph.status == "completed"
             or any(item.status == "completed" for item in graph.subgoals)
@@ -1350,76 +1311,27 @@ class DeepSeekTaskGraphPlanner:
         _require_text(reason, "replan.reason")
         self._require_provider()
         prompt = _replan_prompt(graph, observation, trigger=trigger, reason=reason)
-        try:
-            candidate = self._request_graph(
-                prompt,
-                task_id=graph.task_id,
-                device_id=graph.device_id,
-                revision=graph.revision + 1,
-                raw_user_goal=graph.raw_user_goal or graph.goal.objective,
-                validate=False,
-            )
-            candidate = _restore_completed_history_evidence(graph, candidate)
-            candidate = _canonicalize_literal_visible_evidence_clauses(
-                graph,
-                candidate,
-                observation,
-            )
-            candidate = _normalize_unique_active_frontier(candidate)
-            self._validate_replan_candidate(
-                graph,
-                candidate,
-                observation,
-                trigger=trigger,
-            )
-        except TaskGraphError as exc:
-            if not _retryable_replan_output_error(exc):
-                raise
-            invalid_response = self.last_raw_response
-            candidate = self._request_graph(
-                _repair_replan_prompt(
-                    graph,
-                    observation,
-                    trigger=trigger,
-                    reason=reason,
-                    invalid_response=invalid_response,
-                    validation_error=str(exc),
-                ),
-                task_id=graph.task_id,
-                device_id=graph.device_id,
-                revision=graph.revision + 1,
-                raw_user_goal=graph.raw_user_goal or graph.goal.objective,
-                validate=False,
-            )
-            candidate = _restore_completed_history_evidence(graph, candidate)
-            candidate = _canonicalize_literal_visible_evidence_clauses(
-                graph,
-                candidate,
-                observation,
-            )
-            candidate = _normalize_unique_active_frontier(candidate)
-            try:
-                self._validate_replan_candidate(
-                    graph,
-                    candidate,
-                    observation,
-                    trigger=trigger,
-                )
-            except TaskGraphError as repair_error:
-                normalized = _normalize_blocked_mismatch_clarification(
-                    candidate,
-                    trigger=trigger,
-                    error=repair_error,
-                )
-                if normalized is None:
-                    raise
-                candidate = _restore_completed_history_evidence(graph, normalized)
-                self._validate_replan_candidate(
-                    graph,
-                    candidate,
-                    observation,
-                    trigger=trigger,
-                )
+        candidate = self._request_graph(
+            prompt,
+            task_id=graph.task_id,
+            device_id=graph.device_id,
+            revision=graph.revision + 1,
+            raw_user_goal=graph.raw_user_goal or graph.goal.objective,
+            validate=False,
+        )
+        candidate = _restore_completed_history_evidence(graph, candidate)
+        candidate = _canonicalize_literal_visible_evidence_clauses(
+            graph,
+            candidate,
+            observation,
+        )
+        candidate = _normalize_unique_active_frontier(candidate)
+        self._validate_replan_candidate(
+            graph,
+            candidate,
+            observation,
+            trigger=trigger,
+        )
         previous_ids = {item.subgoal_id for item in graph.subgoals}
         completed_ids = tuple(
             item.subgoal_id for item in graph.subgoals if item.status == "completed"
@@ -1601,7 +1513,9 @@ class DeepSeekTaskGraphPlanner:
 def _initial_prompt(raw_goal: str) -> str:
     return f"""
 你是通用手机视觉操作 Agent 的 DeepSeek 高层任务图规划器。你只维护目标和高层子目标，
-不观察图片、不选择控件、不输出点击/滑动/输入等动作，也不能输出坐标、Shell 或系统命令。
+不观察图片、不选择控件。用户可以直接要求点击、滑动、输入、长按、拖动、返回或回到主页；
+这些自然动作意图可以原样进入目标和子目标，但它们绝不构成执行授权。你不能输出坐标、
+Shell、ADB、keycode、main.exe 指令或其他可直接驱动设备的控制细节。
 
 用户原始目标：{json.dumps(raw_goal, ensure_ascii=False)}
 
@@ -1609,26 +1523,17 @@ def _initial_prompt(raw_goal: str) -> str:
 
 初始规划规则：
 1. 适用于任意 App 和跨 App 目标，不得生成任何 App 专用固定流程。
-2. 子目标描述“应达到什么状态”，不能描述具体按钮、坐标或动作序列。
-   用户原始目标可以直接包含点击、滑动、输入等自然语言动作；不要拒绝，也不要把这些动作词
-   复制进任务图。应提取该动作希望达到的可见结果状态，例如把“滑动页面找到目标内容”抽象为
-   “目标内容在当前页面可见”，具体下一动作仍由 Qwen 根据真实画面决定。
-   但用户用“不要、不得、禁止、不能、避免”明确否定的低层动作属于安全约束，必须以同样的
-   明确否定形式保留在 constraints 中；不得删除，也不得改写成含糊或双重否定的表达。
-   用户对方向或次数的限制也要保留，但必须改写成动作后的状态变化，不得复述动作词。例如把
-   “只能向上滑动一次”改写为“页面内容只允许向上移动一次”。
+2. 子目标可以同时保留“用户要做什么动作”和“动作后必须出现什么状态”。动作名称只是任务语义，
+   不能携带坐标、控件索引、系统命令或可执行脚本；实际下一步控件和动作仍由 Qwen 基于真实画面
+   提议，并由本地控制器以独立观察、作用域和能力门禁裁决。用户对方向、次数、文字原文和禁止事项
+   必须逐字保留，不得为了满足协议而改写成另一项任务。
    如果用户明确指“当前页面”“当前应用”或“当前前台”但没有说 App 名称，target_apps 使用
    [{{"app_id":"current_foreground","app_name":"当前前台应用"}}]；不能只因未重复 App 名称而阻塞。
-   如果目标界面的字面标签本身含有点击、滑动、输入、长按、拖动等动作词，这仍只是
-   可见文字；必须将它逐字保存在goal.entities.target_ui_label，不得复制到goal.objective、
-   subgoals.objective、completion_conditions或constraints。这些状态字段只能描述目标页面、区域或
-   内容可见，不能把字面标签当成动作指令。
-   必须按以下通用语义边界改写，而不是照抄用户动作措辞：
-   - “点击或打开某入口”写成“目标页面在前台可见”；
-   - “关闭遮挡层”写成“目标页面不再被遮挡，主要内容可见”；
-   - “在输入框输入 X”写成“当前输入框内容为 X”，提交边界另存 constraints；
-   - “计算某表达式”写成“本机临时结果区域显示该表达式的答案”。
-   这些只是跨 App 的结果状态例式，不能据此生成固定步骤或控件选择。
+   如果目标界面的字面标签含动作词，可将逐字标签保存在 goal.entities.target_ui_label；同一个动作词
+   也可以出现在 objective，但两者含义必须分开。entities 中只有 recipient、input_text、
+   target_ui_label、target_surface、spatial_hint 是正式执行上下文；其他键仅是规划说明，不能扩大
+   Qwen 或控制器权限。device/system/current_surface 目标可将 target_apps 留空并设置 target_surface；
+   App 目标仍应使用 target_apps。
 3. 只能有一个 active 子目标；其依赖必须已经 completed（初始图通常无依赖）。
 4. 初始规划没有画面证据，所有完成条件 satisfied=false，任何子目标都不能 completed。
 5. 每个子目标必须用 external_impact 标为 read_only、navigation_only、external_state 或 unknown。
@@ -1659,7 +1564,7 @@ def _initial_prompt(raw_goal: str) -> str:
    才是 external_state，send_message 风险只能关联发送子目标，不能提前污染 App 导航、收件人定位
    或未提交草稿准备。联系人重名、身份不唯一或缺少消息原文时必须 blocked 并提出澄清问题。
 8. 信息不足时 status=blocked、active_subgoal_id=null，并填写 clarification_questions。
-9. 只返回 JSON 对象，不要 Markdown。
+9. 一次给出完整、严格 JSON。不要 Markdown，也不要要求通过第二次远程采样修复格式。
 """
 
 
@@ -1671,8 +1576,8 @@ def _repair_initial_prompt(
 ) -> str:
     return f"""
 你是通用手机视觉操作 Agent 的 DeepSeek 高层任务图规划器。上一次 JSON 未通过本地协议校验。
-请根据校验错误重新生成完整任务图，不要解释、不要局部补丁，也不要输出点击、滑动、输入、
-坐标、Shell、系统命令或任何 App 专用固定流程。
+请根据校验错误重新生成完整任务图，不要解释、不要局部补丁。自然点击、滑动、输入、长按、
+拖动意图可以保留，但不能输出坐标、Shell、ADB、keycode、main.exe 或 App 专用固定流程。
 
 用户原始目标：{json.dumps(raw_goal, ensure_ascii=False)}
 本地校验错误：{json.dumps(validation_error, ensure_ascii=False)}
@@ -1691,22 +1596,16 @@ def _repair_initial_prompt(
    临时标签页属于 navigation_only；登录/退出账号、账号数据或云端同步状态不属于此例外。
    只改变当前可见输入框中的未提交临时文字仅在目标文字非空、用户直接禁止相关提交效果、且没有
    任何未否定外部效果时属于 navigation_only；否则仍按 external_state 或 unknown 失败关闭。
-5. 如果用户原始目标含有点击、滑动、输入等低层动作措辞，goal、subgoals 和
-   completion_conditions 只保留动作希望达到的可见结果状态，不得复述低层动作；具体下一动作
-   由 Qwen 根据真实画面决定。例如把“滑动页面找到目标内容”改写为“目标内容在当前页面可见”。
-   用户以“不要、不得、禁止、不能、避免”明确否定的动作是例外：必须用同样的明确否定形式
-   保留在 constraints 中，例如逐字保留“不要点击其他控件”，不得删除或改成“不点击”。
-   对方向或次数的限制必须改写成动作后的状态变化，例如把“只能向上滑动一次”改写为
-   “页面内容只允许向上移动一次”，不得把正向低层动作词放入 constraints。
-   同样必须把“点击或打开某入口”改写为“目标页面在前台可见”，把“关闭遮挡层”改写为
-   “目标页面不再被遮挡，主要内容可见”，把“在输入框输入 X”改写为“当前输入框内容为 X”，
-   把“计算某表达式”改写为“本机临时结果区域显示该表达式的答案”。这些是结果状态例式，
-   不是固定步骤，也不能出现在 Qwen 动作之前的本地编排中。
+5. goal、subgoals、constraints 和 completion_conditions 可以保留用户原始的点击、滑动、输入、
+   长按、拖动、返回等自然动作意图、方向和次数限制；不得为了规避协议而改写成另一项任务。
+   每个动作意图必须同时给出可验证的后置状态，但不得附带控件索引、坐标、按键码、Shell、ADB、
+   main.exe 或其他可执行控制细节。具体下一控件和单步动作仍由 Qwen 基于真实画面选择，本地控制器
+   独立授权。用户明确写出的否定约束必须原意保留。
 6. 如果用户明确指“当前页面”“当前应用”或“当前前台”但未说 App 名称，target_apps 必须使用
    [{{"app_id":"current_foreground","app_name":"当前前台应用"}}]，不得只因缺少 App 名称而阻塞。
-7. 字面 UI 标签若包含点击、滑动、输入、长按、拖动等词，必须逐字放在
-   goal.entities.target_ui_label，不得出现在goal.objective、subgoals.objective、
-   completion_conditions或constraints；状态字段只描述目标页面、区域或内容可见。
+7. 字面 UI 标签若包含点击、滑动、输入、长按、拖动等词，应逐字放在
+   goal.entities.target_ui_label；同一字面词也可以出现在 objective 或完成条件中，但不得因此
+   被解释为坐标或直接机械权限。
 8. 用户指定已有收件人和文字消息时，goal.entities.recipient 与 input_text 必须分别逐字复制
    收件人和消息原文。App 导航、已有收件人页面定位和未发送草稿准备使用 navigation_only；
    只有真正发送子目标使用 external_state 并关联 send_message 风险。收件人定位子目标及其完成
@@ -1719,8 +1618,8 @@ def _retry_safe_initial_audit_prompt(raw_goal: str) -> str:
     return f"""
 你是通用手机视觉操作 Agent 的 DeepSeek 高层任务图规划器。上一次独立语义风险审计与任务图
 分类发生冲突，但本地逐词校验没有发现任何未被否定的外部状态效果。请根据用户原始目标进行
-一次独立重新规划；不要沿用上一次任务图或审计结论，不要解释，也不要输出点击、滑动、输入、
-坐标、Shell、系统命令或任何 App 专用固定流程。
+一次独立重新规划；不要沿用上一次任务图或审计结论，不要解释。可以保留自然点击、滑动、输入、
+长按或拖动意图，但不得输出坐标、Shell、系统命令或任何 App 专用固定流程。
 
 用户原始目标：{json.dumps(raw_goal, ensure_ascii=False)}
 
@@ -2284,6 +2183,32 @@ def _normalize_initial_input_goal_objective(
     )
 
 
+def _normalize_explicit_target_surface(
+    graph: DynamicTaskGraph,
+    raw_goal: str,
+) -> DynamicTaskGraph:
+    """Preserve an explicit device/current-surface scope without inventing an App."""
+
+    if graph.goal.target_apps or graph.goal.entities.get("target_surface"):
+        return graph
+    text = "".join(str(raw_goal or "").lower().split())
+    if re.search(r"当前(?:页面|界面|应用|app|前台)|本页|这个页面", text):
+        surface = "current_surface"
+    elif re.search(r"(?:回到|返回|按)(?:手机)?(?:主页|桌面|home)|系统设置|通知栏", text):
+        surface = "system"
+    elif re.search(r"手机|设备|屏幕", text):
+        surface = "device"
+    else:
+        return graph
+    return replace(
+        graph,
+        goal=replace(
+            graph.goal,
+            entities={**graph.goal.entities, "target_surface": surface},
+        ),
+    )
+
+
 def _normalize_unique_active_frontier(graph: DynamicTaskGraph) -> DynamicTaskGraph:
     """Repair active markers only when the dependency graph has one safe frontier.
 
@@ -2597,7 +2522,8 @@ def _replan_prompt(
 ) -> str:
     return f"""
 你是通用手机视觉操作 Agent 的 DeepSeek 高层任务图重规划器。根据新的只读观察，返回修订后的
-完整高层任务图快照。你不能输出控件选择、点击、滑动、输入、坐标、Shell 或系统命令。
+完整高层任务图快照。可以保留用户的自然点击、滑动、输入、长按和拖动意图，但不能输出
+具体控件选择、坐标、按键码、Shell、ADB、main.exe 或其他可直接驱动设备的细节。
 
 当前任务图：
 {json.dumps(graph.to_dict(), ensure_ascii=False)}
@@ -2622,7 +2548,8 @@ def _replan_prompt(
    navigation_only；read_only/navigation_only 必须分别有纯观察或纯导航依据。
    trigger=observation_changed 且当前 read_only 结果无法由新画面直接证明时，如果目标页面或区域
    尚未出现，应把未完成路径改写为先达到 navigation_only 的目标页面可见状态，再保留后续
-   read_only 结果核对；不得把导航动作本身写入子目标，也不得凭空宣称结果完成。
+   read_only 结果核对；可以保留用户原始导航动作意图，但不得写入具体控件或坐标，也不得凭空
+   宣称结果完成。
 8. 只返回 JSON 对象，不要 Markdown，也不要返回 task_id、device_id、revision、协议版本、
     current_subgoal 或历史记录；这些字段由本地协议层生成。
 9. 当 trigger=subgoal_completed 且当前子目标是 read_only 时，本轮必须用 visible_evidence 完成
@@ -2665,8 +2592,8 @@ def _repair_replan_prompt(
     return f"""
 你是通用手机视觉操作 Agent 的 DeepSeek 高层任务图重规划器。上一次修订 JSON 未通过
 本地协议、安全或证据校验。请根据原任务图、新观察和校验错误重新生成一份完整修订图。
-这只是唯一一次格式与高层协议修复机会；不要解释、不要局部补丁，也不要输出控件选择、
-点击、滑动、输入、坐标、Shell、系统命令或任何 App 专用固定流程。
+这只是唯一一次格式与高层协议修复机会；不要解释、不要局部补丁。可以保留自然点击、滑动、
+输入、长按和拖动意图，但不得输出具体控件选择、坐标、Shell、系统命令或任何 App 专用固定流程。
 
 当前任务图：
 {json.dumps(graph.to_dict(), ensure_ascii=False)}
@@ -2687,7 +2614,8 @@ def _repair_replan_prompt(
 2. 已 completed 的子目标和已满足的全局条件不得撤销；既有风险不得删除、降级或取消确认。
 3. 只能逐字依据 visible_evidence 或 grounded_visual_facts 新增视觉完成证据；
    动作结果不匹配时不得假称预期结果已完成。
-4. 可替换、跳过或新增尚未完成的高层子目标，但不能描述按钮、坐标或任何低层动作。
+4. 可替换、跳过或新增尚未完成的高层子目标，也可保留自然动作意图；但不能描述具体按钮索引、
+   坐标、按键码或其他可直接驱动设备的执行细节。
 5. external_state 或 unknown 必须关联风险；成为 active 时必须等待本地确认。
 6. 仍需通过全部本地校验；不要试图改写任务身份、设备、revision 或协议字段。
 7. 只返回符合结构的完整 JSON 对象，不要 Markdown。
@@ -2721,9 +2649,9 @@ def _schema_prompt() -> str:
 {
   "status":"ready|running|awaiting_confirmation|completed|blocked",
   "goal":{
-    "objective":"用户最终想达到的结果",
-    "target_apps":[{"app_id":"稳定小写英文ID","app_name":"App名称"}],
-    "entities":{"目标对象或内容":"值","recipient":"发送文字消息时逐字复制用户指定收件人；否则省略","input_text":"仅在确实需要输入时逐字复制用户指定文字；否则省略此键"}
+    "objective":"用户目标，可保留点击、滑动、输入、长按、拖动等自然动作意图，但不得含坐标或系统命令",
+    "target_apps":[{"app_id":"稳定小写英文ID","app_name":"App名称；设备或当前表面任务可为空数组"}],
+    "entities":{"recipient":"发送文字消息时逐字复制用户指定收件人；否则省略","input_text":"需要输入时逐字复制原文；否则省略","target_ui_label":"具名字面目标；否则省略","target_surface":"仅 device|system|current_surface；App任务省略","spatial_hint":"仅用户明确给出的上中下左右提示；否则省略","其他键":"仅供规划说明，不能扩大执行权限"}
   },
   "constraints":["全局约束"],
   "completion_conditions":[{
@@ -2744,7 +2672,7 @@ def _schema_prompt() -> str:
   }],
   "subgoals":[{
     "subgoal_id":"小写稳定ID",
-    "objective":"应达到的高层状态",
+    "objective":"要执行的自然动作意图及其可验证后置状态",
     "status":"pending|active|completed|blocked|skipped",
     "depends_on":["前置子目标ID"],
     "constraints":["本子目标约束"],
@@ -3743,20 +3671,11 @@ def _reject_low_level_instruction(
             prefix
         ):
             continue
-        raise TaskGraphError(f"DeepSeek 高层任务图包含低层动作表达：{path}")
+        raise TaskGraphError(f"DeepSeek 任务图包含越权执行细节：{path}")
 
 
 def _reject_low_level_completion_evidence(value: str, path: str) -> None:
-    """Allow only a negated low-level token inside a visible control state.
-
-    DeepSeek occasionally describes the safe pre-submit state as a button being
-    "not activated or clicked".  That is not an instruction, but accepting all
-    negated low-level prose here would let a misplaced constraint masquerade as
-    completion evidence.  The exception therefore requires both the existing
-    read-only risk-control state grammar and independent negation of every
-    low-level token. Positive action history and direct prohibitions still fail
-    and must be repaired into a high-level state or moved to constraints.
-    """
+    """Reject executable control details while preserving natural action facts."""
 
     try:
         _reject_low_level_instruction(value, path)
@@ -4271,12 +4190,7 @@ def _normalize_explicit_ui_label_payload(
     for pattern in patterns:
         for match in pattern.finditer(source):
             candidate = match.group(1).strip()
-            try:
-                _reject_low_level_instruction(
-                    candidate,
-                    "goal.entities.target_ui_label",
-                )
-            except TaskGraphError:
+            if NATURAL_ACTION_INTENT_PATTERN.search(candidate):
                 if candidate not in action_like_labels:
                     action_like_labels.append(candidate)
     if not action_like_labels:

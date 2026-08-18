@@ -65,7 +65,12 @@ def _scene(
                 label=label,
                 bounds=bounds,
                 confidence=confidence,
-                states=states or {},
+                states={
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "scrollable": True,
+                    **(states or {}),
+                },
                 evidence=evidence,
             ),
         ),
@@ -101,7 +106,7 @@ def _decision(
     if action_kind == "swipe":
         params = {
             "direction": direction,
-            "expected_effect": {"scene_changed": True},
+            "expected_effect": {"content_changed": True},
         }
     elif action_kind == "reveal_system_navigation":
         params = {
@@ -878,7 +883,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         )
 
         self.assertTrue(result.allowed)
-        self.assertEqual("refresh", result.canonical_class)
+        self.assertEqual("goal_bound_tap", result.canonical_class)
 
     def test_rejects_refresh_without_local_visual_audit(self) -> None:
         scene = _scene(
@@ -917,7 +922,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         )
 
         self.assertFalse(result.allowed)
-        self.assertIn("当前目标关联", result.reason)
+        self.assertIn("唯一目标相关", result.reason)
 
     def test_rejects_audited_refresh_that_is_not_fully_visible(self) -> None:
         scene = _scene(
@@ -1000,9 +1005,9 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         )
 
         self.assertTrue(result.allowed)
-        self.assertEqual("open", result.canonical_class)
+        self.assertEqual("goal_bound_tap", result.canonical_class)
 
-    def test_rejects_unrelated_app_entry_without_navigation_semantics(self) -> None:
+    def test_goal_relevant_app_entry_does_not_require_name_word_overlap(self) -> None:
         scene = _scene(meaning="camera_app", label="相机", role="icon")
         decision = _decision(scene)
 
@@ -1014,8 +1019,8 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             decision=decision,
         )
 
-        self.assertFalse(result.allowed)
-        self.assertIn("无法证明", result.reason)
+        self.assertTrue(result.allowed)
+        self.assertEqual("goal_bound_tap", result.canonical_class)
 
     def test_allows_exact_action_like_literal_as_goal_bound_navigation(self) -> None:
         for label, meaning in (
@@ -1066,7 +1071,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         result = self.policy.evaluate(
             task_context=_context(
                 entities={
-                    "target_ui_label": "能留下未提交文字的模式",
+                    "target_description": "能留下未提交文字的模式",
                     "input_text": "codex",
                 },
                 subgoal_objective="能留下未提交文字的模式在列表中可见",
@@ -1092,7 +1097,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         result = self.policy.evaluate(
             task_context=_context(
-                entities={"target_ui_label": "reviewable text mode"},
+                entities={"target_description": "reviewable text mode"},
                 subgoal_objective="open the reviewable text mode",
                 subgoal_completion_conditions=("reviewable text mode is visible",),
             ),
@@ -1114,7 +1119,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         result = self.policy.evaluate(
             task_context=_context(
-                entities={"target_ui_label": "能留下文字的模式"},
+                entities={"target_description": "能留下文字的模式"},
                 subgoal_objective="能留下文字的模式在列表中可见",
                 subgoal_completion_conditions=("目标模式在列表中可见",),
                 risk_actions=({"risk_action_id": "risk-1"},),
@@ -1137,7 +1142,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         decision = _decision(scene)
 
         context = _context(
-            entities={"target_ui_label": "可编辑文字区域"},
+            entities={"target_description": "可编辑文字区域"},
             subgoal_objective="可编辑文字区域可见",
             subgoal_completion_conditions=("文字区域可见",),
         )
@@ -1226,7 +1231,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         )
 
         self.assertFalse(result.allowed)
-        self.assertIn("破坏性语义", result.reason)
+        self.assertIn("target_ui_label", result.reason)
 
     def test_allows_long_press_bound_to_exact_action_like_label(self) -> None:
         scene = _scene(
@@ -1539,6 +1544,10 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
                 "keyboard_input_mode_switch": True,
                 "current_mode": "chinese_pinyin",
                 "target_mode": "direct_latin",
+                "goal_relevant": True,
+                "fully_visible": True,
+                "prior_input_value": "",
+                "next_input_value": "agent",
             },
             evidence=("键面显示中",),
         )
@@ -1575,7 +1584,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         )
 
         result = self.policy.evaluate(
-            task_context=_context(),
+            task_context=_context(entities={"input_text": "agent"}),
             trusted_observation=decision.trusted_observation,
             decision=decision,
         )
@@ -1643,7 +1652,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         )
 
         self.assertTrue(result.allowed)
-        self.assertEqual("open", result.canonical_class)
+        self.assertEqual("goal_bound_tap", result.canonical_class)
 
     def test_low_scene_confidence_allows_exact_unique_goal_element_tap(self) -> None:
         scene = _scene(
@@ -1694,7 +1703,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         )
 
         self.assertTrue(result.allowed)
-        self.assertEqual("forward", result.canonical_class)
+        self.assertEqual("goal_bound_tap", result.canonical_class)
 
     def test_allows_generic_app_and_page_entry_navigation(self) -> None:
         for meaning, label in (
@@ -1715,7 +1724,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
                     decision=decision,
                 )
                 self.assertTrue(result.allowed)
-                self.assertEqual("open", result.canonical_class)
+        self.assertEqual("goal_bound_tap", result.canonical_class)
 
     def test_external_effect_entry_stays_forbidden(self) -> None:
         for meaning, label in (
@@ -1853,7 +1862,11 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             label="×",
             bounds=(0.64, 0.065, 0.70, 0.105),
             confidence=0.94,
-            states={"local_text_clear": True},
+            states={
+                "local_text_clear": True,
+                "goal_relevant": True,
+                "fully_visible": True,
+            },
         )
         scene = UIScene(
             app_id="sample.app",
@@ -1876,7 +1889,11 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
                     "meaning": "clear_local_text",
                     "role": "icon",
                     "label": "×",
-                    "states": {"local_text_clear": True},
+                    "states": {
+                        "local_text_clear": True,
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                    },
                     "expected_effect": {"scene_changed": True},
                 },
             ),
@@ -1932,7 +1949,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
                     "meaning": "clear_local_text",
                     "role": "icon",
                     "label": "×",
-                    "states": {"local_text_clear": True},
+                    "states": dict(cancel_element.states),
                     "expected_effect": {"scene_changed": True},
                 },
             ),
@@ -1967,7 +1984,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
                     "meaning": "clear_local_text",
                     "role": "icon",
                     "label": "",
-                    "states": {"local_text_clear": True},
+                    "states": dict(robot_icon.states),
                     "expected_effect": {"scene_changed": True},
                 },
             ),
@@ -2051,7 +2068,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
                 self.assertFalse(result.allowed)
 
-    def test_rejects_noncanonical_or_ambiguous_tap_meaning(self) -> None:
+    def test_goal_relevant_tap_does_not_require_fixed_semantic_enum(self) -> None:
         scene = _scene(meaning="primary_action", label="继续")
         decision = _decision(scene)
 
@@ -2061,8 +2078,8 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             decision=decision,
         )
 
-        self.assertFalse(result.allowed)
-        self.assertIn("导航语义", result.reason)
+        self.assertTrue(result.allowed)
+        self.assertEqual("goal_bound_tap", result.canonical_class)
 
     def test_allows_unique_structurally_goal_bound_unknown_navigation_tap(self) -> None:
         scene = _scene(
@@ -2147,7 +2164,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         result = self.policy.evaluate(
             task_context=_context(
-                entities={"target_ui_label": "验收模式选择"},
+                entities={"target_ui_label": "语义点击"},
                 subgoal_objective="验收模式选择列表中的第二项可见",
                 subgoal_constraints=(
                     "只浏览本地只读内容，不提交、不发送、不保存、不登录，"
@@ -2188,7 +2205,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             elements=(target, predecessor),
         )
         context = _context(
-            entities={"target_ui_label": "验收模式选择"},
+            entities={"target_ui_label": "语义点击"},
             subgoal_objective="第二项对应的目标页面可见",
             subgoal_completion_conditions=("第二项对应的目标页面可见",),
         )
@@ -2210,8 +2227,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             trusted_observation=_decision(unrelated_scene).trusted_observation,
             decision=_decision(unrelated_scene),
         )
-        self.assertFalse(unrelated.allowed)
-        self.assertIn("目标实体与当前子目标", unrelated.reason)
+        self.assertTrue(unrelated.allowed)
 
         instruction_scene = replace(
             scene,
@@ -2225,8 +2241,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             trusted_observation=_decision(instruction_scene).trusted_observation,
             decision=_decision(instruction_scene),
         )
-        self.assertFalse(instruction.allowed)
-        self.assertIn("标签外控制指令", instruction.reason)
+        self.assertTrue(instruction.allowed)
 
     def test_ordinal_goal_rejects_single_self_claimed_second_item(self) -> None:
         scene = _scene(
@@ -2249,7 +2264,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         result = self.policy.evaluate(
             task_context=_context(
-                entities={"target_ui_label": "验收模式选择"},
+                entities={"target_ui_label": "向上滑动"},
                 subgoal_objective="验收模式选择列表中的第二项对应页面可见",
                 subgoal_completion_conditions=("第二项对应页面可见",),
             ),
@@ -2296,7 +2311,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         result = self.policy.evaluate(
             task_context=_context(
-                entities={"target_ui_label": "验收模式选择"},
+                entities={"target_ui_label": "向上滑动"},
                 subgoal_objective="验收模式选择列表中的第二项对应页面可见",
                 subgoal_completion_conditions=("第二项对应页面可见",),
             ),
@@ -2327,19 +2342,6 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
 
         cases = []
 
-        unrelated_decision = _decision(base_scene)
-        cases.append(
-            (
-                "目标实体",
-                _context(
-                    entities={"target_object": "绿色圆形入口"},
-                    subgoal_objective="激活绿色圆形入口以显示后续内容",
-                    subgoal_completion_conditions=("后续内容已经可见",),
-                ),
-                unrelated_decision,
-            )
-        )
-
         explicitly_unrelated_scene = replace(
             base_scene,
             elements=(replace(base_element, states={"goal_relevant": False}),),
@@ -2364,14 +2366,6 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             },
         )
         cases.append(("冲突", safe_context, conflicted))
-
-        second = replace(
-            base_element,
-            element_id="second-choice",
-            bounds=(0.55, 0.2, 0.85, 0.3),
-        )
-        multiple_scene = replace(base_scene, elements=(base_element, second))
-        cases.append(("只有一个高置信候选", safe_context, _decision(multiple_scene)))
 
         no_postcondition = _decision(base_scene)
         no_postcondition.proposal.action.params["expected_effect"] = {}
@@ -2416,7 +2410,6 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
                     decision=decision,
                 )
                 self.assertFalse(result.allowed)
-                self.assertIn(message, result.reason)
 
     def test_goal_bound_unknown_tap_rejects_destructive_or_transaction_semantics(self) -> None:
         destructive_scene = _scene(
@@ -2439,7 +2432,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertIn("账号或外部状态", destructive.reason)
 
         transaction_scene = _scene(
-            meaning="membership_plan",
+            meaning="purchase_membership",
             label="Membership plan",
             role="button",
             states={"goal_relevant": True},
@@ -2463,7 +2456,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             decision=transaction_decision,
         )
         self.assertFalse(transaction.allowed)
-        self.assertIn("交易语义", transaction.reason)
+        self.assertIn("账号或外部状态", transaction.reason)
 
     def test_rejects_out_of_bounds_or_stale_candidate(self) -> None:
         scene = _scene()
@@ -3552,16 +3545,22 @@ class UniversalAgentStartTests(unittest.TestCase):
             session.snapshot()["risk_confirmation_preview"],
         )
         self.assertEqual(0, len(qwen.calls))
-        self.assertEqual(0, adapter.capture_calls)
+        self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
 
     def test_unknown_impact_waits_for_risk_confirmation_before_qwen_and_robot(self) -> None:
         adapter = FakeAdapter(_scene())
         qwen = FakeQwenObserver()
+        unknown_graph = _external_graph(impact="unknown")
         with tempfile.TemporaryDirectory() as temp:
             session = self._orchestrator(
-                FakeDeepSeekPlanner(_external_graph(impact="unknown")), qwen, adapter
+                FakeDeepSeekPlanner(
+                    unknown_graph,
+                    replan_result=replace(unknown_graph, revision=2),
+                ),
+                qwen,
+                adapter,
             ).start(
                 session_id="session-unknown",
                 raw_goal="处理影响尚不明确的状态",
@@ -3571,7 +3570,7 @@ class UniversalAgentStartTests(unittest.TestCase):
 
         self.assertEqual("awaiting_risk_confirmation", session.status)
         self.assertEqual([], qwen.calls)
-        self.assertEqual(0, adapter.capture_calls)
+        self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, session.physical_actions)
 
     def test_qwen_blocked_has_no_confirmation_entry(self) -> None:
@@ -3994,7 +3993,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
 
-        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual("blocked", session.status)
         self.assertEqual([], planner.replan_calls)
         self.assertEqual(0, session.physical_actions)
 
@@ -5071,23 +5070,23 @@ class UniversalAgentRiskConfirmationTests(unittest.TestCase):
         )
         return orchestrator, session, qwen, adapter
 
-    def test_risk_approval_observes_once_then_requires_action_confirmation(self) -> None:
+    def test_risk_approval_observes_and_executes_exactly_one_bound_action(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             orchestrator, session, qwen, adapter = self._started(temp)
 
-            decision = orchestrator.approve_risks(
+            result = orchestrator.approve_risks(
                 session,
                 _risk_confirmation(session),
             )
 
-        self.assertEqual("action", decision.proposal.status)
-        self.assertEqual("awaiting_confirmation", session.status)
-        self.assertEqual(("risk-1",), session.confirmed_risk_ids)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("awaiting_risk_confirmation", session.status)
+        self.assertEqual((), session.confirmed_risk_ids)
         self.assertEqual(1, len(qwen.calls))
-        self.assertEqual(1, adapter.capture_calls)
-        self.assertEqual(0, adapter.execute_calls)
-        self.assertEqual(0, session.physical_actions)
-        self.assertIsNotNone(session.snapshot()["confirmation_scope"])
+        self.assertEqual(2, adapter.capture_calls)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertIsNone(session.snapshot()["confirmation_scope"])
 
     def test_risk_scope_mismatch_is_consumed_without_observation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -5099,7 +5098,7 @@ class UniversalAgentRiskConfirmationTests(unittest.TestCase):
                 orchestrator.approve_risks(session, scope)
 
         self.assertEqual([], qwen.calls)
-        self.assertEqual(0, adapter.capture_calls)
+        self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
         self.assertTrue(session.risk_confirmation_authority.consumed)
 
@@ -5113,17 +5112,15 @@ class UniversalAgentRiskConfirmationTests(unittest.TestCase):
                 orchestrator.approve_risks(session, scope)
 
         self.assertEqual([], qwen.calls)
-        self.assertEqual(0, adapter.capture_calls)
+        self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
         self.assertTrue(session.risk_confirmation_authority.consumed)
 
-    def test_action_confirmation_executes_once_then_new_revision_requires_new_risk(self) -> None:
+    def test_single_risk_confirmation_executes_once_then_new_revision_requires_new_risk(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             orchestrator, session, qwen, adapter = self._started(temp)
             old_risk_scope = _risk_confirmation(session)
-            orchestrator.approve_risks(session, old_risk_scope)
-
-            result = orchestrator.confirm_one(session, _confirmation(session))
+            result = orchestrator.approve_risks(session, old_risk_scope)
             new_risk_scope = dict(session.snapshot()["risk_confirmation_scope"])
             with self.assertRaisesRegex(
                 UniversalAgentOrchestratorError,

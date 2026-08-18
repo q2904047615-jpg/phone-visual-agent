@@ -388,27 +388,23 @@ test("risk approval grant excludes observation and cannot execute a physical act
   });
 });
 
-test("compatibility auto payload is hard-bounded to one exact confirmed action", () => {
-  const view = Protocol.adaptSession(safeActionSession());
-  const confirmation = Protocol.consumeConfirmationGrant(
-    Protocol.createConfirmationGrant(view, "phone-01"),
-    view,
-    "phone-01",
-  );
+test("safe auto payload is unconfirmed and bounded by explicit budgets", () => {
   const payload = Protocol.buildAutoRequestPayload(
     "phone-01",
-    confirmation,
     { maxPhysicalActions: 3, maxIterations: 8 },
   );
-  assert.equal(payload.confirmed, true);
+  assert.equal(payload.confirmed, false);
   assert.equal(payload.device_id, "phone-01");
-  assert.equal(payload.max_physical_actions, 1);
-  assert.equal(payload.max_iterations, 1);
-  assert.equal(payload.confirmation.observation_id, "obs_0123456789abcdef0123456789abcdef");
-  assert.throws(
-    () => Protocol.buildAutoRequestPayload("phone-01", { confirmed: false }),
-    /精确动作确认/,
+  assert.equal(payload.max_physical_actions, 3);
+  assert.equal(payload.max_iterations, 8);
+  assert.equal(payload.confirmation, null);
+
+  const capped = Protocol.buildAutoRequestPayload(
+    "phone-01",
+    { maxPhysicalActions: 999, maxIterations: 999 },
   );
+  assert.equal(capped.max_physical_actions, 20);
+  assert.equal(capped.max_iterations, 40);
 });
 
 test("confirmation scope cannot cross any action authority field", () => {

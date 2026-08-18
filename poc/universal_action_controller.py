@@ -51,14 +51,48 @@ ACCOUNT_EFFECT_MARKERS = frozenset(
         "heart",
         "comment",
         "follow",
+        "unfollow",
+        "favorite",
+        "subscribe",
+        "pay",
+        "payment",
+        "purchase",
+        "buy",
+        "order",
         "delete",
+        "remove",
+        "submit",
+        "save",
+        "invite",
+        "join",
+        "confirm",
+        "approve",
+        "accept",
+        "agree",
+        "authorize",
         "发送",
         "发布",
         "点赞",
         "爱心",
         "评论",
         "关注",
+        "取关",
+        "收藏",
+        "订阅",
+        "支付",
+        "购买",
+        "下单",
         "删除",
+        "移除",
+        "提交",
+        "保存",
+        "邀请",
+        "加入",
+        "确认",
+        "确定",
+        "同意",
+        "批准",
+        "授权",
     }
 )
 ACCOUNT_EFFECT_STATE_KEYS = frozenset(
@@ -466,8 +500,6 @@ class UniversalActionController:
             delete_count = editable_character_count(observed_value)
             if not 1 <= delete_count <= 100:
                 raise UniversalActionError("清空文字的已验证字符数必须在1～100之间。")
-            if element.states.get("keyboard_layout") != "qwerty":
-                raise UniversalActionError("清空文字要求当前画面确认 QWERTY 键盘。")
             if element.states.get("goal_relevant") is not True:
                 raise UniversalActionError("清空文字目标必须由当前画面证明与当前目标相关。")
             eligible_inputs = tuple(
@@ -480,7 +512,6 @@ class UniversalActionController:
                 and candidate.states.get("focused") is True
                 and isinstance(candidate.states.get("value"), str)
                 and bool(candidate.states.get("value"))
-                and candidate.states.get("keyboard_layout") == "qwerty"
             )
             if len(eligible_inputs) != 1 or eligible_inputs[0].element_id != element.element_id:
                 raise UniversalActionError(

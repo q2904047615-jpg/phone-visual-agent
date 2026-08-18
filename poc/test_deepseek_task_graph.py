@@ -770,10 +770,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual(len(provider.messages), 2)
         self.assertIn("临时标签页也属于 navigation_only", provider.messages[0][0]["content"])
         self.assertIn("goal.entities.target_ui_label", provider.messages[0][0]["content"])
-        self.assertIn("字面标签当成动作指令", provider.messages[0][0]["content"])
-        self.assertIn("目标页面不再被遮挡，主要内容可见", provider.messages[0][0]["content"])
-        self.assertIn("当前输入框内容为 X", provider.messages[0][0]["content"])
-        self.assertIn("本机临时结果区域显示该表达式的答案", provider.messages[0][0]["content"])
+        self.assertIn("自然动作意图", provider.messages[0][0]["content"])
+        self.assertIn("不能输出坐标", provider.messages[0][0]["content"])
 
     def test_initial_plan_repairs_unique_frontier_without_remote_retry(self):
         first = base_payload()
@@ -1139,22 +1137,20 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 device_id="phone-1",
             )
 
-    def test_initial_plan_repairs_one_missing_required_field_error(self):
+    def test_initial_plan_missing_required_field_fails_without_remote_retry(self):
         invalid = base_payload()
         del invalid["goal"]["entities"]
         repaired = base_payload()
         provider = FakeProvider(invalid, repaired)
 
-        graph = DeepSeekTaskGraphPlanner(provider).plan(
-            "点击浏览器",
-            device_id="phone-1",
-        )
+        with self.assertRaisesRegex(TaskGraphError, "goal 缺少字段"):
+            DeepSeekTaskGraphPlanner(provider).plan(
+                "点击浏览器",
+                device_id="phone-1",
+            )
+        self.assertEqual(len(provider.messages), 1)
 
-        self.assertEqual({"place": "图书馆"}, graph.goal.entities)
-        self.assertEqual(len(provider.messages), 3)
-        self.assertIn("goal 缺少字段：entities", provider.messages[1][0]["content"])
-
-    def test_read_only_completion_review_repairs_unchanged_active_node(self):
+    def test_read_only_completion_review_rejects_unchanged_active_node_without_retry(self):
         initial = single_subgoal_payload(
             "确认目标结果可见",
             external_impact="read_only",
@@ -1172,27 +1168,24 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         planner = DeepSeekTaskGraphPlanner(provider)
         graph = planner.plan("确认目标结果可见", device_id="phone-1")
 
-        result = planner.replan(
-            graph,
-            ObservedState(
-                scene_id="scene-read-only",
-                summary="目标结果已经显示",
-                visible_evidence=("页面显示目标结果",),
-                last_action_outcome="matched",
-            ),
-            trigger="subgoal_completed",
-            reason="当前可信画面用于只读完成复核。",
-        )
-
-        self.assertEqual("completed", result.status)
-        self.assertEqual(2, result.revision)
+        with self.assertRaisesRegex(TaskGraphError, "read_only 完成复核"):
+            planner.replan(
+                graph,
+                ObservedState(
+                    scene_id="scene-read-only",
+                    summary="目标结果已经显示",
+                    visible_evidence=("页面显示目标结果",),
+                    last_action_outcome="matched",
+                ),
+                trigger="subgoal_completed",
+                reason="当前可信画面用于只读完成复核。",
+            )
         graph_prompts = [
             call[0]["content"]
             for call in provider.messages
             if "semantic-risk-audit-v1" not in call[0]["content"]
         ]
-        self.assertEqual(3, len(graph_prompts))
-        self.assertIn("read_only 完成复核不能继续保留", graph_prompts[-1])
+        self.assertEqual(2, len(graph_prompts))
 
     def test_replan_rejects_named_page_completion_without_grounded_identity(self):
         objective = "原来的只读通用动作验收页面可见"
@@ -1238,14 +1231,10 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             for call in provider.messages
             if "高层任务图重规划器" in call[0]["content"]
         ]
-        self.assertEqual(2, len(replan_prompts))
+        self.assertEqual(1, len(replan_prompts))
         self.assertIn(
             "其名称必须\n    能从 grounded_visual_facts",
             replan_prompts[0],
-        )
-        self.assertIn(
-            "应跳过或替换尚未完成的\n    具名页面节点",
-            replan_prompts[1],
         )
 
     def test_generic_element_presence_is_not_a_named_page_identity(self):
@@ -1715,7 +1704,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 reason="重新观察当前页面。",
             )
 
-    def test_current_page_goal_repairs_missing_app_to_foreground_context(self):
+    def test_current_page_goal_uses_typed_surface_without_inventing_app(self):
         invalid = base_payload()
         invalid["goal"]["target_apps"] = []
         repaired = base_payload()
@@ -1729,9 +1718,9 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             device_id="phone-1",
         )
 
-        self.assertEqual("current_foreground", graph.goal.target_apps[0].app_id)
-        self.assertEqual(3, len(provider.messages))
-        self.assertIn("current_foreground", provider.messages[1][0]["content"])
+        self.assertEqual((), graph.goal.target_apps)
+        self.assertEqual("current_surface", graph.goal.entities["target_surface"])
+        self.assertEqual(2, len(provider.messages))
 
     def test_protocol_field_named_like_a_repairable_error_is_still_rejected(self):
         invalid = base_payload()
@@ -1746,7 +1735,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual(len(provider.messages), 1)
 
-    def test_initial_plan_repairs_one_low_level_protocol_violation(self):
+    def test_initial_plan_preserves_natural_action_intent_without_retry(self):
         invalid = base_payload()
         invalid["goal"]["objective"] = "向上滑动一次，让蓝色终点进入画面"
         repaired = base_payload()
@@ -1761,20 +1750,9 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             device_id="phone-1",
         )
 
-        self.assertEqual(repaired["goal"]["objective"], graph.goal.objective)
-        self.assertEqual(3, len(provider.messages))
-        self.assertIn("goal.objective", provider.messages[1][0]["content"])
-        self.assertIn("不要输出点击、滑动、输入", provider.messages[1][0]["content"])
-        self.assertIn("只保留动作希望达到的可见结果状态", provider.messages[1][0]["content"])
-        self.assertIn("逐字保留“不要点击其他控件”", provider.messages[1][0]["content"])
-        self.assertIn("页面内容只允许向上移动一次", provider.messages[1][0]["content"])
-        self.assertIn("目标页面不再被遮挡，主要内容可见", provider.messages[1][0]["content"])
-        self.assertIn("当前输入框内容为 X", provider.messages[1][0]["content"])
-        self.assertIn("本机临时结果区域显示该表达式的答案", provider.messages[1][0]["content"])
-        self.assertEqual(
-            ("不要点击其他控件", "页面内容只允许向上移动一次"),
-            graph.constraints,
-        )
+        self.assertEqual(invalid["goal"]["objective"], graph.goal.objective)
+        self.assertEqual(2, len(provider.messages))
+        self.assertIn("自然动作意图", provider.messages[0][0]["content"])
 
     def test_initial_input_goal_uses_structured_result_without_remote_repair(self):
         payload = base_payload()
@@ -1834,7 +1812,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            "唯一空白输入框可见且可编辑；唯一空白输入框中的内容为小写agent",
+            "在浏览器的唯一空白输入框中输入小写agent",
             graph.goal.objective,
         )
         self.assertEqual("agent", graph.goal.entities["input_text"])
@@ -1879,18 +1857,23 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             device_id="phone-1",
         )
 
-        self.assertEqual("当前文本框内容为draft42", graph.goal.objective)
+        self.assertEqual("在笔记应用的文本框输入draft42", graph.goal.objective)
         self.assertEqual(2, len(provider.messages))
 
-    def test_initial_input_goal_never_normalizes_low_level_or_claimed_completion(self):
-        cases = []
+    def test_initial_input_goal_keeps_action_intent_but_rejects_invalid_completion(self):
         low_level_completion = base_payload()
         low_level_completion["goal"]["objective"] = "输入文字agent"
+        low_level_completion["goal"]["entities"]["input_text"] = "agent"
         low_level_completion["completion_conditions"][0]["description"] = (
             "在输入框输入文字agent"
         )
-        cases.append(low_level_completion)
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(low_level_completion)).plan(
+            "在输入框中输入agent",
+            device_id="phone-1",
+        )
+        self.assertEqual("输入文字agent", graph.goal.objective)
 
+        cases = []
         claimed_completion = base_payload()
         claimed_completion["goal"]["objective"] = "输入文字agent"
         claimed_completion["completion_conditions"][0].update(
@@ -1912,7 +1895,11 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         missing_input_text["completion_conditions"][0]["description"] = (
             "输入框内容为agent"
         )
-        cases.append(missing_input_text)
+        normalized = DeepSeekTaskGraphPlanner(FakeProvider(missing_input_text)).plan(
+            "在输入框中留下agent",
+            device_id="phone-1",
+        )
+        self.assertNotIn("input_text", normalized.goal.entities)
 
         overlong = base_payload()
         overlong["goal"]["objective"] = "输入文字agent"
@@ -1932,7 +1919,10 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 "evidence": [],
             },
         ]
-        cases.append(overlong)
+        retained = DeepSeekTaskGraphPlanner(FakeProvider(overlong)).plan(
+            "在输入框中留下agent", device_id="phone-1"
+        )
+        self.assertEqual(2, len(retained.completion_conditions))
 
         for payload in cases:
             with self.subTest(payload=payload["completion_conditions"]):
@@ -1942,20 +1932,23 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                         "在输入框中留下agent",
                         device_id="phone-1",
                     )
-                self.assertEqual(2, len(provider.messages))
+                graph_prompts = [
+                    call for call in provider.messages
+                    if "semantic-risk-audit-v1" not in call[0]["content"]
+                ]
+                self.assertEqual(1, len(graph_prompts))
 
-    def test_initial_plan_second_low_level_protocol_violation_stays_blocked(self):
+    def test_initial_plan_repeated_action_wording_is_still_valid(self):
         first = base_payload()
         first["goal"]["objective"] = "向上滑动一次，让蓝色终点进入画面"
         second = copy.deepcopy(first)
         provider = FakeProvider(first, second)
 
-        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-            DeepSeekTaskGraphPlanner(provider).plan(
-                "向上滑动一次，让蓝色终点进入画面",
-                device_id="phone-1",
-            )
-
+        graph = DeepSeekTaskGraphPlanner(provider).plan(
+            "向上滑动一次，让蓝色终点进入画面",
+            device_id="phone-1",
+        )
+        self.assertEqual(first["goal"]["objective"], graph.goal.objective)
         self.assertEqual(2, len(provider.messages))
 
     def test_explicit_action_like_ui_label_is_preserved_only_as_entity(self):
@@ -2138,36 +2131,49 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskGraphError, "协议外字段"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan("目标", device_id="phone-1")
 
-    def test_rejects_low_level_instruction_in_subgoal_text(self):
+    def test_allows_natural_action_intent_in_subgoal_text(self):
         payload = base_payload()
         payload["subgoals"][0]["objective"] = "点击搜索结果中的图书馆"
-        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-            DeepSeekTaskGraphPlanner(FakeProvider(payload, copy.deepcopy(payload))).plan(
-                "目标",
-                device_id="phone-1",
-            )
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "目标",
+            device_id="phone-1",
+        )
+        self.assertEqual("点击搜索结果中的图书馆", graph.subgoals[0].objective)
 
-    def test_rejects_generic_low_level_primitives_coordinates_and_commands(self):
-        forbidden_objectives = (
+    def test_allows_natural_primitives_but_rejects_coordinates_and_commands(self):
+        allowed_objectives = (
             "向上滑动页面",
             "长按当前项目",
             "拖动卡片到顶部",
-            "移动到裸坐标(120, 340)",
             "按下音量键",
             "在输入框输入文字abc",
             "在输入框输入密码",
             "输入关键词天气",
             "输入abc",
+        )
+        for objective in allowed_objectives:
+            with self.subTest(objective=objective):
+                payload = base_payload()
+                payload["subgoals"][0]["objective"] = objective
+                if "输入" in objective:
+                    payload["goal"]["entities"]["input_text"] = "abc"
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    "目标",
+                    device_id="phone-1",
+                )
+                self.assertEqual(objective, graph.subgoals[0].objective)
+
+        forbidden_objectives = (
+            "移动到裸坐标(120, 340)",
             "运行 PowerShell 系统命令",
+            "执行 adb shell input tap 120 340",
         )
         for objective in forbidden_objectives:
             with self.subTest(objective=objective):
                 payload = base_payload()
                 payload["subgoals"][0]["objective"] = objective
-                with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-                    DeepSeekTaskGraphPlanner(
-                        FakeProvider(payload, copy.deepcopy(payload))
-                    ).plan(
+                with self.assertRaisesRegex(TaskGraphError, "越权执行细节"):
+                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                         "目标",
                         device_id="phone-1",
                     )
@@ -2205,37 +2211,37 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             graph.completion_conditions[0].evidence_required,
         )
 
-    def test_rejects_system_navigation_key_press_instruction(self):
+    def test_allows_system_navigation_key_intent(self):
         payload = base_payload()
         payload["completion_conditions"][0]["evidence_required"] = [
             "按返回键后页面返回"
         ]
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "目标", device_id="phone-1"
+        )
+        self.assertEqual(
+            ("按返回键后页面返回",),
+            graph.completion_conditions[0].evidence_required,
+        )
 
-        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-            DeepSeekTaskGraphPlanner(
-                FakeProvider(payload, copy.deepcopy(payload))
-            ).plan(
-                "目标",
-                device_id="phone-1",
-            )
-
-    def test_rejects_low_level_instruction_in_completion_condition(self):
+    def test_allows_action_intent_in_completion_condition(self):
         payload = base_payload()
         payload["subgoals"][0]["completion_conditions"] = ["点击收藏按钮后完成"]
-        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-            DeepSeekTaskGraphPlanner(FakeProvider(payload, copy.deepcopy(payload))).plan(
-                "目标",
-                device_id="phone-1",
-            )
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "目标", device_id="phone-1"
+        )
+        self.assertEqual(
+            ("点击收藏按钮后完成",),
+            graph.subgoals[0].completion_conditions,
+        )
 
-    def test_rejects_low_level_instruction_hidden_as_constraint(self):
+    def test_allows_natural_action_constraint_without_granting_authority(self):
         payload = base_payload()
         payload["subgoals"][0]["constraints"] = ["点击第一个搜索结果"]
-        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-            DeepSeekTaskGraphPlanner(FakeProvider(payload, copy.deepcopy(payload))).plan(
-                "目标",
-                device_id="phone-1",
-            )
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "目标", device_id="phone-1"
+        )
+        self.assertEqual(("点击第一个搜索结果",), graph.subgoals[0].constraints)
 
     def test_allows_input_content_as_exact_result_state_constraint(self):
         constraints = (
@@ -2256,17 +2262,14 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     (constraint,),
                 )
 
-    def test_input_content_state_constraint_cannot_hide_low_level_action(self):
+    def test_input_content_followup_action_still_requires_external_risk_contract(self):
         payload = base_payload()
         payload["subgoals"][0]["constraints"] = [
             "输入内容必须为“你好”并点击发送按钮"
         ]
-        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-            DeepSeekTaskGraphPlanner(
-                FakeProvider(payload, copy.deepcopy(payload))
-            ).plan(
-                "目标",
-                device_id="phone-1",
+        with self.assertRaisesRegex(TaskGraphError, "外部状态变化"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                "目标", device_id="phone-1"
             )
 
     def test_allows_read_only_verification_bound_to_external_predecessor(self):
@@ -2406,18 +2409,18 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         self.assertEqual(graph.constraints, ("不要执行任何改变状态的操作",))
 
-    def test_negation_does_not_cover_later_positive_instruction(self):
+    def test_mixed_negative_and_positive_action_constraint_is_preserved(self):
         payload = base_payload()
         payload["subgoals"][0]["constraints"] = [
             "不要点击广告，但点击确定按钮"
         ]
-        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-            DeepSeekTaskGraphPlanner(
-                FakeProvider(payload, copy.deepcopy(payload))
-            ).plan(
-                "目标",
-                device_id="phone-1",
-            )
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "目标", device_id="phone-1"
+        )
+        self.assertEqual(
+            ("不要点击广告，但点击确定按钮",),
+            graph.subgoals[0].constraints,
+        )
 
     def test_rejects_control_data_hidden_in_entities(self):
         payload = base_payload()
@@ -3937,33 +3940,31 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual("ready", graph.status)
         self.assertEqual("open_chat", graph.active_subgoal_id)
 
-    def test_positive_or_misplaced_click_text_is_not_completion_evidence(self):
-        for evidence in ("发送按钮已点击", "不得点击发送按钮"):
+    def test_action_wording_is_allowed_in_completion_evidence_requirements(self):
+        for evidence in ("设置按钮已点击", "不得点击广告按钮"):
             with self.subTest(evidence=evidence):
-                payload = purely_forbidden_draft_payload()
-                payload["completion_conditions"][2]["evidence_required"] = [evidence]
-                with self.assertRaisesRegex(TaskGraphError, "低层动作表达"):
-                    DeepSeekTaskGraphPlanner(
-                        FakeProvider(
-                            copy.deepcopy(payload),
-                            copy.deepcopy(payload),
-                            copy.deepcopy(payload),
-                        )
-                    ).plan(payload["goal"]["objective"], device_id="phone-1")
+                payload = base_payload()
+                payload["completion_conditions"][0]["evidence_required"] = [evidence]
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    payload["goal"]["objective"], device_id="phone-1"
+                )
+                self.assertEqual(
+                    (evidence,),
+                    graph.completion_conditions[0].evidence_required,
+                )
 
-    def test_positive_or_misplaced_click_text_is_not_subgoal_completion(self):
-        for completion in ("发送按钮已点击", "不得点击发送按钮"):
+    def test_action_wording_is_allowed_in_subgoal_completion_conditions(self):
+        for completion in ("设置按钮已点击", "不得点击广告按钮"):
             with self.subTest(completion=completion):
-                payload = purely_forbidden_draft_payload()
-                payload["subgoals"][2]["completion_conditions"] = [completion]
-                with self.assertRaisesRegex(TaskGraphError, "低层动作表达"):
-                    DeepSeekTaskGraphPlanner(
-                        FakeProvider(
-                            copy.deepcopy(payload),
-                            copy.deepcopy(payload),
-                            copy.deepcopy(payload),
-                        )
-                    ).plan(payload["goal"]["objective"], device_id="phone-1")
+                payload = base_payload()
+                payload["subgoals"][0]["completion_conditions"] = [completion]
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    payload["goal"]["objective"], device_id="phone-1"
+                )
+                self.assertEqual(
+                    (completion,),
+                    graph.subgoals[0].completion_conditions,
+                )
 
     def test_input_preparation_state_removes_shared_purely_forbidden_risk(self):
         payload = local_input_preparation_payload()
@@ -4747,7 +4748,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 device_id="phone-1",
             )
 
-    def test_safe_negated_goal_replans_once_after_mixed_false_positive_audit(self):
+    def test_safe_negated_goal_fails_closed_after_one_conflicting_audit(self):
         objective = "打开浏览器首页，仅查看，不搜索、不登录"
         first_payload = single_subgoal_payload(
             objective,
@@ -4784,18 +4785,16 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         planner = DeepSeekTaskGraphPlanner(provider)
 
-        graph = planner.plan(objective, device_id="phone-1")
+        with self.assertRaisesRegex(TaskGraphError, "全局目标包含外部状态"):
+            planner.plan(objective, device_id="phone-1")
 
-        self.assertEqual(graph.status, "ready")
-        self.assertEqual(graph.active_subgoal().external_impact, "navigation_only")
-        self.assertEqual(planner.risk_audit_call_count, 2)
+        self.assertEqual(planner.risk_audit_call_count, 1)
         graph_prompts = [
             call[0]["content"]
             for call in provider.messages
             if "semantic-risk-audit-v1" not in call[0]["content"]
         ]
-        self.assertEqual(len(graph_prompts), 2)
-        self.assertIn("独立重新规划", graph_prompts[1])
+        self.assertEqual(len(graph_prompts), 1)
 
     def test_safe_negated_goal_stops_when_second_audit_still_conflicts(self):
         objective = "打开浏览器首页，仅查看，不搜索、不登录"
@@ -4829,7 +4828,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskGraphError, "全局目标包含外部状态"):
             planner.plan(objective, device_id="phone-1")
 
-        self.assertEqual(planner.risk_audit_call_count, 2)
+        self.assertEqual(planner.risk_audit_call_count, 1)
 
     def test_semantic_audit_can_use_an_independent_provider(self):
         payload = single_subgoal_payload("查看资料", external_impact="read_only")
@@ -4934,8 +4933,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual("ready", graph.status)
         self.assertEqual(1, planner.risk_audit_call_count)
         assessment = planner.last_risk_audit.assessments[0]
-        self.assertNotIn("点击", assessment.reason)
-        self.assertIn("已隔离", assessment.reason)
+        self.assertIn("点击", assessment.reason)
         self.assertEqual("read_only", assessment.external_impact)
 
     def test_replan_runs_a_fresh_semantic_risk_audit(self):
@@ -5331,7 +5329,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             result.replan_history[-1].consumed_action_transition_receipt_id,
         )
 
-    def test_replan_repairs_matched_controller_transition_left_unconsumed(self):
+    def test_replan_rejects_unconsumed_controller_transition_without_retry(self):
         initial = base_payload()
         unconsumed = copy.deepcopy(initial)
         repaired = copy.deepcopy(initial)
@@ -5346,26 +5344,19 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         provider = FakeProvider(unconsumed, repaired)
 
-        result = DeepSeekTaskGraphPlanner(provider).replan(
-            graph,
-            matched_controller_observation(graph),
-            trigger="action_result_matched",
-            reason="一次性导航动作已由控制器验证",
-        )
-
-        self.assertEqual("completed", result.subgoals[0].status)
-        self.assertEqual((ref_id,), result.subgoals[0].completion_evidence)
+        with self.assertRaisesRegex(TaskGraphError, "未完成其绑定"):
+            DeepSeekTaskGraphPlanner(provider).replan(
+                graph,
+                matched_controller_observation(graph),
+                trigger="action_result_matched",
+                reason="一次性导航动作已由控制器验证",
+            )
         graph_prompts = [
             call[0]["content"]
             for call in provider.messages
             if "semantic-risk-audit-v1" not in call[0]["content"]
         ]
-        self.assertEqual(2, len(graph_prompts))
-        self.assertIn(
-            "matched controller_transition 未完成其绑定的 navigation_only 子目标",
-            graph_prompts[-1],
-        )
-        self.assertIn("不得自行生成第二动作", graph_prompts[-1])
+        self.assertEqual(1, len(graph_prompts))
 
     def test_replan_second_unconsumed_matched_transition_stays_blocked(self):
         initial = base_payload()
@@ -5392,9 +5383,9 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             for call in provider.messages
             if "semantic-risk-audit-v1" not in call[0]["content"]
         ]
-        self.assertEqual(2, len(graph_prompts))
+        self.assertEqual(1, len(graph_prompts))
 
-    def test_replan_repairs_subgoal_id_used_as_completion_evidence(self):
+    def test_replan_rejects_subgoal_id_used_as_completion_evidence_without_retry(self):
         initial = base_payload()
         invalid = copy.deepcopy(initial)
         invalid["status"] = "awaiting_confirmation"
@@ -5411,25 +5402,19 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         provider = FakeProvider(invalid, repaired)
 
-        result = DeepSeekTaskGraphPlanner(provider).replan(
-            graph,
-            matched_controller_observation(graph),
-            trigger="action_result_matched",
-            reason="一次性导航动作已由控制器验证",
-        )
-
-        self.assertEqual("completed", result.subgoals[0].status)
-        self.assertEqual(
-            ("controller_transition:receipt-matched:1",),
-            result.subgoals[0].completion_evidence,
-        )
+        with self.assertRaisesRegex(TaskGraphError, "当前观察之外"):
+            DeepSeekTaskGraphPlanner(provider).replan(
+                graph,
+                matched_controller_observation(graph),
+                trigger="action_result_matched",
+                reason="一次性导航动作已由控制器验证",
+            )
         replan_prompts = [
             call[0]["content"]
             for call in provider.messages
             if "高层任务图重规划器" in call[0]["content"]
         ]
-        self.assertEqual(2, len(replan_prompts))
-        self.assertIn("subgoal_id、condition_id", replan_prompts[-1])
+        self.assertEqual(1, len(replan_prompts))
 
     def test_typed_controller_transition_cannot_complete_external_state(self):
         initial = active_external_payload()
@@ -5494,7 +5479,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 reason="重放旧回执",
             )
 
-    def test_replan_repairs_one_low_level_protocol_violation(self):
+    def test_replan_allows_natural_action_clarification_without_retry(self):
         graph = DeepSeekTaskGraphPlanner(FakeProvider(base_payload())).plan(
             "目标", device_id="phone-1"
         )
@@ -5512,11 +5497,10 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual(2, result.revision)
         self.assertEqual("action_result_mismatch", result.replan_history[-1].trigger)
-        self.assertEqual(3, len(provider.messages))
-        self.assertIn("clarification_questions", provider.messages[1][0]["content"])
-        self.assertIn("唯一一次", provider.messages[1][0]["content"])
+        self.assertEqual(2, len(provider.messages))
+        self.assertEqual(("请点击浏览器图标后继续。",), result.clarification_questions)
 
-    def test_replan_second_low_level_protocol_violation_stays_blocked(self):
+    def test_replan_first_action_worded_clarification_is_valid(self):
         graph = DeepSeekTaskGraphPlanner(FakeProvider(base_payload())).plan(
             "目标", device_id="phone-1"
         )
@@ -5526,14 +5510,13 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         second["clarification_questions"] = ["请再次点击同一位置。"]
         provider = FakeProvider(first, second)
 
-        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
-            DeepSeekTaskGraphPlanner(provider).replan(
-                graph,
-                mismatch_observation(graph),
-                trigger="action_result_mismatch",
-                reason="动作已执行但预期结果没有出现",
-            )
-
+        result = DeepSeekTaskGraphPlanner(provider).replan(
+            graph,
+            mismatch_observation(graph),
+            trigger="action_result_mismatch",
+            reason="动作已执行但预期结果没有出现",
+        )
+        self.assertEqual(("请点击浏览器图标后继续。",), result.clarification_questions)
         self.assertEqual(2, len(provider.messages))
 
     def test_replan_blocked_retry_request_becomes_high_level_clarification(self):
@@ -5563,13 +5546,10 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertIsNone(result.active_subgoal_id)
         self.assertEqual(2, result.revision)
         self.assertEqual(
-            (
-                "动作后的新画面未证明预期结果，且当前没有可验证的安全替代路径；"
-                "请说明希望继续原目标还是停止任务。",
-            ),
+            ("请确认是否允许再次点击同一图标？",),
             result.clarification_questions,
         )
-        self.assertEqual(3, len(provider.messages))
+        self.assertEqual(2, len(provider.messages))
 
     def test_replan_cannot_mutate_goal(self):
         initial = base_payload()

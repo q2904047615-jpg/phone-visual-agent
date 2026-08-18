@@ -68,6 +68,22 @@ function externalActionSession() {
   return session;
 }
 
+function externalExecutedSession() {
+  const session = externalActionSession();
+  session.status = "succeeded";
+  session.physical_actions = 1;
+  session.task_graph.status = "completed";
+  session.task_graph.active_subgoal_id = null;
+  session.task_graph.current_subgoal = null;
+  session.task_graph.subgoals = session.task_graph.subgoals.map(item => ({
+    ...item,
+    status: "completed",
+  }));
+  session.confirmation_scope = null;
+  session.confirmation_ready = false;
+  return session;
+}
+
 function safeActionSession(decisionStatus = "action") {
   const graph = clone(deepSeekFixture.task_graph);
   graph.status = "running";
@@ -352,7 +368,7 @@ function createServer({ devices = null, activeSessions = [], restoredSessions = 
     }
     if (request.method === "POST" && url.pathname.endsWith("/approve-risk")) {
       requests.approveRisk.push(await readBody(request));
-      json(response, 200, { physical_actions: 0, session: externalActionSession() });
+      json(response, 200, { physical_actions: 1, session: externalExecutedSession() });
       return;
     }
     if (request.method === "POST" && url.pathname.endsWith("/next")) {
@@ -574,7 +590,7 @@ test("browser renders controller evidence and confirms one exact observation", {
   }
 });
 
-test("external-state graph requires risk approval before exact action confirmation", { timeout: 30000 }, async () => {
+test("external-state graph executes at most one bound action after one risk approval", { timeout: 30000 }, async () => {
   Object.values(requests).forEach(items => { items.length = 0; });
   const server = createServer();
   const { browser, page } = await launchFixturePage(server);
@@ -594,19 +610,17 @@ test("external-state graph requires risk approval before exact action confirmati
     assert.match(goalText, /确认作用域 · active · 后端 scope 与当前权威任务、观察和动作字段一致/);
     assert.match(await page.locator("#actionContent").innerText(), /Qwen 唯一动作尚未产生/);
     await page.locator("#reviewAction").click();
-    assert.match(await page.locator("#riskWarning").innerText(), /后端风险 scope 与当前权威任务字段一致/);
+    assert.match(await page.locator("#riskWarning").innerText(), /后端风险 scope 与当前权威任务、收件人\/文字草稿一致/);
     assert.match(await page.locator("#riskReason").innerText(), /收件人：张三/);
     assert.match(await page.locator("#riskReason").innerText(), /消息原文：今晚八点见。/);
-    assert.match(await page.locator("#riskWarning").innerText(), /不触发机械臂/);
+    assert.match(await page.locator("#riskWarning").innerText(), /最多执行一个/);
     const approvalResponse = page.waitForResponse(
       response => response.url().endsWith("/approve-risk"),
       { timeout: 5000 },
     );
     await page.locator("#confirmRiskAction").click();
     await approvalResponse;
-    await page.locator("#reviewAction").waitFor({ timeout: 5000 });
-    assert.match(await page.locator("#sessionBadge").innerText(), /等待当前动作确认/);
-    assert.equal(await page.locator("#reviewAction").innerText(), "确认当前动作");
+    await page.locator("#sessionBadge").getByText("目标完成").waitFor({ timeout: 5000 });
     assert.deepEqual(requests.approveRisk[0], {
       confirmed: true,
       confirmation: {
@@ -620,9 +634,7 @@ test("external-state graph requires risk approval before exact action confirmati
       },
     });
     assert.equal(requests.confirm.length, 0);
-    await page.locator("#reviewAction").click();
-    assert.match(await page.locator("#riskWarning").innerText(), /后端动作 scope 与当前权威任务、观察和动作字段一致/);
-    assert.equal(requests.confirm.length, 0);
+    assert.equal(await page.locator("#reviewAction").isHidden(), true);
     assert.equal(await page.locator("#autoSupervisedAgent").count(), 0);
   } finally {
     await browser.close();

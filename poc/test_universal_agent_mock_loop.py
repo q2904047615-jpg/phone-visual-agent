@@ -69,7 +69,21 @@ def scene(
                 label="启用" if unsafe else "查看内容",
                 bounds=(0.12, 0.27, 0.88, 0.42),
                 confidence=0.98,
+                states={"goal_relevant": True, "fully_visible": True},
                 evidence=("合成画面中的唯一候选",),
+            ),
+        )
+    elif action_kind == "swipe":
+        elements = (
+            UIElement(
+                element_id="generic-scroll-surface",
+                role="container",
+                meaning="scrollable_content",
+                label="",
+                bounds=(0.05, 0.18, 0.95, 0.9),
+                confidence=0.98,
+                states={"scrollable": True},
+                evidence=("合成内容区域仍可继续浏览",),
             ),
         )
     return UIScene(
@@ -186,7 +200,7 @@ class ScriptedQwen:
         elif self.action_kind == "swipe":
             params = {
                 "direction": "up",
-                "expected_effect": {"scene_changed": True},
+                "expected_effect": {"content_changed": True},
             }
         else:
             element = trusted_observation.scene.elements[0]
@@ -196,6 +210,7 @@ class ScriptedQwen:
                 "meaning": element.meaning,
                 "role": element.role,
                 "label": element.label,
+                "states": dict(element.states),
                 "expected_effect": {"scene_changed": True},
             }
         action = SemanticAction(

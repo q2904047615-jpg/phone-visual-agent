@@ -3341,7 +3341,13 @@ class UniversalAgentOrchestrator:
         session: UniversalAgentSessionState,
         confirmation: Mapping[str, Any],
     ) -> Any:
-        """Consume one graph-bound risk approval, then observe without acting."""
+        """Consume one risk approval and execute at most its one bound effect.
+
+        The approval binds the canonical task/subgoal/risk draft.  Observation,
+        Qwen selection and the controller still create a separate exact action
+        scope internally; when that scope is valid it is consumed immediately,
+        so the user is not asked to confirm the same external effect twice.
+        """
 
         if self.device_registry.active_session(session.device_id) != session.session_id:
             raise UniversalAgentOrchestratorError(
@@ -3376,6 +3382,16 @@ class UniversalAgentOrchestrator:
                     confirmed_revision=graph.revision,
                 )
                 result = self._observe_after_risk_confirmation(session, context)
+                if session.status == "awaiting_confirmation":
+                    action_authority = session.confirmation_authority
+                    if action_authority is None or action_authority.consumed:
+                        raise UniversalAgentOrchestratorError(
+                            "风险确认后没有形成一次性精确动作作用域。"
+                        )
+                    result = self._confirm_one_locked(
+                        session,
+                        action_authority.scope(),
+                    )
                 self._write_terminal_snapshot(session)
                 return result
         finally:
@@ -3457,6 +3473,110 @@ class UniversalAgentOrchestrator:
         return {
             "physical_actions": session.physical_actions - start_actions,
             "iterations": 1,
+            "status": session.status,
+            "pause_reason": session.auto_pause_reason,
+        }
+
+    def run_autonomous_safe_loop(
+        self,
+        session: UniversalAgentSessionState,
+        *,
+        max_physical_actions: int = 12,
+        max_iterations: int = 24,
+    ) -> dict[str, Any]:
+        """Advance only read-only/navigation work with fresh one-shot scopes.
+
+        Every iteration consumes the exact authority already bound to the
+        latest revision/observation/decision, executes at most one physical
+        action, then re-observes and replans through ``_confirm_one_locked``.
+        External/unknown work, mismatch, failure and exhausted budgets stop the
+        loop; a physical action is never retried automatically.
+        """
+
+        if self.device_registry.active_session(session.device_id) != session.session_id:
+            raise UniversalAgentOrchestratorError(
+                "当前会话已不再拥有该设备，禁止自动推进。"
+            )
+        if (
+            isinstance(max_physical_actions, bool)
+            or not isinstance(max_physical_actions, int)
+            or not 1 <= max_physical_actions <= 20
+        ):
+            raise UniversalAgentOrchestratorError("安全动作预算必须是1～20。")
+        if (
+            isinstance(max_iterations, bool)
+            or not isinstance(max_iterations, int)
+            or not 1 <= max_iterations <= 40
+        ):
+            raise UniversalAgentOrchestratorError("安全迭代预算必须是1～40。")
+
+        start_actions = session.physical_actions
+        iterations = 0
+        session.automatic_loop_enabled = True
+        session.auto_pause_reason = ""
+        try:
+            with self.device_registry.device_lock(session.device_id):
+                while iterations < max_iterations:
+                    if session.status in {
+                        "succeeded",
+                        "blocked",
+                        "failed",
+                        "cancelled",
+                        "awaiting_risk_confirmation",
+                    }:
+                        break
+                    graph = session.task_graph
+                    current = graph.active_subgoal() if graph is not None else None
+                    impact = current.external_impact if current is not None else "unknown"
+                    if impact not in {"read_only", "navigation_only"}:
+                        session.auto_pause_reason = (
+                            "下一子目标可能产生外部影响或仍未知，已在物理动作前停止。"
+                        )
+                        break
+                    if session.status == "needs_reobservation":
+                        self._refresh_decision_locked(session)
+                        iterations += 1
+                        continue
+                    if session.status != "awaiting_confirmation":
+                        session.auto_pause_reason = (
+                            f"会话状态 {session.status} 没有可执行的安全动作。"
+                        )
+                        break
+                    authority = session.confirmation_authority
+                    if authority is None or authority.consumed:
+                        raise UniversalAgentOrchestratorError(
+                            "安全自动推进缺少当前一次性动作作用域。"
+                        )
+                    before = session.physical_actions
+                    result = self._confirm_one_locked(session, authority.scope())
+                    iterations += 1
+                    delta = session.physical_actions - before
+                    if delta not in {0, 1}:
+                        raise UniversalAgentOrchestratorError(
+                            "单轮安全自动推进产生了超过一个物理动作。"
+                        )
+                    if session.physical_actions - start_actions >= max_physical_actions:
+                        session.auto_pause_reason = "已达到本次安全物理动作预算。"
+                        break
+                    if getattr(result, "action_outcome", "matched") != "matched":
+                        session.auto_pause_reason = (
+                            "动作后没有匹配预期变化；已停止且不会自动重试。"
+                        )
+                        break
+                if not session.auto_pause_reason:
+                    session.auto_pause_reason = {
+                        "awaiting_risk_confirmation": "下一子目标需要一次外部影响确认。",
+                        "succeeded": "目标已由新观察和任务图修订证明完成。",
+                        "blocked": "当前视觉或本地门禁已阻止继续。",
+                        "failed": "当前执行或验证失败，禁止自动重试。",
+                    }.get(session.status, "已达到本次安全迭代预算。")
+        finally:
+            session.automatic_loop_enabled = False
+            self._write_terminal_snapshot(session)
+            self._release_if_terminal(session)
+        return {
+            "physical_actions": session.physical_actions - start_actions,
+            "iterations": iterations,
             "status": session.status,
             "pause_reason": session.auto_pause_reason,
         }
@@ -3607,15 +3727,6 @@ class UniversalAgentOrchestrator:
                 session.failed_reason = "任务图没有活动子目标。"
                 self._write_terminal_snapshot(session)
                 return session
-            if impact in {"external_state", "unknown"}:
-                session.status = "awaiting_risk_confirmation"
-                session.failed_reason = ""
-                session.confirmed_risk_ids = ()
-                session.confirmation_authority = None
-                self._bind_risk_confirmation(session)
-                self._write_terminal_snapshot(session)
-                return session
-
             session.status = "observing"
             scene, frames, frame_paths = adapter.capture_scene(
                 session.goal_draft,
@@ -3634,6 +3745,55 @@ class UniversalAgentOrchestrator:
                 session,
                 store.write_trusted_observation(session.step_number, observation),
             )
+
+            if impact == "unknown":
+                observed = self.bridge.observed_state(
+                    graph=graph,
+                    trusted_observation=observation,
+                    action_outcome="not_applicable",
+                    verification={
+                        "visible_evidence": [scene.summary],
+                        "blocked_reasons": [],
+                    },
+                )
+                revised = self.deepseek_planner.replan(
+                    graph,
+                    observed,
+                    trigger="observation_changed",
+                    reason=(
+                        "初始只读观察已经可用；请仅依据当前结构化画面事实"
+                        "重新分类 unknown 子目标。不能因此宣称动作已执行。"
+                    ),
+                )
+                self._validate_graph_identity(
+                    revised,
+                    device_id=session.device_id,
+                    previous=graph,
+                    trusted_observation=observation,
+                )
+                self._store_revised_graph(session, revised)
+                graph = revised
+                if graph.status == "completed":
+                    session.status = "succeeded"
+                    session.failed_reason = ""
+                    self._write_terminal_snapshot(session)
+                    return session
+                current = graph.active_subgoal()
+                if current is None:
+                    session.status = "blocked"
+                    session.failed_reason = "unknown 子目标重分类后没有活动子目标。"
+                    self._write_terminal_snapshot(session)
+                    return session
+                impact = current.external_impact if current is not None else "unknown"
+
+            if impact in {"external_state", "unknown"}:
+                session.status = "awaiting_risk_confirmation"
+                session.failed_reason = ""
+                session.confirmed_risk_ids = ()
+                session.confirmation_authority = None
+                self._bind_risk_confirmation(session)
+                self._write_terminal_snapshot(session)
+                return session
 
             if impact in {"read_only", "navigation_only"}:
                 initial_safe = graph.active_subgoal()
@@ -3893,10 +4053,10 @@ class PhaseOneNavigationPolicy:
     )
     FORBIDDEN_ROLES = frozenset({"keyboard_key"})
     NAVIGATION_ROLES = frozenset(
-        {"button", "icon", "text", "tab", "image", "list_item"}
+        {"button", "icon", "text", "tab", "image", "list_item", "container"}
     )
     GOAL_BOUND_TAP_ROLES = frozenset(
-        {"button", "icon", "tab", "image", "list_item"}
+        {"button", "icon", "tab", "image", "list_item", "container"}
     )
     GENERIC_BINDING_TERMS = frozenset(
         {
@@ -4539,20 +4699,16 @@ class PhaseOneNavigationPolicy:
 
         goal = self._value(task_context, "goal", {})
         target_apps = self._value(goal, "target_apps", ()) or ()
-        candidate_tokens = self._tokens(
-            " ".join(
-                (
-                    str(self._value(element, "meaning", "")),
-                    str(self._value(element, "label", "")),
-                )
-            )
-        )
+        candidate_app_id = str(
+            self._value(self._value(element, "states", {}), "app_id", "")
+        ).strip().casefold()
+        candidate_meaning = str(
+            self._value(element, "meaning", "")
+        ).strip().casefold()
         candidate_label = str(self._value(element, "label", "")).strip().casefold()
         for target_app in target_apps:
-            app_id_tokens = self._tokens(
-                str(self._value(target_app, "app_id", ""))
-            )
-            if app_id_tokens and app_id_tokens.issubset(candidate_tokens):
+            app_id = str(self._value(target_app, "app_id", "")).strip().casefold()
+            if app_id and app_id in {candidate_app_id, candidate_meaning}:
                 return True
             app_name = str(self._value(target_app, "app_name", "")).strip().casefold()
             if app_name and candidate_label == app_name:
@@ -4660,6 +4816,10 @@ class PhaseOneNavigationPolicy:
         if float(self._value(decision, "confidence", 0.0)) < self.min_confidence:
             return self._deny("Qwen 决策置信度不足。")
 
+        current_subgoal = self._value(task_context, "current_subgoal", {})
+        active_risk_ids = self._value(current_subgoal, "risk_action_ids", ()) or ()
+        if impact == "navigation_only" and active_risk_ids:
+            return self._deny("navigation_only 动作不能携带当前子目标风险动作。")
         if action_has_account_effect(action) and not external_allowed:
             return self._deny("动作语义可能改变账号或外部状态。")
 
@@ -4725,10 +4885,31 @@ class PhaseOneNavigationPolicy:
             direction = str(action.params.get("direction") or "").strip()
             if direction not in {"up", "down", "left", "right"}:
                 return self._deny("滑动方向无效。")
+            if impact != "navigation_only":
+                return self._deny("滑动只允许 navigation_only 子目标。")
+            if action.params.get("expected_effect") != {"content_changed": True}:
+                return self._deny("滑动缺少精确的内容变化后置条件。")
+            scrollable = any(
+                element.states.get("scrollable") is True
+                for element in scene.elements
+            ) or any(
+                marker in scene.summary
+                for marker in ("列表仍在延伸", "内容仍可继续浏览", "仍可滚动")
+            )
+            if not scrollable:
+                return self._deny("当前画面没有结构化可滚动或内容延续证据。")
             return NavigationPolicyDecision(True, "允许一个四向导航滑动。", "swipe")
         if action_kind == "back":
+            if impact != "navigation_only" or action.params.get("expected_effect") != {
+                "scene_changed": True
+            }:
+                return self._deny("系统返回要求 navigation_only 和场景变化后置条件。")
             return NavigationPolicyDecision(True, "允许一个系统返回动作。", "back")
         if action_kind == "home":
+            if impact != "navigation_only" or action.params.get("expected_effect") != {
+                "scene_changed": True
+            }:
+                return self._deny("Home 要求 navigation_only 和场景变化后置条件。")
             return NavigationPolicyDecision(
                 True,
                 "允许一个Android系统Home动作，返回系统Launcher。",
@@ -4820,8 +5001,6 @@ class PhaseOneNavigationPolicy:
                 or not element.states.get("value")
             ):
                 return self._deny("精确文字清空要求最新画面确认非空输入值。")
-            if element.states.get("keyboard_layout") != "qwerty":
-                return self._deny("精确文字输入要求最新画面确认 QWERTY 键盘。")
             input_step = None
             if action_kind == "input_verified_text":
                 try:
@@ -4848,8 +5027,6 @@ class PhaseOneNavigationPolicy:
                     != input_step.required_case_mode
                 ):
                     return self._deny("当前键盘大小写状态与下一英文分段不一致。")
-            elif element.states.get("keyboard_input_mode") != "direct_latin":
-                return self._deny("精确文字清空要求 direct_latin 键盘证据。")
             eligible_inputs = tuple(
                 candidate
                 for candidate in scene.elements
@@ -4865,12 +5042,14 @@ class PhaseOneNavigationPolicy:
                         or bool(candidate.states.get("value"))
                     )
                 )
-                and candidate.states.get("keyboard_layout") == "qwerty"
-                and candidate.states.get("keyboard_input_mode")
-                == (
-                    input_step.required_mode
-                    if input_step is not None
-                    else "direct_latin"
+                and (
+                    input_step is None
+                    or candidate.states.get("keyboard_layout") == "qwerty"
+                )
+                and (
+                    input_step is None
+                    or candidate.states.get("keyboard_input_mode")
+                    == input_step.required_mode
                 )
                 and (
                     input_step is None
@@ -4930,6 +5109,33 @@ class PhaseOneNavigationPolicy:
         for field, expected in expected_fields.items():
             if str(action.params.get(field) or "") != expected:
                 return self._deny(f"动作 {field} 没有逐字复用可信候选。")
+        if element.states.get("goal_relevant") is not True:
+            return self._deny("元素绑定动作要求最新观察明确标记唯一目标相关候选。")
+        goal_value = self._value(task_context, "goal", {})
+        goal_entities = (
+            goal_value.get("entities")
+            if isinstance(goal_value, Mapping)
+            else None
+        )
+        exact_target_label = (
+            str(goal_entities.get("target_ui_label") or "").strip()
+            if isinstance(goal_entities, Mapping)
+            else ""
+        )
+        if exact_target_label and element.label.strip() != exact_target_label:
+            return self._deny("动作候选没有逐字绑定 goal.entities.target_ui_label。")
+        if element.states.get("fully_visible") is False:
+            return self._deny("元素绑定动作的目标控件已被观察为不完整可见。")
+        requested_states = action.params.get("states")
+        if not isinstance(requested_states, dict) or requested_states != element.states:
+            return self._deny("元素绑定动作没有逐项复用最新可信候选 states。")
+        if (
+            impact == "navigation_only"
+            and action_has_account_effect(action)
+        ):
+            return self._deny(
+                "navigation_only 候选包含发送、确认、支付、关系或其他外部影响语义。"
+            )
 
         exclusion_error = self._explicit_target_exclusion_error(
             task_context=task_context,
@@ -4937,6 +5143,11 @@ class PhaseOneNavigationPolicy:
         )
         if exclusion_error:
             return self._deny(exclusion_error)
+        if (
+            action_kind == "tap_semantic"
+            and element.role not in self.GOAL_BOUND_TAP_ROLES | {"input"}
+        ):
+            return self._deny("tap_semantic 候选缺少可点击角色。")
 
         ordinal_error = self._ordinal_binding_error(
             task_context=task_context,
@@ -5164,14 +5375,31 @@ class PhaseOneNavigationPolicy:
             and element.meaning == "switch_keyboard_input_mode"
         ):
             states = element.states
+            target_text = self._value(task_context, "requested_input_text", None)
+            if target_text is None:
+                goal_value = self._value(task_context, "goal", {})
+                goal_entities = (
+                    goal_value.get("entities")
+                    if isinstance(goal_value, Mapping)
+                    else None
+                )
+                if isinstance(goal_entities, Mapping):
+                    target_text = goal_entities.get("input_text")
+            prior_value = states.get("prior_input_value")
+            try:
+                input_step = plan_next_verified_input(target_text, prior_value)
+            except (ValueError, VerifiedTextTransactionError) as exc:
+                return self._deny(f"键盘输入模式切换无法绑定精确文字事务：{exc}")
             if (
                 impact != "navigation_only"
                 or element.role not in {"button", "icon"}
                 or states.get("keyboard_input_mode_switch") is not True
-                or states.get("current_mode") != "chinese_pinyin"
-                or states.get("target_mode") != "direct_latin"
+                or input_step is None
+                or states.get("target_mode") != input_step.required_mode
+                or states.get("current_mode") == input_step.required_mode
+                or states.get("next_input_value") != input_step.segment
             ):
-                return self._deny("键盘模式切换候选缺少从中文拼音到英文直输的可信状态。")
+                return self._deny("键盘模式切换没有绑定下一确定性文字分段所需方向。")
             focused_inputs = tuple(
                 candidate
                 for candidate in scene.elements
@@ -5179,12 +5407,13 @@ class PhaseOneNavigationPolicy:
                 and float(candidate.confidence) >= self.min_confidence
                 and candidate.states.get("focused") is True
                 and candidate.states.get("goal_relevant") is True
-                and candidate.states.get("value") == ""
+                and candidate.states.get("value") == input_step.current_text
                 and candidate.states.get("keyboard_layout") == "qwerty"
-                and candidate.states.get("keyboard_input_mode") == "chinese_pinyin"
+                and candidate.states.get("keyboard_input_mode")
+                == states.get("current_mode")
             )
             if len(focused_inputs) != 1:
-                return self._deny("键盘模式切换要求唯一空白、已聚焦的中文拼音 QWERTY 输入框。")
+                return self._deny("键盘模式切换要求唯一已聚焦且前缀逐字一致的 QWERTY 输入框。")
             left, top, right, bottom = element.bounds
             if (
                 top < 0.72
@@ -5194,16 +5423,9 @@ class PhaseOneNavigationPolicy:
                 or bottom <= top
             ):
                 return self._deny("键盘模式切换候选不在可信的底部紧凑按键区域。")
-            visible = " ".join(
-                [element.label, *element.evidence]
-            ).strip().casefold()
-            if not visible or not (
-                "中" in visible or "chinese" in visible or "中文" in visible
-            ):
-                return self._deny("键盘模式切换候选缺少可见中文模式证据。")
             return NavigationPolicyDecision(
                 True,
-                "允许把唯一空白目标输入框从中文拼音切换到英文直输；动作后必须重新观察。",
+                "允许按下一确定性文字分段切换唯一目标输入框的输入模式；动作后必须重新观察。",
                 "switch_keyboard_input_mode",
             )
         clear_claimed = (
@@ -5262,58 +5484,7 @@ class PhaseOneNavigationPolicy:
                 "允许清空唯一已聚焦输入框中的本地临时文字。",
                 "clear_local_text",
             )
-        canonical = self._semantic_class(
-            element.meaning,
-            element.label,
-            str(action.params.get("target") or ""),
-        )
-        local_capability_entry = self._is_goal_bound_local_capability_entry(
-            task_context=task_context,
-            action=action,
-            element=element,
-        )
-        if canonical == "forbidden":
-            if impact == "external_state" and external_allowed:
-                canonical = "external"
-            elif action_kind in {"input_verified_text", "clear_verified_text"}:
-                canonical = "input"
-            elif self._is_exact_literal_local_action_label(
-                task_context=task_context,
-                action=action,
-                element=element,
-            ):
-                sanitized = self._without_literal_local_action_markers(
-                    (
-                        element.meaning,
-                        element.label,
-                        str(action.params.get("target") or ""),
-                    )
-                )
-                sanitized_class = self._semantic_class(*sanitized)
-                if sanitized_class == "forbidden":
-                    return self._deny("候选包含外部状态、输入或破坏性语义。")
-                canonical = (
-                    "long_press"
-                    if action_kind == "long_press"
-                    else sanitized_class
-                )
-            elif local_capability_entry:
-                sanitized = self._without_literal_local_action_markers(
-                    (
-                        element.meaning,
-                        element.label,
-                        str(action.params.get("target") or ""),
-                    )
-                )
-                if self._semantic_class(*sanitized) == "forbidden":
-                    return self._deny("候选包含外部状态、输入或破坏性语义。")
-                # Do not authorize from the sanitized label.  An empty class
-                # deliberately falls through to the complete goal-bound tap
-                # proof below.
-                canonical = ""
-            else:
-                return self._deny("候选包含外部状态、输入或破坏性语义。")
-        if canonical == "refresh":
+        if element.meaning == "reload":
             if (
                 impact != "navigation_only"
                 or action_kind != "tap_semantic"
@@ -5330,41 +5501,36 @@ class PhaseOneNavigationPolicy:
             requested_states = action.params.get("states")
             if not isinstance(requested_states, dict) or requested_states != element.states:
                 return self._deny("刷新动作没有逐项复用本地审计 states。")
-        if not canonical:
-            if action_kind in {"input_verified_text", "clear_verified_text"}:
-                canonical = "input"
-            elif action_kind == "long_press":
-                canonical = "long_press"
-            elif (
-                action_kind == "tap_semantic"
-                and impact == "navigation_only"
-                and element.role in {"button", "icon", "image", "list_item"}
-                and self._matches_target_app(task_context, element)
-            ):
-                canonical = "open"
-            elif action_kind == "tap_semantic":
-                fallback_error = self._goal_bound_navigation_fallback_error(
-                    task_context=task_context,
-                    trusted_observation=trusted_observation,
-                    action=action,
-                    element=element,
-                    scene=scene,
-                )
-                if fallback_error:
-                    return self._deny(
-                        "本地策略无法证明候选属于通用导航语义或动作语义："
-                        + fallback_error
-                    )
-                canonical = "goal_bound_tap"
-            elif impact == "external_state" and external_allowed:
-                canonical = "external"
-            else:
-                return self._deny("本地策略无法证明候选属于通用导航语义或动作语义。")
-        if action_kind == "dismiss_overlay" and canonical not in {"close", "back"}:
-            return self._deny("关闭弹层动作只能指向关闭、取消或返回语义。")
+        if not self._has_structured_postcondition(
+            action.params.get("expected_effect"),
+            scene,
+        ):
+            return self._deny("元素绑定动作缺少可由新画面验证的结构化后置条件。")
+        if action_kind == "dismiss_overlay":
+            if not scene.overlays or element.role not in {"button", "icon"}:
+                return self._deny("关闭弹层动作要求当前画面存在弹层及完整可见的独立控件。")
+            if self._semantic_class(element.meaning, element.label) not in {"close", "back"}:
+                return self._deny("关闭弹层控件缺少关闭、取消或返回的可见语义。")
+            canonical = "dismiss_overlay"
+        elif impact == "external_state":
+            if not external_allowed:
+                return self._deny("外部影响动作缺少当前风险作用域确认。")
+            canonical = "external"
+        elif action_kind in {"input_verified_text", "clear_verified_text"}:
+            canonical = "input"
+        elif action_kind == "long_press":
+            canonical = "long_press"
+        elif action_kind == "tap_semantic":
+            canonical = (
+                "open_target_app"
+                if self._matches_target_app(task_context, element)
+                else "goal_bound_tap"
+            )
+        else:
+            return self._deny("当前元素绑定动作没有对应的类型化执行合同。")
 
         return NavigationPolicyDecision(
             allowed=True,
-            reason="当前唯一候选通过第一阶段低风险导航策略。",
+            reason="当前唯一候选通过类型、作用域、几何、能力和后置条件门禁。",
             canonical_class=canonical,
         )

@@ -418,17 +418,11 @@ class QwenTaskContext:
         if not isinstance(entities, dict):
             raise VisionAgentError("goal.entities 必须是JSON对象。")
         values: list[str] = []
-        for key in ("expected_text", "exact_text", "target_text"):
-            raw = entities.get(key)
-            parts = raw if isinstance(raw, (list, tuple)) else [raw]
-            for part in parts:
-                if part is None:
-                    continue
-                if not isinstance(part, str) or not part.strip():
-                    raise VisionAgentError(f"goal.entities.{key} 格式无效。")
-                text = part.strip()
-                if text not in values:
-                    values.append(text)
+        target_label = entities.get("target_ui_label")
+        if target_label is not None:
+            if not isinstance(target_label, str) or not target_label.strip():
+                raise VisionAgentError("goal.entities.target_ui_label 格式无效。")
+            values.append(target_label.strip())
         recipient = entities.get("recipient")
         if recipient is not None:
             if (
@@ -472,33 +466,8 @@ class QwenTaskContext:
 
     @property
     def exact_text_target_roles(self) -> tuple[str, ...]:
-        entities = self.goal.get("entities") or {}
-        values: list[str] = []
-        for key in ("expected_role", "target_role", "exact_text_role"):
-            raw = entities.get(key)
-            parts = raw if isinstance(raw, (list, tuple)) else [raw]
-            for part in parts:
-                if part is None:
-                    continue
-                role = str(part).strip().lower()
-                if role not in {
-                    "button",
-                    "icon",
-                    "input",
-                    "text",
-                    "tab",
-                    "toggle",
-                    "image",
-                    "list_item",
-                    "dialog",
-                    "keyboard_key",
-                    "container",
-                    "unknown",
-                }:
-                    raise VisionAgentError(f"goal.entities.{key} 角色无效：{role}")
-                if role not in values:
-                    values.append(role)
-        return tuple(values)
+        # Role/meaning hints are observation facts, not task-authority fields.
+        return ()
 
     @property
     def requested_input_text(self) -> str | None:
@@ -516,20 +485,7 @@ class QwenTaskContext:
 
     @property
     def exact_text_target_meanings(self) -> tuple[str, ...]:
-        entities = self.goal.get("entities") or {}
-        values: list[str] = []
-        for key in ("expected_meaning", "target_meaning", "exact_text_meaning"):
-            raw = entities.get(key)
-            parts = raw if isinstance(raw, (list, tuple)) else [raw]
-            for part in parts:
-                if part is None:
-                    continue
-                meaning = str(part).strip().casefold()
-                if not meaning:
-                    raise VisionAgentError(f"goal.entities.{key} 格式无效。")
-                if meaning not in values:
-                    values.append(meaning)
-        return tuple(values)
+        return ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1558,6 +1514,14 @@ def _selection_choices(
             item
             for item in candidates
             if str(item.get("role") or "") not in {"keyboard_key", "dialog"}
+            and isinstance(item.get("states"), Mapping)
+            and (
+                item["states"].get("goal_relevant") is True
+                or item["states"].get("ime_candidate") is True
+                or item["states"].get("input_literal_key") is True
+                or item["states"].get("keyboard_layout_switch") is True
+                or item["states"].get("keyboard_case_switch") is True
+            )
         )
         if action in {"input_verified_text", "clear_verified_text"}:
             eligible = tuple(
@@ -1576,7 +1540,6 @@ def _selection_choices(
                     and item["states"].get("focused") is True
                     and isinstance(item["states"].get("value"), str)
                     and bool(item["states"].get("value"))
-                    and item["states"].get("keyboard_layout") == "qwerty"
                     and item["states"].get("goal_relevant") is True
                 )
         if action in SINGLE_ELEMENT_ACTIONS:
@@ -3235,6 +3198,17 @@ def _matching_identity_text_candidates(
         if float(element.confidence) >= MIN_TARGET_CONFIDENCE
         and element.states.get("visible") is not False
         and element.role != "input"
+        and (
+            element.states.get("identity_anchor") is True
+            or element.states.get("goal_relevant") is True
+            or element.meaning.strip().casefold()
+            in {
+                "recipient_identity",
+                "conversation_identity",
+                "conversation_title",
+                "page_title",
+            }
+        )
         and required_text in (element.label, *element.evidence)
     ]
 

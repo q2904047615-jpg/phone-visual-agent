@@ -62,10 +62,10 @@ TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
     "2026-08-18-foreground-app-identity-audit-v1"
 )
-INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-18-input-structure-audit-v6"
+INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-18-input-structure-audit-v7"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
-COMPACT_OUTPUT_TOKENS = 1800
+COMPACT_OUTPUT_TOKENS = 2600
 TARGETED_OUTPUT_TOKENS = 700
 FOREGROUND_APP_IDENTITY_AUDIT_TOKENS = 300
 INPUT_STRUCTURE_AUDIT_TOKENS = 1000
@@ -75,7 +75,7 @@ ELEMENT_GEOMETRY_AUDIT_TOKENS = 500
 ORIENTATION_AUDIT_TOKENS = 500
 MIN_SYSTEM_UI_AUDIT_CONFIDENCE = 0.80
 OBSERVATION_TIMEOUT_SECONDS = 60.0
-MAX_COMPACT_ELEMENTS = 4
+MAX_COMPACT_ELEMENTS = 12
 AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE = "输入结构只读审计确认软键盘不可见"
 
 STAGE_LABELS = {
@@ -361,7 +361,19 @@ class GenericSceneObserver:
         audited_scene = replace(
             scene,
             elements=tuple(
-                replace(element, bounds=replacements[element.element_id])
+                replace(
+                    element,
+                    bounds=replacements[element.element_id],
+                    states={
+                        **element.states,
+                        # These private facts are minted only after the strict
+                        # one-crop parser has proved one complete control.  The
+                        # model-authored scene path strips both keys.
+                        "fully_visible": True,
+                        "independent_geometry_verified": True,
+                        "geometry_audit_source": "element_geometry_audit",
+                    },
+                )
                 if element.element_id in replacements
                 else element
                 for element in scene.elements
@@ -425,7 +437,6 @@ class GenericSceneObserver:
         self._set_stage("waiting_orientation_audit")
         raw = ""
         model_calls = 0
-        first_rejected_payload: dict[str, Any] | None = None
         try:
             model_calls += 1
             raw = self._provider_chat(
@@ -433,48 +444,12 @@ class GenericSceneObserver:
                 max_tokens=ORIENTATION_AUDIT_TOKENS,
             )
             self._set_stage("parsing_orientation_audit")
-            try:
-                credential = _credential_from_orientation_audit(
-                    raw=raw,
-                    device_id=device_id,
-                    scene_fingerprint=scene_fingerprint,
-                    frame=frame,
-                )
-            except OrientationSafetyError as first_error:
-                if not _orientation_evidence_format_error(first_error):
-                    raise
-                # The rejected response grants no authority. Evidence is
-                # validated before the private seal is registered, and this
-                # one fresh audit is parsed independently without editing or
-                # reusing any rejected evidence.
-                first_rejected_payload = _orientation_audit_diagnostic_payload(raw)
-                self._set_stage("waiting_orientation_audit_retry")
-                model_calls += 1
-                raw = self._provider_chat(
-                    [
-                        _json_only_system_message(),
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": _orientation_audit_retry_prompt(
-                                        first_error
-                                    ),
-                                },
-                                *content[1:],
-                            ],
-                        },
-                    ],
-                    max_tokens=ORIENTATION_AUDIT_TOKENS,
-                )
-                self._set_stage("parsing_orientation_audit")
-                credential = _credential_from_orientation_audit(
-                    raw=raw,
-                    device_id=device_id,
-                    scene_fingerprint=scene_fingerprint,
-                    frame=frame,
-                )
+            credential = _credential_from_orientation_audit(
+                raw=raw,
+                device_id=device_id,
+                scene_fingerprint=scene_fingerprint,
+                frame=frame,
+            )
             credential.assert_authorizes(
                 device_id=device_id,
                 scene_fingerprint=scene_fingerprint,
@@ -491,12 +466,8 @@ class GenericSceneObserver:
                 "confidence": float(credential.confidence),
                 "response_payload": _orientation_audit_diagnostic_payload(raw),
                 "audit_accepted": True,
+                "retry_used": False,
             }
-            if first_rejected_payload is not None:
-                self.last_orientation_audit_diagnostics[
-                    "first_rejected_response_payload"
-                ] = first_rejected_payload
-                self.last_orientation_audit_diagnostics["retry_used"] = True
             return credential
         except Exception as exc:
             self.last_orientation_audit_diagnostics = {
@@ -509,13 +480,9 @@ class GenericSceneObserver:
                 "frame_fingerprint": local_fingerprint,
                 "response_payload": _orientation_audit_diagnostic_payload(raw),
                 "audit_accepted": False,
+                "retry_used": False,
                 "error_type": classify_qwen_error(exc, raw_response=raw),
             }
-            if first_rejected_payload is not None:
-                self.last_orientation_audit_diagnostics[
-                    "first_rejected_response_payload"
-                ] = first_rejected_payload
-                self.last_orientation_audit_diagnostics["retry_used"] = True
             if isinstance(exc, VisionAgentError):
                 raise
             if isinstance(exc, (OrientationSafetyError, UISceneError, ValueError)):
@@ -1007,46 +974,13 @@ class GenericSceneObserver:
                 )
                 self.last_raw_response = raw
                 self._set_stage("parsing_system_ui_audit")
-                try:
-                    scene, system_ui_audit_confidence, system_ui_audit_evidence = (
-                        _apply_system_ui_audit(
-                            scene,
-                            raw,
-                            fingerprint=fingerprint,
-                        )
+                scene, system_ui_audit_confidence, system_ui_audit_evidence = (
+                    _apply_system_ui_audit(
+                        scene,
+                        raw,
+                        fingerprint=fingerprint,
                     )
-                except VisionAgentError as audit_error:
-                    system_ui_audit_retry_used = True
-                    self._set_stage("waiting_system_ui_audit_retry")
-                    retry_messages = [
-                        _json_only_system_message(),
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": _system_ui_audit_retry_prompt(
-                                        context,
-                                        audit_error,
-                                    ),
-                                },
-                                *system_ui_images,
-                            ],
-                        },
-                    ]
-                    raw = model_chat(
-                        retry_messages,
-                        max_tokens=SYSTEM_UI_AUDIT_TOKENS,
-                    )
-                    self.last_raw_response = raw
-                    self._set_stage("parsing_system_ui_audit")
-                    scene, system_ui_audit_confidence, system_ui_audit_evidence = (
-                        _apply_system_ui_audit(
-                            scene,
-                            raw,
-                            fingerprint=fingerprint,
-                        )
-                    )
+                )
 
             if _should_audit_prefilled_input(scene, context):
                 input_structure_audit_used = True
@@ -1957,7 +1891,7 @@ def _targeted_prompt(
 {_roi_observation_note(roi_bounds)}
 
 重新检查原图中与目标直接相关的文字、图标、输入框、列表项和最上层弹层。
-只保留最多4个最相关元素；目标元素必须states.goal_relevant=true。看不清或不唯一就不要输出，
+只保留最多{MAX_COMPACT_ELEMENTS}个最相关元素；目标元素必须states.goal_relevant=true。看不清或不唯一就不要输出，
 并降低confidence。bounds的x和y必须分别按原图宽、高独立归一化到0..1000：
 左/上边为0，右/下边为1000。竖图不是以宽度1000等比缩放后的长方形坐标系；
 任何y>1000都说明坐标系错了，必须省略该元素，不得截断或换算。只框元素自身。
@@ -1976,7 +1910,7 @@ summary_addendum必须记录“对应边缘存在部分可见的后续内容，�
 手机边框和机械臂控制器标线不算；不得猜测边缘外是什么，也不得把该标记写成可操作目标。
 若目标以序数指定列表条目，必须把目标及其之前所有同列、同类、完整可见兄弟项分别写入elements，
 逐字抄录label并紧框自身；只把按垂直中心从上到下排序后位于指定序位的条目标成goal_relevant:true，
-前序证明项写false。缺少任一前序项、超过4个元素或无法证明同列顺序时不得猜测目标。
+前序证明项写false。缺少任一前序项、超过{MAX_COMPACT_ELEMENTS}个元素或无法证明同列顺序时不得猜测目标。
 若目标要求读取当前或下一页标题，必须优先返回唯一页面主标题元素，使用role=text、
 meaning=page_title、逐字label、goal_relevant:true并明确fully_visible；普通正文、按钮文字、
 卡片说明和浏览器标题栏都不是页面主标题。
@@ -2134,7 +2068,8 @@ Distinguish three different visual structures; never merge them:
 2. ime_preedit_regions: the input method's composition/candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Enumerate only complete visible candidate words inside each region; candidates are read-only facts and never application inputs.
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
-5. keyboard.literal_keys: enumerate at most eight complete visible keys that insert exactly one character. value is the exact inserted character; for the space bar use value=" " and key_kind="space". For every other key use key_kind="character" and require label to equal value literally. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
+5. keyboard.backspace_key: for any complete visible keyboard layout, report the one complete backspace/delete key as label, bounds, confidence and fully_visible. Use null when absent, clipped, ambiguous, or confused with an App delete control. This is read-only geometry and never authorizes clearing by itself.
+6. keyboard.literal_keys: enumerate at most eight complete visible keys that insert exactly one character. value is the exact inserted character; for the space bar use value=" " and key_kind="space". For every other key use key_kind="character" and require label to equal value literally. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
 6. keyboard.layout_switches: enumerate only compact visible keys with an explicit destination layout: qwerty, numeric, or symbol. Copy the literal label and report current_layout and target_layout; never infer a destination from the goal alone.
 7. keyboard.case_mode and keyboard.case_switch apply only to direct_latin QWERTY. case_mode is lower, upper, or unknown from the visible letter glyphs. case_switch is null unless a complete visible shift/case key and its lower↔upper direction are independently clear.
 Determine keyboard.input_mode only from the current whole keyboard image, never from the goal or the JSON example. Visible Chinese composition/candidates, pinyin separators, or a current-mode label such as 中/中文/Pinyin prove chinese_pinyin. A visible current-mode label such as 英/EN/English/ABC/Latin together with a plain Latin QWERTY layout and no Chinese composition/candidate strip proves direct_latin. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
@@ -2159,9 +2094,10 @@ Return exactly this JSON schema and no other fields:
 "candidates":[{{"text":"literal candidate","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true}}]}}],
 "keyboard":{{"visible":true,"bounds":[0,0,1000,1000],"layout":"qwerty",
 "input_mode":"unknown","case_mode":"unknown","qwerty_anchors":{{"q":[0,0],"p":[0,0],"a":[0,0],"l":[0,0],"z":[0,0],"m":[0,0],"backspace":[0,0]}},"mode_switch":null,
+"backspace_key":{{"label":"⌫","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true}},
 "case_switch":null,"literal_keys":[{{"value":".","label":".","key_kind":"character","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true}}],
 "layout_switches":[{{"label":"123","bounds":[0,0,1000,1000],"confidence":0.0,"current_layout":"qwerty","target_layout":"numeric"}}]}}}}
-When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","case_mode":"unknown","qwerty_anchors":null,"mode_switch":null,"case_switch":null,"literal_keys":[],"layout_switches":[]}}.
+When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","case_mode":"unknown","qwerty_anchors":null,"mode_switch":null,"backspace_key":null,"case_switch":null,"literal_keys":[],"layout_switches":[]}}.
 Return empty arrays when their geometry is not visible. Never merge a clipped structure with a complete structure, and never copy an IME pre-edit region into application_inputs.
 """
 
@@ -2273,6 +2209,12 @@ def _map_input_structure_crop_audit_to_full(
             mode_switch["bounds"] = map_bounds(
                 mode_switch["bounds"],
                 "keyboard.mode_switch.bounds",
+            )
+        backspace_key = keyboard.get("backspace_key")
+        if isinstance(backspace_key, dict) and "bounds" in backspace_key:
+            backspace_key["bounds"] = map_bounds(
+                backspace_key["bounds"],
+                "keyboard.backspace_key.bounds",
             )
         case_switch = keyboard.get("case_switch")
         if isinstance(case_switch, dict) and "bounds" in case_switch:
@@ -3363,9 +3305,23 @@ def _has_exact_clear_glyph(item: dict[str, Any]) -> bool:
 def _goal_directed_roi_bounds(
     context: dict[str, Any],
 ) -> tuple[int, int, int, int] | None:
-    """Select at most one coarse ROI from explicit spatial words in the goal."""
+    """Select a coarse ROI only from the typed, user-authored spatial hint."""
 
-    visible = json.dumps(context, ensure_ascii=False).casefold()
+    hints: list[str] = []
+    focused = _active_subgoal_visual_context(context)
+    for source in (focused, context):
+        if not isinstance(source, dict):
+            continue
+        for key in ("goal_entities", "entities"):
+            entities = source.get(key)
+            if not isinstance(entities, dict):
+                continue
+            hint = entities.get("spatial_hint")
+            if isinstance(hint, str) and hint.strip():
+                hints.append(hint.strip().casefold())
+    if len(set(hints)) != 1:
+        return None
+    visible = hints[0]
     top = any(term in visible for term in ("顶部", "上方", "顶端", "top"))
     bottom = any(term in visible for term in ("底部", "下方", "底端", "bottom"))
     left = any(term in visible for term in ("左侧", "左边", "left"))
@@ -4829,6 +4785,7 @@ def _apply_input_structure_audit(
         }
         optional_keyboard_fields = {
             "qwerty_anchors",
+            "backspace_key",
             "case_mode",
             "case_switch",
             "literal_keys",
@@ -4891,6 +4848,7 @@ def _apply_input_structure_audit(
                 keyboard_input_mode = "unknown"
                 keyboard_case_mode = "unknown"
                 keyboard["mode_switch"] = None
+                keyboard["backspace_key"] = None
                 keyboard["case_switch"] = None
                 keyboard["literal_keys"] = []
                 keyboard["layout_switches"] = []
@@ -4898,6 +4856,7 @@ def _apply_input_structure_audit(
         elif (
             keyboard.get("bounds") is not None
             or keyboard.get("mode_switch") is not None
+            or keyboard.get("backspace_key") is not None
             or keyboard.get("case_switch") is not None
             or keyboard.get("literal_keys") not in (None, [])
             or keyboard.get("layout_switches") not in (None, [])
@@ -5106,7 +5065,20 @@ def _apply_input_structure_audit(
                 raw_qwerty_anchors,
                 keyboard_bounds=keyboard_bounds,
             )
+        generic_backspace_geometry = _validated_keyboard_backspace_key(
+            keyboard.get("backspace_key"),
+            keyboard_bounds=keyboard_bounds,
+        )
         raw_mode_switch = keyboard.get("mode_switch")
+        input_needs_mode_switch = bool(
+            input_step is not None
+            and input_step.kind in {"direct_latin", "chinese_pinyin"}
+            and keyboard_visible
+            and keyboard_layout == "qwerty"
+            and keyboard_input_mode in {"direct_latin", "chinese_pinyin"}
+            and keyboard_input_mode != input_step.required_mode
+        )
+        switch_is_goal = switch_is_goal or input_needs_mode_switch
         if (
             not switch_is_goal
             and trusted_input is not None
@@ -5137,6 +5109,11 @@ def _apply_input_structure_audit(
             and mode_switch["current_mode"] != keyboard_input_mode
         ):
             raise UISceneError("模式切换键 current_mode 与键盘 input_mode 冲突。")
+        if input_needs_mode_switch and (
+            mode_switch is None
+            or mode_switch["target_mode"] != input_step.required_mode
+        ):
+            raise UISceneError("模式切换键未绑定下一确定性文字分段所需方向。")
         literal_keys = _validated_keyboard_literal_keys(
             keyboard.get("literal_keys", []),
             keyboard_bounds=keyboard_bounds,
@@ -5279,6 +5256,14 @@ def _apply_input_structure_audit(
                 )
             if qwerty_geometry is not None:
                 states["keyboard_geometry"] = qwerty_geometry
+            elif generic_backspace_geometry is not None:
+                states["keyboard_geometry"] = {
+                    "type": "generic",
+                    "anchors": {
+                        "backspace": generic_backspace_geometry["center"]
+                    },
+                    "source": "input_structure_audit",
+                }
             if exact_ime_candidate is not None and input_step is not None:
                 states.update(
                     {
@@ -5420,9 +5405,17 @@ def _apply_input_structure_audit(
                     "confidence": mode_switch["confidence"],
                     "states": {
                         "goal_relevant": switch_is_goal,
+                        "fully_visible": True,
                         "keyboard_input_mode_switch": True,
                         "current_mode": mode_switch["current_mode"],
                         "target_mode": mode_switch["target_mode"],
+                        "prior_input_value": (
+                            input_step.current_text if input_step is not None else ""
+                        ),
+                        "next_input_value": (
+                            input_step.segment if input_step is not None else ""
+                        ),
+                        "input_element_id": "local_audited_input_1",
                     },
                     "evidence": ["键盘区域内方向明确的独立输入模式切换键"],
                 }
@@ -5480,7 +5473,7 @@ def _apply_hidden_keyboard_only_attestation(
         keyboard = payload.get("keyboard")
         hidden_required = {"visible", "bounds", "layout", "input_mode", "mode_switch"}
         hidden_optional = {
-            "qwerty_anchors", "case_mode", "case_switch",
+            "qwerty_anchors", "backspace_key", "case_mode", "case_switch",
             "literal_keys", "layout_switches",
         }
         if (
@@ -5496,6 +5489,7 @@ def _apply_hidden_keyboard_only_attestation(
             and keyboard.get("input_mode") == "unknown"
             and keyboard.get("mode_switch") is None
             and keyboard.get("qwerty_anchors") is None
+            and keyboard.get("backspace_key") is None
             and keyboard.get("case_mode", "unknown") == "unknown"
             and keyboard.get("case_switch") is None
             and keyboard.get("literal_keys") in (None, [])
@@ -5694,6 +5688,51 @@ def _validated_keyboard_mode_switch(
         "confidence": confidence,
         "current_mode": current_mode,
         "target_mode": target_mode,
+    }
+
+
+def _validated_keyboard_backspace_key(
+    value: Any,
+    *,
+    keyboard_bounds: tuple[float, float, float, float] | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if keyboard_bounds is None:
+        raise UISceneError("退格键必须绑定完整可见键盘区域。")
+    if not isinstance(value, dict) or set(value) != {
+        "label",
+        "bounds",
+        "confidence",
+        "fully_visible",
+    }:
+        raise UISceneError("输入结构审计 backspace_key 字段不符合协议。")
+    label = str(value.get("label") or "").strip()
+    if not label or not re.search(
+        r"(?:⌫|⌦|退格|删除|backspace|delete)",
+        label,
+        re.IGNORECASE,
+    ):
+        raise UISceneError("backspace_key 缺少逐字可见退格图形。")
+    if value.get("fully_visible") is not True or not _valid_1000_bounds(
+        value.get("bounds")
+    ):
+        raise UISceneError("backspace_key 必须完整可见且 bounds 有效。")
+    confidence = _audit_confidence(value.get("confidence"), "backspace_key")
+    bounds = tuple(float(part) for part in value["bounds"])
+    if confidence < 0.9 or not _bounds_inside(
+        bounds,
+        keyboard_bounds,
+        tolerance=12,
+    ):
+        return None
+    return {
+        "label": label,
+        "center": [
+            round((bounds[0] + bounds[2]) / 2),
+            round((bounds[1] + bounds[3]) / 2),
+        ],
+        "confidence": confidence,
     }
 
 
@@ -6081,29 +6120,9 @@ def _normalize_exact_target_ui_label_relevance(
         if not isinstance(states, dict):
             continue
         states["goal_relevant"] = item is target
-    target_states = target.get("states")
-    bounds = target.get("bounds")
-    overlays = payload.get("overlays")
-    if (
-        isinstance(target_states, dict)
-        and "fully_visible" not in target_states
-        and isinstance(bounds, list)
-        and len(bounds) == 4
-        and all(
-            isinstance(value, (int, float)) and math.isfinite(float(value))
-            for value in bounds
-        )
-        and 5.0 <= float(bounds[0]) < float(bounds[2]) <= 995.0
-        and 5.0 <= float(bounds[1]) < float(bounds[3]) <= 995.0
-        and isinstance(overlays, list)
-        and not overlays
-        and isinstance(target.get("evidence"), list)
-        and bool(target["evidence"])
-    ):
-        # ``fully_visible`` only means the reported target box is wholly in
-        # the original frame and unobscured by a reported overlay.  It does not
-        # attest meaning, clickability or action safety.
-        target_states["fully_visible"] = True
+    # Exact text may resolve relevance, but never visibility authority.
+    # ``fully_visible`` must be supplied by observation and independently
+    # confirmed by the geometry audit before an element-bound action.
 
 
 def _goal_target_ui_label(context: dict[str, Any]) -> str:

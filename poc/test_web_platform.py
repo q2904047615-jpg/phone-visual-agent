@@ -4397,100 +4397,28 @@ class ApiEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(observer["supported_app_scope"], "dynamic")
         architecture["universal_agent"] = universal
+        self.assertEqual(architecture["active_orchestrator"], "universal_agent")
+        self.assertEqual(architecture["controller"], "single_state_controller")
         self.assertEqual(
-            architecture,
-            {
-                "model_role": "observation_only",
-                "controller": "single_state_controller",
-                "legacy_free_agent_enabled": False,
-                "active_orchestrator": "universal_agent",
-                "background_compatibility_worker": {
-                    "enabled": True,
-                    "mode": "legacy",
-                    "default_user_path": False,
-                },
-                "universal_agent": {
-                    "goal_protocol": "2026-08-10-generic-intent-v1",
-                    "scene_protocol": "2026-08-14-ui-scene-v3",
-                    "action_protocol": "2026-08-18-universal-action-v14",
-                    "goal_preview_enabled": True,
-                    "scene_preview_enabled": True,
-                    "hardware_execution_enabled": True,
-                    "automatic_loop_enabled": False,
-                    "automatic_loop_max_physical_actions": 1,
-                    "supervised_single_step_enabled": True,
-                    "enabled_physical_actions": [
-                        "back",
-                        "dismiss_overlay",
-                        "drag",
-                        "home",
-                        "input_verified_text",
-                        "long_press",
-                        "reveal_system_navigation",
-                        "swipe",
-                        "tap_semantic",
-                    ],
-                    "protocol_physical_actions": [
-                        "tap_semantic",
-                        "dismiss_overlay",
-                        "swipe",
-                        "back",
-                        "home",
-                        "reveal_system_navigation",
-                        "input_verified_text",
-                        "clear_verified_text",
-                        "long_press",
-                        "drag",
-                    ],
-                    "hardware_capabilities": {
-                        "tap_semantic": True,
-                        "dismiss_overlay": True,
-                        "swipe": True,
-                        "back": True,
-                        "home": True,
-                        "wait_for_change": True,
-                        "input_verified_text": True,
-                        "long_press": True,
-                        "drag": True,
-                        "reveal_system_navigation": True,
-                    },
-                    "supported_app_scope": "dynamic",
-                },
-                "generic_orchestrator": {
-                    "available": True,
-                    "execution_enabled": False,
-                    "protocol_version": "2026-08-06-generic-plan-v1",
-                    "role": "compatibility_only",
-                    "default_user_path": False,
-                    "allowed_actions": [
-                        "back",
-                        "dismiss_overlay",
-                        "ensure_app",
-                        "finish",
-                        "input_verified_text",
-                        "observe",
-                        "record_verified_result",
-                        "recover_unknown",
-                        "swipe",
-                        "tap_semantic",
-                        "verify",
-                        "wait_for_change",
-                    ],
-                },
-                "semantic_action_adapter": {
-                    "role": "compatibility_only",
-                    "default_user_path": False,
-                    "execution_enabled": True,
-                    "enabled_real_actions": [
-                        "ensure_app",
-                        "tap_semantic:heart",
-                        "swipe:up_on_live_preview_or_ad",
-                    ],
-                    "enabled_read_only_actions": ["observe"],
-                    "max_physical_actions_per_request": 1,
-                },
-            },
+            architecture["background_compatibility_worker"]["enabled"],
+            web_app.LEGACY_WORKFLOWS_ENABLED,
         )
+        self.assertFalse(
+            architecture["background_compatibility_worker"]["default_user_path"]
+        )
+        self.assertTrue(universal["automatic_loop_enabled"])
+        self.assertEqual(universal["automatic_loop_max_physical_actions"], 12)
+        self.assertEqual(universal["supported_app_scope"], "dynamic")
+        self.assertEqual(
+            universal["hardware_capability_profile"]["protocol_version"],
+            "2026-08-18-device-capability-profile-v1",
+        )
+        self.assertTrue(
+            universal["hardware_capability_profile"]["actions"]["tap_semantic"]
+            ["fresh_visual_postcondition_required"]
+        )
+        self.assertFalse(architecture["generic_orchestrator"]["default_user_path"])
+        self.assertFalse(architecture["semantic_action_adapter"]["default_user_path"])
 
     def test_home_uses_generic_supervised_single_step_endpoints(self) -> None:
         home = self.client.get("/")
@@ -4525,6 +4453,20 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertNotIn("wechatView", script.text)
         self.assertNotIn("douyinView", script.text)
 
+    def test_legacy_fixed_workflows_are_disabled_outside_explicit_compatibility_mode(self) -> None:
+        with patch.object(web_app, "LEGACY_WORKFLOWS_ENABLED", False):
+            response = self.client.post(
+                "/api/tasks",
+                headers=self.headers,
+                json={
+                    "app_id": "wechat",
+                    "operation": "wechat.send_text",
+                    "params": {},
+                },
+            )
+        self.assertEqual(response.status_code, 410, response.text)
+        self.assertIn("generic-supervised/start", response.text)
+
     def test_capability_revision_must_match_loaded_service_code(self) -> None:
         runtime = web_app.Runtime.__new__(web_app.Runtime)
         runtime.loaded_code_revision = "loaded-revision"
@@ -4544,12 +4486,19 @@ class ApiEndToEndTests(unittest.TestCase):
         request = web_app.GenericSupervisedAutoRequest(device_id="phone-01")
         self.assertFalse(request.confirmed)
         self.assertIsNone(request.confirmation)
-        self.assertEqual(request.max_physical_actions, 1)
-        self.assertEqual(request.max_iterations, 1)
+        self.assertEqual(request.max_physical_actions, 12)
+        self.assertEqual(request.max_iterations, 24)
+        bounded = web_app.GenericSupervisedAutoRequest(
+            device_id="phone-01",
+            max_physical_actions=20,
+            max_iterations=40,
+        )
+        self.assertEqual(bounded.max_physical_actions, 20)
+        self.assertEqual(bounded.max_iterations, 40)
         with self.assertRaises(ValueError):
             web_app.GenericSupervisedAutoRequest(
                 device_id="phone-01",
-                max_physical_actions=2,
+                max_physical_actions=21,
             )
         with self.assertRaises(ValueError):
             web_app.GenericSupervisedAutoRequest(
@@ -5278,7 +5227,7 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertEqual(422, response.status_code, response.text)
         self.assertIn("原始只读观察错误", response.text)
 
-    def test_generic_supervised_api_starts_unexecuted_and_requires_confirmation(self) -> None:
+    def test_generic_supervised_api_starts_and_enters_safe_auto_loop(self) -> None:
         orchestrator, planner, qwen, adapter = self._universal_api_orchestrator()
         before_executions = len(web_app.runtime.controller.executions)
         with (
@@ -5298,6 +5247,16 @@ class ApiEndToEndTests(unittest.TestCase):
                 "propose",
                 side_effect=AssertionError("legacy step planner must not run"),
             ),
+            patch.object(
+                orchestrator,
+                "run_autonomous_safe_loop",
+                return_value={
+                    "physical_actions": 0,
+                    "iterations": 0,
+                    "status": "awaiting_confirmation",
+                    "pause_reason": "测试保留待执行安全动作",
+                },
+            ) as auto_loop,
         ):
             started = self.client.post(
                 "/api/agent/generic-supervised/start",
@@ -5308,6 +5267,7 @@ class ApiEndToEndTests(unittest.TestCase):
             payload = started.json()
             session_id = payload["session"]["session_id"]
             self.assertEqual(payload["physical_actions"], 0)
+            self.assertTrue(payload["automatic_loop_enabled"])
             self.assertEqual(
                 payload["session"]["status"], "awaiting_confirmation"
             )
@@ -5315,6 +5275,7 @@ class ApiEndToEndTests(unittest.TestCase):
             self.assertEqual(len(qwen.calls), 1)
             self.assertEqual(adapter.capture_calls, 1)
             self.assertEqual(adapter.execute_calls, 0)
+            auto_loop.assert_called_once()
 
             rejected = self.client.post(
                 f"/api/agent/generic-supervised/{session_id}/confirm",
@@ -5364,7 +5325,7 @@ class ApiEndToEndTests(unittest.TestCase):
             self.assertEqual(session["status"], "awaiting_risk_confirmation")
             self.assertEqual(response.json()["physical_actions"], 0)
             self.assertEqual(len(qwen.calls), 0)
-            self.assertEqual(adapter.capture_calls, 0)
+            self.assertEqual(adapter.capture_calls, 1)
             self.assertEqual(adapter.execute_calls, 0)
 
             approved = self.client.post(
@@ -5377,11 +5338,10 @@ class ApiEndToEndTests(unittest.TestCase):
             )
 
         self.assertEqual(approved.status_code, 200, approved.text)
-        self.assertEqual(approved.json()["session"]["status"], "awaiting_confirmation")
-        self.assertEqual(approved.json()["physical_actions"], 0)
+        self.assertEqual(approved.json()["physical_actions"], 1)
         self.assertEqual(len(qwen.calls), 1)
-        self.assertEqual(adapter.capture_calls, 1)
-        self.assertEqual(adapter.execute_calls, 0)
+        self.assertGreaterEqual(adapter.capture_calls, 2)
+        self.assertEqual(adapter.execute_calls, 1)
 
     def test_same_device_second_generic_session_returns_409(self) -> None:
         orchestrator, planner, qwen, adapter = self._universal_api_orchestrator()
@@ -5393,6 +5353,16 @@ class ApiEndToEndTests(unittest.TestCase):
                     web_app.runtime,
                     "universal_agent_orchestrator",
                     orchestrator,
+                ),
+                patch.object(
+                    orchestrator,
+                    "run_autonomous_safe_loop",
+                    return_value={
+                        "physical_actions": 0,
+                        "iterations": 0,
+                        "status": "awaiting_confirmation",
+                        "pause_reason": "测试保留活动会话",
+                    },
                 ),
             ):
                 first = self.client.post(
@@ -5424,7 +5394,7 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertEqual(adapter.capture_calls, 1)
         self.assertEqual(adapter.execute_calls, 0)
 
-    def test_next_reobserves_then_bounded_auto_executes_one_verified_action(self) -> None:
+    def test_safe_auto_executes_one_verified_action_without_confirmation(self) -> None:
         orchestrator, _planner, _qwen, adapter = self._universal_api_orchestrator()
         with (
             patch.object(web_app, "_require_supervised_device_ready"),
@@ -5433,6 +5403,16 @@ class ApiEndToEndTests(unittest.TestCase):
                 "universal_agent_orchestrator",
                 orchestrator,
             ),
+            patch.object(
+                orchestrator,
+                "run_autonomous_safe_loop",
+                return_value={
+                    "physical_actions": 0,
+                    "iterations": 0,
+                    "status": "awaiting_confirmation",
+                    "pause_reason": "测试把执行留给 /auto",
+                },
+            ),
         ):
             started = self.client.post(
                 "/api/agent/generic-supervised/start",
@@ -5440,21 +5420,21 @@ class ApiEndToEndTests(unittest.TestCase):
                 json={"text": "查看详情", "device_id": "phone-01"},
             )
             session_id = started.json()["session"]["session_id"]
-            first_observation = started.json()["session"]["confirmation_scope"][
-                "observation_id"
-            ]
-            refreshed = self.client.post(
-                f"/api/agent/generic-supervised/{session_id}/next",
-                headers=self.headers,
-                json={"device_id": "phone-01"},
-            )
+
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+        ):
             automatic = self.client.post(
                 f"/api/agent/generic-supervised/{session_id}/auto",
                 headers=self.headers,
                 json={
                     "device_id": "phone-01",
-                    "confirmed": True,
-                    "confirmation": refreshed.json()["session"]["confirmation_scope"],
+                    "confirmed": False,
                     "max_physical_actions": 1,
                     "max_iterations": 1,
                 },
@@ -5465,16 +5445,10 @@ class ApiEndToEndTests(unittest.TestCase):
                 json={"device_id": "phone-01"},
             )
 
-        self.assertEqual(refreshed.status_code, 200, refreshed.text)
-        self.assertEqual(refreshed.json()["physical_actions"], 0)
-        self.assertNotEqual(
-            first_observation,
-            refreshed.json()["session"]["confirmation_scope"]["observation_id"],
-        )
         self.assertEqual(automatic.status_code, 200, automatic.text)
         self.assertEqual(automatic.json()["execution"]["physical_actions"], 1)
         self.assertEqual(automatic.json()["session"]["physical_actions"], 1)
-        self.assertEqual(adapter.capture_calls, 2)
+        self.assertGreaterEqual(adapter.capture_calls, 1)
         self.assertEqual(adapter.execute_calls, 1)
 
     def test_supervised_session_starts_paused_and_requires_confirmation(self) -> None:

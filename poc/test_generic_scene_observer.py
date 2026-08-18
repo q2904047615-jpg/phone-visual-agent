@@ -932,7 +932,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
 
         self.assertEqual("target", scene.unique_trusted_goal_element().element_id)
-        self.assertTrue(scene.elements[0].states["fully_visible"])
+        self.assertNotIn("fully_visible", scene.elements[0].states)
         self.assertFalse(scene.elements[1].states["goal_relevant"])
 
     def test_active_subgoal_target_label_resolves_model_false_relevance(self) -> None:
@@ -1115,7 +1115,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIs(scene.system_ui.navigation_bar_visible, False)
         self.assertEqual(0.95, scene.confidence)
         self.assertEqual(2, provider.calls)
-        self.assertEqual([1800, 600], provider.max_tokens_seen)
+        self.assertEqual([2600, 600], provider.max_tokens_seen)
         self.assertTrue(observer.last_diagnostics["system_ui_audit_used"])
         self.assertFalse(observer.last_diagnostics["system_ui_audit_retry_used"])
         self.assertFalse(observer.last_diagnostics["targeted_refinement_used"])
@@ -1125,7 +1125,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             sum(item.get("type") == "image_url" for item in audit_content),
         )
 
-    def test_system_ui_audit_retries_once_then_fails_closed_on_unknown(self) -> None:
+    def test_system_ui_audit_fails_closed_without_remote_retry_on_unknown(self) -> None:
         compact = scene_payload()
         compact["elements"] = []
         provider = SequenceProvider(
@@ -1146,9 +1146,9 @@ class GenericSceneObserverTests(unittest.TestCase):
                 goal_context={"objective": "检查全屏状态和系统导航栏"},
             )
 
-        self.assertEqual(3, provider.calls)
+        self.assertEqual(2, provider.calls)
         self.assertTrue(observer.last_diagnostics["system_ui_audit_used"])
-        self.assertTrue(observer.last_diagnostics["system_ui_audit_retry_used"])
+        self.assertFalse(observer.last_diagnostics["system_ui_audit_retry_used"])
 
     def test_system_ui_audit_rejects_action_fields_and_coordinate_evidence(self) -> None:
         compact = scene_payload()
@@ -1164,7 +1164,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                         frames=stable_frames(),
                         goal_context={"objective": "显示系统导航栏"},
                     )
-                self.assertEqual(3, provider.calls)
+                self.assertEqual(2, provider.calls)
 
     def test_non_system_ui_goal_does_not_trigger_system_ui_audit(self) -> None:
         payload = scene_payload()
@@ -1427,7 +1427,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         self.assertEqual(3, provider.calls)
 
-    def test_direction_audit_retries_once_for_rejected_evidence_wording(self):
+    def test_direction_audit_rejected_evidence_fails_without_remote_retry(self):
         provider = SequenceProvider(
             [
                 {
@@ -1446,20 +1446,20 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         observer = GenericSceneObserver(provider)
 
-        credential = observer.audit_camera_alignment(
-            frames=stable_frames(),
-            device_id="device-a",
-            scene_fingerprint="scene-a",
-        )
+        with self.assertRaisesRegex(VisionAgentError, "包含坐标、动作"):
+            observer.audit_camera_alignment(
+                frames=stable_frames(),
+                device_id="device-a",
+                scene_fingerprint="scene-a",
+            )
 
-        self.assertEqual(2, provider.calls)
-        self.assertEqual(("手机页面文字横向排列且字形正立",), credential.evidence)
+        self.assertEqual(1, provider.calls)
         diagnostics = observer.last_orientation_audit_diagnostics
-        self.assertTrue(diagnostics["audit_accepted"])
-        self.assertTrue(diagnostics["retry_used"])
-        self.assertEqual(2, diagnostics["model_calls"])
+        self.assertFalse(diagnostics["audit_accepted"])
+        self.assertFalse(diagnostics["retry_used"])
+        self.assertEqual(1, diagnostics["model_calls"])
         self.assertEqual(
-            [3, 3],
+            [3],
             [
                 sum(
                     item.get("type") == "image_url"
@@ -1468,14 +1468,9 @@ class GenericSceneObserverTests(unittest.TestCase):
                 for messages in provider.messages_seen
             ],
         )
-        serialized = json.dumps(diagnostics, ensure_ascii=False)
-        self.assertNotIn("点击控制端", serialized)
-        retry_prompt = provider.messages_seen[1][1]["content"][0]["text"]
-        self.assertIn("rejected before any", retry_prompt)
-        self.assertIn("physical action", retry_prompt)
-        self.assertIn("each at most 60 characters", retry_prompt)
+        self.assertEqual(1, len(provider.responses))
 
-    def test_direction_audit_second_bad_evidence_fails_without_third_call(self):
+    def test_direction_audit_bad_evidence_fails_after_one_call(self):
         invalid = {
             "protocol_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
             "phone_content_rotation": "upright",
@@ -1492,12 +1487,12 @@ class GenericSceneObserverTests(unittest.TestCase):
                 scene_fingerprint="scene-a",
             )
 
-        self.assertEqual(2, provider.calls)
-        self.assertEqual(1, len(provider.responses))
+        self.assertEqual(1, provider.calls)
+        self.assertEqual(2, len(provider.responses))
         diagnostics = observer.last_orientation_audit_diagnostics
         self.assertFalse(diagnostics["audit_accepted"])
-        self.assertTrue(diagnostics["retry_used"])
-        self.assertEqual(2, diagnostics["model_calls"])
+        self.assertFalse(diagnostics["retry_used"])
+        self.assertEqual(1, diagnostics["model_calls"])
 
     def test_independent_direction_audit_fails_closed_on_unknown_low_or_extra_fields(self):
         cases = (
@@ -2229,7 +2224,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(scene.elements[0].bounds, (0.1, 0.6, 0.26, 0.76))
         self.assertNotEqual(scene.fingerprint, "model-value-must-not-be-trusted")
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.max_tokens, 1800)
+        self.assertEqual(provider.max_tokens, 2600)
         self.assertEqual(provider.call_options["timeout"], 60.0)
 
     def test_low_confidence_scene_is_rejected_before_trusted_observation(self) -> None:
@@ -2392,7 +2387,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         with self.assertRaisesRegex(VisionAgentError, "唯一、严格有效"):
             observer.observe(frames=stable_frames())
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.max_tokens_seen, [1800])
+        self.assertEqual(provider.max_tokens_seen, [2600])
         self.assertEqual(len(provider.responses), 1)
         self.assertFalse(observer.last_diagnostics["compact_retry_used"])
         self.assertEqual(observer.last_diagnostics["model_calls"], 1)
@@ -2458,7 +2453,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(scene.foreground_app_id, "launcher")
         self.assertEqual(scene.elements[0].label, "浏览器")
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.max_tokens_seen, [1800])
+        self.assertEqual(provider.max_tokens_seen, [2600])
         self.assertFalse(observer.last_diagnostics["compact_retry_used"])
         self.assertTrue(observer.last_diagnostics["local_structural_repair_used"])
         self.assertEqual(observer.last_diagnostics["model_calls"], 1)
@@ -2487,7 +2482,7 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         self.assertEqual(scene.foreground_app_id, "calculator")
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.max_tokens_seen, [1800])
+        self.assertEqual(provider.max_tokens_seen, [2600])
         self.assertTrue(observer.last_diagnostics["local_structural_repair_used"])
 
     def test_missing_two_final_braces_still_fails_closed(self) -> None:
@@ -2503,7 +2498,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             observer.observe(frames=stable_frames())
 
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.max_tokens_seen, [1800])
+        self.assertEqual(provider.max_tokens_seen, [2600])
         self.assertFalse(observer.last_diagnostics["local_structural_repair_used"])
 
     def test_valid_duplicate_key_first_response_fails_closed(self) -> None:
@@ -2535,7 +2530,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             observer.observe(frames=stable_frames())
 
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.max_tokens_seen, [1800])
+        self.assertEqual(provider.max_tokens_seen, [2600])
         self.assertEqual(len(provider.responses), 1)
         self.assertFalse(observer.last_diagnostics["repair_retry_success"])
         self.assertEqual(observer.last_diagnostics["model_calls"], 1)
@@ -2616,7 +2611,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         self.assertEqual(scene.elements[0].element_id, "e1")
         self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [1800, 700])
+        self.assertEqual(provider.max_tokens_seen, [2600, 700])
         self.assertTrue(observer.last_diagnostics["format_retry_used"])
         self.assertTrue(observer.last_diagnostics["local_structural_repair_used"])
         self.assertTrue(observer.last_diagnostics["repair_retry_success"])
@@ -2635,7 +2630,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             )
 
         self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [1800, 700])
+        self.assertEqual(provider.max_tokens_seen, [2600, 700])
         self.assertEqual(len(provider.responses), 1)
         self.assertFalse(observer.last_diagnostics["local_structural_repair_used"])
         self.assertFalse(observer.last_diagnostics["repair_retry_success"])
@@ -2652,7 +2647,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 goal_context={"objective": "查找目标按钮"},
             )
         self.assertEqual(provider.calls, 1)
-        self.assertEqual(provider.max_tokens_seen, [1800])
+        self.assertEqual(provider.max_tokens_seen, [2600])
         self.assertEqual(len(provider.responses), 1)
         self.assertFalse(observer.last_diagnostics["format_retry_used"])
         self.assertFalse(observer.last_diagnostics["repair_retry_success"])
@@ -2738,7 +2733,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         )
         self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [1800, 700])
+        self.assertEqual(provider.max_tokens_seen, [2600, 700])
         self.assertEqual(scene.elements[0].label, "微信")
         self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
         targeted_text = provider.messages_seen[1][1]["content"][0]["text"]
@@ -2908,7 +2903,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             frames=stable_frames(),
             goal_context={
                 "objective": "输入框内容为 codex 且不提交",
-                "entities": {"input_text": "codex"},
+                "entities": {"input_text": "codex", "spatial_hint": "bottom"},
             },
         )
         self.assertEqual(provider.calls, 2)
@@ -2948,7 +2943,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             frames=stable_frames(),
             goal_context={
                 "objective": "在底部唯一消息输入框中保留 codex 草稿",
-                "entities": {"input_text": "codex"},
+                "entities": {"input_text": "codex", "spatial_hint": "bottom"},
             },
         )
 
@@ -2990,7 +2985,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             frames=stable_frames(),
             goal_context={
                 "objective": "在底部唯一输入框中保留 codex 草稿",
-                "entities": {"input_text": "codex"},
+                "entities": {"input_text": "codex", "spatial_hint": "bottom"},
             },
         )
 
@@ -3281,7 +3276,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     fingerprint="local-fingerprint",
                 )
 
-    def test_targeted_delta_rejects_duplicates_and_more_than_four_elements(self) -> None:
+    def test_targeted_delta_rejects_duplicates_and_more_than_twelve_elements(self) -> None:
         base = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),
             fingerprint="local-fingerprint",
@@ -3303,7 +3298,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         oversized = targeted_delta_payload(
             elements=[
                 {**element, "element_id": f"e{index}"}
-                for index in range(5)
+                for index in range(13)
             ]
         )
         with self.assertRaisesRegex(VisionAgentError, "最小增量协议"):
@@ -5000,7 +4995,10 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         scene = observer.observe(
             frames=icon_cluster_frames(),
-            goal_context={"objective": "顶部右侧圆形箭头对应的页面重新加载已完成"},
+            goal_context={
+                "objective": "圆形箭头对应的页面重新加载已完成",
+                "entities": {"spatial_hint": "top_right"},
+            },
         )
 
         self.assertEqual(4, provider.calls)
@@ -5053,7 +5051,10 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         scene = observer.observe(
             frames=icon_cluster_frames(),
-            goal_context={"objective": "顶部右侧圆形箭头对应的页面重新加载已完成"},
+            goal_context={
+                "objective": "圆形箭头对应的页面重新加载已完成",
+                "entities": {"spatial_hint": "top_right"},
+            },
         )
 
         self.assertEqual(4, provider.calls)
@@ -5553,7 +5554,10 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         scene = observer.observe(
             frames=stable_frames(),
-            goal_context={"objective": "修改顶部已有文字的输入框"},
+            goal_context={
+                "objective": "修改已有文字的输入框",
+                "entities": {"spatial_hint": "top"},
+            },
         )
 
         self.assertEqual(scene.elements[0].bounds, (0.1, 0.1, 0.9, 0.3))
@@ -5781,7 +5785,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual((0.704, 0.078, 0.836, 0.129), button.bounds)
         self.assertFalse(button.states["goal_relevant"])
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
-        self.assertEqual([1800, 700, 1000], provider.max_tokens_seen)
+        self.assertEqual([2600, 700, 1000], provider.max_tokens_seen)
 
     def test_incomplete_disjoint_right_button_is_discarded_without_input_widening(self) -> None:
         empty = scene_payload()
@@ -6199,14 +6203,14 @@ class GenericSceneObserverTests(unittest.TestCase):
 
     def test_status_exposes_observation_policy(self) -> None:
         status = GenericSceneObserver(FakeProvider(scene_payload())).status()
-        self.assertEqual(status["compact_output_tokens"], 1800)
+        self.assertEqual(status["compact_output_tokens"], 2600)
         self.assertEqual(status["targeted_output_tokens"], 700)
         self.assertEqual(
             status["targeted_delta_protocol"],
             TARGETED_SCENE_DELTA_PROTOCOL_VERSION,
         )
         self.assertEqual(status["observation_timeout_seconds"], 60.0)
-        self.assertEqual(status["max_compact_elements"], 4)
+        self.assertEqual(status["max_compact_elements"], 12)
         self.assertEqual(status["current_stage"], "idle")
 
     def test_ordinal_prompts_require_preceding_visible_siblings(self) -> None:

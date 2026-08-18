@@ -409,7 +409,10 @@ class GenericSingleActionAdapter:
             and all(
                 element.states.get("independent_geometry_verified") is True
                 and element.states.get("geometry_audit_source")
-                == "icon_cluster_localization"
+                in {
+                    "icon_cluster_localization",
+                    "element_geometry_audit",
+                }
                 and any(item.strip() for item in element.evidence)
                 for element in elements
             )
@@ -985,14 +988,24 @@ class GenericSingleActionAdapter:
             keyboard_geometry = input_element.states.get("keyboard_geometry")
             if (
                 not isinstance(keyboard_geometry, dict)
-                or keyboard_geometry.get("type") != "qwerty"
                 or keyboard_geometry.get("source") != "input_structure_audit"
+                or (
+                    resolved.kind == "input_verified_text"
+                    and keyboard_geometry.get("type") != "qwerty"
+                )
+                or (
+                    resolved.kind == "clear_verified_text"
+                    and keyboard_geometry.get("type") not in {"qwerty", "generic"}
+                )
             ):
                 raise GenericActionAdapterError(
-                    "当前文字输入缺少本轮输入结构审计签发的 QWERTY 几何；拒绝使用静态键盘配置。"
+                    "当前文字动作缺少本轮输入结构审计签发的键盘几何；拒绝使用静态配置。"
                 )
             execution_keyboard_geometry = dict(keyboard_geometry)
-            if self.require_local_qwerty_row_snap:
+            if (
+                keyboard_geometry.get("type") == "qwerty"
+                and self.require_local_qwerty_row_snap
+            ):
                 if not callable(self.qwerty_row_snapper):
                     raise GenericActionAdapterError(
                         "真机文字输入缺少本地 QWERTY 行中心复核器。"
@@ -1007,14 +1020,32 @@ class GenericSingleActionAdapter:
                     )
                 execution_keyboard_geometry["anchors"] = snapped_anchors
                 execution_keyboard_geometry["row_snap_source"] = "stable_local_ocr"
-            try:
-                qwerty_keyboard_config_from_anchors(
-                    execution_keyboard_geometry.get("anchors")
-                )
-            except WorkflowNotReady as exc:
-                raise GenericActionAdapterError(
-                    f"当前 QWERTY 几何未通过动作前本地复核：{exc}"
-                ) from exc
+            if execution_keyboard_geometry.get("type") == "qwerty":
+                try:
+                    qwerty_keyboard_config_from_anchors(
+                        execution_keyboard_geometry.get("anchors")
+                    )
+                except WorkflowNotReady as exc:
+                    raise GenericActionAdapterError(
+                        f"当前 QWERTY 几何未通过动作前本地复核：{exc}"
+                    ) from exc
+            else:
+                backspace = (
+                    execution_keyboard_geometry.get("anchors") or {}
+                ).get("backspace")
+                if (
+                    not isinstance(backspace, list)
+                    or len(backspace) != 2
+                    or any(
+                        isinstance(part, bool)
+                        or not isinstance(part, (int, float))
+                        or not 0 <= float(part) <= 1000
+                        for part in backspace
+                    )
+                ):
+                    raise GenericActionAdapterError(
+                        "非 QWERTY 清空缺少本轮完整可见退格键中心。"
+                    )
             validator = getattr(self.robot, "validate_verified_text", None)
             if resolved.kind == "input_verified_text" and callable(validator):
                 try:

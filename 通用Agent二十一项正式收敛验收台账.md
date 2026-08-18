@@ -344,3 +344,25 @@ Uvicorn 后，用全新 session 从当前 Settings 前台先返回 Home，再完
 离线结果：observer 定向正反测试 `196/196`，观察、几何、adapter、通用 mock 与编排相关回归
 `494/494`，Python 完整回归 `1445/1445`；完整回归只有既知测试子进程 `ResourceWarning`，无断言
 失败。observer 版本更新为 v56，未放宽 targeted delta schema 或坐标边界。
+
+## 14. Launcher 同名可见文字被误当成目标绑定已经成立
+
+- v56 全新会话 `fbaccfae9a354bd3ba3c84a9a7453e02` 的 Home 动作 matched，Launcher 四帧和
+  fingerprint 更新均完整；随后 0 次打开动作就 blocked。可信 scene 有唯一 `e3/浏览器/open_browser`
+  和原始视觉证据，但 Qwen 将 12 个桌面元素全部写为 `goal_relevant:false` 且未提供完整可见性。
+  本地正式视觉权威因此只产生 back/wait 候选，正确拒绝 tap；不能通过控制器放宽解决。
+- 根因在 `_needs_targeted_refinement`：没有可信 goal element 时，只要任意 summary/label/meaning
+  出现目标词就跳过精查。“看见同名文字”只能证明元素存在，不能证明它是当前子目标的完整唯一
+  目标。这是任意 Launcher/App 入口和任意同名控件都会遇到的通用绑定缺口。
+- 修复仅收紧“打开/进入/启动目标 App”的观察合同：目标 App 已在前台时不精查；目标 App 尚未
+  在前台且没有通过现有可信条件的 goal element 时，必须进行一次当前子目标精查。精查仍必须由
+  Qwen 明确给出 goal relevance、evidence、合法 bounds，之后还要独立 geometry/fresh/IoU/policy
+  门禁；本地不把 false 改 true，也不新增 App 名、坐标或固定入口。
+- 正向现场样本为 Launcher 上浏览器文字存在但 relevance=false；变化样本为音乐/设置等不同 App。
+  反向样本为目标 App 已在前台，即使无 element 也不得为了 future goal 精查；已有低置信/不完整
+  goal element 仍按原门禁精查。先完成 observer 定向、相关回归和一次完整回归，全部通过后提交、
+  只重载 Uvicorn，再以原目标创建全新 session。旧 blocked session 不复用、不执行后续动作。
+
+离线结果：observer 定向 `197/197`，观察、几何、adapter、通用 mock 与编排相关 `495/495`，
+Python 完整回归 `1446/1446`；静态编译和差异检查通过。完整回归只有既知测试子进程
+`ResourceWarning`，无断言失败。observer 版本更新为 v57。

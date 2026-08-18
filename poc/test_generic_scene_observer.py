@@ -1060,6 +1060,53 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         self.assertTrue(_needs_targeted_refinement(scene, context))
 
+    def test_launcher_app_name_without_trusted_goal_requires_refinement(self) -> None:
+        payload = scene_payload()
+        payload.update(
+            {
+                "foreground_app_id": "launcher",
+                "screen_id": "home_screen",
+                "summary": "当前为稳定桌面，应用图标网格清晰可见。",
+                "elements": [
+                    {
+                        "element_id": "browser-entry",
+                        "role": "button",
+                        "meaning": "open_browser",
+                        "label": "浏览器",
+                        "bounds": [150, 40, 310, 150],
+                        "confidence": 1.0,
+                        "states": {"goal_relevant": False},
+                        "evidence": ["蓝色星球图标，下方文字浏览器"],
+                    }
+                ],
+                "confidence": 1.0,
+            }
+        )
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="launcher-browser-entry",
+            camera_layout_orientation="portrait",
+        )
+
+        for app_id, app_name in (("browser", "浏览器"), ("music", "音乐")):
+            with self.subTest(app_id=app_id):
+                context = {
+                    "app_id": app_id,
+                    "app_name": app_name,
+                    "objective": f"打开{app_name}",
+                    "entities": {
+                        "active_subgoal_visual_context": {
+                            "subgoal_id": f"open_{app_id}",
+                            "objective": f"打开{app_name}",
+                            "constraints": [],
+                            "completion_conditions": [f"{app_name}主界面可见"],
+                            "external_impact": "navigation_only",
+                            "goal_entities": {},
+                        }
+                    },
+                }
+                self.assertTrue(_needs_targeted_refinement(scene, context))
+
     def test_conflicting_root_and_active_target_labels_do_not_rebind(self) -> None:
         payload = scene_payload()
         payload["elements"][0]["label"] = "语义点击"

@@ -57,7 +57,7 @@ from verified_text_transaction import (
 )
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v56"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v57"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
     "2026-08-18-foreground-app-identity-audit-v1"
@@ -6482,9 +6482,11 @@ def _needs_targeted_refinement(scene: UIScene, context: dict[str, Any]) -> bool:
 
     target_app = str(context.get("app_id") or "").strip().casefold()
     objective = str(focused.get("objective") or "").strip()
-    if target_app and scene.foreground_app_id.casefold() == target_app:
-        if re.search(r"^(打开|进入|启动)", objective):
-            return False
+    if target_app and re.search(r"^(打开|进入|启动)", objective):
+        # Seeing an App name somewhere on Launcher is not an actionable target.
+        # When no trusted goal element survived above, a not-yet-foreground App
+        # requires a focused pass to establish one complete, relevant entry.
+        return scene.foreground_app_id.casefold() != target_app
 
     terms = _goal_terms(context)
     if not terms:

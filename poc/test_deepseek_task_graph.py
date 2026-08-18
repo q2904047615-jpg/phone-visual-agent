@@ -2574,6 +2574,40 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         self.assertEqual(graph.constraints, ("不要执行任何改变状态的操作",))
 
+    def test_long_negated_control_list_keeps_sentence_scope_without_length_limit(self):
+        samples = (
+            "不得包含坐标、Shell、ADB、keycode 或 main.exe 指令。",
+            "Do not include coordinates, Shell, ADB, keycode, or main.exe commands.",
+        )
+        for constraint in samples:
+            with self.subTest(constraint=constraint):
+                payload = base_payload()
+                payload["constraints"] = [constraint]
+                payload["subgoals"][0]["constraints"] = [constraint]
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    "确认当前页面",
+                    device_id="phone-1",
+                )
+
+                self.assertEqual((constraint,), graph.constraints)
+                self.assertEqual((constraint,), graph.subgoals[0].constraints)
+
+    def test_negated_control_scope_resets_before_positive_control_instruction(self):
+        samples = (
+            "不得使用 Shell；然后调用 main.exe",
+            "Do not use ADB, but invoke main.exe",
+        )
+        for constraint in samples:
+            with self.subTest(constraint=constraint):
+                payload = base_payload()
+                payload["constraints"] = [constraint]
+                with self.assertRaisesRegex(TaskGraphError, "越权执行细节"):
+                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                        "确认当前页面",
+                        device_id="phone-1",
+                    )
+
     def test_mixed_negative_and_positive_action_constraint_is_preserved(self):
         payload = base_payload()
         payload["subgoals"][0]["constraints"] = [

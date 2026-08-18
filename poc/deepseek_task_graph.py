@@ -198,8 +198,7 @@ NEGATED_LOW_LEVEL_INSTRUCTION_PREFIX_PATTERN = re.compile(
     r"do\s+not|don't|never|without)\s*"
     r"(?:(?:进行|执行)\s*)?"
     r"(?:(?:任何|任意|一切|all|any)\s*)?"
-    r"(?:(?!(?:但|但是|然而|不过|可以|仍可|需要|应当|然后|再|"
-    r"but|however|may|can)).){0,24}$",
+    r"(?!(?:忘记|漏掉|只|仅|forget\b|fail\b))",
     re.IGNORECASE,
 )
 REPAIRABLE_INITIAL_GRAPH_ERRORS = (
@@ -260,6 +259,12 @@ LOCAL_INPUT_PREPARATION_STATE_PATTERN = re.compile(
     r"\b(?:visible|shown|present|editable|focused)\b"
     r"[^,.;\r\n]{0,24}\b(?:input|text|query|message)\s*(?:field|box|area)\b"
     r")",
+    re.IGNORECASE,
+)
+LOW_LEVEL_NEGATION_SCOPE_RESET_PATTERN = re.compile(
+    r"[。；;！？!?\r\n]+|"
+    r"\b(?:but|however|then|afterwards|next|may|can|need(?:s|ed)?\s+to)\b|"
+    r"(?:但是|但|然而|不过|然后|随后|接着|可以|仍可|需要|应当)",
     re.IGNORECASE,
 )
 INPUT_CONTENT_STATE_CONSTRAINT_PATTERN = re.compile(
@@ -3905,7 +3910,10 @@ def _reject_low_level_instruction(
     ):
         return
     for match in LOW_LEVEL_INSTRUCTION_PATTERN.finditer(value):
-        prefix = value[max(0, match.start() - 40) : match.start()].lower()
+        prefix = value[: match.start()].lower()
+        resets = tuple(LOW_LEVEL_NEGATION_SCOPE_RESET_PATTERN.finditer(prefix))
+        if resets:
+            prefix = prefix[resets[-1].end() :]
         if allow_negated and NEGATED_LOW_LEVEL_INSTRUCTION_PREFIX_PATTERN.search(
             prefix
         ):

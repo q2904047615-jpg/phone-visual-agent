@@ -3589,6 +3589,128 @@ class UniversalAgentStartTests(unittest.TestCase):
                 self.assertEqual("action", session.qwen_decision.proposal.status)
                 self.assertEqual(0, session.physical_actions)
 
+    def test_launcher_entry_cannot_prove_named_target_app_is_foreground(self) -> None:
+        cases = (
+            ("browser", "浏览器", "open_browser"),
+            ("settings", "设置", "open_settings"),
+            ("chat_app", "聊天工具", "open_chat"),
+        )
+        for app_id, app_name, meaning in cases:
+            with self.subTest(app_id=app_id):
+                base = self._named_app_page_graph(
+                    app_id=app_id,
+                    app_name=app_name,
+                )
+                graph = replace(
+                    base,
+                    goal=replace(
+                        base.goal,
+                        objective=f"确认{app_name}应用在前台可见",
+                    ),
+                    subgoals=(
+                        replace(
+                            base.subgoals[0],
+                            objective=f"{app_name}应用在前台可见",
+                            completion_conditions=(
+                                f"{app_name}应用在前台可见",
+                            ),
+                        ),
+                        base.subgoals[1],
+                    ),
+                    raw_user_goal=f"确认{app_name}应用在前台可见",
+                )
+                graph.validate()
+                planner = FakeDeepSeekPlanner(
+                    graph,
+                    replan_result=self._advance_named_app_page_graph(graph),
+                )
+                launcher = replace(
+                    _scene(
+                        meaning=meaning,
+                        label=app_name,
+                        states={"goal_relevant": True, "fully_visible": True},
+                    ),
+                    app_id="launcher",
+                    screen_id="home_screen",
+                    summary=f"手机桌面显示{app_name}入口图标。",
+                )
+                qwen = FakeQwenObserver()
+
+                with tempfile.TemporaryDirectory() as temp:
+                    session = self._orchestrator(
+                        planner,
+                        qwen,
+                        FakeAdapter(launcher),
+                    ).start(
+                        session_id=f"session-foreground-{app_id}",
+                        raw_goal=graph.raw_user_goal,
+                        device_id="device-1",
+                        run_dir=Path(temp),
+                    )
+
+                self.assertEqual("awaiting_confirmation", session.status)
+                self.assertEqual([], planner.replan_calls)
+                self.assertEqual(1, len(qwen.calls))
+                self.assertEqual(0, session.physical_actions)
+
+    def test_matching_target_app_can_prove_foreground_wording(self) -> None:
+        base = self._named_app_page_graph(
+            app_id="local_tool",
+            app_name="本地工具",
+        )
+        graph = replace(
+            base,
+            subgoals=(
+                replace(
+                    base.subgoals[0],
+                    objective="本地工具应用在前台可见",
+                    completion_conditions=(
+                        "本地工具应用在前台可见",
+                    ),
+                ),
+                base.subgoals[1],
+            ),
+        )
+        graph.validate()
+        planner = FakeDeepSeekPlanner(
+            graph,
+            replan_result=self._advance_named_app_page_graph(graph),
+        )
+        foreground = replace(
+            _scene(
+                meaning="local_tool_title",
+                label="本地工具",
+                role="text",
+                states={"goal_relevant": True, "fully_visible": True},
+            ),
+            app_id="local_tool",
+            screen_id="local_tool_home",
+            summary="本地工具应用在前台可见。",
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                planner,
+                FakeQwenObserver(),
+                FakeAdapter(foreground),
+            ).start(
+                session_id="session-matching-foreground",
+                raw_goal=graph.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual("safe-followup", session.task_graph.active_subgoal_id)
+        self.assertEqual(1, len(planner.replan_calls))
+        self.assertEqual(0, session.physical_actions)
+        self.assertIn(
+            "foreground_app",
+            UniversalAgentOrchestrator._presence_surface_classes(
+                "Local tool is in the foreground"
+            ),
+        )
+
     def test_settings_search_page_cannot_prove_named_launcher_page(self) -> None:
         base = self._named_app_page_graph(
             app_id="current_foreground",

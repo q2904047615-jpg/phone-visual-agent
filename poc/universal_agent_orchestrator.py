@@ -1016,6 +1016,14 @@ class UniversalAgentOrchestrator:
                     "detail page",
                     "details",
                 ),
+                "foreground_app": (
+                    "应用在前台",
+                    "前台应用",
+                    "前台可见",
+                    "foreground app",
+                    "in the foreground",
+                    "is foreground",
+                ),
             }.items()
             if any(marker in text for marker in markers)
         }
@@ -1042,7 +1050,8 @@ class UniversalAgentOrchestrator:
         rule applies to every App and every natural-language goal.
         """
 
-        if "page" not in cls._presence_surface_classes(presence_text):
+        required_surfaces = cls._presence_surface_classes(presence_text)
+        if not required_surfaces.intersection({"page", "foreground_app"}):
             return ()
         presence_terms = cls._presence_binding_terms(presence_text)
         referenced = []
@@ -1329,6 +1338,10 @@ class UniversalAgentOrchestrator:
                     scene.screen_id,
                     scene.summary,
                 ).intersection({"page"})
+                if referenced_app_pages:
+                    scene_container_surfaces = scene_container_surfaces.union(
+                        required_surfaces.intersection({"foreground_app"})
+                    )
                 required_element_surfaces = required_surfaces.difference(
                     scene_container_surfaces
                 )
@@ -1356,6 +1369,10 @@ class UniversalAgentOrchestrator:
                     scene.screen_id,
                     scene.summary,
                 ).intersection({"page"})
+                if referenced_app_pages:
+                    scene_container_surfaces = scene_container_surfaces.union(
+                        required_surfaces.intersection({"foreground_app"})
+                    )
                 required_element_surfaces = required_surfaces.difference(
                     scene_container_surfaces
                 )

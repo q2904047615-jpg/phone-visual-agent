@@ -1200,3 +1200,38 @@ observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `896/896`，Py
 离线结果：DeepSeek 与编排核心 `386/386`，observer、Qwen、adapter、DeepSeek、编排和 Web 关联
 回归 `896/896`，Python 完整回归 `1481/1481`。完整回归只有既知测试子进程 `ResourceWarning`，
 无断言失败。
+
+## 37. App 身份等价规则在选择层与策略层漂移
+
+### 37.1 验收台账与根因证据
+
+- 提交 `3280d17` 加载后的 Settings session `ce7dec5223404326adf2b90ac8c51391`
+  已按新活动节点重新观察到 revision 3：可信 scene 为
+  `com.android.settings/settings_main`，唯一输入框 `local_audited_input_1` 完整可见且空值；Qwen 选择的
+  正式 candidate 是对该输入框的 `tap_semantic`，置信度 `0.95`。
+- 最终 controller 仍以“跨 surface App 入口”拒绝。代码证据表明 Qwen 选择层已经使用第 35 项的
+  语义 App ID/真实包名等价规则，但正式策略层仍保留逐字判断
+  `scene.foreground_app_id != target_surface.app_id`，同一身份合同出现两份不同实现。
+- 主要根因是共享 App 身份规则在两个安全门之间漂移，不是模型、候选、否定约束、手机状态或机械臂；
+  session 全程 0 物理动作。
+
+### 37.2 同类样本、通用修复与边界
+
+- 现场样本为 `settings → com.android.settings`；变化样本为其他稳定语义 ID 与真实包名末级组件精确
+  一致，或唯一完整 page title 与 App 名逐字一致。反例保留近似包名、正文提及、Launcher 同名入口、
+  空/unknown identity 和多个标题候选。
+- 正式策略层复用 Qwen 选择层已经验证的同一个 `_scene_matches_target_app_surface` 判定，删除第二份
+  逐字比较；这样候选生成和最终 controller 使用同一身份 authority，不会一层允许、下一层以旧规则拒绝。
+- 不增加 App 映射表、已知包名、控件、命令或坐标分支；无法由共享结构化规则证明时仍只允许 Home，
+  所有 formal candidate、scope、postcondition 和确认门禁保持不变。
+
+### 37.3 验证与停止条件
+
+- 新增策略层正反测试，证明语义 ID/真实包名等价在最终 controller 放行，近似包名继续拒绝；既有 Qwen
+  同合同测试继续作为选择层证据。
+- 先运行最小策略与 Qwen 测试，再运行关联回归和一次完整 Python 回归；全绿后本地提交并只重载项目
+  Uvicorn。旧 session 不恢复；相同 Settings 目标只建立一个新 session，任一真实动作失败即停止。
+
+离线结果：策略层与 Qwen 共享身份规则正反样本 `2/2`，observer、Qwen、adapter、DeepSeek、编排和
+Web 关联回归 `897/897`，Python 完整回归 `1482/1482`。完整回归只有既知测试子进程
+`ResourceWarning`，无断言失败。

@@ -626,6 +626,73 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.policy = PhaseOneNavigationPolicy()
 
+    def test_formal_policy_reuses_semantic_app_surface_identity(self) -> None:
+        transition_payload = {"transition_id": "transition-1"}
+        candidate = SimpleNamespace(
+            action_kind="tap_semantic",
+            parameters={"element_id": "candidate-1"},
+            effect_ref="",
+            transition=SimpleNamespace(to_dict=lambda: transition_payload),
+        )
+        action = SemanticAction(
+            node_id="tap-input",
+            action="tap_semantic",
+            params={
+                "element_id": "candidate-1",
+                "formal_candidate_id": "candidate-formal-1",
+                "formal_report_digest": "digest-1",
+                "formal_transition": transition_payload,
+            },
+        )
+        context = SimpleNamespace(
+            current_external_impact="navigation_only",
+            current_subgoal={"subgoal_id": "input-value"},
+            semantic_ir=SimpleNamespace(
+                subgoals=(
+                    SimpleNamespace(
+                        subgoal_id="input-value",
+                        surface_ref="surface-settings",
+                    ),
+                ),
+                surfaces=(
+                    SimpleNamespace(
+                        surface_id="surface-settings",
+                        kind="app",
+                        app_id="settings",
+                        app_name="设置",
+                    ),
+                ),
+                effects=(),
+            ),
+        )
+
+        with (
+            patch(
+                "visual_action_shadow.compile_visual_action_authority",
+                return_value=object(),
+            ),
+            patch(
+                "visual_action_shadow.select_shadow_candidate",
+                return_value=SimpleNamespace(candidate=candidate),
+            ),
+        ):
+            allowed = self.policy._formal_candidate_decision(
+                task_context=context,
+                scene=_scene(app_id="com.android.settings"),
+                action=action,
+                available_action_kinds=frozenset({"tap_semantic"}),
+            )
+            denied = self.policy._formal_candidate_decision(
+                task_context=context,
+                scene=_scene(app_id="com.android.settings_helper"),
+                action=action,
+                available_action_kinds=frozenset({"tap_semantic"}),
+            )
+
+        self.assertTrue(allowed.allowed, allowed.reason)
+        self.assertFalse(denied.allowed)
+        self.assertIn("跨 surface", denied.reason)
+
     def test_allows_swipe_for_navigation_only_subgoal(self) -> None:
         scene = _scene()
 

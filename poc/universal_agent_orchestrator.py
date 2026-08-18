@@ -29,7 +29,11 @@ from generic_action_adapter import GenericActionAdapterError
 from generic_intent import GenericIntentDraft
 from generic_step_planner import GenericStepProposal
 from message_intent import CanonicalMessageIntent, MessageIntentError
-from qwen_visual_decision import QwenTaskContext, TrustedObservation
+from qwen_visual_decision import (
+    QwenTaskContext,
+    TrustedObservation,
+    _scene_matches_target_app_surface,
+)
 from ui_scene import (
     MIN_TARGET_CONFIDENCE,
     UISceneError,
@@ -5922,8 +5926,7 @@ class PhaseOneNavigationPolicy:
             target_surface is not None
             and target_surface.kind == "app"
             and current_surface_kind != "launcher"
-            and scene.foreground_app_id.casefold()
-            != target_surface.app_id.casefold()
+            and not _scene_matches_target_app_surface(scene, target_surface)
             and action_kind != "home"
         ):
             return self._deny(

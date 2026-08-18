@@ -257,3 +257,47 @@ Python 完整回归 `1441/1441`，静态编译与 `git diff --check` 均通过�
 相关回归 `369/369`，Python 完整回归 `1443/1443`，静态编译与 `git diff --check` 通过。
 完整回归仍只有既知测试子进程 `ResourceWarning`，无断言失败。待本地提交并只重载项目
 Uvicorn 后，用全新 session 从当前 Settings 前台先返回 Home，再完成正式跨 App 闭环。
+
+## 12. 浏览器动作后目标精查容量合同缺口
+
+### 12.1 已有证据与根因分类
+
+- Settings 正式会话 `0769cfcc3b624ba2b1d0f5ef66e00b64` 已完成：同一 session 依次执行
+  Home、打开设置、Home 三个真实动作，三条 receipt 均 matched，revision `1→2→3→4`，最终
+  `status=succeeded`、graph completed、active_subgoal=null，最终可信 scene 为 Launcher。
+- 第二个 App 会话 `c9720422f4fa4c09a7e0624230b82650` 已在 Launcher 唯一浏览器入口上执行
+  1 次真实 `tap_semantic`；动作后的四帧已保存，但目标精查 JSON 解析失败，session 为 failed、
+  `physical_actions=1`，没有 receipt、没有最终 Home、没有自动重试。
+- 原始响应长度 1809 字符，在第 5 个元素的 `bounds.w` 值之前以 `"w":` 截断；JSON 大括号、
+  数组和字符串均未闭合。目标精查协议允许最多 12 个完整元素，调用预算却只有 700 token，当前
+  输出的元素数量没有越过协议上限。这是输出容量与 schema 最大规模不一致的通用代码缺陷。
+- 历史目录 `generic_supervised_20260818_004715_00ae1a44` 已出现同一目标精查“单结构标点修复”
+  失败；另有完整但最小增量协议不合格样本。按同类模型合同失败两次的规则，本轮停止在线采样，
+  不通过改措辞或重试绕过，先修复子协议容量和诊断边界。
+
+### 12.2 通用修复与样本
+
+- 将 targeted delta 的输出预算与同样允许 12 个元素的 compact 场景预算对齐为 2600 token；
+  仍按需调用，不增加模型轮次，不改变严格 schema、最多元素数或可执行候选权限。
+- 提示继续要求只报告直接相关元素，并明确不得为填充数组枚举无关导航标签；即使模型仍多报，
+  本地 relevance、唯一候选、fresh geometry 和控制器门禁仍独立裁决。
+- 保留现有错误分类和失败关闭控制流；本次截断由落盘 raw 的未闭合结构直接证明，不把诊断标签
+  改动带入 adapter 的格式重观察分支，避免为了标签准确而新增任何模型重试。
+- 正向样本：允许上限内的长 targeted delta 能在 2600 预算下完整返回并继续严格解析；变化样本
+  为标题读取、列表序数和多控件结构。反向样本：截断 raw 准确分类且 0 后续动作，完整协议外
+  字段、重复键、越界或非唯一目标继续失败关闭。
+
+### 12.3 影响、验证与停止条件
+
+- 影响仅观察器 targeted 调用预算、提示和错误分类及对应测试；不改 DeepSeek、正式视觉 authority、
+  controller、风险、坐标、硬件或 App 分支。回滚可整体撤销该批。
+- 运行 Qwen error/observer 最小测试、观察/adapter/编排相关回归、一次 Python 完整回归、静态
+  编译和 `git diff --check`；全部通过后本地提交并只重载 Uvicorn。
+- 手机当前可能停在浏览器；下一全新 session 必须先 Home，再以原浏览器读取目标重新验收，不能
+  复用旧会话或旧 scope。若完整响应仍违反 strict delta，本轮立即停止，不再扩大协议字段。
+
+离线结果：targeted/error/observer 最小测试 `196/196`；观察、几何、adapter、通用 mock、编排
+相关回归 `483/483`；Python 完整回归 `1443/1443`；静态编译与 `git diff --check` 通过。
+完整回归仅有既知测试子进程 `ResourceWarning`。曾尝试把修复失败的最终错误标签重分类为
+`truncated_json`，相关回归立即证明它会触发额外格式重观察；该改动已完整撤回且未进入提交，
+因此生产变化只剩 token 容量对齐、无关元素提示和 observer v55 版本标识。

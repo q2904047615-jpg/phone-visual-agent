@@ -57,7 +57,7 @@ from verified_text_transaction import (
 )
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v54"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v55"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
     "2026-08-18-foreground-app-identity-audit-v1"
@@ -66,7 +66,9 @@ INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-18-input-structure-audit-v7"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
 COMPACT_OUTPUT_TOKENS = 2600
-TARGETED_OUTPUT_TOKENS = 700
+# Targeted delta permits the same maximum element count as compact observation.
+# Its output budget must therefore cover the same strict worst-case structure.
+TARGETED_OUTPUT_TOKENS = COMPACT_OUTPUT_TOKENS
 FOREGROUND_APP_IDENTITY_AUDIT_TOKENS = 300
 INPUT_STRUCTURE_AUDIT_TOKENS = 1000
 SYSTEM_UI_AUDIT_TOKENS = 600
@@ -1922,6 +1924,7 @@ def _targeted_prompt(
 
 重新检查原图中与目标直接相关的文字、图标、输入框、列表项和最上层弹层。
 只保留最多{MAX_COMPACT_ELEMENTS}个最相关元素；目标元素必须states.goal_relevant=true。看不清或不唯一就不要输出，
+不得为了填满elements枚举与目标无关的导航标签、工具栏项或正文；
 并降低confidence。bounds的x和y必须分别按原图宽、高独立归一化到0..1000：
 左/上边为0，右/下边为1000。竖图不是以宽度1000等比缩放后的长方形坐标系；
 任何y>1000都说明坐标系错了，必须省略该元素，不得截断或换算。只框元素自身。

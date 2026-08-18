@@ -2611,7 +2611,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         self.assertEqual(scene.elements[0].element_id, "e1")
         self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [2600, 700])
+        self.assertEqual(provider.max_tokens_seen, [2600, 2600])
         self.assertTrue(observer.last_diagnostics["format_retry_used"])
         self.assertTrue(observer.last_diagnostics["local_structural_repair_used"])
         self.assertTrue(observer.last_diagnostics["repair_retry_success"])
@@ -2630,7 +2630,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             )
 
         self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [2600, 700])
+        self.assertEqual(provider.max_tokens_seen, [2600, 2600])
         self.assertEqual(len(provider.responses), 1)
         self.assertFalse(observer.last_diagnostics["local_structural_repair_used"])
         self.assertFalse(observer.last_diagnostics["repair_retry_success"])
@@ -2733,7 +2733,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         )
         self.assertEqual(provider.calls, 2)
-        self.assertEqual(provider.max_tokens_seen, [2600, 700])
+        self.assertEqual(provider.max_tokens_seen, [2600, 2600])
         self.assertEqual(scene.elements[0].label, "微信")
         self.assertTrue(observer.last_diagnostics["targeted_refinement_used"])
         targeted_text = provider.messages_seen[1][1]["content"][0]["text"]
@@ -5785,7 +5785,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual((0.704, 0.078, 0.836, 0.129), button.bounds)
         self.assertFalse(button.states["goal_relevant"])
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
-        self.assertEqual([2600, 700, 1000], provider.max_tokens_seen)
+        self.assertEqual([2600, 2600, 1000], provider.max_tokens_seen)
 
     def test_incomplete_disjoint_right_button_is_discarded_without_input_widening(self) -> None:
         empty = scene_payload()
@@ -6204,7 +6204,7 @@ class GenericSceneObserverTests(unittest.TestCase):
     def test_status_exposes_observation_policy(self) -> None:
         status = GenericSceneObserver(FakeProvider(scene_payload())).status()
         self.assertEqual(status["compact_output_tokens"], 2600)
-        self.assertEqual(status["targeted_output_tokens"], 700)
+        self.assertEqual(status["targeted_output_tokens"], 2600)
         self.assertEqual(
             status["targeted_delta_protocol"],
             TARGETED_SCENE_DELTA_PROTOCOL_VERSION,

@@ -861,3 +861,44 @@ fact（不作为标题值）提供；本地另要求完成证据必须逐字包�
 离线结果：DeepSeek 与编排根因回归 `381/381`，observer、Qwen、adapter、DeepSeek、编排和 Web
 关联回归 `889/889`，Python 完整回归 `1470/1470`。完整回归只有既知测试子进程
 `ResourceWarning`，无断言失败；稳定命名页面与逐字标题反例继续失败关闭。
+
+## 28. 已验证导航完成仍被模型自由证据抢先裁决
+
+### 28.1 验收台账与根因证据
+
+- 提交 `241be36` 加载后的标题任务 session `ee4f591867804f61b6199a144f347895` 再次完成 Home 与
+  Browser 启动两个 matched 动作；第 27 项旧的时间指代身份错误没有复现。当前新闻流没有独立页面主
+  标题，observer 正确只报告选中“要闻”tab 和多条 `news_headline`，因此该验收目标本身无法取得标题
+  值；会话在 0 新动作处 blocked，没有把新闻标题伪装成页面标题。
+- 随后改用不依赖内容标题的三步导航 session `07245a3dba6042ce88db5b6c9bb02add`。Home 与从
+  Launcher 打开 Browser 两次动作均 matched，第二步 `verification_step_2` 为
+  `physical_actions=1`、无 verification error、fingerprint
+  `f2e09e91ad24468737ff -> e6b3e42828bd84e9d192`；会话总动作数为 2，没有第三动作或自动重试。
+- DeepSeek 已把 `open_browser` 标为 completed，但没有使用本地 typed controller receipt；现有
+  `_apply_verified_navigation_completion()` 仅在模型仍把节点留为 active 时才改用回执，模型已经标
+  completed 时直接保留其自由证据。随后命名 App 身份门先于编排器 surface 验证拒绝，导致严格回执虽
+  已存在却没有机会成为完成 authority。
+
+### 28.2 通用修复、变化样本与边界
+
+- 在 `action_result_matched` 且 transition、session/task/device/revision/subgoal、after observation、
+  receipt 和 controller evidence ref 全部严格绑定时，本地控制器本来就是刚发生导航转换的唯一权威。
+  无论 DeepSeek 是遗漏完成，还是已完成却引用当前视觉自由文本，本地都把该旧 navigation-only 节点的
+  completion evidence 规范化为精确 typed receipt。
+- 只改写同一旧活动节点的 controller-owned `status/completion_evidence`；objective、depends_on、
+  constraints、completion conditions、risk IDs、impact 任一被模型改变仍直接拒绝。mismatched、纯观察、
+  read_only/external_state、错 receipt/scene/revision、回执重放继续不能使用该规范化。
+- 变化样本覆盖任意 App 启动后模型先写视觉证据、以及模型完全遗漏导航完成两种形状；稳定命名页面的
+  普通视觉完成仍走原身份门，不会因为没有 matched receipt 而放宽。
+
+### 28.3 验证与停止条件
+
+- 正测模型遗漏完成与“已完成但引用非权威证据”均只调用一次 provider，并得到同一 controller ref；
+  后继唯一安全 frontier 正常激活。
+- 反测子目标语义改写、无 transition、错绑定、纯视觉稳定页面和 receipt 重放必须继续失败关闭。
+- 运行 DeepSeek/编排根因测试、相关回归和一次完整 Python 回归，静态编译及 diff-check 全绿后本地
+  提交并只重载项目 Uvicorn。旧 session 不恢复；下一次只建立一个全新 Browser 三步导航会话。
+
+离线结果：两种 controller receipt 规范化正例及语义改写/纯视觉反例通过；DeepSeek 与编排根因回归
+`381/381`，observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `889/889`，Python 完整回归
+`1470/1470`。完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。

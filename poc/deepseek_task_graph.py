@@ -3459,12 +3459,21 @@ def _apply_verified_navigation_completion(
             "matched controller_transition 的候选图改写了其绑定子目标语义。"
         )
     if candidate_current.status == "completed":
-        # A model may already have completed the node with either a bound
-        # controller ref or independently valid current visual evidence.  Keep
-        # that claim intact so the ordinary source-aware validator can accept
-        # or reject it; local authority is needed only for the omitted state
-        # transition.
-        return candidate
+        # The controller receipt is the sole authority for the just-executed
+        # navigation transition.  DeepSeek may recognize the same completion
+        # but cite a current visual claim instead; canonicalize that redundant
+        # evidence to the exact bound receipt before named-surface validation.
+        # Immutable semantics were checked above, so this does not repair a
+        # different node, action or goal.
+        return replace(
+            candidate,
+            subgoals=tuple(
+                replace(item, completion_evidence=ref_ids)
+                if item.subgoal_id == previous_current.subgoal_id
+                else item
+                for item in candidate.subgoals
+            ),
+        )
 
     completed_subgoals = tuple(
         replace(

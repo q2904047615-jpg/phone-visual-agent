@@ -5816,7 +5816,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 reason="一次性导航动作已由控制器验证",
             )
 
-    def test_replan_rejects_subgoal_id_used_as_completion_evidence_without_retry(self):
+    def test_replan_replaces_model_navigation_evidence_with_bound_receipt_without_retry(self):
         initial = base_payload()
         invalid = copy.deepcopy(initial)
         invalid["status"] = "awaiting_confirmation"
@@ -5824,22 +5824,24 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         invalid["subgoals"][0]["completion_evidence"] = ["locate_target"]
         invalid["subgoals"][1]["status"] = "active"
         invalid["active_subgoal_id"] = "save_target"
-        repaired = copy.deepcopy(invalid)
-        repaired["subgoals"][0]["completion_evidence"] = [
-            "controller_transition:receipt-matched:1"
-        ]
         graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
             "目标", device_id="phone-1"
         )
-        provider = FakeProvider(invalid, repaired)
+        provider = FakeProvider(invalid)
 
-        with self.assertRaisesRegex(TaskGraphError, "当前观察之外"):
-            DeepSeekTaskGraphPlanner(provider).replan(
-                graph,
-                matched_controller_observation(graph),
-                trigger="action_result_matched",
-                reason="一次性导航动作已由控制器验证",
-            )
+        result = DeepSeekTaskGraphPlanner(provider).replan(
+            graph,
+            matched_controller_observation(graph),
+            trigger="action_result_matched",
+            reason="一次性导航动作已由控制器验证",
+        )
+
+        self.assertEqual("completed", result.subgoals[0].status)
+        self.assertEqual(
+            ("controller_transition:receipt-matched:1",),
+            result.subgoals[0].completion_evidence,
+        )
+        self.assertEqual("save_target", result.active_subgoal_id)
         replan_prompts = [
             call[0]["content"]
             for call in provider.messages
@@ -6217,7 +6219,10 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual("completed", result.status)
         self.assertEqual((full_fact,), result.completion_conditions[0].evidence)
-        self.assertEqual((full_fact,), result.subgoals[0].completion_evidence)
+        self.assertEqual(
+            ("controller_transition:receipt-matched:1",),
+            result.subgoals[0].completion_evidence,
+        )
         graph_messages = [
             messages
             for messages in provider.messages

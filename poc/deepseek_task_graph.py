@@ -3112,9 +3112,8 @@ _LEADING_UNNAMED_VISUAL_CONTAINER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _TEMPORAL_REFERENTIAL_VISUAL_CONTAINER_PATTERN = re.compile(
-    r"^(?:已)?(?:读取|查看|确认|核对|观察)?\s*"
     r"(?:打开|进入|操作|动作|加载|刷新|跳转|切换|返回|退出|完成)"
-    r"(?:操作|动作)?后(?:的)?(?:页面|界面|屏幕|视图)(?:中|内|上)?",
+    r"[^，。；;\r\n]*?后(?:的)?(?:页面|界面|屏幕|视图)(?:中|内|上)?",
     re.IGNORECASE,
 )
 _VISUAL_IDENTITY_GENERIC_TOKENS = (

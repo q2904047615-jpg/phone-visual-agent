@@ -1449,9 +1449,13 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
     def test_temporal_result_page_title_is_not_a_named_page_identity(self):
         referential_phrases = (
             "已读取打开后页面的主标题或错误提示",
+            "读取浏览器打开后页面的主标题或错误提示",
+            "浏览器打开后页面标题已读取",
             "进入后页面的标题已确认",
+            "进入目标 App 后的页面标题已确认",
             "操作后页面的错误提示可见",
             "加载后界面的主标题文字可见",
+            "跳转后界面的状态提示可见",
             "The page shown after opening has a visible title",
         )
         for phrase in referential_phrases:
@@ -1467,7 +1471,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 self.assertTrue(_named_visual_identity_anchor((named_page,)))
 
     def test_replan_accepts_exact_title_evidence_for_temporal_result_page(self):
-        objective = "打开后页面的主标题或错误提示内容已确认"
+        objective = "读取浏览器打开后页面的主标题或错误提示"
         title_fact = (
             '{"label":"通用动作真机验收页","meaning":"page_title",'
             '"role":"text"}'
@@ -1475,7 +1479,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         initial = single_subgoal_payload(objective, external_impact="read_only")
         initial["completion_conditions"][0].update(
             condition_id="title_read",
-            description="已读取打开后页面的主标题或错误提示",
+            description="浏览器打开后页面的主标题或错误提示已读取",
             evidence_required=["主标题或错误提示内容已确认"],
         )
         initial["subgoals"][0]["completion_conditions"] = [
@@ -5648,7 +5652,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         initial["completion_conditions"] = [
             {
                 "condition_id": "title_read",
-                "description": "浏览器打开后页面标题已读取",
+                "description": "浏览器设置页面标题已读取",
                 "evidence_required": ["页面标题可见"],
                 "satisfied": False,
                 "evidence": [],
@@ -5668,11 +5672,11 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             },
             {
                 "subgoal_id": "read_title",
-                "objective": "读取打开后页面标题",
+                "objective": "读取浏览器设置页面标题",
                 "status": "pending",
                 "depends_on": ["open_browser"],
                 "constraints": ["仅读取"],
-                "completion_conditions": ["页面标题已读取"],
+                "completion_conditions": ["浏览器设置页面标题已读取"],
                 "completion_evidence": [],
                 "risk_action_ids": [],
                 "external_impact": "read_only",

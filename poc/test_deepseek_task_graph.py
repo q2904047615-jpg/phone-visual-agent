@@ -1541,6 +1541,47 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             ),
         )
 
+    def test_named_chinese_home_page_uses_the_app_name_as_identity_anchor(self):
+        settings_texts = (
+            "设置主页可见",
+            "设置主页的界面元素（如设置列表、标题等）可见",
+        )
+        settings_facts = (
+            '{"app_id":"settings","screen_id":"settings_home","overlays":[]}',
+            '{"label":"设置","meaning":"page_title","role":"text"}',
+        )
+        self.assertEqual("设置", _named_visual_identity_anchor(settings_texts))
+        self.assertTrue(
+            named_visual_identity_is_grounded(settings_texts, settings_facts)
+        )
+
+        music_texts = (
+            "音乐首页可见",
+            "音乐首页的列表元素可见",
+        )
+        music_facts = (
+            '{"app_id":"music","screen_id":"music_home","overlays":[]}',
+            '{"label":"音乐","meaning":"page_title","role":"text"}',
+        )
+        self.assertEqual("音乐", _named_visual_identity_anchor(music_texts))
+        self.assertTrue(
+            named_visual_identity_is_grounded(music_texts, music_facts)
+        )
+
+    def test_unnamed_home_page_does_not_gain_identity_authority(self):
+        for phrase in ("主页可见", "首页可见", "主页面中的列表可见"):
+            with self.subTest(phrase=phrase):
+                self.assertEqual("", _named_visual_identity_anchor((phrase,)))
+        self.assertFalse(
+            named_visual_identity_is_grounded(
+                ("设置主页的界面元素可见",),
+                (
+                    '{"app_id":"music","screen_id":"music_home","overlays":[]}',
+                    '{"label":"音乐","meaning":"page_title","role":"text"}',
+                ),
+            )
+        )
+
     def test_chinese_chat_page_is_grounded_by_structured_english_screen_id(self):
         self.assertTrue(
             named_visual_identity_is_grounded(

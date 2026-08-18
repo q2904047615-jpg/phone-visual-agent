@@ -215,3 +215,45 @@ effect、claim、relation、fresh observation、geometry 和 capability。`goal_
 Python 完整回归 `1441/1441`，静态编译与 `git diff --check` 均通过；只有既知测试子进程
 `ResourceWarning`，无断言失败。待本地提交并只重载项目 Uvicorn 后，以一个全新 Settings
 会话验证该通用修复；旧会话 `634a02a077fd49e2b4a7fde6dd0a7d2a` 已取消且不得复用。
+
+## 11. Settings 首次真实动作后的中文主页身份语法缺口
+
+### 11.1 验收台账与根因证据
+
+- 提交 `929aee1` 加载后，0 动作观察 `ed9ebd9bbfdb24c30760` 证明 Launcher 稳定、唯一设置入口
+  和原始证据完整。全新会话 `54c5961876e645a393b2740d09468568` 的独立几何审计通过，机械臂
+  执行 1 次 `tap_semantic`；receipt `receipt_b5aec7fe3b0e4d55a8553656f8e2da50` 为 matched，
+  前后 observation/fingerprint 均更新。没有自动重试，也没有执行后续 Home。
+- 动作后可信 scene 明确为 `app_id=settings`、`screen_id=settings_home`，且有标题元素
+  `label=设置 / meaning=page_title`；当前唯一缺口是 DeepSeek 重规划在本地身份门报：
+  `completion_conditions.settings_home_visible` 缺少结构化画面身份锚点，session 最终 blocked。
+- 离线复现证明：命名页面解析器只把“页面/界面/屏幕/视图”等当容器，不识别中文“主页/首页”。
+  因而“设置主页的界面元素可见”会从后面的“界面”切分，错误提取锚点“设置主页的”，无法与
+  结构化标题“设置”匹配。这是跨 App 的中文页面语法缺陷，不是视觉、硬件、Settings 特例或
+  DeepSeek 无证据完成。
+
+### 11.2 同类样本、通用修复与边界
+
+- 现场正向：`设置主页的界面元素可见` 应提取命名锚点“设置”，由 `settings_home` 和标题“设置”
+  共同支持；任意变化样本 `音乐首页的列表可见` 应提取“音乐”，不能依赖 App 分支。
+- 反向：裸写“主页可见”或“首页可见”只是未命名页面，不得凭任意当前画面完成；Launcher 上
+  只有某 App 入口仍不能证明该 App 已在前台，继续由编排器的 foreground App 独立门禁拒绝。
+- 通用修复：把“主页/首页/主页面”加入命名视觉容器语法，并同步加入开头未命名容器与通用
+  容器词清理；不新增 App alias，不读取 summary 自由文本作为身份，不改变 typed visual claim、
+  controller receipt、前台 App、fresh observation、scope 或一动作一观察门禁。
+- 影响范围仅 `deepseek_task_graph.py` 及其身份语法测试；回滚可整体撤销该批。若修复需要 App 名
+  分支、跳过前台校验或让入口文字直接证明前台页面，则停止并撤销。
+
+### 11.3 验证与下一在线停止条件
+
+1. 加入现场“设置主页”、另一 App“音乐首页”正向样本，以及裸“主页/首页”和错误前台反向样本。
+2. 运行 DeepSeek 身份测试、任务图/编排相关回归、一次 Python 完整回归、静态编译和
+   `git diff --check`，全部通过后本地提交。
+3. 只重载项目 Uvicorn；因手机当前停在设置主页，新的跨 App 正式会话必须先通过 typed `home`
+   回到 Launcher，再打开目标 App 并在末尾返回 Launcher，不能手工点击或复用旧 session。
+4. 下一会话任一步失败立即保存证据并停止；不得为完成 Settings 样本自动重试失败动作。
+
+离线结果：现场“设置主页”与“音乐首页”变化样本、裸主页/错误 App 反向样本通过；DeepSeek+编排
+相关回归 `369/369`，Python 完整回归 `1443/1443`，静态编译与 `git diff --check` 通过。
+完整回归仍只有既知测试子进程 `ResourceWarning`，无断言失败。待本地提交并只重载项目
+Uvicorn 后，用全新 session 从当前 Settings 前台先返回 Home，再完成正式跨 App 闭环。

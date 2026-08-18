@@ -3075,7 +3075,8 @@ def _subgoal_from_payload(value: Any) -> Subgoal:
 
 
 _VISUAL_IDENTITY_CONTAINER_PATTERN = re.compile(
-    r"页面|界面|屏幕|视图|面板|卡片|(?:^|\b)(?:page|screen|view|panel|card)(?:\b|$)",
+    r"主页面|主页|首页|页面|界面|屏幕|视图|面板|卡片|"
+    r"(?:^|\b)(?:page|screen|view|panel|card)(?:\b|$)",
     re.IGNORECASE,
 )
 _GENERIC_VISUAL_LOCATION_PATTERN = re.compile(
@@ -3098,7 +3099,7 @@ _QUOTED_VISUAL_IDENTITY_CONTEXT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _LEADING_UNNAMED_VISUAL_CONTAINER_PATTERN = re.compile(
-    r"^(?:页面|界面|屏幕|视图|面板|卡片)(?:中|内|上)?|"
+    r"^(?:主页面|主页|首页|页面|界面|屏幕|视图|面板|卡片)(?:中|内|上)?|"
     r"^(?:the\s+)?(?:page|screen|view|panel|card)\b",
     re.IGNORECASE,
 )
@@ -3122,6 +3123,9 @@ _VISUAL_IDENTITY_GENERIC_TOKENS = (
     "原有",
     "指定",
     "目标",
+    "主页面",
+    "主页",
+    "首页",
     "页面",
     "界面",
     "屏幕",

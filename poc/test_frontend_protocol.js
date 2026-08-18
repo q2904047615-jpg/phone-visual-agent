@@ -648,6 +648,30 @@ test("risk scope binds the exact intent digest and rejects drift", () => {
   );
 });
 
+test("all typed effects expose the same target payload policy and digest preview", () => {
+  const raw = riskApprovalSession();
+  raw.effect_previews = [
+    {
+      protocol_version: "2026-08-19-effect-preview-v1",
+      effect_id: "effect_send",
+      effect_kind: "send_message",
+      targets: [{ entity_ref: "recipient_1", role: "recipient", entity_type: "person", value: "张三" }],
+      payloads: [{ entity_ref: "text_1", role: "input_text", entity_type: "text", value: "你好" }],
+      policy: "automatic",
+      policy_id: "local-risk-policy",
+      policy_version: 1,
+      expected_result_texts: ["消息可见"],
+      preview_digest: "f".repeat(64),
+    },
+  ];
+  const previews = Protocol.adaptSession(raw).risk.effectPreviews;
+  assert.equal(previews.length, 1);
+  assert.equal(previews[0].effect_kind, "send_message");
+  assert.equal(previews[0].targets[0].value, "张三");
+  assert.equal(previews[0].payloads[0].value, "你好");
+  assert.equal(previews[0].preview_digest, "f".repeat(64));
+});
+
 test("current Qwen v2 fields win over conflicting legacy fallback data after a v3 graph", () => {
   const session = safeActionSession();
   session.current_action = {

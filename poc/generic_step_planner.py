@@ -26,6 +26,9 @@ ALLOWED_STEP_ACTIONS = frozenset(
         "drag",
     }
 )
+FORMAL_AUTHORITY_PARAMS = frozenset(
+    {"formal_candidate_id", "formal_report_digest", "formal_transition"}
+)
 
 
 class JsonStepProvider(Protocol):
@@ -70,17 +73,22 @@ class GenericStepProposal:
                 scene.get_element(element_id)
             if self.action.action == "input_verified_text":
                 text = self.action.params.get("text")
-                if not isinstance(text, str) or not text or len(text) > 100:
-                    raise GenericStepPlanningError("输入动作 text 必须为1～100个字符。")
-                if "\n" in text or "\r" in text:
-                    raise GenericStepPlanningError("输入动作 text 不得包含换行。")
+                if (
+                    not isinstance(text, str)
+                    or not text
+                    or len(text) > 4000
+                    or "\r" in text
+                ):
+                    raise GenericStepPlanningError(
+                        "输入动作 text 必须为1～4000字符；换行由可见 Enter 键分段执行。"
+                    )
                 if scene.get_element(str(self.action.params["element_id"])).role != "input":
                     raise GenericStepPlanningError("输入动作必须绑定 input 元素。")
             if self.action.action == "clear_verified_text":
                 unexpected = set(self.action.params) - {
                     "element_id", "target", "role", "label", "states",
                     "expected_effect",
-                }
+                } - FORMAL_AUTHORITY_PARAMS
                 if unexpected:
                     raise GenericStepPlanningError(
                         "清空动作包含协议外参数：" + ", ".join(sorted(unexpected))
@@ -109,7 +117,11 @@ class GenericStepProposal:
                 if direction not in {"up", "down", "left", "right"}:
                     raise GenericStepPlanningError("滑动动作方向无效。")
             if self.action.action == "reveal_system_navigation":
-                unexpected = set(self.action.params) - {"expected_effect"}
+                unexpected = (
+                    set(self.action.params)
+                    - {"expected_effect"}
+                    - FORMAL_AUTHORITY_PARAMS
+                )
                 if unexpected:
                     raise GenericStepPlanningError(
                         "系统导航栏唤出动作不能携带坐标、方向、距离或其他参数。"

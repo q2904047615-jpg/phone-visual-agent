@@ -4291,12 +4291,20 @@ class ApiEndToEndTests(unittest.TestCase):
             replan_result=replace(initial, revision=initial.revision + 1),
         )
         qwen = FakeQwenObserver()
+        target_app_id = (
+            initial.goal.target_apps[0].app_id
+            if len(initial.goal.target_apps) == 1
+            else "sample.app"
+        )
         adapter = FakeExecutingAdapter(
-            _scene(),
-            _scene(
-                fingerprint="frame-after-api",
-                meaning="open_more",
-                label="查看更多",
+            replace(_scene(), app_id=target_app_id),
+            replace(
+                _scene(
+                    fingerprint="frame-after-api",
+                    meaning="open_more",
+                    label="查看更多",
+                ),
+                app_id=target_app_id,
             ),
         )
         orchestrator = UniversalAgentOrchestrator(
@@ -4437,7 +4445,7 @@ class ApiEndToEndTests(unittest.TestCase):
         semantic_authority = universal["semantic_risk_authority"]
         self.assertEqual(
             semantic_authority["authority_scope"],
-            "semantic_and_risk_only",
+            "semantic_task_and_risk",
         )
         self.assertFalse(
             semantic_authority["legacy_remote_risk_diagnostics_enabled"]

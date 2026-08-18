@@ -30,7 +30,7 @@ DeepSeek 只负责：理解完整目标、拆分动态子目标、写完成条�
 
 一次 plan/replan 只允许一次远程语义采样。只有唯一、局部且不改变语义的 JSON 规范化可以在本地修复；不会靠连续请求模型“抽到一个合法答案”。
 
-能够影响执行权限的实体只有正式 typed 字段，例如：
+能够影响执行权限的实体必须是正式 typed entity，但 entity 的业务名称不再受固定五键限制。例如：
 
 - `recipient`：收件人或会话身份；
 - `input_text`：需要输入的逐字文本；
@@ -38,9 +38,11 @@ DeepSeek 只负责：理解完整目标、拆分动态子目标、写完成条�
 - `target_surface`：`device`、`system` 或 `current_surface`；
 - `spatial_hint`：用户明确表达的相对区域。
 
-未知实体可以作为规划上下文，但不能单独授权动作。没有目标 App 仅在目标明确属于设备、系统或当前表面时才合法。
+任意用户明确给出的对象、文件、目录、联系人、字段或目标都可成为 typed entity。只有同时存在用户原文 source span、显式 relation/effect binding 和当前子目标引用时才能参与执行；旧 `goal.entities` 只作为非权威兼容上下文。没有目标 App 仅在目标明确属于设备、系统或当前表面时才合法。
 
-DeepSeek 输出后必须经过正式 `2026-08-18-task-semantic-ir-v1` 投影。`TaskSemanticIR` 将 surface、entity、effect 和 critical binding 分开，约束与完成条件不能再被当成风险字段。正式语义/风险权威为 `2026-08-18-semantic-risk-authority-v1`，权威范围仅是 `semantic_and_risk_only`，不能授予视觉动作或物理执行。
+DeepSeek 输出后必须经过正式 `2026-08-19-task-semantic-ir-v2` 投影。`TaskSemanticIR` 将 surface、entity、effect、constraint、desired state、evidence requirement、input field 和 semantic subgoal 分开，约束与完成条件不能再被当成风险字段。正式语义/风险权威为 `2026-08-19-semantic-risk-authority-v2`，权威范围仅是 `semantic_and_risk_only`，不能授予视觉动作或物理执行。
+
+每个可执行子目标都绑定一个 typed surface。跨 App 任务若当前不在目标 App，正式选择器先产生 `home`，回到 Launcher 后再从首页寻找目标 App；不会从任意 App 内部猜测跨 App 入口。用户把常用 App 放在首页只是提高视觉可发现性，不形成 App 名称分支。
 
 本地风险策略来自可替换配置 `poc/config/local_risk_policy.v1.json`。新旧语义切换会逐项生成结构化 diff；未声明的差异或无法类型化的 `generic_effect` 在调用 Qwen 前失败关闭。生产默认不再调用旧的远程自由文本风险审计；旧审计只保留在显式离线兼容测试中。
 
@@ -48,7 +50,7 @@ DeepSeek 输出后必须经过正式 `2026-08-18-task-semantic-ir-v1` 投影。`
 
 场景协议为 `2026-08-14-ui-scene-v3`，当前观察器为 `2026-08-18-generic-scene-observer-v53`。
 
-观察器使用多帧真实画面生成有界候选集，记录角色、标签、meaning、状态、置信度、边界、遮挡和画面 fingerprint。模型不能自行写入本地可信标记；`fully_visible`、独立几何认证等权限必须由本地规则或严格几何审计产生。
+观察器使用多帧真实画面生成有界候选集，记录角色、标签、meaning、状态、置信度、边界、遮挡和画面 fingerprint。模型不能自行写入本地可信标记；`fully_visible`、独立几何认证等权限必须由本地规则或严格几何审计产生。每条可见事实由本地生成绑定当前 scene ID 的 `visual_claim` 引用；任务图只能引用该 ID，不能复制一段自然语言就把它变成完成证据。
 
 同一 fingerprint 下可复用只读证据；画面一旦变化，旧观察、旧几何和旧确认作用域全部失效。
 
@@ -56,7 +58,7 @@ DeepSeek 输出后必须经过正式 `2026-08-18-task-semantic-ir-v1` 投影。`
 
 正式视觉决策版本为 `2026-08-14-qwen-visual-decision-v5`。
 
-Qwen 每次只能从当前可信候选中选择一个下一动作，或返回完成/阻塞。它不能规划连续动作，也不能新增候选、改写身份、扩大风险权限或直接给机械臂坐标。
+Qwen 每次只能从本地 `2026-08-19-visual-action-authority-v1` 报告中的正式候选选择一个下一动作，或返回完成/阻塞。候选由 claim、relation、affordance、typed transition 和当前 semantic subgoal 确定性生成；Qwen 不能新增候选、改写身份、扩大风险权限或直接给机械臂坐标。`goal_relevant` 仅保留为诊断字段，不能创造候选或执行权限。
 
 当用户明确给出 `target_ui_label`、`recipient` 或 `input_text` 时，Qwen 必须逐字绑定相应实体。重复文字必须通过角色、容器、标题/身份锚点和区域消歧；无法得到唯一候选时为 0 动作阻塞。
 
@@ -72,7 +74,7 @@ Qwen 每次只能从当前可信候选中选择一个下一动作，或返回完
 - 当前设备是否声明并已认证该动作能力；
 - 本地策略标为 `confirmation_required` 的效果是否持有未消费、未过期的风险确认。
 
-正式动作集合：`tap_semantic`、`dismiss_overlay`、`swipe`、`back`、`home`、`reveal_system_navigation`、`input_verified_text`、`clear_verified_text`、`long_press`、`drag`、`wait_for_change`。
+正式动作能力词汇：`tap_semantic`、`dismiss_overlay`、`swipe`、`back`、`home`、`reveal_system_navigation`、`input_verified_text`、`clear_verified_text`、`long_press`、`drag`、`wait_for_change`、`double_tap`、`press_enter`、`pinch`、`hardware_key`。词汇存在不等于当前机械设备支持；`2026-08-19-action-capability-v1` 逐项声明设备参数与支持状态，不支持或尚未安全接入的动作返回 `2026-08-19-capability-gap-v1`，不会进入视觉模型、相机或机械臂。
 
 “发送、发布、点赞、评论、关注、收藏、订阅、支付、购买、删除、提交、保存、邀请、加入、确认、同意、授权”等可以被类型化为外部效果，不能伪装成普通导航；但“是外部效果”不再自动等于“必须向用户确认”。确认只由效果类型和本地策略决定，不读取收件人、正文、约束或完成条件中的关键词。
 
@@ -84,11 +86,11 @@ Qwen 每次只能从当前可信候选中选择一个下一动作，或返回完
 
 ### 6. 输入与手势
 
-输入内容来自 typed `input_text`，执行采用“已有可信前缀 + 下一确定性分段”的事务：每段输入后重新观察并核对字段值，不正确时停止，不发送或提交。
+输入内容来自 typed input field transaction，支持多个输入字段、多个接收者、多个段落和最多 4000 个 Unicode 字符；正文仍逐字来自用户原文，不由模型补写。执行采用“已有可信前缀 + 下一确定性分段”的事务：物理层每段最多 30 个字符，每段输入后重新观察并核对字段值，不正确时停止，不发送或提交。
 
-输入法可以根据新观察在拼音、字母、数字、符号、大小写之间双向切换。清空文本只要求当前键盘存在唯一可见退格键，不再限定 QWERTY 或 direct-latin 布局。
+输入法可以根据新观察在拼音、字母、数字、符号、大小写之间双向切换。换行被建模为独立 `press_enter` 能力，只有画面存在唯一可见 Enter 且能力被认证时才执行；否则整项任务在输入前返回 gap，不会先输入半段。清空文本只要求当前键盘存在唯一可见退格键，不再限定 QWERTY 或 direct-latin 布局。
 
-长按、拖动、文字长度和可用输入分段来自设备能力描述。传输调用返回不等于机械接触成功；最终仍必须由动作后画面证明后置条件。
+长按、拖动、双击、Enter、pinch/多指、硬件键、文字长度和可用输入分段都来自设备能力描述。卖家工具中存在某个按钮或传输路径不等于已获得安全 ACK；无法证明时明确报告 capability gap。传输调用返回也不等于机械接触成功；最终仍必须由动作后画面证明 typed 后置条件。
 
 ## 三、自动执行与确认边界
 
@@ -124,7 +126,7 @@ Qwen 每次只能从当前可信候选中选择一个下一动作，或返回完
 
 动作后本地写 `VerifiedActionTransition`，绑定 requested、rebound、resolved 三层动作摘要、前后 observation/fingerprint、物理动作数、结果和错误。非等待动作必须恰好一个物理动作；revision 必须精确 `N -> N+1`；receipt 只能消费一次，不能跨会话或跨 revision 重放。
 
-可见状态证据与历史动作回执严格分源：画面事实只能由 visible evidence 证明；“某动作已经执行”只能由 controller transition 证明，二者不能相互伪装。
+可见状态证据与历史动作回执严格分源：画面事实只能由绑定 scene 的 `visual_claim:<scene_id>:<digest>` 证明；“某动作已经执行”只能由一次性 controller transition receipt 证明，二者不能相互伪装、跨 revision 重放或靠复制自然语言升级为 authority。
 
 ## 五、默认入口和兼容层
 

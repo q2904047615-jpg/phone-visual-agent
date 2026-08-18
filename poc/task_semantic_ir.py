@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-TASK_SEMANTIC_IR_PROTOCOL = "2026-08-18-task-semantic-ir-v1"
+TASK_SEMANTIC_IR_PROTOCOL = "2026-08-19-task-semantic-ir-v2"
 RISK_POLICY_PROTOCOL = "2026-08-18-local-risk-policy-v1"
 SHADOW_REPORT_PROTOCOL = "2026-08-18-semantic-shadow-report-v1"
-AUTHORITY_REPORT_PROTOCOL = "2026-08-18-semantic-risk-authority-v1"
+AUTHORITY_REPORT_PROTOCOL = "2026-08-19-semantic-risk-authority-v2"
 CUTOVER_DIFF_PROTOCOL = "2026-08-18-semantic-risk-cutover-diff-v1"
+EFFECT_PREVIEW_PROTOCOL = "2026-08-19-effect-preview-v1"
 
 AUTOMATIC = "automatic"
 CONFIRMATION_REQUIRED = "confirmation_required"
@@ -42,6 +43,48 @@ SURFACE_KINDS = frozenset(
 )
 
 ENTITY_AUTHORITIES = frozenset({"user_literal", "planner_context"})
+CONSTRAINT_KINDS = frozenset(
+    {
+        "exact_entity",
+        "forbidden_effect",
+        "required_state",
+        "required_action",
+        "legacy_context",
+    }
+)
+REQUIRED_ACTION_KINDS = frozenset(
+    {
+        "tap_semantic",
+        "double_tap",
+        "swipe",
+        "long_press",
+        "drag",
+        "input_verified_text",
+        "clear_verified_text",
+        "press_enter",
+        "pinch",
+        "home",
+        "back",
+        "hardware_key",
+        "dismiss_overlay",
+        "reveal_system_navigation",
+    }
+)
+STATE_PREDICATES = frozenset(
+    {
+        "input.value_equals",
+        "surface.state_visible",
+        "effect.applied",
+        "effect.result_visible",
+        "observation.matches_description",
+    }
+)
+EVIDENCE_SOURCE_KINDS = frozenset(
+    {"visual_claim", "controller_transition", "effect_receipt"}
+)
+SUBGOAL_IMPACTS = frozenset(
+    {"read_only", "navigation_only", "external_state", "unknown"}
+)
 _ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,95}$")
 _EXTERNAL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
@@ -307,6 +350,206 @@ class CriticalBinding:
 
 
 @dataclass(frozen=True)
+class ConstraintIntent:
+    constraint_id: str
+    kind: str
+    subject_refs: tuple[str, ...] = ()
+    object_refs: tuple[str, ...] = ()
+    value: Any = None
+    source_text: str = ""
+    authoritative: bool = False
+
+    def validate(self) -> None:
+        _validate_id(self.constraint_id, "constraint.constraint_id")
+        if self.kind not in CONSTRAINT_KINDS:
+            raise TaskSemanticIRError(f"constraint.kind 无效：{self.kind}")
+        for field_name, values in (
+            ("subject_refs", self.subject_refs),
+            ("object_refs", self.object_refs),
+        ):
+            if len(values) != len(set(values)):
+                raise TaskSemanticIRError(
+                    f"constraint.{self.constraint_id}.{field_name} 重复。"
+                )
+            for value in values:
+                _validate_id(value, f"constraint.{self.constraint_id}.{field_name}")
+        _json_value(self.value, f"constraint.{self.constraint_id}.value")
+        if self.source_text:
+            _required_text(
+                self.source_text,
+                f"constraint.{self.constraint_id}.source_text",
+                max_length=500,
+            )
+        if not isinstance(self.authoritative, bool):
+            raise TaskSemanticIRError("constraint.authoritative 必须是布尔值。")
+        if self.kind == "legacy_context" and self.authoritative:
+            raise TaskSemanticIRError("legacy_context 约束不得取得 authority。")
+        if self.kind != "legacy_context" and not self.authoritative:
+            raise TaskSemanticIRError("typed constraint 必须明确取得 authority。")
+        if self.kind == "required_action" and self.value not in REQUIRED_ACTION_KINDS:
+            raise TaskSemanticIRError("required_action 约束的动作类型无效。")
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "constraint_id": self.constraint_id,
+            "kind": self.kind,
+            "subject_refs": list(self.subject_refs),
+            "object_refs": list(self.object_refs),
+            "value": _json_value(self.value, f"constraint.{self.constraint_id}.value"),
+            "source_text": self.source_text,
+            "authoritative": self.authoritative,
+        }
+
+
+@dataclass(frozen=True)
+class DesiredState:
+    state_id: str
+    subject_ref: str
+    predicate: str
+    value: Any
+    source_subgoal_id: str = ""
+
+    def validate(self) -> None:
+        _validate_id(self.state_id, "desired_state.state_id")
+        _validate_id(self.subject_ref, "desired_state.subject_ref")
+        if self.predicate not in STATE_PREDICATES:
+            raise TaskSemanticIRError(
+                f"desired_state.predicate 无效：{self.predicate}"
+            )
+        _json_value(self.value, f"desired_state.{self.state_id}.value")
+        if self.source_subgoal_id:
+            _validate_id(
+                self.source_subgoal_id,
+                f"desired_state.{self.state_id}.source_subgoal_id",
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "state_id": self.state_id,
+            "subject_ref": self.subject_ref,
+            "predicate": self.predicate,
+            "value": _json_value(self.value, f"desired_state.{self.state_id}.value"),
+            "source_subgoal_id": self.source_subgoal_id,
+        }
+
+
+@dataclass(frozen=True)
+class EvidenceRequirement:
+    requirement_id: str
+    desired_state_ref: str
+    allowed_sources: tuple[str, ...]
+
+    def validate(self) -> None:
+        _validate_id(self.requirement_id, "evidence_requirement.requirement_id")
+        _validate_id(
+            self.desired_state_ref,
+            "evidence_requirement.desired_state_ref",
+        )
+        if not self.allowed_sources or len(self.allowed_sources) != len(
+            set(self.allowed_sources)
+        ):
+            raise TaskSemanticIRError(
+                "evidence_requirement.allowed_sources 必须非空且不重复。"
+            )
+        unknown = set(self.allowed_sources) - EVIDENCE_SOURCE_KINDS
+        if unknown:
+            raise TaskSemanticIRError(
+                "evidence_requirement.allowed_sources 无效："
+                + ", ".join(sorted(unknown))
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "requirement_id": self.requirement_id,
+            "desired_state_ref": self.desired_state_ref,
+            "allowed_sources": list(self.allowed_sources),
+        }
+
+
+@dataclass(frozen=True)
+class SemanticSubgoal:
+    subgoal_id: str
+    surface_ref: str
+    status: str
+    external_impact: str
+    depends_on: tuple[str, ...] = ()
+    constraint_refs: tuple[str, ...] = ()
+    desired_state_refs: tuple[str, ...] = ()
+    effect_refs: tuple[str, ...] = ()
+
+    def validate(self) -> None:
+        _validate_id(self.subgoal_id, "semantic_subgoal.subgoal_id")
+        _validate_id(self.surface_ref, "semantic_subgoal.surface_ref")
+        if not self.status:
+            raise TaskSemanticIRError("semantic_subgoal.status 不能为空。")
+        if self.external_impact not in SUBGOAL_IMPACTS:
+            raise TaskSemanticIRError(
+                f"semantic_subgoal.external_impact 无效：{self.external_impact}"
+            )
+        for field_name, values in (
+            ("depends_on", self.depends_on),
+            ("constraint_refs", self.constraint_refs),
+            ("desired_state_refs", self.desired_state_refs),
+            ("effect_refs", self.effect_refs),
+        ):
+            if len(values) != len(set(values)):
+                raise TaskSemanticIRError(
+                    f"semantic_subgoal.{self.subgoal_id}.{field_name} 重复。"
+                )
+            for value in values:
+                _validate_id(value, f"semantic_subgoal.{self.subgoal_id}.{field_name}")
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "subgoal_id": self.subgoal_id,
+            "surface_ref": self.surface_ref,
+            "status": self.status,
+            "external_impact": self.external_impact,
+            "depends_on": list(self.depends_on),
+            "constraint_refs": list(self.constraint_refs),
+            "desired_state_refs": list(self.desired_state_refs),
+            "effect_refs": list(self.effect_refs),
+        }
+
+
+@dataclass(frozen=True)
+class InputFieldIntent:
+    field_id: str
+    payload_ref: str
+    recipient_refs: tuple[str, ...] = ()
+    source_subgoal_ids: tuple[str, ...] = ()
+    multiline: bool = False
+
+    def validate(self) -> None:
+        _validate_id(self.field_id, "input_field.field_id")
+        _validate_id(self.payload_ref, "input_field.payload_ref")
+        for field_name, values in (
+            ("recipient_refs", self.recipient_refs),
+            ("source_subgoal_ids", self.source_subgoal_ids),
+        ):
+            if len(values) != len(set(values)):
+                raise TaskSemanticIRError(f"input_field.{field_name} 重复。")
+            for value in values:
+                _validate_id(value, f"input_field.{field_name}")
+        if not isinstance(self.multiline, bool):
+            raise TaskSemanticIRError("input_field.multiline 必须是布尔值。")
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "field_id": self.field_id,
+            "payload_ref": self.payload_ref,
+            "recipient_refs": list(self.recipient_refs),
+            "source_subgoal_ids": list(self.source_subgoal_ids),
+            "multiline": self.multiline,
+        }
+
+
+@dataclass(frozen=True)
 class TaskSemanticIR:
     task_id: str
     device_id: str
@@ -316,6 +559,11 @@ class TaskSemanticIR:
     entities: tuple[SemanticEntity, ...]
     effects: tuple[EffectIntent, ...]
     critical_bindings: tuple[CriticalBinding, ...] = ()
+    constraints: tuple[ConstraintIntent, ...] = ()
+    desired_states: tuple[DesiredState, ...] = ()
+    evidence_requirements: tuple[EvidenceRequirement, ...] = ()
+    subgoals: tuple[SemanticSubgoal, ...] = ()
+    input_fields: tuple[InputFieldIntent, ...] = ()
     protocol_version: str = TASK_SEMANTIC_IR_PROTOCOL
 
     def validate(self) -> None:
@@ -340,6 +588,15 @@ class TaskSemanticIR:
         entities = unique(self.entities, "entity", "entity_id")
         effects = unique(self.effects, "effect", "effect_id")
         bindings = unique(self.critical_bindings, "critical_binding", "binding_id")
+        constraints = unique(self.constraints, "constraint", "constraint_id")
+        states = unique(self.desired_states, "desired_state", "state_id")
+        requirements = unique(
+            self.evidence_requirements,
+            "evidence_requirement",
+            "requirement_id",
+        )
+        subgoals = unique(self.subgoals, "semantic_subgoal", "subgoal_id")
+        input_fields = unique(self.input_fields, "input_field", "field_id")
         for surface in surfaces.values():
             surface.validate()
         for entity in entities.values():
@@ -368,6 +625,65 @@ class TaskSemanticIR:
                 raise TaskSemanticIRError(
                     f"critical_binding.{binding.binding_id} 未绑定 effect 对应引用。"
                 )
+        known_subjects = set(entities).union(effects).union(surfaces)
+        for constraint in constraints.values():
+            constraint.validate()
+            unknown_refs = set(constraint.subject_refs).union(
+                constraint.object_refs
+            ) - known_subjects
+            if unknown_refs:
+                raise TaskSemanticIRError(
+                    f"constraint.{constraint.constraint_id} 引用未知对象："
+                    + ", ".join(sorted(unknown_refs))
+                )
+        for state in states.values():
+            state.validate()
+            if state.subject_ref not in known_subjects:
+                raise TaskSemanticIRError(
+                    f"desired_state.{state.state_id} 引用未知 subject。"
+                )
+            if state.source_subgoal_id and state.source_subgoal_id not in subgoals:
+                raise TaskSemanticIRError(
+                    f"desired_state.{state.state_id} 引用未知 subgoal。"
+                )
+        for requirement in requirements.values():
+            requirement.validate()
+            if requirement.desired_state_ref not in states:
+                raise TaskSemanticIRError(
+                    f"evidence_requirement.{requirement.requirement_id} 引用未知 state。"
+                )
+        for subgoal in subgoals.values():
+            subgoal.validate()
+            if subgoal.surface_ref not in surfaces:
+                raise TaskSemanticIRError(
+                    f"semantic_subgoal.{subgoal.subgoal_id} 引用未知 surface。"
+                )
+            for field_name, refs, known in (
+                ("depends_on", subgoal.depends_on, subgoals),
+                ("constraint_refs", subgoal.constraint_refs, constraints),
+                ("desired_state_refs", subgoal.desired_state_refs, states),
+                ("effect_refs", subgoal.effect_refs, effects),
+            ):
+                unknown = set(refs) - set(known)
+                if unknown:
+                    raise TaskSemanticIRError(
+                        f"semantic_subgoal.{subgoal.subgoal_id}.{field_name} 引用未知 ID："
+                        + ", ".join(sorted(unknown))
+                    )
+        for input_field in input_fields.values():
+            input_field.validate()
+            if input_field.payload_ref not in entities:
+                raise TaskSemanticIRError(
+                    f"input_field.{input_field.field_id} 引用未知 payload。"
+                )
+            if set(input_field.recipient_refs) - set(entities):
+                raise TaskSemanticIRError(
+                    f"input_field.{input_field.field_id} 引用未知 recipient。"
+                )
+            if set(input_field.source_subgoal_ids) - set(subgoals):
+                raise TaskSemanticIRError(
+                    f"input_field.{input_field.field_id} 引用未知 subgoal。"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -381,11 +697,38 @@ class TaskSemanticIR:
             "entities": [item.to_dict() for item in self.entities],
             "effects": [item.to_dict() for item in self.effects],
             "critical_bindings": [item.to_dict() for item in self.critical_bindings],
+            "constraints": [item.to_dict() for item in self.constraints],
+            "desired_states": [item.to_dict() for item in self.desired_states],
+            "evidence_requirements": [
+                item.to_dict() for item in self.evidence_requirements
+            ],
+            "subgoals": [item.to_dict() for item in self.subgoals],
+            "input_fields": [item.to_dict() for item in self.input_fields],
         }
 
     @property
     def semantic_digest(self) -> str:
-        return _canonical_digest(self.to_dict())
+        value = self.to_dict()
+        authoritative_constraint_ids = {
+            item.constraint_id for item in self.constraints if item.authoritative
+        }
+        value["constraints"] = [
+            item
+            for item in value["constraints"]
+            if item["constraint_id"] in authoritative_constraint_ids
+        ]
+        value["subgoals"] = [
+            {
+                **item,
+                "constraint_refs": [
+                    ref
+                    for ref in item["constraint_refs"]
+                    if ref in authoritative_constraint_ids
+                ],
+            }
+            for item in value["subgoals"]
+        ]
+        return _canonical_digest(value)
 
 
 @dataclass(frozen=True)
@@ -478,6 +821,89 @@ class LocalRiskPolicyConfig:
                 for kind, policy in self.overrides
             ],
         }
+
+
+@dataclass(frozen=True)
+class EffectEntityPreview:
+    entity_ref: str
+    role: str
+    entity_type: str
+    value: Any
+
+    def validate(self) -> None:
+        _validate_id(self.entity_ref, "effect_preview.entity_ref")
+        _validate_id(self.role, "effect_preview.role")
+        _validate_id(self.entity_type, "effect_preview.entity_type")
+        _json_value(self.value, "effect_preview.value")
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "entity_ref": self.entity_ref,
+            "role": self.role,
+            "entity_type": self.entity_type,
+            "value": _json_value(self.value, "effect_preview.value"),
+        }
+
+
+@dataclass(frozen=True)
+class EffectPreview:
+    task_id: str
+    device_id: str
+    revision: int
+    effect_id: str
+    effect_kind: str
+    targets: tuple[EffectEntityPreview, ...]
+    payloads: tuple[EffectEntityPreview, ...]
+    policy: str
+    policy_id: str
+    policy_version: int
+    expected_result_texts: tuple[str, ...] = ()
+    protocol_version: str = EFFECT_PREVIEW_PROTOCOL
+
+    def validate(self) -> None:
+        if self.protocol_version != EFFECT_PREVIEW_PROTOCOL:
+            raise TaskSemanticIRError("EffectPreview protocol_version 无效。")
+        _required_text(self.task_id, "effect_preview.task_id", max_length=128)
+        _required_text(self.device_id, "effect_preview.device_id", max_length=128)
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1:
+            raise TaskSemanticIRError("effect_preview.revision 必须是正整数。")
+        _validate_id(self.effect_id, "effect_preview.effect_id")
+        _validate_id(self.effect_kind, "effect_preview.effect_kind")
+        if self.policy not in RISK_POLICIES:
+            raise TaskSemanticIRError("effect_preview.policy 无效。")
+        _validate_id(self.policy_id, "effect_preview.policy_id")
+        if isinstance(self.policy_version, bool) or not isinstance(self.policy_version, int) or self.policy_version < 1:
+            raise TaskSemanticIRError("effect_preview.policy_version 必须是正整数。")
+        refs: list[str] = []
+        for item in (*self.targets, *self.payloads):
+            item.validate()
+            refs.append(item.entity_ref)
+        if len(refs) != len(set(refs)):
+            raise TaskSemanticIRError("EffectPreview target/payload 引用重复。")
+        for item in self.expected_result_texts:
+            _required_text(item, "effect_preview.expected_result", max_length=1000)
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "protocol_version": self.protocol_version,
+            "task_id": self.task_id,
+            "device_id": self.device_id,
+            "revision": self.revision,
+            "effect_id": self.effect_id,
+            "effect_kind": self.effect_kind,
+            "targets": [item.to_dict() for item in self.targets],
+            "payloads": [item.to_dict() for item in self.payloads],
+            "policy": self.policy,
+            "policy_id": self.policy_id,
+            "policy_version": self.policy_version,
+            "expected_result_texts": list(self.expected_result_texts),
+        }
+
+    @property
+    def preview_digest(self) -> str:
+        return _canonical_digest(self.to_dict())
 
 
 def local_risk_policy_from_dict(payload: Mapping[str, Any]) -> LocalRiskPolicyConfig:
@@ -618,15 +1044,16 @@ class SemanticRiskAuthorityReport:
     risk_policy: LocalRiskPolicyConfig
     risk_decisions: tuple[RiskDecision, ...]
     cutover_diffs: tuple[RiskCutoverDiff, ...]
+    effect_previews: tuple[EffectPreview, ...]
     source_graph_digest: str
-    authoritative_scope: str = "semantic_and_risk_only"
+    authoritative_scope: str = "semantic_task_and_risk"
     physical_execution_allowed: bool = False
     protocol_version: str = AUTHORITY_REPORT_PROTOCOL
 
     def validate(self) -> None:
         if self.protocol_version != AUTHORITY_REPORT_PROTOCOL:
             raise TaskSemanticIRError("正式语义风险报告协议版本无效。")
-        if self.authoritative_scope != "semantic_and_risk_only":
+        if self.authoritative_scope != "semantic_task_and_risk":
             raise TaskSemanticIRError("正式语义风险报告权威范围无效。")
         if self.physical_execution_allowed is not False:
             raise TaskSemanticIRError("语义风险权威不得授予物理执行权限。")
@@ -642,6 +1069,23 @@ class SemanticRiskAuthorityReport:
             raise TaskSemanticIRError("正式风险决定必须覆盖全部 EffectIntent。")
         for item in self.risk_decisions:
             item.validate()
+        previews = {item.effect_id: item for item in self.effect_previews}
+        if len(previews) != len(self.effect_previews) or set(previews) != expected:
+            raise TaskSemanticIRError("EffectPreview 必须逐项覆盖全部 EffectIntent。")
+        for effect in self.semantic_ir.effects:
+            preview = previews[effect.effect_id]
+            preview.validate()
+            decision = decisions[effect.effect_id]
+            if (
+                preview.task_id != self.semantic_ir.task_id
+                or preview.device_id != self.semantic_ir.device_id
+                or preview.revision != self.semantic_ir.revision
+                or preview.effect_kind != effect.kind
+                or preview.policy != decision.policy
+                or preview.policy_id != decision.policy_id
+                or preview.policy_version != decision.policy_version
+            ):
+                raise TaskSemanticIRError("EffectPreview 与 effect/risk authority 不一致。")
         unsupported = [
             item.effect_id
             for item in self.semantic_ir.effects
@@ -672,6 +1116,10 @@ class SemanticRiskAuthorityReport:
             "semantic_digest": self.semantic_ir.semantic_digest,
             "risk_policy": self.risk_policy.to_dict(),
             "risk_decisions": [item.to_dict() for item in self.risk_decisions],
+            "effect_previews": [
+                {**item.to_dict(), "preview_digest": item.preview_digest}
+                for item in self.effect_previews
+            ],
             "cutover_diff_protocol": CUTOVER_DIFF_PROTOCOL,
             "cutover_diffs": [item.to_dict() for item in self.cutover_diffs],
         }
@@ -758,7 +1206,28 @@ def compile_legacy_graph_shadow(
 
     target_apps = tuple(getattr(goal, "target_apps", ()) or ())
     surfaces: list[SurfaceRef] = []
-    if len(target_apps) > 1:
+    raw_goal_folded = raw_goal.casefold()
+    launcher_terms = ("主桌面", "桌面", "主页", "home screen", "launcher")
+    current_surface_terms = (
+        "当前",
+        "当前页面",
+        "当前界面",
+        "当前应用",
+        "当前前台",
+        "眼前",
+        "current page",
+        "current screen",
+        "current app",
+        "current",
+        "foreground",
+    )
+    raw_uses_current_surface = any(
+        term in raw_goal_folded for term in current_surface_terms
+    )
+    needs_launcher = len(target_apps) > 1 or any(
+        term in raw_goal_folded for term in launcher_terms
+    )
+    if needs_launcher:
         surfaces.append(SurfaceRef(surface_id="surface_launcher", kind="launcher"))
     for app in target_apps:
         app_id = _slug(getattr(app, "app_id", ""), fallback="app")
@@ -770,12 +1239,66 @@ def compile_legacy_graph_shadow(
                 app_name=str(getattr(app, "app_name", "") or app_id),
             )
         )
+    if len(target_apps) > 1 or raw_uses_current_surface:
+        surfaces.append(
+            SurfaceRef(
+                surface_id="surface_current",
+                kind="current_surface",
+            )
+        )
 
     raw_entities = getattr(goal, "entities", {}) or {}
     if not isinstance(raw_entities, Mapping):
         raise TaskSemanticIRError("legacy goal.entities 必须是映射。")
     entities: list[SemanticEntity] = []
+    input_field_id_by_entity: dict[str, str] = {}
+    raw_recipients = raw_entities.get("recipients")
+    if isinstance(raw_recipients, list):
+        for index, value in enumerate(raw_recipients, 1):
+            entity_id = f"entity_recipient_{index}"
+            entities.append(
+                SemanticEntity(
+                    entity_id=entity_id,
+                    entity_type="party",
+                    role="recipient",
+                    value=_json_value(value, f"legacy.entities.recipients[{index - 1}]"),
+                    source_span=_source_span(raw_goal, value),
+                    authority=(
+                        "user_literal"
+                        if _source_span(raw_goal, value) is not None
+                        else "planner_context"
+                    ),
+                )
+            )
+    raw_input_fields = raw_entities.get("input_fields")
+    if isinstance(raw_input_fields, list):
+        for index, spec in enumerate(raw_input_fields, 1):
+            if not isinstance(spec, Mapping):
+                continue
+            value = spec.get("text")
+            field_name = _slug(spec.get("field_id"), fallback=f"field_{index}")
+            entity_id = f"entity_input_text_{field_name}"
+            entities.append(
+                SemanticEntity(
+                    entity_id=entity_id,
+                    entity_type="text",
+                    role="input_text",
+                    value=_json_value(
+                        value,
+                        f"legacy.entities.input_fields[{index - 1}].text",
+                    ),
+                    source_span=_source_span(raw_goal, value),
+                    authority=(
+                        "user_literal"
+                        if _source_span(raw_goal, value) is not None
+                        else "planner_context"
+                    ),
+                )
+            )
+            input_field_id_by_entity[entity_id] = field_name
     for index, key in enumerate(sorted(raw_entities, key=lambda item: str(item))):
+        if key in {"recipients", "input_fields"}:
+            continue
         role = _slug(key, fallback=f"role_{index + 1}")
         value = raw_entities[key]
         span = _source_span(raw_goal, value)
@@ -927,6 +1450,379 @@ def compile_legacy_graph_shadow(
                 )
             )
 
+    entity_by_role: dict[str, list[SemanticEntity]] = {}
+    for entity in entities:
+        entity_by_role.setdefault(entity.role, []).append(entity)
+
+    typed_constraints: list[ConstraintIntent] = []
+    entity_constraint_ids: list[str] = []
+    for index, entity in enumerate(entities, 1):
+        if entity.authority != "user_literal":
+            continue
+        constraint_id = f"constraint_exact_{index}"
+        entity_constraint_ids.append(constraint_id)
+        typed_constraints.append(
+            ConstraintIntent(
+                constraint_id=constraint_id,
+                kind="exact_entity",
+                subject_refs=(entity.entity_id,),
+                value=entity.value,
+                source_text=str(entity.value) if isinstance(entity.value, str) else "",
+                authoritative=True,
+            )
+        )
+
+    legacy_constraint_ids_by_subgoal: dict[str, list[str]] = {}
+    action_constraint_ids_by_subgoal: dict[str, list[str]] = {}
+    all_legacy_constraints: list[tuple[str, str]] = [
+        ("", str(item).strip())
+        for item in tuple(getattr(graph, "constraints", ()) or ())
+        if str(item).strip()
+    ]
+    for subgoal_id, subgoal in subgoals.items():
+        all_legacy_constraints.extend(
+            (subgoal_id, str(item).strip())
+            for item in tuple(getattr(subgoal, "constraints", ()) or ())
+            if str(item).strip()
+        )
+    for index, (subgoal_id, text) in enumerate(all_legacy_constraints, 1):
+        constraint_id = f"constraint_context_{index}"
+        typed_constraints.append(
+            ConstraintIntent(
+                constraint_id=constraint_id,
+                kind="legacy_context",
+                value=text,
+                source_text=text,
+                authoritative=False,
+            )
+        )
+        legacy_constraint_ids_by_subgoal.setdefault(subgoal_id, []).append(
+            constraint_id
+        )
+
+    action_patterns = (
+        ("double_tap", re.compile(r"双击|double[ _-]?(?:tap|click)", re.I)),
+        ("pinch", re.compile(r"捏合|双指|pinch|zoom", re.I)),
+        ("press_enter", re.compile(r"回车|enter(?:\s+key)?", re.I)),
+        (
+            "clear_verified_text",
+            re.compile(
+                r"(?:清空|清除|置空).{0,8}(?:输入框|文本|文字|内容|草稿)|"
+                r"(?:clear|empty).{0,8}(?:input|text|draft)",
+                re.I,
+            ),
+        ),
+        (
+            "dismiss_overlay",
+            re.compile(r"关闭.{0,6}(?:弹窗|弹层|对话框)|dismiss[ _-]?overlay", re.I),
+        ),
+        (
+            "reveal_system_navigation",
+            re.compile(r"(?:唤出|显示).{0,6}(?:系统)?导航栏|reveal[ _-]?navigation", re.I),
+        ),
+        ("long_press", re.compile(r"长按|long[ _-]?press", re.I)),
+        ("drag", re.compile(r"拖动|拖拽|drag", re.I)),
+        ("swipe", re.compile(r"滑动|上划|下划|左划|右划|swipe", re.I)),
+        ("input_verified_text", re.compile(r"输入|填写|键入|type|input", re.I)),
+        ("home", re.compile(r"home\s*键|回到主页|回到主桌面", re.I)),
+        (
+            "back",
+            re.compile(
+                r"返回键|后退键|back\s*key|"
+                r"(?:收起|隐藏|关闭).{0,6}(?:软?键盘|输入法)",
+                re.I,
+            ),
+        ),
+        ("hardware_key", re.compile(r"音量键|电源键|hardware\s*key", re.I)),
+        ("tap_semantic", re.compile(r"点击|轻触|点按|tap|click", re.I)),
+    )
+    for subgoal_id, subgoal in subgoals.items():
+        objective = str(getattr(subgoal, "objective", "") or "")
+        for action_kind, pattern in action_patterns:
+            if not pattern.search(objective):
+                continue
+            constraint_id = f"constraint_action_{len(typed_constraints) + 1}"
+            typed_constraints.append(
+                ConstraintIntent(
+                    constraint_id=constraint_id,
+                    kind="required_action",
+                    value=action_kind,
+                    source_text=objective,
+                    authoritative=True,
+                )
+            )
+            action_constraint_ids_by_subgoal.setdefault(subgoal_id, []).append(
+                constraint_id
+            )
+
+    surface_by_app_term: dict[str, str] = {}
+    for surface in surfaces:
+        if surface.kind == "app":
+            surface_by_app_term[surface.app_id.casefold()] = surface.surface_id
+            surface_by_app_term[surface.app_name.casefold()] = surface.surface_id
+
+    def surface_for_subgoal(subgoal: Any) -> str:
+        values = (
+            str(getattr(subgoal, "objective", "") or ""),
+            *tuple(str(item) for item in tuple(getattr(subgoal, "constraints", ()) or ())),
+            *tuple(
+                str(item)
+                for item in tuple(
+                    getattr(subgoal, "completion_conditions", ()) or ()
+                )
+            ),
+        )
+        normalized = " ".join(values).casefold()
+        if any(term in normalized for term in launcher_terms):
+            launcher = next(
+                (item.surface_id for item in surfaces if item.kind == "launcher"),
+                "",
+            )
+            if launcher:
+                return launcher
+        if any(term in normalized for term in current_surface_terms):
+            current = next(
+                (item.surface_id for item in surfaces if item.kind == "current_surface"),
+                "",
+            )
+            if current:
+                return current
+        matches = {
+            surface_id
+            for term, surface_id in surface_by_app_term.items()
+            if term and term in normalized
+        }
+        if len(matches) == 1:
+            return next(iter(matches))
+        if raw_uses_current_surface:
+            current = next(
+                (item.surface_id for item in surfaces if item.kind == "current_surface"),
+                "",
+            )
+            if current:
+                return current
+        app_surfaces = [item.surface_id for item in surfaces if item.kind == "app"]
+        if len(app_surfaces) == 1:
+            return app_surfaces[0]
+        current = next(
+            (item.surface_id for item in surfaces if item.kind == "current_surface"),
+            "",
+        )
+        if current:
+            return current
+        return surfaces[0].surface_id
+
+    effect_refs_by_subgoal: dict[str, list[str]] = {}
+    for effect in effects:
+        for subgoal_id in effect.source_subgoal_ids:
+            effect_refs_by_subgoal.setdefault(subgoal_id, []).append(effect.effect_id)
+
+    desired_states: list[DesiredState] = []
+    evidence_requirements: list[EvidenceRequirement] = []
+    desired_by_subgoal: dict[str, list[str]] = {}
+
+    def append_desired_state(
+        *,
+        description: str,
+        source_subgoal_id: str,
+        surface_ref: str,
+    ) -> None:
+        state_number = len(desired_states) + 1
+        state_id = f"state_{state_number}"
+        input_entities = tuple(entity_by_role.get("input_text", ()))
+        effect_refs = effect_refs_by_subgoal.get(source_subgoal_id, [])
+        compact_description = description.casefold()
+        if (
+            len(input_entities) == 1
+            and isinstance(input_entities[0].value, str)
+            and input_entities[0].value
+            and input_entities[0].value.casefold() in compact_description
+        ):
+            subject_ref = input_entities[0].entity_id
+            predicate = "input.value_equals"
+            value: Any = input_entities[0].value
+            sources = ("visual_claim",)
+        elif len(effect_refs) == 1:
+            subject_ref = effect_refs[0]
+            predicate = (
+                "effect.result_visible"
+                if any(marker in compact_description for marker in ("可见", "显示", "确认", "verify", "visible"))
+                else "effect.applied"
+            )
+            value = True
+            sources = (
+                ("visual_claim", "effect_receipt")
+                if predicate == "effect.result_visible"
+                else ("effect_receipt",)
+            )
+        elif any(
+            term and term in compact_description
+            for term in surface_by_app_term
+        ):
+            subject_ref = surface_ref
+            predicate = "surface.state_visible"
+            value = description
+            sources = ("visual_claim",)
+        else:
+            subject_ref = surface_ref
+            predicate = "observation.matches_description"
+            value = description
+            sources = ("visual_claim", "controller_transition")
+        desired_states.append(
+            DesiredState(
+                state_id=state_id,
+                subject_ref=subject_ref,
+                predicate=predicate,
+                value=value,
+                source_subgoal_id=source_subgoal_id,
+            )
+        )
+        desired_by_subgoal.setdefault(source_subgoal_id, []).append(state_id)
+        evidence_requirements.append(
+            EvidenceRequirement(
+                requirement_id=f"evidence_{state_number}",
+                desired_state_ref=state_id,
+                allowed_sources=tuple(sources),
+            )
+        )
+
+    semantic_subgoals: list[SemanticSubgoal] = []
+    for subgoal_id, subgoal in subgoals.items():
+        surface_ref = surface_for_subgoal(subgoal)
+        for description in tuple(
+            getattr(subgoal, "completion_conditions", ()) or ()
+        ):
+            if str(description).strip():
+                append_desired_state(
+                    description=str(description).strip(),
+                    source_subgoal_id=subgoal_id,
+                    surface_ref=surface_ref,
+                )
+        semantic_subgoals.append(
+            SemanticSubgoal(
+                subgoal_id=subgoal_id,
+                surface_ref=surface_ref,
+                status=str(getattr(subgoal, "status", "") or "pending"),
+                external_impact=str(
+                    getattr(subgoal, "external_impact", "") or "unknown"
+                ),
+                depends_on=tuple(
+                    str(item)
+                    for item in tuple(getattr(subgoal, "depends_on", ()) or ())
+                ),
+                constraint_refs=tuple(
+                    dict.fromkeys(
+                        [
+                            *entity_constraint_ids,
+                            *legacy_constraint_ids_by_subgoal.get("", ()),
+                            *legacy_constraint_ids_by_subgoal.get(subgoal_id, ()),
+                            *action_constraint_ids_by_subgoal.get(subgoal_id, ()),
+                        ]
+                    )
+                ),
+                desired_state_refs=tuple(desired_by_subgoal.get(subgoal_id, ())),
+                effect_refs=tuple(effect_refs_by_subgoal.get(subgoal_id, ())),
+            )
+        )
+
+    global_conditions = tuple(
+        getattr(graph, "completion_conditions", ()) or ()
+    )
+    default_surface = surfaces[0].surface_id
+    for condition in global_conditions:
+        description = str(getattr(condition, "description", "") or "").strip()
+        if description:
+            append_desired_state(
+                description=description,
+                source_subgoal_id="",
+                surface_ref=default_surface,
+            )
+
+    recipient_refs = tuple(
+        item.entity_id for item in entity_by_role.get("recipient", ())
+    )
+    input_fields: list[InputFieldIntent] = []
+    for index, payload in enumerate(entity_by_role.get("input_text", ()), 1):
+        source_subgoal_ids = tuple(
+            subgoal_id
+            for subgoal_id, subgoal in subgoals.items()
+            if isinstance(payload.value, str)
+            and payload.value
+            and payload.value in " ".join(
+                [
+                    str(getattr(subgoal, "objective", "") or ""),
+                    *tuple(
+                        str(item)
+                        for item in tuple(
+                            getattr(subgoal, "completion_conditions", ()) or ()
+                        )
+                    ),
+                ]
+            )
+        )
+        input_fields.append(
+            InputFieldIntent(
+                field_id=input_field_id_by_entity.get(
+                    payload.entity_id,
+                    f"input_field_{index}",
+                ),
+                payload_ref=payload.entity_id,
+                recipient_refs=recipient_refs,
+                source_subgoal_ids=source_subgoal_ids,
+                multiline=isinstance(payload.value, str)
+                and ("\n" in payload.value or "\r" in payload.value),
+            )
+        )
+    constraints_by_id = {
+        item.constraint_id: item for item in typed_constraints
+    }
+    semantic_subgoal_by_id = {
+        item.subgoal_id: item for item in semantic_subgoals
+    }
+    for input_field in input_fields:
+        if not input_field.multiline:
+            continue
+        candidate_subgoal_ids = list(input_field.source_subgoal_ids)
+        if not candidate_subgoal_ids:
+            candidate_subgoal_ids = [
+                item.subgoal_id
+                for item in semantic_subgoals
+                if any(
+                    constraints_by_id[constraint_ref].kind == "required_action"
+                    and constraints_by_id[constraint_ref].value
+                    == "input_verified_text"
+                    for constraint_ref in item.constraint_refs
+                    if constraint_ref in constraints_by_id
+                )
+            ]
+        if len(candidate_subgoal_ids) != 1:
+            continue
+        subgoal_id = candidate_subgoal_ids[0]
+        current_subgoal = semantic_subgoal_by_id.get(subgoal_id)
+        if current_subgoal is None or any(
+            constraints_by_id[constraint_ref].kind == "required_action"
+            and constraints_by_id[constraint_ref].value == "press_enter"
+            for constraint_ref in current_subgoal.constraint_refs
+            if constraint_ref in constraints_by_id
+        ):
+            continue
+        constraint_id = f"constraint_action_{len(typed_constraints) + 1}"
+        press_enter_constraint = ConstraintIntent(
+            constraint_id=constraint_id,
+            kind="required_action",
+            value="press_enter",
+            source_text="multiline typed input field",
+            authoritative=True,
+        )
+        typed_constraints.append(press_enter_constraint)
+        constraints_by_id[constraint_id] = press_enter_constraint
+        semantic_subgoal_by_id[subgoal_id] = replace(
+            current_subgoal,
+            constraint_refs=(*current_subgoal.constraint_refs, constraint_id),
+        )
+    semantic_subgoals = [
+        semantic_subgoal_by_id[item.subgoal_id] for item in semantic_subgoals
+    ]
     semantic_ir = TaskSemanticIR(
         task_id=task_id,
         device_id=device_id,
@@ -936,6 +1832,11 @@ def compile_legacy_graph_shadow(
         entities=tuple(entities),
         effects=tuple(effects),
         critical_bindings=tuple(bindings),
+        constraints=tuple(typed_constraints),
+        desired_states=tuple(desired_states),
+        evidence_requirements=tuple(evidence_requirements),
+        subgoals=tuple(semantic_subgoals),
+        input_fields=tuple(input_fields),
     )
     semantic_ir.validate()
     policy = risk_policy or LocalRiskPolicyConfig()
@@ -965,6 +1866,7 @@ def compile_formal_semantic_authority(
 
     shadow = compile_legacy_graph_shadow(graph, risk_policy=risk_policy)
     decisions = {item.effect_id: item for item in shadow.risk_decisions}
+    entity_by_id = {item.entity_id: item for item in shadow.semantic_ir.entities}
     diffs: list[RiskCutoverDiff] = []
     for effect in shadow.semantic_ir.effects:
         decision = decisions[effect.effect_id]
@@ -991,11 +1893,44 @@ def compile_formal_semantic_authority(
                 reason=reason,
             )
         )
+    previews = tuple(
+        EffectPreview(
+            task_id=shadow.semantic_ir.task_id,
+            device_id=shadow.semantic_ir.device_id,
+            revision=shadow.semantic_ir.revision,
+            effect_id=effect.effect_id,
+            effect_kind=effect.kind,
+            targets=tuple(
+                EffectEntityPreview(
+                    entity_ref=entity_ref,
+                    role=entity_by_id[entity_ref].role,
+                    entity_type=entity_by_id[entity_ref].entity_type,
+                    value=entity_by_id[entity_ref].value,
+                )
+                for entity_ref in effect.target_refs
+            ),
+            payloads=tuple(
+                EffectEntityPreview(
+                    entity_ref=entity_ref,
+                    role=entity_by_id[entity_ref].role,
+                    entity_type=entity_by_id[entity_ref].entity_type,
+                    value=entity_by_id[entity_ref].value,
+                )
+                for entity_ref in effect.payload_refs
+            ),
+            policy=decisions[effect.effect_id].policy,
+            policy_id=decisions[effect.effect_id].policy_id,
+            policy_version=decisions[effect.effect_id].policy_version,
+            expected_result_texts=effect.expected_result_texts,
+        )
+        for effect in shadow.semantic_ir.effects
+    )
     report = SemanticRiskAuthorityReport(
         semantic_ir=shadow.semantic_ir,
         risk_policy=shadow.risk_policy,
         risk_decisions=shadow.risk_decisions,
         cutover_diffs=tuple(diffs),
+        effect_previews=previews,
         source_graph_digest=_legacy_graph_digest(graph),
     )
     report.validate()

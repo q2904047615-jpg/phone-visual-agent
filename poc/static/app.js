@@ -881,7 +881,32 @@ function openRiskDialog() {
     : `${view.currentSubgoal.label} · 等待 Qwen 唯一动作`;
   document.querySelector("#riskReason").textContent = view.risk.currentActions.map(item => `${item.id} [${item.level}]：${item.description}；${item.externalEffect}`).join("\n") || view.visualAction.reason;
   const intentPreview = view.risk.intentPreview || {};
-  if (riskPhase && intentPreview.kind === "message_or_communication") {
+  const effectPreviews = Array.isArray(view.risk.effectPreviews)
+    ? view.risk.effectPreviews
+    : [];
+  if (effectPreviews.length) {
+    const previewLines = effectPreviews.map((preview) => {
+      const targetValues = Array.isArray(preview.targets)
+        ? preview.targets.map(item => Protocol.displayValue(item && item.value)).join("、")
+        : "";
+      const payloadValues = Array.isArray(preview.payloads)
+        ? preview.payloads.map(item => Protocol.displayValue(item && item.value)).join("、")
+        : "";
+      return [
+        `效果 ${preview.effect_kind || preview.effect_id || "unknown"}`,
+        targetValues ? `目标=${targetValues}` : "",
+        payloadValues ? `载荷=${payloadValues}` : "",
+        `策略=${preview.policy || "unknown"}`,
+        preview.preview_digest ? `摘要=${preview.preview_digest}` : "",
+      ].filter(Boolean).join("；");
+    });
+    document.querySelector("#riskReason").textContent = previewLines.join("\n");
+  }
+  if (
+    riskPhase
+    && intentPreview.kind === "message_or_communication"
+    && effectPreviews.length === 0
+  ) {
     const apps = Array.isArray(intentPreview.target_apps)
       ? intentPreview.target_apps.map(item => item.app_name || item.app_id).filter(Boolean).join("、")
       : "";

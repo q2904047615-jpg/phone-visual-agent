@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from PIL import Image
@@ -30,6 +30,7 @@ from message_intent import (
 )
 from qwen_runtime_errors import classify_qwen_error, failure_diagnostics
 from semantic_executor import SemanticAction
+from task_semantic_ir import TaskSemanticIR
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 from universal_action_controller import UniversalActionController, UniversalActionError
 from verified_text_transaction import (
@@ -187,7 +188,7 @@ def _finished_has_transition_evidence(
 
 
 @dataclass(frozen=True)
-class QwenTaskContext:
+class QwenTaskContext(Mapping[str, Any]):
     protocol_version: str
     task_id: str
     device_id: str
@@ -200,6 +201,11 @@ class QwenTaskContext:
     current_external_impact: str
     risk_actions: tuple[dict[str, Any], ...]
     confirmation_gate: dict[str, Any]
+    semantic_ir: TaskSemanticIR | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "QwenTaskContext":
@@ -280,6 +286,16 @@ class QwenTaskContext:
             raise VisionAgentError(
                 f"current_external_impact 无效：{self.current_external_impact}"
             )
+        if self.semantic_ir is not None:
+            self.semantic_ir.validate()
+            expected_scope = (self.task_id, self.device_id, self.revision)
+            actual_scope = (
+                self.semantic_ir.task_id,
+                self.semantic_ir.device_id,
+                self.semantic_ir.revision,
+            )
+            if actual_scope != expected_scope:
+                raise VisionAgentError("TaskSemanticIR 与 Qwen task scope 不一致。")
 
         subgoal_allowed = {
             "subgoal_id",
@@ -436,20 +452,36 @@ class QwenTaskContext:
             if not isinstance(target_label, str) or not target_label.strip():
                 raise VisionAgentError("goal.entities.target_ui_label 格式无效。")
             values.append(target_label.strip())
-        recipient = entities.get("recipient")
-        if recipient is not None:
-            if (
-                not isinstance(recipient, str)
-                or not recipient
-                or len(recipient) > 100
-                or recipient != recipient.strip()
-                or "\n" in recipient
-                or "\r" in recipient
-            ):
-                raise VisionAgentError("goal.entities.recipient 格式无效。")
+        for recipient in self.recipient_values:
             if subgoal_targets_recipient_control(recipient, self.current_subgoal):
                 if recipient not in values:
                     values.append(recipient)
+        return tuple(values)
+
+    @property
+    def recipient_values(self) -> tuple[str, ...]:
+        entities = self.goal.get("entities") or {}
+        if not isinstance(entities, dict):
+            raise VisionAgentError("goal.entities 必须是JSON对象。")
+        values: list[str] = []
+        recipient = entities.get("recipient")
+        if recipient is not None:
+            values.append(recipient)
+        recipients = entities.get("recipients")
+        if recipients is not None:
+            if not isinstance(recipients, list) or not 1 <= len(recipients) <= 32:
+                raise VisionAgentError("goal.entities.recipients 格式无效。")
+            values.extend(recipients)
+        if any(
+            not isinstance(item, str)
+            or not item
+            or len(item) > 100
+            or item != item.strip()
+            or "\n" in item
+            or "\r" in item
+            for item in values
+        ) or len(values) != len(set(values)):
+            raise VisionAgentError("goal.entities recipient/recipients 格式无效。")
         return tuple(values)
 
     @property
@@ -457,25 +489,15 @@ class QwenTaskContext:
         entities = self.goal.get("entities") or {}
         if not isinstance(entities, dict):
             raise VisionAgentError("goal.entities 必须是JSON对象。")
-        recipient = entities.get("recipient")
-        if recipient is None:
-            return ()
-        if (
-            not isinstance(recipient, str)
-            or not recipient
-            or len(recipient) > 100
-            or recipient != recipient.strip()
-        ):
-            raise VisionAgentError("goal.entities.recipient 格式无效。")
-        if (
-            subgoal_binds_recipient(recipient, self.current_subgoal)
+        return tuple(
+            recipient
+            for recipient in self.recipient_values
+            if subgoal_binds_recipient(recipient, self.current_subgoal)
             and not subgoal_targets_recipient_control(
                 recipient,
                 self.current_subgoal,
             )
-        ):
-            return (recipient,)
-        return ()
+        )
 
     @property
     def exact_text_target_roles(self) -> tuple[str, ...]:
@@ -486,14 +508,34 @@ class QwenTaskContext:
     def requested_input_text(self) -> str | None:
         """Return the exact text authorized by DeepSeek, never model-invented text."""
 
+        if self.semantic_ir is not None and self.semantic_ir.input_fields:
+            active_id = str(self.current_subgoal.get("subgoal_id") or "")
+            entities = {item.entity_id: item for item in self.semantic_ir.entities}
+            relevant = [
+                item
+                for item in self.semantic_ir.input_fields
+                if active_id in item.source_subgoal_ids
+            ]
+            if not relevant and len(self.semantic_ir.input_fields) == 1:
+                relevant = [self.semantic_ir.input_fields[0]]
+            if not relevant and len(self.semantic_ir.input_fields) > 1:
+                raise VisionAgentError(
+                    "当前子目标没有绑定唯一 typed input field，禁止猜测多个字段。"
+                )
+            if len(relevant) > 1:
+                raise VisionAgentError("当前子目标同时绑定多个输入字段，缺少唯一字段选择。")
+            if relevant:
+                raw = entities[relevant[0].payload_ref].value
+                if not isinstance(raw, str):
+                    raise VisionAgentError("typed input payload 不是文字。")
+                return raw
+
         entities = self.goal.get("entities") or {}
         raw = entities.get("input_text")
         if raw is None:
             return None
-        if not isinstance(raw, str) or not raw or len(raw) > 100:
-            raise VisionAgentError("goal.entities.input_text 必须为1～100个字符。")
-        if "\n" in raw or "\r" in raw:
-            raise VisionAgentError("goal.entities.input_text 不得包含换行。")
+        if not isinstance(raw, str) or not raw or len(raw) > 4000 or "\r" in raw:
+            raise VisionAgentError("goal.entities.input_text 必须为1～4000个字符。")
         return raw
 
     @property
@@ -517,6 +559,15 @@ class QwenTaskContext:
             "risk_actions": [dict(item) for item in self.risk_actions],
             "confirmation_gate": dict(self.confirmation_gate),
         }
+
+    def __getitem__(self, key: str) -> Any:
+        return self.to_dict()[key]
+
+    def __iter__(self):
+        return iter(self.to_dict())
+
+    def __len__(self) -> int:
+        return len(self.to_dict())
 
     def to_observation_context(self) -> dict[str, Any]:
         """Small read-only goal context for candidate discovery.
@@ -1490,30 +1541,132 @@ def _selection_choices(
         and str(item.get("element_id") or "").strip()
     )
     choices: list[dict[str, Any]] = []
+    formal_report = None
+    if context.semantic_ir is not None:
+        try:
+            from visual_action_shadow import compile_visual_action_authority
+
+            formal_report = compile_visual_action_authority(
+                observation.scene,
+                context.semantic_ir,
+                available_action_kinds,
+            )
+        except Exception as exc:
+            raise VisionAgentError(
+                f"正式视觉候选权威构建失败：{exc}"
+            ) from exc
+    force_launcher_entry = False
+    if context.semantic_ir is not None:
+        active_id = str(context.current_subgoal.get("subgoal_id") or "")
+        typed_subgoal = next(
+            (
+                item
+                for item in context.semantic_ir.subgoals
+                if item.subgoal_id == active_id
+            ),
+            None,
+        )
+        surfaces = {
+            item.surface_id: item for item in context.semantic_ir.surfaces
+        }
+        target_surface = (
+            surfaces.get(typed_subgoal.surface_ref)
+            if typed_subgoal is not None
+            else None
+        )
+        current_identity = (
+            f"{observation.scene.foreground_app_id} {observation.scene.screen_id}"
+            .casefold()
+        )
+        current_is_launcher = any(
+            token in current_identity
+            for token in ("launcher", "home_screen", "desktop")
+        )
+        force_launcher_entry = bool(
+            target_surface is not None
+            and target_surface.kind == "app"
+            and not current_is_launcher
+            and observation.scene.foreground_app_id.casefold()
+            != target_surface.app_id.casefold()
+        )
+
+    def formal_candidate(
+        action: str,
+        *,
+        element_ids: tuple[str, ...] = (),
+        direction: str = "",
+    ) -> Any:
+        if formal_report is None:
+            return None
+        matches = [
+            item
+            for item in formal_report.candidates
+            if item.action_kind == action
+            and (
+                not element_ids
+                or (
+                    len(element_ids) == 1
+                    and str(item.parameters.get("element_id") or "")
+                    == element_ids[0]
+                )
+                or (
+                    len(element_ids) == 2
+                    and (
+                        str(item.parameters.get("source_element_id") or ""),
+                        str(item.parameters.get("destination_element_id") or ""),
+                    )
+                    == element_ids
+                )
+            )
+            and (
+                not direction
+                or str(item.parameters.get("direction") or "") == direction
+            )
+        ]
+        if len(matches) != 1:
+            return None
+        return matches[0]
 
     def append_choice(
         action: str,
         *,
         expected_result: Mapping[str, Any],
+        authority_candidate: Any = None,
         **parts: Any,
     ) -> None:
+        if formal_report is not None and authority_candidate is None:
+            return
+        formal_parts: dict[str, Any] = {}
+        if authority_candidate is not None:
+            formal_parts = {
+                "formal_candidate_id": authority_candidate.candidate_id,
+                "formal_report_digest": formal_report.report_digest,
+                "formal_transition": authority_candidate.transition.to_dict(),
+            }
         choices.append(
             {
                 "choice_id": f"choice_{len(choices) + 1}",
                 "action": action,
                 "expected_result": dict(expected_result),
+                **formal_parts,
                 **parts,
             }
         )
 
     for action in sorted(available_action_kinds):
+        if force_launcher_entry and action != "home":
+            continue
         if action in {"back", "home", "reveal_system_navigation", "wait_for_change"}:
             expected_result = (
                 {"system_ui": {"navigation_bar_visible": True}}
                 if action == "reveal_system_navigation"
                 else {"scene_changed": True}
             )
-            append_choice(action, expected_result=expected_result)
+            append_choice(
+                action,
+                expected_result=expected_result,
+                authority_candidate=formal_candidate(action),
+            )
             continue
         if action == "swipe":
             for direction in ("up", "down", "left", "right"):
@@ -1521,6 +1674,10 @@ def _selection_choices(
                     action,
                     direction=direction,
                     expected_result={"content_changed": True},
+                    authority_candidate=formal_candidate(
+                        action,
+                        direction=direction,
+                    ),
                 )
             continue
         eligible = tuple(
@@ -1529,11 +1686,20 @@ def _selection_choices(
             if str(item.get("role") or "") not in {"keyboard_key", "dialog"}
             and isinstance(item.get("states"), Mapping)
             and (
-                item["states"].get("goal_relevant") is True
-                or item["states"].get("ime_candidate") is True
-                or item["states"].get("input_literal_key") is True
-                or item["states"].get("keyboard_layout_switch") is True
-                or item["states"].get("keyboard_case_switch") is True
+                formal_report is not None
+                and formal_candidate(
+                    action,
+                    element_ids=(str(item.get("element_id") or ""),),
+                )
+                is not None
+                or formal_report is None
+                and (
+                    item["states"].get("goal_relevant") is True
+                    or item["states"].get("ime_candidate") is True
+                    or item["states"].get("input_literal_key") is True
+                    or item["states"].get("keyboard_layout_switch") is True
+                    or item["states"].get("keyboard_case_switch") is True
+                )
             )
         )
         if action in {"input_verified_text", "clear_verified_text"}:
@@ -1553,7 +1719,10 @@ def _selection_choices(
                     and item["states"].get("focused") is True
                     and isinstance(item["states"].get("value"), str)
                     and bool(item["states"].get("value"))
-                    and item["states"].get("goal_relevant") is True
+                    and (
+                        formal_report is not None
+                        or item["states"].get("goal_relevant") is True
+                    )
                 )
         if action in SINGLE_ELEMENT_ACTIONS:
             for item in eligible:
@@ -1679,6 +1848,10 @@ def _selection_choices(
                     action,
                     element_id=str(item["element_id"]),
                     expected_result=expected_result,
+                    authority_candidate=formal_candidate(
+                        action,
+                        element_ids=(str(item["element_id"]),),
+                    ),
                 )
             continue
         if action == "drag":
@@ -1691,6 +1864,13 @@ def _selection_choices(
                         source_element_id=str(source["element_id"]),
                         destination_element_id=str(destination["element_id"]),
                         expected_result={"scene_changed": True},
+                        authority_candidate=formal_candidate(
+                            action,
+                            element_ids=(
+                                str(source["element_id"]),
+                                str(destination["element_id"]),
+                            ),
+                        ),
                     )
     return tuple(choices)
 
@@ -2534,7 +2714,10 @@ def _precondition_eligible_action_kinds(
             and isinstance(element.states.get("value"), str)
             and bool(element.states.get("value"))
             and element.states.get("keyboard_layout") == "qwerty"
-            and element.states.get("goal_relevant") is True
+            and (
+                context.semantic_ir is not None
+                or element.states.get("goal_relevant") is True
+            )
         )
         if len(clearable_inputs) != 1:
             eligible.remove("clear_verified_text")
@@ -2545,7 +2728,10 @@ def _precondition_eligible_action_kinds(
             # preconditions for the one-shot clear contract.
             eligible.intersection_update({"clear_verified_text"})
     if _current_subgoal_requests_keyboard_dismissal(context) and (
-        _trusted_scene_proves_visible_keyboard(observation.scene)
+        _trusted_scene_proves_visible_keyboard(
+            observation.scene,
+            formal=context.semantic_ir is not None,
+        )
     ):
         # Android back is the certified device primitive for dismissing a
         # currently visible soft keyboard.  Keep Qwen as the single-step
@@ -2578,6 +2764,9 @@ def _current_subgoal_requests_verified_clear(
 ) -> bool:
     """Recognize only the active subgoal's explicit empty-value request."""
 
+    typed_actions = _typed_required_action_kinds(context)
+    if typed_actions:
+        return "clear_verified_text" in typed_actions
     if context.requested_input_text is not None:
         return False
     visible = " ".join(
@@ -2600,6 +2789,9 @@ def _current_subgoal_requests_keyboard_dismissal(
 ) -> bool:
     """Match only the active subgoal, never a keyboard mention in the goal."""
 
+    typed_actions = _typed_required_action_kinds(context)
+    if typed_actions:
+        return "back" in typed_actions
     visible = " ".join(
         [
             str(context.current_subgoal.get("objective") or ""),
@@ -2618,7 +2810,33 @@ def _current_subgoal_requests_keyboard_dismissal(
     )
 
 
-def _trusted_scene_proves_visible_keyboard(scene: UIScene) -> bool:
+def _typed_required_action_kinds(context: QwenTaskContext) -> frozenset[str]:
+    semantic_ir = context.semantic_ir
+    if semantic_ir is None:
+        return frozenset()
+    active_id = str(context.current_subgoal.get("subgoal_id") or "")
+    subgoal = next(
+        (item for item in semantic_ir.subgoals if item.subgoal_id == active_id),
+        None,
+    )
+    if subgoal is None:
+        return frozenset()
+    constraints = {
+        item.constraint_id: item for item in semantic_ir.constraints
+    }
+    return frozenset(
+        str(constraints[constraint_ref].value)
+        for constraint_ref in subgoal.constraint_refs
+        if constraint_ref in constraints
+        and constraints[constraint_ref].kind == "required_action"
+    )
+
+
+def _trusted_scene_proves_visible_keyboard(
+    scene: UIScene,
+    *,
+    formal: bool = False,
+) -> bool:
     """Require the independent input audit's complete visible-keyboard facts."""
 
     candidates = tuple(
@@ -2626,7 +2844,7 @@ def _trusted_scene_proves_visible_keyboard(scene: UIScene) -> bool:
         for element in scene.elements
         if element.role == "input"
         and float(element.confidence) >= MIN_TARGET_CONFIDENCE
-        and element.states.get("goal_relevant") is True
+        and (formal or element.states.get("goal_relevant") is True)
         and element.states.get("focused") is True
         and element.states.get("keyboard_layout")
         in {"qwerty", "numeric", "symbol", "unknown"}
@@ -2697,6 +2915,7 @@ def _parse_action(
     allowed = {
         "kind", "element_id", "target", "role", "label", "states", "direction",
         "text", "duration_ms",
+        "formal_candidate_id", "formal_report_digest", "formal_transition",
         "source_element_id", "source_target", "source_role", "source_label",
         "source_states", "destination_element_id", "destination_target",
         "destination_role", "destination_label", "destination_states",
@@ -2731,7 +2950,12 @@ def _parse_action(
         "home": set(),
         "wait_for_change": set(),
     }
-    effective_fields = parameter_fields_by_kind[kind]
+    formal_fields = {
+        "formal_candidate_id",
+        "formal_report_digest",
+        "formal_transition",
+    }
+    effective_fields = parameter_fields_by_kind[kind] | formal_fields
     params = {
         key: value[key]
         for key in effective_fields

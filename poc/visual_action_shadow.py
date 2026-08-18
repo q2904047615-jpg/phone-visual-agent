@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping
 
 from task_semantic_ir import EffectIntent, SemanticEntity, TaskSemanticIR
@@ -11,12 +11,13 @@ from ui_scene import UIElement, UIScene
 
 
 VISUAL_ACTION_SHADOW_PROTOCOL = "2026-08-18-visual-action-shadow-v1"
+VISUAL_ACTION_AUTHORITY_PROTOCOL = "2026-08-19-visual-action-authority-v1"
 VISUAL_CLAIM_PROTOCOL = "2026-08-18-visual-claim-v1-shadow"
 SHADOW_SELECTION_PROTOCOL = "2026-08-18-shadow-candidate-selection-v1"
 
 MIN_ELEMENT_CONFIDENCE = 0.72
-MIN_READY_CANDIDATES = 2
-MAX_READY_CANDIDATES = 8
+MIN_READY_CANDIDATES = 1
+MAX_READY_CANDIDATES = 24
 
 ELEMENT_ACTION_ROLES = frozenset(
     {"button", "icon", "input", "tab", "toggle", "list_item"}
@@ -82,6 +83,7 @@ EXPECTATION_PREDICATES = frozenset(
         "element.state.value",
         "element.state.interaction_result",
         "element.state.location_relation",
+        "effect.applied",
     }
 )
 _ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
@@ -432,10 +434,15 @@ class VisualActionShadowReport:
     protocol_version: str = VISUAL_ACTION_SHADOW_PROTOCOL
 
     def validate(self) -> None:
-        if self.protocol_version != VISUAL_ACTION_SHADOW_PROTOCOL:
-            raise VisualActionShadowError("shadow report protocol_version 无效。")
-        if self.authoritative or self.execution_allowed:
-            raise VisualActionShadowError("shadow report 不得取得权威或执行权限。")
+        expected_protocol = (
+            VISUAL_ACTION_AUTHORITY_PROTOCOL
+            if self.authoritative
+            else VISUAL_ACTION_SHADOW_PROTOCOL
+        )
+        if self.protocol_version != expected_protocol:
+            raise VisualActionShadowError("visual report protocol_version 无效。")
+        if self.execution_allowed:
+            raise VisualActionShadowError("视觉候选报告本身不得授予物理执行权限。")
         _required_text(self.task_id, "report.task_id", max_length=128)
         _required_text(self.device_id, "report.device_id", max_length=128)
         if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1:
@@ -449,7 +456,10 @@ class VisualActionShadowReport:
         if self.status not in {"ready", "blocked"}:
             raise VisualActionShadowError("report.status 无效。")
         if self.status == "ready" and not MIN_READY_CANDIDATES <= len(self.candidates) <= MAX_READY_CANDIDATES:
-            raise VisualActionShadowError("ready report 必须包含2至8个候选。")
+            raise VisualActionShadowError(
+                f"ready report 必须包含{MIN_READY_CANDIDATES}至"
+                f"{MAX_READY_CANDIDATES}个候选。"
+            )
         if self.status == "blocked" and len(self.candidates) >= MIN_READY_CANDIDATES:
             raise VisualActionShadowError("候选已足够时不得标记 blocked。")
 
@@ -504,6 +514,7 @@ class VisualActionShadowReport:
                 raise VisualActionShadowError("transition 引用未知 claim。")
             if any(
                 item.subject_ref not in claimed_subjects
+                and item.subject_ref != candidate.effect_ref
                 for item in candidate.transition.expectations
             ):
                 raise VisualActionShadowError("transition expectation 没有事实主体。")
@@ -811,6 +822,17 @@ def compile_visual_action_shadow(
 
     exact_elements_by_entity: dict[str, tuple[UIElement, ...]] = {}
     relation_ids_by_element: dict[str, list[str]] = {}
+    element_id_by_ref = {
+        _element_ref(element.element_id): element.element_id
+        for element in sorted_elements
+    }
+    for relation in relations:
+        if relation.relation == "on_surface":
+            element_id = element_id_by_ref.get(relation.subject_ref)
+            if element_id:
+                relation_ids_by_element.setdefault(element_id, []).append(
+                    relation.relation_id
+                )
     relation_effects_by_element: dict[str, list[tuple[str, str, str]]] = {}
     focused_inputs = tuple(
         element
@@ -916,6 +938,16 @@ def compile_visual_action_shadow(
     affordances: list[Affordance] = []
     for action_kind in sorted(available):
         if action_kind in {"back", "home", "reveal_system_navigation", "swipe", "wait_for_change"}:
+            if action_kind == "swipe" and not any(
+                element.states.get("scrollable") is True
+                for element in sorted_elements
+            ):
+                continue
+            if action_kind == "reveal_system_navigation" and not (
+                scene.system_ui.immersive_or_fullscreen is True
+                and scene.system_ui.navigation_bar_visible is False
+            ):
+                continue
             affordances.append(_affordance(surface_ref, action_kind, surface_claim_ids))
     for element in sorted_elements:
         if not _element_eligible(element):
@@ -948,6 +980,15 @@ def compile_visual_action_shadow(
     affordances = sorted(affordances, key=lambda item: item.affordance_id)
 
     candidates: list[ShadowActionCandidate] = []
+    active_external_effect_refs = tuple(
+        dict.fromkeys(
+            effect_ref
+            for subgoal in semantic_ir.subgoals
+            if subgoal.status == "active"
+            and subgoal.external_impact == "external_state"
+            for effect_ref in subgoal.effect_refs
+        )
+    )
     # Element candidates require a unique exact entity/surface binding. A model
     # boolean such as goal_relevant never grants eligibility here.
     for element in sorted_elements:
@@ -994,6 +1035,8 @@ def compile_visual_action_shadow(
                     for entity_id in related_entities
                 ):
                     unique_relation_ids.append(relation_id)
+            elif relation.relation == "on_surface":
+                unique_relation_ids.append(relation_id)
         if not unique_relation_ids:
             continue
 
@@ -1023,13 +1066,19 @@ def compile_visual_action_shadow(
                 )
             else:
                 entity_ref = sorted(set(bound_entity_ids))[0] if bound_entity_ids else ""
-                if not entity_ref:
-                    continue
-                expectation = StateExpectation(
-                    surface_ref,
-                    "surface.focused_entity_ref",
-                    "equals",
-                    entity_ref,
+                expectation = (
+                    StateExpectation(
+                        surface_ref,
+                        "surface.focused_entity_ref",
+                        "equals",
+                        entity_ref,
+                    )
+                    if entity_ref
+                    else StateExpectation(
+                        surface_ref,
+                        "surface.navigation_depth",
+                        "changed",
+                    )
                 )
             effect_ref = ""
             effects = sorted(
@@ -1044,6 +1093,23 @@ def compile_visual_action_shadow(
             )
             if len(effects) == 1:
                 effect_ref = effects[0]
+                expectation = StateExpectation(
+                    effect_ref,
+                    "effect.applied",
+                    "equals",
+                    True,
+                )
+            elif not effects and len(active_external_effect_refs) == 1:
+                # Qwen selects which visible control realizes the already
+                # authorized typed effect.  The model cannot change the effect
+                # identity, target, payload or local policy.
+                effect_ref = active_external_effect_refs[0]
+                expectation = StateExpectation(
+                    effect_ref,
+                    "effect.applied",
+                    "equals",
+                    True,
+                )
             candidates.append(
                 _candidate(
                     action_kind="tap_semantic",
@@ -1053,6 +1119,12 @@ def compile_visual_action_shadow(
                     precondition_claim_ids=tuple(element_claim_ids[element.element_id]),
                     expectations=(expectation,),
                     effect_ref=effect_ref,
+                    parameters={"element_id": element.element_id},
+                    exploratory=(
+                        not effect_ref
+                        and surface_binding is None
+                        and element.role != "input"
+                    ),
                 )
             )
 
@@ -1098,6 +1170,7 @@ def compile_visual_action_shadow(
                             ),
                         ),
                         effect_ref=payload_effects[0] if len(payload_effects) == 1 else "",
+                        parameters={"element_id": element.element_id},
                     )
                 )
 
@@ -1118,6 +1191,7 @@ def compile_visual_action_shadow(
                             "",
                         ),
                     ),
+                    parameters={"element_id": element.element_id},
                 )
             )
 
@@ -1138,6 +1212,7 @@ def compile_visual_action_shadow(
                             False,
                         ),
                     ),
+                    parameters={"element_id": element.element_id},
                 )
             )
 
@@ -1158,6 +1233,7 @@ def compile_visual_action_shadow(
                         ),
                     ),
                     exploratory=True,
+                    parameters={"element_id": element.element_id},
                 )
             )
 
@@ -1218,6 +1294,10 @@ def compile_visual_action_shadow(
                                 destination_ref,
                             ),
                         ),
+                        parameters={
+                            "source_element_id": source_element.element_id,
+                            "destination_element_id": destination_element.element_id,
+                        },
                     )
                 )
 
@@ -1252,11 +1332,14 @@ def compile_visual_action_shadow(
             True,
             {},
         ),
-        (
-            "swipe",
-            (StateExpectation(surface_ref, "surface.viewport", "changed"),),
-            True,
-            {"direction": "up"},
+        *tuple(
+            (
+                "swipe",
+                (StateExpectation(surface_ref, "surface.viewport", "changed"),),
+                True,
+                {"direction": direction},
+            )
+            for direction in ("up", "down", "left", "right")
         ),
         (
             "wait_for_change",
@@ -1355,6 +1438,33 @@ def select_shadow_candidate(
     )
     selection.validate()
     return selection
+
+
+def compile_visual_action_authority(
+    scene: UIScene,
+    semantic_ir: TaskSemanticIR,
+    available_action_kinds: Iterable[str],
+) -> VisualActionShadowReport:
+    """Promote the deterministic local candidate graph, never model prose.
+
+    Authority here means only candidate identity and typed transition authority.
+    It cannot execute hardware; the fresh-observation, policy, geometry and
+    one-shot confirmation gates remain mandatory downstream.
+    """
+
+    shadow = compile_visual_action_shadow(
+        scene,
+        semantic_ir,
+        available_action_kinds,
+    )
+    report = replace(
+        shadow,
+        protocol_version=VISUAL_ACTION_AUTHORITY_PROTOCOL,
+        authoritative=True,
+        execution_allowed=False,
+    )
+    report.validate()
+    return report
 
 
 def compile_visual_action_shadow_safe(

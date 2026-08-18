@@ -34,12 +34,11 @@ class CanonicalMessageIntentTests(unittest.TestCase):
         self.assertNotEqual(first, self.intent(text="内容变化").digest(**scope))
         self.assertNotEqual(first, self.intent().digest(**{**scope, "revision": 4}))
 
-    def test_rejects_missing_ambiguous_or_multiline_values(self):
+    def test_rejects_missing_or_ambiguous_values(self):
         cases = [
             {"recipient": "", "input_text": "你好"},
             {"recipient": " 张三", "input_text": "你好"},
             {"recipient": "张三", "input_text": ""},
-            {"recipient": "张三", "input_text": "第一行\n第二行"},
         ]
         for entities in cases:
             with self.subTest(entities=entities):
@@ -48,6 +47,18 @@ class CanonicalMessageIntentTests(unittest.TestCase):
                         target_apps=[{"app_id": "chat", "app_name": "聊天应用"}],
                         entities=entities,
                     )
+
+    def test_multiline_and_multiple_recipients_are_preserved(self):
+        intent = CanonicalMessageIntent.from_goal(
+            target_apps=[{"app_id": "chat", "app_name": "聊天应用"}],
+            entities={
+                "recipients": ["张三", "李四"],
+                "input_text": "第一行\n第二行",
+            },
+        )
+        self.assertEqual(("张三", "李四"), intent.recipients)
+        self.assertEqual("第一行\n第二行", intent.message_text)
+        self.assertEqual("", intent.recipient)
 
     def test_recipient_becomes_exact_only_for_bound_subgoal(self):
         self.assertFalse(subgoal_binds_recipient("张三", "聊天应用在前台可见"))

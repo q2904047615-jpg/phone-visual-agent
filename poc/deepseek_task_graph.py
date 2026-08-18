@@ -79,15 +79,9 @@ NATURAL_ACTION_INTENT_PATTERN = re.compile(
 # executable control details; natural click/swipe/input/drag intent is legal.
 LOW_LEVEL_INSTRUCTION_PATTERN = FORBIDDEN_EXECUTION_INSTRUCTION_PATTERN
 TARGET_SURFACES = frozenset({"device", "system", "current_surface"})
-AUTHORITATIVE_GOAL_ENTITY_KEYS = frozenset(
-    {
-        "recipient",
-        "input_text",
-        "target_ui_label",
-        "target_surface",
-        "spatial_hint",
-    }
-)
+MAX_CANONICAL_INPUT_CHARS = 4000
+MAX_INPUT_FIELDS = 32
+MAX_RECIPIENTS = 32
 EXTERNAL_STATE_CHANGE_PATTERN = re.compile(
     r"(?:"
     r"发送|发布|点赞|"
@@ -428,12 +422,16 @@ class GraphGoal:
             )
         input_text = self.entities.get("input_text")
         if input_text is not None:
-            if not isinstance(input_text, str) or not input_text or len(input_text) > 100:
+            if (
+                not isinstance(input_text, str)
+                or not input_text
+                or len(input_text) > MAX_CANONICAL_INPUT_CHARS
+                or "\r" in input_text
+            ):
                 raise TaskGraphError(
-                    "goal.entities.input_text 必须为1～100个逐字输入字符。"
+                    "goal.entities.input_text 必须为1～4000个逐字输入字符；"
+                    "允许换行但不允许回车控制符。"
                 )
-            if "\n" in input_text or "\r" in input_text:
-                raise TaskGraphError("goal.entities.input_text 不得包含换行。")
         recipient = self.entities.get("recipient")
         if recipient is not None:
             if (
@@ -447,6 +445,57 @@ class GraphGoal:
                 )
             if "\n" in recipient or "\r" in recipient:
                 raise TaskGraphError("goal.entities.recipient 不得包含换行。")
+        recipients = self.entities.get("recipients")
+        if recipient is not None and recipients is not None:
+            raise TaskGraphError("recipient 与 recipients 只能使用一种表达。")
+        if recipients is not None:
+            if (
+                not isinstance(recipients, list)
+                or not 1 <= len(recipients) <= MAX_RECIPIENTS
+                or any(
+                    not isinstance(item, str)
+                    or not item
+                    or len(item) > 100
+                    or item != item.strip()
+                    or "\n" in item
+                    or "\r" in item
+                    for item in recipients
+                )
+                or len(recipients) != len(set(recipients))
+            ):
+                raise TaskGraphError(
+                    "goal.entities.recipients 必须为1～32个互不重复的逐字收件人。"
+                )
+        input_fields = self.entities.get("input_fields")
+        if input_text is not None and input_fields is not None:
+            raise TaskGraphError("input_text 与 input_fields 只能使用一种表达。")
+        if input_fields is not None:
+            if not isinstance(input_fields, list) or not 1 <= len(input_fields) <= MAX_INPUT_FIELDS:
+                raise TaskGraphError("goal.entities.input_fields 必须为1～32个输入字段。")
+            field_ids: set[str] = set()
+            for index, item in enumerate(input_fields):
+                if not isinstance(item, dict) or set(item) != {"field_id", "text"}:
+                    raise TaskGraphError(
+                        f"goal.entities.input_fields[{index}] 只允许 field_id/text。"
+                    )
+                field_id = item.get("field_id")
+                text = item.get("text")
+                if not isinstance(field_id, str) or not ID_PATTERN.fullmatch(field_id):
+                    raise TaskGraphError(
+                        f"goal.entities.input_fields[{index}].field_id 无效。"
+                    )
+                if field_id in field_ids:
+                    raise TaskGraphError("goal.entities.input_fields.field_id 重复。")
+                field_ids.add(field_id)
+                if (
+                    not isinstance(text, str)
+                    or not text
+                    or len(text) > MAX_CANONICAL_INPUT_CHARS
+                    or "\r" in text
+                ):
+                    raise TaskGraphError(
+                        f"goal.entities.input_fields[{index}].text 必须为1～4000字符。"
+                    )
 
 
 @dataclass(frozen=True)
@@ -809,6 +858,49 @@ class ControllerTransitionEvidenceRef:
 
 
 @dataclass(frozen=True)
+class VisualClaimEvidenceRef:
+    ref_id: str
+    claim_id: str
+    scene_id: str
+    subject_ref: str
+    predicate: str
+    fact: str
+    source: str = "visual_claim"
+
+    def validate(self) -> None:
+        if self.source != "visual_claim":
+            raise TaskGraphError("视觉 claim 证据来源无效。")
+        for field_name in (
+            "ref_id",
+            "claim_id",
+            "scene_id",
+            "subject_ref",
+            "predicate",
+            "fact",
+        ):
+            _require_text(
+                getattr(self, field_name),
+                f"visual_claim_evidence.{field_name}",
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", self.claim_id):
+            raise TaskGraphError("视觉 claim_id 必须是 SHA-256。")
+        if self.ref_id != f"visual_claim:{self.scene_id}:{self.claim_id}":
+            raise TaskGraphError("视觉 claim ref_id 未绑定 scene_id/claim_id。")
+
+    def to_dict(self) -> dict[str, str]:
+        self.validate()
+        return {
+            "ref_id": self.ref_id,
+            "source": self.source,
+            "claim_id": self.claim_id,
+            "scene_id": self.scene_id,
+            "subject_ref": self.subject_ref,
+            "predicate": self.predicate,
+            "fact": self.fact,
+        }
+
+
+@dataclass(frozen=True)
 class ObservedState:
     scene_id: str
     summary: str
@@ -820,6 +912,7 @@ class ObservedState:
     controller_transition_evidence_refs: tuple[
         ControllerTransitionEvidenceRef, ...
     ] = ()
+    visual_claim_evidence_refs: tuple[VisualClaimEvidenceRef, ...] = ()
 
     def validate(self) -> None:
         _require_text(self.scene_id, "observation.scene_id")
@@ -871,6 +964,14 @@ class ObservedState:
             and self.controller_transition_evidence_refs
         ):
             raise TaskGraphError("无动作回执时不得携带控制器转换证据。")
+        visual_ref_ids: set[str] = set()
+        for item in self.visual_claim_evidence_refs:
+            item.validate()
+            if item.scene_id != self.scene_id:
+                raise TaskGraphError("视觉 claim 未绑定当前 scene_id。")
+            if item.ref_id in visual_ref_ids:
+                raise TaskGraphError("视觉 claim ref_id 重复。")
+            visual_ref_ids.add(item.ref_id)
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -889,6 +990,9 @@ class ObservedState:
             "controller_transition_evidence_refs": [
                 item.to_dict()
                 for item in self.controller_transition_evidence_refs
+            ],
+            "visual_claim_evidence_refs": [
+                item.to_dict() for item in self.visual_claim_evidence_refs
             ],
         }
 
@@ -1632,9 +1736,12 @@ Shell、ADB、keycode、main.exe 指令或其他可直接驱动设备的控制�
    如果用户明确指“当前页面”“当前应用”或“当前前台”但没有说 App 名称，target_apps 使用
    [{{"app_id":"current_foreground","app_name":"当前前台应用"}}]；不能只因未重复 App 名称而阻塞。
    如果目标界面的字面标签含动作词，可将逐字标签保存在 goal.entities.target_ui_label；同一个动作词
-   也可以出现在 objective，但两者含义必须分开。entities 中只有 recipient、input_text、
-   target_ui_label、target_surface、spatial_hint 是正式执行上下文；其他键仅是规划说明，不能扩大
-   Qwen 或控制器权限。device/system/current_surface 目标可将 target_apps 留空并设置 target_surface；
+   也可以出现在 objective，但两者含义必须分开。entities 可使用稳定、描述角色的任意键保存
+   用户明确给出的对象、内容、字段、文件、日期或其他 JSON 值；本地会把每项编译成 typed entity，
+   只有带明确 role、用户字面来源和显式 relation/effect binding 的 entity 才能进入动作 authority，
+   未绑定键只能作 planner context，模型不能借它扩大 Qwen 或控制器权限。recipient/input_text、
+   recipients/input_fields、target_ui_label、target_surface、spatial_hint 是通用常见结构，不是封闭白名单。
+   device/system/current_surface 目标可将 target_apps 留空并设置 target_surface；
    App 目标仍应使用 target_apps。
 3. 只能有一个 active 子目标；其依赖必须已经 completed（初始图通常无依赖）。
 4. 初始规划没有画面证据，所有完成条件 satisfied=false，任何子目标都不能 completed。
@@ -2649,7 +2756,8 @@ def _replan_prompt(
 1. goal 必须逐字段保持不变；constraints 必须保留已有约束，可追加新发现的约束。
 2. 已 completed 的子目标必须原样保留且仍为 completed；已满足的全局条件不得撤销。
 3. 可修改、跳过或替换尚未完成的子目标，并新增子目标；不要坚持已失效的旧路径。
-4. 新宣称 completed/satisfied 时，evidence 必须逐字复制 visible_evidence 中的证据；
+4. 新宣称 completed/satisfied 时，如果 visual_claim_evidence_refs 非空，视觉证据必须逐字复制
+   其中的 ref_id；只有旧观察没有 typed visual refs 时才允许逐字复制 visible_evidence。
    历史完成节点继续保留自己的历史证据。
 5. 既有 risk_actions 必须保留，不能降低风险等级或取消 confirmation_required。
 6. external_state 和 unknown 子目标都必须关联风险；成为 active 时必须返回
@@ -2662,20 +2770,21 @@ def _replan_prompt(
    宣称结果完成。
 8. 只返回 JSON 对象，不要 Markdown，也不要返回 task_id、device_id、revision、协议版本、
     current_subgoal 或历史记录；这些字段由本地协议层生成。
-9. 当 trigger=subgoal_completed 且当前子目标是 read_only 时，本轮必须用 visible_evidence 完成
+9. 当 trigger=subgoal_completed 且当前子目标是 read_only 时，本轮必须用当前 typed visual claim 完成
    该只读子目标及匹配的全局条件，或明确阻塞，或推进到后续非只读子目标；不得继续保留任何
    read_only 活动子目标，避免只读复核再次请求视觉动作或形成循环。
-10. completion_conditions[].evidence 只能选择 visible_evidence 中完整、逐字相同的独立短字符串。
-    subgoals[].completion_evidence 通常也只能选 visible_evidence；唯一例外是当前严格绑定的
+10. visual_claim_evidence_refs[].fact 仅用于理解当前事实，输出证据必须选择对应 ref_id，不能复制 fact。
+    completion_conditions[].evidence 只能选择 visual_claim_evidence_refs[].ref_id；旧观察没有该数组时
+    才兼容 visible_evidence 完整短字符串。subgoals[].completion_evidence 也遵守同一规则；唯一例外是当前严格绑定的
     navigation_only 旧子目标可选择 controller_transition_evidence_refs[].ref_id。每个数组最多3项，
     不得拼接多项、不得复制整个观察对象或 JSON。没有匹配证据时保持未完成或阻塞。
 11. verified_action_transition 是本地控制器生成、严格绑定上一 revision/子目标/决策/动作和
     前后观察的动作回执；它与 visible_evidence 分离，不能当作页面可见事实或全局完成证据。
     outcome=matched 只证明该受控动作已执行并获得匹配验证，不代表任意子目标自动完成。
-12. trigger=action_result_matched 时，可以结合回执和当前 visible_evidence 完成其严格绑定的
+12. trigger=action_result_matched 时，可以结合回执和当前 visual claim 完成其严格绑定的
     navigation_only 旧子目标，或推进到不同的剩余状态目标；若证据不足，应明确重写剩余目标
     或阻塞。不得让同一活动子目标原样存活后再次请求等价动作。external_state/unknown 不能
-    仅凭回执完成，仍必须由当前 visible_evidence 证明真实外部结果。
+    仅凭回执完成，仍必须由当前 visual claim 证明真实外部结果。
     如果旧子目标要求目标页面/结果区域可见，而新画面只出现了具名入口或分类项，绝不能完成旧
     子目标；应把未完成路径修订为先达到“具名入口可见”的 navigation_only 状态，再保留目标页面
     和结果核对状态。控制器回执只证明本轮受控动作及其可见变化，不能把入口冒充结果页面。
@@ -2722,7 +2831,9 @@ def _repair_replan_prompt(
 修复规则：
 1. goal 必须逐字段保持不变；constraints 必须保留已有约束，可追加新发现的约束。
 2. 已 completed 的子目标和已满足的全局条件不得撤销；既有风险不得删除、降级或取消确认。
-3. 只能逐字依据 visible_evidence 或 grounded_visual_facts 新增视觉完成证据；
+3. visual_claim_evidence_refs 非空时只能逐字依据其 ref_id 新增视觉完成证据；fact 与
+   grounded_visual_facts 只用于理解和身份复核，不能复制成完成 evidence。旧观察没有 typed refs 时
+   才兼容逐字 visible_evidence 或 grounded_visual_facts；
    动作结果不匹配时不得假称预期结果已完成。
 4. 可替换、跳过或新增尚未完成的高层子目标，也可保留自然动作意图；但不能描述具体按钮索引、
    坐标、按键码或其他可直接驱动设备的执行细节。
@@ -2730,9 +2841,9 @@ def _repair_replan_prompt(
 6. 仍需通过全部本地校验；不要试图改写任务身份、设备、revision 或协议字段。
 7. 只返回符合结构的完整 JSON 对象，不要 Markdown。
 8. 当 trigger=subgoal_completed 且原活动子目标是 read_only 时，不得继续返回 read_only 活动
-   子目标；只能依据 visible_evidence 或 grounded_visual_facts 完成、阻塞，或推进到后续非只读子目标。
-9. 全局完成条件证据只能逐字选择 visible_evidence 或 grounded_visual_facts。子目标完成证据通常也只能
-   逐字选择这两类视觉证据；
+   子目标；只能依据 visual_claim_evidence_refs[].ref_id 完成、阻塞，或推进到后续非只读子目标。
+9. 全局完成条件和子目标视觉证据只能逐字选择 visual_claim_evidence_refs[].ref_id；旧观察没有
+   typed refs 时才兼容 visible_evidence 或 grounded_visual_facts；
    严格绑定的 navigation_only 旧子目标可选择 controller_transition_evidence_refs[].ref_id。
    每个数组最多3项；禁止拼接多项或复制整个观察对象/JSON。
 10. verified_action_transition 是本地控制器回执而不是视觉证据；只能与当前
@@ -2745,7 +2856,7 @@ def _repair_replan_prompt(
     具名页面节点，改为基于当前结构化可见元素的高层状态。不得改写用户最终目标。
 13. 若校验错误指出子目标使用了当前观察之外的完成证据，必须删除该伪证据；不得把
     subgoal_id、condition_id、目标名称或自行概括的句子当作证据。只能逐字选择
-    visible_evidence，或为严格绑定的上一 navigation_only 子目标选择
+    visual_claim_evidence_refs[].ref_id，或为严格绑定的上一 navigation_only 子目标选择
     controller_transition_evidence_refs[].ref_id；没有合格证据就保持未完成、替换路径或阻塞。
 14. 若校验错误指出“matched controller_transition 未完成其绑定的 navigation_only 子目标”，
     必须把该严格绑定的上一活动子目标标为 completed，并逐字使用对应
@@ -3390,6 +3501,13 @@ def _canonicalize_literal_visible_evidence_clauses(
 
     visible = tuple(observation.visible_evidence)
     visible_set = frozenset(visible)
+    typed_refs_by_fact: dict[str, set[str]] = {}
+    for item in observation.visual_claim_evidence_refs:
+        typed_refs_by_fact.setdefault(item.fact, set()).add(item.ref_id)
+
+    def authority_value(source: str) -> str:
+        refs = typed_refs_by_fact.get(source, set())
+        return next(iter(refs)) if len(refs) == 1 else source
 
     def normalized(value: str) -> str:
         return " ".join(str(value or "").strip().casefold().split())
@@ -3404,14 +3522,17 @@ def _canonicalize_literal_visible_evidence_clauses(
     def canonicalize(claims: tuple[str, ...]) -> tuple[str, ...]:
         result: list[str] = []
         for claim in claims:
-            if claim in visible_set or claim.startswith("controller_transition:"):
+            if claim.startswith(("controller_transition:", "visual_claim:")):
                 result.append(claim)
+                continue
+            if claim in visible_set:
+                result.append(authority_value(claim))
                 continue
             key = normalized(claim)
             semantic_chars = re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", key)
             sources = clause_sources.get(key, set())
             if len(semantic_chars) >= 6 and len(sources) == 1:
-                result.append(next(iter(sources)))
+                result.append(authority_value(next(iter(sources))))
             else:
                 result.append(claim)
         return tuple(dict.fromkeys(result))
@@ -3473,8 +3594,15 @@ def _validate_revision(
     # safely invent; allowing their exact strings also removes the otherwise
     # contradictory requirement to cite an identity that could not be used as
     # completion evidence.  Paraphrases remain outside the allow-list.
-    evidence = set(observation.visible_evidence).union(
-        observation.grounded_visual_facts
+    visual_claim_refs = {
+        item.ref_id: item for item in observation.visual_claim_evidence_refs
+    }
+    evidence = (
+        set(visual_claim_refs)
+        if visual_claim_refs
+        else set(observation.visible_evidence).union(
+            observation.grounded_visual_facts
+        )
     )
     controller_refs = {
         item.ref_id: item

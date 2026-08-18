@@ -467,6 +467,28 @@ class GenericSingleActionAdapter:
             supported.add("drag")
         return frozenset(supported)
 
+    def capability_snapshot(self) -> Any:
+        from action_capabilities import build_device_capability_snapshot
+
+        provider = getattr(self.robot, "hardware_capability_profile", None)
+        raw_profile = provider() if callable(provider) else None
+        return build_device_capability_snapshot(
+            device_id=str(getattr(self.robot, "device_id", "") or "unknown-device"),
+            supported_actions=self.supported_action_kinds(),
+            raw_profile=raw_profile,
+        )
+
+    def capability_gap(
+        self,
+        requested_action: str,
+        *,
+        required_parameters: tuple[str, ...] = (),
+    ) -> Any:
+        return self.capability_snapshot().gap(
+            requested_action,
+            required_parameters=required_parameters,
+        )
+
     def __init__(
         self,
         *,
@@ -1440,6 +1462,13 @@ class GenericSingleActionAdapter:
                 )
             current = matches[0]
             if current.meaning.casefold() != original.meaning.casefold():
+                if str(
+                    requested.params.get("formal_candidate_id") or ""
+                ).strip():
+                    raise GenericActionAdapterError(
+                        "确认时正式候选 meaning 已变化，旧 authority 失效："
+                        f"{original.meaning} -> {current.meaning}。"
+                    )
                 def semantic_class(meaning: str, label: str) -> str:
                     normalized = str(meaning or "").casefold()
                     if requested.action == "drag" and prefix in {

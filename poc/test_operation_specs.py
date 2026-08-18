@@ -28,11 +28,13 @@ class TextPolicyTests(unittest.TestCase):
             ["今天天气", "真的很好"],
         )
 
-    def test_emoji_and_newline_are_rejected(self) -> None:
+    def test_emoji_is_rejected_and_newline_is_preserved(self) -> None:
         with self.assertRaisesRegex(ValueError, "暂不支持"):
             normalize_user_text("你好🙂", field_name="正文")
-        with self.assertRaisesRegex(ValueError, "不支持换行"):
-            normalize_user_text("你好\n世界", field_name="正文")
+        self.assertEqual(
+            "你好\n世界",
+            normalize_user_text("你好\n世界", field_name="正文"),
+        )
 
     def test_editable_count_ignores_ime_pinyin_separators(self) -> None:
         self.assertEqual(editable_character_count("ni'hao"), 5)

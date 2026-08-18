@@ -759,6 +759,9 @@
         actions: riskActions,
         currentActions: currentRiskActions,
         intentPreview: asObject(session.risk_confirmation_preview),
+        effectPreviews: Array.isArray(session.effect_previews)
+          ? session.effect_previews.map(item => ({ ...asObject(item) }))
+          : [],
         confirmationGate: {
           required: gateRequired,
           state: gateState,

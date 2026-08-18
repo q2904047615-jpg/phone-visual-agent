@@ -519,6 +519,135 @@ class RevealSystemNavigationControllerTests(unittest.TestCase):
                 )
 
 
+class FormalTypedTransitionControllerTests(unittest.TestCase):
+    def test_home_requires_typed_launcher_postcondition(self):
+        controller = UniversalActionController()
+        before = scene("before", screen_id="settings_main", app_id="settings")
+        action = SemanticAction(
+            node_id="formal-home",
+            action="home",
+            params={
+                "formal_candidate_id": "candidate.home",
+                "formal_report_digest": "a" * 64,
+                "formal_transition": {
+                    "transition_id": "transition.home",
+                    "precondition_claim_ids": ["claim.surface"],
+                    "expectations": [
+                        {
+                            "subject_ref": "surface.current",
+                            "predicate": "surface.kind",
+                            "operator": "equals",
+                            "value": "launcher",
+                        }
+                    ],
+                    "exploratory": False,
+                },
+            },
+        )
+        resolved = controller.resolve_one(action, before, confirmed=True)
+        self.assertEqual("candidate.home", resolved.formal_candidate_id)
+        self.assertEqual(
+            "surface.kind",
+            resolved.formal_transition["expectations"][0]["predicate"],
+        )
+
+        controller.verify_after_action(
+            resolved,
+            before,
+            scene("after", screen_id="android_home", app_id="unknown"),
+        )
+        with self.assertRaisesRegex(UniversalActionError, "typed surface.kind"):
+            controller.verify_after_action(
+                resolved,
+                before,
+                scene("wrong", screen_id="settings_detail", app_id="settings"),
+            )
+
+    def test_formal_input_uses_exact_element_identity_not_goal_relevant_flag(self):
+        controller = UniversalActionController()
+        before = UIScene(
+            app_id="generic_app",
+            screen_id="editor",
+            summary="唯一聚焦输入框",
+            elements=(
+                UIElement(
+                    element_id="field",
+                    role="input",
+                    meaning="application_text_input",
+                    label="输入",
+                    bounds=(0.1, 0.1, 0.9, 0.2),
+                    confidence=0.97,
+                    states={
+                        "focused": True,
+                        "value": "",
+                        "keyboard_layout": "qwerty",
+                        "keyboard_input_mode": "direct_latin",
+                        "keyboard_case_mode": "lower",
+                        "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+                        "goal_relevant": False,
+                    },
+                ),
+            ),
+            stable=True,
+            confidence=0.96,
+            fingerprint="before-input",
+        )
+        action = SemanticAction(
+            node_id="formal-input",
+            action="input_verified_text",
+            params={
+                "element_id": "field",
+                "target": "application_text_input",
+                "role": "input",
+                "label": "输入",
+                "states": {"focused": True},
+                "text": "agent",
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "application_text_input",
+                        "states": {"value": "agent"},
+                    }
+                },
+                "formal_candidate_id": "candidate.input",
+                "formal_report_digest": "b" * 64,
+                "formal_transition": {
+                    "transition_id": "transition.input",
+                    "precondition_claim_ids": ["claim.field"],
+                    "expectations": [
+                        {
+                            "subject_ref": "element.field",
+                            "predicate": "element.state.value",
+                            "operator": "equals",
+                            "value": "agent",
+                        }
+                    ],
+                    "exploratory": False,
+                },
+            },
+        )
+        resolved = controller.resolve_one(action, before, confirmed=True)
+        after = UIScene(
+            app_id="generic_app",
+            screen_id="editor",
+            summary="输入完成",
+            elements=(
+                UIElement(
+                    element_id="field",
+                    role="input",
+                    meaning="application_text_input",
+                    label="输入",
+                    bounds=(0.1, 0.1, 0.9, 0.2),
+                    confidence=0.97,
+                    states={"focused": True, "value": "agent"},
+                ),
+            ),
+            stable=True,
+            confidence=0.96,
+            fingerprint="after-input",
+        )
+        controller.verify_after_action(resolved, before, after)
+
+
 class GenericActionAdapterTests(unittest.TestCase):
     def _adapter(self, observer, robot, **kwargs):
         return GenericSingleActionAdapter(

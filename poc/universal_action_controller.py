@@ -266,6 +266,11 @@ class ActionSafetyPolicy:
         *,
         confirmed: bool,
     ) -> None:
+        if str(action.params.get("formal_candidate_id") or "").strip():
+            # Production authority is already bound to a typed EffectIntent and
+            # local policy.  Re-reading labels such as "send" or "pay" here
+            # would create a second, wording-dependent business planner.
+            return
         meaning = str(action.params.get("target") or "").strip().lower()
         if meaning in self.blocked_meanings:
             raise UniversalActionError(f"当前安全策略禁止动作：{meaning}")
@@ -296,6 +301,8 @@ class ResolvedSemanticAction:
     destination_element_id: str | None = None
     before_fingerprint: str = ""
     expected_effect: dict[str, Any] = field(default_factory=dict)
+    formal_candidate_id: str = ""
+    formal_transition: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -349,6 +356,10 @@ class UniversalActionController:
                     "页面整体置信度不足，且没有唯一可信的目标局部证据。"
                 )
         self.safety_policy.check(action, confirmed=confirmed)
+        formal_candidate_id = str(
+            action.params.get("formal_candidate_id") or ""
+        ).strip()
+        formal_transition = dict(action.params.get("formal_transition") or {})
         expected_effect = dict(action.params.get("expected_effect") or {})
         if "system_ui" in expected_effect and action.action != "reveal_system_navigation":
             raise UniversalActionError(
@@ -358,7 +369,11 @@ class UniversalActionController:
         if action.action == "tap_semantic":
             element = self._resolve_target(action, scene)
             if element.states.get("local_text_clear") is True:
-                self._validate_local_text_clear(element, scene)
+                self._validate_local_text_clear(
+                    element,
+                    scene,
+                    formal=bool(formal_candidate_id),
+                )
             if element.meaning in {
                 "input_exact_literal_key",
                 "switch_keyboard_layout",
@@ -368,6 +383,7 @@ class UniversalActionController:
                     element,
                     scene,
                     expected_effect,
+                    formal=bool(formal_candidate_id),
                 )
             return self._point_action(
                 action,
@@ -396,7 +412,10 @@ class UniversalActionController:
                 raise UniversalActionError("文字输入前必须有当前画面证明输入框已聚焦。")
             if element.states.get("keyboard_layout") != "qwerty":
                 raise UniversalActionError("精确文字输入要求当前画面确认 QWERTY 键盘。")
-            if element.states.get("goal_relevant") is not True:
+            if (
+                not formal_candidate_id
+                and element.states.get("goal_relevant") is not True
+            ):
                 raise UniversalActionError("文字输入目标必须由当前画面证明与当前目标相关。")
             try:
                 input_step = plan_from_input_states(text, element.states)
@@ -460,7 +479,11 @@ class UniversalActionController:
                 if candidate.role == "input"
                 and float(candidate.confidence) >= self.min_confidence
                 and candidate.states.get("visible") is not False
-                and candidate.states.get("goal_relevant") is True
+                and (
+                    candidate.element_id == element.element_id
+                    if formal_candidate_id
+                    else candidate.states.get("goal_relevant") is True
+                )
                 and candidate.states.get("focused") is True
                 and candidate.states.get("keyboard_layout") == "qwerty"
                 and candidate.states.get("keyboard_input_mode")
@@ -489,6 +512,8 @@ class UniversalActionController:
                 target_element_id=element.element_id,
                 before_fingerprint=scene.fingerprint,
                 expected_effect=expected_effect,
+                formal_candidate_id=formal_candidate_id,
+                formal_transition=formal_transition,
             )
         if action.action == "clear_verified_text":
             element = self._resolve_target(action, scene, required_role="input")
@@ -500,7 +525,10 @@ class UniversalActionController:
             delete_count = editable_character_count(observed_value)
             if not 1 <= delete_count <= 100:
                 raise UniversalActionError("清空文字的已验证字符数必须在1～100之间。")
-            if element.states.get("goal_relevant") is not True:
+            if (
+                not formal_candidate_id
+                and element.states.get("goal_relevant") is not True
+            ):
                 raise UniversalActionError("清空文字目标必须由当前画面证明与当前目标相关。")
             eligible_inputs = tuple(
                 candidate
@@ -508,7 +536,11 @@ class UniversalActionController:
                 if candidate.role == "input"
                 and float(candidate.confidence) >= self.min_confidence
                 and candidate.states.get("visible") is not False
-                and candidate.states.get("goal_relevant") is True
+                and (
+                    candidate.element_id == element.element_id
+                    if formal_candidate_id
+                    else candidate.states.get("goal_relevant") is True
+                )
                 and candidate.states.get("focused") is True
                 and isinstance(candidate.states.get("value"), str)
                 and bool(candidate.states.get("value"))
@@ -534,6 +566,8 @@ class UniversalActionController:
                 target_element_id=element.element_id,
                 before_fingerprint=scene.fingerprint,
                 expected_effect=expected_effect,
+                formal_candidate_id=formal_candidate_id,
+                formal_transition=formal_transition,
             )
         if action.action == "long_press":
             element = self._resolve_target(action, scene)
@@ -590,9 +624,16 @@ class UniversalActionController:
                 path_distance=distance,
                 before_fingerprint=scene.fingerprint,
                 expected_effect=expected_effect,
+                formal_candidate_id=formal_candidate_id,
+                formal_transition=formal_transition,
             )
         if action.action == "reveal_system_navigation":
-            unexpected = set(action.params) - {"expected_effect"}
+            unexpected = set(action.params) - {
+                "expected_effect",
+                "formal_candidate_id",
+                "formal_report_digest",
+                "formal_transition",
+            }
             if unexpected:
                 raise UniversalActionError(
                     "系统导航栏唤出动作不能携带坐标、方向、距离或其他参数。"
@@ -607,6 +648,8 @@ class UniversalActionController:
                 kind="reveal_system_navigation",
                 before_fingerprint=scene.fingerprint,
                 expected_effect=expected_effect,
+                formal_candidate_id=formal_candidate_id,
+                formal_transition=formal_transition,
             )
         if action.action == "swipe":
             direction = str(action.params.get("direction") or "").strip().lower()
@@ -618,6 +661,8 @@ class UniversalActionController:
                 direction=direction,
                 before_fingerprint=scene.fingerprint,
                 expected_effect=expected_effect,
+                formal_candidate_id=formal_candidate_id,
+                formal_transition=formal_transition,
             )
         if action.action in {
             "back",
@@ -632,6 +677,8 @@ class UniversalActionController:
                 kind=action.action,
                 before_fingerprint=scene.fingerprint,
                 expected_effect=expected_effect,
+                formal_candidate_id=formal_candidate_id,
+                formal_transition=formal_transition,
             )
         if action.action == "ensure_app":
             app_id = str(action.params.get("app_id") or "").strip().lower()
@@ -642,10 +689,18 @@ class UniversalActionController:
                 kind="ensure_app",
                 before_fingerprint=scene.fingerprint,
                 expected_effect={"app_id": app_id, **expected_effect},
+                formal_candidate_id=formal_candidate_id,
+                formal_transition=formal_transition,
             )
         raise UniversalActionError(f"通用动作控制器尚不支持：{action.action}")
 
-    def _validate_local_text_clear(self, element: UIElement, scene: UIScene) -> None:
+    def _validate_local_text_clear(
+        self,
+        element: UIElement,
+        scene: UIScene,
+        *,
+        formal: bool = False,
+    ) -> None:
         if (
             element.meaning != "clear_local_text"
             or element.role not in {"button", "icon"}
@@ -657,7 +712,7 @@ class UniversalActionController:
             for candidate in scene.elements
             if candidate.role == "input"
             and float(candidate.confidence) >= self.min_confidence
-            and candidate.states.get("goal_relevant") is True
+            and (formal or candidate.states.get("goal_relevant") is True)
             and candidate.states.get("focused") is True
             and isinstance(candidate.states.get("value"), str)
             and bool(candidate.states.get("value"))
@@ -689,12 +744,14 @@ class UniversalActionController:
         element: UIElement,
         scene: UIScene,
         expected_effect: dict[str, Any],
+        *,
+        formal: bool = False,
     ) -> None:
         states = element.states
         if (
             element.role != "button"
             or float(element.confidence) < 0.9
-            or states.get("goal_relevant") is not True
+            or (not formal and states.get("goal_relevant") is not True)
             or states.get("fully_visible") is not True
         ):
             raise UniversalActionError("输入辅助键缺少本轮完整、高置信本地审计。")
@@ -812,6 +869,8 @@ class UniversalActionController:
             )
         if resolved.kind in {"input_verified_text", "clear_verified_text"}:
             self._verify_exact_input_value(resolved, before, after)
+        if resolved.formal_candidate_id:
+            self._verify_formal_transition(resolved, before, after)
         element_state = expected.get("element_state")
         if element_state is not None:
             if not isinstance(element_state, dict):
@@ -1109,6 +1168,82 @@ class UniversalActionController:
             "长按后缺少新增弹层、目标状态变化或等价结构化结果证据。"
         )
 
+    @staticmethod
+    def _verify_formal_transition(
+        resolved: ResolvedSemanticAction,
+        before: UIScene,
+        after: UIScene,
+    ) -> None:
+        transition = resolved.formal_transition
+        expectations = transition.get("expectations") if isinstance(transition, dict) else None
+        if not isinstance(expectations, list) or not expectations:
+            raise UniversalActionError("正式候选缺少 typed transition expectations。")
+        for expectation in expectations:
+            if not isinstance(expectation, dict):
+                raise UniversalActionError("typed transition expectation 格式无效。")
+            predicate = str(expectation.get("predicate") or "")
+            operator = str(expectation.get("operator") or "")
+            value = expectation.get("value")
+            if predicate == "surface.kind" and operator == "equals":
+                identity = f"{after.foreground_app_id} {after.screen_id}".casefold()
+                actual = (
+                    "launcher"
+                    if any(token in identity for token in ("launcher", "home_screen", "desktop"))
+                    else "app"
+                )
+                if actual != value:
+                    raise UniversalActionError("typed surface.kind 后置状态未满足。")
+            elif predicate == "surface.overlay_present" and operator == "equals":
+                if bool(after.overlays) is not bool(value):
+                    raise UniversalActionError("typed overlay 后置状态未满足。")
+            elif predicate == "system_ui.navigation_bar_visible" and operator == "equals":
+                if after.system_ui.navigation_bar_visible is not value:
+                    raise UniversalActionError("typed system_ui 后置状态未满足。")
+            elif predicate == "element.state.value" and operator == "equals":
+                if resolved.expected_input_value != value and resolved.text != value:
+                    raise UniversalActionError("typed input value 与已验证事务不一致。")
+            elif predicate == "effect.applied" and operator == "equals":
+                if value is not True or before.fingerprint == after.fingerprint:
+                    raise UniversalActionError("typed effect receipt 缺少动作后变化证据。")
+            elif predicate in {
+                "surface.active_ref",
+                "surface.focused_entity_ref",
+            } and operator == "equals":
+                if before.fingerprint == after.fingerprint:
+                    raise UniversalActionError("typed surface 目标没有产生新观察。")
+            elif predicate in {
+                "surface.navigation_depth",
+                "surface.viewport",
+                "observation.changed",
+                "scene.changed",
+                "element.state.interaction_result",
+                "element.state.location_relation",
+            } and operator == "changed":
+                if before.fingerprint == after.fingerprint:
+                    raise UniversalActionError("typed changed 后置状态未满足。")
+            elif predicate in {
+                "element.state.focused",
+            } and operator == "equals":
+                target_id = str(resolved.target_element_id or "")
+                matches = [item for item in after.elements if item.element_id == target_id]
+                if len(matches) != 1 or matches[0].states.get("focused") is not value:
+                    raise UniversalActionError("typed focused 后置状态未满足。")
+            elif predicate == "element.state.location_relation" and operator == "equals":
+                if (
+                    resolved.kind != "drag"
+                    or not resolved.target_element_id
+                    or not resolved.destination_element_id
+                    or not isinstance(value, str)
+                    or not value
+                ):
+                    raise UniversalActionError("typed drag relation 与已解析动作不一致。")
+                # The concrete spatial outcome is verified by
+                # _verify_drag_result immediately after this contract check.
+            else:
+                raise UniversalActionError(
+                    f"尚未实现的 typed transition expectation：{predicate}/{operator}"
+                )
+
     def _element_state_transition_expected(
         self,
         expected: dict[str, Any],
@@ -1180,7 +1315,10 @@ class UniversalActionController:
             raise UniversalActionError(f"输入前目标证据无效：{exc}") from exc
         if before_input.role != "input":
             raise UniversalActionError("输入前目标不是 input 元素。")
-        if before_input.states.get("goal_relevant") is not True:
+        if (
+            not resolved.formal_candidate_id
+            and before_input.states.get("goal_relevant") is not True
+        ):
             raise UniversalActionError("输入前目标与当前目标缺少可信关联。")
         exact_id = tuple(
             element
@@ -1544,4 +1682,8 @@ class UniversalActionController:
             target_element_id=element.element_id,
             before_fingerprint=before_fingerprint,
             expected_effect=expected_effect,
+            formal_candidate_id=str(
+                action.params.get("formal_candidate_id") or ""
+            ).strip(),
+            formal_transition=dict(action.params.get("formal_transition") or {}),
         )

@@ -606,9 +606,12 @@ class RobotController:
         actions["long_press"]["duration_ms"] = {"min": 500, "max": 2000}
         actions["drag"]["duration_ms"] = {"fixed": 800}
         actions["input_verified_text"]["text"] = {
-            "canonical_max_chars": 100,
+            "canonical_max_chars": 4000,
+            "max_chars_per_physical_step": 30,
+            "max_fields": 32,
+            "max_targets": 32,
             "segments": ["direct_latin", "chinese_pinyin", "visible_literal_key"],
-            "newline": False,
+            "newline": "requires_fresh_visible_enter_key",
             "unsupported_character_policy": "structured_capability_gap",
         }
         actions["clear_verified_text"] = {
@@ -616,6 +619,24 @@ class RobotController:
             "enabled": bool(enabled.get("input_verified_text")),
             "layouts": ["qwerty", "numeric", "symbol", "generic_visible_backspace"],
             "verified_delete_count": {"min": 1, "max": 100},
+        }
+        actions["double_tap"] = {
+            "enabled": False,
+            "vendor_transport_observed": "middle_button_multi_click",
+            "gap_reason": "vendor_multi_click_not_safely_integrated",
+            "mechanical_contact_ack": False,
+        }
+        actions["press_enter"] = {
+            "enabled": False,
+            "gap_reason": "requires_fresh_visible_enter_key",
+        }
+        actions["pinch"] = {
+            "enabled": False,
+            "gap_reason": "multi_touch_not_supported_by_single_contact_robot",
+        }
+        actions["hardware_key"] = {
+            "enabled": False,
+            "gap_reason": "hardware_key_transport_not_verified",
         }
         return {
             "protocol_version": "2026-08-18-device-capability-profile-v1",

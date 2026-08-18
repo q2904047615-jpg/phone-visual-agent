@@ -20,6 +20,7 @@ from deepseek_task_graph import (
     DynamicTaskGraph,
     ObservedState,
     VerifiedActionTransition,
+    VisualClaimEvidenceRef,
     named_visual_identity_is_grounded,
 )
 from deepseek_failure_diagnostics import persist_deepseek_failure_diagnostic
@@ -37,6 +38,10 @@ from ui_scene import (
 from universal_action_controller import (
     action_has_account_effect,
     navigation_semantic_class,
+)
+from task_semantic_ir import (
+    TaskSemanticIRError,
+    compile_formal_semantic_authority,
 )
 from verified_text_transaction import (
     VerifiedTextTransactionError,
@@ -528,6 +533,52 @@ class ObservationBridge:
         scene_id = str(
             getattr(trusted_observation, "observation_id", "")
         ).strip() or f"{scene.screen_id}:{fingerprint[:16]}"
+        visual_claim_evidence_refs: list[VisualClaimEvidenceRef] = []
+        typed_fact_sources = [
+            (fact, "scene.visible_literal", "") for fact in evidence
+        ] + [
+            (fact, "grounded.snapshot", "grounded")
+            for fact in grounded_visual_facts
+        ]
+        for fact, default_predicate, source_kind in typed_fact_sources:
+            try:
+                payload = json.loads(fact)
+            except json.JSONDecodeError:
+                payload = {}
+            element_id = str(payload.get("element_id") or "").strip()
+            subject_ref = (
+                f"element:{element_id}" if element_id else f"scene:{scene_id}"
+            )
+            predicate = (
+                "element.snapshot"
+                if element_id
+                else "scene.snapshot"
+                if source_kind == "grounded"
+                else default_predicate
+            )
+            claim_id = hashlib.sha256(
+                json.dumps(
+                    {
+                        "scene_id": scene_id,
+                        "subject_ref": subject_ref,
+                        "predicate": predicate,
+                        "fact": fact,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            visual_claim_evidence_refs.append(
+                VisualClaimEvidenceRef(
+                    ref_id=f"visual_claim:{scene_id}:{claim_id}",
+                    claim_id=claim_id,
+                    scene_id=scene_id,
+                    subject_ref=subject_ref,
+                    predicate=predicate,
+                    fact=fact,
+                )
+            )
         observed = ObservedState(
             scene_id=scene_id,
             summary=scene.summary.strip() or "当前可信页面观察",
@@ -539,6 +590,7 @@ class ObservationBridge:
             controller_transition_evidence_refs=(
                 controller_transition_evidence_refs
             ),
+            visual_claim_evidence_refs=tuple(visual_claim_evidence_refs),
         )
         observed.validate()
         return observed
@@ -625,6 +677,9 @@ class UniversalAgentSessionState:
     evidence_paths: list[str] = field(default_factory=list)
     last_post_action_transition: dict[str, Any] | None = None
     last_confirmation_failure: dict[str, Any] | None = None
+    capability_gap: dict[str, Any] | None = None
+    effect_previews: tuple[dict[str, Any], ...] = ()
+    semantic_task_context: Any = field(default=None, repr=False)
     confirm_stage: str = ""
     failed_reason: str = ""
     created_at: str = field(
@@ -730,6 +785,17 @@ class UniversalAgentSessionState:
                 self.status == "awaiting_risk_confirmation"
                 and self.risk_confirmation_authority is not None
                 and not self.risk_confirmation_authority.consumed
+            ),
+            "capability_gap": (
+                dict(self.capability_gap)
+                if self.capability_gap is not None
+                else None
+            ),
+            "effect_previews": [dict(item) for item in self.effect_previews],
+            "device_capability": (
+                self.adapter.capability_snapshot().to_dict()
+                if callable(getattr(self.adapter, "capability_snapshot", None))
+                else None
             ),
             "risk_confirmation_preview": (
                 dict(self.risk_confirmation_authority.intent_preview)
@@ -910,13 +976,160 @@ class UniversalAgentOrchestrator:
         session: UniversalAgentSessionState,
         *,
         frames: list[Any],
-        task_context: Mapping[str, Any],
+        task_context: Any,
         trusted_observation: Any,
     ) -> Any:
+        if not isinstance(task_context, QwenTaskContext) and not {
+            "protocol_version",
+            "task_status",
+            "goal",
+            "global_constraints",
+            "goal_completion_conditions",
+            "current_subgoal",
+            "current_external_impact",
+            "risk_actions",
+            "confirmation_gate",
+        }.issubset(set(task_context)):
+            # Narrow compatibility path for isolated diagnostics and old test
+            # doubles. Production graph contexts always use the full schema.
+            available_actions = self._available_action_kinds(session)
+            kwargs = {
+                "frames": frames,
+                "task_context": task_context,
+                "trusted_observation": trusted_observation,
+                "decision_number": session.step_number,
+                "available_action_kinds": available_actions,
+            }
+            try:
+                decision = self.qwen_observer.decide(**kwargs)
+            except TypeError as exc:
+                text = str(exc)
+                if "available_action_kinds" not in text or "unexpected keyword" not in text:
+                    raise
+                kwargs.pop("available_action_kinds")
+                decision = self.qwen_observer.decide(**kwargs)
+            self._capture_visual_action_shadow(
+                task_context=task_context,
+                trusted_observation=trusted_observation,
+                available_action_kinds=available_actions,
+            )
+            return decision
+        context = (
+            task_context
+            if isinstance(task_context, QwenTaskContext)
+            else QwenTaskContext.from_dict(dict(task_context))
+        )
+        if context.semantic_ir is None:
+            graph = session.task_graph
+            semantic_authority = None
+            if graph is not None:
+                try:
+                    semantic_authority = compile_formal_semantic_authority(graph)
+                except TaskSemanticIRError as exc:
+                    raise UniversalAgentOrchestratorError(
+                        f"正式 TaskSemanticIR authority 拒绝：{exc}"
+                    ) from exc
+                semantic_ir = semantic_authority.semantic_ir
+            else:
+                semantic_authority = getattr(
+                    self.deepseek_planner,
+                    "last_semantic_authority",
+                    None,
+                )
+                semantic_shadow = getattr(
+                    self.deepseek_planner,
+                    "last_semantic_shadow",
+                    None,
+                )
+                semantic_ir = (
+                    getattr(semantic_authority, "semantic_ir", None)
+                    or getattr(semantic_shadow, "semantic_ir", None)
+                )
+                if semantic_ir is None:
+                    raise UniversalAgentOrchestratorError(
+                        "正式视觉决策缺少当前任务图。"
+                    )
+            context = replace(context, semantic_ir=semantic_ir)
+            context.validate()
+            if semantic_authority is not None and hasattr(
+                semantic_authority,
+                "effect_previews",
+            ):
+                session.effect_previews = tuple(
+                    {
+                        **preview.to_dict(),
+                        "preview_digest": preview.preview_digest,
+                    }
+                    for preview in semantic_authority.effect_previews
+                )
+        session.semantic_task_context = context
         available_actions = self._available_action_kinds(session)
+        semantic_ir = context.semantic_ir
+        assert semantic_ir is not None
+        active_id = str(context.current_subgoal.get("subgoal_id") or "")
+        typed_subgoal = next(
+            (item for item in semantic_ir.subgoals if item.subgoal_id == active_id),
+            None,
+        )
+        constraints = {item.constraint_id: item for item in semantic_ir.constraints}
+        required_actions = tuple(
+            dict.fromkeys(
+                str(constraints[ref].value)
+                for ref in (
+                    typed_subgoal.constraint_refs if typed_subgoal is not None else ()
+                )
+                if constraints[ref].kind == "required_action"
+            )
+        )
+        unsupported = tuple(
+            action for action in required_actions if action not in available_actions
+        )
+        if unsupported:
+            from action_capabilities import build_device_capability_snapshot
+
+            provider = getattr(session.adapter, "capability_snapshot", None)
+            capability = (
+                provider()
+                if callable(provider)
+                else build_device_capability_snapshot(
+                    device_id=context.device_id,
+                    supported_actions=available_actions,
+                )
+            )
+            gap = capability.gap(unsupported[0])
+            assert gap is not None
+            session.capability_gap = gap.to_dict()
+            reason = "当前设备能力不支持 typed required_action：" + unsupported[0]
+            proposal = GenericStepProposal(status="blocked", reason=reason)
+            decision = SimpleNamespace(
+                task_id=context.task_id,
+                device_id=context.device_id,
+                revision=context.revision,
+                observation_id=trusted_observation.observation_id,
+                fingerprint=trusted_observation.fingerprint,
+                trusted_observation=trusted_observation,
+                proposal=proposal,
+                target_region=None,
+                expected_result={},
+                confidence=1.0,
+                reason=reason,
+                completion_evidence_element_ids=(),
+            )
+            decision.to_dict = lambda: {
+                "task_id": decision.task_id,
+                "device_id": decision.device_id,
+                "revision": decision.revision,
+                "observation_id": decision.observation_id,
+                "fingerprint": decision.fingerprint,
+                "status": "blocked",
+                "next_action": None,
+                "reason": reason,
+                "capability_gap": dict(session.capability_gap),
+            }
+            return decision
         kwargs = {
             "frames": frames,
-            "task_context": task_context,
+            "task_context": context,
             "trusted_observation": trusted_observation,
             "decision_number": session.step_number,
             "available_action_kinds": available_actions,
@@ -929,17 +1142,128 @@ class UniversalAgentOrchestrator:
                 raise
             kwargs.pop("available_action_kinds")
             decision = self.qwen_observer.decide(**kwargs)
+        decision = self._bind_formal_visual_candidate(
+            task_context=context,
+            trusted_observation=trusted_observation,
+            decision=decision,
+            available_action_kinds=available_actions,
+        )
         self._capture_visual_action_shadow(
-            task_context=task_context,
+            task_context=context,
             trusted_observation=trusted_observation,
             available_action_kinds=available_actions,
         )
         return decision
 
+    @staticmethod
+    def _bind_formal_visual_candidate(
+        *,
+        task_context: Any,
+        trusted_observation: Any,
+        decision: Any,
+        available_action_kinds: frozenset[str],
+    ) -> Any:
+        """Bind a model-selected action to one deterministic local candidate.
+
+        The visual model chooses the semantic target, but it cannot mint the
+        candidate identity, digest or transition.  Those fields are rebuilt
+        locally from the current typed task and trusted scene.  A missing or
+        ambiguous match is intentionally left unbound so the policy rejects it.
+        """
+
+        semantic_ir = getattr(task_context, "semantic_ir", None)
+        proposal = getattr(decision, "proposal", None)
+        action = getattr(proposal, "action", None)
+        if semantic_ir is None or action is None:
+            return decision
+        try:
+            from visual_action_shadow import compile_visual_action_authority
+
+            report = compile_visual_action_authority(
+                trusted_observation.scene,
+                semantic_ir,
+                available_action_kinds,
+            )
+        except Exception:
+            return decision
+
+        action_kind = str(getattr(action, "action", "") or "").strip()
+        params = dict(getattr(action, "params", {}) or {})
+        existing_id = str(params.get("formal_candidate_id") or "").strip()
+        if existing_id:
+            matches = [
+                item for item in report.candidates if item.candidate_id == existing_id
+            ]
+        else:
+            if action_kind == "drag":
+                subject_refs = (
+                    f"element.{str(params.get('source_element_id') or '').strip()}",
+                    f"element.{str(params.get('destination_element_id') or '').strip()}",
+                )
+            elif action_kind in {
+                "tap_semantic",
+                "dismiss_overlay",
+                "input_verified_text",
+                "clear_verified_text",
+                "long_press",
+            }:
+                subject_refs = (
+                    f"element.{str(params.get('element_id') or '').strip()}",
+                )
+            else:
+                subject_refs = ()
+            matches = [
+                item
+                for item in report.candidates
+                if item.action_kind == action_kind
+                and (
+                    not subject_refs
+                    or (
+                        len(subject_refs) == 1
+                        and str(item.parameters.get("element_id") or "")
+                        == str(params.get("element_id") or "")
+                    )
+                    or (
+                        len(subject_refs) == 2
+                        and (
+                            str(item.parameters.get("source_element_id") or ""),
+                            str(item.parameters.get("destination_element_id") or ""),
+                        )
+                        == (
+                            str(params.get("source_element_id") or ""),
+                            str(params.get("destination_element_id") or ""),
+                        )
+                    )
+                )
+                and (
+                    action_kind != "swipe"
+                    or str(item.parameters.get("direction") or "")
+                    == str(params.get("direction") or "")
+                )
+            ]
+        if len(matches) != 1:
+            return decision
+
+        candidate = matches[0]
+        params.update(
+            {
+                "formal_candidate_id": candidate.candidate_id,
+                "formal_report_digest": report.report_digest,
+                "formal_transition": candidate.transition.to_dict(),
+            }
+        )
+        rebound_action = replace(action, params=params)
+        rebound_proposal = replace(proposal, action=rebound_action)
+        try:
+            return replace(decision, proposal=rebound_proposal)
+        except TypeError:
+            decision.proposal = rebound_proposal
+            return decision
+
     def _capture_visual_action_shadow(
         self,
         *,
-        task_context: Mapping[str, Any],
+        task_context: Any,
         trusted_observation: Any,
         available_action_kinds: frozenset[str],
     ) -> None:
@@ -948,18 +1272,27 @@ class UniversalAgentOrchestrator:
         self.last_visual_action_shadow = None
         self.last_visual_action_shadow_error = None
         try:
+            semantic_authority = getattr(
+                self.deepseek_planner,
+                "last_semantic_authority",
+                None,
+            )
             semantic_shadow = getattr(
                 self.deepseek_planner,
                 "last_semantic_shadow",
                 None,
             )
-            semantic_ir = getattr(semantic_shadow, "semantic_ir", None)
+            semantic_ir = (
+                getattr(task_context, "semantic_ir", None)
+                or getattr(semantic_authority, "semantic_ir", None)
+                or getattr(semantic_shadow, "semantic_ir", None)
+            )
             if semantic_ir is None:
                 return
             expected = {
-                "task_id": str(task_context.get("task_id") or ""),
-                "device_id": str(task_context.get("device_id") or ""),
-                "revision": task_context.get("revision"),
+                "task_id": str(self._context_value(task_context, "task_id") or ""),
+                "device_id": str(self._context_value(task_context, "device_id") or ""),
+                "revision": self._context_value(task_context, "revision"),
             }
             actual = {
                 "task_id": getattr(semantic_ir, "task_id", None),
@@ -978,13 +1311,14 @@ class UniversalAgentOrchestrator:
             else:
                 # Lazy import is deliberate: a shadow-only module failure must
                 # not prevent the formal orchestrator from loading or deciding.
-                from visual_action_shadow import compile_visual_action_shadow_safe
+                from visual_action_shadow import compile_visual_action_authority
 
-                report, error = compile_visual_action_shadow_safe(
+                report = compile_visual_action_authority(
                     trusted_observation.scene,
                     semantic_ir,
                     available_action_kinds,
                 )
+                error = None
                 self.last_visual_action_shadow = report
                 self.last_visual_action_shadow_error = error
         except Exception as exc:  # shadow diagnostics must never alter production
@@ -1005,7 +1339,7 @@ class UniversalAgentOrchestrator:
             report = self.last_visual_action_shadow
             diagnostics["visual_action_shadow"] = {
                 "protocol_version": report.protocol_version,
-                "authoritative": False,
+                "authoritative": report.authoritative,
                 "execution_allowed": False,
                 "status": report.status,
                 "report_digest": report.report_digest,
@@ -1018,6 +1352,12 @@ class UniversalAgentOrchestrator:
             diagnostics["visual_action_shadow"] = dict(
                 self.last_visual_action_shadow_error
             )
+
+    @staticmethod
+    def _context_value(source: Any, name: str, default: Any = None) -> Any:
+        if isinstance(source, Mapping):
+            return source.get(name, default)
+        return getattr(source, name, default)
 
     @staticmethod
     def _is_presence_only_read_only_subgoal(subgoal: Any) -> bool:
@@ -2646,7 +2986,8 @@ class UniversalAgentOrchestrator:
             persist_transition()
             return
         policy_decision = self.policy.evaluate(
-            task_context=QwenTaskContext.from_dict(context),
+            task_context=session.semantic_task_context
+            or QwenTaskContext.from_dict(context),
             trusted_observation=new_observation,
             decision=decision,
             available_action_kinds=self._available_action_kinds(session),
@@ -2906,7 +3247,8 @@ class UniversalAgentOrchestrator:
 
             if decision.proposal.status == "action":
                 policy_decision = self.policy.evaluate(
-                    task_context=QwenTaskContext.from_dict(context),
+                    task_context=session.semantic_task_context
+                    or QwenTaskContext.from_dict(context),
                     trusted_observation=observation,
                     decision=decision,
                     available_action_kinds=self._available_action_kinds(session),
@@ -3171,7 +3513,8 @@ class UniversalAgentOrchestrator:
         else:
             context = graph.to_qwen_context()
         policy_decision = self.policy.evaluate(
-            task_context=QwenTaskContext.from_dict(context),
+            task_context=session.semantic_task_context
+            or QwenTaskContext.from_dict(context),
             trusted_observation=observation,
             decision=decision,
             available_action_kinds=self._available_action_kinds(session),
@@ -3745,7 +4088,8 @@ class UniversalAgentOrchestrator:
         )
         if decision.proposal.status == "action":
             policy_decision = self.policy.evaluate(
-                task_context=QwenTaskContext.from_dict(dict(task_context)),
+                task_context=session.semantic_task_context
+                or QwenTaskContext.from_dict(dict(task_context)),
                 trusted_observation=observation,
                 decision=decision,
                 available_action_kinds=self._available_action_kinds(session),
@@ -3997,7 +4341,77 @@ class UniversalAgentOrchestrator:
                         self._write_terminal_snapshot(session)
                         return session
 
-            task_context = graph.to_qwen_context()
+            task_context_payload = graph.to_qwen_context()
+            task_context = QwenTaskContext.from_dict(task_context_payload)
+            try:
+                semantic_authority = compile_formal_semantic_authority(graph)
+                semantic_ir = semantic_authority.semantic_ir
+            except TaskSemanticIRError as exc:
+                session.status = "blocked"
+                session.failed_reason = f"正式 TaskSemanticIR authority 拒绝：{exc}"
+                self._write_terminal_snapshot(session)
+                return session
+            task_context = replace(task_context, semantic_ir=semantic_ir)
+            task_context.validate()
+            session.effect_previews = tuple(
+                {
+                    **preview.to_dict(),
+                    "preview_digest": preview.preview_digest,
+                }
+                for preview in semantic_authority.effect_previews
+            )
+            active_typed_subgoal = next(
+                (
+                    item
+                    for item in semantic_ir.subgoals
+                    if item.subgoal_id
+                    == str(task_context.current_subgoal.get("subgoal_id") or "")
+                ),
+                None,
+            )
+            constraints = {
+                item.constraint_id: item for item in semantic_ir.constraints
+            }
+            required_actions = tuple(
+                dict.fromkeys(
+                    str(constraints[constraint_ref].value)
+                    for constraint_ref in (
+                        active_typed_subgoal.constraint_refs
+                        if active_typed_subgoal is not None
+                        else ()
+                    )
+                    if constraints[constraint_ref].kind == "required_action"
+                )
+            )
+            available_actions = self._available_action_kinds(session)
+            unsupported_actions = tuple(
+                action for action in required_actions if action not in available_actions
+            )
+            if unsupported_actions:
+                from action_capabilities import build_device_capability_snapshot
+
+                capability_provider = getattr(
+                    session.adapter,
+                    "capability_snapshot",
+                    None,
+                )
+                snapshot = (
+                    capability_provider()
+                    if callable(capability_provider)
+                    else build_device_capability_snapshot(
+                        device_id=session.device_id,
+                        supported_actions=available_actions,
+                    )
+                )
+                gap = snapshot.gap(unsupported_actions[0])
+                session.capability_gap = gap.to_dict() if gap is not None else None
+                session.status = "blocked"
+                session.failed_reason = (
+                    "当前设备能力不支持 typed required_action："
+                    + unsupported_actions[0]
+                )
+                self._write_terminal_snapshot(session)
+                return session
             decision = self._decide_next_action(
                 session,
                 frames=frames,
@@ -4014,7 +4428,7 @@ class UniversalAgentOrchestrator:
             proposal = decision.proposal
             if proposal.status == "action":
                 policy_decision = self.policy.evaluate(
-                    task_context=QwenTaskContext.from_dict(task_context),
+                    task_context=task_context,
                     trusted_observation=observation,
                     decision=decision,
                     available_action_kinds=self._available_action_kinds(session),
@@ -4610,6 +5024,139 @@ class PhaseOneNavigationPolicy:
             and element_state["states"]
         )
 
+    def _formal_candidate_decision(
+        self,
+        *,
+        task_context: Any,
+        scene: Any,
+        action: Any,
+        available_action_kinds: frozenset[str] | None,
+    ) -> NavigationPolicyDecision | None:
+        """Validate a typed candidate without interpreting business prose."""
+
+        semantic_ir = self._value(task_context, "semantic_ir", None)
+        if semantic_ir is None:
+            return None
+        try:
+            from visual_action_shadow import (
+                compile_visual_action_authority,
+                select_shadow_candidate,
+            )
+
+            report = compile_visual_action_authority(
+                scene,
+                semantic_ir,
+                available_action_kinds or self.ALLOWED_ACTIONS,
+            )
+            candidate_id = str(
+                action.params.get("formal_candidate_id") or ""
+            ).strip()
+            report_digest = str(
+                action.params.get("formal_report_digest") or ""
+            ).strip()
+            if not candidate_id or not report_digest:
+                return self._deny("动作缺少正式 visual candidate authority。")
+            candidate = select_shadow_candidate(
+                report,
+                report_digest=report_digest,
+                candidate_id=candidate_id,
+            ).candidate
+        except Exception as exc:
+            return self._deny(f"正式 visual candidate authority 拒绝：{exc}")
+
+        action_kind = str(self._value(action, "action", "")).strip()
+        if candidate.action_kind != action_kind:
+            return self._deny("动作 kind 与正式 candidate 不一致。")
+        if action.params.get("formal_transition") != candidate.transition.to_dict():
+            return self._deny("动作 typed transition 与正式 candidate 不一致。")
+        if action_kind == "drag":
+            element_ids = (
+                str(action.params.get("source_element_id") or ""),
+                str(action.params.get("destination_element_id") or ""),
+            )
+            candidate_element_ids = (
+                str(candidate.parameters.get("source_element_id") or ""),
+                str(candidate.parameters.get("destination_element_id") or ""),
+            )
+        elif action_kind in {
+            "tap_semantic",
+            "dismiss_overlay",
+            "input_verified_text",
+            "clear_verified_text",
+            "long_press",
+        }:
+            element_ids = (str(action.params.get("element_id") or ""),)
+            candidate_element_ids = (
+                str(candidate.parameters.get("element_id") or ""),
+            )
+        else:
+            element_ids = ()
+            candidate_element_ids = ()
+        if element_ids and candidate_element_ids != element_ids:
+            return self._deny("动作元素与正式 candidate subject 不一致。")
+        if action_kind == "swipe" and str(
+            candidate.parameters.get("direction") or ""
+        ) != str(action.params.get("direction") or ""):
+            return self._deny("滑动方向与正式 candidate 不一致。")
+
+        impact = str(
+            self._value(task_context, "current_external_impact", "unknown")
+        )
+        if impact == "external_state":
+            current = self._value(task_context, "current_subgoal", {})
+            current_subgoal_id = str(self._value(current, "subgoal_id", ""))
+            effects = {effect.effect_id: effect for effect in semantic_ir.effects}
+            effect = effects.get(candidate.effect_ref)
+            if effect is None or current_subgoal_id not in effect.source_subgoal_ids:
+                return self._deny(
+                    "external_state 动作没有绑定当前子目标的 EffectIntent。"
+                )
+        current = self._value(task_context, "current_subgoal", {})
+        current_subgoal_id = str(self._value(current, "subgoal_id", ""))
+        typed_subgoal = next(
+            (
+                item
+                for item in semantic_ir.subgoals
+                if item.subgoal_id == current_subgoal_id
+            ),
+            None,
+        )
+        surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
+        target_surface = (
+            surfaces.get(typed_subgoal.surface_ref)
+            if typed_subgoal is not None
+            else None
+        )
+        current_surface_kind = "launcher" if any(
+            token in f"{scene.foreground_app_id} {scene.screen_id}".casefold()
+            for token in ("launcher", "home_screen", "desktop")
+        ) else "app"
+        if (
+            target_surface is not None
+            and target_surface.kind == "launcher"
+            and current_surface_kind != "launcher"
+            and action_kind != "home"
+        ):
+            return self._deny(
+                "当前 typed 子目标要求 launcher surface；只能选择 home 候选。"
+            )
+        if (
+            target_surface is not None
+            and target_surface.kind == "app"
+            and current_surface_kind != "launcher"
+            and scene.foreground_app_id.casefold()
+            != target_surface.app_id.casefold()
+            and action_kind != "home"
+        ):
+            return self._deny(
+                "跨 surface App 入口必须先用 home 回到 launcher，再选择首页入口。"
+            )
+        return NavigationPolicyDecision(
+            allowed=True,
+            reason="正式 typed visual candidate、scope 与设备能力一致。",
+            canonical_class=action_kind,
+        )
+
     def _goal_bound_navigation_fallback_error(
         self,
         *,
@@ -4938,6 +5485,14 @@ class PhaseOneNavigationPolicy:
         active_risk_ids = self._value(current_subgoal, "risk_action_ids", ()) or ()
         if impact == "navigation_only" and active_risk_ids:
             return self._deny("navigation_only 动作不能携带当前子目标风险动作。")
+        formal_decision = self._formal_candidate_decision(
+            task_context=task_context,
+            scene=scene,
+            action=action,
+            available_action_kinds=available_action_kinds,
+        )
+        if formal_decision is not None:
+            return formal_decision
         if action_has_account_effect(action) and not external_allowed:
             return self._deny("动作语义可能改变账号或外部状态。")
 

@@ -424,9 +424,9 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
 
         self.assertEqual([("tap_semantic", "tap"), ("tap_semantic", "tap")], outcomes)
 
-    def test_non_navigation_button_is_blocked_without_robot_call(self):
+    def test_ordinary_toggle_effect_is_offered_and_executes_once(self):
         with tempfile.TemporaryDirectory() as temp:
-            _orchestrator, session, _planner, _qwen, _capture, robot = self._session(
+            orchestrator, session, _planner, _qwen, _capture, robot = self._session(
                 temp,
                 app_id="synthetic.controls",
                 app_name="合成控制页",
@@ -451,9 +451,15 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
             )
             self.assertFalse(any(name.startswith("after_") for name in evidence_names))
 
-        self.assertEqual("blocked", session.status)
-        self.assertEqual(0, session.physical_actions)
-        self.assertEqual([], robot.calls)
+            self.assertEqual("awaiting_confirmation", session.status)
+            self.assertEqual(0, session.physical_actions)
+            self.assertEqual([], robot.calls)
+
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(["tap"], [item[0] for item in robot.calls])
 
     def test_unstable_after_frames_fail_after_one_action_without_retry(self):
         with tempfile.TemporaryDirectory() as temp:

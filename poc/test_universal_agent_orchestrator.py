@@ -52,9 +52,10 @@ def _scene(
     states: dict | None = None,
     evidence: tuple[str, ...] = ("画面中可见目标",),
     system_ui=None,
+    app_id: str = "gallery",
 ) -> UIScene:
     current = UIScene(
-        app_id="sample.app",
+        app_id=app_id,
         screen_id="home",
         summary="显示一个可进入的详情入口",
         elements=(
@@ -281,7 +282,7 @@ def _external_graph(*, impact: str = "external_state") -> DynamicTaskGraph:
                 if impact == "external_state"
                 else "处理影响尚不明确的目标状态"
             ),
-            target_apps=(TargetApp(app_id="sample", app_name="示例工具"),),
+            target_apps=(TargetApp(app_id="gallery", app_name="示例工具"),),
             entities={
                 "contact": "目标联系人",
                 "recipient": "目标联系人",
@@ -2808,6 +2809,20 @@ class ObservationBridgeTests(unittest.TestCase):
         self.assertTrue(
             any("查看详情" in item for item in observed.grounded_visual_facts)
         )
+        self.assertTrue(observed.visual_claim_evidence_refs)
+        self.assertTrue(
+            all(
+                item.scene_id == observed.scene_id
+                and item.ref_id.startswith(f"visual_claim:{observed.scene_id}:")
+                for item in observed.visual_claim_evidence_refs
+            )
+        )
+        self.assertTrue(
+            any(
+                item.fact == "页面标题已变化"
+                for item in observed.visual_claim_evidence_refs
+            )
+        )
         self.assertNotIn("不得进入证据", observed.visible_evidence)
         observed.validate()
 
@@ -3538,8 +3553,9 @@ class UniversalAgentStartTests(unittest.TestCase):
         self.assertEqual(
             {
                 "kind": "message_or_communication",
-                "target_apps": [{"app_id": "sample", "app_name": "示例工具"}],
+                    "target_apps": [{"app_id": "gallery", "app_name": "示例工具"}],
                 "recipient": "目标联系人",
+                "recipients": ["目标联系人"],
                 "message_text": "需求询问",
             },
             session.snapshot()["risk_confirmation_preview"],
@@ -4221,9 +4237,9 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         planner = SequenceDeepSeekPlanner(initial, revision_two, completed)
         qwen = SequenceQwenObserver("action", "action")
         adapter = SequenceExecutingAdapter(
-            _scene(),
-            (_scene(fingerprint="frame-b", label="进入公开内容"), "matched", ()),
-            (_scene(fingerprint="frame-c", label="公开内容已显示"), "matched", ()),
+            _scene(app_id="unseen.reference.workspace"),
+            (_scene(fingerprint="frame-b", label="进入公开内容", app_id="unseen.reference.workspace"), "matched", ()),
+            (_scene(fingerprint="frame-c", label="公开内容已显示", app_id="unseen.reference.workspace"), "matched", ()),
         )
         with tempfile.TemporaryDirectory() as temp:
             orchestrator = self._orchestrator(planner, qwen, adapter)
@@ -4253,7 +4269,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         revised = replace(initial, revision=2)
         planner = SequenceDeepSeekPlanner(initial, revised)
         qwen = SequenceQwenObserver("action", "blocked")
-        unchanged = _scene()
+        unchanged = _scene(app_id="unseen.reference.workspace")
         adapter = SequenceExecutingAdapter(
             unchanged,
             (
@@ -4286,12 +4302,12 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         planner = SequenceDeepSeekPlanner(initial, revised)
         qwen = SequenceQwenObserver("action", "blocked")
         disappeared = replace(
-            _scene(fingerprint="frame-no-candidate"),
+            _scene(fingerprint="frame-no-candidate", app_id="unseen.reference.workspace"),
             summary="动作后目标候选已经不在当前画面",
             elements=(),
         )
         adapter = SequenceExecutingAdapter(
-            _scene(),
+            _scene(app_id="unseen.reference.workspace"),
             (disappeared, "matched", ()),
         )
         with tempfile.TemporaryDirectory() as temp:
@@ -4318,8 +4334,8 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         planner = SequenceDeepSeekPlanner(initial, completed)
         qwen = SequenceQwenObserver("action", "finished")
         adapter = SequenceCaptureAdapter(
-            _scene(),
-            _scene(fingerprint="frame-complete", label="公开内容已显示"),
+            _scene(app_id="unseen.reference.workspace"),
+            _scene(fingerprint="frame-complete", label="公开内容已显示", app_id="unseen.reference.workspace"),
         )
         with tempfile.TemporaryDirectory() as temp:
             orchestrator = self._orchestrator(planner, qwen, adapter)
@@ -4343,8 +4359,8 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         planner = SequenceDeepSeekPlanner(initial, replace(initial, revision=2))
         qwen = SequenceQwenObserver("action", "action")
         adapter = SequenceCaptureAdapter(
-            _scene(),
-            _scene(fingerprint="frame-new-candidate", label="新的唯一入口"),
+            _scene(app_id="unseen.reference.workspace"),
+            _scene(fingerprint="frame-new-candidate", label="新的唯一入口", app_id="unseen.reference.workspace"),
         )
         with tempfile.TemporaryDirectory() as temp:
             orchestrator = self._orchestrator(planner, qwen, adapter)
@@ -5115,6 +5131,41 @@ class UniversalAgentRiskConfirmationTests(unittest.TestCase):
         self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
         self.assertTrue(session.risk_confirmation_authority.consumed)
+
+    def test_unsupported_explicit_double_tap_returns_typed_capability_gap(self) -> None:
+        base = _graph()
+        graph = replace(
+            base,
+            goal=replace(base.goal, objective="双击当前唯一目标"),
+            subgoals=(
+                replace(base.subgoals[0], objective="双击当前唯一目标"),
+            ),
+            raw_user_goal="双击当前唯一目标",
+        )
+        graph.validate()
+        qwen = FakeQwenObserver()
+        adapter = FakeAdapter(_scene())
+        with tempfile.TemporaryDirectory() as temp:
+            session = UniversalAgentOrchestrator(
+                deepseek_planner=FakeDeepSeekPlanner(graph),
+                qwen_observer=qwen,
+                adapter_factory=lambda _device_id: adapter,
+                trusted_observation_factory=_trusted_factory,
+            ).start(
+                session_id="session-double-gap",
+                raw_goal=graph.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+        self.assertEqual("blocked", session.status)
+        self.assertEqual("double_tap", session.capability_gap["requested_action"])
+        self.assertEqual(
+            "vendor_multi_click_not_safely_integrated",
+            session.capability_gap["reason_code"],
+        )
+        self.assertEqual([], qwen.calls)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
 
     def test_single_risk_confirmation_executes_once_then_new_revision_requires_new_risk(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

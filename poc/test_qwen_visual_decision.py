@@ -21,6 +21,13 @@ from qwen_visual_decision import (
 )
 from ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
 from vision_agent import VisionAgentError
+from task_semantic_ir import (
+    SemanticEntity,
+    SemanticSubgoal,
+    SourceSpan,
+    SurfaceRef,
+    TaskSemanticIR,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -383,6 +390,72 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.frames = load_sequence("launcher_stable")
         self.context = task_context()
         self.observation = trusted_observation(self.frames)
+
+    def test_cross_surface_app_entry_offers_home_before_app_controls(self) -> None:
+        parsed = QwenTaskContext.from_dict(task_context())
+        semantic_ir = TaskSemanticIR(
+            task_id=parsed.task_id,
+            device_id=parsed.device_id,
+            revision=parsed.revision,
+            raw_goal="打开目标应用",
+            surfaces=(
+                SurfaceRef(
+                    surface_id="surface_target",
+                    kind="app",
+                    app_id="target",
+                    app_name="目标应用",
+                ),
+            ),
+            entities=(
+                SemanticEntity(
+                    entity_id="entity_target",
+                    entity_type="ui_label",
+                    role="target_ui_label",
+                    value="目标应用",
+                    source_span=SourceSpan(2, 6),
+                    authority="user_literal",
+                ),
+            ),
+            effects=(),
+            subgoals=(
+                SemanticSubgoal(
+                    subgoal_id="current_target",
+                    surface_ref="surface_target",
+                    status="active",
+                    external_impact="navigation_only",
+                ),
+            ),
+        )
+        parsed = replace(parsed, semantic_ir=semantic_ir)
+        current_scene = UIScene(
+            app_id="source",
+            screen_id="source_home",
+            summary="当前位于另一个应用",
+            elements=(
+                UIElement(
+                    element_id="target-entry",
+                    role="button",
+                    meaning="open_target",
+                    label="目标应用",
+                    bounds=(0.2, 0.2, 0.7, 0.3),
+                    confidence=0.97,
+                    states={"visible": True, "fully_visible": True},
+                ),
+            ),
+            stable=True,
+            confidence=0.96,
+            fingerprint=scene_for(self.frames).fingerprint,
+        )
+        observation = trusted_observation(
+            self.frames,
+            scene=current_scene,
+        )
+        choices = _selection_choices(
+            parsed,
+            observation,
+            frozenset({"home", "tap_semantic"}),
+        )
+        self.assertEqual(["home"], [item["action"] for item in choices])
 
     def test_recipient_exact_text_applies_only_to_bound_subgoal(self) -> None:
         context = task_context()

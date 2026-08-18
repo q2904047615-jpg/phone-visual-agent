@@ -1450,7 +1450,7 @@ def device() -> dict[str, Any]:
                 "semantic_ir_protocol": TASK_SEMANTIC_IR_PROTOCOL,
                 "authority_protocol": AUTHORITY_REPORT_PROTOCOL,
                 "risk_policy_protocol": RISK_POLICY_PROTOCOL,
-                "authority_scope": "semantic_and_risk_only",
+                "authority_scope": "semantic_task_and_risk",
                 "legacy_remote_risk_diagnostics_enabled": False,
                 "visual_action_authority": "formal_qwen_v3",
                 "visual_action_shadow_enabled": True,

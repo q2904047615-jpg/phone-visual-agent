@@ -399,6 +399,59 @@ class TaskSemanticIRTests(unittest.TestCase):
         projected = apply_formal_semantic_risk_policy(graph, authority)
         self.assertFalse(projected.risk_actions[0].confirmation_required)
 
+    def test_effect_preview_covers_target_payload_policy_and_digest(self):
+        authority = compile_formal_semantic_authority(graph_from_payload())
+        self.assertEqual(1, len(authority.effect_previews))
+        preview = authority.effect_previews[0]
+        self.assertEqual("send_message", preview.effect_kind)
+        self.assertEqual(["recipient"], [item.role for item in preview.targets])
+        self.assertEqual(["input_text"], [item.role for item in preview.payloads])
+        self.assertEqual(AUTOMATIC, preview.policy)
+        self.assertRegex(preview.preview_digest, r"^[0-9a-f]{64}$")
+        changed = replace(
+            preview,
+            payloads=(replace(preview.payloads[0], value="另一段文字"),),
+        )
+        self.assertNotEqual(preview.preview_digest, changed.preview_digest)
+
+    def test_multiple_recipients_and_input_fields_compile_to_typed_refs(self):
+        payload = current_send_failure_payload()
+        payload["goal"]["entities"] = {
+            "recipients": ["张三", "李四"],
+            "input_fields": [
+                {"field_id": "subject", "text": "主题"},
+                {"field_id": "body", "text": "第一行\n第二行"},
+            ],
+        }
+        payload["subgoals"][1]["objective"] = "为张三和李四填写主题与正文"
+        payload["subgoals"][1]["completion_conditions"] = [
+            "主题为“主题”且正文为“第一行\n第二行”"
+        ]
+        graph = _graph_from_payload(
+            payload,
+            task_id="multi-field-task",
+            device_id="device-local-01",
+            revision=1,
+            raw_user_goal="给张三和李四填写主题和两行正文后发送",
+        )
+        authority = compile_formal_semantic_authority(graph)
+        roles = [item.role for item in authority.semantic_ir.entities]
+        self.assertEqual(2, roles.count("recipient"))
+        self.assertEqual(2, roles.count("input_text"))
+        self.assertEqual(
+            {"subject", "body"},
+            {item.field_id for item in authority.semantic_ir.input_fields},
+        )
+        self.assertTrue(
+            any(item.multiline for item in authority.semantic_ir.input_fields)
+        )
+        required_actions = {
+            item.value
+            for item in authority.semantic_ir.constraints
+            if item.kind == "required_action"
+        }
+        self.assertIn("press_enter", required_actions)
+
         changed = replace(graph, revision=2)
         with self.assertRaisesRegex(TaskSemanticIRError, "未绑定当前任务图"):
             apply_formal_semantic_risk_policy(changed, authority)

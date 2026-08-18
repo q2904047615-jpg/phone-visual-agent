@@ -13,6 +13,7 @@ from visual_action_shadow import (
     TypedStateTransition,
     VisualActionShadowError,
     compile_visual_action_shadow,
+    compile_visual_action_authority,
     compile_visual_action_shadow_safe,
     select_shadow_candidate,
 )
@@ -133,7 +134,7 @@ class VisualActionShadowTests(unittest.TestCase):
         self.assertFalse(first.execution_allowed)
         self.assertEqual(first.status, "ready")
         self.assertGreaterEqual(len(first.candidates), 2)
-        self.assertLessEqual(len(first.candidates), 8)
+        self.assertLessEqual(len(first.candidates), 24)
 
     def test_goal_relevant_cannot_change_shadow_output(self):
         original = make_element(states={"goal_relevant": True})
@@ -170,7 +171,7 @@ class VisualActionShadowTests(unittest.TestCase):
         self.assertFalse(candidate.transition.exploratory)
         self.assertEqual(
             candidate.transition.expectations[0].predicate,
-            "surface.focused_entity_ref",
+            "effect.applied",
         )
         relation_kinds = {
             item.relation
@@ -239,7 +240,7 @@ class VisualActionShadowTests(unittest.TestCase):
         self.assertEqual(expectation.value, "任意文本 42")
         self.assertFalse(candidate.transition.exploratory)
 
-    def test_duplicate_literal_does_not_grant_element_action(self):
+    def test_duplicate_literal_never_grants_effect_binding(self):
         scene = make_scene(
             make_element("first", label="小组", role="list_item"),
             make_element(
@@ -254,9 +255,9 @@ class VisualActionShadowTests(unittest.TestCase):
             make_ir(role="recipient", value="小组", effect_kind="send_message"),
             ALL_ACTIONS,
         )
-        self.assertFalse(
-            any(item.action_kind == "tap_semantic" for item in report.candidates)
-        )
+        taps = [item for item in report.candidates if item.action_kind == "tap_semantic"]
+        self.assertEqual(2, len(taps))
+        self.assertTrue(all(not item.effect_ref for item in taps))
         self.assertIn("duplicate_exact_literal_binding", report.warnings)
 
     def test_low_confidence_or_incomplete_target_does_not_grant_action(self):
@@ -272,15 +273,20 @@ class VisualActionShadowTests(unittest.TestCase):
                     any(item.action_kind == "tap_semantic" for item in report.candidates)
                 )
 
-    def test_unrelated_goal_relevant_never_creates_element_candidate(self):
-        report = compile_visual_action_shadow(
+    def test_unrelated_goal_relevant_never_changes_element_candidate(self):
+        first = compile_visual_action_shadow(
             make_scene(make_element(label="无关按钮", states={"goal_relevant": True})),
             make_ir(value="设置"),
             ALL_ACTIONS,
         )
-        self.assertFalse(
-            any(item.action_kind == "tap_semantic" for item in report.candidates)
+        second = compile_visual_action_shadow(
+            make_scene(make_element(label="无关按钮", states={"goal_relevant": False})),
+            make_ir(value="设置"),
+            ALL_ACTIONS,
         )
+        self.assertEqual(first.to_dict(), second.to_dict())
+        tap = next(item for item in first.candidates if item.action_kind == "tap_semantic")
+        self.assertTrue(tap.transition.exploratory)
 
     def test_relational_scene_graph_has_surface_and_spatial_relations(self):
         report = compile_visual_action_shadow(
@@ -310,7 +316,7 @@ class VisualActionShadowTests(unittest.TestCase):
 
     def test_exploratory_navigation_has_typed_weak_change(self):
         report = compile_visual_action_shadow(
-            make_scene(make_element()), make_ir(), ALL_ACTIONS
+            make_scene(make_element(states={"scrollable": True})), make_ir(), ALL_ACTIONS
         )
         swipe = next(item for item in report.candidates if item.action_kind == "swipe")
         self.assertTrue(swipe.transition.exploratory)
@@ -455,14 +461,24 @@ class VisualActionShadowTests(unittest.TestCase):
         self.assertFalse(error["execution_allowed"])
         self.assertEqual(error["status"], "shadow_error")
 
-    def test_ready_requires_two_candidates(self):
+    def test_single_typed_candidate_is_ready(self):
         report = compile_visual_action_shadow(
             make_scene(make_element(label="无匹配")),
             make_ir(value="其他"),
             {"wait_for_change"},
         )
-        self.assertEqual(report.status, "blocked")
+        self.assertEqual(report.status, "ready")
         self.assertEqual(len(report.candidates), 1)
+
+    def test_formal_authority_is_local_and_cannot_execute_by_itself(self):
+        report = compile_visual_action_authority(
+            make_scene(make_element(states={"goal_relevant": False})),
+            make_ir(),
+            ALL_ACTIONS,
+        )
+        self.assertTrue(report.authoritative)
+        self.assertFalse(report.execution_allowed)
+        self.assertTrue(any(item.action_kind == "tap_semantic" for item in report.candidates))
 
     def test_orchestrator_attaches_read_only_shadow_without_changing_decision(self):
         ir = make_ir()
@@ -501,7 +517,7 @@ class VisualActionShadowTests(unittest.TestCase):
         self.assertEqual(result, {"formal_decision": "sentinel"})
         self.assertEqual(observer.last_diagnostics["formal"], "unchanged")
         shadow = observer.last_diagnostics["visual_action_shadow"]
-        self.assertFalse(shadow["authoritative"])
+        self.assertTrue(shadow["authoritative"])
         self.assertFalse(shadow["execution_allowed"])
         self.assertGreaterEqual(shadow["candidate_count"], 2)
 

@@ -10,21 +10,31 @@ class MessageIntentError(ValueError):
     pass
 
 
-def _canonical_text(value: Any, field: str, *, max_length: int) -> str:
+def _canonical_text(
+    value: Any,
+    field: str,
+    *,
+    max_length: int,
+    allow_newline: bool = False,
+) -> str:
     if not isinstance(value, str) or not value or len(value) > max_length:
         raise MessageIntentError(f"{field} 必须为1～{max_length}个字符。")
     if value != value.strip():
         raise MessageIntentError(f"{field} 首尾不能包含空白。")
-    if "\n" in value or "\r" in value:
-        raise MessageIntentError(f"{field} 不得包含换行。")
+    if "\r" in value or (not allow_newline and "\n" in value):
+        raise MessageIntentError(f"{field} 包含不支持的换行控制符。")
     return value
 
 
 @dataclass(frozen=True)
 class CanonicalMessageIntent:
     target_apps: tuple[tuple[str, str], ...]
-    recipient: str
+    recipients: tuple[str, ...]
     message_text: str
+
+    @property
+    def recipient(self) -> str:
+        return self.recipients[0] if len(self.recipients) == 1 else ""
 
     @classmethod
     def from_goal(
@@ -33,15 +43,29 @@ class CanonicalMessageIntent:
         target_apps: Iterable[Any],
         entities: Mapping[str, Any],
     ) -> "CanonicalMessageIntent":
-        recipient = _canonical_text(
-            entities.get("recipient"),
-            "goal.entities.recipient",
-            max_length=100,
+        raw_recipient = entities.get("recipient")
+        raw_recipients = entities.get("recipients")
+        if raw_recipient is not None and raw_recipients is not None:
+            raise MessageIntentError("recipient 与 recipients 只能使用一种表达。")
+        if raw_recipients is None:
+            raw_recipients = [raw_recipient]
+        if not isinstance(raw_recipients, list) or not 1 <= len(raw_recipients) <= 32:
+            raise MessageIntentError("消息目标必须包含1～32个收件人。")
+        recipients = tuple(
+            _canonical_text(
+                value,
+                f"goal.entities.recipients[{index}]",
+                max_length=100,
+            )
+            for index, value in enumerate(raw_recipients)
         )
+        if len(recipients) != len(set(recipients)):
+            raise MessageIntentError("消息收件人不能重复。")
         message_text = _canonical_text(
             entities.get("input_text"),
             "goal.entities.input_text",
-            max_length=100,
+            max_length=4000,
+            allow_newline=True,
         )
         apps: list[tuple[str, str]] = []
         for raw in target_apps:
@@ -60,7 +84,7 @@ class CanonicalMessageIntent:
                 apps.append(pair)
         if not apps:
             raise MessageIntentError("消息目标至少需要一个目标 App。")
-        return cls(tuple(apps), recipient, message_text)
+        return cls(tuple(apps), recipients, message_text)
 
     def payload(
         self,
@@ -82,7 +106,7 @@ class CanonicalMessageIntent:
                 {"app_id": app_id, "app_name": app_name}
                 for app_id, app_name in self.target_apps
             ],
-            "recipient": self.recipient,
+            "recipients": list(self.recipients),
             "message_text": self.message_text,
         }
 
@@ -102,6 +126,7 @@ class CanonicalMessageIntent:
                 for app_id, app_name in self.target_apps
             ],
             "recipient": self.recipient,
+            "recipients": list(self.recipients),
             "message_text": self.message_text,
         }
 

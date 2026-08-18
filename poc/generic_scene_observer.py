@@ -55,9 +55,13 @@ from verified_text_transaction import (
     VerifiedTextTransactionError,
     plan_next_verified_input,
 )
+from system_navigation_privacy import (
+    SYSTEM_NAVIGATION_PRIVACY_VIEW_VERSION,
+    privacy_minimized_system_navigation_view,
+)
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v60"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v61"
 POST_NAVIGATION_RESULT_OBSERVATION_PHASE = "verified_navigation_result_v1"
 POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
 POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被重新观察"]
@@ -432,6 +436,38 @@ class GenericSceneObserver:
     ) -> OrientationCredential:
         """Mint action authority from a separate, read-only model response."""
 
+        return self._audit_camera_alignment(
+            frames=frames,
+            device_id=device_id,
+            scene_fingerprint=scene_fingerprint,
+            privacy_minimized=False,
+        )
+
+    def audit_coordinate_free_system_navigation_alignment(
+        self,
+        *,
+        frames: list[Image.Image],
+        device_id: str,
+        scene_fingerprint: str,
+    ) -> OrientationCredential:
+        """Audit Home orientation without disclosing unrelated App content."""
+
+        return self._audit_camera_alignment(
+            frames=frames,
+            device_id=device_id,
+            scene_fingerprint=scene_fingerprint,
+            privacy_minimized=True,
+        )
+
+    def _audit_camera_alignment(
+        self,
+        *,
+        frames: list[Image.Image],
+        device_id: str,
+        scene_fingerprint: str,
+        privacy_minimized: bool,
+    ) -> OrientationCredential:
+
         self.last_orientation_audit_diagnostics = {}
         if len(frames) < 4:
             raise VisionAgentError("方向独立审计至少需要4帧。")
@@ -446,10 +482,15 @@ class GenericSceneObserver:
         frame = frames[selected_index].convert("RGB")
         local_fingerprint = _local_frame_fingerprint(frame)
 
+        model_frame = (
+            privacy_minimized_system_navigation_view(frame)
+            if privacy_minimized
+            else frame
+        )
         images = (
-            frame,
-            frame.transpose(Image.Transpose.ROTATE_90),
-            frame.transpose(Image.Transpose.ROTATE_270),
+            model_frame,
+            model_frame.transpose(Image.Transpose.ROTATE_90),
+            model_frame.transpose(Image.Transpose.ROTATE_270),
         )
         image_roles = (
             "IMAGE 1 - CLASSIFICATION TARGET - ORIGINAL STABLE FRAME",
@@ -502,6 +543,11 @@ class GenericSceneObserver:
                 "response_payload": _orientation_audit_diagnostic_payload(raw),
                 "audit_accepted": True,
                 "retry_used": False,
+                "privacy_view_version": (
+                    SYSTEM_NAVIGATION_PRIVACY_VIEW_VERSION
+                    if privacy_minimized
+                    else None
+                ),
             }
             return credential
         except Exception as exc:
@@ -516,6 +562,11 @@ class GenericSceneObserver:
                 "response_payload": _orientation_audit_diagnostic_payload(raw),
                 "audit_accepted": False,
                 "retry_used": False,
+                "privacy_view_version": (
+                    SYSTEM_NAVIGATION_PRIVACY_VIEW_VERSION
+                    if privacy_minimized
+                    else None
+                ),
                 "error_type": classify_qwen_error(exc, raw_response=raw),
             }
             if isinstance(exc, VisionAgentError):
@@ -660,11 +711,19 @@ class GenericSceneObserver:
             )
             fingerprint = _local_frame_fingerprint(frame)
             context = _safe_goal_context(goal_context or {})
+            privacy_minimized_system_home = (
+                _goal_requests_coordinate_free_system_home(context)
+            )
+            model_frame = (
+                privacy_minimized_system_navigation_view(frame)
+                if privacy_minimized_system_home
+                else frame
+            )
             system_ui_audit_required = _goal_requests_system_ui_audit(context)
             camera_layout_orientation = _camera_layout_orientation(frame)
             image_part = {
                 "type": "image_url",
-                "image_url": {"url": _image_data_url(frame)},
+                "image_url": {"url": _image_data_url(model_frame)},
             }
             detail_image_part = image_part
             first_messages = [
@@ -754,6 +813,20 @@ class GenericSceneObserver:
                 format_retry_used = True
                 local_structural_repair_used = True
 
+            if privacy_minimized_system_home:
+                # The masked view is authority only for a coordinate-free
+                # system Home choice.  App identity, page completion and any
+                # element candidates from this view are deliberately erased.
+                scene = replace(
+                    scene,
+                    app_id="unknown",
+                    screen_id="unknown",
+                    summary="中央App内容未披露；仅建立系统Home前稳定画布观察。",
+                    elements=(),
+                    overlays=(),
+                )
+                scene.validate()
+
             if (
                 not system_ui_audit_required
                 and not _goal_requests_keyboard_mode_switch(context)
@@ -837,7 +910,10 @@ class GenericSceneObserver:
                     format_retry_used = True
                     local_structural_repair_used = True
 
-            if _needs_foreground_app_identity_audit(scene, context):
+            if (
+                not privacy_minimized_system_home
+                and _needs_foreground_app_identity_audit(scene, context)
+            ):
                 foreground_app_identity_audit_used = True
                 self._set_stage("waiting_foreground_app_identity_audit")
                 raw = model_chat(
@@ -1225,6 +1301,11 @@ class GenericSceneObserver:
                 ),
                 "foreground_app_identity_audit_evidence": list(
                     foreground_app_identity_audit_evidence
+                ),
+                "system_navigation_privacy_view_version": (
+                    SYSTEM_NAVIGATION_PRIVACY_VIEW_VERSION
+                    if privacy_minimized_system_home
+                    else None
                 ),
                 "compact_geometry_discarded": compact_geometry_discarded,
                 "compact_input_geometry_isolated": compact_input_geometry_isolated,
@@ -1851,6 +1932,13 @@ Return exactly one JSON object with no Markdown, duplicate keys, or extra fields
 
 
 def _compact_prompt(context: dict[str, Any]) -> str:
+    privacy_note = (
+        "本轮是坐标无关的Android系统Home观察。中央App内容已由本地固定遮罩隐藏；"
+        "只能根据保留的手机画布边缘和底部Android系统导航结构报告unknown场景、画布方向和稳定性，"
+        "不得猜测App、正文或元素。"
+        if _goal_requests_coordinate_free_system_home(context)
+        else ""
+    )
     context = _observation_goal_context(context)
     if _goal_requests_keyboard_mode_switch(context):
         keyboard_switch_rule = (
@@ -1869,6 +1957,7 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 你是通用手机页面观察器，只报告画面事实，不规划也不执行动作。
 用户目标只用于选择需要读清的控件，不能让你幻读：
 {json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
+{privacy_note}
 
 用最短JSON报告：当前前台App、页面类型、最上层弹层，以及与目标直接相关的可见控件。
 规则：

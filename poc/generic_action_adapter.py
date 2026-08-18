@@ -1176,7 +1176,17 @@ class GenericSingleActionAdapter:
         )
         if resolved.kind in self.PHYSICAL_KINDS:
             arm = getattr(self.robot, "arm_physical_execution", None)
-            audit = getattr(self.observer, "audit_camera_alignment", None)
+            audit = (
+                getattr(
+                    self.observer,
+                    "audit_coordinate_free_system_navigation_alignment",
+                    None,
+                )
+                if resolved.kind == "home"
+                else getattr(self.observer, "audit_camera_alignment", None)
+            )
+            if resolved.kind == "home" and not callable(audit):
+                audit = getattr(self.observer, "audit_camera_alignment", None)
             if not callable(arm) or not callable(clear_authorization):
                 raise GenericActionAdapterError(
                     "机械臂控制器未提供共享物理执行门禁，拒绝动作。",

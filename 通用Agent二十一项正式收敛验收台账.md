@@ -676,3 +676,41 @@ goal-conditioned 重观察。
 确认作用域相关回归 `658/658`，Python 完整回归 `1461/1461`；5 个变更 Python 文件静态编译和
 diff-check 通过。完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。严格 targeted delta
 parser 未放宽；不满足导航结果合同的动作继续使用原目标做动作后观察。
+
+## 23. 云端内容审核拒绝会使坐标无关 Home 也无法退出
+
+### 23.1 验收台账与根因证据
+
+- 提交 `e6a9abc` 加载后的全新 Browser 会话 `4b1c7c1ad1a44b75ba7786077469024a` 在第一个
+  `return_home_initial` 节点、0 个物理动作处失败。阿里云返回
+  `data_inspection_failed`；本地保存的 4 帧稳定，当前 Browser 新闻流含政治新闻标题，图像编码和相机
+  均正常。该失败发生在视觉请求进入模型之前，不是 scene JSON、坐标或动作后观察合同错误。
+- 当前系统 Home 虽然没有元素坐标，仍先把整张 App 内容分别发送给 compact observer、Qwen action
+  selector 和独立方向审计；任一任意 App 页面触发云端内容审核后，Agent 无法退出到桌面，形成跨 App
+  的永久阻塞。重复发送相同整图既不会缩小缺口，也违反同类服务失败止损。
+
+### 23.2 通用修复、边界与回滚
+
+- 仅当当前 active subgoal 被严格识别为 `navigation_only` 的 Android 系统 Home、完成条件明确要求手机
+  桌面可见时，构造本地最小披露图：中央 App 内容用固定中性色覆盖，只保留手机画布边缘与底部 Android
+  系统导航结构。compact observer、Qwen 单步选择器和动作前独立方向审计三者使用同一最小披露视图；
+  fingerprint、稳定性、新鲜度和物理执行门仍绑定未经修改的原始 4 帧。
+- 该视图只能支持 `home`，不能形成元素候选，也不能用于 tap/input/swipe/back、App 身份、页面完成、
+  标题读取或外部影响动作。用户/DeepSeek 仅写同名字段不能激活；必须同时满足本地 task context、唯一
+  system-navigation action 和 controller resolved kind。Home 后必须用新的完整原图重新观察桌面。
+- 这不是规避或分析被审核内容：中央内容不会发送给模型，模型只看执行系统导航所需的最小设备结构。
+  若最小披露视图仍被拒、方向不唯一、返回动作不是 Home 或动作后桌面未被完整观察，保持 0/1 动作
+  失败关闭，不再自动重试。回滚只需移除独立视图模块和三个明确接入点。
+
+### 23.3 验证清单与停止条件
+
+- 单测证明中央像素被固定覆盖、底部系统导航结构保留，原始帧不被修改；普通目标仍发送完整图。
+- observer 明确 Home 时只调用一次 compact、跳过前台 App 身份与 target refinement；Qwen 只允许绑定
+  Home；方向凭据仍绑定原始 frame fingerprint。伪造 marker、外部影响、App 内“主页”和其他动作反测。
+- 相关模块与完整回归通过后提交并只重载 Uvicorn；然后从当前新闻页开启全新 Browser 会话。若首次
+  最小披露请求仍被云端拒绝，停止真机链并保留为外部服务阻塞，不再扩大恢复通道。
+
+离线结果：最小披露、Home-only 选择、方向凭据与普通路径正反定向 `7/7`，observer/Qwen/adapter/
+orchestrator/web 相关回归 `732/732`，Python 完整回归 `1466/1466`。完整回归只有既知测试子进程
+`ResourceWarning`，无断言失败。中央 App 内容会被固定遮罩且原帧不变；该视图产出的 App、页面、
+元素和弹层声明均被本地清空，只能形成坐标无关 Home 候选。

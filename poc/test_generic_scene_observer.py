@@ -1168,9 +1168,17 @@ class GenericSceneObserverTests(unittest.TestCase):
                 )
 
                 self.assertEqual(1, provider.calls)
+                self.assertEqual("unknown", scene.foreground_app_id)
                 self.assertEqual("unknown", scene.screen_id)
+                self.assertEqual((), scene.elements)
                 self.assertFalse(
                     observer.last_diagnostics["targeted_refinement_used"]
+                )
+                self.assertEqual(
+                    "2026-08-19-system-navigation-privacy-view-v1",
+                    observer.last_diagnostics[
+                        "system_navigation_privacy_view_version"
+                    ],
                 )
 
     def test_app_home_and_future_home_do_not_skip_current_target_refinement(self) -> None:
@@ -3235,6 +3243,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
 
         self.assertEqual(3, provider.calls)
+
         self.assertEqual(
             "local_audited_input_1",
             scene.unique_trusted_goal_element().element_id,
@@ -3256,6 +3265,31 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertNotEqual(
             provider.messages_seen[1][1]["content"],
             retry_content,
+        )
+
+    def test_system_home_direction_audit_uses_privacy_minimized_views(self):
+        provider = FakeProvider(
+            {
+                "protocol_version": ORIENTATION_AUDIT_PROTOCOL_VERSION,
+                "phone_content_rotation": "upright",
+                "confidence": 0.95,
+                "evidence": ["底部手机系统导航结构位于画布下缘"],
+            }
+        )
+        observer = GenericSceneObserver(provider)
+        frames = stable_frames()
+
+        credential = observer.audit_coordinate_free_system_navigation_alignment(
+            frames=frames,
+            device_id="device-a",
+            scene_fingerprint="scene-a",
+        )
+
+        self.assertEqual("upright", credential.phone_content_rotation)
+        self.assertEqual(1, provider.calls)
+        self.assertEqual(
+            "2026-08-19-system-navigation-privacy-view-v1",
+            observer.last_orientation_audit_diagnostics["privacy_view_version"],
         )
 
     def test_two_empty_input_audits_remain_fail_closed(self) -> None:

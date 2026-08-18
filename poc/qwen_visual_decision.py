@@ -38,6 +38,7 @@ from verified_text_transaction import (
     plan_next_verified_input,
 )
 from vision_agent import VisionAgentError, _image_data_url
+from system_navigation_privacy import privacy_minimized_system_navigation_view
 from vision_model_config import public_model_identity
 
 
@@ -72,6 +73,38 @@ ALLOWED_TASK_STATUSES = {
     "completed",
     "blocked",
 }
+
+
+def _task_requests_coordinate_free_system_home(
+    context: "QwenTaskContext",
+) -> bool:
+    if context.current_external_impact != "navigation_only":
+        return False
+    objective = re.sub(
+        r"\s+",
+        "",
+        str(context.current_subgoal.get("objective") or "").strip().casefold(),
+    )
+    conditions = context.current_subgoal.get("completion_conditions")
+    if not objective or not isinstance(conditions, list):
+        return False
+    objective_matches = bool(
+        re.search(
+            r"(?:返回|回到|退回|切回)(?:手机|设备)?(?:的)?(?:桌面|主屏幕)",
+            objective,
+        )
+        or re.search(
+            r"\b(?:return|go|switch)(?:back)?to(?:the)?(?:phone|device)?homescreen\b",
+            objective,
+        )
+    )
+    return objective_matches and any(
+        re.search(
+            r"(?:手机|设备)?(?:的)?(?:桌面|主屏幕)(?:已)?(?:可见|显示|在前台)",
+            re.sub(r"\s+", "", str(item or "").strip().casefold()),
+        )
+        for item in conditions
+    )
 ALLOWED_EXTERNAL_IMPACTS = {
     "read_only",
     "navigation_only",
@@ -1235,6 +1268,13 @@ class QwenVisualDecisionObserver:
             trusted_observation,
             available_actions,
         )
+        privacy_minimized_system_home = (
+            _task_requests_coordinate_free_system_home(context)
+        )
+        if privacy_minimized_system_home:
+            available_actions = frozenset(
+                {"home"} if "home" in available_actions else set()
+            )
         # These are the same read-only frames that established the trusted
         # observation, so apply the observer's one-leading-frame tolerance.
         # Confirmation-time recapture and post-action verification use their
@@ -1353,6 +1393,8 @@ class QwenVisualDecisionObserver:
             available_action_kinds=available_actions,
         )
         image = frames[trusted_observation.selected_frame_index].convert("RGB")
+        if privacy_minimized_system_home:
+            image = privacy_minimized_system_navigation_view(image)
         messages = _decision_messages(prompt, image)
         self._metrics["model_attempted_count"] += 1
         try:

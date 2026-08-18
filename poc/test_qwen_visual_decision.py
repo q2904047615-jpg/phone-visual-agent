@@ -21,6 +21,8 @@ from qwen_visual_decision import (
 )
 from ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
 from vision_agent import VisionAgentError
+from vision_agent import _image_data_url
+from system_navigation_privacy import privacy_minimized_system_navigation_view
 from task_semantic_ir import (
     SemanticEntity,
     SemanticSubgoal,
@@ -2103,6 +2105,50 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual("system_navigation", decision.target_region.kind)
         self.assertEqual("", decision.target_region.element_id)
         self.assertEqual((0.0, 0.0, 1.0, 1.0), decision.target_region.bounds)
+
+    def test_explicit_system_home_sends_only_privacy_minimized_image(self) -> None:
+        context = task_context(task_id="task_home_privacy", revision=5)
+        context["current_subgoal"]["objective"] = "返回手机桌面"
+        context["current_subgoal"]["completion_conditions"] = ["手机桌面可见"]
+        payload = action_payload(context, self.observation)
+        payload["next_action"] = {"kind": "home"}
+        payload["target_region"] = {
+            "kind": "system_navigation",
+            "bounds": [0, 0, 1000, 1000],
+            "description": "Android系统Home键",
+        }
+        payload["expected_result"] = {"scene_changed": True}
+        provider = FakeProvider(payload)
+
+        _observer, decision = self.decide(
+            provider,
+            context=context,
+            available_action_kinds={"home"},
+        )
+
+        sent_url = provider.messages[1]["content"][1]["image_url"]["url"]
+        selected = self.frames[self.observation.selected_frame_index].convert("RGB")
+        self.assertEqual(
+            _image_data_url(privacy_minimized_system_navigation_view(selected)),
+            sent_url,
+        )
+        self.assertEqual("home", decision.proposal.action.action)
+
+    def test_explicit_system_home_privacy_view_rejects_other_actions(self) -> None:
+        context = task_context(task_id="task_home_only", revision=6)
+        context["current_subgoal"]["objective"] = "返回手机桌面"
+        context["current_subgoal"]["completion_conditions"] = ["手机桌面可见"]
+        forged = action_payload(context, self.observation)
+        provider = FakeProvider(forged)
+
+        _observer, decision = self.decide(
+            provider,
+            context=context,
+            available_action_kinds={"home", "tap_semantic", "swipe"},
+        )
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("tap_semantic", decision.reason)
 
     def _reveal_system_navigation_payload(self) -> tuple[dict, TrustedObservation]:
         current_scene = scene_for(self.frames)

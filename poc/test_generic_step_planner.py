@@ -103,6 +103,7 @@ class FakeSceneObserver:
         self.geometry_audit_calls = []
         self.geometry_scenes = list(geometry_scenes or ())
         self.goal_contexts = []
+        self.home_audit_calls = 0
         self.audit_rotation = audit_rotation
         self.audit_confidence = audit_confidence
 
@@ -127,6 +128,16 @@ class FakeSceneObserver:
             phone_content_rotation=self.audit_rotation,
             confidence=self.audit_confidence,
             evidence=("测试手机界面轴线",),
+        )
+
+    def audit_coordinate_free_system_navigation_alignment(
+        self, *, frames, device_id, scene_fingerprint
+    ):
+        self.home_audit_calls += 1
+        return self.audit_camera_alignment(
+            frames=frames,
+            device_id=device_id,
+            scene_fingerprint=scene_fingerprint,
         )
 
     def audit_element_geometry(self, *, frames, scene, element_ids):
@@ -254,7 +265,6 @@ class PhysicalGateDriftRobot(FakeRobot):
             brightness_delta=22.66,
             centered_mae=73.09,
         )
-
 
 class GenericSingleActionAdapter(_GenericSingleActionAdapter):
     def __init__(self, *args, device_id="test-device", **kwargs):
@@ -1270,6 +1280,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual("home", result.resolved_action.kind)
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(2, observer.calls)
+        self.assertEqual(1, observer.home_audit_calls)
 
     def test_confirmed_tap_executes_exactly_once_and_reobserves(self):
         planned = scene("planned", bounds=(0.1, 0.2, 0.3, 0.4))

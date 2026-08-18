@@ -2308,6 +2308,14 @@ class UniversalAgentOrchestrator:
         previous: DynamicTaskGraph,
         revised: DynamicTaskGraph,
         trusted_observation: Any,
+        session_id: str = "",
+        verified_transition: VerifiedActionTransition | None = None,
+        controller_transition_evidence_refs: tuple[
+            ControllerTransitionEvidenceRef, ...
+        ] = (),
+        before_observation: Any | None = None,
+        previous_decision: Any | None = None,
+        execution_result: Any | None = None,
     ) -> None:
         scene = getattr(trusted_observation, "scene", None)
         if scene is None:
@@ -2331,11 +2339,193 @@ class UniversalAgentOrchestrator:
             if referenced_app_pages and not cls._scene_foreground_matches_target_app_page(
                 scene=scene,
                 target_apps=referenced_app_pages,
+            ) and not cls._verified_transition_proves_named_app_surface(
+                previous=previous,
+                completed_subgoal=item,
+                target_apps=referenced_app_pages,
+                trusted_observation=trusted_observation,
+                session_id=session_id,
+                verified_transition=verified_transition,
+                controller_transition_evidence_refs=(
+                    controller_transition_evidence_refs
+                ),
+                before_observation=before_observation,
+                previous_decision=previous_decision,
+                execution_result=execution_result,
             ):
                 raise UniversalAgentOrchestratorError(
                     "Launcher 或其他页面中的 App 入口不能证明目标 App 页面已在前台："
                     f"subgoal_id={item.subgoal_id}。"
                 )
+
+    @classmethod
+    def _verified_transition_proves_named_app_surface(
+        cls,
+        *,
+        previous: DynamicTaskGraph,
+        completed_subgoal: Any,
+        target_apps: tuple[Any, ...],
+        trusted_observation: Any,
+        session_id: str,
+        verified_transition: VerifiedActionTransition | None,
+        controller_transition_evidence_refs: tuple[
+            ControllerTransitionEvidenceRef, ...
+        ],
+        before_observation: Any | None,
+        previous_decision: Any | None,
+        execution_result: Any | None,
+    ) -> bool:
+        """Accept only a controller-proven launcher-to-App surface transition.
+
+        A visual observer may describe the destination by its current function
+        (for example, a news feed) rather than by the enclosing App identity.
+        That functional classification is not rewritten here.  This bounded
+        proof completes only the navigation node whose exact launcher action,
+        typed surface expectation and one-action receipt all agree.
+        """
+
+        receipt = verified_transition
+        before_scene = getattr(before_observation, "scene", None)
+        after_scene = getattr(trusted_observation, "scene", None)
+        proposal = getattr(previous_decision, "proposal", None)
+        action = getattr(proposal, "action", None)
+        if (
+            receipt is None
+            or before_scene is None
+            or after_scene is None
+            or action is None
+            or execution_result is None
+            or not session_id
+            or str(getattr(completed_subgoal, "external_impact", ""))
+            != "navigation_only"
+            or str(getattr(action, "action", "")) != "tap_semantic"
+        ):
+            return False
+        try:
+            receipt.validate()
+            for ref in controller_transition_evidence_refs:
+                ref.validate()
+        except TaskGraphError:
+            return False
+        old_active = previous.active_subgoal()
+        if old_active is None or old_active.subgoal_id != completed_subgoal.subgoal_id:
+            return False
+        if (
+            receipt.session_id != session_id
+            or receipt.task_id != previous.task_id
+            or receipt.device_id != previous.device_id
+            or receipt.prior_revision != previous.revision
+            or receipt.subgoal_id != completed_subgoal.subgoal_id
+            or receipt.decision_node_id != str(getattr(action, "node_id", ""))
+            or receipt.action_kind != "tap_semantic"
+            or receipt.action_digest != _action_digest(action)
+            or receipt.rebound_action_digest
+            != _action_digest(getattr(execution_result, "rebound_action", None))
+            or receipt.resolved_action_digest
+            != _action_digest(getattr(execution_result, "resolved_action", None))
+            or receipt.outcome != "matched"
+            or receipt.physical_actions != 1
+            or receipt.errors
+            or receipt.before_observation_id
+            != str(getattr(before_observation, "observation_id", ""))
+            or receipt.before_fingerprint
+            != str(getattr(before_observation, "fingerprint", ""))
+            or receipt.after_observation_id
+            != str(getattr(trusted_observation, "observation_id", ""))
+            or receipt.after_fingerprint
+            != str(getattr(trusted_observation, "fingerprint", ""))
+            or receipt.before_fingerprint == receipt.after_fingerprint
+        ):
+            return False
+        if not any(
+            ref.receipt_id == receipt.receipt_id
+            and ref.subgoal_id == receipt.subgoal_id
+            for ref in controller_transition_evidence_refs
+        ):
+            return False
+        if (
+            str(getattr(before_scene, "foreground_app_id", "")).casefold()
+            != "launcher"
+            or str(getattr(after_scene, "foreground_app_id", "")).casefold()
+            == "launcher"
+        ):
+            return False
+
+        params = getattr(action, "params", None)
+        if not isinstance(params, Mapping):
+            return False
+        element_id = str(params.get("element_id") or "").strip()
+        before_elements = tuple(getattr(before_scene, "elements", ()) or ())
+        matches = tuple(
+            element
+            for element in before_elements
+            if str(getattr(element, "element_id", "")) == element_id
+        )
+        if len(matches) != 1:
+            return False
+        element = matches[0]
+        if (
+            str(params.get("label") or "").strip()
+            != str(getattr(element, "label", "") or "").strip()
+            or str(params.get("role") or "").strip()
+            != str(getattr(element, "role", "") or "").strip()
+            or str(params.get("target") or params.get("meaning") or "").strip()
+            != str(getattr(element, "meaning", "") or "").strip()
+        ):
+            return False
+
+        action_terms = cls._presence_binding_terms(
+            params.get("label"),
+            params.get("target"),
+            params.get("meaning"),
+            getattr(element, "label", ""),
+            getattr(element, "meaning", ""),
+        )
+        bound_targets = tuple(
+            target_app
+            for target_app in target_apps
+            if cls._target_app_identity_terms(
+                target_app.app_id,
+                target_app.app_name,
+            ).intersection(action_terms)
+        )
+        if len(bound_targets) != 1:
+            return False
+        try:
+            semantic_ir = compile_formal_semantic_authority(previous).semantic_ir
+        except Exception:
+            return False
+        target = bound_targets[0]
+        surface_ids = {
+            surface.surface_id
+            for surface in semantic_ir.surfaces
+            if surface.kind == "app"
+            and (
+                surface.app_id.casefold() == str(target.app_id).casefold()
+                or surface.app_name.casefold() == str(target.app_name).casefold()
+            )
+        }
+        formal_transition = params.get("formal_transition")
+        expectations = (
+            formal_transition.get("expectations")
+            if isinstance(formal_transition, Mapping)
+            else None
+        )
+        if (
+            not isinstance(expectations, list)
+            or formal_transition.get("exploratory") is not False
+        ):
+            return False
+        matching_expectations = [
+            expectation
+            for expectation in expectations
+            if isinstance(expectation, Mapping)
+            and expectation.get("subject_ref") == "surface_current"
+            and expectation.get("predicate") == "surface.active_ref"
+            and expectation.get("operator") == "equals"
+            and expectation.get("value") in surface_ids
+        ]
+        return bool(surface_ids) and len(matching_expectations) == 1
 
     @classmethod
     def _validate_graph_identity(
@@ -2345,6 +2535,14 @@ class UniversalAgentOrchestrator:
         device_id: str,
         previous: DynamicTaskGraph | None = None,
         trusted_observation: Any | None = None,
+        session_id: str = "",
+        verified_transition: VerifiedActionTransition | None = None,
+        controller_transition_evidence_refs: tuple[
+            ControllerTransitionEvidenceRef, ...
+        ] = (),
+        before_observation: Any | None = None,
+        previous_decision: Any | None = None,
+        execution_result: Any | None = None,
     ) -> None:
         graph.validate()
         if graph.device_id != device_id:
@@ -2365,6 +2563,14 @@ class UniversalAgentOrchestrator:
                     previous=previous,
                     revised=graph,
                     trusted_observation=trusted_observation,
+                    session_id=session_id,
+                    verified_transition=verified_transition,
+                    controller_transition_evidence_refs=(
+                        controller_transition_evidence_refs
+                    ),
+                    before_observation=before_observation,
+                    previous_decision=previous_decision,
+                    execution_result=execution_result,
                 )
 
     @staticmethod
@@ -2836,6 +3042,12 @@ class UniversalAgentOrchestrator:
                 device_id=session.device_id,
                 previous=previous_graph,
                 trusted_observation=new_observation,
+                session_id=session.session_id,
+                verified_transition=receipt,
+                controller_transition_evidence_refs=controller_refs,
+                before_observation=before_observation,
+                previous_decision=previous_decision,
+                execution_result=result,
             )
         except Exception as exc:
             session.status = "blocked"

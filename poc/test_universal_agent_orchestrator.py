@@ -12,12 +12,14 @@ from PIL import Image
 
 from deepseek_task_graph import (
     CompletionCondition,
+    ControllerTransitionEvidenceRef,
     DynamicTaskGraph,
     GraphGoal,
     RiskAction,
     Subgoal,
     TaskGraphError,
     TargetApp,
+    VerifiedActionTransition,
 )
 from generic_step_planner import GenericStepProposal
 from generic_action_adapter import (
@@ -4022,6 +4024,256 @@ class UniversalAgentStartTests(unittest.TestCase):
                         previous=previous,
                         trusted_observation=SimpleNamespace(scene=launcher),
                     )
+
+    @staticmethod
+    def _named_app_launch_transition_proof(
+        *,
+        app_id: str,
+        app_name: str,
+        after_app_id: str,
+    ) -> tuple[DynamicTaskGraph, DynamicTaskGraph, dict]:
+        previous = UniversalAgentStartTests._named_app_page_graph(
+            app_id=app_id,
+            app_name=app_name,
+        )
+        revised = UniversalAgentStartTests._advance_named_app_page_graph(
+            previous
+        )
+        before_scene = replace(
+            _scene(
+                fingerprint=f"before-{app_id}",
+                meaning=f"open_{app_id}",
+                label=app_name,
+                states={"goal_relevant": True, "fully_visible": True},
+            ),
+            app_id="launcher",
+            screen_id="home_screen",
+            summary=f"手机主桌面显示{app_name}入口。",
+        )
+        after_scene = replace(
+            _scene(
+                fingerprint=f"after-{app_id}",
+                meaning="current_page_title",
+                label="当前页面",
+                role="text",
+            ),
+            app_id=after_app_id,
+            screen_id=f"{after_app_id}_home",
+            summary=f"{app_name}打开后的当前功能页面。",
+        )
+        before = FakeTrustedObservation(
+            device_id="device-1",
+            scene=before_scene,
+            observation_id=f"obs-before-{app_id}",
+        )
+        after = FakeTrustedObservation(
+            device_id="device-1",
+            scene=after_scene,
+            observation_id=f"obs-after-{app_id}",
+        )
+        element = before_scene.elements[0]
+        action = SemanticAction(
+            node_id=f"node-open-{app_id}",
+            action="tap_semantic",
+            params={
+                "element_id": element.element_id,
+                "target": element.meaning,
+                "role": element.role,
+                "label": element.label,
+                "formal_transition": {
+                    "transition_id": f"transition-open-{app_id}",
+                    "precondition_claim_ids": ["claim-launcher-entry"],
+                    "expectations": [
+                        {
+                            "subject_ref": "surface_current",
+                            "predicate": "surface.active_ref",
+                            "operator": "equals",
+                            "value": f"surface_{app_id}",
+                        }
+                    ],
+                    "exploratory": False,
+                },
+                "expected_effect": {
+                    "scene_changed": True,
+                    "goal_complete_on_success": True,
+                },
+            },
+        )
+        resolved = ResolvedSemanticAction(
+            node_id=action.node_id,
+            kind=action.action,
+            normalized_point=(0.3, 0.25),
+            target_element_id=element.element_id,
+            before_fingerprint=before.fingerprint,
+            expected_effect=dict(action.params["expected_effect"]),
+        )
+        result = SimpleNamespace(rebound_action=action, resolved_action=resolved)
+        receipt = VerifiedActionTransition(
+            receipt_id=f"receipt-open-{app_id}",
+            session_id=f"session-open-{app_id}",
+            task_id=previous.task_id,
+            device_id=previous.device_id,
+            prior_revision=previous.revision,
+            subgoal_id=previous.active_subgoal_id,
+            decision_node_id=action.node_id,
+            action_digest=_action_digest(action),
+            rebound_action_digest=_action_digest(action),
+            resolved_action_digest=_action_digest(resolved),
+            action_kind=action.action,
+            before_observation_id=before.observation_id,
+            before_fingerprint=before.fingerprint,
+            after_observation_id=after.observation_id,
+            after_fingerprint=after.fingerprint,
+            physical_actions=1,
+            outcome="matched",
+            errors=(),
+            controller_completion_evidence=(f"已打开{app_name}",),
+        )
+        ref = ControllerTransitionEvidenceRef(
+            ref_id=f"controller_transition:{receipt.receipt_id}:1",
+            receipt_id=receipt.receipt_id,
+            subgoal_id=receipt.subgoal_id,
+            text=f"已打开{app_name}",
+        )
+        kwargs = {
+            "device_id": "device-1",
+            "previous": previous,
+            "trusted_observation": after,
+            "session_id": receipt.session_id,
+            "verified_transition": receipt,
+            "controller_transition_evidence_refs": (ref,),
+            "before_observation": before,
+            "previous_decision": SimpleNamespace(
+                proposal=GenericStepProposal(status="action", action=action),
+                trusted_observation=before,
+            ),
+            "execution_result": result,
+        }
+        return previous, revised, kwargs
+
+    def test_matched_launcher_transition_proves_functionally_classified_app_surface(
+        self,
+    ) -> None:
+        for app_id, app_name, functional_app_id in (
+            ("browser", "浏览器", "news_aggregator"),
+            ("music", "音乐", "media_library"),
+        ):
+            with self.subTest(app_id=app_id):
+                _previous, revised, kwargs = self._named_app_launch_transition_proof(
+                    app_id=app_id,
+                    app_name=app_name,
+                    after_app_id=functional_app_id,
+                )
+                UniversalAgentOrchestrator._validate_graph_identity(
+                    revised,
+                    **kwargs,
+                )
+
+    def test_named_app_launch_transition_requires_complete_exact_binding(self) -> None:
+        _previous, revised, base = self._named_app_launch_transition_proof(
+            app_id="browser",
+            app_name="浏览器",
+            after_app_id="news_aggregator",
+        )
+        cases: list[tuple[str, dict]] = []
+        cases.append(("missing_controller_ref", {**base, "controller_transition_evidence_refs": ()}))
+        cases.append(("wrong_session", {**base, "session_id": "session-other"}))
+        cases.append(
+            (
+                "wrong_after_fingerprint",
+                {
+                    **base,
+                    "verified_transition": replace(
+                        base["verified_transition"],
+                        after_fingerprint="after-other",
+                    ),
+                },
+            )
+        )
+        mismatched = replace(
+            base["verified_transition"],
+            outcome="mismatched",
+            errors=("目标页面未出现",),
+        )
+        cases.append(("mismatched", {**base, "verified_transition": mismatched}))
+
+        old_action = base["previous_decision"].proposal.action
+        wrong_surface_action = replace(
+            old_action,
+            params={
+                **old_action.params,
+                "formal_transition": {
+                    **old_action.params["formal_transition"],
+                    "expectations": [
+                        {
+                            "subject_ref": "surface_current",
+                            "predicate": "surface.active_ref",
+                            "operator": "equals",
+                            "value": "surface_music",
+                        }
+                    ],
+                },
+            },
+        )
+        wrong_surface_result = SimpleNamespace(
+            rebound_action=wrong_surface_action,
+            resolved_action=base["execution_result"].resolved_action,
+        )
+        cases.append(
+            (
+                "wrong_surface",
+                {
+                    **base,
+                    "previous_decision": SimpleNamespace(
+                        proposal=GenericStepProposal(
+                            status="action",
+                            action=wrong_surface_action,
+                        ),
+                        trusted_observation=base["before_observation"],
+                    ),
+                    "verified_transition": replace(
+                        base["verified_transition"],
+                        action_digest=_action_digest(wrong_surface_action),
+                        rebound_action_digest=_action_digest(wrong_surface_action),
+                    ),
+                    "execution_result": wrong_surface_result,
+                },
+            )
+        )
+
+        launcher_after = FakeTrustedObservation(
+            device_id="device-1",
+            scene=replace(
+                base["trusted_observation"].scene,
+                app_id="launcher",
+                screen_id="home_screen",
+            ),
+            observation_id=base["trusted_observation"].observation_id,
+        )
+        launcher_receipt = replace(
+            base["verified_transition"],
+            after_fingerprint=launcher_after.fingerprint,
+        )
+        cases.append(
+            (
+                "still_launcher",
+                {
+                    **base,
+                    "trusted_observation": launcher_after,
+                    "verified_transition": launcher_receipt,
+                },
+            )
+        )
+
+        for name, kwargs in cases:
+            with self.subTest(case=name), self.assertRaisesRegex(
+                UniversalAgentOrchestratorError,
+                "入口不能证明目标 App 页面已在前台",
+            ):
+                UniversalAgentOrchestrator._validate_graph_identity(
+                    revised,
+                    **kwargs,
+                )
 
     def test_replan_structured_foreground_app_and_launcher_checkpoint_pass(self) -> None:
         previous = self._named_app_page_graph(

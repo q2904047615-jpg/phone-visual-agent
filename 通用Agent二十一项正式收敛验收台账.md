@@ -714,3 +714,50 @@ parser 未放宽；不满足导航结果合同的动作继续使用原目标做�
 orchestrator/web 相关回归 `732/732`，Python 完整回归 `1466/1466`。完整回归只有既知测试子进程
 `ResourceWarning`，无断言失败。中央 App 内容会被固定遮罩且原帧不变；该视图产出的 App、页面、
 元素和弹层声明均被本地清空，只能形成坐标无关 Home 候选。
+
+## 24. 目标 App 启动成功后被功能页面分类误拒绝
+
+### 24.1 验收台账与根因证据
+
+- v61 全新 Browser 会话 `91d2b067fa394d848084a03a9147d6af` 先以 system Home 从新闻页返回
+  Launcher，再由新目标重观察取得唯一“浏览器”入口并执行一次 `tap_semantic`。第二动作具有新的
+  前后 4 帧、变化后的 observation/fingerprint、`physical_actions=1`、`outcome=matched` 和完整 typed
+  receipt；手机实际进入了浏览器新闻流，没有第三次动作或自动重试。
+- Qwen 动作逐字绑定桌面元素 `label=浏览器`、`meaning=open_browser`，正式转换要求
+  `surface.active_ref equals surface_browser`。动作后 observer 根据当前页面功能把前台 App 分类为
+  `news_aggregator/news_feed`。`_validate_newly_completed_named_app_surfaces()` 只比较动作后功能分类与
+  goal 中的 `browser`，忽略已由本地控制器证明的启动转换，因此错误拒绝已经成功的导航节点。
+- 这是“App 容器身份”和“当前功能页面类别”两个语义维度被错误当作同一字段，不是点击、坐标、
+  Browser 特例或模型没有看到页面。任意 App 打开内容流、文档、媒体、会话或设置子页时都可能被按
+  功能重新分类，继续添加 App 别名会形成不可收敛的专用补丁。
+
+### 24.2 同类样本、通用修复与边界
+
+- 现场样本为 `browser -> news_aggregator`；变化样本覆盖目标 App 打开后被分类为媒体页、文档页或内容
+  流。共同合同是：动作前为 Launcher，唯一可信入口逐字绑定目标 App，Qwen 正式转换也绑定同一目标
+  surface，控制器回执严格证明恰好一次 matched 动作和新的非 Launcher 观察。
+- 仅在上述全部条件成立时，允许该 typed controller transition 完成它绑定的 navigation-only 启动节点；
+  动作后功能分类无需冒充 App 包身份。回执必须严格绑定 session/task/device/revision/subgoal/decision、
+  requested/rebound/resolved action digest、before/after observation 和 fingerprint，且对应 controller ref
+  必须存在。
+- 仍在 Launcher、目标 label/meaning 不绑定 App、正式转换缺失或指向其他 surface、回执 mismatched、
+  0/2 次动作、错误 observation/fingerprint/subgoal，均继续拒绝。普通可见文字、Launcher 入口本身、
+  read-only/external_state/unknown 节点不能取得该例外。
+- 该回执只完成“打开目标 App”的导航转换；后续标题、错误提示、内容、发送或其他结果仍必须由新目标
+  下的完整画面重新观察证明。不会改写 observer 的功能分类，不增加 App 名称映射、固定步骤或坐标。
+
+### 24.3 验证清单与停止条件
+
+- 正测两种不同目标 App 的“Launcher 入口 -> 不同功能类页面”：严格回执、目标 surface 和 controller
+  ref 全部一致时允许完成导航节点。
+- 反测仍在 Launcher、目标名称错误、正式 surface 缺失/错误、receipt 的 session/subgoal/after observation
+  或 fingerprint 错误、mismatched/有 errors、controller ref 缺失；全部维持原身份错误并且 0 新动作。
+- 复用原有“Launcher 入口不能证明前台 App”和“普通匹配前台 App 可证明”的视觉正反测试；运行
+  DeepSeek/编排相关回归与一次 Python 完整回归、静态编译和 diff-check。
+- 全绿后本地提交，只重载项目 Uvicorn，不操作卖家 `main.exe`。以全新 Browser 目标进行一次最终真机
+  验收；若后续标题读取失败，保存为独立新缺口并停止，不扩大此身份修复。
+
+离线结果：两种功能分类变化及完整绑定反例 `9/9`，DeepSeek 与编排核心 `379/379`，observer、Qwen、
+adapter、DeepSeek、编排和 Web 相关回归 `887/887`，Python 完整回归 `1468/1468`。完整回归只有既知
+测试子进程 `ResourceWarning`，无断言失败。原视觉身份门保持；只有本地严格回执证明的 Launcher 到
+目标 App navigation-only 转换可使用该证据，后续页面内容仍须独立重观察。

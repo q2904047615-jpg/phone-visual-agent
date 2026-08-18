@@ -8,6 +8,7 @@ from PIL import Image, ImageDraw, ImageFilter
 
 from generic_scene_observer import (
     AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE,
+    FOREGROUND_APP_IDENTITY_AUDIT_VERSION,
     GenericSceneObserver,
     ICON_CLUSTER_AUDIT_VERSION,
     INPUT_STRUCTURE_AUDIT_VERSION,
@@ -20,6 +21,7 @@ from generic_scene_observer import (
     _camera_layout_orientation,
     _can_use_stable_ocr_literal_bounds,
     _compact_prompt,
+    _foreground_app_identity_audit_prompt,
     _goal_requests_input,
     _input_structure_audit_prompt,
     _map_input_structure_crop_audit_to_full,
@@ -32,6 +34,7 @@ from generic_scene_observer import (
     _single_json_structural_edits,
     _snap_reload_audit_to_local_glyph,
     _strict_icon_cluster_audit_payload,
+    _strict_foreground_app_identity_audit,
     _targeted_prompt,
 )
 from ocr_runtime import OcrMatch
@@ -197,6 +200,20 @@ def scene_payload() -> dict:
         "stable": True,
         "confidence": 0.96,
         "fingerprint": "model-value-must-not-be-trusted",
+    }
+
+
+def app_identity_audit_payload(
+    app_id: str,
+    *,
+    confidence: float = 0.98,
+    evidence: list[str] | None = None,
+) -> dict:
+    return {
+        "protocol_version": FOREGROUND_APP_IDENTITY_AUDIT_VERSION,
+        "foreground_app_id": app_id,
+        "confidence": confidence,
+        "evidence": list(evidence or ["前台应用视觉身份清晰可辨"]),
     }
 
 
@@ -5821,6 +5838,133 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(provider.calls, 1)
         self.assertEqual("unknown", scene.screen_id)
         self.assertFalse(observer.last_diagnostics["targeted_refinement_used"])
+
+    def test_placeholder_foreground_app_gets_independent_browser_identity_audit(self) -> None:
+        compact = scene_payload()
+        compact["foreground_app_id"] = "current_foreground"
+        compact["screen_id"] = "通用动作真机验收页"
+        compact["elements"] = [
+            {
+                "element_id": "page-title",
+                "role": "text",
+                "meaning": "page_title",
+                "label": "通用动作真机验收页",
+                "bounds": [100, 100, 700, 180],
+                "confidence": 1.0,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["页面顶部唯一主标题"],
+            }
+        ]
+        provider = SequenceProvider(
+            [
+                compact,
+                app_identity_audit_payload(
+                    "browser",
+                    evidence=["可见浏览器地址栏与页面内容区域"],
+                ),
+            ]
+        )
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={
+                "app_id": "current_foreground",
+                "objective": "看清当前页面主标题",
+            },
+        )
+
+        self.assertEqual("browser", scene.foreground_app_id)
+        self.assertEqual(2, provider.calls)
+        self.assertTrue(
+            observer.last_diagnostics["foreground_app_identity_audit_used"]
+        )
+        audit_messages = provider.messages_seen[1]
+        audit_text = audit_messages[1]["content"][0]["text"]
+        self.assertNotIn("看清当前页面主标题", audit_text)
+        self.assertEqual(
+            2,
+            len(audit_messages[1]["content"]),
+        )
+
+    def test_placeholder_foreground_app_audit_is_cross_app_and_low_confidence_fails_closed(self) -> None:
+        for audited_app, confidence, expected in (
+            ("settings", 0.98, "settings"),
+            ("chat_app", 0.98, "chat_app"),
+            ("browser", 0.70, "unknown"),
+            ("unknown", 1.0, "unknown"),
+        ):
+            with self.subTest(audited_app=audited_app, confidence=confidence):
+                compact = scene_payload()
+                compact["foreground_app_id"] = "current_app"
+                provider = SequenceProvider(
+                    [
+                        compact,
+                        app_identity_audit_payload(
+                            audited_app,
+                            confidence=confidence,
+                        ),
+                    ]
+                )
+                scene = GenericSceneObserver(provider).observe(
+                    frames=stable_frames(),
+                    goal_context={},
+                )
+                self.assertEqual(expected, scene.foreground_app_id)
+
+    def test_existing_structured_foreground_app_does_not_add_identity_call(self) -> None:
+        provider = SequenceProvider([scene_payload()])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={},
+        )
+
+        self.assertEqual("calculator", scene.foreground_app_id)
+        self.assertEqual(1, provider.calls)
+        self.assertFalse(
+            observer.last_diagnostics["foreground_app_identity_audit_used"]
+        )
+
+    def test_foreground_app_identity_audit_rejects_unsafe_or_ambiguous_payloads(self) -> None:
+        invalid_payloads = (
+            app_identity_audit_payload("current_foreground"),
+            {
+                **app_identity_audit_payload("browser"),
+                "unexpected": True,
+            },
+            app_identity_audit_payload(
+                "browser",
+                evidence=["点击右上角并使用坐标 x=10"],
+            ),
+        )
+        duplicate = (
+            '{"protocol_version":"'
+            + FOREGROUND_APP_IDENTITY_AUDIT_VERSION
+            + '","foreground_app_id":"browser","foreground_app_id":"settings",'
+            '"confidence":0.98,"evidence":["可见应用身份"]}'
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(VisionAgentError):
+                    _strict_foreground_app_identity_audit(
+                        json.dumps(payload, ensure_ascii=False)
+                    )
+        with self.assertRaises(VisionAgentError):
+            _strict_foreground_app_identity_audit(duplicate)
+
+    def test_foreground_app_identity_prompts_forbid_context_placeholders(self) -> None:
+        compact = _compact_prompt(
+            {"app_id": "current_foreground", "objective": "读取当前画面"}
+        )
+        audit = _foreground_app_identity_audit_prompt()
+
+        for prompt in (compact, audit):
+            self.assertIn("current_foreground", prompt)
+            self.assertIn("unknown", prompt)
+        self.assertIn("No user goal", audit)
+        self.assertIn("no action authority", audit)
 
     def test_status_exposes_observation_policy(self) -> None:
         status = GenericSceneObserver(FakeProvider(scene_payload())).status()

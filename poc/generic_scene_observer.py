@@ -52,13 +52,17 @@ from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
 from vision_model_config import public_model_identity
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v49"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v50"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
+FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
+    "2026-08-18-foreground-app-identity-audit-v1"
+)
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-17-input-structure-audit-v4"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1800
 TARGETED_OUTPUT_TOKENS = 700
+FOREGROUND_APP_IDENTITY_AUDIT_TOKENS = 300
 INPUT_STRUCTURE_AUDIT_TOKENS = 700
 SYSTEM_UI_AUDIT_TOKENS = 600
 ICON_CLUSTER_AUDIT_TOKENS = 700
@@ -78,6 +82,8 @@ STAGE_LABELS = {
     "parsing_compact_retry": "解析修正结果",
     "waiting_targeted_refinement": "等待千问目标精查",
     "parsing_targeted_refinement": "解析目标精查结果",
+    "waiting_foreground_app_identity_audit": "等待前台应用身份只读审计",
+    "parsing_foreground_app_identity_audit": "解析前台应用身份只读审计",
     "waiting_icon_cluster_audit": "等待图标簇只读审计",
     "parsing_icon_cluster_audit": "解析图标簇只读审计",
     "waiting_icon_cluster_localization": "等待图标簇局部定位复核",
@@ -561,6 +567,9 @@ class GenericSceneObserver:
         format_retry_used = False
         local_structural_repair_used = False
         targeted_refinement_used = False
+        foreground_app_identity_audit_used = False
+        foreground_app_identity_audit_confidence: float | None = None
+        foreground_app_identity_audit_evidence: tuple[str, ...] = ()
         compact_geometry_discarded = False
         compact_input_geometry_isolated = False
         icon_cluster_audit_used = False
@@ -808,6 +817,35 @@ class GenericSceneObserver:
                     )
                     format_retry_used = True
                     local_structural_repair_used = True
+
+            if _is_foreground_app_identity_placeholder(scene.foreground_app_id):
+                foreground_app_identity_audit_used = True
+                self._set_stage("waiting_foreground_app_identity_audit")
+                raw = model_chat(
+                    [
+                        _json_only_system_message(),
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": _foreground_app_identity_audit_prompt(),
+                                },
+                                image_part,
+                            ],
+                        },
+                    ],
+                    max_tokens=FOREGROUND_APP_IDENTITY_AUDIT_TOKENS,
+                )
+                self.last_raw_response = raw
+                self._set_stage("parsing_foreground_app_identity_audit")
+                (
+                    foreground_app_id,
+                    foreground_app_identity_audit_confidence,
+                    foreground_app_identity_audit_evidence,
+                ) = _strict_foreground_app_identity_audit(raw)
+                scene = replace(scene, app_id=foreground_app_id)
+                scene.validate()
 
             if _goal_requests_reload(context):
                 # Reload is a generic navigation semantic, but compact toolbar
@@ -1193,6 +1231,15 @@ class GenericSceneObserver:
                 "first_pass_success": not format_retry_used,
                 "repair_retry_success": format_retry_used,
                 "targeted_refinement_used": targeted_refinement_used,
+                "foreground_app_identity_audit_used": (
+                    foreground_app_identity_audit_used
+                ),
+                "foreground_app_identity_audit_confidence": (
+                    foreground_app_identity_audit_confidence
+                ),
+                "foreground_app_identity_audit_evidence": list(
+                    foreground_app_identity_audit_evidence
+                ),
                 "compact_geometry_discarded": compact_geometry_discarded,
                 "compact_input_geometry_isolated": compact_input_geometry_isolated,
                 "icon_cluster_audit_used": icon_cluster_audit_used,
@@ -1754,6 +1801,48 @@ other vendor robot-controller chrome outside the phone display. JSON only.
 """
 
 
+_FOREGROUND_APP_IDENTITY_PLACEHOLDERS = frozenset(
+    {
+        "current_foreground",
+        "current_app",
+        "foreground_app",
+        "target_app",
+        "active_app",
+    }
+)
+_FOREGROUND_APP_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_MIN_FOREGROUND_APP_IDENTITY_CONFIDENCE = 0.90
+
+
+def _is_foreground_app_identity_placeholder(value: str) -> bool:
+    return str(value or "").strip().casefold() in (
+        _FOREGROUND_APP_IDENTITY_PLACEHOLDERS
+    )
+
+
+def _foreground_app_identity_audit_prompt() -> str:
+    return f"""
+You are an app-independent, read-only foreground application identity auditor.
+Inspect only the physical phone display in this one stable image. No user goal,
+target App, planned action, or previous model answer is provided or authoritative.
+
+Return a short lower_snake_case semantic category for the App that is visibly in
+the foreground. Use "unknown" when the visible chrome and content do not establish
+one category with high confidence. Never return a referential placeholder such as
+current_foreground, current_app, foreground_app, target_app, or active_app.
+
+Evidence must contain one or two short visible identity cues from the phone screen.
+Do not mention coordinates, bounds, PX/MM, robot controls, calibration, or any tap,
+press, swipe, drag, execution, or suggestion. This audit grants no action authority
+and must not describe a workflow.
+
+Return exactly one JSON object with no Markdown, duplicate keys, or extra fields:
+{{"protocol_version":"{FOREGROUND_APP_IDENTITY_AUDIT_VERSION}",
+"foreground_app_id":"unknown","confidence":0.0,
+"evidence":["short visible App identity cue"]}}
+"""
+
+
 def _compact_prompt(context: dict[str, Any]) -> str:
     if _goal_requests_keyboard_mode_switch(context):
         keyboard_switch_rule = (
@@ -1775,7 +1864,9 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 
 用最短JSON报告：当前前台App、页面类型、最上层弹层，以及与目标直接相关的可见控件。
 规则：
-1. 桌面写 launcher；不确定写 unknown。不得把目标App当成当前App。
+1. 桌面写 launcher；不确定写 unknown。不得把目标App当成当前App，也不得把
+   current_foreground、current_app、foreground_app、target_app 或 active_app 等引用占位符
+   写成foreground_app_id；该字段只能来自当前画面的视觉身份。
 2. elements最多{MAX_COMPACT_ELEMENTS}个。必须先报告目标相关控件和当前输入框，
    再报告关闭/返回与必要导航；省略新闻、商品、图片、标签组等无关内容。
 3. bounds使用0..1000的[left,top,right,bottom]，必须只框真实清晰控件。0和1000分别代表
@@ -2178,6 +2269,69 @@ def _reject_duplicate_json_object_pairs(
 
 def _load_json_without_duplicate_keys(raw: str) -> Any:
     return json.loads(raw, object_pairs_hook=_reject_duplicate_json_object_pairs)
+
+
+def _strict_foreground_app_identity_audit(
+    raw: str,
+) -> tuple[str, float, tuple[str, ...]]:
+    text = str(raw or "").strip()
+    if not text or text.startswith("```"):
+        raise VisionAgentError("前台应用身份审计必须返回纯 JSON 对象。")
+    try:
+        payload = _load_json_without_duplicate_keys(text)
+    except _DuplicateJSONKeyError as exc:
+        raise VisionAgentError(
+            f"前台应用身份审计包含重复 JSON 字段：{exc}"
+        ) from exc
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise VisionAgentError(f"前台应用身份审计 JSON 无法解析：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise VisionAgentError("前台应用身份审计必须是 JSON 对象。")
+    required = {
+        "protocol_version",
+        "foreground_app_id",
+        "confidence",
+        "evidence",
+    }
+    missing = required - set(payload)
+    unexpected = set(payload) - required
+    if missing:
+        raise VisionAgentError(
+            "前台应用身份审计缺少字段：" + ", ".join(sorted(missing))
+        )
+    if unexpected:
+        raise VisionAgentError(
+            "前台应用身份审计包含协议外字段："
+            + ", ".join(sorted(map(str, unexpected)))
+        )
+    if payload["protocol_version"] != FOREGROUND_APP_IDENTITY_AUDIT_VERSION:
+        raise VisionAgentError("前台应用身份审计协议版本不匹配。")
+    app_id = str(payload["foreground_app_id"] or "").strip().casefold()
+    if not _FOREGROUND_APP_ID_PATTERN.fullmatch(app_id):
+        raise VisionAgentError("前台应用身份审计 app_id 格式无效。")
+    if _is_foreground_app_identity_placeholder(app_id):
+        raise VisionAgentError("前台应用身份审计不得返回引用占位符。")
+    confidence = payload["confidence"]
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        raise VisionAgentError("前台应用身份审计 confidence 格式无效。")
+    confidence = float(confidence)
+    if not 0.0 <= confidence <= 1.0:
+        raise VisionAgentError("前台应用身份审计 confidence 越界。")
+    evidence = payload["evidence"]
+    if (
+        not isinstance(evidence, list)
+        or not 1 <= len(evidence) <= 2
+        or any(
+            not camera_alignment_evidence_is_safe(item)
+            or len(str(item).strip()) > 120
+            for item in evidence
+        )
+    ):
+        raise VisionAgentError("前台应用身份审计 evidence 不安全或格式无效。")
+    evidence_tuple = tuple(str(item).strip() for item in evidence)
+    if app_id == "unknown" or confidence < _MIN_FOREGROUND_APP_IDENTITY_CONFIDENCE:
+        app_id = "unknown"
+    return app_id, confidence, evidence_tuple
 
 
 def _extract_compact_json_object(raw: str) -> dict[str, Any]:

@@ -360,6 +360,29 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
 
         type_pinyin.assert_called_once_with("agent", "agent")
 
+    def test_universal_uppercase_profile_uses_same_audited_key_geometry(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"input_verified_text"},
+        )
+        layout = {"type": "qwerty", "anchors": {}}
+        with patch.object(controller, "vision_type_pinyin") as type_pinyin:
+            controller.vision_type_text_with_layout("M", layout)
+        type_pinyin.assert_called_once_with("M", "m", layout)
+
+        controller.validate_verified_text(
+            "M",
+            {
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+                "keyboard_case_mode": "upper",
+            },
+            target_text="Meeting",
+            input_method="direct_latin",
+        )
+
     def test_verified_text_profile_requires_empty_focused_qwerty_scene(self):
         controller = RobotController(
             title="test",
@@ -4370,7 +4393,7 @@ class ApiEndToEndTests(unittest.TestCase):
         observer = universal.pop("observer")
         self.assertEqual(
             observer["observer_version"],
-            "2026-08-18-generic-scene-observer-v52",
+            "2026-08-18-generic-scene-observer-v53",
         )
         self.assertEqual(observer["supported_app_scope"], "dynamic")
         architecture["universal_agent"] = universal
@@ -4389,7 +4412,7 @@ class ApiEndToEndTests(unittest.TestCase):
                 "universal_agent": {
                     "goal_protocol": "2026-08-10-generic-intent-v1",
                     "scene_protocol": "2026-08-14-ui-scene-v3",
-                    "action_protocol": "2026-08-18-universal-action-v13",
+                    "action_protocol": "2026-08-18-universal-action-v14",
                     "goal_preview_enabled": True,
                     "scene_preview_enabled": True,
                     "hardware_execution_enabled": True,

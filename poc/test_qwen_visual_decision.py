@@ -1004,6 +1004,41 @@ class QwenVisualDecisionTests(unittest.TestCase):
             decision.expected_result,
         )
 
+    def test_literal_key_and_keyboard_switches_are_local_exact_choices(self) -> None:
+        context = task_context()
+        context["goal"]["entities"] = {"input_text": "draft 8"}
+        context["current_subgoal"]["objective"] = "消息草稿逐字为draft 8"
+        parsed = QwenTaskContext.from_dict(context)
+        field = UIElement(
+            element_id="field", role="input", meaning="application_text_input",
+            label="消息", bounds=(0.08, 0.12, 0.92, 0.22), confidence=0.97,
+            states={
+                "focused": True, "value": "draft", "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin", "goal_relevant": False,
+            },
+        )
+        literal = UIElement(
+            element_id="local_audited_literal_key_1", role="button",
+            meaning="input_exact_literal_key", label="空格",
+            bounds=(0.31, 0.87, 0.69, 0.97), confidence=0.98,
+            states={
+                "goal_relevant": True, "fully_visible": True,
+                "input_literal_key": True, "key_value": " ",
+                "prior_input_value": "draft", "expected_input_value": "draft ",
+                "input_element_id": "field",
+            },
+        )
+        observation = trusted_observation(self.frames, elements=(field, literal))
+        choices = _selection_choices(
+            parsed, observation, frozenset({"tap_semantic", "input_verified_text"})
+        )
+        choice = next(item for item in choices if item["element_id"] == literal.element_id)
+        self.assertEqual("tap_semantic", choice["action"])
+        self.assertEqual(
+            {"element_state": {"meaning": "application_text_input", "states": {"value": "draft "}}},
+            choice["expected_result"],
+        )
+
     def test_recipient_title_is_identity_evidence_not_input_action_target(self) -> None:
         context = task_context()
         context["goal"]["entities"] = {

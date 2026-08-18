@@ -37,6 +37,8 @@ from generic_scene_observer import (
     _strict_icon_cluster_audit_payload,
     _strict_foreground_app_identity_audit,
     _targeted_prompt,
+    _validated_keyboard_layout_switches,
+    _validated_keyboard_literal_keys,
 )
 from ocr_runtime import OcrMatch
 from orientation_safety import ORIENTATION_AUDIT_PROTOCOL_VERSION
@@ -270,6 +272,10 @@ def input_audit_payload(
             "mode_switch": None,
         }
     )
+    resolved_keyboard.setdefault("case_mode", "unknown")
+    resolved_keyboard.setdefault("case_switch", None)
+    resolved_keyboard.setdefault("literal_keys", [])
+    resolved_keyboard.setdefault("layout_switches", [])
     if (
         resolved_keyboard.get("visible") is True
         and str(resolved_keyboard.get("layout") or "").strip().casefold()
@@ -3654,9 +3660,10 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
         audit_prompt = provider.messages_seen[1][1]["content"][0]["text"]
         self.assertIn(
-            '"input_mode":"unknown","qwerty_anchors":',
+            '"input_mode":"unknown","case_mode":"unknown"',
             audit_prompt,
         )
+        self.assertIn('"qwerty_anchors":', audit_prompt)
         self.assertIn('"backspace":[0,0]},"mode_switch":null', audit_prompt)
         self.assertIn("text-entry verification goal", audit_prompt)
         self.assertNotIn(
@@ -4557,6 +4564,158 @@ class GenericSceneObserverTests(unittest.TestCase):
         field = scene.get_element("local_audited_input_1")
         self.assertEqual("nihao", field.states["ime_preedit_text"])
         self.assertEqual("你好", field.states["ime_exact_candidate_text"])
+
+    def test_input_audit_mints_only_exact_next_literal_key(self) -> None:
+        base_scene = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="frame-literal-key",
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="message-field",
+                    bounds=[80, 120, 920, 210],
+                    text="draft",
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 480, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [115, 610], "p": [875, 610],
+                    "a": [157, 700], "l": [832, 700],
+                    "z": [241, 790], "m": [747, 790],
+                    "backspace": [875, 790],
+                },
+                "mode_switch": None,
+                "case_switch": None,
+                "literal_keys": [
+                    {
+                        "value": " ", "label": "空格", "key_kind": "space",
+                        "bounds": [310, 870, 690, 970], "confidence": 0.98,
+                        "fully_visible": True,
+                    },
+                    {
+                        "value": ".", "label": ".", "key_kind": "character",
+                        "bounds": [720, 870, 800, 970], "confidence": 0.98,
+                        "fully_visible": True,
+                    },
+                ],
+                "layout_switches": [],
+            },
+        )
+        scene = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="frame-literal-key",
+            goal_context={
+                "objective": "草稿内容为draft message",
+                "entities": {"input_text": "draft message"},
+            },
+        )
+        target = scene.unique_trusted_goal_element()
+        self.assertEqual("local_audited_literal_key_1", target.element_id)
+        self.assertEqual(" ", target.states["key_value"])
+        self.assertEqual("draft ", target.states["expected_input_value"])
+        self.assertFalse(
+            scene.get_element("local_audited_input_1").states["goal_relevant"]
+        )
+
+    def test_input_audit_mints_layout_and_case_switches_only_for_next_step(self) -> None:
+        base_scene = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="frame-switches",
+        )
+        common_input = [
+            audited_application_input(
+                structure_id="message-field", bounds=[80, 120, 920, 210], text=""
+            )
+        ]
+        upper_audit = input_audit_payload(
+            application_inputs=common_input,
+            keyboard={
+                "visible": True, "bounds": [0, 480, 1000, 1000],
+                "layout": "qwerty", "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [115, 610], "p": [875, 610],
+                    "a": [157, 700], "l": [832, 700],
+                    "z": [241, 790], "m": [747, 790],
+                    "backspace": [875, 790],
+                },
+                "mode_switch": None,
+                "case_switch": {
+                    "label": "⇧", "bounds": [40, 760, 130, 850],
+                    "confidence": 0.98, "current_mode": "lower",
+                    "target_mode": "upper",
+                },
+                "literal_keys": [],
+                "layout_switches": [
+                    {
+                        "label": "123", "bounds": [80, 880, 200, 980],
+                        "confidence": 0.98, "current_layout": "qwerty",
+                        "target_layout": "numeric",
+                    }
+                ],
+            },
+        )
+        upper_scene = _apply_input_structure_audit(
+            base_scene, json.dumps(upper_audit, ensure_ascii=False),
+            fingerprint="frame-switches",
+            goal_context={"objective": "草稿内容为Meeting", "entities": {"input_text": "Meeting"}},
+        )
+        self.assertEqual(
+            "local_audited_keyboard_case_switch_1",
+            upper_scene.unique_trusted_goal_element().element_id,
+        )
+
+        numeric_scene = _apply_input_structure_audit(
+            base_scene, json.dumps(upper_audit, ensure_ascii=False),
+            fingerprint="frame-switches",
+            goal_context={"objective": "草稿内容为8", "entities": {"input_text": "8"}},
+        )
+        self.assertEqual(
+            "local_audited_keyboard_layout_switch_1",
+            numeric_scene.unique_trusted_goal_element().element_id,
+        )
+
+    def test_literal_key_and_layout_switch_validation_fail_closed(self) -> None:
+        keyboard_bounds = (0.0, 480.0, 1000.0, 1000.0)
+        with self.assertRaisesRegex(UISceneError, "label"):
+            _validated_keyboard_literal_keys(
+                [{
+                    "value": "8", "label": "9", "key_kind": "character",
+                    "bounds": [200, 600, 280, 690], "confidence": 0.99,
+                    "fully_visible": True,
+                }],
+                keyboard_bounds=keyboard_bounds,
+            )
+        self.assertEqual(
+            [],
+            _validated_keyboard_literal_keys(
+                [{
+                    "value": "8", "label": "8", "key_kind": "character",
+                    "bounds": [200, 600, 280, 690], "confidence": 0.70,
+                    "fully_visible": True,
+                }],
+                keyboard_bounds=keyboard_bounds,
+            ),
+        )
+        self.assertEqual(
+            [],
+            _validated_keyboard_layout_switches(
+                [{
+                    "label": "emoji", "bounds": [80, 880, 200, 980],
+                    "confidence": 0.99, "current_layout": "qwerty",
+                    "target_layout": "numeric",
+                }],
+                keyboard_bounds=keyboard_bounds,
+                current_layout="qwerty",
+            ),
+        )
 
     def test_hidden_keyboard_only_attestation_rejects_structured_keyboard_conflict(self) -> None:
         compact = scene_payload()
@@ -5622,7 +5781,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual((0.704, 0.078, 0.836, 0.129), button.bounds)
         self.assertFalse(button.states["goal_relevant"])
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
-        self.assertEqual([1800, 700, 700], provider.max_tokens_seen)
+        self.assertEqual([1800, 700, 1000], provider.max_tokens_seen)
 
     def test_incomplete_disjoint_right_button_is_discarded_without_input_widening(self) -> None:
         empty = scene_payload()

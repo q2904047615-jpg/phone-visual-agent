@@ -21,7 +21,7 @@ from ui_scene import (
 )
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-18-universal-action-v13"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-18-universal-action-v14"
 
 REVEAL_SYSTEM_NAVIGATION_EFFECT = {
     "system_ui": {"navigation_bar_visible": True}
@@ -325,6 +325,16 @@ class UniversalActionController:
             element = self._resolve_target(action, scene)
             if element.states.get("local_text_clear") is True:
                 self._validate_local_text_clear(element, scene)
+            if element.meaning in {
+                "input_exact_literal_key",
+                "switch_keyboard_layout",
+                "switch_keyboard_case",
+            }:
+                self._validate_input_auxiliary_tap(
+                    element,
+                    scene,
+                    expected_effect,
+                )
             return self._point_action(
                 action,
                 element,
@@ -360,13 +370,21 @@ class UniversalActionController:
                 raise UniversalActionError(f"无法建立精确文字输入事务：{exc}") from exc
             if input_step is None:
                 raise UniversalActionError("输入框已经逐字等于目标文字，不得重复输入。")
-            if input_step.kind == "symbol":
+            if input_step.kind == "literal_key":
                 raise UniversalActionError(
                     "下一分段需要独立可见的数字、空格或符号键审计，不能按字母键盘猜测。"
                 )
             if element.states.get("keyboard_input_mode") != input_step.required_mode:
                 raise UniversalActionError(
                     "当前键盘输入模式与下一确定性文字分段不一致。"
+                )
+            if (
+                input_step.required_case_mode
+                and element.states.get("keyboard_case_mode")
+                != input_step.required_case_mode
+            ):
+                raise UniversalActionError(
+                    "当前键盘大小写状态与下一确定性英文分段不一致。"
                 )
             if element.states.get("ime_preedit_text"):
                 raise UniversalActionError("当前仍有未完成的输入法组合，禁止继续键入。")
@@ -413,6 +431,11 @@ class UniversalActionController:
                 and candidate.states.get("keyboard_layout") == "qwerty"
                 and candidate.states.get("keyboard_input_mode")
                 == input_step.required_mode
+                and (
+                    not input_step.required_case_mode
+                    or candidate.states.get("keyboard_case_mode")
+                    == input_step.required_case_mode
+                )
                 and not candidate.states.get("ime_preedit_text")
             )
             if len(eligible_inputs) != 1 or eligible_inputs[0].element_id != element.element_id:
@@ -629,6 +652,80 @@ class UniversalActionController:
             and element_height <= 1.5 * input_height
         ):
             raise UniversalActionError("本地文字清空控件没有与唯一目标输入框形成可信几何绑定。")
+
+    def _validate_input_auxiliary_tap(
+        self,
+        element: UIElement,
+        scene: UIScene,
+        expected_effect: dict[str, Any],
+    ) -> None:
+        states = element.states
+        if (
+            element.role != "button"
+            or float(element.confidence) < 0.9
+            or states.get("goal_relevant") is not True
+            or states.get("fully_visible") is not True
+        ):
+            raise UniversalActionError("输入辅助键缺少本轮完整、高置信本地审计。")
+        input_id = str(states.get("input_element_id") or "").strip()
+        try:
+            input_element = scene.get_element(
+                input_id,
+                min_confidence=self.min_confidence,
+            )
+        except UISceneError as exc:
+            raise UniversalActionError(f"输入辅助键没有绑定唯一输入框：{exc}") from exc
+        prior_value = states.get("prior_input_value")
+        if (
+            input_element.role != "input"
+            or input_element.states.get("focused") is not True
+            or not isinstance(prior_value, str)
+            or input_element.states.get("value") != prior_value
+        ):
+            raise UniversalActionError("输入辅助键与当前精确输入前缀不一致。")
+        expected_state = expected_effect.get("element_state")
+        if not isinstance(expected_state, dict) or expected_state.get("meaning") != input_element.meaning:
+            raise UniversalActionError("输入辅助键没有绑定原输入框的后置条件。")
+        expected_states = expected_state.get("states")
+        if not isinstance(expected_states, dict):
+            raise UniversalActionError("输入辅助键后置状态格式无效。")
+        if element.meaning == "input_exact_literal_key":
+            key_value = states.get("key_value")
+            expected_value = states.get("expected_input_value")
+            if (
+                states.get("input_literal_key") is not True
+                or not isinstance(key_value, str)
+                or len(key_value) != 1
+                or expected_value != prior_value + key_value
+                or expected_states != {"value": expected_value}
+            ):
+                raise UniversalActionError("逐键输入没有绑定唯一下一字符和精确结果。")
+        elif element.meaning == "switch_keyboard_layout":
+            current = states.get("current_layout")
+            target = states.get("target_layout")
+            if (
+                states.get("keyboard_layout_switch") is not True
+                or input_element.states.get("keyboard_layout") != current
+                or current not in {"qwerty", "numeric", "symbol"}
+                or target not in {"qwerty", "numeric", "symbol"}
+                or current == target
+                or expected_states != {"value": prior_value, "keyboard_layout": target}
+            ):
+                raise UniversalActionError("键盘布局切换方向或后置条件无效。")
+        elif element.meaning == "switch_keyboard_case":
+            current = states.get("current_mode")
+            target = states.get("target_mode")
+            if (
+                states.get("keyboard_case_switch") is not True
+                or input_element.states.get("keyboard_layout") != "qwerty"
+                or input_element.states.get("keyboard_input_mode") != "direct_latin"
+                or input_element.states.get("keyboard_case_mode") != current
+                or current not in {"lower", "upper"}
+                or target not in {"lower", "upper"}
+                or current == target
+                or expected_states != {"value": prior_value, "keyboard_case_mode": target}
+            ):
+                raise UniversalActionError("键盘大小写切换方向或后置条件无效。")
 
     def verify_after_action(
         self,

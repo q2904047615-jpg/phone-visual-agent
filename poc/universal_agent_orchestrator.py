@@ -4783,7 +4783,7 @@ class PhaseOneNavigationPolicy:
                     return self._deny(f"无法建立精确文字输入事务：{exc}")
                 if input_step is None:
                     return self._deny("输入框已经逐字等于目标文字，不得重复输入。")
-                if input_step.kind == "symbol":
+                if input_step.kind == "literal_key":
                     return self._deny("下一字符需要独立可见键位审计，禁止猜测输入。")
                 if (
                     element.states.get("keyboard_input_mode")
@@ -4792,6 +4792,12 @@ class PhaseOneNavigationPolicy:
                     return self._deny("当前键盘模式与下一确定性文字分段不一致。")
                 if element.states.get("ime_preedit_text"):
                     return self._deny("当前仍有未完成输入法组合，禁止继续键入。")
+                if (
+                    input_step.required_case_mode
+                    and element.states.get("keyboard_case_mode")
+                    != input_step.required_case_mode
+                ):
+                    return self._deny("当前键盘大小写状态与下一英文分段不一致。")
             elif element.states.get("keyboard_input_mode") != "direct_latin":
                 return self._deny("精确文字清空要求 direct_latin 键盘证据。")
             eligible_inputs = tuple(
@@ -4815,6 +4821,12 @@ class PhaseOneNavigationPolicy:
                     input_step.required_mode
                     if input_step is not None
                     else "direct_latin"
+                )
+                and (
+                    input_step is None
+                    or not input_step.required_case_mode
+                    or candidate.states.get("keyboard_case_mode")
+                    == input_step.required_case_mode
                 )
                 and (
                     action_kind != "input_verified_text"
@@ -4946,6 +4958,145 @@ class PhaseOneNavigationPolicy:
                 True,
                 "允许选择本轮拼音组合中唯一逐字一致的中文候选。",
                 "ime_exact_candidate",
+            )
+
+        if (
+            action_kind == "tap_semantic"
+            and element.meaning == "input_exact_literal_key"
+        ):
+            states = element.states
+            target_text = self._value(task_context, "requested_input_text", None)
+            if target_text is None:
+                goal_value = self._value(task_context, "goal", {})
+                goal_entities = goal_value.get("entities") if isinstance(goal_value, Mapping) else None
+                if isinstance(goal_entities, Mapping):
+                    target_text = goal_entities.get("input_text")
+            prior_value = states.get("prior_input_value")
+            try:
+                input_step = plan_next_verified_input(target_text, prior_value)
+            except (ValueError, VerifiedTextTransactionError) as exc:
+                return self._deny(f"可见逐键候选无法绑定精确文字事务：{exc}")
+            if (
+                impact != "navigation_only"
+                or element.role != "button"
+                or float(element.confidence) < 0.9
+                or states.get("goal_relevant") is not True
+                or states.get("fully_visible") is not True
+                or states.get("input_literal_key") is not True
+                or input_step is None
+                or input_step.kind != "literal_key"
+                or states.get("key_value") != input_step.segment
+                or states.get("expected_input_value") != input_step.expected_value
+            ):
+                return self._deny("可见逐键候选与本地下一字符事务不一致。")
+            expected = action.params.get("expected_effect")
+            if not isinstance(expected, dict) or expected.get("element_state") != {
+                "meaning": "application_text_input",
+                "states": {"value": input_step.expected_value},
+            }:
+                return self._deny("可见逐键候选缺少精确输入值后置条件。")
+            return NavigationPolicyDecision(
+                True,
+                "允许点击本轮唯一完整可见且逐字绑定的下一字符键。",
+                "input_exact_literal_key",
+            )
+
+        if (
+            action_kind == "tap_semantic"
+            and element.meaning == "switch_keyboard_layout"
+        ):
+            states = element.states
+            target_text = self._value(task_context, "requested_input_text", None)
+            if target_text is None:
+                goal_value = self._value(task_context, "goal", {})
+                goal_entities = goal_value.get("entities") if isinstance(goal_value, Mapping) else None
+                if isinstance(goal_entities, Mapping):
+                    target_text = goal_entities.get("input_text")
+            prior_value = states.get("prior_input_value")
+            try:
+                input_step = plan_next_verified_input(target_text, prior_value)
+            except (ValueError, VerifiedTextTransactionError) as exc:
+                return self._deny(f"布局切换候选无法绑定精确文字事务：{exc}")
+            desired_layout = (
+                "numeric" if input_step and input_step.segment.isdecimal()
+                else "qwerty" if input_step and (
+                    input_step.kind in {"direct_latin", "chinese_pinyin"}
+                    or input_step.segment == " "
+                    or input_step.segment.isalpha()
+                )
+                else "symbol"
+            )
+            if (
+                impact != "navigation_only"
+                or element.role != "button"
+                or float(element.confidence) < 0.9
+                or states.get("goal_relevant") is not True
+                or states.get("fully_visible") is not True
+                or states.get("keyboard_layout_switch") is not True
+                or input_step is None
+                or states.get("next_input_value") != input_step.segment
+                or states.get("target_layout") != desired_layout
+                or states.get("current_layout") == desired_layout
+            ):
+                return self._deny("键盘布局切换没有绑定下一字符所需的唯一方向。")
+            expected = action.params.get("expected_effect")
+            if not isinstance(expected, dict) or expected.get("element_state") != {
+                "meaning": "application_text_input",
+                "states": {
+                    "value": input_step.current_text,
+                    "keyboard_layout": desired_layout,
+                },
+            }:
+                return self._deny("键盘布局切换缺少保持输入值并到达目标布局的后置条件。")
+            return NavigationPolicyDecision(
+                True,
+                "允许切换到下一逐键字符所需的已审计键盘布局。",
+                "switch_keyboard_layout",
+            )
+
+        if (
+            action_kind == "tap_semantic"
+            and element.meaning == "switch_keyboard_case"
+        ):
+            states = element.states
+            target_text = self._value(task_context, "requested_input_text", None)
+            if target_text is None:
+                goal_value = self._value(task_context, "goal", {})
+                goal_entities = goal_value.get("entities") if isinstance(goal_value, Mapping) else None
+                if isinstance(goal_entities, Mapping):
+                    target_text = goal_entities.get("input_text")
+            prior_value = states.get("prior_input_value")
+            try:
+                input_step = plan_next_verified_input(target_text, prior_value)
+            except (ValueError, VerifiedTextTransactionError) as exc:
+                return self._deny(f"大小写切换候选无法绑定精确文字事务：{exc}")
+            if (
+                impact != "navigation_only"
+                or element.role != "button"
+                or float(element.confidence) < 0.9
+                or states.get("goal_relevant") is not True
+                or states.get("fully_visible") is not True
+                or states.get("keyboard_case_switch") is not True
+                or input_step is None
+                or input_step.kind != "direct_latin"
+                or not input_step.required_case_mode
+                or states.get("target_mode") != input_step.required_case_mode
+                or states.get("current_mode") == input_step.required_case_mode
+            ):
+                return self._deny("大小写切换没有绑定下一大写英文分段。")
+            expected = action.params.get("expected_effect")
+            if not isinstance(expected, dict) or expected.get("element_state") != {
+                "meaning": "application_text_input",
+                "states": {
+                    "value": input_step.current_text,
+                    "keyboard_case_mode": input_step.required_case_mode,
+                },
+            }:
+                return self._deny("大小写切换缺少保持输入值并到达大写状态的后置条件。")
+            return NavigationPolicyDecision(
+                True,
+                "允许为下一英文分段切换唯一已审计的大小写状态。",
+                "switch_keyboard_case",
             )
 
         if action_kind == "tap_semantic" and element.role == "input":

@@ -1026,7 +1026,7 @@ class UISceneTests(unittest.TestCase):
             )
         )
         for text, error in (
-            ("Agent", "独立可见"),
+            ("Agent", "大小写状态"),
             ("中文", "输入模式"),
         ):
             with self.subTest(text=text), self.assertRaisesRegex(UniversalActionError, error):
@@ -1057,6 +1057,63 @@ class UISceneTests(unittest.TestCase):
             current,
         )
         self.assertEqual("a" * 20, long_text.input_fragment)
+
+    def test_verified_uppercase_segment_requires_visible_upper_case_mode(self) -> None:
+        field = element(
+            "field", "消息", role="input",
+            states={
+                "focused": True, "value": "", "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+                "keyboard_case_mode": "upper", "goal_relevant": True,
+            },
+        )
+        action = SemanticAction(
+            node_id="type-upper", action="input_verified_text",
+            params={
+                "element_id": "field", "target": "消息", "text": "Meeting",
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "消息", "states": {"value": "M"},
+                    }
+                },
+            },
+        )
+        resolved = UniversalActionController().resolve_one(action, scene(field))
+        self.assertEqual("M", resolved.input_fragment)
+        self.assertEqual("direct_latin", resolved.input_method)
+
+    def test_exact_literal_key_is_bound_to_input_prefix_and_postcondition(self) -> None:
+        field = element(
+            "field", "application_text_input", role="input",
+            states={
+                "focused": True, "value": "draft", "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin", "goal_relevant": False,
+            },
+        )
+        key = element(
+            "literal-key", "input_exact_literal_key", role="button",
+            states={
+                "goal_relevant": True, "fully_visible": True,
+                "input_literal_key": True, "key_value": " ",
+                "prior_input_value": "draft", "expected_input_value": "draft ",
+                "input_element_id": "field",
+            },
+        )
+        action = SemanticAction(
+            node_id="space", action="tap_semantic",
+            params={
+                "element_id": "literal-key", "target": "input_exact_literal_key",
+                "role": "button", "label": "input_exact_literal_key",
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "application_text_input",
+                        "states": {"value": "draft "},
+                    }
+                },
+            },
+        )
+        resolved = UniversalActionController().resolve_one(action, scene(field, key))
+        self.assertEqual(key.center, resolved.normalized_point)
 
     def test_long_press_requires_safe_bounds_and_visual_postcondition(self) -> None:
         edge = UIElement(

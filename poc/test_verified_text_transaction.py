@@ -28,7 +28,26 @@ class VerifiedTextTransactionTests(unittest.TestCase):
         third = plan_next_verified_input("你好abc。", "你好abc")
         self.assertEqual(("你好", "chinese_pinyin"), (first.segment, first.kind))
         self.assertEqual(("abc", "direct_latin"), (second.segment, second.kind))
-        self.assertEqual(("。", "symbol"), (third.segment, third.kind))
+        self.assertEqual(("。", "literal_key"), (third.segment, third.kind))
+
+    def test_uppercase_uses_exact_uppercase_segment_and_lowercase_key_sequence(self) -> None:
+        step = plan_next_verified_input("Meeting", "")
+        self.assertEqual("M", step.segment)
+        self.assertEqual("direct_latin", step.kind)
+        self.assertEqual("upper", step.required_case_mode)
+        self.assertEqual("m", step.physical_keys)
+
+    def test_digits_spaces_and_punctuation_are_one_visible_key_step(self) -> None:
+        for target, current, expected in (
+            ("a 8", "a", " "),
+            ("a 8", "a ", "8"),
+            ("a。", "a", "。"),
+        ):
+            with self.subTest(target=target, current=current):
+                step = plan_next_verified_input(target, current)
+                self.assertEqual(expected, step.segment)
+                self.assertEqual("literal_key", step.kind)
+                self.assertEqual("visible_key", step.required_mode)
 
     def test_finished_returns_none(self) -> None:
         self.assertIsNone(plan_next_verified_input("你好", "你好"))

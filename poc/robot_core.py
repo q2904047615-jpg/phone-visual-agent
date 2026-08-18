@@ -1002,10 +1002,11 @@ class RobotController:
         """Universal-agent input path; never falls back to static geometry."""
 
         self._require_verified_action("input_verified_text", "输入文字")
-        self._validate_verified_text_characters(text)
+        if not isinstance(text, str) or not re.fullmatch(r"[A-Za-z]{1,30}", text):
+            raise WorkflowNotReady("通用英文分段必须是1～30个同一可见大小写状态的字母。")
         if not isinstance(keyboard_layout, dict):
             raise WorkflowNotReady("通用文字输入缺少本轮视觉键盘几何。")
-        self.vision_type_pinyin(text, text, keyboard_layout)
+        self.vision_type_pinyin(text, text.casefold(), keyboard_layout)
 
     @staticmethod
     def _validate_verified_text_characters(text: str) -> None:
@@ -1053,7 +1054,13 @@ class RobotController:
         if step is None or text != step.segment or input_method != step.kind:
             raise WorkflowNotReady("设备收到的文字分段与本地精确事务不一致。")
         if step.kind == "direct_latin":
-            self._validate_verified_text_characters(text)
+            if not re.fullmatch(r"[A-Za-z]{1,30}", text):
+                raise WorkflowNotReady("英文分段包含未认证字符。")
+            if (
+                step.required_case_mode
+                and input_states.get("keyboard_case_mode") != step.required_case_mode
+            ):
+                raise WorkflowNotReady("当前键盘大小写状态与英文分段不一致。")
         elif step.kind == "chinese_pinyin":
             if pinyin != step.pinyin:
                 raise WorkflowNotReady("设备收到的拼音与本地确定性结果不一致。")

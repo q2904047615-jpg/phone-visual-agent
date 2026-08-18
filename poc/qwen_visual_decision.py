@@ -1591,10 +1591,15 @@ def _selection_choices(
                         continue
                     if (
                         input_step is None
-                        or input_step.kind == "symbol"
+                        or input_step.kind == "literal_key"
                         or item["states"].get("keyboard_layout") != "qwerty"
                         or item["states"].get("keyboard_input_mode")
                         != input_step.required_mode
+                        or (
+                            bool(input_step.required_case_mode)
+                            and item["states"].get("keyboard_case_mode")
+                            != input_step.required_case_mode
+                        )
                         or item["states"].get("ime_preedit_text")
                     ):
                         continue
@@ -1631,6 +1636,50 @@ def _selection_choices(
                             "meaning": "application_text_input",
                             "states": {
                                 "value": item["states"].get("expected_input_value"),
+                            },
+                        }
+                    }
+                elif (
+                    action == "tap_semantic"
+                    and str(item.get("meaning") or "") == "input_exact_literal_key"
+                    and isinstance(item.get("states"), Mapping)
+                    and item["states"].get("input_literal_key") is True
+                ):
+                    expected_result = {
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {
+                                "value": item["states"].get("expected_input_value"),
+                            },
+                        }
+                    }
+                elif (
+                    action == "tap_semantic"
+                    and str(item.get("meaning") or "") == "switch_keyboard_layout"
+                    and isinstance(item.get("states"), Mapping)
+                    and item["states"].get("keyboard_layout_switch") is True
+                ):
+                    expected_result = {
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {
+                                "value": item["states"].get("prior_input_value"),
+                                "keyboard_layout": item["states"].get("target_layout"),
+                            },
+                        }
+                    }
+                elif (
+                    action == "tap_semantic"
+                    and str(item.get("meaning") or "") == "switch_keyboard_case"
+                    and isinstance(item.get("states"), Mapping)
+                    and item["states"].get("keyboard_case_switch") is True
+                ):
+                    expected_result = {
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {
+                                "value": item["states"].get("prior_input_value"),
+                                "keyboard_case_mode": item["states"].get("target_mode"),
                             },
                         }
                     }
@@ -2487,9 +2536,14 @@ def _precondition_eligible_action_kinds(
                     continue
                 if (
                     step is not None
-                    and step.kind != "symbol"
+                    and step.kind != "literal_key"
                     and element.states.get("keyboard_layout") == "qwerty"
                     and element.states.get("keyboard_input_mode") == step.required_mode
+                    and (
+                        not step.required_case_mode
+                        or element.states.get("keyboard_case_mode")
+                        == step.required_case_mode
+                    )
                     and not element.states.get("ime_preedit_text")
                 ):
                     eligible_inputs.append(element)

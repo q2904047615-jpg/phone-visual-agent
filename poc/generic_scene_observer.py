@@ -57,18 +57,18 @@ from verified_text_transaction import (
 )
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v52"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v53"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
     "2026-08-18-foreground-app-identity-audit-v1"
 )
-INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-18-input-structure-audit-v5"
+INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-18-input-structure-audit-v6"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
 COMPACT_OUTPUT_TOKENS = 1800
 TARGETED_OUTPUT_TOKENS = 700
 FOREGROUND_APP_IDENTITY_AUDIT_TOKENS = 300
-INPUT_STRUCTURE_AUDIT_TOKENS = 700
+INPUT_STRUCTURE_AUDIT_TOKENS = 1000
 SYSTEM_UI_AUDIT_TOKENS = 600
 ICON_CLUSTER_AUDIT_TOKENS = 700
 ELEMENT_GEOMETRY_AUDIT_TOKENS = 500
@@ -2134,6 +2134,9 @@ Distinguish three different visual structures; never merge them:
 2. ime_preedit_regions: the input method's composition/candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Enumerate only complete visible candidate words inside each region; candidates are read-only facts and never application inputs.
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
+5. keyboard.literal_keys: enumerate at most eight complete visible keys that insert exactly one character. value is the exact inserted character; for the space bar use value=" " and key_kind="space". For every other key use key_kind="character" and require label to equal value literally. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
+6. keyboard.layout_switches: enumerate only compact visible keys with an explicit destination layout: qwerty, numeric, or symbol. Copy the literal label and report current_layout and target_layout; never infer a destination from the goal alone.
+7. keyboard.case_mode and keyboard.case_switch apply only to direct_latin QWERTY. case_mode is lower, upper, or unknown from the visible letter glyphs. case_switch is null unless a complete visible shift/case key and its lower↔upper direction are independently clear.
 Determine keyboard.input_mode only from the current whole keyboard image, never from the goal or the JSON example. Visible Chinese composition/candidates, pinyin separators, or a current-mode label such as 中/中文/Pinyin prove chinese_pinyin. A visible current-mode label such as 英/EN/English/ABC/Latin together with a plain Latin QWERTY layout and no Chinese composition/candidate strip proves direct_latin. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
 keyboard.mode_switch.current_mode MUST equal keyboard.input_mode whenever input_mode is known. Treat an unambiguous single-mode label on the key as the current visible mode: 中/中文/Pinyin means chinese_pinyin; 英/EN/English/ABC/Latin means direct_latin. If the label could instead name a destination and the current whole-keyboard state is not independently clear, do not guess a direction; set mode_switch to null.
 For a text-entry verification goal, report the proven current keyboard.input_mode; keyboard.mode_switch is optional and should be null unless its direction is independently unambiguous. Never invent a switch direction merely because the goal asks for text entry.
@@ -2141,6 +2144,7 @@ keyboard.mode_switch MUST be either null or an object with exactly these five fi
 {{"label":"中","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"chinese_pinyin","target_mode":"direct_latin"}}
 {{"label":"英","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"direct_latin","target_mode":"chinese_pinyin"}}
 These are shape examples only. Copy the literal visible label and measured bounds from Image 1, set confidence from the visible evidence, and choose the direction from the independently proven current keyboard state. Never copy either example merely to satisfy the goal.
+keyboard.case_switch uses the same five field names, but current_mode and target_mode are lower or upper. It is valid only for direct_latin QWERTY and a visible shift/case glyph. Example shape: {{"label":"⇧","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"lower","target_mode":"upper"}}.
 Do not plan, suggest, authorize, or perform any action.
 {coordinate_contract}
 Use text="" for a visibly empty application field. Copy placeholders and visible_editable_cues literally; do not infer them from the goal. right_button describes a trailing utility control; it is structural evidence only and is never authorized for activation. Set it to null when no separate trailing control is visible.
@@ -2154,8 +2158,10 @@ Return exactly this JSON schema and no other fields:
 "text":"visible composition text or empty","confidence":0.0,
 "candidates":[{{"text":"literal candidate","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true}}]}}],
 "keyboard":{{"visible":true,"bounds":[0,0,1000,1000],"layout":"qwerty",
-"input_mode":"unknown","qwerty_anchors":{{"q":[0,0],"p":[0,0],"a":[0,0],"l":[0,0],"z":[0,0],"m":[0,0],"backspace":[0,0]}},"mode_switch":null}}}}
-When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","qwerty_anchors":null,"mode_switch":null}}.
+"input_mode":"unknown","case_mode":"unknown","qwerty_anchors":{{"q":[0,0],"p":[0,0],"a":[0,0],"l":[0,0],"z":[0,0],"m":[0,0],"backspace":[0,0]}},"mode_switch":null,
+"case_switch":null,"literal_keys":[{{"value":".","label":".","key_kind":"character","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true}}],
+"layout_switches":[{{"label":"123","bounds":[0,0,1000,1000],"confidence":0.0,"current_layout":"qwerty","target_layout":"numeric"}}]}}}}
+When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","case_mode":"unknown","qwerty_anchors":null,"mode_switch":null,"case_switch":null,"literal_keys":[],"layout_switches":[]}}.
 Return empty arrays when their geometry is not visible. Never merge a clipped structure with a complete structure, and never copy an IME pre-edit region into application_inputs.
 """
 
@@ -2268,6 +2274,21 @@ def _map_input_structure_crop_audit_to_full(
                 mode_switch["bounds"],
                 "keyboard.mode_switch.bounds",
             )
+        case_switch = keyboard.get("case_switch")
+        if isinstance(case_switch, dict) and "bounds" in case_switch:
+            case_switch["bounds"] = map_bounds(
+                case_switch["bounds"],
+                "keyboard.case_switch.bounds",
+            )
+        for collection_name in ("literal_keys", "layout_switches"):
+            collection = keyboard.get(collection_name)
+            if isinstance(collection, list):
+                for index, item in enumerate(collection):
+                    if isinstance(item, dict) and "bounds" in item:
+                        item["bounds"] = map_bounds(
+                            item["bounds"],
+                            f"keyboard.{collection_name}[{index}].bounds",
+                        )
 
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -4806,10 +4827,17 @@ def _apply_input_structure_audit(
             "input_mode",
             "mode_switch",
         }
+        optional_keyboard_fields = {
+            "qwerty_anchors",
+            "case_mode",
+            "case_switch",
+            "literal_keys",
+            "layout_switches",
+        }
         if (
             not isinstance(keyboard, dict)
             or not required_keyboard_fields.issubset(keyboard)
-            or set(keyboard) - required_keyboard_fields - {"qwerty_anchors"}
+            or set(keyboard) - required_keyboard_fields - optional_keyboard_fields
         ):
             raise UISceneError("输入结构审计 keyboard 字段不符合协议。")
 
@@ -4823,6 +4851,7 @@ def _apply_input_structure_audit(
                 keyboard_layout = normalized_layout
                 keyboard["layout"] = normalized_layout
         keyboard_input_mode = keyboard.get("input_mode")
+        keyboard_case_mode = keyboard.get("case_mode", "unknown")
         if not isinstance(keyboard_visible, bool):
             raise UISceneError("输入结构审计 keyboard.visible 必须是布尔值。")
         if keyboard_layout not in {"qwerty", "numeric", "symbol", "unknown"}:
@@ -4833,6 +4862,8 @@ def _apply_input_structure_audit(
             "unknown",
         }:
             raise UISceneError("输入结构审计 keyboard.input_mode 无效。")
+        if keyboard_case_mode not in {"lower", "upper", "unknown"}:
+            raise UISceneError("输入结构审计 keyboard.case_mode 无效。")
         keyboard_bounds: tuple[float, float, float, float] | None = None
         boundsless_keyboard_dismissal = False
         if keyboard_visible:
@@ -4858,10 +4889,20 @@ def _apply_input_structure_audit(
                 boundsless_keyboard_dismissal = True
                 keyboard_layout = "unknown"
                 keyboard_input_mode = "unknown"
+                keyboard_case_mode = "unknown"
                 keyboard["mode_switch"] = None
+                keyboard["case_switch"] = None
+                keyboard["literal_keys"] = []
+                keyboard["layout_switches"] = []
                 keyboard.pop("qwerty_anchors", None)
-        elif keyboard.get("bounds") is not None or keyboard.get("mode_switch") is not None:
-            raise UISceneError("不可见键盘不能包含 bounds 或 mode_switch。")
+        elif (
+            keyboard.get("bounds") is not None
+            or keyboard.get("mode_switch") is not None
+            or keyboard.get("case_switch") is not None
+            or keyboard.get("literal_keys") not in (None, [])
+            or keyboard.get("layout_switches") not in (None, [])
+        ):
+            raise UISceneError("不可见键盘不能包含键位或切换控件。")
 
         preedit_bounds: list[tuple[float, float, float, float]] = []
         trusted_preedits: list[dict[str, Any]] = []
@@ -5096,14 +5137,74 @@ def _apply_input_structure_audit(
             and mode_switch["current_mode"] != keyboard_input_mode
         ):
             raise UISceneError("模式切换键 current_mode 与键盘 input_mode 冲突。")
+        literal_keys = _validated_keyboard_literal_keys(
+            keyboard.get("literal_keys", []),
+            keyboard_bounds=keyboard_bounds,
+        )
+        layout_switches = _validated_keyboard_layout_switches(
+            keyboard.get("layout_switches", []),
+            keyboard_bounds=keyboard_bounds,
+            current_layout=keyboard_layout,
+        )
+        case_switch = _validated_keyboard_case_switch(
+            keyboard.get("case_switch"),
+            keyboard_bounds=keyboard_bounds,
+            keyboard_layout=keyboard_layout,
+            keyboard_input_mode=keyboard_input_mode,
+            case_mode=keyboard_case_mode,
+        )
+        exact_literal_key: dict[str, Any] | None = None
+        exact_layout_switch: dict[str, Any] | None = None
+        exact_case_switch: dict[str, Any] | None = None
+        if input_step is not None:
+            if (
+                input_step.kind in {"direct_latin", "chinese_pinyin"}
+                and keyboard_layout != "qwerty"
+            ):
+                exact_switches = [
+                    item for item in layout_switches
+                    if item["target_layout"] == "qwerty"
+                ]
+                if len(exact_switches) == 1:
+                    exact_layout_switch = exact_switches[0]
+            elif input_step.kind == "literal_key":
+                exact_keys = [
+                    item for item in literal_keys
+                    if item["value"] == input_step.segment
+                ]
+                if len(exact_keys) == 1:
+                    exact_literal_key = exact_keys[0]
+                else:
+                    desired_layout = _preferred_keyboard_layout(
+                        input_step.segment
+                    )
+                    exact_switches = [
+                        item for item in layout_switches
+                        if item["target_layout"] == desired_layout
+                    ]
+                    if (
+                        desired_layout != keyboard_layout
+                        and len(exact_switches) == 1
+                    ):
+                        exact_layout_switch = exact_switches[0]
+            elif (
+                input_step.kind == "direct_latin"
+                and bool(input_step.required_case_mode)
+                and keyboard_case_mode != input_step.required_case_mode
+                and case_switch is not None
+                and case_switch["target_mode"] == input_step.required_case_mode
+            ):
+                exact_case_switch = case_switch
         if (
             trusted_input is not None
-            and trusted_input["text"] == ""
             and keyboard_visible
             and keyboard_layout == "qwerty"
             and keyboard_input_mode in {"direct_latin", "chinese_pinyin"}
             and _goal_has_explicit_input_text(goal_context)
             and not switch_is_goal
+            and input_step is not None
+            and input_step.kind in {"direct_latin", "chinese_pinyin"}
+            and exact_case_switch is None
             and qwerty_geometry is None
         ):
             raise UISceneError(
@@ -5127,8 +5228,36 @@ def _apply_input_structure_audit(
                 continue
             elements.append(element)
         if trusted_input is not None:
+            pending_auxiliary_input_action = any(
+                item is not None
+                for item in (
+                    exact_ime_candidate,
+                    exact_literal_key,
+                    exact_layout_switch,
+                    exact_case_switch,
+                )
+            )
+            input_requires_auxiliary_action = bool(
+                input_step is not None
+                and keyboard_visible
+                and (
+                    input_step.kind == "literal_key"
+                    or (
+                        input_step.kind in {"direct_latin", "chinese_pinyin"}
+                        and keyboard_layout != "qwerty"
+                    )
+                    or (
+                        bool(input_step.required_case_mode)
+                        and keyboard_case_mode != input_step.required_case_mode
+                    )
+                )
+            )
             states: dict[str, Any] = {
-                "goal_relevant": not switch_is_goal and exact_ime_candidate is None,
+                "goal_relevant": (
+                    not switch_is_goal
+                    and not pending_auxiliary_input_action
+                    and not input_requires_auxiliary_action
+                ),
                 "fully_visible": True,
                 "value": trusted_input["text"],
             }
@@ -5145,6 +5274,7 @@ def _apply_input_structure_audit(
                         "focused": True,
                         "keyboard_layout": keyboard_layout,
                         "keyboard_input_mode": keyboard_input_mode,
+                        "keyboard_case_mode": keyboard_case_mode,
                     }
                 )
             if qwerty_geometry is not None:
@@ -5211,6 +5341,72 @@ def _apply_input_structure_audit(
                     "evidence": [
                         f"输入结构审计确认拼音 {input_step.pinyin} 的唯一逐字候选：{input_step.segment}"
                     ],
+                }
+            )
+        if exact_literal_key is not None and input_step is not None:
+            elements.append(
+                {
+                    "element_id": "local_audited_literal_key_1",
+                    "role": "button",
+                    "meaning": "input_exact_literal_key",
+                    "label": exact_literal_key["label"],
+                    "bounds": [part / 1000.0 for part in exact_literal_key["bounds"]],
+                    "confidence": exact_literal_key["confidence"],
+                    "states": {
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "input_literal_key": True,
+                        "key_value": input_step.segment,
+                        "prior_input_value": input_step.current_text,
+                        "expected_input_value": input_step.expected_value,
+                        "input_element_id": "local_audited_input_1",
+                    },
+                    "evidence": [
+                        "输入结构审计确认下一字符对应唯一完整可见键位"
+                    ],
+                }
+            )
+        if exact_layout_switch is not None and input_step is not None:
+            elements.append(
+                {
+                    "element_id": "local_audited_keyboard_layout_switch_1",
+                    "role": "button",
+                    "meaning": "switch_keyboard_layout",
+                    "label": exact_layout_switch["label"],
+                    "bounds": [part / 1000.0 for part in exact_layout_switch["bounds"]],
+                    "confidence": exact_layout_switch["confidence"],
+                    "states": {
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "keyboard_layout_switch": True,
+                        "current_layout": exact_layout_switch["current_layout"],
+                        "target_layout": exact_layout_switch["target_layout"],
+                        "prior_input_value": input_step.current_text,
+                        "next_input_value": input_step.segment,
+                        "input_element_id": "local_audited_input_1",
+                    },
+                    "evidence": ["输入结构审计确认方向明确的键盘布局切换键"],
+                }
+            )
+        if exact_case_switch is not None and input_step is not None:
+            elements.append(
+                {
+                    "element_id": "local_audited_keyboard_case_switch_1",
+                    "role": "button",
+                    "meaning": "switch_keyboard_case",
+                    "label": exact_case_switch["label"],
+                    "bounds": [part / 1000.0 for part in exact_case_switch["bounds"]],
+                    "confidence": exact_case_switch["confidence"],
+                    "states": {
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "keyboard_case_switch": True,
+                        "current_mode": exact_case_switch["current_mode"],
+                        "target_mode": exact_case_switch["target_mode"],
+                        "prior_input_value": input_step.current_text,
+                        "input_element_id": "local_audited_input_1",
+                    },
+                    "evidence": ["输入结构审计确认方向明确的大小写切换键"],
                 }
             )
         if mode_switch is not None:
@@ -5282,16 +5478,15 @@ def _apply_hidden_keyboard_only_attestation(
         ):
             raise UISceneError("输入结构审计数组字段无效。")
         keyboard = payload.get("keyboard")
-        if not isinstance(keyboard, dict) or set(keyboard) not in (
-            {"visible", "bounds", "layout", "input_mode", "mode_switch"},
-            {
-                "visible",
-                "bounds",
-                "layout",
-                "input_mode",
-                "qwerty_anchors",
-                "mode_switch",
-            },
+        hidden_required = {"visible", "bounds", "layout", "input_mode", "mode_switch"}
+        hidden_optional = {
+            "qwerty_anchors", "case_mode", "case_switch",
+            "literal_keys", "layout_switches",
+        }
+        if (
+            not isinstance(keyboard, dict)
+            or not hidden_required.issubset(keyboard)
+            or set(keyboard) - hidden_required - hidden_optional
         ):
             raise UISceneError("输入结构审计 keyboard 字段不符合协议。")
         if not (
@@ -5301,6 +5496,10 @@ def _apply_hidden_keyboard_only_attestation(
             and keyboard.get("input_mode") == "unknown"
             and keyboard.get("mode_switch") is None
             and keyboard.get("qwerty_anchors") is None
+            and keyboard.get("case_mode", "unknown") == "unknown"
+            and keyboard.get("case_switch") is None
+            and keyboard.get("literal_keys") in (None, [])
+            and keyboard.get("layout_switches") in (None, [])
         ):
             raise UISceneError("软键盘不可见事实不完整。")
         focused = _active_subgoal_visual_context(goal_context)
@@ -5495,6 +5694,184 @@ def _validated_keyboard_mode_switch(
         "confidence": confidence,
         "current_mode": current_mode,
         "target_mode": target_mode,
+    }
+
+
+def _preferred_keyboard_layout(character: str) -> str:
+    if len(character) != 1:
+        raise UISceneError("下一逐键字符必须恰好一个字符。")
+    if character.isdecimal():
+        return "numeric"
+    if character == " " or character.isalpha():
+        return "qwerty"
+    return "symbol"
+
+
+def _validated_keyboard_literal_keys(
+    value: Any,
+    *,
+    keyboard_bounds: tuple[float, float, float, float] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > 8:
+        raise UISceneError("literal_keys 必须是最多8项的数组。")
+    if value and keyboard_bounds is None:
+        raise UISceneError("literal_keys 必须绑定完整可见键盘。")
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {
+            "value", "label", "key_kind", "bounds", "confidence", "fully_visible"
+        }:
+            raise UISceneError("literal_key 字段不符合协议。")
+        key_value = item.get("value")
+        label = item.get("label")
+        key_kind = item.get("key_kind")
+        if (
+            not isinstance(key_value, str)
+            or len(key_value) != 1
+            or not isinstance(label, str)
+            or key_kind not in {"character", "space"}
+            or not _valid_1000_bounds(item.get("bounds"))
+            or not isinstance(item.get("fully_visible"), bool)
+        ):
+            raise UISceneError("literal_key 内容无效。")
+        if key_kind == "character" and (key_value == " " or label != key_value):
+            raise UISceneError("字符键 label 必须逐字等于其输入值。")
+        if key_kind == "space" and (
+            key_value != " "
+            or label.strip().casefold() not in {"", "space", "空格"}
+        ):
+            raise UISceneError("空格键缺少明确的空格语义。")
+        bounds = tuple(float(part) for part in item["bounds"])
+        confidence = _audit_confidence(item.get("confidence"), "literal_key")
+        if (
+            item["fully_visible"] is not True
+            or confidence < 0.9
+            or keyboard_bounds is None
+            or not _bounds_inside(bounds, keyboard_bounds, tolerance=12)
+        ):
+            continue
+        if key_kind == "space":
+            keyboard_width = keyboard_bounds[2] - keyboard_bounds[0]
+            keyboard_height = keyboard_bounds[3] - keyboard_bounds[1]
+            if (
+                bounds[2] - bounds[0] < 0.18 * keyboard_width
+                or bounds[1] < keyboard_bounds[1] + 0.55 * keyboard_height
+            ):
+                continue
+        result.append(
+            {
+                "value": key_value,
+                "label": label,
+                "key_kind": key_kind,
+                "bounds": [round(part) for part in bounds],
+                "confidence": confidence,
+            }
+        )
+    return result
+
+
+def _layout_switch_label_matches(label: str, target_layout: str) -> bool:
+    normalized = label.strip().casefold()
+    if target_layout == "numeric":
+        return bool(re.search(r"(?:123|数字|num)", normalized))
+    if target_layout == "qwerty":
+        return bool(re.search(r"(?:abc|字母|英文|letters?)", normalized))
+    if target_layout == "symbol":
+        return bool(re.search(r"(?:符|sym|[#?+]=?|[.?]123)", normalized))
+    return False
+
+
+def _validated_keyboard_layout_switches(
+    value: Any,
+    *,
+    keyboard_bounds: tuple[float, float, float, float] | None,
+    current_layout: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > 4:
+        raise UISceneError("layout_switches 必须是最多4项的数组。")
+    if value and keyboard_bounds is None:
+        raise UISceneError("layout_switches 必须绑定完整可见键盘。")
+    result: list[dict[str, Any]] = []
+    layouts = {"qwerty", "numeric", "symbol"}
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {
+            "label", "bounds", "confidence", "current_layout", "target_layout"
+        }:
+            raise UISceneError("layout_switch 字段不符合协议。")
+        label = str(item.get("label") or "").strip()
+        source = item.get("current_layout")
+        target = item.get("target_layout")
+        if (
+            source not in layouts
+            or target not in layouts
+            or source == target
+            or source != current_layout
+            or not _valid_1000_bounds(item.get("bounds"))
+        ):
+            raise UISceneError("layout_switch 方向或 bounds 无效。")
+        bounds = tuple(float(part) for part in item["bounds"])
+        confidence = _audit_confidence(item.get("confidence"), "layout_switch")
+        if (
+            confidence < 0.9
+            or not _layout_switch_label_matches(label, target)
+            or keyboard_bounds is None
+            or not _bounds_inside(bounds, keyboard_bounds, tolerance=12)
+        ):
+            continue
+        result.append(
+            {
+                "label": label,
+                "bounds": [round(part) for part in bounds],
+                "confidence": confidence,
+                "current_layout": source,
+                "target_layout": target,
+            }
+        )
+    return result
+
+
+def _validated_keyboard_case_switch(
+    value: Any,
+    *,
+    keyboard_bounds: tuple[float, float, float, float] | None,
+    keyboard_layout: str,
+    keyboard_input_mode: str,
+    case_mode: str,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "label", "bounds", "confidence", "current_mode", "target_mode"
+    }:
+        raise UISceneError("case_switch 字段不符合协议。")
+    current = value.get("current_mode")
+    target = value.get("target_mode")
+    label = str(value.get("label") or "").strip()
+    if (
+        keyboard_layout != "qwerty"
+        or keyboard_input_mode != "direct_latin"
+        or keyboard_bounds is None
+        or current not in {"lower", "upper"}
+        or target not in {"lower", "upper"}
+        or current == target
+        or current != case_mode
+        or not _valid_1000_bounds(value.get("bounds"))
+    ):
+        raise UISceneError("case_switch 只允许绑定英文QWERTY明确大小写方向。")
+    bounds = tuple(float(part) for part in value["bounds"])
+    confidence = _audit_confidence(value.get("confidence"), "case_switch")
+    if (
+        confidence < 0.9
+        or not re.search(r"(?:shift|大小写|大写|小写|⇧|↑|⬆)", label, re.IGNORECASE)
+        or not _bounds_inside(bounds, keyboard_bounds, tolerance=12)
+    ):
+        return None
+    return {
+        "label": label,
+        "bounds": [round(part) for part in bounds],
+        "confidence": confidence,
+        "current_mode": current,
+        "target_mode": target,
     }
 
 

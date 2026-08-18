@@ -1457,6 +1457,61 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertTrue(result.allowed, result.reason)
         self.assertEqual("ime_exact_candidate", result.canonical_class)
 
+    def test_allows_only_locally_bound_exact_literal_key(self) -> None:
+        field = UIElement(
+            element_id="field", role="input", meaning="application_text_input",
+            label="消息", bounds=(0.08, 0.12, 0.92, 0.22), confidence=0.97,
+            states={
+                "focused": True, "value": "draft", "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin", "goal_relevant": False,
+            },
+        )
+        key = UIElement(
+            element_id="local_audited_literal_key_1", role="button",
+            meaning="input_exact_literal_key", label="空格",
+            bounds=(0.31, 0.87, 0.69, 0.97), confidence=0.98,
+            states={
+                "goal_relevant": True, "fully_visible": True,
+                "input_literal_key": True, "key_value": " ",
+                "prior_input_value": "draft", "expected_input_value": "draft ",
+                "input_element_id": "field",
+            },
+        )
+        current = UIScene(
+            app_id="chat", screen_id="conversation", summary="消息输入框与键盘可见",
+            elements=(key, field), stable=True, confidence=0.96,
+            fingerprint="literal-key",
+        )
+        decision = _decision(current)
+        decision.proposal = GenericStepProposal(
+            status="action",
+            action=SemanticAction(
+                node_id="literal-step", action="tap_semantic",
+                params={
+                    "element_id": key.element_id, "target": key.meaning,
+                    "role": key.role, "label": key.label,
+                    "states": dict(key.states),
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {"value": "draft "},
+                        }
+                    },
+                },
+            ),
+        )
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={"input_text": "draft 8"},
+                subgoal_objective="消息草稿逐字为draft 8",
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+            available_action_kinds=frozenset({"tap_semantic"}),
+        )
+        self.assertTrue(result.allowed, result.reason)
+        self.assertEqual("input_exact_literal_key", result.canonical_class)
+
     def test_allows_only_observed_chinese_to_direct_latin_mode_switch(self) -> None:
         input_element = UIElement(
             element_id="field",

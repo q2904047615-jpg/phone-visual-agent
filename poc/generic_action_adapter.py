@@ -19,6 +19,7 @@ from ocr_runtime import recognize as recognize_ocr
 from observation_images import measure_local_stability
 from orientation_safety import (
     OrientationCredential,
+    OrientationFrameMismatchError,
     OrientationSafetyError,
     frame_fingerprint,
     validate_device_id,
@@ -1223,10 +1224,17 @@ class GenericSingleActionAdapter:
         except GenericActionAdapterError:
             raise
         except OrientationSafetyError as exc:
+            gate_evidence = before_paths
+            if isinstance(exc, OrientationFrameMismatchError):
+                gate_evidence += self._save_frames(
+                    [exc.actual_frame],
+                    evidence_dir,
+                    f"{evidence_prefix}_physical_gate_actual",
+                )
             raise GenericActionAdapterError(
                 f"共享物理执行门在控制端原语前拒绝动作：{exc}",
                 physical_actions=0,
-                evidence=before_paths,
+                evidence=gate_evidence,
             ) from exc
         except Exception as exc:
             raise GenericActionAdapterError(

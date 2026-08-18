@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw, ImageEnhance
 from generic_action_adapter import GenericSingleActionAdapter
 from orientation_safety import (
     OrientationCredential,
+    OrientationFrameMismatchError,
     OrientationSafetyError,
     PhysicalExecutionGate,
     _CLAIMED_AUDIT_CREDENTIALS,
@@ -81,8 +82,13 @@ class OrientationCredentialTests(unittest.TestCase):
         changed.paste((255, 255, 255), (180, 360, 360, 600))
         credential = audited_credential(frame=reference)
         gate.arm(credential, action="tap_semantic", scene_fingerprint="scene-a")
-        with self.assertRaisesRegex(OrientationSafetyError, "实际捕获帧.*视觉漂移"):
+        with self.assertRaisesRegex(
+            OrientationFrameMismatchError,
+            "实际捕获帧.*视觉漂移",
+        ) as caught:
             gate.consume(action="tap_semantic", frame=changed)
+        self.assertEqual(changed.size, caught.exception.actual_frame.size)
+        self.assertGreater(caught.exception.centered_mae, 6.0)
 
     def test_small_camera_noise_and_exposure_pass_but_rotation_is_rejected(self):
         reference = patterned_frame()

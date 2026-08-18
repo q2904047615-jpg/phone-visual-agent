@@ -31,6 +31,23 @@ class OrientationSafetyError(RuntimeError):
     pass
 
 
+class OrientationFrameMismatchError(OrientationSafetyError):
+    """Carry the exact rejected frame for session-local diagnostic evidence."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        actual_frame: Image.Image,
+        brightness_delta: float,
+        centered_mae: float,
+    ) -> None:
+        super().__init__(message)
+        self.actual_frame = actual_frame.convert("RGB").copy()
+        self.brightness_delta = float(brightness_delta)
+        self.centered_mae = float(centered_mae)
+
+
 def validate_device_id(value: str) -> str:
     device_id = str(value or "").strip()
     if device_id.casefold() in _PLACEHOLDER_DEVICE_IDS:
@@ -90,9 +107,15 @@ def _assert_visually_bound(
         brightness_delta > MAX_ORIENTATION_MEAN_BRIGHTNESS_DELTA
         or centered_mae > MAX_ORIENTATION_CENTERED_MAE
     ):
-        raise OrientationSafetyError(
+        message = (
             "动作前实际捕获帧与独立方向审计帧发生视觉漂移："
             f"亮度差{brightness_delta:.2f}，结构差{centered_mae:.2f}。"
+        )
+        raise OrientationFrameMismatchError(
+            message,
+            actual_frame=actual_frame,
+            brightness_delta=brightness_delta,
+            centered_mae=centered_mae,
         )
 
 

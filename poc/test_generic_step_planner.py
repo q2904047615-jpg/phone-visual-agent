@@ -20,6 +20,7 @@ from generic_action_adapter import (
 from generic_intent import GenericIntentDraft
 from generic_scene_observer import GenericSceneObserver, _local_frame_fingerprint
 from orientation_safety import (
+    OrientationFrameMismatchError,
     _claim_audit_seal,
     _mint_audited_credential,
 )
@@ -234,6 +235,18 @@ class FakeRobot:
     def vision_drag_relative(self, start_x, start_y, end_x, end_y):
         self._consume("drag")
         self.actions.append(("drag", start_x, start_y, end_x, end_y))
+
+
+class PhysicalGateDriftRobot(FakeRobot):
+    def vision_swipe_up(self):
+        self._consume("swipe")
+        raise OrientationFrameMismatchError(
+            "动作前实际捕获帧与独立方向审计帧发生视觉漂移："
+            "亮度差22.66，结构差73.09。",
+            actual_frame=Image.new("RGB", (540, 960), "white"),
+            brightness_delta=22.66,
+            centered_mae=73.09,
+        )
 
 
 class GenericSingleActionAdapter(_GenericSingleActionAdapter):
@@ -2767,6 +2780,50 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual([("swipe", "up")], robot.actions)
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(1, observer.calls)
+
+    def test_physical_gate_drift_persists_exact_actual_frame_without_action(self):
+        planned = scene("planned", screen_id="generic_action_verification_page")
+        observer = FakeSceneObserver([])
+        robot = PhysicalGateDriftRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+        action = SemanticAction(
+            node_id="generic_step_1",
+            action="swipe",
+            params={"direction": "up", "expected_effect": {"scene_changed": True}},
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(
+                GenericActionAdapterError,
+                "共享物理执行门.*视觉漂移",
+            ) as caught:
+                adapter.execute(
+                    requested_action=action,
+                    planned_scene=planned,
+                    planned_frames=tuple(
+                        Image.new("RGB", (540, 960), "gray") for _ in range(4)
+                    ),
+                    goal=goal(),
+                    confirmed=True,
+                    evidence_dir=Path(temp),
+                )
+            actual_paths = [
+                Path(item)
+                for item in caught.exception.evidence
+                if "physical_gate_actual" in Path(item).name
+            ]
+            self.assertEqual(1, len(actual_paths))
+            self.assertTrue(actual_paths[0].is_file())
+            with Image.open(actual_paths[0]) as persisted:
+                self.assertEqual((540, 960), persisted.size)
+        self.assertEqual(0, caught.exception.physical_actions)
+        self.assertEqual([], robot.actions)
 
     def test_matching_planned_frames_require_fresh_geometry_interpretation(self):
         planned = scene("planned")

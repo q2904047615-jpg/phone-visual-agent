@@ -1051,3 +1051,41 @@ observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `892/892`，Py
 离线结果：幂等目的地与 occurrence/absence 正反定向通过；DeepSeek 与编排核心 `385/385`，
 observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `893/893`，Python 完整回归 `1474/1474`。
 完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。
+
+## 33. 否定约束的共享词误杀合法目标
+
+### 33.1 验收台账与根因证据
+
+- 提交 `5ec7807` 加载后的 Settings session `afb3d1820d8e4423b8e09f8701ad3b9f` 已在 0 动作下
+  正确跳过当前可见的 `open_settings` 和 `locate_search_box`，revision `1→3`，证明第 32 项动态起始
+  状态修复在线生效；当前活动节点为 `input_wifi`。
+- 当前可信画面有唯一 `role=input / meaning=application_text_input / label=搜索系统设置项 /`
+  `goal_relevant=true / fully_visible=true / value="" / soft_keyboard_visible=false` 候选，设备动作能力也包含
+  `tap_semantic` 和 `input_verified_text`，但 Qwen 收到的正式 choices 只剩 `home`，因此 0 动作 blocked。
+- 离线最小复现确认 `constraint_excludes_candidate()` 会把“不得选择任何搜索结果”与“搜索系统设置项”
+  仅凭共享二字词“搜索”判为同一禁止目标。正确输入框在 choices 构建前即被删除；主要根因是禁止动作的
+  **宾语范围**没有被结构化绑定，不是 Qwen、输入事务、焦点前置、几何、App 或机械臂故障。
+
+### 33.2 同类样本、通用修复与边界
+
+- 已知现场样本：“不得选择搜索结果”不得排除搜索输入框，但仍必须排除真正的搜索结果；变化样本覆盖
+  “不要点击广告”与非广告控件、“不要使用设置入口”与设置入口、英文 `do not open search results`
+  与 search input，以及带“但/但是/but/however”的后续允许子句。
+- 把元素级否定约束按标点和转折词切成独立子句，只从带禁止词且带点击/打开/选择/使用等目标动作的
+  子句中抽取动作后的禁止宾语；候选必须与该宾语的规范化可见/语义短语存在完整包含或精确匹配才排除。
+  不再用整句与候选任意一个中文二字片段相交就排除。
+- 页面全部控件禁用、`除…之外` blanket exception、状态/外部效果约束继续走原独立门；真正的“搜索结果”、
+  “发送按钮”“设置入口”等仍失败关闭。实现不包含 Settings、搜索框 label、固定步骤或坐标分支。
+
+### 33.3 验证与停止条件
+
+- 先为现场与变化样本补正反合同测试，再证明同一正式 input scene 产生唯一聚焦
+  `tap_semantic` choice，而未聚焦时仍不产生 `input_verified_text`。
+- 运行 constraint、Qwen、visual authority、observer、adapter、编排与 Web 相关回归及一次完整 Python
+  回归，静态编译及 diff-check 全绿后本地提交并只重载项目 Uvicorn。旧 blocked session 不恢复；完全
+  相同 Settings 原目标只建立一个新 session，任一真实动作失败立即停止，不自动重试。
+
+离线结果：否定宾语范围现场与中英文变化样本 `16/16`，正式未聚焦 input choice 重放 `1/1`，
+constraint、Qwen 与 visual authority `145/145`，observer、Qwen、adapter、DeepSeek、编排和 Web 关联
+回归 `894/894`，Python 完整回归 `1479/1479`。完整回归只有既知测试子进程 `ResourceWarning`，
+无断言失败。

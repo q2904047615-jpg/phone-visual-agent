@@ -24,6 +24,9 @@ from vision_agent import VisionAgentError
 from vision_agent import _image_data_url
 from system_navigation_privacy import privacy_minimized_system_navigation_view
 from task_semantic_ir import (
+    ConstraintIntent,
+    EffectIntent,
+    InputFieldIntent,
     SemanticEntity,
     SemanticSubgoal,
     SourceSpan,
@@ -1113,6 +1116,107 @@ class QwenVisualDecisionTests(unittest.TestCase):
             {"element_state": {"meaning": "application_text_input", "states": {"value": "draft "}}},
             choice["expected_result"],
         )
+
+    def test_search_result_prohibition_keeps_unique_unfocused_input_focus_choice(self) -> None:
+        raw_goal = "在搜索输入框输入wifi，不得选择任何搜索结果"
+        literal_start = raw_goal.index("wifi")
+        payload = SemanticEntity(
+            entity_id="entity_input_text",
+            entity_type="text",
+            role="input_text",
+            value="wifi",
+            source_span=SourceSpan(literal_start, literal_start + 4),
+            authority="user_literal",
+        )
+        effect = EffectIntent(
+            effect_id="effect_input_text",
+            kind="input_text",
+            payload_refs=(payload.entity_id,),
+            source_subgoal_ids=("input_wifi",),
+        )
+        required_action = ConstraintIntent(
+            constraint_id="constraint_input_action",
+            kind="required_action",
+            value="input_verified_text",
+            source_text="输入wifi",
+            authoritative=True,
+        )
+        semantic_ir = TaskSemanticIR(
+            task_id="task_offline_01",
+            device_id="offline_phone_01",
+            revision=3,
+            raw_goal=raw_goal,
+            surfaces=(SurfaceRef("surface_settings", "current_surface"),),
+            entities=(payload,),
+            effects=(effect,),
+            constraints=(required_action,),
+            subgoals=(
+                SemanticSubgoal(
+                    subgoal_id="input_wifi",
+                    surface_ref="surface_settings",
+                    status="active",
+                    external_impact="navigation_only",
+                    constraint_refs=(required_action.constraint_id,),
+                    effect_refs=(effect.effect_id,),
+                ),
+            ),
+            input_fields=(
+                InputFieldIntent(
+                    field_id="field_search",
+                    payload_ref=payload.entity_id,
+                    source_subgoal_ids=("input_wifi",),
+                ),
+            ),
+        )
+        context = task_context()
+        context["goal"]["objective"] = raw_goal
+        context["goal"]["entities"] = {"input_text": "wifi"}
+        context["current_subgoal"].update(
+            {
+                "subgoal_id": "input_wifi",
+                "objective": "在搜索输入框中输入 wifi",
+                "constraints": ["不得提交搜索", "不得选择任何搜索结果"],
+                "completion_conditions": ["输入框中显示 'wifi'"],
+            }
+        )
+        context["confirmation_gate"]["scope"]["subgoal_id"] = "input_wifi"
+        parsed = replace(QwenTaskContext.from_dict(context), semantic_ir=semantic_ir)
+        field = UIElement(
+            element_id="local_audited_input_1",
+            role="input",
+            meaning="application_text_input",
+            label="搜索系统设置项",
+            bounds=(0.12, 0.15, 0.9, 0.21),
+            confidence=0.95,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "value": "",
+                "soft_keyboard_visible": False,
+            },
+            evidence=("应用输入框为空", "search icon"),
+        )
+        observation = trusted_observation(self.frames, elements=(field,))
+
+        choices = _selection_choices(
+            parsed,
+            observation,
+            frozenset({"tap_semantic", "input_verified_text", "home"}),
+        )
+
+        focus = [item for item in choices if item["action"] == "tap_semantic"]
+        self.assertEqual(1, len(focus))
+        self.assertEqual(field.element_id, focus[0]["element_id"])
+        self.assertEqual(
+            {
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {"focused": True},
+                }
+            },
+            focus[0]["expected_result"],
+        )
+        self.assertNotIn("input_verified_text", [item["action"] for item in choices])
 
     def test_recipient_title_is_identity_evidence_not_input_action_target(self) -> None:
         context = task_context()

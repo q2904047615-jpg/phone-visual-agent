@@ -93,6 +93,26 @@ _BLANKET_OPERATION_SCOPE = re.compile(
     r"|\b(?:anything|everything)\b",
     re.IGNORECASE,
 )
+_CLAUSE_SPLIT = re.compile(r"[，。；;,.;]+")
+_CONTRAST_SPLIT = re.compile(
+    r"(?:但(?:是)?|不过|然而|\bbut\b|\bhowever\b)",
+    re.IGNORECASE,
+)
+_TARGET_ACTION = re.compile(
+    r"(?:点击|点按|触碰|触摸|打开|进入|选择|勾选|切换|操作|使用|访问|启动|按下|长按|滑动|拖动|跳转)"
+    r"|\b(?:click|tap|touch|open|enter|select|choose|toggle|operate|use|visit|launch|press|long[- ]press|swipe|drag)\b",
+    re.IGNORECASE,
+)
+_LEADING_TARGET_FILLER = re.compile(
+    r"^(?:(?:任何|所有|一切|任意|全部|该|这些|那些|当前|再次|直接)(?:的)?|"
+    r"\b(?:any|all|every|the|a|an|this|these|those|current)\b\s*)+",
+    re.IGNORECASE,
+)
+_TRAILING_ROLE_NOUN = re.compile(
+    r"(?:按钮|入口|控件|元素|选项|列表项|标签页|页签|图标)$"
+    r"|\b(?:button|entry|control|element|option|list\s*item|tab|icon)s?$",
+    re.IGNORECASE,
+)
 ELEMENT_BOUND_ROLES = frozenset(
     {"button", "icon", "text", "tab", "image", "list_item", "input", "toggle"}
 )
@@ -152,6 +172,60 @@ def binding_terms(values: Any) -> set[str]:
     return terms
 
 
+def _prohibited_target_phrases(constraint: str) -> tuple[str, ...]:
+    """Extract only the object phrases of explicitly prohibited UI actions."""
+
+    targets: list[str] = []
+    for raw_clause in _CLAUSE_SPLIT.split(constraint):
+        clause = _CONTRAST_SPLIT.split(raw_clause, maxsplit=1)[0].strip()
+        prohibition = _PROHIBITION.search(clause)
+        if prohibition is None:
+            continue
+        action_matches = [
+            match
+            for match in _TARGET_ACTION.finditer(clause)
+            if match.start() >= prohibition.end()
+        ]
+        for index, match in enumerate(action_matches):
+            end = action_matches[index + 1].start() if index + 1 < len(action_matches) else len(clause)
+            target = clause[match.end() : end].strip()
+            target = re.sub(r"^(?:并|且|也|或|以及|再)+", "", target).strip()
+            target = re.sub(r"(?:并|且|也|或|以及|再)+$", "", target).strip()
+            if target:
+                targets.append(target)
+    return tuple(targets)
+
+
+def _normalized_surface_phrase(value: str) -> str:
+    normalized = value.casefold().strip()
+    normalized = re.sub(r"\bresults\b", "result", normalized)
+    normalized = re.sub(r"\bbuttons\b", "button", normalized)
+    normalized = _LEADING_TARGET_FILLER.sub("", normalized).strip()
+    previous = None
+    while previous != normalized:
+        previous = normalized
+        normalized = _TRAILING_ROLE_NOUN.sub("", normalized).strip()
+    return "".join(re.findall(r"[a-z0-9]+|[\u3400-\u9fff]", normalized))
+
+
+def _candidate_matches_prohibited_target(
+    constraint: str,
+    candidate_values: Any,
+) -> bool:
+    candidate_phrases = tuple(
+        normalized
+        for value in structured_strings(candidate_values)
+        if (normalized := _normalized_surface_phrase(value))
+    )
+    for target in _prohibited_target_phrases(constraint):
+        normalized_target = _normalized_surface_phrase(target)
+        if len(normalized_target) < 2:
+            continue
+        if any(normalized_target in candidate for candidate in candidate_phrases):
+            return True
+    return False
+
+
 def constraint_excludes_candidate(
     constraints: Any,
     candidate_values: Any,
@@ -189,6 +263,6 @@ def constraint_excludes_candidate(
             # with an App or control label is not enough to make that visible
             # element itself a forbidden target.
             continue
-        if candidate_terms.intersection(binding_terms(constraint)):
+        if _candidate_matches_prohibited_target(constraint, candidate_values):
             return True
     return False

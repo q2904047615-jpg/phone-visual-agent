@@ -86,6 +86,55 @@ class ConstraintTargetFilterTests(unittest.TestCase):
             )
         )
 
+    def test_search_result_prohibition_keeps_search_input_with_shared_prefix(self) -> None:
+        self.assertFalse(
+            constraint_excludes_candidate(
+                ("不得提交搜索", "不得选择任何搜索结果"),
+                (
+                    "application_text_input",
+                    "搜索系统设置项",
+                    "search icon",
+                    "rounded rectangular border",
+                ),
+                candidate_role="input",
+            )
+        )
+
+    def test_search_result_prohibition_still_excludes_actual_result(self) -> None:
+        self.assertTrue(
+            constraint_excludes_candidate(
+                ("不得选择任何搜索结果",),
+                ("search_result", "Wi-Fi 搜索结果", "搜索结果列表项"),
+                candidate_role="list_item",
+            )
+        )
+
+    def test_english_search_result_prohibition_keeps_search_input(self) -> None:
+        self.assertFalse(
+            constraint_excludes_candidate(
+                ("Do not open any search results",),
+                ("search_input", "Search settings", "text input"),
+                candidate_role="input",
+            )
+        )
+
+    def test_allowed_contrast_clause_is_not_treated_as_prohibited(self) -> None:
+        constraint = "不要点击广告，但点击确定按钮"
+        self.assertTrue(
+            constraint_excludes_candidate(
+                (constraint,),
+                ("advertisement", "广告"),
+                candidate_role="button",
+            )
+        )
+        self.assertFalse(
+            constraint_excludes_candidate(
+                (constraint,),
+                ("confirm_action", "确定按钮"),
+                candidate_role="button",
+            )
+        )
+
     def test_explicit_use_prohibition_excludes_named_entry(self) -> None:
         self.assertTrue(
             constraint_excludes_candidate(

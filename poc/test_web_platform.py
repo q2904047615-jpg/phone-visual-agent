@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 from contextlib import nullcontext
 import json
+import queue
 import tempfile
 import threading
 import time
@@ -4212,6 +4213,12 @@ class ApiEndToEndTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.temp_dir = tempfile.TemporaryDirectory()
         cls.original_web_output_dir = web_app.WEB_OUTPUT_DIR
+        cls.original_legacy_workflows_enabled = web_app.LEGACY_WORKFLOWS_ENABLED
+        # This class still contains explicit compatibility-route coverage.  The
+        # production default remains disabled; only this isolated test fixture
+        # opts into the retired routes so their locks and fail-closed behavior
+        # can continue to be regression-tested.
+        web_app.LEGACY_WORKFLOWS_ENABLED = True
         web_app.WEB_OUTPUT_DIR = Path(cls.temp_dir.name) / "web_output"
         web_app.WEB_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         web_app.runtime.store = TaskStore(
@@ -4226,10 +4233,28 @@ class ApiEndToEndTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.client_context.__exit__(None, None, None)
         web_app.WEB_OUTPUT_DIR = cls.original_web_output_dir
+        web_app.LEGACY_WORKFLOWS_ENABLED = cls.original_legacy_workflows_enabled
         cls.temp_dir.cleanup()
 
     def setUp(self) -> None:
         from universal_agent_orchestrator import DeviceTaskRegistry
+
+        # Every API test receives a fresh database.  The compatibility worker
+        # is process-global, so also wait for and drain its queue before moving
+        # the store pointer; otherwise a task from one test can make an
+        # unrelated read-only preview report the device as busy.
+        deadline = time.monotonic() + 2
+        while web_app.runtime.jobs.unfinished_tasks and time.monotonic() < deadline:
+            time.sleep(0.01)
+        while True:
+            try:
+                web_app.runtime.jobs.get_nowait()
+            except queue.Empty:
+                break
+            else:
+                web_app.runtime.jobs.task_done()
+        database_name = f"api_tasks_{self._testMethodName}.sqlite3"
+        web_app.runtime.store = TaskStore(Path(self.temp_dir.name) / database_name)
 
         self.device_registry_patcher = patch.object(
             web_app.runtime,
@@ -4409,6 +4434,15 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertTrue(universal["automatic_loop_enabled"])
         self.assertEqual(universal["automatic_loop_max_physical_actions"], 12)
         self.assertEqual(universal["supported_app_scope"], "dynamic")
+        semantic_authority = universal["semantic_risk_authority"]
+        self.assertEqual(
+            semantic_authority["authority_scope"],
+            "semantic_and_risk_only",
+        )
+        self.assertFalse(
+            semantic_authority["legacy_remote_risk_diagnostics_enabled"]
+        )
+        self.assertTrue(semantic_authority["visual_action_shadow_enabled"])
         self.assertEqual(
             universal["hardware_capability_profile"]["protocol_version"],
             "2026-08-18-device-capability-profile-v1",

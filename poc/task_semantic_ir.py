@@ -3,14 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping
 
 
-TASK_SEMANTIC_IR_PROTOCOL = "2026-08-18-task-semantic-ir-v1-shadow"
+TASK_SEMANTIC_IR_PROTOCOL = "2026-08-18-task-semantic-ir-v1"
 RISK_POLICY_PROTOCOL = "2026-08-18-local-risk-policy-v1"
 SHADOW_REPORT_PROTOCOL = "2026-08-18-semantic-shadow-report-v1"
+AUTHORITY_REPORT_PROTOCOL = "2026-08-18-semantic-risk-authority-v1"
+CUTOVER_DIFF_PROTOCOL = "2026-08-18-semantic-risk-cutover-diff-v1"
 
 AUTOMATIC = "automatic"
 CONFIRMATION_REQUIRED = "confirmation_required"
@@ -50,7 +52,7 @@ _LEGACY_RISK_EFFECT_KIND = {
     "membership_change": "membership_change",
     "permission_role_change": "sensitive_permission_change",
     "data_mutation": "data_mutation",
-    "data_deletion": "data_deletion",
+    "data_deletion": "irreversible_data_deletion",
     "transaction_or_payment": "financial_transaction",
     "account_or_permission_change": "sensitive_permission_change",
     "unknown_external_effect": "generic_effect",
@@ -570,6 +572,111 @@ class SemanticShadowReport:
         }
 
 
+@dataclass(frozen=True)
+class RiskCutoverDiff:
+    effect_id: str
+    effect_kind: str
+    legacy_confirmation_required: bool
+    formal_policy: str
+    allowed: bool
+    reason: str
+
+    def validate(self) -> None:
+        _validate_id(self.effect_id, "risk_cutover.effect_id")
+        _validate_id(self.effect_kind, "risk_cutover.effect_kind")
+        if not isinstance(self.legacy_confirmation_required, bool):
+            raise TaskSemanticIRError(
+                "risk_cutover.legacy_confirmation_required 必须是布尔值。"
+            )
+        if self.formal_policy not in RISK_POLICIES:
+            raise TaskSemanticIRError("risk_cutover.formal_policy 无效。")
+        if not isinstance(self.allowed, bool):
+            raise TaskSemanticIRError("risk_cutover.allowed 必须是布尔值。")
+        _required_text(self.reason, "risk_cutover.reason", max_length=300)
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "effect_id": self.effect_id,
+            "effect_kind": self.effect_kind,
+            "legacy_confirmation_required": self.legacy_confirmation_required,
+            "formal_policy": self.formal_policy,
+            "allowed": self.allowed,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class SemanticRiskAuthorityReport:
+    """Formal authority for field roles and confirmation policy only.
+
+    It cannot grant a visual action or physical execution.  Its only authority
+    is to bind typed effects to the local, versioned confirmation policy.
+    """
+
+    semantic_ir: TaskSemanticIR
+    risk_policy: LocalRiskPolicyConfig
+    risk_decisions: tuple[RiskDecision, ...]
+    cutover_diffs: tuple[RiskCutoverDiff, ...]
+    source_graph_digest: str
+    authoritative_scope: str = "semantic_and_risk_only"
+    physical_execution_allowed: bool = False
+    protocol_version: str = AUTHORITY_REPORT_PROTOCOL
+
+    def validate(self) -> None:
+        if self.protocol_version != AUTHORITY_REPORT_PROTOCOL:
+            raise TaskSemanticIRError("正式语义风险报告协议版本无效。")
+        if self.authoritative_scope != "semantic_and_risk_only":
+            raise TaskSemanticIRError("正式语义风险报告权威范围无效。")
+        if self.physical_execution_allowed is not False:
+            raise TaskSemanticIRError("语义风险权威不得授予物理执行权限。")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.source_graph_digest):
+            raise TaskSemanticIRError("source_graph_digest 必须是 SHA-256。")
+        self.semantic_ir.validate()
+        self.risk_policy.validate()
+        decisions = {item.effect_id: item for item in self.risk_decisions}
+        if len(decisions) != len(self.risk_decisions):
+            raise TaskSemanticIRError("正式风险决定 effect_id 重复。")
+        expected = {item.effect_id for item in self.semantic_ir.effects}
+        if set(decisions) != expected:
+            raise TaskSemanticIRError("正式风险决定必须覆盖全部 EffectIntent。")
+        for item in self.risk_decisions:
+            item.validate()
+        unsupported = [
+            item.effect_id
+            for item in self.semantic_ir.effects
+            if item.kind == "generic_effect"
+        ]
+        if unsupported:
+            raise TaskSemanticIRError(
+                "未知外部效果没有可执行语义类型：" + ", ".join(unsupported)
+            )
+        diffs = {item.effect_id: item for item in self.cutover_diffs}
+        if len(diffs) != len(self.cutover_diffs) or set(diffs) != expected:
+            raise TaskSemanticIRError("新旧风险差异必须逐项覆盖全部 EffectIntent。")
+        for item in self.cutover_diffs:
+            item.validate()
+            if not item.allowed:
+                raise TaskSemanticIRError(
+                    f"存在未经允许的语义风险切换差异：{item.effect_id}"
+                )
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "protocol_version": self.protocol_version,
+            "authoritative_scope": self.authoritative_scope,
+            "physical_execution_allowed": False,
+            "source_graph_digest": self.source_graph_digest,
+            "semantic_ir": self.semantic_ir.to_dict(),
+            "semantic_digest": self.semantic_ir.semantic_digest,
+            "risk_policy": self.risk_policy.to_dict(),
+            "risk_decisions": [item.to_dict() for item in self.risk_decisions],
+            "cutover_diff_protocol": CUTOVER_DIFF_PROTOCOL,
+            "cutover_diffs": [item.to_dict() for item in self.cutover_diffs],
+        }
+
+
 def _source_span(raw_goal: str, value: Any) -> SourceSpan | None:
     if not isinstance(value, str) or not value:
         return None
@@ -748,6 +855,7 @@ def compile_legacy_graph_shadow(
                 source_subgoal_ids=source_subgoal_ids,
                 expected_result_texts=tuple(dict.fromkeys(expected_results)),
                 attributes={
+                    "legacy_risk_id": str(getattr(risk, "risk_id", "") or ""),
                     "legacy_risk_type": legacy_type,
                     "legacy_risk_level": str(getattr(risk, "risk_level", "") or ""),
                     "legacy_confirmation_required": bool(
@@ -841,3 +949,120 @@ def compile_legacy_graph_shadow(
     )
     report.validate()
     return report
+
+
+def compile_formal_semantic_authority(
+    graph: Any,
+    *,
+    risk_policy: LocalRiskPolicyConfig | None = None,
+) -> SemanticRiskAuthorityReport:
+    """Compile the sole formal field-role and confirmation authority.
+
+    The legacy graph remains the planner transport during migration, but its
+    free-text constraints and its model-supplied confirmation booleans are not
+    authoritative.  Only typed ``EffectIntent.kind`` and the local policy are.
+    """
+
+    shadow = compile_legacy_graph_shadow(graph, risk_policy=risk_policy)
+    decisions = {item.effect_id: item for item in shadow.risk_decisions}
+    diffs: list[RiskCutoverDiff] = []
+    for effect in shadow.semantic_ir.effects:
+        decision = decisions[effect.effect_id]
+        legacy_required = bool(
+            effect.attributes.get("legacy_confirmation_required", False)
+        )
+        formal_required = decision.policy == CONFIRMATION_REQUIRED
+        changed = legacy_required != formal_required
+        allowed = effect.kind != "generic_effect"
+        reason = (
+            "typed_effect_local_policy"
+            if not changed
+            else "remove_legacy_blanket_confirmation"
+            if legacy_required and not formal_required
+            else "local_policy_safety_escalation"
+        )
+        diffs.append(
+            RiskCutoverDiff(
+                effect_id=effect.effect_id,
+                effect_kind=effect.kind,
+                legacy_confirmation_required=legacy_required,
+                formal_policy=decision.policy,
+                allowed=allowed,
+                reason=reason,
+            )
+        )
+    report = SemanticRiskAuthorityReport(
+        semantic_ir=shadow.semantic_ir,
+        risk_policy=shadow.risk_policy,
+        risk_decisions=shadow.risk_decisions,
+        cutover_diffs=tuple(diffs),
+        source_graph_digest=_legacy_graph_digest(graph),
+    )
+    report.validate()
+    return report
+
+
+def apply_formal_semantic_risk_policy(
+    graph: Any,
+    authority: SemanticRiskAuthorityReport,
+) -> Any:
+    """Project formal confirmation decisions back onto the transport graph."""
+
+    authority.validate()
+    if authority.source_graph_digest != _legacy_graph_digest(graph):
+        raise TaskSemanticIRError("正式语义风险权威未绑定当前任务图。")
+    decisions = {item.effect_id: item for item in authority.risk_decisions}
+    decision_by_legacy_risk_id: dict[str, RiskDecision] = {}
+    for effect in authority.semantic_ir.effects:
+        risk_id = str(effect.attributes.get("legacy_risk_id") or "").strip()
+        if not risk_id:
+            raise TaskSemanticIRError(
+                f"EffectIntent 缺少 legacy risk 绑定：{effect.effect_id}"
+            )
+        if risk_id in decision_by_legacy_risk_id:
+            raise TaskSemanticIRError(f"legacy risk 重复映射：{risk_id}")
+        decision_by_legacy_risk_id[risk_id] = decisions[effect.effect_id]
+
+    projected_risks = []
+    for risk in tuple(getattr(graph, "risk_actions", ()) or ()):
+        risk_id = str(getattr(risk, "risk_id", "") or "")
+        decision = decision_by_legacy_risk_id.get(risk_id)
+        if decision is None:
+            raise TaskSemanticIRError(f"正式风险权威遗漏 risk_action：{risk_id}")
+        projected_risks.append(
+            replace(
+                risk,
+                confirmation_required=(
+                    decision.policy == CONFIRMATION_REQUIRED
+                ),
+            )
+        )
+
+    status = str(getattr(graph, "status", "") or "")
+    active_id = str(getattr(graph, "active_subgoal_id", "") or "")
+    active = next(
+        (
+            item
+            for item in tuple(getattr(graph, "subgoals", ()) or ())
+            if str(getattr(item, "subgoal_id", "") or "") == active_id
+        ),
+        None,
+    )
+    required_ids = {
+        str(getattr(item, "risk_id", "") or "")
+        for item in projected_risks
+        if bool(getattr(item, "confirmation_required", False))
+    }
+    active_requires_confirmation = bool(
+        active is not None
+        and set(tuple(getattr(active, "risk_action_ids", ()) or ()))
+        .intersection(required_ids)
+    )
+    if status == "awaiting_confirmation" and not active_requires_confirmation:
+        status = "ready"
+    elif (
+        status in {"ready", "running"}
+        and active_requires_confirmation
+    ):
+        status = "awaiting_confirmation"
+    return replace(graph, risk_actions=tuple(projected_risks), status=status)

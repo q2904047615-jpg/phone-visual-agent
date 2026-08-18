@@ -17,11 +17,14 @@ from task_semantic_ir import (
     EffectIntent,
     LocalRiskPolicyConfig,
     SemanticEntity,
+    SemanticRiskAuthorityReport,
     SemanticShadowReport,
     SourceSpan,
     TaskSemanticIR,
     TaskSemanticIRError,
     compile_legacy_graph_shadow,
+    compile_formal_semantic_authority,
+    apply_formal_semantic_risk_policy,
     load_local_risk_policy,
     local_risk_policy_from_dict,
 )
@@ -308,14 +311,22 @@ class TaskSemanticIRTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskSemanticIRError, "未绑定 effect"):
             semantic_ir.validate()
 
-    def test_shadow_capture_preserves_existing_formal_rejection(self):
+    def test_formal_authority_removes_blanket_send_confirmation(self):
         provider = OneResponseProvider(current_send_failure_payload())
-        planner = DeepSeekTaskGraphPlanner(provider)
+        planner = DeepSeekTaskGraphPlanner(
+            provider,
+            enable_legacy_risk_diagnostics=False,
+        )
 
-        with self.assertRaises(TaskGraphError):
-            planner.plan(RAW_GOAL, device_id="device-local-01", task_id="9abc")
+        graph = planner.plan(RAW_GOAL, device_id="device-local-01", task_id="9abc")
 
         self.assertEqual(provider.calls, 1)
+        self.assertEqual(graph.status, "ready")
+        self.assertFalse(graph.risk_actions[0].confirmation_required)
+        self.assertIsInstance(
+            planner.last_semantic_authority,
+            SemanticRiskAuthorityReport,
+        )
         self.assertIsNotNone(planner.last_semantic_shadow)
         self.assertEqual(planner.last_semantic_shadow_error, "")
         assert planner.last_semantic_shadow is not None
@@ -325,9 +336,14 @@ class TaskSemanticIRTests(unittest.TestCase):
         )
         self.assertFalse(planner.last_semantic_shadow.execution_allowed)
 
-    def test_current_failure_artifact_contains_non_authoritative_shadow(self):
+    def test_unknown_effect_failure_artifact_records_formal_authority_error(self):
+        payload = current_send_failure_payload()
+        payload["risk_actions"][0]["risk_type"] = "unknown_external_effect"
+        payload["subgoals"][1]["objective"] = "处理当前对象"
+        payload["subgoals"][1]["completion_conditions"] = ["处理结果可见"]
         planner = DeepSeekTaskGraphPlanner(
-            OneResponseProvider(current_send_failure_payload())
+            OneResponseProvider(payload),
+            enable_legacy_risk_diagnostics=False,
         )
         with self.assertRaises(TaskGraphError) as caught:
             planner.plan(RAW_GOAL, device_id="device-local-01", task_id="9abc")
@@ -342,17 +358,15 @@ class TaskSemanticIRTests(unittest.TestCase):
             )
             artifact = json.loads(Path(paths[0]).read_text(encoding="utf-8"))
 
-        shadow = artifact["semantic_shadow"]
-        self.assertFalse(shadow["authoritative"])
-        self.assertFalse(shadow["execution_allowed"])
-        self.assertEqual(
-            shadow["risk_decisions"][0]["policy"],
-            AUTOMATIC,
-        )
+        self.assertIn("semantic_risk_authority_error", artifact)
+        self.assertIn("未知外部效果", artifact["semantic_risk_authority_error"])
 
-    def test_shadow_compiler_error_cannot_replace_formal_error(self):
+    def test_shadow_compiler_error_cannot_replace_formal_success(self):
         provider = OneResponseProvider(current_send_failure_payload())
-        planner = DeepSeekTaskGraphPlanner(provider)
+        planner = DeepSeekTaskGraphPlanner(
+            provider,
+            enable_legacy_risk_diagnostics=False,
+        )
         original_compiler = __import__("deepseek_task_graph").compile_legacy_graph_shadow
 
         def broken_compiler(graph):
@@ -361,17 +375,45 @@ class TaskSemanticIRTests(unittest.TestCase):
         module = __import__("deepseek_task_graph")
         module.compile_legacy_graph_shadow = broken_compiler
         try:
-            with self.assertRaises(TaskGraphError) as caught:
-                planner.plan(RAW_GOAL, device_id="device-local-01", task_id="9abc")
+            graph = planner.plan(
+                RAW_GOAL,
+                device_id="device-local-01",
+                task_id="9abc",
+            )
         finally:
             module.compile_legacy_graph_shadow = original_compiler
 
-        self.assertNotEqual(str(caught.exception), "shadow-only failure")
+        self.assertEqual(graph.status, "ready")
         self.assertIsNone(planner.last_semantic_shadow)
         self.assertEqual(planner.last_semantic_shadow_error, "shadow-only failure")
 
+    def test_formal_cutover_diff_is_complete_and_bound_to_graph(self):
+        graph = graph_from_payload()
+        authority = compile_formal_semantic_authority(graph)
+
+        self.assertEqual(len(authority.cutover_diffs), 1)
+        diff = authority.cutover_diffs[0]
+        self.assertTrue(diff.allowed)
+        self.assertTrue(diff.legacy_confirmation_required)
+        self.assertEqual(diff.formal_policy, AUTOMATIC)
+        projected = apply_formal_semantic_risk_policy(graph, authority)
+        self.assertFalse(projected.risk_actions[0].confirmation_required)
+
+        changed = replace(graph, revision=2)
+        with self.assertRaisesRegex(TaskSemanticIRError, "未绑定当前任务图"):
+            apply_formal_semantic_risk_policy(changed, authority)
+
+    def test_unknown_effect_cannot_cross_formal_cutover(self):
+        payload = current_send_failure_payload()
+        payload["risk_actions"][0]["risk_type"] = "unknown_external_effect"
+        with self.assertRaisesRegex(TaskSemanticIRError, "未知外部效果"):
+            compile_formal_semantic_authority(graph_from_payload(payload))
+
     def test_new_request_clears_stale_shadow_before_json_parse(self):
-        planner = DeepSeekTaskGraphPlanner(RawResponseProvider("{"))
+        planner = DeepSeekTaskGraphPlanner(
+            RawResponseProvider("{"),
+            enable_legacy_risk_diagnostics=False,
+        )
         planner.last_semantic_shadow = compile_legacy_graph_shadow(graph_from_payload())
         planner.last_semantic_shadow_error = "stale"
 

@@ -345,8 +345,14 @@ class QwenTaskContext:
         )
         if len(gate_risk_ids) != len(set(gate_risk_ids)):
             raise VisionAgentError("confirmation_gate.risk_ids 含重复风险ID。")
-        if set(gate_risk_ids) != set(subgoal_risk_ids) or set(risk_ids) != set(
-            subgoal_risk_ids
+        confirmation_risk_ids = {
+            str(item.get("risk_id") or "").strip()
+            for item in self.risk_actions
+            if item.get("confirmation_required") is True
+        }
+        if (
+            set(gate_risk_ids) != confirmation_risk_ids
+            or set(risk_ids) != set(subgoal_risk_ids)
         ):
             raise VisionAgentError(
                 "risk_actions、current_subgoal 与 confirmation_gate 风险ID不一致。"
@@ -375,15 +381,20 @@ class QwenTaskContext:
                     )
 
         external = self.current_external_impact in {"external_state", "unknown"}
-        if external:
+        if self.current_external_impact == "unknown":
+            raise VisionAgentError("unknown 子目标禁止进入视觉动作协议。")
+        if external and confirmation_risk_ids:
             if not required or not gate_risk_ids:
-                raise VisionAgentError("外部状态子目标必须关闭风险确认门。")
+                raise VisionAgentError("需确认的外部状态子目标必须关闭风险确认门。")
             if state not in {"awaiting_confirmation", "confirmed"}:
                 raise VisionAgentError("外部状态子目标的确认门状态无效。")
             if state == "confirmed" and not allowed:
                 raise VisionAgentError("确认门状态与 external_state_action_allowed 冲突。")
             if state != "confirmed" and allowed:
                 raise VisionAgentError("未确认风险不能允许外部状态动作。")
+        elif external:
+            if required or gate_risk_ids or state != "not_required" or not allowed:
+                raise VisionAgentError("自动外部效果的本地策略授权状态无效。")
         elif required or gate_risk_ids or allowed or state != "not_required":
             raise VisionAgentError("只读/导航子目标不得伪造风险确认状态。")
 
@@ -398,7 +409,9 @@ class QwenTaskContext:
     def pre_observation_block_reason(self) -> str | None:
         """Return the local gate that must run before either Qwen call."""
 
-        if self.current_external_impact in {"external_state", "unknown"}:
+        if self.current_external_impact == "unknown":
+            return "unknown 子目标禁止调用观察或决策模型。"
+        if self.current_external_impact == "external_state":
             if self.protocol_version == MIGRATION_TASK_CONTEXT_PROTOCOL:
                 return "v2迁移上下文缺少确认作用域，禁止调用观察或决策模型。"
             if not self.external_action_allowed:

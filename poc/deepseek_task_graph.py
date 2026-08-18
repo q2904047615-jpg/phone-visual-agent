@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import re
 import uuid
 from dataclasses import asdict, dataclass, field, replace
@@ -17,7 +18,16 @@ from deepseek_semantic_risk_audit import (
     SemanticRiskAuditor,
 )
 from generic_intent import GenericIntentError, _parse_json_object
-from task_semantic_ir import SemanticShadowReport, compile_legacy_graph_shadow
+from task_semantic_ir import (
+    SemanticRiskAuthorityReport,
+    SemanticShadowReport,
+    TaskSemanticIRError,
+    LocalRiskPolicyConfig,
+    apply_formal_semantic_risk_policy,
+    compile_formal_semantic_authority,
+    compile_legacy_graph_shadow,
+    load_local_risk_policy,
+)
 
 
 DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-11-deepseek-task-graph-v3"
@@ -55,6 +65,9 @@ FORBIDDEN_EXECUTION_INSTRUCTION_PATTERN = re.compile(
     r"\b(?:coordinate|keycode|system[ _-]?command|shell[ _-]?command)\b"
     r")",
     re.IGNORECASE,
+)
+DEFAULT_LOCAL_RISK_POLICY_PATH = (
+    Path(__file__).resolve().parent / "config" / "local_risk_policy.v1.json"
 )
 NATURAL_ACTION_INTENT_PATTERN = re.compile(
     r"(?:点击|轻触|点按|滑动|上划|下划|左划|右划|长按|拖动|输入|"
@@ -487,8 +500,10 @@ class RiskAction:
             raise TaskGraphError(f"通用风险类型无效：{self.risk_type}")
         if self.risk_level not in RISK_LEVELS:
             raise TaskGraphError(f"风险等级无效：{self.risk_level}")
-        if self.confirmation_required is not True:
-            raise TaskGraphError(f"风险动作必须等待用户确认：{self.risk_id}")
+        if not isinstance(self.confirmation_required, bool):
+            raise TaskGraphError(
+                f"risk_actions.confirmation_required 必须是布尔值：{self.risk_id}"
+            )
         _validate_id_list(self.subgoal_ids, "risk_actions.subgoal_ids", required=True)
 
 
@@ -549,8 +564,6 @@ class Subgoal:
             )
         inferred_risk_types = _infer_external_risk_types(
             self.objective,
-            *self.constraints,
-            *self.completion_conditions,
         )
         scoped_input_texts = (
             self.objective,
@@ -981,8 +994,6 @@ class DynamicTaskGraph:
         for subgoal in subgoals.values():
             inferred_types = _infer_external_risk_types(
                 subgoal.objective,
-                *subgoal.constraints,
-                *subgoal.completion_conditions,
             )
             if _is_explicitly_unsubmitted_local_input(
                 subgoal.objective,
@@ -1066,14 +1077,19 @@ class DynamicTaskGraph:
                 raise TaskGraphError(
                     "活动子目标存在未完成依赖：" + ", ".join(unfinished_dependencies)
                 )
-            if self.status == "awaiting_confirmation" and not active_node.risk_action_ids:
+            confirmation_risk_ids = {
+                risk_id
+                for risk_id in active_node.risk_action_ids
+                if risks[risk_id].confirmation_required
+            }
+            if self.status == "awaiting_confirmation" and not confirmation_risk_ids:
                 raise TaskGraphError("等待确认状态必须关联当前子目标的风险动作。")
             if (
-                active_node.external_impact in {"external_state", "unknown"}
+                confirmation_risk_ids
                 and self.status != "awaiting_confirmation"
             ):
                 raise TaskGraphError(
-                    "外部状态或未知影响子目标成为 current_subgoal 时必须等待用户确认。"
+                    "本地风险策略要求确认的子目标必须等待用户确认。"
                 )
             if (
                 self.status == "awaiting_confirmation"
@@ -1167,6 +1183,15 @@ class DynamicTaskGraph:
         value = self.to_dict()
         current = value["current_subgoal"]
         current_risk_ids = set(current["risk_action_ids"] if current else [])
+        risk_by_id = {
+            item["risk_id"]: item
+            for item in value["risk_actions"]
+        }
+        confirmation_risk_ids = {
+            risk_id
+            for risk_id in current_risk_ids
+            if bool(risk_by_id[risk_id]["confirmation_required"])
+        }
         confirmed = set(confirmed_risk_ids)
         if confirmed and confirmed_task_id != self.task_id:
             raise TaskGraphError("确认记录 task_id 不匹配，禁止跨 task 复用。")
@@ -1183,20 +1208,21 @@ class DynamicTaskGraph:
             or confirmed_revision is not None
         ):
             raise TaskGraphError("确认作用域不能脱离 confirmed_risk_ids 单独提供。")
-        unknown_confirmations = confirmed - current_risk_ids
+        unknown_confirmations = confirmed - confirmation_risk_ids
         if unknown_confirmations:
             raise TaskGraphError(
                 "确认记录不属于 current_subgoal："
                 + ", ".join(sorted(unknown_confirmations))
             )
-        confirmation_required = bool(
-            current
-            and current["external_impact"] in {"external_state", "unknown"}
-        )
+        confirmation_required = bool(confirmation_risk_ids)
         confirmation_granted = bool(
             confirmation_required
-            and current_risk_ids
-            and current_risk_ids.issubset(confirmed)
+            and confirmation_risk_ids.issubset(confirmed)
+        )
+        automatic_external_allowed = bool(
+            current
+            and current["external_impact"] == "external_state"
+            and not confirmation_required
         )
         return {
             "protocol_version": self.protocol_version,
@@ -1225,14 +1251,16 @@ class DynamicTaskGraph:
                     if confirmation_required
                     else "not_required"
                 ),
-                "risk_ids": sorted(current_risk_ids),
+                "risk_ids": sorted(confirmation_risk_ids),
                 "scope": {
                     "task_id": self.task_id,
                     "device_id": self.device_id,
                     "revision": self.revision,
                     "subgoal_id": self.active_subgoal_id,
                 },
-                "external_state_action_allowed": confirmation_granted,
+                "external_state_action_allowed": (
+                    confirmation_granted or automatic_external_allowed
+                ),
             },
         }
 
@@ -1245,11 +1273,23 @@ class DeepSeekTaskGraphPlanner:
         provider: JsonTaskGraphProvider,
         *,
         risk_audit_provider: JsonRiskAuditProvider | None = None,
+        enable_legacy_risk_diagnostics: bool = True,
+        semantic_risk_policy: LocalRiskPolicyConfig | None = None,
     ) -> None:
         self.provider = provider
         self.risk_auditor = SemanticRiskAuditor(risk_audit_provider or provider)
+        self.legacy_risk_diagnostics_enabled = bool(
+            enable_legacy_risk_diagnostics
+        )
+        self.semantic_risk_policy = (
+            semantic_risk_policy
+            if semantic_risk_policy is not None
+            else load_local_risk_policy(DEFAULT_LOCAL_RISK_POLICY_PATH)
+        )
         self.last_raw_response = ""
         self.last_risk_audit: SemanticRiskAuditReport | None = None
+        self.last_semantic_authority: SemanticRiskAuthorityReport | None = None
+        self.last_semantic_authority_error = ""
         self.last_semantic_shadow: SemanticShadowReport | None = None
         self.last_semantic_shadow_error = ""
 
@@ -1290,6 +1330,11 @@ class DeepSeekTaskGraphPlanner:
         graph = _normalize_initial_premature_completed_status(graph)
         graph = _normalize_unique_active_frontier(graph)
         graph = _normalize_initial_confirmation_status(graph)
+        # Reject malformed planner transport before semantic cutover so the
+        # formal projector never masks missing IDs, invalid enums or broken
+        # graph structure with a later migration error.
+        graph.validate()
+        graph = self._apply_formal_semantic_authority(graph)
         self._capture_semantic_shadow(graph)
         graph.validate()
         self._audit_and_validate_graph(graph)
@@ -1332,6 +1377,10 @@ class DeepSeekTaskGraphPlanner:
             observation,
         )
         candidate = _normalize_unique_active_frontier(candidate)
+        _validate_external_impact_revision(graph, candidate)
+        _validate_preserved_risk_ids(graph, candidate)
+        candidate.validate()
+        candidate = self._apply_formal_semantic_authority(candidate)
         self._capture_semantic_shadow(candidate)
         self._validate_replan_candidate(
             graph,
@@ -1382,13 +1431,36 @@ class DeepSeekTaskGraphPlanner:
     def _capture_semantic_shadow(self, graph: DynamicTaskGraph) -> None:
         """Compile diagnostics only; never influence the formal v3 graph."""
 
-        self._reset_semantic_shadow()
+        self.last_semantic_shadow = None
+        self.last_semantic_shadow_error = ""
         try:
             self.last_semantic_shadow = compile_legacy_graph_shadow(graph)
         except Exception as exc:  # Shadow migration must remain non-authoritative.
             self.last_semantic_shadow_error = str(exc)[:1000]
 
+    def _apply_formal_semantic_authority(
+        self,
+        graph: DynamicTaskGraph,
+    ) -> DynamicTaskGraph:
+        """Apply typed field roles and local confirmation policy fail-closed."""
+
+        self.last_semantic_authority = None
+        self.last_semantic_authority_error = ""
+        try:
+            authority = compile_formal_semantic_authority(
+                graph,
+                risk_policy=self.semantic_risk_policy,
+            )
+            projected = apply_formal_semantic_risk_policy(graph, authority)
+        except TaskSemanticIRError as exc:
+            self.last_semantic_authority_error = str(exc)[:1000]
+            raise TaskGraphError(f"正式语义风险权威拒绝任务图：{exc}") from exc
+        self.last_semantic_authority = authority
+        return projected
+
     def _reset_semantic_shadow(self) -> None:
+        self.last_semantic_authority = None
+        self.last_semantic_authority_error = ""
         self.last_semantic_shadow = None
         self.last_semantic_shadow_error = ""
 
@@ -1502,6 +1574,9 @@ class DeepSeekTaskGraphPlanner:
         return graph
 
     def _audit_and_validate_graph(self, graph: DynamicTaskGraph) -> None:
+        if not self.legacy_risk_diagnostics_enabled:
+            self.last_risk_audit = None
+            return
         sources = _risk_audit_sources(graph)
         report = self.risk_auditor.audit(sources)
         sanitized_assessments = []
@@ -1522,7 +1597,14 @@ class DeepSeekTaskGraphPlanner:
             sanitized_assessments.append(assessment)
         report = replace(report, assessments=tuple(sanitized_assessments))
         report = _apply_local_risk_supplements(report, sources, graph=graph)
+        # The model/text audit is retained only as migration telemetry.  It no
+        # longer has authority to add, remove or upgrade risks; formal risk is
+        # decided exclusively from TaskSemanticIR EffectIntent + local policy.
         self.last_risk_audit = report
+        # Explicit legacy-diagnostic mode is test/migration-only.  It keeps the
+        # retired validator available for historical corpus replay, while the
+        # production Runtime disables this mode and therefore has exactly one
+        # semantic/risk authority.
         _validate_graph_against_risk_audit(graph, report)
 
     def _require_provider(self) -> None:
@@ -1558,8 +1640,10 @@ Shell、ADB、keycode、main.exe 指令或其他可直接驱动设备的控制�
 4. 初始规划没有画面证据，所有完成条件 satisfied=false，任何子目标都不能 completed。
 5. 每个子目标必须用 external_impact 标为 read_only、navigation_only、external_state 或 unknown。
    会改变账号、数据、交易、发布、发送或其他外部状态的事项必须标为 external_state 并列入
-   risk_actions；无法确定影响时标为 unknown。两者都必须关联风险，confirmation_required=true；
-   如果成为 active，status 必须为 awaiting_confirmation。
+   risk_actions；无法确定影响时标为 unknown。两者都必须关联类型化效果。兼容字段
+   confirmation_required 仍输出 true，但它不是确认权威；本地版本化策略会按 EffectIntent.kind
+   重新计算。发送、关注、评论等普通效果不会仅因 external_state 自动要求用户确认；登录、付款、
+   敏感权限与不可逆删除等策略内效果才进入确认门。unknown 不得进入视觉或执行。
 6. read_only 只能描述查看、读取、检查等纯观察结果；navigation_only 只能描述打开或进入页面等
    导航结果。仅改变本机临时界面层级、前后台页面或临时标签页也属于 navigation_only，不得为它
    虚构 risk_actions；但登录/退出账号、修改账号数据或云端同步状态仍属于 external_state。
@@ -1649,7 +1733,7 @@ def _retry_safe_initial_audit_prompt(raw_goal: str) -> str:
 1. 明确否定或禁止的效果词是约束，不是正向目标；例如“不登录”“不要发送”本身不构成外部
    状态动作，但“不要忘记登录”“不能只查看而要发送”仍包含正向外部效果。
 2. read_only、navigation_only、external_state、unknown 必须按完整句子语义重新判断。
-3. external_state 或 unknown 必须声明并关联风险；成为 active 时必须等待本地用户确认。
+3. external_state 或 unknown 必须声明并关联类型化效果；是否确认只由本地策略决定，unknown 阻塞。
 4. 初始规划没有画面证据，不能宣称任何目标或子目标已经完成。
 5. 只返回符合结构的完整 JSON 对象，不要 Markdown。
 """
@@ -2294,10 +2378,16 @@ def _normalize_initial_confirmation_status(
         return graph
     current = active[0]
     declared_risk_ids = {risk.risk_id for risk in graph.risk_actions}
+    model_confirmation_ids = {
+        risk.risk_id
+        for risk in graph.risk_actions
+        if risk.confirmation_required
+    }
     if (
         current.external_impact not in {"external_state", "unknown"}
         or not current.risk_action_ids
         or not set(current.risk_action_ids) <= declared_risk_ids
+        or not set(current.risk_action_ids).intersection(model_confirmation_ids)
     ):
         return graph
     return replace(graph, status="awaiting_confirmation")
@@ -3431,7 +3521,7 @@ def _validate_revision(
             or new.external_effect != old.external_effect
             or new.risk_type != old.risk_type
             or risk_order[new.risk_level] < risk_order[old.risk_level]
-            or new.confirmation_required is not True
+            or new.confirmation_required != old.confirmation_required
             or not set(old.subgoal_ids).issubset(new.subgoal_ids)
         ):
             raise TaskGraphError(f"重规划不能改写或降低既有风险：{risk_id}")
@@ -3564,8 +3654,9 @@ def _validate_preserved_risk_ids(
         candidate_risk = candidate_risks[risk_id]
         if candidate_risk.risk_type != previous_risk.risk_type:
             raise TaskGraphError(f"重规划不能改换既有风险类别：{risk_id}")
-        if candidate_risk.confirmation_required is not True:
-            raise TaskGraphError(f"重规划不能取消既有风险确认：{risk_id}")
+        # The model-supplied confirmation flag is transport-only.  The formal
+        # TaskSemanticIR policy is applied immediately after this structural
+        # preservation check and is compared in the full revision validator.
 
 
 def _reject_dependency_cycles(subgoals: dict[str, Subgoal]) -> None:

@@ -2432,7 +2432,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         payload["subgoals"][0]["constraints"] = [
             "输入内容必须为“你好”并点击发送按钮"
         ]
-        with self.assertRaisesRegex(TaskGraphError, "外部状态变化"):
+        with self.assertRaisesRegex(TaskGraphError, "外部状态变化|语义风险审计.*冲突"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 "目标", device_id="phone-1"
             )
@@ -2532,7 +2532,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         payload["subgoals"][1]["external_impact"] = "read_only"
         payload["subgoals"][1]["risk_action_ids"] = []
 
-        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+        with self.assertRaisesRegex(TaskGraphError, "外部状态变化|语义风险审计.*冲突"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 "确认消息是否已发送给联系人。",
                 device_id="phone-1",
@@ -2617,11 +2617,26 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual(" ", graph.goal.entities["input_text"])
 
-    def test_risk_action_cannot_disable_confirmation(self):
-        payload = base_payload()
+    def test_model_cannot_disable_local_payment_confirmation(self):
+        payload = active_external_payload()
+        payload["goal"]["objective"] = "为订单付款"
+        payload["completion_conditions"][0]["description"] = "订单付款完成"
+        payload["completion_conditions"][0]["evidence_required"] = [
+            "页面显示付款完成"
+        ]
+        payload["subgoals"][1]["objective"] = "订单进入付款完成状态"
+        payload["subgoals"][1]["completion_conditions"] = ["页面显示付款完成"]
+        payload["risk_actions"][0]["description"] = "为订单付款"
+        payload["risk_actions"][0]["external_effect"] = "产生一笔资金交易"
+        payload["risk_actions"][0]["risk_type"] = "transaction_or_payment"
         payload["risk_actions"][0]["confirmation_required"] = False
-        with self.assertRaisesRegex(TaskGraphError, "必须等待用户确认"):
-            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan("目标", device_id="phone-1")
+        payload["status"] = "ready"
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "为订单付款",
+            device_id="phone-1",
+        )
+        self.assertTrue(graph.risk_actions[0].confirmation_required)
+        self.assertEqual(graph.status, "awaiting_confirmation")
 
     def test_deepseek_cannot_generate_confirmation_results(self):
         payload = base_payload()
@@ -2660,7 +2675,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         payload["subgoals"][1]["completion_conditions"] = ["地点信息发送成功"]
         payload["subgoals"][1]["risk_action_ids"] = []
         payload["subgoals"][1]["external_impact"] = "read_only"
-        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+        with self.assertRaisesRegex(TaskGraphError, "外部状态变化|语义风险审计.*冲突"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 "目标",
                 device_id="phone-1",
@@ -2814,7 +2829,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             external_impact="read_only",
         )
         payload["subgoals"][0]["constraints"] = ["完成前给联系人发消息"]
-        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+        with self.assertRaisesRegex(TaskGraphError, "外部状态变化|语义风险审计.*冲突"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 "处理联系人请求",
                 device_id="phone-1",
@@ -3527,7 +3542,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     )
                 )
 
-    def test_risk_bound_active_initial_graph_enters_confirmation_gate(self):
+    def test_unknown_effect_is_blocked_before_any_confirmation_gate(self):
         for impact, status in (
             ("external_state", "ready"),
             ("unknown", "running"),
@@ -3553,16 +3568,11 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     "hardware_state_change"
                 ]
 
-                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
-                    "使本机硬件状态发生变化",
-                    device_id="phone-1",
-                )
-
-                self.assertEqual("awaiting_confirmation", graph.status)
-                self.assertEqual(
-                    ("hardware_state_change",),
-                    graph.active_subgoal().risk_action_ids,
-                )
+                with self.assertRaisesRegex(TaskGraphError, "未知外部效果"):
+                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                        "使本机硬件状态发生变化",
+                        device_id="phone-1",
+                    )
 
     def test_initial_confirmation_status_never_mints_missing_risk(self):
         payload = single_subgoal_payload(
@@ -4270,7 +4280,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual(("send_message",), graph.active_subgoal().risk_action_ids)
         self.assertEqual("external_state", graph.active_subgoal().external_impact)
-        self.assertEqual("awaiting_confirmation", graph.status)
+        self.assertEqual("ready", graph.status)
 
     def test_input_preparation_state_is_cross_app_and_bilingual(self):
         payload = local_input_preparation_payload()
@@ -4485,7 +4495,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
 
         self.assertEqual(("send_message",), graph.active_subgoal().risk_action_ids)
-        self.assertEqual("awaiting_confirmation", graph.status)
+        self.assertEqual("ready", graph.status)
 
     def test_purely_forbidden_effect_normalization_requires_direct_prohibition(self):
         payload = purely_forbidden_draft_payload()
@@ -4652,18 +4662,11 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             }
         )
 
-        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
-            "让当前文本区域显示 codex 并保持未提交；不得发送、提交、保存或发布。",
-            device_id="phone-1",
-        )
-
-        self.assertEqual(
-            ("shared_risk",),
-            tuple(item.risk_id for item in graph.risk_actions),
-        )
-        self.assertTrue(
-            all("shared_risk" in item.risk_action_ids for item in graph.subgoals)
-        )
+        with self.assertRaisesRegex(TaskGraphError, "未知外部效果"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                "让当前文本区域显示 codex 并保持未提交；不得发送、提交、保存或发布。",
+                device_id="phone-1",
+            )
 
     def test_unsubmitted_input_workflow_never_removes_shared_send_effect(self):
         payload = single_subgoal_payload(
@@ -5061,11 +5064,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             FakeProvider(payload, audit_error=TimeoutError("audit timeout"))
         )
 
-        graph = planner.plan("处理当前对象", device_id="phone-1")
-
-        self.assertEqual(graph.status, "awaiting_confirmation")
-        self.assertEqual(graph.active_subgoal().external_impact, "unknown")
-        self.assertTrue(planner.last_risk_audit.failed_closed)
+        with self.assertRaisesRegex(TaskGraphError, "未知外部效果"):
+            planner.plan("处理当前对象", device_id="phone-1")
 
     def test_semantic_audit_low_confidence_fails_closed_to_unknown(self):
         payload = single_subgoal_payload("查看资料", external_impact="read_only")
@@ -5126,7 +5126,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         self.assertIn("最初的用户目标", provider.messages[3][0]["content"])
 
-    def test_active_external_state_subgoal_is_promoted_to_confirmation(self):
+    def test_automatic_external_state_subgoal_does_not_request_risk_confirmation(self):
         payload = base_payload()
         payload["status"] = "running"
         payload["subgoals"][0]["status"] = "skipped"
@@ -5138,7 +5138,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             device_id="phone-1",
         )
 
-        self.assertEqual("awaiting_confirmation", graph.status)
+        self.assertEqual("ready", graph.status)
+        self.assertFalse(graph.risk_actions[0].confirmation_required)
         self.assertEqual("save_target", graph.active_subgoal_id)
         self.assertEqual(("save_place",), graph.active_subgoal().risk_action_ids)
 
@@ -5161,15 +5162,11 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         payload["subgoals"][1]["completion_conditions"] = ["目标地点详情可见"]
         payload["subgoals"][1]["external_impact"] = "read_only"
         payload["subgoals"][1]["risk_action_ids"] = []
-        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
-            "目标",
-            device_id="phone-1",
-        )
-
-        self.assertEqual("awaiting_confirmation", graph.status)
-        self.assertEqual("locate_target", graph.active_subgoal_id)
-        self.assertEqual("unknown", graph.active_subgoal().external_impact)
-        self.assertEqual(("unknown_effect",), graph.active_subgoal().risk_action_ids)
+        with self.assertRaisesRegex(TaskGraphError, "未知外部效果"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                "目标",
+                device_id="phone-1",
+            )
 
     def test_read_only_and_navigation_subgoals_are_allowed(self):
         payload = base_payload()
@@ -5256,7 +5253,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 device_id="phone-1",
             )
 
-    def test_qwen_context_closes_gate_for_external_state_subgoal(self):
+    def test_qwen_context_allows_typed_automatic_external_effect(self):
         payload = base_payload()
         payload["status"] = "awaiting_confirmation"
         payload["subgoals"][0]["status"] = "skipped"
@@ -5272,9 +5269,9 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual(context["current_external_impact"], "external_state")
         self.assertNotIn("subgoals", context)
         self.assertEqual(len(context["risk_actions"]), 1)
-        self.assertTrue(gate["required"])
-        self.assertEqual(gate["state"], "awaiting_confirmation")
-        self.assertEqual(gate["risk_ids"], ["save_place"])
+        self.assertFalse(gate["required"])
+        self.assertEqual(gate["state"], "not_required")
+        self.assertEqual(gate["risk_ids"], [])
         self.assertEqual(
             gate["scope"],
             {
@@ -5284,17 +5281,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 "subgoal_id": "save_target",
             },
         )
-        self.assertFalse(gate["external_state_action_allowed"])
-
-        confirmed_gate = graph.to_qwen_context(
-            confirmed_risk_ids=("save_place",),
-            confirmed_task_id=graph.task_id,
-            confirmed_device_id=graph.device_id,
-            confirmed_subgoal_id="save_target",
-            confirmed_revision=graph.revision,
-        )["confirmation_gate"]
-        self.assertEqual(confirmed_gate["state"], "confirmed")
-        self.assertTrue(confirmed_gate["external_state_action_allowed"])
+        self.assertTrue(gate["external_state_action_allowed"])
 
     def test_confirmation_cannot_be_reused_for_an_unrelated_risk(self):
         graph = DeepSeekTaskGraphPlanner(FakeProvider(base_payload())).plan(

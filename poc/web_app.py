@@ -53,6 +53,11 @@ from universal_action_controller import (
     UniversalActionError,
 )
 from ui_scene import UI_SCENE_PROTOCOL_VERSION
+from task_semantic_ir import (
+    AUTHORITY_REPORT_PROTOCOL,
+    RISK_POLICY_PROTOCOL,
+    TASK_SEMANTIC_IR_PROTOCOL,
+)
 
 from operation_specs import (
     STRUCTURED_OPERATIONS,
@@ -956,7 +961,8 @@ class Runtime:
         self.generic_scene_observer = GenericSceneObserver(self.vision_provider)
         self.generic_step_planner = GenericStepPlanner(self.intent_provider)
         self.deepseek_task_graph_planner = DeepSeekTaskGraphPlanner(
-            self.intent_provider
+            self.intent_provider,
+            enable_legacy_risk_diagnostics=False,
         )
         self.qwen_visual_decision_observer = QwenVisualDecisionObserver(
             self.vision_provider
@@ -1440,6 +1446,15 @@ def device() -> dict[str, Any]:
             "hardware_capabilities": hardware_capabilities,
             "hardware_capability_profile": hardware_capability_profile,
             "supported_app_scope": "dynamic",
+            "semantic_risk_authority": {
+                "semantic_ir_protocol": TASK_SEMANTIC_IR_PROTOCOL,
+                "authority_protocol": AUTHORITY_REPORT_PROTOCOL,
+                "risk_policy_protocol": RISK_POLICY_PROTOCOL,
+                "authority_scope": "semantic_and_risk_only",
+                "legacy_remote_risk_diagnostics_enabled": False,
+                "visual_action_authority": "formal_qwen_v3",
+                "visual_action_shadow_enabled": True,
+            },
             "observer": runtime.generic_scene_observer.status(),
         },
         "generic_orchestrator": {

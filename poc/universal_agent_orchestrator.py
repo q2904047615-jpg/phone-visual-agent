@@ -127,11 +127,36 @@ def _subgoal_progress_signature(subgoal: Any) -> str:
     ).hexdigest()
 
 
+def _confirmation_risk_ids(
+    graph: DynamicTaskGraph,
+    current: Any | None,
+) -> tuple[str, ...]:
+    """Return only locally-policy-bound confirmation risks for one subgoal."""
+
+    if current is None:
+        return ()
+    active_ids = set(tuple(getattr(current, "risk_action_ids", ()) or ()))
+    return tuple(
+        sorted(
+            risk.risk_id
+            for risk in graph.risk_actions
+            if risk.risk_id in active_ids and risk.confirmation_required
+        )
+    )
+
+
+def _requires_risk_confirmation(
+    graph: DynamicTaskGraph,
+    current: Any | None,
+) -> bool:
+    return bool(_confirmation_risk_ids(graph, current))
+
+
 def _risk_intent_material(
     graph: DynamicTaskGraph,
     current: Any,
 ) -> tuple[str, dict[str, Any]]:
-    risk_ids = tuple(sorted(str(item) for item in current.risk_action_ids))
+    risk_ids = _confirmation_risk_ids(graph, current)
     risks = [
         risk
         for risk in graph.risk_actions
@@ -2107,7 +2132,8 @@ class UniversalAgentOrchestrator:
         if graph is None:
             raise UniversalAgentOrchestratorError("风险确认缺少任务图。")
         current = graph.active_subgoal()
-        if current is None or not current.risk_action_ids:
+        risk_ids = _confirmation_risk_ids(graph, current)
+        if current is None or not risk_ids:
             raise UniversalAgentOrchestratorError("当前子目标没有可确认风险。")
         intent_digest, intent_preview = _risk_intent_material(graph, current)
         session.risk_confirmation_authority = RiskConfirmationAuthority(
@@ -2116,7 +2142,7 @@ class UniversalAgentOrchestrator:
             device_id=graph.device_id,
             revision=graph.revision,
             subgoal_id=current.subgoal_id,
-            risk_ids=tuple(current.risk_action_ids),
+            risk_ids=risk_ids,
             intent_digest=intent_digest,
             intent_preview=intent_preview,
         )
@@ -2435,7 +2461,7 @@ class UniversalAgentOrchestrator:
             transition_record["disposition"] = "blocked_missing_active_subgoal"
             persist_transition()
             return
-        if impact in {"external_state", "unknown"}:
+        if _requires_risk_confirmation(revised, current):
             session.status = "awaiting_risk_confirmation"
             session.failed_reason = ""
             transition_record["disposition"] = "advanced_to_risk_confirmation"
@@ -2497,7 +2523,7 @@ class UniversalAgentOrchestrator:
                 transition_record["diagnostic"] = session.failed_reason
                 persist_transition()
                 return
-            if reviewed_impact in {"external_state", "unknown"}:
+            if _requires_risk_confirmation(reviewed, reviewed_current):
                 session.status = "awaiting_risk_confirmation"
                 session.failed_reason = ""
                 self._bind_risk_confirmation(session)
@@ -2680,7 +2706,7 @@ class UniversalAgentOrchestrator:
                 "当前子目标必须先确认风险范围，禁止提前调用 Qwen。"
             )
         if current is None or (
-            impact in {"external_state", "unknown"}
+            _requires_risk_confirmation(graph, current)
             and not session.confirmed_risk_ids
         ):
             raise UniversalAgentOrchestratorError(
@@ -2839,7 +2865,7 @@ class UniversalAgentOrchestrator:
                     )
                     self._write_terminal_snapshot(session)
                     return blocked_decision
-                if impact in {"external_state", "unknown"}:
+                if _requires_risk_confirmation(graph, current):
                     session.status = "awaiting_risk_confirmation"
                     session.failed_reason = ""
                     self._bind_risk_confirmation(session)
@@ -3878,7 +3904,7 @@ class UniversalAgentOrchestrator:
                     return session
                 impact = current.external_impact if current is not None else "unknown"
 
-            if impact in {"external_state", "unknown"}:
+            if _requires_risk_confirmation(graph, current):
                 session.status = "awaiting_risk_confirmation"
                 session.failed_reason = ""
                 session.confirmed_risk_ids = ()
@@ -3956,7 +3982,7 @@ class UniversalAgentOrchestrator:
                         session.failed_reason = "可见状态证据推进后没有活动子目标。"
                         self._write_terminal_snapshot(session)
                         return session
-                    if impact in {"external_state", "unknown"}:
+                    if _requires_risk_confirmation(revised, current):
                         session.status = "awaiting_risk_confirmation"
                         session.failed_reason = ""
                         self._bind_risk_confirmation(session)

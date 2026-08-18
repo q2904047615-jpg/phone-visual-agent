@@ -126,6 +126,28 @@ def persist_deepseek_failure_diagnostic(
         payload["semantic_shadow_error"] = _redact_deepseek_failure_response(
             shadow_error
         )[:1000]
+    authority = getattr(planner, "last_semantic_authority", None)
+    if authority is not None:
+        try:
+            authority_json = json.dumps(
+                authority.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            payload["semantic_risk_authority"] = json.loads(
+                _redact_deepseek_failure_response(authority_json)
+            )
+        except (AttributeError, TypeError, ValueError):
+            payload["semantic_risk_authority_error"] = (
+                "正式语义风险报告无法安全序列化。"
+            )
+    authority_error = str(
+        getattr(planner, "last_semantic_authority_error", "") or ""
+    ).strip()
+    if authority_error:
+        payload["semantic_risk_authority_error"] = (
+            _redact_deepseek_failure_response(authority_error)[:1000]
+        )
     encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     temporary = output_dir / f".{target.name}.{uuid.uuid4().hex}.tmp"
     try:

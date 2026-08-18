@@ -227,14 +227,20 @@ class DeepSeekV3QwenContractTests(unittest.TestCase):
         )
 
     def test_v2_external_or_unknown_can_never_become_executable(self) -> None:
-        for impact in ("external_state", "unknown"):
-            with self.subTest(impact=impact):
-                context = as_v2_migration(fixture_context("external_confirmed"))
-                context["current_external_impact"] = impact
-                context["current_subgoal"]["external_impact"] = impact
-                parsed = QwenTaskContext.from_dict(context)
-                self.assertFalse(parsed.external_action_allowed)
-                self.assertIsNotNone(parsed.pre_observation_block_reason)
+        external_context = as_v2_migration(
+            fixture_context("external_confirmed")
+        )
+        parsed = QwenTaskContext.from_dict(external_context)
+        self.assertFalse(parsed.external_action_allowed)
+        self.assertIsNotNone(parsed.pre_observation_block_reason)
+
+        unknown_context = as_v2_migration(
+            fixture_context("external_confirmed")
+        )
+        unknown_context["current_external_impact"] = "unknown"
+        unknown_context["current_subgoal"]["external_impact"] = "unknown"
+        with self.assertRaisesRegex(VisionAgentError, "unknown"):
+            QwenTaskContext.from_dict(unknown_context)
 
     def test_confirmed_v2_external_state_blocks_before_either_model(self) -> None:
         manifest_path = ROOT / "evals" / "qwen_visual_decision" / "cases.json"

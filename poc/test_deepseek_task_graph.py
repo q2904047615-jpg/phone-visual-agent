@@ -536,7 +536,172 @@ def audit_payload_for_graph(payload, *, overrides=None, confidence=0.99):
     return {"assessments": assessments}
 
 
+def message_send_payload():
+    return {
+        "status": "ready",
+        "goal": {
+            "objective": "打开聊天应用，进入文件传输助手，输入“你好”，然后发送。",
+            "target_apps": [{"app_id": "chat", "app_name": "聊天应用"}],
+            "entities": {"recipient": "文件传输助手", "input_text": "你好"},
+        },
+        "constraints": ["收件人和消息内容必须逐字一致"],
+        "completion_conditions": [
+            {
+                "condition_id": "message_sent",
+                "description": "消息“你好”已发送到文件传输助手对话",
+                "evidence_required": ["指定对话中可见刚发送的消息“你好”"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ],
+        "risk_actions": [
+            {
+                "risk_id": "send_message",
+                "description": "向文件传输助手发送消息“你好”",
+                "external_effect": "消息进入文件传输助手聊天记录",
+                "risk_type": "message_or_communication",
+                "risk_level": "medium",
+                "subgoal_ids": ["send_message"],
+                "confirmation_required": True,
+            }
+        ],
+        "subgoals": [
+            {
+                "subgoal_id": "open_chat",
+                "objective": "文件传输助手聊天页面可见",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["聊天对象必须为文件传输助手"],
+                "completion_conditions": ["文件传输助手聊天页面可见"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "prepare_message",
+                "objective": "当前消息输入框内容为“你好”",
+                "status": "pending",
+                "depends_on": ["open_chat"],
+                "constraints": ["输入内容必须为“你好”"],
+                "completion_conditions": ["当前消息输入框内容为“你好”"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "send_message",
+                "objective": "消息“你好”已发送到文件传输助手对话",
+                "status": "pending",
+                "depends_on": ["prepare_message"],
+                "constraints": ["收件人和消息内容必须逐字一致"],
+                "completion_conditions": ["指定对话中可见刚发送的消息“你好”"],
+                "completion_evidence": [],
+                "risk_action_ids": ["send_message"],
+                "external_impact": "external_state",
+            },
+        ],
+        "active_subgoal_id": "open_chat",
+        "clarification_questions": [],
+    }
+
+
 class DeepSeekTaskGraphTests(unittest.TestCase):
+    def test_specific_message_risk_covers_only_global_unknown_audit_uncertainty(self):
+        payload = message_send_payload()
+        audit = audit_payload_for_graph(
+            payload,
+            overrides={
+                "raw_goal": {
+                    "external_impact": "external_state",
+                    "risk_types": ["unknown_external_effect"],
+                }
+            },
+        )
+
+        graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(payload, audit_payloads=[audit])
+        ).plan(payload["goal"]["objective"], device_id="phone-1")
+
+        self.assertEqual(
+            ("message_or_communication",),
+            tuple(item.risk_type for item in graph.risk_actions),
+        )
+        self.assertEqual("文件传输助手", graph.goal.entities["recipient"])
+        self.assertEqual("你好", graph.goal.entities["input_text"])
+
+    def test_global_unknown_is_not_covered_without_complete_message_entities(self):
+        for missing_entity in ("recipient", "input_text"):
+            with self.subTest(missing_entity=missing_entity):
+                payload = message_send_payload()
+                del payload["goal"]["entities"][missing_entity]
+                audit = audit_payload_for_graph(
+                    payload,
+                    overrides={
+                        "raw_goal": {
+                            "external_impact": "external_state",
+                            "risk_types": ["unknown_external_effect"],
+                        }
+                    },
+                )
+
+                with self.assertRaises(TaskGraphError):
+                    DeepSeekTaskGraphPlanner(
+                        FakeProvider(payload, audit_payloads=[audit])
+                    ).plan(payload["goal"]["objective"], device_id="phone-1")
+
+    def test_global_unknown_is_not_covered_for_mixed_external_effects(self):
+        payload = message_send_payload()
+        payload["goal"]["objective"] = (
+            "向文件传输助手发送“你好”，并向商家支付1元。"
+        )
+        payload["completion_conditions"].append(
+            {
+                "condition_id": "payment_completed",
+                "description": "已向商家支付1元",
+                "evidence_required": ["支付成功结果可见"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        )
+        payload["risk_actions"].append(
+            {
+                "risk_id": "pay_merchant",
+                "description": "向商家支付1元",
+                "external_effect": "商家账户收到1元付款",
+                "risk_type": "transaction_or_payment",
+                "risk_level": "critical",
+                "subgoal_ids": ["pay_merchant"],
+                "confirmation_required": True,
+            }
+        )
+        payload["subgoals"].append(
+            {
+                "subgoal_id": "pay_merchant",
+                "objective": "商家已收到1元付款",
+                "status": "pending",
+                "depends_on": ["send_message"],
+                "constraints": ["付款金额必须为1元"],
+                "completion_conditions": ["支付成功结果可见"],
+                "completion_evidence": [],
+                "risk_action_ids": ["pay_merchant"],
+                "external_impact": "external_state",
+            }
+        )
+        audit = audit_payload_for_graph(
+            payload,
+            overrides={
+                "raw_goal": {
+                    "external_impact": "external_state",
+                    "risk_types": ["unknown_external_effect"],
+                }
+            },
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "unknown_external_effect"):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(payload, audit_payloads=[audit])
+            ).plan(payload["goal"]["objective"], device_id="phone-1")
+
     def test_message_entities_preserve_recipient_and_body_verbatim(self):
         payload = base_payload()
         payload["goal"]["entities"].update(

@@ -4457,11 +4457,88 @@ def _validate_graph_against_risk_audit(
     if global_impact == "unknown" and "unknown" not in graph_impacts:
         raise TaskGraphError("语义风险审计为 unknown 且任务图未声明匹配风险：全局目标。")
     missing_global = set(global_risk_types) - graph_risk_types
+    if (
+        missing_global == {"unknown_external_effect"}
+        and _concrete_message_risk_covers_global_unknown(
+            graph,
+            global_risk_types=set(global_risk_types),
+        )
+    ):
+        missing_global.clear()
     if missing_global:
         raise TaskGraphError(
             "语义风险审计要求任务图关联匹配风险："
             + ", ".join(sorted(missing_global))
         )
+
+
+def _concrete_message_risk_covers_global_unknown(
+    graph: DynamicTaskGraph,
+    *,
+    global_risk_types: set[str],
+) -> bool:
+    """Allow one concrete communication risk to cover only audit uncertainty.
+
+    Composite natural-language message goals can make the independent auditor
+    classify the raw sentence as ``unknown_external_effect`` while its other
+    global sources identify the concrete communication effect.  This exception
+    remains fail-closed: the graph must carry the exact recipient and body, all
+    external subgoals must bind only the communication risk, and deterministic
+    local semantics must independently identify the same concrete effect.
+    """
+
+    if global_risk_types != {
+        "message_or_communication",
+        "unknown_external_effect",
+    }:
+        return False
+    recipient = graph.goal.entities.get("recipient")
+    input_text = graph.goal.entities.get("input_text")
+    if not isinstance(recipient, str) or not recipient.strip():
+        return False
+    if not isinstance(input_text, str) or not input_text.strip():
+        return False
+
+    risks = {item.risk_id: item for item in graph.risk_actions}
+    if not risks or {item.risk_type for item in risks.values()} != {
+        "message_or_communication"
+    }:
+        return False
+    external_subgoals = tuple(
+        item for item in graph.subgoals if item.external_impact == "external_state"
+    )
+    if not external_subgoals or any(
+        item.external_impact == "unknown" for item in graph.subgoals
+    ):
+        return False
+    external_ids = {item.subgoal_id for item in external_subgoals}
+    for subgoal in external_subgoals:
+        if not subgoal.risk_action_ids:
+            return False
+        if any(
+            risk_id not in risks
+            or risks[risk_id].risk_type != "message_or_communication"
+            for risk_id in subgoal.risk_action_ids
+        ):
+            return False
+    if any(set(risk.subgoal_ids) != external_ids for risk in risks.values()):
+        return False
+
+    semantic_sources = [
+        condition.description for condition in graph.completion_conditions
+    ]
+    semantic_sources.extend(
+        evidence
+        for condition in graph.completion_conditions
+        for evidence in condition.evidence_required
+    )
+    for risk in risks.values():
+        semantic_sources.extend((risk.description, risk.external_effect))
+    for subgoal in external_subgoals:
+        semantic_sources.append(subgoal.objective)
+        semantic_sources.extend(subgoal.completion_conditions)
+    inferred = set(_infer_external_risk_types(*semantic_sources))
+    return inferred == {"message_or_communication"}
 
 
 def _aggregate_audit_assessments(

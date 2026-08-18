@@ -1305,3 +1305,36 @@ Qwen、adapter、DeepSeek、编排和 Web 关联回归 `898/898`，Python 完整
 离线结果：Launcher 目的地、Browser 结果页 lineage 及既有 App/Launcher 身份反例 `4/4`，DeepSeek
 与编排核心 `388/388`，observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `899/899`，
 Python 完整回归 `1484/1484`。完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。
+
+## 40. 完成事实齐全但任务图状态仍为 running
+
+### 40.1 验收台账与根因证据
+
+- 加载第 39 项修复后的 Settings session `9dc44fbbec1e42738ae4c5f649e95f4e` 在同一会话内
+  完成打开设置与 Home 两个真实动作；两次均 `matched`，最终 after scene 为稳定的
+  `launcher/home_screen`，`physical_actions=2`。
+- 动作后 DeepSeek 修订被 `DynamicTaskGraph.validate()` 以“可推进任务图必须且只能有一个活动子目标”
+  拒绝；该错误发生在模型候选已经经过 verified navigation completion 与 unique frontier 规范化之后，
+  不是物理动作、Qwen、Launcher 识别或第 39 项 App 身份规则失败。
+- 主要根因是本地唯一前沿规范化只覆盖进行态中的唯一可运行节点，没有覆盖“所有节点已终结、全部全局
+  条件已有证据、active=null，但模型只把 status 遗留为 running”的唯一终态枚举不一致。
+
+### 40.2 同类样本、通用修复与边界
+
+- 正样本为任意 App 导航链完成后，所有子目标均为 `completed/skipped`、所有全局条件 satisfied 且有
+  evidence、无 active pointer、无 clarification，但 graph status 仍为进行态。
+- 本地只把上述候选的 `status` 规范化为 `completed`，不增加、删除或改写任何子目标、完成条件、证据、
+  App、动作或风险事实；这是由现有字段唯一决定的单枚举修复。
+- 任一子目标仍 pending/active/blocked、任一全局条件未满足或缺证据、active pointer 残留、存在澄清问题，
+  都不规范化并继续由严格 validator 拒绝；不能把部分完成或歧义状态伪造成成功。
+
+### 40.3 验证与停止条件
+
+- 新增唯一终态正测，以及 pending、未满足条件、残留 active pointer、澄清问题四类反测；再运行
+  DeepSeek/编排核心、关联回归和一次完整 Python 回归。
+- 全绿后本地提交并只重载项目 Uvicorn；不恢复旧 blocked session。建立一个新的第三 App 会话，任一
+  真实动作失败即停止；只有同会话至少两个 matched 动作且最终 succeeded 才计入阶段 3。
+
+离线结果：唯一终态正测与四类未决事实反例 `2/2`，DeepSeek 与编排核心 `390/390`，observer、
+Qwen、DeepSeek、编排和 Web 关联回归 `870/870`，Python 完整回归 `1486/1486`。完整回归只有
+既知测试子进程 `ResourceWarning`，无断言失败。

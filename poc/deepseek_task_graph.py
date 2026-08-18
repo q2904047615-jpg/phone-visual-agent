@@ -2528,6 +2528,27 @@ def _normalize_unique_active_frontier(graph: DynamicTaskGraph) -> DynamicTaskGra
 
     if graph.status not in {"ready", "running", "awaiting_confirmation"}:
         return graph
+    # When every semantic node is already terminal and every global condition
+    # carries completion evidence, the only coherent graph status is
+    # ``completed``.  Repair that one enum value locally instead of rejecting a
+    # model response whose facts already prove the terminal state.  Any stale
+    # active pointer, unfinished node, clarification or unsatisfied condition
+    # remains ambiguous and continues through the strict validator unchanged.
+    if (
+        graph.active_subgoal_id is None
+        and graph.subgoals
+        and not graph.clarification_questions
+        and all(
+            item.status in {"completed", "skipped"}
+            for item in graph.subgoals
+        )
+        and graph.completion_conditions
+        and all(
+            item.satisfied and item.evidence
+            for item in graph.completion_conditions
+        )
+    ):
+        return replace(graph, status="completed")
     completed_ids = {
         item.subgoal_id for item in graph.subgoals if item.status == "completed"
     }

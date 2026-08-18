@@ -11,7 +11,9 @@ from deepseek_task_graph import (
     VerifiedActionTransition,
     _compact_identity_text,
     _infer_external_risk_types,
+    _graph_from_payload,
     _named_visual_identity_anchor,
+    _normalize_unique_active_frontier,
     _quoted_visual_identity_anchor,
     _require_named_visual_identity_grounding,
     named_visual_identity_is_grounded,
@@ -606,6 +608,81 @@ def message_send_payload():
 
 
 class DeepSeekTaskGraphTests(unittest.TestCase):
+    def test_normalizes_uniquely_terminal_graph_status(self):
+        payload = base_payload()
+        payload["status"] = "running"
+        payload["active_subgoal_id"] = None
+        payload["completion_conditions"][0].update(
+            satisfied=True,
+            evidence=["页面显示已收藏状态"],
+        )
+        for item in payload["subgoals"]:
+            item["status"] = "completed"
+            item["completion_evidence"] = [
+                f"verified completion for {item['subgoal_id']}"
+            ]
+        graph = _graph_from_payload(
+            payload,
+            task_id="task-terminal-status",
+            device_id="phone-1",
+            revision=2,
+            raw_user_goal="在地图应用中找到图书馆并保存地点",
+        )
+
+        normalized = _normalize_unique_active_frontier(graph)
+
+        self.assertEqual("completed", normalized.status)
+        self.assertIsNone(normalized.active_subgoal_id)
+        normalized.validate()
+
+    def test_terminal_status_normalization_rejects_any_unfinished_fact(self):
+        variants = []
+        base = base_payload()
+        base["status"] = "running"
+        base["active_subgoal_id"] = None
+        base["completion_conditions"][0].update(
+            satisfied=True,
+            evidence=["页面显示已收藏状态"],
+        )
+        for item in base["subgoals"]:
+            item["status"] = "completed"
+            item["completion_evidence"] = [
+                f"verified completion for {item['subgoal_id']}"
+            ]
+
+        pending = copy.deepcopy(base)
+        pending["subgoals"][1].update(status="pending", completion_evidence=[])
+        variants.append(pending)
+
+        unsatisfied = copy.deepcopy(base)
+        unsatisfied["completion_conditions"][0].update(
+            satisfied=False,
+            evidence=[],
+        )
+        variants.append(unsatisfied)
+
+        stale_active = copy.deepcopy(base)
+        stale_active["active_subgoal_id"] = "save_target"
+        variants.append(stale_active)
+
+        clarification = copy.deepcopy(base)
+        clarification["clarification_questions"] = ["需要确认完成状态"]
+        variants.append(clarification)
+
+        for index, payload in enumerate(variants, start=1):
+            with self.subTest(index=index):
+                graph = _graph_from_payload(
+                    payload,
+                    task_id=f"task-terminal-negative-{index}",
+                    device_id="phone-1",
+                    revision=2,
+                    raw_user_goal="在地图应用中找到图书馆并保存地点",
+                )
+                normalized = _normalize_unique_active_frontier(graph)
+                self.assertEqual("running", normalized.status)
+                with self.assertRaises(TaskGraphError):
+                    normalized.validate()
+
     def test_specific_message_risk_covers_only_global_unknown_audit_uncertainty(self):
         payload = message_send_payload()
         audit = audit_payload_for_graph(

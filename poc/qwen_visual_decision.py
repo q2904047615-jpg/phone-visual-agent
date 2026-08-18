@@ -1568,6 +1568,43 @@ def _decision_observation_prompt_dict(
     return value
 
 
+def _scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> bool:
+    """Bind a typed App surface to a real package or a strict page title."""
+
+    foreground = str(scene.foreground_app_id or "").strip().casefold()
+    target_app_id = str(getattr(target_surface, "app_id", "") or "").strip().casefold()
+    if not foreground or foreground == "unknown" or not target_app_id:
+        return False
+    if foreground == target_app_id:
+        return True
+
+    def package_leaf(value: str) -> str:
+        parts = tuple(part for part in value.split(".") if part)
+        return parts[-1] if parts else ""
+
+    foreground_leaf = package_leaf(foreground)
+    target_leaf = package_leaf(target_app_id)
+    if foreground_leaf and foreground_leaf == target_leaf:
+        return True
+
+    app_name = str(getattr(target_surface, "app_name", "") or "").strip().casefold()
+    if not app_name:
+        return False
+    title_matches = tuple(
+        element
+        for element in scene.elements
+        if element.role in {"text", "container"}
+        and any(
+            marker in str(element.meaning or "").strip().casefold()
+            for marker in ("page_title", "title", "heading", "app_header")
+        )
+        and str(element.label or "").strip().casefold() == app_name
+        and float(element.confidence) >= MIN_TARGET_CONFIDENCE
+        and element.states.get("fully_visible") is True
+    )
+    return len(title_matches) == 1
+
+
 def _selection_choices(
     context: QwenTaskContext,
     observation: TrustedObservation,
@@ -1628,8 +1665,10 @@ def _selection_choices(
             target_surface is not None
             and target_surface.kind == "app"
             and not current_is_launcher
-            and observation.scene.foreground_app_id.casefold()
-            != target_surface.app_id.casefold()
+            and not _scene_matches_target_app_surface(
+                observation.scene,
+                target_surface,
+            )
         )
 
     def formal_candidate(

@@ -1126,3 +1126,40 @@ constraint、Qwen 与 visual authority `145/145`，observer、Qwen、adapter、D
 离线结果：现场 scene identity 与 Launcher/错误前台/无关元素反例 `4/4`，DeepSeek 与编排核心
 `386/386`，observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `895/895`，Python 完整回归
 `1480/1480`。完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。
+
+## 35. 语义 App ID 与真实包名被误判为跨 App
+
+### 35.1 验收台账与根因证据
+
+- 提交 `f2224de` 加载后的 Settings session `b20c7126746746b2b2c44087eb4f7ae5` 已在 0 动作下
+  连续完成 `open_settings`、`find_search_box`，revision `1→3`，证明第 34 项页面身份修复在线生效；
+  当前输入框 `e2` 完整可见、空值且未聚焦。
+- 用该 session 的真实 revision 3 task graph 和 trusted scene 离线重放，正式 visual authority 实际含
+  `tap_semantic(element_id=e2)`；否定过滤投影也保留 e2。但 `_selection_choices()` 最终只留下 Home。
+- 根因是跨 surface 门直接比较 `scene.foreground_app_id == target_surface.app_id`：真实前台为
+  `com.android.settings`，TaskSemanticIR 的稳定语义 App ID 为 `settings`，二者不逐字相等就被误判为
+  “当前在其他 App”，强制只给 Home。主要根因是 App 身份表示层不一致，不是 Qwen、输入框、约束或
+  formal candidate 缺失；本次仍为 0 物理动作。
+
+### 35.2 同类样本、通用修复与边界
+
+- App surface 匹配改为本地结构化 identity：优先完整 app_id 相等；否则允许稳定语义 ID 与真实包名的
+  **末级包组件**精确相等；再否则只允许非 Launcher 当前页中，唯一完整可见的 page title/heading
+  逐字等于 target App name。不能用任意正文、按钮、输入框或部分字符串证明 App 身份。
+- 变化样本覆盖 `settings→com.android.settings`、`browser→com.android.browser` 和带中文 App 标题的
+  非同名包；反例覆盖 Camera 前台、`browser_tools`/`settings_helper` 等近似包名、Launcher 上同名图标、
+  页面正文仅提到目标 App。无法唯一证明时仍只允许 Home 重新建立 Launcher 起点。
+- 不增加已知 App 映射表或 App 名称分支；该 helper 只回答“当前 surface 是否就是 typed target App”，
+  不创建动作、不改变候选或完成状态。
+
+### 35.3 验证与停止条件
+
+- 用现场 task graph/scene 形状证明正式 choices 含唯一 input 聚焦 tap 且未聚焦时不含正文输入；既有
+  cross-surface Home-only 反例必须继续通过。
+- 运行 Qwen/visual authority/编排/observer/adapter/Web 相关回归及一次完整 Python 回归，静态编译与
+  diff-check 全绿后本地提交并只重载 Uvicorn。旧 session 不恢复；相同 Settings 原目标只再建立一个
+  新 session，任一物理动作失败立即停止。
+
+离线结果：现场 package/semantic ID 与近似包名/正文误提反例 `4/4`，Qwen 全模块 `106/106`，
+observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `896/896`，Python 完整回归 `1481/1481`。
+完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。

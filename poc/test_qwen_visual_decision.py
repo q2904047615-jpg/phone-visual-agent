@@ -17,6 +17,7 @@ from qwen_visual_decision import (
     QwenVisualDecisionObserver,
     TrustedObservation,
     _decision_retry_prompt,
+    _scene_matches_target_app_surface,
     _selection_choices,
 )
 from ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
@@ -461,6 +462,56 @@ class QwenVisualDecisionTests(unittest.TestCase):
             frozenset({"home", "tap_semantic"}),
         )
         self.assertEqual(["home"], [item["action"] for item in choices])
+
+    def test_target_app_surface_rejects_near_package_and_non_title_mentions(self) -> None:
+        target = SimpleNamespace(app_id="settings", app_name="设置")
+        exact_package = scene_for(
+            self.frames,
+            app_id="com.android.settings",
+            screen_id="settings_main",
+            elements=(),
+        )
+        self.assertTrue(_scene_matches_target_app_surface(exact_package, target))
+
+        opaque_package_with_title = scene_for(
+            self.frames,
+            app_id="com.vendor.controlcenter",
+            screen_id="main",
+            elements=(
+                UIElement(
+                    element_id="title",
+                    role="text",
+                    meaning="page_title",
+                    label="设置",
+                    bounds=(0.1, 0.05, 0.4, 0.12),
+                    confidence=0.98,
+                    states={"fully_visible": True},
+                ),
+            ),
+        )
+        self.assertTrue(
+            _scene_matches_target_app_surface(opaque_package_with_title, target)
+        )
+
+        near_package_with_body_mention = scene_for(
+            self.frames,
+            app_id="com.android.settings_helper",
+            screen_id="helper_main",
+            elements=(
+                UIElement(
+                    element_id="body-mention",
+                    role="text",
+                    meaning="body_text",
+                    label="设置",
+                    bounds=(0.1, 0.2, 0.4, 0.26),
+                    confidence=0.98,
+                    states={"fully_visible": True},
+                ),
+            ),
+        )
+        self.assertFalse(
+            _scene_matches_target_app_surface(near_package_with_body_mention, target)
+        )
 
     def test_recipient_exact_text_applies_only_to_bound_subgoal(self) -> None:
         context = task_context()
@@ -1146,7 +1197,14 @@ class QwenVisualDecisionTests(unittest.TestCase):
             device_id="offline_phone_01",
             revision=3,
             raw_goal=raw_goal,
-            surfaces=(SurfaceRef("surface_settings", "current_surface"),),
+            surfaces=(
+                SurfaceRef(
+                    "surface_settings",
+                    "app",
+                    app_id="settings",
+                    app_name="设置",
+                ),
+            ),
             entities=(payload,),
             effects=(effect,),
             constraints=(required_action,),
@@ -1196,7 +1254,25 @@ class QwenVisualDecisionTests(unittest.TestCase):
             },
             evidence=("应用输入框为空", "search icon"),
         )
-        observation = trusted_observation(self.frames, elements=(field,))
+        page_title = UIElement(
+            element_id="page-title",
+            role="text",
+            meaning="page_title",
+            label="设置",
+            bounds=(0.12, 0.08, 0.3, 0.14),
+            confidence=1.0,
+            states={"goal_relevant": False, "fully_visible": True},
+        )
+        observation = trusted_observation(
+            self.frames,
+            scene=scene_for(
+                self.frames,
+                elements=(field, page_title),
+                app_id="com.android.settings",
+                screen_id="settings_main",
+                summary="设置主页面",
+            ),
+        )
 
         choices = _selection_choices(
             parsed,

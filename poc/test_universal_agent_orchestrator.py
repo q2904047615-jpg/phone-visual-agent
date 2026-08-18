@@ -2784,6 +2784,113 @@ class ObservationBridgeTests(unittest.TestCase):
             focus["completion_conditions"],
         )
 
+    def test_current_open_app_node_projects_exact_app_label_without_mutating_graph(self) -> None:
+        for app_id, app_name, verb in (
+            ("browser", "浏览器", "打开"),
+            ("music", "音乐", "启动"),
+        ):
+            with self.subTest(app_id=app_id):
+                graph = replace(
+                    _graph(),
+                    goal=GraphGoal(
+                        objective=f"先{verb}{app_name}，再读取页面标题",
+                        target_apps=(TargetApp(app_id=app_id, app_name=app_name),),
+                        entities={"target_surface": "device"},
+                    ),
+                    subgoals=(
+                        replace(
+                            _graph().subgoals[0],
+                            subgoal_id=f"open_{app_id}",
+                            objective=f"{verb}{app_name}",
+                            completion_conditions=(f"{app_name}主界面可见",),
+                        ),
+                    ),
+                    active_subgoal_id=f"open_{app_id}",
+                )
+                graph.validate()
+
+                goal = self.bridge.goal_draft(graph)
+                focus = goal.entities["active_subgoal_visual_context"]
+
+                self.assertEqual(app_name, focus["goal_entities"]["target_ui_label"])
+                self.assertNotIn("target_ui_label", graph.goal.entities)
+
+    def test_multi_app_node_projects_only_the_uniquely_referenced_current_app(self) -> None:
+        graph = replace(
+            _graph(),
+            goal=GraphGoal(
+                objective="依次查看浏览器和音乐",
+                target_apps=(
+                    TargetApp(app_id="browser", app_name="浏览器"),
+                    TargetApp(app_id="music", app_name="音乐"),
+                ),
+                entities={"target_surface": "device"},
+            ),
+            subgoals=(
+                replace(
+                    _graph().subgoals[0],
+                    objective="启动音乐",
+                    completion_conditions=("音乐主界面可见",),
+                ),
+            ),
+        )
+        graph.validate()
+
+        focus = self.bridge.goal_draft(graph).entities["active_subgoal_visual_context"]
+
+        self.assertEqual("音乐", focus["goal_entities"]["target_ui_label"])
+
+    def test_non_entry_ambiguous_and_reference_nodes_do_not_project_app_label(self) -> None:
+        cases = (
+            (
+                "read",
+                (TargetApp(app_id="browser", app_name="浏览器"),),
+                "读取浏览器页面标题",
+                "read_only",
+            ),
+            (
+                "ambiguous",
+                (
+                    TargetApp(app_id="browser", app_name="浏览器"),
+                    TargetApp(app_id="music", app_name="音乐"),
+                ),
+                "打开浏览器或音乐",
+                "navigation_only",
+            ),
+            (
+                "reference",
+                (TargetApp(app_id="current_foreground", app_name="当前前台应用"),),
+                "打开当前前台应用",
+                "navigation_only",
+            ),
+            (
+                "home",
+                (TargetApp(app_id="browser", app_name="浏览器"),),
+                "返回手机桌面",
+                "navigation_only",
+            ),
+        )
+        for name, target_apps, objective, impact in cases:
+            with self.subTest(name=name):
+                graph = replace(
+                    _graph(),
+                    goal=replace(_graph().goal, target_apps=target_apps),
+                    subgoals=(
+                        replace(
+                            _graph().subgoals[0],
+                            objective=objective,
+                            external_impact=impact,
+                        ),
+                    ),
+                )
+                graph.validate()
+
+                focus = self.bridge.goal_draft(graph).entities[
+                    "active_subgoal_visual_context"
+                ]
+
+                self.assertNotIn("target_ui_label", focus["goal_entities"])
+
     def test_builds_observed_state_only_from_visible_evidence(self) -> None:
         scene = _scene()
         observation = SimpleNamespace(

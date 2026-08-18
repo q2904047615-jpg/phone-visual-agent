@@ -370,6 +370,68 @@ class AgentEvidenceStore:
 class ObservationBridge:
     """Translate protocol objects without inventing actions or business flow."""
 
+    _APP_REFERENCE_IDS = frozenset(
+        {
+            "unknown",
+            "current_foreground",
+            "current_app",
+            "foreground_app",
+            "target_app",
+            "active_app",
+        }
+    )
+
+    @classmethod
+    def _active_app_entry_target_label(
+        cls,
+        graph: DynamicTaskGraph,
+        active: Any,
+    ) -> str:
+        """Project one typed App name into the current observation node only.
+
+        The task graph owns App identity while the scene owns geometry and
+        visibility.  This projection only preserves which named App the active
+        navigation node refers to; it cannot create an element or authorize an
+        action.  Missing or ambiguous references remain empty and fail closed.
+        """
+
+        if active is None or active.external_impact != "navigation_only":
+            return ""
+        objective = str(active.objective or "").strip()
+        if not objective:
+            return ""
+
+        eligible_apps = [
+            app
+            for app in graph.goal.target_apps
+            if str(app.app_name or "").strip()
+            and str(app.app_id or "").strip().casefold() not in cls._APP_REFERENCE_IDS
+        ]
+        mentioned_apps = [
+            app
+            for app in eligible_apps
+            if str(app.app_name or "").strip().casefold() in objective.casefold()
+        ]
+        if len(mentioned_apps) != 1:
+            return ""
+
+        matches: list[str] = []
+        for app in mentioned_apps:
+            app_id = str(app.app_id or "").strip().casefold()
+            app_name = str(app.app_name or "").strip()
+            assert app_name and app_id not in cls._APP_REFERENCE_IDS
+            literal = re.escape(app_name)
+            patterns = (
+                rf"(?:打开|进入|启动|切换到|切至|前往)\s*(?:应用|app)?\s*{literal}",
+                rf"{literal}\s*(?:应用)?\s*(?:已打开|已启动|主界面可见|首页可见)",
+                rf"(?<![a-z0-9_])(?:open|launch|enter|go\s+to|switch\s+to)\s+"
+                rf"(?:the\s+)?(?:app\s+)?{literal}(?![a-z0-9_])",
+            )
+            if any(re.search(pattern, objective, flags=re.IGNORECASE) for pattern in patterns):
+                matches.append(app_name)
+        unique = tuple(dict.fromkeys(matches))
+        return unique[0] if len(unique) == 1 else ""
+
     def goal_draft(self, graph: DynamicTaskGraph) -> GenericIntentDraft:
         graph.validate()
         if not graph.goal.target_apps:
@@ -390,13 +452,17 @@ class ObservationBridge:
         if graph.raw_user_goal.strip():
             entities["original_goal_visual_context"] = graph.raw_user_goal.strip()
         if active is not None:
+            active_goal_entities = dict(graph.goal.entities)
+            active_app_label = self._active_app_entry_target_label(graph, active)
+            if active_app_label:
+                active_goal_entities["target_ui_label"] = active_app_label
             entities["active_subgoal_visual_context"] = {
                 "subgoal_id": active.subgoal_id,
                 "objective": active.objective,
                 "constraints": list(active.constraints),
                 "completion_conditions": list(active.completion_conditions),
                 "external_impact": active.external_impact,
-                "goal_entities": dict(graph.goal.entities),
+                "goal_entities": active_goal_entities,
             }
         entities["target_apps"] = [
             {"app_id": item.app_id, "app_name": item.app_name}

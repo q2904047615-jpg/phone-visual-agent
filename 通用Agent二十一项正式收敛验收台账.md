@@ -412,3 +412,47 @@ Python 完整回归 `1446/1446`；静态编译和差异检查通过。完整回�
 离线结果：observer/identity 定向 `199/199`，观察、几何、adapter、通用 mock 与编排相关
 `498/498`，Python 完整回归 `1449/1449`；完整回归只有既知测试子进程 `ResourceWarning`，无断言
 失败。静态编译与差异检查通过，observer 版本更新为 v58。
+
+## 17. 当前打开 App 节点没有形成逐字视觉目标
+
+### 17.1 验收台账与根因证据
+
+- 阶段 3 当前缺口仍是：在一个全新 Browser 会话中，从 Launcher 打开 Browser、读取打开后页面
+  的主标题或错误提示、再返回 Launcher，并以同一会话 `succeeded` 和逐动作 matched receipt 证明。
+- v58 全新会话 `54efb63b307040a1b0375d0e2725272b` 只执行了 1 次 Home 且 matched；进入
+  `open_browser` 后，真实画面上“浏览器”入口可见，Qwen 决策也逐字说明看见它，但可信 scene 和
+  本地 choices 只包含设置、电话、信息、相机，因此 Qwen 正确 blocked，Browser 点击为 0 动作。
+- `ObservationBridge.goal_draft()` 把根 `goal.entities` 原样复制给每个活动节点。任务图虽然有类型化
+  `target_apps=[browser/浏览器]`，当前节点也明确为“打开浏览器”，但活动观察上下文没有
+  `target_ui_label=浏览器`；已有唯一逐字标签归一化和正式 `binds_surface` 因而没有可用的节点级绑定。
+  这是多 App 任务中“当前节点指向哪个 App”的通用语义投影缺口，不是 Browser 名称或坐标特例。
+
+### 17.2 同类样本、通用修复与回滚
+
+- 现场样本：单目标 App 的当前节点“打开浏览器”；变化样本：多目标 App 任务中当前节点唯一写明
+  “启动音乐”。两者都应只在当前节点观察上下文得到对应逐字 App 标签。
+- 反向样本：当前节点是“读取浏览器标题”或“返回桌面”、节点同时提到多个目标 App、目标为
+  `current_foreground` 等引用占位符、画面中同名元素缺失或重复，均不得形成可执行绑定。
+- 通用修复：本地只读投影从任务图的目标 App 集合中找出“当前 navigation_only 节点以打开/进入/
+  启动/切换到/前往语义唯一指向”的一个 App，把其 `app_name` 写入该节点副本的
+  `goal_entities.target_ui_label`。不修改持久化任务图、根 entities、Qwen 决策或动作 authority。
+- 观察器继续只接受唯一逐字同名元素；该修复不会补 geometry、confidence、fully_visible、evidence，
+  更不会生成坐标。后续独立 geometry、确认前 fresh observation、IoU、policy 和一次一动作门禁保持不变。
+  回滚只需移除节点级投影 helper，不影响任务图 schema、模型协议和历史会话。
+
+### 17.3 验证清单与停止条件
+
+- 正测当前“打开浏览器/启动音乐”得到节点级逐字标签；正测多 App 中仅当前唯一 App 被选中。
+- 反测后续读取、Home、多个 App 同时被提及、引用占位 App 均不添加标签；持久化
+  `graph.goal.entities` 不得被修改。复用 observer 现有正反合同证明唯一同名可纠正 relevance，重复同名
+  仍不产生唯一可信目标。
+- 先运行 ObservationBridge、observer、visual shadow 和编排最小回归，再运行本批一次完整 Python
+  回归、静态编译和 `git diff --check`。全部通过后本地提交，只重载项目 Uvicorn。
+- 重载后先做 0 动作设备/服务门检查，再用原 Browser 目标建立全新 session；旧 blocked session、
+  observation 和 scope 全部不复用。若 Browser 仍未进入唯一完整候选，本轮停止并保存新的模型响应证据，
+  不放宽唯一性或可见性，也不试探性点击。
+
+离线结果：节点投影、唯一/重复标签及 surface binding 定向 `11/11`；ObservationBridge、observer、
+visual shadow 与 TaskSemanticIR 相关回归 `409/409`；Python 完整回归 `1452/1452`。完整回归只有
+既知测试子进程 `ResourceWarning`，无断言失败。静态编译与差异检查通过；未修改任务图 schema、
+模型输出协议、坐标、风险或机械臂层。

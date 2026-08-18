@@ -5109,14 +5109,15 @@ class UniversalAgentOrchestrator:
                         self._bind_risk_confirmation(session)
                         self._write_terminal_snapshot(session)
                         return session
-                    if impact == "read_only":
-                        session.status = "needs_reobservation"
-                        session.failed_reason = (
-                            "同一可信画面最多推进一个可见状态子目标；"
-                            "必须重新观察后再继续。"
-                        )
-                        self._write_terminal_snapshot(session)
-                        return session
+                    session.status = "needs_reobservation"
+                    session.failed_reason = (
+                        "可见状态证据已切换活动子目标；必须按新子目标重新观察，"
+                        "不得复用旧目标条件下的候选清单。"
+                    )
+                    session.controller_decision = None
+                    session.confirmation_authority = None
+                    self._write_terminal_snapshot(session)
+                    return session
 
             task_context_payload = graph.to_qwen_context()
             task_context = QwenTaskContext.from_dict(task_context_payload)

@@ -3502,12 +3502,11 @@ class UniversalAgentStartTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
 
-        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual("needs_reobservation", session.status)
         self.assertEqual(2, session.task_graph.revision)
         self.assertEqual("replace-input", session.task_graph.active_subgoal_id)
         self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
-        self.assertEqual(1, len(qwen.calls))
-        self.assertEqual(2, qwen.calls[0][1]["revision"])
+        self.assertEqual(0, len(qwen.calls))
         self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
@@ -3530,7 +3529,8 @@ class UniversalAgentStartTests(unittest.TestCase):
         self.assertEqual(2, session.task_graph.revision)
         self.assertEqual("move-source", session.task_graph.active_subgoal_id)
         self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
-        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(0, len(qwen.calls))
+        self.assertEqual("needs_reobservation", session.status)
         self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
@@ -3675,14 +3675,14 @@ class UniversalAgentStartTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
 
-        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual("needs_reobservation", session.status)
         self.assertEqual(2, session.task_graph.revision)
         self.assertEqual("show-target-page", session.task_graph.active_subgoal_id)
         self.assertEqual(
             ["observation_changed"],
             [call[2] for call in planner.replan_calls],
         )
-        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(0, len(qwen.calls))
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
 
@@ -4795,7 +4795,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
 
-        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual("needs_reobservation", session.status)
         self.assertEqual("safe-followup", session.task_graph.active_subgoal_id)
         self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
         self.assertEqual(0, session.physical_actions)
@@ -5264,7 +5264,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
 
-        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual("needs_reobservation", session.status)
         self.assertEqual(2, session.task_graph.revision)
         self.assertEqual("replace-input", session.task_graph.active_subgoal_id)
         self.assertEqual(1, len(planner.replan_calls))
@@ -5509,6 +5509,8 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
                 device_id="device-1",
                 run_dir=Path(temp),
             )
+            self.assertEqual("needs_reobservation", session.status)
+            orchestrator.refresh_decision(session)
             self.assertEqual("awaiting_confirmation", session.status)
             self.assertEqual(0, session.physical_actions)
             orchestrator.confirm_one(session, _confirmation(session))
@@ -5696,8 +5698,8 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         self.assertEqual(3, session.task_graph.revision)
         self.assertEqual("target-page-visible", session.task_graph.active_subgoal_id)
         self.assertEqual(2, len(planner.replan_calls))
-        self.assertEqual(1, len(qwen.calls))
-        self.assertEqual(3, qwen.calls[0][1]["revision"])
+        self.assertEqual(0, len(qwen.calls))
+        self.assertEqual("needs_reobservation", session.status)
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
 
@@ -5803,9 +5805,8 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         self.assertEqual(2, session.task_graph.revision)
         self.assertEqual("second-page-visible", session.task_graph.active_subgoal_id)
         self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
-        self.assertEqual(1, len(qwen.calls))
-        self.assertEqual(2, qwen.calls[0][1]["revision"])
-        self.assertEqual("second-page-visible", qwen.calls[0][1]["current_subgoal"]["subgoal_id"])
+        self.assertEqual(0, len(qwen.calls))
+        self.assertEqual("needs_reobservation", session.status)
         self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)

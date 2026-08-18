@@ -1163,3 +1163,40 @@ constraint、Qwen 与 visual authority `145/145`，observer、Qwen、adapter、D
 离线结果：现场 package/semantic ID 与近似包名/正文误提反例 `4/4`，Qwen 全模块 `106/106`，
 observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `896/896`，Python 完整回归 `1481/1481`。
 完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。
+
+## 36. 可见前缀切换子目标后复用旧目标观察
+
+### 36.1 验收台账与根因证据
+
+- 提交 `d714264` 加载后的 Settings session `a5e340a622bf47029e65c72ef92bf5f7`
+  在 0 物理动作处完成 `open_settings` 并将活动节点切到 `find_search_box`，随后 blocked。
+- 该 session 复用了为 `open_settings` 目标条件生成的同一份观察。旧观察足以证明设置页在前台，
+  但没有按新的 `find_search_box` 目标重新生成完整输入候选；因此新的 presence 检查缺少对应的
+  goal-conditioned authority，不能继续推进。
+- 主要根因是**活动子目标发生变化却复用旧目标条件下的候选清单**。这与 App 名称、输入框标签、
+  坐标、模型措辞或机械臂无关；动作后切换子目标原本已经要求重新观察，唯独 0 动作可见前缀缺少
+  同一条边界。本次 session 无 confirmation scope、无物理动作。
+
+### 36.2 同类样本、通用修复与边界
+
+- 现场样本是 `open_settings → find_search_box`；变化样本覆盖“列表页已可见→定位下一列表项”、
+  “目标页面已可见→定位输入框”和“只读检查点完成→后续输入节点”。它们都要求新活动节点取得
+  一次新的四帧观察，不能复用上一节点的候选与 `goal_relevant` 标记。
+- `_advance_visible_presence_prefix` 只要安全推进后改变活动 subgoal，就进入
+  `needs_reobservation`，清除旧 Qwen 决策和 confirmation authority，并在新观察前停止；若任务图
+  已完成、进入风险阶段或没有活动节点，则保留原有终态流程。
+- 该修复不增加 App、控件、命令或坐标分支，也不放宽模型协议；它统一 0 动作推进与动作后推进的
+  observation 生命周期。重新观察后仍须通过原 presence、visual authority、policy 与确认门禁。
+
+### 36.3 验证与停止条件
+
+- 正测：可见前缀推进到新活动节点时不调用 Qwen，状态为 `needs_reobservation`；刷新后以新 subgoal
+  捕获四帧并产生对应决策。反测：未改变活动节点的普通动作前会话仍保持 `awaiting_confirmation`，
+  动作后既有 goal-conditioned reobservation 行为不变。
+- 运行 DeepSeek/编排核心、observer/Qwen/adapter/Web 关联回归和一次完整 Python 回归；全部通过、
+  静态编译与 diff-check 无误后本地提交并只重载项目 Uvicorn。旧 0 动作 session 不恢复；相同
+  Settings 原目标只建立一个全新 session，任一真实物理动作失败立即停止且不自动重试。
+
+离线结果：DeepSeek 与编排核心 `386/386`，observer、Qwen、adapter、DeepSeek、编排和 Web 关联
+回归 `896/896`，Python 完整回归 `1481/1481`。完整回归只有既知测试子进程 `ResourceWarning`，
+无断言失败。

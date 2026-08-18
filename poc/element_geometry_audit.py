@@ -21,6 +21,7 @@ LITERAL_ROI_WIDTH_TARGET_SCALE = 1.50
 LITERAL_ROI_HEIGHT_TARGET_SCALE = 3.00
 DEFAULT_INTERNAL_EDGE_MARGIN = 20.0
 MAX_GEOMETRY_MATCHES = 8
+MAX_GEOMETRY_LITERAL_LABELS = 8
 
 ALLOWED_VISUAL_ROLES = frozenset(
     {
@@ -379,7 +380,7 @@ def parse_element_geometry_audit(
         )
     )
     if (
-        len(allowed_scene_labels) > 8
+        len(allowed_scene_labels) > MAX_GEOMETRY_LITERAL_LABELS
         or any(len(item) > 200 for item in allowed_scene_labels)
     ):
         raise ElementGeometryAuditError("visible_literal_labels 无效。")
@@ -571,7 +572,7 @@ def element_geometry_audit_prompt(
         )
     )
     if (
-        len(allowed_labels) > 8
+        len(allowed_labels) > MAX_GEOMETRY_LITERAL_LABELS
         or any(len(item) > 200 for item in allowed_labels)
     ):
         raise ElementGeometryAuditError("visible_literal_labels 无效。")

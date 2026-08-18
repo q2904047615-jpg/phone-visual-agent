@@ -57,7 +57,7 @@ from verified_text_transaction import (
 )
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-18-generic-scene-observer-v53"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v54"
 TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
     "2026-08-18-foreground-app-identity-audit-v1"
@@ -171,6 +171,34 @@ def _can_use_stable_ocr_literal_bounds(role: str, label: str) -> bool:
     )
 
 
+def _geometry_evidence_literal_labels(
+    scene: UIScene,
+    *,
+    target_element_id: str,
+    evidence: str,
+) -> tuple[str, ...]:
+    """Expose only literal labels that the selected evidence actually cites."""
+
+    target = scene.get_element(target_element_id)
+    selected: list[str] = []
+    target_label = str(target.label or "").strip()
+    if target_label:
+        selected.append(target_label)
+    evidence_text = str(evidence or "")
+    for item in scene.elements:
+        label = str(item.label or "").strip()
+        if (
+            label
+            and label in evidence_text
+            and label not in selected
+        ):
+            selected.append(label)
+    # Do not truncate a genuinely dense evidence statement. Passing the full
+    # set lets the strict geometry contract reject it instead of silently
+    # changing which visible words are considered trustworthy.
+    return tuple(selected)
+
+
 class GenericSceneObserver:
     """Qwen reports the current scene; it never chooses or executes actions."""
 
@@ -249,21 +277,23 @@ class GenericSceneObserver:
             source_ref = f"geom-{source_digest[:24]}"
             prompt = None
             selected_evidence = ""
-            visible_literal_labels = tuple(
-                item.label
-                for item in scene.elements
-                if item.label
-            )
+            visible_literal_labels: tuple[str, ...] = ()
             for evidence in element.evidence:
                 try:
+                    evidence_literal_labels = _geometry_evidence_literal_labels(
+                        scene,
+                        target_element_id=element_id,
+                        evidence=evidence,
+                    )
                     prompt = element_geometry_audit_prompt(
                         source_ref=source_ref,
                         literal_label=element.label,
                         visual_role=element.role,
                         visible_evidence=evidence,
-                        visible_literal_labels=visible_literal_labels,
+                        visible_literal_labels=evidence_literal_labels,
                     )
                     selected_evidence = evidence
+                    visible_literal_labels = evidence_literal_labels
                     break
                 except ElementGeometryAuditError:
                     continue

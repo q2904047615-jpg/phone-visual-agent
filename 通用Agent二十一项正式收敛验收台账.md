@@ -162,5 +162,56 @@ effect、claim、relation、fresh observation、geometry 和 capability。`goal_
   报越权执行细节。修复只在这些正反样本和 DeepSeek/编排相关回归通过后重新加载；不得直接
   重发在线请求试错。
 - 离线结果：定向正反样本 `4/4`，DeepSeek+编排 `367/367`，Python 完整回归 `1438/1438`；
-  只有既知测试子进程 `ResourceWarning`，无断言失败。该修复尚待本地提交与 Uvicorn 重载；
-  原失败 session 已终止且不可复用。
+  只有既知测试子进程 `ResourceWarning`，无断言失败。修复已提交为 `bb4a0dd` 并只重载项目
+  Uvicorn；卖家 `main.exe` PID 和启动时间未变化。原失败 session 已终止且不可复用。
+
+## 10. 阶段 3 第二次在线门发现的几何标签集合错配
+
+### 10.1 验收台账与根因证据
+
+- 当前阶段合同缺口仍是：在一个全新 Settings 会话中完成“打开设置、只读确认设置主页、返回
+  桌面”的同会话真实闭环；第二个会话 `634a02a077fd49e2b4a7fde6dd0a7d2a` 尚未产生物理动作。
+- 已观察事实：DeepSeek 图、正式视觉候选和控制器策略均已通过，唯一候选是 `e1/设置`；可信
+  observation 明确保存原始证据“灰色齿轮图标，下方文字‘设置’”。执行前独立几何审计却在
+  本地、模型调用之前误报“缺少原始可见证据”，`physical_actions=0`。
+- 离线最小复现：现场 scene 有 10 个非空文字标签。`element_geometry_audit_prompt` 的严格合同
+  最多接收 8 个 `visible_literal_labels`，观察器却把整个 scene 的 10 个标签无差别传入；因此
+  每条证据都因标签集合无效被跳过。传入前 8 个或只传目标证据实际提到的标签均通过。
+- 根因分类：代码缺陷——调用方与严格几何子协议的输入集合错配。不是 Settings 特例、视觉
+  漂移、证据缺失、模型随机输出或机械臂问题，因此必须修改通用生产代码。
+
+### 10.2 同类失败与变化样本
+
+- 现场样本：Launcher 上 10 个有文字 App，目标证据只提到“设置”；scene 密度不得让目标证据
+  在模型调用前失效。
+- 变化样本：任意列表/桌面含 12 个以上有文字控件，目标证据只提到目标及一个邻近文字；几何
+  子协议只能收到这两个实际相关标签，不得泄露或枚举其余页面标签。
+- 反向样本：一条不可信证据确实包含超过 8 个不同可见标签，或包含未被真实 label 覆盖的
+  控制指令词时，仍必须失败关闭；不得截断后伪装成合法证据。
+
+### 10.3 通用修复、影响与回滚
+
+- 在 `GenericSceneObserver.audit_element_geometry` 中按每条原始证据独立构造 label allowlist：
+  始终包含非空目标 label，并只追加该证据字符串中逐字出现的其他 scene labels；保持顺序稳定、
+  去重且不超过严格协议上限。页面中未出现在该证据里的 App/控件 label 不进入几何 prompt。
+- 不提高 8 项上限，不改变 evidence 控制信息过滤、唯一匹配、crop-local 坐标、置信度、完整
+  可见性、fresh observation、IoU 或一动作一观察门禁。超过上限的真实相关证据继续被拒绝并可
+  尝试元素的下一条独立证据。
+- 影响范围仅 `generic_scene_observer.py` 与几何审计测试；回滚可整体撤销该批，不影响正式语义、
+  风险、候选、控制器或硬件传输层。
+
+### 10.4 验证清单与停止条件
+
+1. 用 10 标签现场结构做正向测试，断言模型 prompt 只含目标证据实际提到的 label。
+2. 用高密度跨 surface 变化样本验证无关 label 不进入 prompt；用超过 8 个真实相关 label 和
+   未覆盖控制词做反向测试，断言 0 模型调用、0 动作。
+3. 运行 element geometry 最小测试、observer/adapter 相关回归、一次 Python 完整回归和
+   `git diff --check`；全部通过后本地提交。
+4. 只重载项目 Uvicorn，核对 controller/camera/busy/device、卖家 `main.exe` PID/启动时间和
+   新鲜 observation；随后只启动一个全新 Settings 验收会话。
+5. 若相同根因再次出现或修复需要 App 名、固定位置/坐标、降低协议门禁，则停止，不再在线采样。
+
+离线结果：几何审计定向测试 `36/36`，observer/adapter/通用 mock 相关回归 `320/320`，
+Python 完整回归 `1441/1441`，静态编译与 `git diff --check` 均通过；只有既知测试子进程
+`ResourceWarning`，无断言失败。待本地提交并只重载项目 Uvicorn 后，以一个全新 Settings
+会话验证该通用修复；旧会话 `634a02a077fd49e2b4a7fde6dd0a7d2a` 已取消且不得复用。

@@ -571,6 +571,151 @@ class GenericSceneGeometryAuditIntegrationTests(unittest.TestCase):
                 element.states["geometry_audit_source"],
             )
 
+    def test_dense_scene_exposes_only_labels_cited_by_target_evidence(self):
+        frame = Image.new("RGB", (1000, 1600), "gray")
+        labels = (
+            "设置",
+            "浏览器",
+            "音乐",
+            "小爱视频",
+            "手电筒",
+            "手机管家",
+            "应用商店",
+            "支付宝",
+            "微信",
+            "相机",
+        )
+        elements = tuple(
+            UIElement(
+                element_id=f"e{index + 1}",
+                role="button",
+                meaning=f"open_app_{index + 1}",
+                label=label,
+                bounds=(
+                    0.05 + (index % 2) * 0.45,
+                    0.10 + (index // 2) * 0.15,
+                    0.35 + (index % 2) * 0.45,
+                    0.18 + (index // 2) * 0.15,
+                ),
+                confidence=0.98,
+                evidence=((
+                    "灰色齿轮图标，下方文字‘设置’"
+                    if index == 0
+                    else f"图标下方文字‘{label}’"
+                ),),
+            )
+            for index, label in enumerate(labels)
+        )
+        scene = UIScene(
+            app_id="launcher",
+            screen_id="dense-home",
+            summary="多个带文字入口可见",
+            elements=elements,
+            stable=True,
+            confidence=0.98,
+            fingerprint=_local_frame_fingerprint(frame),
+        )
+        provider = GeometryAuditProvider([[300, 300, 700, 700]])
+
+        GenericSceneObserver(provider).audit_element_geometry(
+            frames=[frame.copy() for _ in range(4)],
+            scene=scene,
+            element_ids=("e1",),
+        )
+
+        prompt = provider.messages[0][-1]["content"][0]["text"]
+        self.assertIn('visible_literal_labels=["设置"]', prompt)
+        for unrelated in labels[1:]:
+            self.assertNotIn(unrelated, prompt)
+
+    def test_evidence_cited_sibling_label_is_preserved_without_page_wide_labels(self):
+        frame = Image.new("RGB", (1000, 1600), "gray")
+        scene = UIScene(
+            app_id="unknown",
+            screen_id="dense-list",
+            summary="多个文字入口可见",
+            elements=(
+                UIElement(
+                    element_id="target",
+                    role="list_item",
+                    meaning="semantic_tap_entry",
+                    label="语义点击",
+                    bounds=(0.10, 0.35, 0.55, 0.42),
+                    confidence=0.98,
+                    evidence=("位于‘向上滑动’正下方，文字‘语义点击’清晰可见",),
+                ),
+                UIElement(
+                    element_id="sibling",
+                    role="list_item",
+                    meaning="swipe_up_entry",
+                    label="向上滑动",
+                    bounds=(0.10, 0.25, 0.55, 0.32),
+                    confidence=0.98,
+                    evidence=("文字‘向上滑动’清晰可见",),
+                ),
+                UIElement(
+                    element_id="unrelated",
+                    role="button",
+                    meaning="other_entry",
+                    label="执行建议",
+                    bounds=(0.60, 0.60, 0.90, 0.68),
+                    confidence=0.98,
+                    evidence=("右下方文字入口完整可见",),
+                ),
+            ),
+            stable=True,
+            confidence=0.98,
+            fingerprint=_local_frame_fingerprint(frame),
+        )
+        provider = GeometryAuditProvider([[250, 300, 750, 700]])
+
+        GenericSceneObserver(provider).audit_element_geometry(
+            frames=[frame.copy() for _ in range(4)],
+            scene=scene,
+            element_ids=("target",),
+        )
+
+        prompt = provider.messages[0][-1]["content"][0]["text"]
+        self.assertIn(
+            'visible_literal_labels=["语义点击", "向上滑动"]',
+            prompt,
+        )
+        self.assertNotIn("执行建议", prompt)
+
+    def test_evidence_with_more_than_eight_actual_labels_still_fails_closed(self):
+        frame = Image.new("RGB", (1000, 1600), "gray")
+        labels = tuple(f"入口{index}" for index in range(1, 10))
+        evidence = "、".join(labels) + "均清晰可见"
+        scene = UIScene(
+            app_id="unknown",
+            screen_id="overloaded-evidence",
+            summary="密集入口可见",
+            elements=tuple(
+                UIElement(
+                    element_id=f"e{index}",
+                    role="button",
+                    meaning=f"entry_{index}",
+                    label=label,
+                    bounds=(0.05, 0.05 + index * 0.08, 0.45, 0.10 + index * 0.08),
+                    confidence=0.98,
+                    evidence=(evidence,) if index == 1 else (f"{label}清晰可见",),
+                )
+                for index, label in enumerate(labels, start=1)
+            ),
+            stable=True,
+            confidence=0.98,
+            fingerprint=_local_frame_fingerprint(frame),
+        )
+        provider = GeometryAuditProvider([[250, 300, 750, 700]])
+
+        with self.assertRaisesRegex(ElementGeometryAuditError, "缺少"):
+            GenericSceneObserver(provider).audit_element_geometry(
+                frames=[frame.copy() for _ in range(4)],
+                scene=scene,
+                element_ids=("e1",),
+            )
+        self.assertEqual([], provider.messages)
+
     def test_zero_match_never_returns_the_rough_scene(self):
         frame = Image.new("RGB", (810, 1515), "gray")
         current = self.scene(frame)

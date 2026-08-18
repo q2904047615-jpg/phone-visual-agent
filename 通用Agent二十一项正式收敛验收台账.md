@@ -939,3 +939,42 @@ fact（不作为标题值）提供；本地另要求完成证据必须逐字包�
 离线结果：载体直述状态与精确 literal 正反定向通过；DeepSeek 与编排核心 `382/382`，observer、Qwen、
 adapter、DeepSeek、编排和 Web 关联回归 `890/890`，Python 完整回归 `1471/1471`。完整回归只有既知
 测试子进程 `ResourceWarning`，无断言失败。
+
+## 30. 根层执行实体泄漏到不相关前置子目标
+
+### 30.1 验收台账与根因证据
+
+- 提交 `e7eace1` 加载后，完全相同的 Settings 原目标已通过 initial graph；证明第 29 项 canonical
+  literal 句式修复在线生效。新 session `3477939acd664dea95fb9a194c188ed2` 在 Launcher 的第一个
+  `open_settings` 节点 0 动作 blocked，原因是“当前可信候选中不存在逐字一致文字：搜索输入框”。
+- 同一 trusted scene 已正确识别唯一 `label=设置 / meaning=open_settings / role=button /`
+  `goal_relevant=true` 候选；错误来自 Qwen context 仍把根层
+  `goal.entities.target_ui_label=搜索输入框` 和 `input_text=wifi` 原样提供给每个子目标。打开 App 的前置
+  节点因此被后续输入节点的精确 label 门错误覆盖。
+- 主要根因是 canonical 执行实体缺少 current-subgoal 投影，不是视觉、App 图标、坐标、风险或模型
+  没有找到设置。该 session 没有产生物理动作，设备保持 Launcher。
+
+### 30.2 通用修复、变化样本与边界
+
+- 完整 task graph 继续永久保存所有 canonical entities；只在生成当前 Qwen/本地策略上下文时，对可能
+  授权执行的实体做 subgoal scope 投影。recipient(s)、input_text/fields、target_ui_label、spatial_hint、
+  金额/币种/账户/文件/商品/日期/时间/target/value 等，只有其逐字值出现在当前 objective、constraints
+  或 completion conditions 时才进入本轮 action context。
+- `target_surface` 和目标 App 结构不属于后续控件 literal，继续保留；当前子目标、全局约束和原 task
+  graph 均不被改写。Observer 已通过 active subgoal 上下文正确标记 Settings 入口，本批只防止后续实体
+  在 Qwen 选择和 controller policy 中越级形成 exact-label 门。
+- 变化样本覆盖同一四节点任务：打开 App 时 label/text 均不可见于 authority；定位输入框时只出现 label；
+  输入节点同时出现 label/text；Home 节点再次全部移除。实体未逐字绑定当前节点时宁可失败关闭，不从
+  根目标推断其可用于本轮动作。
+
+### 30.3 验证与停止条件
+
+- 正测上述四个 current-subgoal context；反测 `target_surface` 保留、确认 scope 和 external effect 的
+  当前实体仍可用、完整 graph snapshot 未被修改。
+- 运行 DeepSeek/Qwen/编排/policy/Web 相关回归和一次完整 Python 回归，静态编译及 diff-check 全绿后
+  本地提交并只重载项目 Uvicorn。旧 blocked session 不恢复；完全相同 Settings 原目标只允许一个新会话，
+  新失败后停止真机链，不继续加现场特例。
+
+离线结果：四阶段实体投影定向通过；DeepSeek 与编排核心 `383/383`，observer、Qwen、adapter、
+DeepSeek、编排和 Web 关联回归 `891/891`，Python 完整回归 `1472/1472`。完整回归只有既知测试
+子进程 `ResourceWarning`，无断言失败。

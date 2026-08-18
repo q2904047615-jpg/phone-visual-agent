@@ -836,6 +836,58 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             context["confirmation_gate"]["external_state_action_allowed"]
         )
 
+    def test_qwen_context_scopes_execution_entities_to_current_subgoal(self):
+        raw_goal = (
+            "打开设置，找到搜索输入框，在其中输入 wifi，"
+            "但不要提交；最后返回手机桌面。"
+        )
+
+        def context_for(objective: str, completion: str) -> dict:
+            payload = single_subgoal_payload(
+                objective,
+                external_impact="navigation_only",
+            )
+            payload["goal"].update(
+                objective=raw_goal,
+                target_apps=[{"app_id": "settings", "app_name": "设置"}],
+                entities={
+                    "input_text": "wifi",
+                    "target_ui_label": "搜索输入框",
+                    "target_surface": "device",
+                },
+            )
+            payload["constraints"] = ["不得提交搜索"]
+            payload["subgoals"][0]["constraints"] = ["不得提交搜索"]
+            payload["subgoals"][0]["completion_conditions"] = [completion]
+            graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                raw_goal,
+                device_id="phone-1",
+            )
+            return graph.to_qwen_context()["goal"]["entities"]
+
+        open_entities = context_for("打开设置应用", "设置主界面可见")
+        self.assertNotIn("target_ui_label", open_entities)
+        self.assertNotIn("input_text", open_entities)
+        self.assertEqual("device", open_entities["target_surface"])
+
+        locate_entities = context_for(
+            "找到设置中的搜索输入框",
+            "搜索输入框可见",
+        )
+        self.assertEqual("搜索输入框", locate_entities["target_ui_label"])
+        self.assertNotIn("input_text", locate_entities)
+
+        input_entities = context_for(
+            "在搜索输入框中输入 wifi，但不要提交",
+            "搜索输入框中显示 wifi",
+        )
+        self.assertEqual("搜索输入框", input_entities["target_ui_label"])
+        self.assertEqual("wifi", input_entities["input_text"])
+
+        home_entities = context_for("返回手机桌面", "手机桌面可见")
+        self.assertNotIn("target_ui_label", home_entities)
+        self.assertNotIn("input_text", home_entities)
+
     def test_task_id_is_preserved_across_replanning(self):
         initial = base_payload()
         revised = copy.deepcopy(initial)

@@ -82,6 +82,28 @@ TARGET_SURFACES = frozenset({"device", "system", "current_surface"})
 MAX_CANONICAL_INPUT_CHARS = 4000
 MAX_INPUT_FIELDS = 32
 MAX_RECIPIENTS = 32
+
+QWEN_SUBGOAL_SCOPED_ENTITY_KEYS = frozenset(
+    {
+        "recipient",
+        "recipients",
+        "input_text",
+        "input_fields",
+        "target_ui_label",
+        "spatial_hint",
+        "amount",
+        "currency",
+        "merchant",
+        "payee",
+        "account",
+        "file",
+        "product",
+        "date",
+        "time",
+        "target",
+        "value",
+    }
+)
 EXTERNAL_STATE_CHANGE_PATTERN = re.compile(
     r"(?:"
     r"发送|发布|点赞|"
@@ -1335,13 +1357,54 @@ class DynamicTaskGraph:
             and current["external_impact"] == "external_state"
             and not confirmation_required
         )
+        goal_context = dict(value["goal"])
+        goal_entities = dict(goal_context.get("entities") or {})
+        if current is not None:
+            current_text = "\n".join(
+                (
+                    str(current.get("objective") or ""),
+                    *tuple(str(item) for item in current.get("constraints") or ()),
+                    *tuple(
+                        str(item)
+                        for item in current.get("completion_conditions") or ()
+                    ),
+                )
+            ).casefold()
+
+            def literal_strings(entity_value: Any) -> tuple[str, ...]:
+                if isinstance(entity_value, str):
+                    text = entity_value.strip()
+                    return (text,) if text else ()
+                if isinstance(entity_value, dict):
+                    return tuple(
+                        literal
+                        for nested in entity_value.values()
+                        for literal in literal_strings(nested)
+                    )
+                if isinstance(entity_value, (list, tuple)):
+                    return tuple(
+                        literal
+                        for nested in entity_value
+                        for literal in literal_strings(nested)
+                    )
+                return ()
+
+            for key in tuple(goal_entities):
+                if key not in QWEN_SUBGOAL_SCOPED_ENTITY_KEYS:
+                    continue
+                literals = literal_strings(goal_entities[key])
+                if not literals or not any(
+                    literal.casefold() in current_text for literal in literals
+                ):
+                    goal_entities.pop(key, None)
+        goal_context["entities"] = goal_entities
         return {
             "protocol_version": self.protocol_version,
             "task_id": self.task_id,
             "device_id": self.device_id,
             "revision": self.revision,
             "task_status": self.status,
-            "goal": value["goal"],
+            "goal": goal_context,
             "global_constraints": value["constraints"],
             "goal_completion_conditions": value["completion_conditions"],
             "current_subgoal": current,

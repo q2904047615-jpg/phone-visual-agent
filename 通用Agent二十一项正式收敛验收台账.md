@@ -588,3 +588,48 @@ Python 完整回归 `1454/1454`；完整回归只有既知测试子进程 `Resou
 编排与 web 相关回归 `679/679`，Python 完整回归 `1457/1457`。完整回归只有既知测试子进程
 `ResourceWarning`，无断言失败。同一 subgoal 的连续导航仍直接推进；不同 subgoal 必须先完成 0 动作
 goal-conditioned 重观察。
+
+## 21. 本地权威导航回执仍依赖 DeepSeek 自行消费
+
+### 21.1 验收台账与根因证据
+
+- 提交 `5d7721f` 加载后的全新 Browser 会话 `f5bfc428e32c407ab2270b54d1262bb0` 从桌面
+  0 动作推进到 `open_browser`，经新目标重观察取得唯一 Browser 入口，执行 1 次 `tap_semantic`；
+  fingerprint `0e767e6e3aa80bc88ea6 -> ddaa95a53923529c4964`、新 4 帧、matched receipt
+  `receipt_508ad70a79a247e9b27763c63388c71e` 完整，随后因 DeepSeek 没有完成 `open_browser` 而停止，
+  没有第二动作。
+- 相同合同在会话 `d91a3fb5a1ae4adab50f2e4cdfef5ae3` 中曾被 DeepSeek 正确消费；本次却保留旧
+  active。严格 parser、prompt 和本地验证相同，说明“语言模型是否把本地权威回执抄入 status/evidence”
+  存在随机性。继续重采样违反单次确定合同，也无法形成通用能力。
+- controller transition 已严格绑定 session/task/device/revision/subgoal/decision、三层 action digest、
+  before/after observation+fingerprint、恰好 1 次物理动作、matched outcome 和一次性 receipt；让 DeepSeek
+  决定是否承认它，权责关系倒置。
+
+### 21.2 通用修复、变化样本与边界
+
+- 在 DeepSeek 单次返回后、正式 graph 校验前，本地仅对严格匹配当前 graph 的 matched transition 生效：
+  若上一 active 是 navigation_only 且至少有一个绑定该节点的 controller evidence ref，本地把该旧节点
+  状态置为 completed，completion_evidence 置为这些 typed refs。模型不得改写该节点的 objective、依赖、
+  条件、风险或 impact；任一变化直接拒绝。
+- 若模型已经正确完成节点，本地保留其声明并继续用原 source-aware 校验裁决；只有模型原样保留旧
+  active 时，才从既有依赖 DAG 中只在唯一、无风险且 impact 为 navigation_only/read_only 的 frontier
+  激活后继。多个可运行后继、
+  external_state/unknown 或需风险确认的后继仍交给 DeepSeek 正确表达，否则失败关闭，不由本地猜选。
+- 现场样本为打开 Browser 后进入唯一 read-only 标题节点；变化样本为任意 App 的唯一导航后继。反向
+  覆盖 wrong session/task/device/revision/subgoal/observation、mismatched、receipt 重放、旧节点语义被改、
+  read_only/external_state 完成、多个安全 frontier，均不得本地完成或猜选。
+- 回执只证明一次导航转换，不能满足全局视觉条件、后续标题/文字读取、发送/关注/删除/付款等外部结果；
+  后续节点仍必须按新目标重观察。无第二次 DeepSeek 采样，不修改视觉、坐标、风险或机械臂。
+
+### 21.3 验证清单与停止条件
+
+- 正测模型保留旧 active：本地一次消费回执、完成旧 navigation 节点、唯一安全后继 active，provider 只调用
+  一次；模型已正确完成时输出等价。
+- 反测 unsafe/ambiguous frontier、节点语义改写、mismatch/wrong binding/replay；模型伪造普通 evidence
+  必须继续被拒绝，不能由本地回执掩盖。
+- 运行 DeepSeek 正反合同、编排闭环及 Qwen/adapter/web 相关回归，再运行一次完整 Python 回归、静态
+  编译和 diff-check；全绿后提交、只重载 Uvicorn，以全新 Browser 会话验收，旧 session 不恢复。
+
+离线结果：DeepSeek typed receipt 正反合同 `210/210`，编排、Qwen、adapter 与 web 相关回归
+`470/470`，Python 完整回归 `1458/1458`。完整回归只有既知测试子进程 `ResourceWarning`，无断言
+失败。单次模型返回被保留；本地只补严格回执已证明但模型遗漏的 navigation-only 状态转换。

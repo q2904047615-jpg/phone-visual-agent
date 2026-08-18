@@ -1485,6 +1485,12 @@ class DeepSeekTaskGraphPlanner:
             candidate,
             observation,
         )
+        candidate = _apply_verified_navigation_completion(
+            graph,
+            candidate,
+            observation,
+            trigger=trigger,
+        )
         candidate = _normalize_unique_active_frontier(candidate)
         _validate_external_impact_revision(graph, candidate)
         _validate_preserved_risk_ids(graph, candidate)
@@ -3380,6 +3386,110 @@ def _restore_completed_history_evidence(
         for item in candidate.subgoals
     )
     return replace(candidate, subgoals=restored)
+
+
+def _apply_verified_navigation_completion(
+    previous: DynamicTaskGraph,
+    candidate: DynamicTaskGraph,
+    observation: ObservedState,
+    *,
+    trigger: str,
+) -> DynamicTaskGraph:
+    """Apply one controller-owned navigation completion deterministically.
+
+    DeepSeek still proposes the next graph once.  It does not decide whether a
+    strictly bound, matched controller receipt exists: that fact is local
+    authority.  This transform completes only the receipt's previous active
+    navigation node.  The existing unique-frontier normalizer may then select
+    one safe dependency successor; ambiguous or risky frontiers remain invalid.
+    """
+
+    transition = observation.verified_action_transition
+    if (
+        trigger != "action_result_matched"
+        or transition is None
+        or transition.outcome != "matched"
+        or not observation.controller_transition_evidence_refs
+    ):
+        return candidate
+    previous_current = previous.active_subgoal()
+    if (
+        previous_current is None
+        or previous_current.external_impact != "navigation_only"
+        or transition.session_id.strip() == ""
+        or transition.task_id != previous.task_id
+        or transition.device_id != previous.device_id
+        or transition.prior_revision != previous.revision
+        or transition.subgoal_id != previous_current.subgoal_id
+        or transition.after_observation_id != observation.scene_id
+    ):
+        return candidate
+    consumed_receipts = {
+        item.consumed_action_transition_receipt_id
+        for item in previous.replan_history
+        if item.consumed_action_transition_receipt_id
+    }
+    if transition.receipt_id in consumed_receipts:
+        return candidate
+    ref_ids = tuple(
+        item.ref_id
+        for item in observation.controller_transition_evidence_refs
+        if item.receipt_id == transition.receipt_id
+        and item.subgoal_id == previous_current.subgoal_id
+    )
+    if not ref_ids:
+        return candidate
+
+    candidate_by_id = {item.subgoal_id: item for item in candidate.subgoals}
+    candidate_current = candidate_by_id.get(previous_current.subgoal_id)
+    if candidate_current is None:
+        raise TaskGraphError(
+            "matched controller_transition 的候选图删除了其绑定子目标。"
+        )
+    immutable_fields_match = (
+        candidate_current.objective == previous_current.objective
+        and candidate_current.depends_on == previous_current.depends_on
+        and candidate_current.constraints == previous_current.constraints
+        and candidate_current.completion_conditions
+        == previous_current.completion_conditions
+        and candidate_current.risk_action_ids == previous_current.risk_action_ids
+        and candidate_current.external_impact == previous_current.external_impact
+    )
+    if not immutable_fields_match:
+        raise TaskGraphError(
+            "matched controller_transition 的候选图改写了其绑定子目标语义。"
+        )
+    if candidate_current.status == "completed":
+        # A model may already have completed the node with either a bound
+        # controller ref or independently valid current visual evidence.  Keep
+        # that claim intact so the ordinary source-aware validator can accept
+        # or reject it; local authority is needed only for the omitted state
+        # transition.
+        return candidate
+
+    completed_subgoals = tuple(
+        replace(
+            item,
+            status="completed",
+            completion_evidence=ref_ids,
+        )
+        if item.subgoal_id == previous_current.subgoal_id
+        else item
+        for item in candidate.subgoals
+    )
+    remaining_active = tuple(
+        item.subgoal_id
+        for item in completed_subgoals
+        if item.status == "active"
+    )
+    active_subgoal_id = (
+        remaining_active[0] if len(remaining_active) == 1 else None
+    )
+    return replace(
+        candidate,
+        subgoals=completed_subgoals,
+        active_subgoal_id=active_subgoal_id,
+    )
 
 
 def _is_explicit_local_temporary_draft_clear(

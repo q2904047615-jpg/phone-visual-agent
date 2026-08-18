@@ -5708,28 +5708,54 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 reason="仅有不匹配的视觉分类",
             )
 
-    def test_replan_rejects_unconsumed_controller_transition_without_retry(self):
+    def test_replan_locally_applies_bound_navigation_transition_without_retry(self):
         initial = base_payload()
+        initial["goal"] = {
+            "objective": "打开资料工具后读取页面标题",
+            "target_apps": [
+                {"app_id": "reference_tool", "app_name": "资料工具"}
+            ],
+            "entities": {"target_surface": "device"},
+        }
+        initial["completion_conditions"] = [
+            {
+                "condition_id": "title_read",
+                "description": "页面标题已读取",
+                "evidence_required": ["页面标题可见"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ]
+        initial["risk_actions"] = []
+        initial["subgoals"][0].update(
+            objective="打开资料工具",
+            completion_conditions=["资料工具主界面可见"],
+        )
+        initial["subgoals"][1].update(
+            objective="读取页面标题",
+            constraints=["仅读取"],
+            completion_conditions=["页面标题已读取"],
+            risk_action_ids=[],
+            external_impact="read_only",
+        )
         unconsumed = copy.deepcopy(initial)
-        repaired = copy.deepcopy(initial)
         ref_id = "controller_transition:receipt-matched:1"
-        repaired["status"] = "awaiting_confirmation"
-        repaired["subgoals"][0]["status"] = "completed"
-        repaired["subgoals"][0]["completion_evidence"] = [ref_id]
-        repaired["subgoals"][1]["status"] = "active"
-        repaired["active_subgoal_id"] = "save_target"
         graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
             "目标", device_id="phone-1"
         )
-        provider = FakeProvider(unconsumed, repaired)
+        provider = FakeProvider(unconsumed)
 
-        with self.assertRaisesRegex(TaskGraphError, "未完成其绑定"):
-            DeepSeekTaskGraphPlanner(provider).replan(
-                graph,
-                matched_controller_observation(graph),
-                trigger="action_result_matched",
-                reason="一次性导航动作已由控制器验证",
-            )
+        result = DeepSeekTaskGraphPlanner(provider).replan(
+            graph,
+            matched_controller_observation(graph),
+            trigger="action_result_matched",
+            reason="一次性导航动作已由控制器验证",
+        )
+
+        self.assertEqual("completed", result.subgoals[0].status)
+        self.assertEqual((ref_id,), result.subgoals[0].completion_evidence)
+        self.assertEqual("save_target", result.active_subgoal_id)
+        self.assertEqual("active", result.subgoals[1].status)
         graph_prompts = [
             call[0]["content"]
             for call in provider.messages
@@ -5746,10 +5772,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         provider = FakeProvider(first, second)
 
-        with self.assertRaisesRegex(
-            TaskGraphError,
-            "matched controller_transition 未完成其绑定的 navigation_only 子目标",
-        ):
+        with self.assertRaises(TaskGraphError):
             DeepSeekTaskGraphPlanner(provider).replan(
                 graph,
                 matched_controller_observation(graph),
@@ -5763,6 +5786,31 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             if "semantic-risk-audit-v1" not in call[0]["content"]
         ]
         self.assertEqual(1, len(graph_prompts))
+
+    def test_local_navigation_completion_rejects_bound_subgoal_rewrite(self):
+        initial = base_payload()
+        mutated = copy.deepcopy(initial)
+        mutated["status"] = "awaiting_confirmation"
+        mutated["subgoals"][0].update(
+            objective="被模型改写的其它导航目标",
+            status="completed",
+            completion_evidence=[
+                "controller_transition:receipt-matched:1"
+            ],
+        )
+        mutated["subgoals"][1]["status"] = "active"
+        mutated["active_subgoal_id"] = "save_target"
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            "目标", device_id="phone-1"
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "改写了其绑定子目标语义"):
+            DeepSeekTaskGraphPlanner(FakeProvider(mutated)).replan(
+                graph,
+                matched_controller_observation(graph),
+                trigger="action_result_matched",
+                reason="一次性导航动作已由控制器验证",
+            )
 
     def test_replan_rejects_subgoal_id_used_as_completion_evidence_without_retry(self):
         initial = base_payload()

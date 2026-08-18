@@ -4873,6 +4873,20 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         )
         revised.validate()
         completed = _completed_graph(revised)
+        completed = replace(
+            completed,
+            subgoals=(
+                completed.subgoals[0],
+                replace(
+                    completed.subgoals[1],
+                    completion_evidence=(
+                        "当前可信画面读取结果：element_id=candidate-1, "
+                        "role=text, meaning=page_title, label=公开页面主标题。",
+                    ),
+                ),
+            ),
+        )
+        completed.validate()
 
         after_scene = replace(
             _scene(

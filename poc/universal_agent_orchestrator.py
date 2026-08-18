@@ -1972,6 +1972,29 @@ class UniversalAgentOrchestrator:
             action_outcome="not_applicable",
             verification={"visible_evidence": [scene.summary, visible_fact]},
         )
+        lineage = session.verified_app_surface_lineage
+        if lineage is not None:
+            lineage_fact = json.dumps(
+                {
+                    "source": "verified_app_surface_lineage",
+                    "app_id": lineage.app_id,
+                    "app_name": lineage.app_name,
+                    "surface_id": lineage.surface_id,
+                    "functional_foreground_app_id": (
+                        lineage.functional_foreground_app_id
+                    ),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            observed = replace(
+                observed,
+                grounded_visual_facts=(
+                    *observed.grounded_visual_facts,
+                    lineage_fact,
+                ),
+            )
         revised = self.deepseek_planner.replan(
             graph,
             observed,
@@ -1996,8 +2019,14 @@ class UniversalAgentOrchestrator:
             (candidate for candidate in revised.subgoals if candidate.subgoal_id == old.subgoal_id),
             None,
         )
-        if new_old is None or new_old.status != "completed":
-            return None
+        if (
+            new_old is None
+            or new_old.status != "completed"
+            or visible_fact not in new_old.completion_evidence
+        ):
+            raise UniversalAgentOrchestratorError(
+                "DeepSeek 未使用唯一可信文字结果完成当前 read_only 子目标。"
+            )
         return revised
 
     def _try_advance_visible_presence_subgoal(
@@ -3744,6 +3773,39 @@ class UniversalAgentOrchestrator:
                 ),
             )
 
+            current = graph.active_subgoal()
+            if current is not None and current.external_impact == "read_only":
+                text_revised = self._try_advance_visible_text_read_subgoal(
+                    session,
+                    graph=graph,
+                    trusted_observation=observation,
+                )
+                if text_revised is not None:
+                    self._store_revised_graph(session, text_revised)
+                    if text_revised.status == "completed":
+                        session.status = "succeeded"
+                    else:
+                        next_subgoal = text_revised.active_subgoal()
+                        if next_subgoal is None:
+                            session.status = "blocked"
+                            session.failed_reason = "只读文字结果推进后没有活动子目标。"
+                        elif _requires_risk_confirmation(text_revised, next_subgoal):
+                            session.status = "awaiting_risk_confirmation"
+                            session.failed_reason = ""
+                            self._bind_risk_confirmation(session)
+                        else:
+                            session.status = "needs_reobservation"
+                            session.failed_reason = ""
+                    decision = SimpleNamespace(
+                        proposal=GenericStepProposal(
+                            status="finished",
+                            reason="唯一可信可见文字已由 DeepSeek 复核。",
+                            completion_evidence=(scene.summary,),
+                        )
+                    )
+                    self._write_terminal_snapshot(session)
+                    return decision
+
             if (
                 prior_observation is not None
                 and str(getattr(prior_observation, "fingerprint", ""))
@@ -3852,41 +3914,6 @@ class UniversalAgentOrchestrator:
                     )
                     self._write_terminal_snapshot(session)
                     return risk_decision
-
-            current = graph.active_subgoal()
-            if current is not None and current.external_impact == "read_only":
-                text_revised = self._try_advance_visible_text_read_subgoal(
-                    session,
-                    graph=graph,
-                    trusted_observation=observation,
-                )
-                if text_revised is not None:
-                    self._store_revised_graph(session, text_revised)
-                    if text_revised.status == "completed":
-                        session.status = "succeeded"
-                    else:
-                        next_subgoal = text_revised.active_subgoal()
-                        if next_subgoal is None:
-                            session.status = "blocked"
-                            session.failed_reason = (
-                                "只读文字结果推进后没有活动子目标。"
-                            )
-                        elif _requires_risk_confirmation(text_revised, next_subgoal):
-                            session.status = "awaiting_risk_confirmation"
-                            session.failed_reason = ""
-                            self._bind_risk_confirmation(session)
-                        else:
-                            session.status = "needs_reobservation"
-                            session.failed_reason = ""
-                    decision = SimpleNamespace(
-                        proposal=GenericStepProposal(
-                            status="finished",
-                            reason="唯一可信可见文字已由 DeepSeek 复核。",
-                            completion_evidence=(scene.summary,),
-                        )
-                    )
-                    self._write_terminal_snapshot(session)
-                    return decision
 
             if session.confirmed_risk_ids:
                 context = graph.to_qwen_context(

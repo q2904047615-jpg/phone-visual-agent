@@ -813,3 +813,10 @@ adapter、DeepSeek、编排和 Web 相关回归 `887/887`，Python 完整回归 
 `381/381`，observer、Qwen、adapter、DeepSeek、编排和 Web 相关回归 `889/889`，Python 完整回归
 `1470/1470`。完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。目标切换后的标题读取不再
 调用 Qwen 选择动作；lineage 不改变 observer 功能分类，并在任何后续非 wait 物理动作前失效。
+
+第一次在线复验 `e819788b17e44779bfe77af40d4c54df` 再次完成 Home 与打开 Browser 两动作，并在线
+生成正确 lineage，但通用 refresh 在本来要求的新目标重观察中先按 fingerprint 变化调用了一次普通
+DeepSeek replan；模型提前完成 read 节点时，DeepSeek 内部身份锚点尚看不到 lineage，因而 0 新动作
+阻塞。修正后，唯一文字结果门在普通页面变化 replan 之前运行，并把本地 lineage 作为结构化 grounding
+fact（不作为标题值）提供；本地另要求完成证据必须逐字包含当前唯一 `label` 结果，不能只引用 lineage。
+相关回归仍为 `889/889`、完整回归 `1470/1470`；旧会话不恢复，下一次仍使用全新会话。

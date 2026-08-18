@@ -1731,12 +1731,40 @@ class UniversalAgentOrchestrator:
             {"app", "application", "android", "com", "应用", "程序"}
         )
 
+    @staticmethod
+    def _subgoal_targets_launcher_surface(
+        graph: DynamicTaskGraph,
+        subgoal_id: str,
+    ) -> bool:
+        """Use the formal semantic surface to distinguish a Launcher destination."""
+
+        if not str(subgoal_id or "").strip():
+            return False
+        try:
+            semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+        except TaskSemanticIRError:
+            return False
+        typed_subgoal = next(
+            (
+                item
+                for item in semantic_ir.subgoals
+                if item.subgoal_id == subgoal_id
+            ),
+            None,
+        )
+        if typed_subgoal is None:
+            return False
+        surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
+        surface = surfaces.get(typed_subgoal.surface_ref)
+        return bool(surface is not None and surface.kind == "launcher")
+
     @classmethod
     def _referenced_target_app_pages(
         cls,
         *,
         graph: DynamicTaskGraph,
         presence_text: str,
+        subgoal_id: str = "",
     ) -> tuple[Any, ...]:
         """Return target Apps whose named page is the claimed visible state.
 
@@ -1746,6 +1774,8 @@ class UniversalAgentOrchestrator:
         rule applies to every App and every natural-language goal.
         """
 
+        if cls._subgoal_targets_launcher_surface(graph, subgoal_id):
+            return ()
         required_surfaces = cls._presence_surface_classes(presence_text)
         if not required_surfaces.intersection({"page", "foreground_app"}):
             return ()
@@ -2120,6 +2150,7 @@ class UniversalAgentOrchestrator:
         referenced_app_pages = self._referenced_target_app_pages(
             graph=graph,
             presence_text=presence_text,
+            subgoal_id=current.subgoal_id,
         )
         if referenced_app_pages and not self._scene_foreground_matches_target_app_page(
             scene=scene,
@@ -2576,6 +2607,7 @@ class UniversalAgentOrchestrator:
             referenced_app_pages = cls._referenced_target_app_pages(
                 graph=previous,
                 presence_text=presence_text,
+                subgoal_id=item.subgoal_id,
             )
             if referenced_app_pages and not cls._scene_foreground_matches_target_app_page(
                 scene=scene,
@@ -2859,6 +2891,7 @@ class UniversalAgentOrchestrator:
             target_apps = cls._referenced_target_app_pages(
                 graph=previous,
                 presence_text=text,
+                subgoal_id=item.subgoal_id,
             )
             if not target_apps or not cls._verified_transition_proves_named_app_surface(
                 previous=previous,

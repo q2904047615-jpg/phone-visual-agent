@@ -1269,3 +1269,39 @@ Web 关联回归 `897/897`，Python 完整回归 `1482/1482`。完整回归只�
 离线结果：prompt、空格正例和白名单外字母反例 `3/3`，observer 与文字事务 `212/212`，observer、
 Qwen、adapter、DeepSeek、编排和 Web 关联回归 `898/898`，Python 完整回归 `1483/1483`。
 完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。
+
+## 39. 返回桌面完成态误绑定来源 App 页面
+
+### 39.1 验收台账与根因证据
+
+- Settings session `2c374ac624af4f839c1e59c4c44719a3` 在同一会话内依次完成 Home、设置入口、
+  Home 三个真实动作，三次均 `matched`，最后 after scene 为 `launcher/home_screen`；但最终 status 仍为
+  blocked，不能计入阶段 3。
+- 最后子目标 objective 为“从设置界面返回手机桌面”，completion condition 为“手机桌面界面可见”。
+  `_validate_newly_completed_named_app_surfaces` 把 objective 与 completion condition 拼接后做 App 名匹配，
+  将来源短语“从设置界面”误当成完成态要求“设置页在前台”，因此拒绝真实 Launcher 完成证据。
+- 主要根因是 named App page authority 没有区分动作来源与完成状态；不是三个动作、Launcher 观察、
+  DeepSeek 完成声明或设备失败。
+
+### 39.2 同类样本、通用修复与边界
+
+- 现场样本为“从设置界面返回手机桌面”；变化样本覆盖“从浏览器页面回到主屏幕”和“离开聊天页后
+  桌面可见”。三者的来源 App 名都不能成为完成态页面要求。反例为 completion condition 明确写
+  “设置主界面可见/浏览器应用在前台”，仍必须校验真实 App 页面身份，Launcher 图标不能证明。
+- named page identity 改为先读取已有正式 TaskSemanticIR surface：当前子目标明确绑定 `launcher` 时，
+  objective 中的来源 App 名不再生成 App-page 完成要求；其他 App/结果页 surface 仍保留 objective 与
+  completion condition 的原身份校验及 verified lineage。可见前缀、动作后完成校验和 App surface
+  lineage 三处统一传入当前 subgoal_id，避免规则漂移。
+- 不增加 App、Home、命令或正则特例；该规则只收紧完成证据的时间角色，所有真实 named App 页面
+  条件继续按原 identity authority 失败关闭。
+
+### 39.3 验证与停止条件
+
+- 新增 Launcher 目的地正测，并保留 Launcher App 入口不能证明 named App 页面的一组反测；运行编排
+  核心、关联回归和一次完整 Python 回归。全绿后本地提交并只重载项目 Uvicorn。
+- 当前 Launcher 不需要恢复旧 blocked session；新建一个改写措辞的 Settings 三动作会话，只有终态
+  `succeeded`、三次 matched receipt、最终 Launcher 同时成立才计为第二个阶段 3 App。
+
+离线结果：Launcher 目的地、Browser 结果页 lineage 及既有 App/Launcher 身份反例 `4/4`，DeepSeek
+与编排核心 `388/388`，observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `899/899`，
+Python 完整回归 `1484/1484`。完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。

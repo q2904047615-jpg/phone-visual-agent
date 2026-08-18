@@ -3345,6 +3345,105 @@ class UniversalAgentStartTests(unittest.TestCase):
         revised.validate()
         return revised
 
+    def test_named_app_source_does_not_rebind_launcher_completion_state(self) -> None:
+        base = _graph()
+        first_home = replace(
+            base.subgoals[0],
+            subgoal_id="return_to_desktop_1",
+            objective="从当前页面返回手机桌面",
+            status="completed",
+            completion_conditions=("手机桌面界面可见",),
+            completion_evidence=("手机桌面界面可见",),
+            external_impact="navigation_only",
+        )
+        open_settings = Subgoal(
+            subgoal_id="open_settings",
+            objective="打开设置并确认设置主界面可见",
+            status="completed",
+            depends_on=(first_home.subgoal_id,),
+            constraints=(),
+            completion_conditions=("设置主界面可见",),
+            completion_evidence=("设置主界面可见",),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        final_home = Subgoal(
+            subgoal_id="return_to_desktop_2",
+            objective="从设置界面返回手机桌面并确认桌面可见",
+            status="active",
+            depends_on=(open_settings.subgoal_id,),
+            constraints=(),
+            completion_conditions=("手机桌面界面可见",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        followup = Subgoal(
+            subgoal_id="safe-followup",
+            objective="下一安全目标可见",
+            status="pending",
+            depends_on=(final_home.subgoal_id,),
+            constraints=(),
+            completion_conditions=("下一安全目标可见",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        previous = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective=(
+                    "从当前页面返回手机桌面，打开设置并确认设置主界面可见，"
+                    "然后再次返回手机桌面"
+                ),
+                target_apps=(TargetApp(app_id="settings", app_name="设置"),),
+                entities={"target_surface": "device"},
+            ),
+            subgoals=(first_home, open_settings, final_home, followup),
+            active_subgoal_id="return_to_desktop_2",
+            raw_user_goal=(
+                "从当前页面返回手机桌面，打开设置并确认设置主界面可见，"
+                "然后再次返回手机桌面"
+            ),
+        )
+        previous.validate()
+        revised = replace(
+            previous,
+            revision=previous.revision + 1,
+            subgoals=(
+                first_home,
+                open_settings,
+                replace(
+                    final_home,
+                    status="completed",
+                    completion_evidence=("手机桌面界面可见",),
+                ),
+                replace(followup, status="active"),
+            ),
+            active_subgoal_id=followup.subgoal_id,
+        )
+        revised.validate()
+        launcher = replace(
+            _scene(
+                meaning="open_settings",
+                label="设置",
+                states={"goal_relevant": True, "fully_visible": True},
+            ),
+            app_id="launcher",
+            screen_id="home_screen",
+            summary="手机桌面可见，包含设置入口。",
+        )
+
+        UniversalAgentOrchestrator._validate_newly_completed_named_app_surfaces(
+            previous=previous,
+            revised=revised,
+            trusted_observation=FakeTrustedObservation(
+                device_id="device-1",
+                scene=launcher,
+            ),
+        )
+
     @staticmethod
     def _read_only_locate_graph() -> DynamicTaskGraph:
         base = _graph()

@@ -2904,6 +2904,22 @@ class UniversalAgentOrchestrator:
             self._bind_risk_confirmation(session)
             persist_transition()
             return
+        if current.subgoal_id != previous_current.subgoal_id:
+            # Scene elements are goal-conditioned.  The action-after scene was
+            # observed for ``previous_current`` and can prove that transition,
+            # but it is not a complete candidate inventory for a different
+            # active node.  Reuse the existing zero-action refresh path so the
+            # new node gets its own four-frame observation and one-shot scope.
+            session.status = "needs_reobservation"
+            session.failed_reason = ""
+            session.controller_decision = None
+            session.confirmation_authority = None
+            transition_record["disposition"] = (
+                "advanced_to_goal_conditioned_reobservation"
+            )
+            transition_record["reobservation_subgoal_id"] = current.subgoal_id
+            persist_transition()
+            return
         if impact == "read_only":
             try:
                 reviewed = self.deepseek_planner.replan(

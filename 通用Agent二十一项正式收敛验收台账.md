@@ -544,3 +544,47 @@ Python 完整回归 `1454/1454`；完整回归只有既知测试子进程 `Resou
 离线结果：系统 Home 路由正反合同 `4/4`；observer、Qwen、adapter 与通用编排相关回归
 `500/500`；Python 完整回归 `1456/1456`。完整回归只有既知测试子进程 `ResourceWarning`，无断言
 失败。observer 版本更新为 v59；非法目标精查响应仍被严格拒绝，没有新增坐标归一化或控件权限。
+
+## 20. 新活动子目标复用了旧目标条件下的动作后 scene
+
+### 20.1 验收台账与根因证据
+
+- v59 全新 Browser 会话 `e8ae082d1ab847f0830ab744651dfdb7` 执行 1 次 system Home，动作前后
+  fingerprint `5110dcc5b5a47d155809 -> 3b3c22487ed7a2fe5f04`，新 4 帧、matched receipt
+  `receipt_45948a6f860e4c6a8621a5f6088473e2` 完整，手机安全停在 Launcher；随后 0 动作 blocked，
+  没有试探性点击 Browser。
+- Home 动作后的 scene 是 observer 按旧 active 节点 `return_home_initial` 生成的；v59 正确不做控件
+  精查，因此 scene elements 为空。DeepSeek 随即完成旧节点并激活 `open_browser`，但
+  `_advance_after_observation()` 直接把这份旧节点 scene 交给新节点的 Qwen。虽然原图中 Browser 图标
+  可见，新节点 choices 仍只有 back/wait，Qwen 正确拒绝。
+- observer 输出包含目标相关元素，天然是 goal-conditioned observation。活动子目标改变后，同一 scene
+  的元素集合不再对新节点完备；这同样会影响“打开 App -> 读取标题”“进入列表 -> 查找条目”等任意
+  跨节点任务，不是 Browser 识别特例。
+
+### 20.2 通用修复、变化样本与边界
+
+- 当且仅当 DeepSeek 新 revision 将上一 active 子目标完成并激活了不同 subgoal_id，且新节点没有先
+  进入风险确认，编排器不得直接在旧 goal-conditioned observation 上调用 Qwen；改为状态
+  `needs_reobservation`，使既有安全自动循环用新 `goal_draft` 进行一次 0 动作只读重观察。
+- 重观察继续捕获 4 帧、生成新 observation_id/fingerprint 绑定、新 Qwen 决策和新一次性 scope；旧
+  confirmation、Qwen decision 和 controller authority 已在重规划前失效。重观察失败即 0 动作停止。
+- 现场样本为 Home -> 打开 Browser；变化样本为打开无品牌 App -> 读取当前页面标题。反向样本为
+  revision 增加但 active subgoal_id 未变的连续滚动/分页，此时可继续使用刚取得的动作后 scene，避免
+  不必要重观察；新节点需要风险确认时仍先进入风险门，不提前调用视觉模型。
+- 不改变 DeepSeek 图、observer schema、App 名称、坐标、风险或机械臂动作；复用现有
+  `_refresh_decision_locked()`，不新建第二条观察实现。回滚仅移除 active 节点变化后的状态转换。
+
+### 20.3 验证清单与停止条件
+
+- 正测动作后 active ID 变化：`confirm_one` 后必须为 needs_reobservation，旧 scene 不得产生第二个
+  Qwen 决策；`refresh_decision` 必须接收新节点 goal context、保持物理动作数不变并产生新 observation。
+- 正测新 read-only 节点：重观察后可由新目标相关标题完成，不能复用上一导航回执伪造标题。
+- 反测 active ID 不变的连续导航仍可直接生成下一确认；风险后继仍进入 risk confirmation；任何
+  重观察异常为 0 新动作并失败关闭。
+- 运行编排定向及 DeepSeek/Qwen/adapter/web 相关回归，再运行一次完整 Python 回归、静态编译和
+  diff-check；全绿后提交、只重载 Uvicorn，并以全新 Browser 会话验收。旧会话不恢复、不复用 scope。
+
+离线结果：活动节点切换与 read-only 后继定向 `3/3`，通用编排 `167/167`，DeepSeek、Qwen、adapter、
+编排与 web 相关回归 `679/679`，Python 完整回归 `1457/1457`。完整回归只有既知测试子进程
+`ResourceWarning`，无断言失败。同一 subgoal 的连续导航仍直接推进；不同 subgoal 必须先完成 0 动作
+goal-conditioned 重观察。

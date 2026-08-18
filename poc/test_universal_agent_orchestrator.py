@@ -4430,6 +4430,113 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         self.assertEqual(3, session.task_graph.revision)
         self.assertEqual("unseen.reference.workspace", session.goal_draft.app_id)
 
+    def test_new_active_subgoal_gets_goal_conditioned_reobservation(self) -> None:
+        base = self._unknown_app_graph()
+        first = replace(
+            base.subgoals[0],
+            subgoal_id="return_home",
+            objective="返回手机桌面",
+            completion_conditions=("手机桌面可见",),
+        )
+        second = Subgoal(
+            subgoal_id="read_title",
+            objective="读取当前页面主标题",
+            status="pending",
+            depends_on=(first.subgoal_id,),
+            constraints=("仅读取",),
+            completion_conditions=("页面主标题已读取",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="read_only",
+        )
+        initial = replace(
+            base,
+            subgoals=(first, second),
+            active_subgoal_id=first.subgoal_id,
+        )
+        initial.validate()
+        revised = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    first,
+                    status="completed",
+                    completion_evidence=("手机桌面可见",),
+                ),
+                replace(second, status="active"),
+            ),
+            active_subgoal_id=second.subgoal_id,
+        )
+        revised.validate()
+        completed = _completed_graph(revised)
+
+        after_scene = replace(
+            _scene(
+                fingerprint="frame-b",
+                app_id="unseen.reference.workspace",
+            ),
+            elements=(),
+            summary="动作后页面稳定，但旧目标观察没有标题候选",
+        )
+        title_scene = _scene(
+            fingerprint="frame-b",
+            app_id="unseen.reference.workspace",
+            meaning="page_title",
+            label="公开页面主标题",
+            role="text",
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+
+        class GoalConditionedAdapter(SequenceExecutingAdapter):
+            def __init__(self):
+                super().__init__(
+                    _scene(app_id="unseen.reference.workspace"),
+                    (after_scene, "matched", ()),
+                )
+                self.captured_subgoals = []
+
+            def capture_scene(self, goal, *, evidence_dir, prefix):
+                focus = goal.entities["active_subgoal_visual_context"]
+                self.captured_subgoals.append(focus["subgoal_id"])
+                if focus["subgoal_id"] == "read_title":
+                    self.scene = title_scene
+                return super().capture_scene(
+                    goal,
+                    evidence_dir=evidence_dir,
+                    prefix=prefix,
+                )
+
+        planner = SequenceDeepSeekPlanner(initial, revised, completed)
+        qwen = SequenceQwenObserver("action", "finished")
+        adapter = GoalConditionedAdapter()
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(planner, qwen, adapter)
+            session = orchestrator.start(
+                session_id="session-goal-conditioned-reobservation",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+            orchestrator.confirm_one(session, _confirmation(session))
+            self.assertEqual("needs_reobservation", session.status)
+            self.assertEqual(1, len(qwen.calls))
+            self.assertEqual((), session.trusted_observation.scene.elements)
+            self.assertEqual(
+                "advanced_to_goal_conditioned_reobservation",
+                session.last_post_action_transition["disposition"],
+            )
+
+            orchestrator.refresh_decision(session)
+
+        self.assertEqual(["return_home", "read_title"], adapter.captured_subgoals)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual("公开页面主标题", qwen.calls[1]["trusted_observation"].scene.elements[0].label)
+        self.assertEqual("succeeded", session.status)
+
     def test_unchanged_screen_is_mismatch_evidence_and_replans_once(self) -> None:
         initial = self._unknown_app_graph()
         revised = replace(initial, revision=2)
@@ -5818,7 +5925,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 return read_only if graph.revision == 1 else completed
 
         planner = SequentialPlanner(initial)
-        qwen = FakeQwenObserver()
+        qwen = SequenceQwenObserver("action", "finished")
         with tempfile.TemporaryDirectory() as temp:
             orchestrator, session, _planner, _qwen, adapter = self._started(
                 temp,
@@ -5827,6 +5934,10 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             )
 
             result = orchestrator.confirm_one(session, _confirmation(session))
+            self.assertEqual("needs_reobservation", session.status)
+            self.assertEqual(1, len(qwen.calls))
+            adapter.scene = adapter.after_scene
+            orchestrator.refresh_decision(session)
 
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(1, adapter.execute_calls)
@@ -5848,7 +5959,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             (),
             planner.replan_calls[1][1].controller_transition_evidence_refs,
         )
-        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(2, len(qwen.calls))
 
     def test_read_only_checkpoint_can_advance_to_later_navigation(self) -> None:
         initial = _graph()
@@ -5909,7 +6020,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 return read_only if graph.revision == 1 else navigation
 
         planner = SequentialPlanner(initial)
-        qwen = FakeQwenObserver()
+        qwen = SequenceQwenObserver("action", "finished", "action")
         with tempfile.TemporaryDirectory() as temp:
             orchestrator, session, _planner, _qwen, adapter = self._started(
                 temp,
@@ -5918,6 +6029,11 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             )
 
             result = orchestrator.confirm_one(session, _confirmation(session))
+            self.assertEqual("needs_reobservation", session.status)
+            adapter.scene = adapter.after_scene
+            orchestrator.refresh_decision(session)
+            self.assertEqual("needs_reobservation", session.status)
+            orchestrator.refresh_decision(session)
 
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(1, adapter.execute_calls)
@@ -5925,8 +6041,8 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertEqual("awaiting_confirmation", session.status)
         self.assertEqual(3, session.task_graph.revision)
         self.assertEqual("continue-navigation", session.task_graph.active_subgoal_id)
-        self.assertEqual(2, len(qwen.calls))
-        self.assertEqual(3, qwen.calls[-1][1]["revision"])
+        self.assertEqual(3, len(qwen.calls))
+        self.assertEqual(3, qwen.calls[-1]["task_context"]["revision"])
 
     def test_safe_loop_executes_one_confirmed_action_then_pauses_for_new_confirmation(self) -> None:
         initial = _graph()

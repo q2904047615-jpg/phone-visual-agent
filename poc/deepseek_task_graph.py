@@ -104,6 +104,11 @@ QWEN_SUBGOAL_SCOPED_ENTITY_KEYS = frozenset(
         "value",
     }
 )
+GENERIC_UI_ROLE_ONLY_LABEL_PATTERN = re.compile(
+    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域|"
+    r"按钮|入口|选项|控件|元素|列表项|标签页|页签)$",
+    re.IGNORECASE,
+)
 EXTERNAL_STATE_CHANGE_PATTERN = re.compile(
     r"(?:"
     r"发送|发布|点赞|"
@@ -1397,6 +1402,21 @@ class DynamicTaskGraph:
                     literal.casefold() in current_text for literal in literals
                 ):
                     goal_entities.pop(key, None)
+            exact_label = str(goal_entities.get("target_ui_label") or "").strip()
+            if exact_label and GENERIC_UI_ROLE_ONLY_LABEL_PATTERN.search(exact_label):
+                escaped_label = re.escape(exact_label)
+                raw_goal = self.raw_user_goal or self.goal.objective
+                explicitly_literal = bool(
+                    re.search(
+                        rf"[“\"]{escaped_label}[”\"]|"
+                        rf"(?:名为|名称为|标有|标签为|文字为|显示文字为)\s*"
+                        rf"[“\"]?{escaped_label}[”\"]?",
+                        raw_goal,
+                        flags=re.IGNORECASE,
+                    )
+                )
+                if not explicitly_literal:
+                    goal_entities.pop("target_ui_label", None)
         goal_context["entities"] = goal_entities
         return {
             "protocol_version": self.protocol_version,

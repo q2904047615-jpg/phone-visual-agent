@@ -838,7 +838,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
     def test_qwen_context_scopes_execution_entities_to_current_subgoal(self):
         raw_goal = (
-            "打开设置，找到搜索输入框，在其中输入 wifi，"
+            "打开设置，找到“搜索输入框”，在其中输入 wifi，"
             "但不要提交；最后返回手机桌面。"
         )
 
@@ -887,6 +887,48 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         home_entities = context_for("返回手机桌面", "手机桌面可见")
         self.assertNotIn("target_ui_label", home_entities)
         self.assertNotIn("input_text", home_entities)
+
+    def test_qwen_context_does_not_treat_generic_role_description_as_literal_label(self):
+        raw_goal = "打开设置，找到设置中的搜索输入框，在其中输入 wifi，但不要提交。"
+        payload = single_subgoal_payload(
+            "在搜索输入框中输入 wifi，但不要提交",
+            external_impact="navigation_only",
+        )
+        payload["goal"].update(
+            objective=raw_goal,
+            target_apps=[{"app_id": "settings", "app_name": "设置"}],
+            entities={
+                "input_text": "wifi",
+                "target_ui_label": "搜索输入框",
+            },
+        )
+        payload["constraints"] = ["不得提交搜索"]
+        payload["subgoals"][0]["constraints"] = ["不得提交搜索"]
+        payload["subgoals"][0]["completion_conditions"] = [
+            "搜索输入框中显示 wifi"
+        ]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            raw_goal,
+            device_id="phone-1",
+        )
+        entities = graph.to_qwen_context()["goal"]["entities"]
+
+        self.assertEqual("wifi", entities["input_text"])
+        self.assertNotIn("target_ui_label", entities)
+
+        explicit_payload = copy.deepcopy(payload)
+        explicit_goal = "打开设置，在名为“搜索输入框”的控件中输入 wifi，但不要提交。"
+        explicit_payload["goal"]["objective"] = explicit_goal
+        explicit_graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(explicit_payload)
+        ).plan(explicit_goal, device_id="phone-1")
+        self.assertEqual(
+            "搜索输入框",
+            explicit_graph.to_qwen_context()["goal"]["entities"][
+                "target_ui_label"
+            ],
+        )
 
     def test_task_id_is_preserved_across_replanning(self):
         initial = base_payload()

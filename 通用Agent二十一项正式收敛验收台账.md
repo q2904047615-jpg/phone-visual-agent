@@ -978,3 +978,39 @@ adapter、DeepSeek、编排和 Web 关联回归 `890/890`，Python 完整回归 
 离线结果：四阶段实体投影定向通过；DeepSeek 与编排核心 `383/383`，observer、Qwen、adapter、
 DeepSeek、编排和 Web 关联回归 `891/891`，Python 完整回归 `1472/1472`。完整回归只有既知测试
 子进程 `ResourceWarning`，无断言失败。
+
+## 31. 控件角色描述被误当作屏幕逐字标签
+
+### 31.1 验收台账与根因证据
+
+- 提交 `63950bf` 加载后的 Settings session `b0f4fd551b0d4f19b3b0061e2ce0e907` 已从 Launcher
+  正确点击唯一“设置”入口；动作 matched，前后各 4 帧，revision `1→2`，证明第 30 项实体跨子目标
+  泄漏修复在线生效。
+- 当前设置页 scene 为 `com.android.settings/settings_main`，唯一可信输入候选是
+  `role=input / label=搜索系统设置项 / placeholder=搜索系统设置项 / value="" /`
+  `goal_relevant=true`。DeepSeek 把用户描述的控件类型“搜索输入框”写入 `target_ui_label`，Qwen context
+  因而要求屏幕 label 逐字等于这五个字并在 0 新动作处 blocked；会话总 `physical_actions=1`，没有点击
+  错误控件或重试。
+- 主要根因是“控件角色描述”和“可见字面标签”没有区分，不是视觉漏掉输入框或几何不准。用户没有
+  引号、‘名为/标有/文字为’等逐字指示；真实可见 placeholder 与语义描述不同是任意 App 的常见情况。
+
+### 31.2 通用修复、变化样本与边界
+
+- Qwen current-subgoal 投影把以输入框、文本框、搜索框、文本区域、输入区域、编辑区域、按钮、入口、
+  选项、控件、元素、列表项、标签页或页签结尾的普通描述视为 role/semantic hint，不作为 exact label。
+  目标仍须通过可信 role、meaning、goal relevance、唯一性和 fresh 几何门。
+- 用户用中文/英文引号逐字引用，或明确写“名为/名称为/标有/标签为/文字为/显示文字为”时，原
+  `target_ui_label` exact authority 保留。普通非角色字面标签（例如“设置”“下一步”）也不受影响。
+- 只改变当前 Qwen/controller context，不删除 graph 中的原 entity、不改写 input_text、目标 App 或
+  completion。没有 App 名称、placeholder 别名、固定步骤或坐标分支。
+
+### 31.3 验证与停止条件
+
+- 正测未加逐字标记的“搜索输入框”只保留 `input_text=wifi`，exact label 被移除；加引号/‘名为’时
+  exact label 仍逐字保留。第 30 项四阶段 scope、literal 标签、输入事务和 policy 反例继续通过。
+- 运行 DeepSeek/Qwen/observer/编排/policy/Web 相关回归和一次完整 Python 回归，静态编译及 diff-check
+  全绿后本地提交并只重载 Uvicorn。旧会话不恢复；完全相同 Settings 原目标再用一个全新 session 验收。
+
+离线结果：role description 与 explicit literal 正反定向通过；DeepSeek 与编排核心 `384/384`，
+observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `892/892`，Python 完整回归 `1473/1473`。
+完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。

@@ -2781,6 +2781,75 @@ class UniversalAgentStartTests(unittest.TestCase):
             trusted_observation_factory=_trusted_factory,
         )
 
+    def test_browser_reload_element_cannot_prove_phone_desktop_presence(self) -> None:
+        base = _graph()
+        desktop_graph = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="让手机桌面在前台稳定可见",
+                target_apps=(
+                    TargetApp(
+                        app_id="current_foreground",
+                        app_name="当前前台应用",
+                    ),
+                ),
+                entities={},
+            ),
+            completion_conditions=(
+                CompletionCondition(
+                    condition_id="desktop_visible",
+                    description="手机桌面在前台稳定可见",
+                    evidence_required=("手机桌面界面在前台显示",),
+                ),
+            ),
+            subgoals=(
+                replace(
+                    base.subgoals[0],
+                    subgoal_id="ensure-desktop",
+                    objective="手机桌面在前台可见",
+                    completion_conditions=("手机桌面在前台显示",),
+                    external_impact="navigation_only",
+                ),
+            ),
+            active_subgoal_id="ensure-desktop",
+            raw_user_goal="让手机桌面在前台稳定可见",
+        )
+        desktop_graph.validate()
+        browser_scene = replace(
+            _scene(
+                meaning="reload",
+                label="",
+                role="icon",
+                states={"goal_relevant": True, "fully_visible": True},
+                evidence=("完整圆弧和箭头头部",),
+            ),
+            app_id="browser",
+            screen_id="generic_acceptance_page",
+            summary="浏览器显示通用动作真机验收页和刷新图标",
+        )
+        planner = FakeDeepSeekPlanner(
+            desktop_graph,
+            replan_result=_completed_graph(desktop_graph),
+        )
+        qwen = FakeQwenObserver(action_kind="home")
+        adapter = FakeAdapter(browser_scene)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(planner, qwen, adapter).start(
+                session_id="session-desktop-from-browser",
+                raw_goal=desktop_graph.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual("home", session.qwen_decision.proposal.action.action)
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual(0, adapter.execute_calls)
+
     @staticmethod
     def _named_app_page_graph(*, app_id: str, app_name: str) -> DynamicTaskGraph:
         base = _graph()

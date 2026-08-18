@@ -1307,6 +1307,34 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             )
         )
 
+    def test_phone_home_surface_requires_structured_launcher_identity(self):
+        phrases = (
+            "手机桌面在前台稳定可见",
+            "系统主屏幕清晰可见",
+            "Android home screen is visible",
+        )
+        launcher_facts = (
+            '{"app_id":"launcher","screen_id":"home_screen"}',
+        )
+        wrong_facts = (
+            '{"app_id":"browser","screen_id":"generic_acceptance_page"}',
+        )
+        for phrase in phrases:
+            with self.subTest(phrase=phrase):
+                self.assertTrue(
+                    named_visual_identity_is_grounded((phrase,), launcher_facts)
+                )
+                self.assertFalse(
+                    named_visual_identity_is_grounded((phrase,), wrong_facts)
+                )
+
+        for unrelated in ("App 首页可见", "网站 homepage 可见", "桌面版页面可见"):
+            with self.subTest(unrelated=unrelated):
+                self.assertNotEqual(
+                    "launcher",
+                    _named_visual_identity_anchor((unrelated,)),
+                )
+
     def test_semantic_screen_alias_does_not_weaken_verbatim_title_grounding(self):
         observation = ObservedState(
             scene_id="scene-chat",

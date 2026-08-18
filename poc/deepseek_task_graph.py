@@ -2847,7 +2847,20 @@ _VISUAL_IDENTITY_SEMANTIC_ALIASES = {
         re.compile(r"浏览器"),
         re.compile(r"(?<![a-z0-9])browser(?![a-z0-9])", re.I),
     ),
+    "launcher": (
+        re.compile(r"(?:手机|系统|android)?(?:主)?桌面(?!版)|(?:手机|系统)?主屏(?:幕)?", re.I),
+        re.compile(
+            r"(?<![a-z0-9])(?:launcher|home[ _-]?screen)(?![a-z0-9])",
+            re.I,
+        ),
+    ),
 }
+
+_SYSTEM_HOME_SURFACE_PATTERN = re.compile(
+    r"(?:手机|系统|android)?(?:主)?桌面(?!版)|(?:手机|系统)?主屏(?:幕)?|"
+    r"(?<![a-z0-9])(?:launcher|home[ _-]?screen)(?![a-z0-9])",
+    re.IGNORECASE,
+)
 
 
 def _compact_identity_text(value: str) -> str:
@@ -2867,6 +2880,13 @@ def _named_visual_identity_anchor(texts: tuple[str, ...]) -> str:
     anchors: list[str] = []
     for item in texts:
         value = str(item or "").strip()
+        # The Android launcher/home screen is a stable system surface, not an
+        # unnamed generic page.  Bind it only to structured launcher facts so
+        # an arbitrary element on another foreground App cannot prove Home.
+        if _SYSTEM_HOME_SURFACE_PATTERN.search(value):
+            if "launcher" not in anchors:
+                anchors.append("launcher")
+            continue
         # "打开后页面" and similar temporal references identify the page by
         # its place in the current action sequence, not by a stable visual
         # name.  Treating the preceding verbs as a page title makes an exact,

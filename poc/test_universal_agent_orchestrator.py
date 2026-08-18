@@ -37,6 +37,7 @@ from universal_agent_orchestrator import (
     PhaseOneNavigationPolicy,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
+    VerifiedAppSurfaceLineage,
     _action_digest,
     _action_equivalence_digest,
 )
@@ -4275,6 +4276,156 @@ class UniversalAgentStartTests(unittest.TestCase):
                     **kwargs,
                 )
 
+    def test_unique_visible_title_advances_with_verified_surface_lineage(self) -> None:
+        base = self._advance_named_app_page_graph(
+            self._named_app_page_graph(app_id="browser", app_name="浏览器")
+        )
+        source = replace(
+            base.subgoals[0],
+            completion_evidence=("controller_transition:receipt-browser:1",),
+        )
+        read = replace(
+            base.subgoals[1],
+            objective="读取浏览器打开后页面的主标题或错误提示",
+            completion_conditions=("已获取页面主标题或错误提示文本",),
+            external_impact="read_only",
+        )
+        finish = Subgoal(
+            subgoal_id="return-home",
+            objective="返回手机桌面",
+            status="pending",
+            depends_on=(read.subgoal_id,),
+            constraints=(),
+            completion_conditions=("手机桌面可见",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        graph = replace(base, subgoals=(source, read, finish))
+        graph.validate()
+        visible_fact = (
+            "当前可信画面读取结果：element_id=title-1, role=text, "
+            "meaning=page_title, label=要闻。"
+        )
+        revised = replace(
+            graph,
+            revision=graph.revision + 1,
+            subgoals=(
+                source,
+                replace(read, status="completed", completion_evidence=(visible_fact,)),
+                replace(finish, status="active"),
+            ),
+            active_subgoal_id=finish.subgoal_id,
+        )
+        revised.validate()
+        scene = replace(
+            _scene(
+                fingerprint="news-current",
+                meaning="page_title",
+                label="要闻",
+                role="text",
+                states={"goal_relevant": True, "fully_visible": True},
+            ),
+            app_id="news_aggregator",
+            screen_id="news_feed",
+            summary="当前页面顶部主标题为要闻。",
+            elements=(
+                replace(
+                    _scene(meaning="page_title", label="要闻", role="text").elements[0],
+                    element_id="title-1",
+                ),
+            ),
+        )
+        observation = FakeTrustedObservation(
+            device_id="device-1", scene=scene, observation_id="obs-title"
+        )
+        lineage = VerifiedAppSurfaceLineage(
+            session_id="session-title",
+            task_id=graph.task_id,
+            device_id=graph.device_id,
+            app_id="browser",
+            app_name="浏览器",
+            surface_id="surface_browser",
+            source_receipt_id="receipt-browser",
+            source_subgoal_id=source.subgoal_id,
+            functional_foreground_app_id="news_aggregator",
+            physical_actions=1,
+        )
+        planner = FakeDeepSeekPlanner(graph, replan_result=revised)
+        orchestrator = self._orchestrator(planner, FakeQwenObserver(), FakeAdapter(scene))
+        session = SimpleNamespace(
+            session_id="session-title",
+            device_id="device-1",
+            verified_app_surface_lineage=lineage,
+            physical_actions=1,
+        )
+
+        actual = orchestrator._try_advance_visible_text_read_subgoal(
+            session,
+            graph=graph,
+            trusted_observation=observation,
+        )
+
+        self.assertEqual(revised, actual)
+        self.assertEqual("subgoal_completed", planner.replan_calls[0][2])
+        self.assertIn(visible_fact, planner.replan_calls[0][1].visible_evidence)
+
+        with self.assertRaisesRegex(
+            UniversalAgentOrchestratorError,
+            "入口不能证明目标 App 页面已在前台",
+        ):
+            UniversalAgentOrchestrator._validate_graph_identity(
+                revised,
+                device_id="device-1",
+                previous=graph,
+                trusted_observation=observation,
+                session_id="session-title",
+                verified_app_surface_lineage=lineage,
+                physical_actions=2,
+            )
+
+    def test_visible_text_read_rejects_exact_or_ambiguous_results(self) -> None:
+        subgoal = SimpleNamespace(
+            external_impact="read_only",
+            objective="读取主标题是否为指定文字",
+            completion_conditions=("主标题等于指定文字",),
+        )
+        self.assertFalse(
+            UniversalAgentOrchestrator._is_visible_text_read_subgoal(subgoal)
+        )
+
+        graph = self._named_app_page_graph(app_id="browser", app_name="浏览器")
+        read = replace(
+            graph.subgoals[0],
+            objective="读取页面主标题或错误提示",
+            completion_conditions=("已获取主标题或错误提示文本",),
+            external_impact="read_only",
+        )
+        graph = replace(graph, subgoals=(read, graph.subgoals[1]))
+        graph.validate()
+        first = _scene(meaning="page_title", label="标题一", role="text").elements[0]
+        ambiguous_scene = replace(
+            _scene(),
+            elements=(first, replace(first, element_id="title-2", label="标题二")),
+        )
+        planner = FakeDeepSeekPlanner(graph)
+        result = self._orchestrator(
+            planner, FakeQwenObserver(), FakeAdapter(ambiguous_scene)
+        )._try_advance_visible_text_read_subgoal(
+            SimpleNamespace(
+                session_id="session-ambiguous",
+                device_id="device-1",
+                verified_app_surface_lineage=None,
+                physical_actions=0,
+            ),
+            graph=graph,
+            trusted_observation=FakeTrustedObservation(
+                device_id="device-1", scene=ambiguous_scene
+            ),
+        )
+        self.assertIsNone(result)
+        self.assertEqual([], planner.replan_calls)
+
     def test_replan_structured_foreground_app_and_launcher_checkpoint_pass(self) -> None:
         previous = self._named_app_page_graph(
             app_id="wechat",
@@ -4760,7 +4911,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
                 )
 
         planner = SequenceDeepSeekPlanner(initial, revised, completed)
-        qwen = SequenceQwenObserver("action", "finished")
+        qwen = SequenceQwenObserver("action")
         adapter = GoalConditionedAdapter()
         with tempfile.TemporaryDirectory() as temp:
             orchestrator = self._orchestrator(planner, qwen, adapter)
@@ -4785,8 +4936,11 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         self.assertEqual(["return_home", "read_title"], adapter.captured_subgoals)
         self.assertEqual(1, adapter.execute_calls)
         self.assertEqual(1, session.physical_actions)
-        self.assertEqual(2, len(qwen.calls))
-        self.assertEqual("公开页面主标题", qwen.calls[1]["trusted_observation"].scene.elements[0].label)
+        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(
+            "公开页面主标题",
+            session.trusted_observation.scene.elements[0].label,
+        )
         self.assertEqual("succeeded", session.status)
 
     def test_unchanged_screen_is_mismatch_evidence_and_replans_once(self) -> None:

@@ -717,6 +717,34 @@ class RiskConfirmationAuthority:
         }
 
 
+@dataclass(frozen=True)
+class VerifiedAppSurfaceLineage:
+    session_id: str
+    task_id: str
+    device_id: str
+    app_id: str
+    app_name: str
+    surface_id: str
+    source_receipt_id: str
+    source_subgoal_id: str
+    functional_foreground_app_id: str
+    physical_actions: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "task_id": self.task_id,
+            "device_id": self.device_id,
+            "app_id": self.app_id,
+            "app_name": self.app_name,
+            "surface_id": self.surface_id,
+            "source_receipt_id": self.source_receipt_id,
+            "source_subgoal_id": self.source_subgoal_id,
+            "functional_foreground_app_id": self.functional_foreground_app_id,
+            "physical_actions": self.physical_actions,
+        }
+
+
 @dataclass
 class UniversalAgentSessionState:
     session_id: str
@@ -742,6 +770,7 @@ class UniversalAgentSessionState:
     history: list[dict[str, Any]] = field(default_factory=list)
     evidence_paths: list[str] = field(default_factory=list)
     last_post_action_transition: dict[str, Any] | None = None
+    verified_app_surface_lineage: VerifiedAppSurfaceLineage | None = None
     last_confirmation_failure: dict[str, Any] | None = None
     capability_gap: dict[str, Any] | None = None
     effect_previews: tuple[dict[str, Any], ...] = ()
@@ -855,6 +884,11 @@ class UniversalAgentSessionState:
             "capability_gap": (
                 dict(self.capability_gap)
                 if self.capability_gap is not None
+                else None
+            ),
+            "verified_app_surface_lineage": (
+                self.verified_app_surface_lineage.to_dict()
+                if self.verified_app_surface_lineage is not None
                 else None
             ),
             "effect_previews": [dict(item) for item in self.effect_previews],
@@ -1868,6 +1902,104 @@ class UniversalAgentOrchestrator:
             )
         )
 
+    @staticmethod
+    def _is_visible_text_read_subgoal(subgoal: Any) -> bool:
+        if str(getattr(subgoal, "external_impact", "")) != "read_only":
+            return False
+        text = " ".join(
+            (
+                str(getattr(subgoal, "objective", "") or ""),
+                *tuple(getattr(subgoal, "completion_conditions", ()) or ()),
+            )
+        ).casefold()
+        read_markers = ("读取", "获取", "读出", "read", "report", "get the")
+        value_markers = (
+            "标题", "题头", "错误提示", "错误信息", "状态提示",
+            "title", "heading", "error message", "status message",
+        )
+        exact_markers = (
+            "等于", "包含", "逐字", "指定文字", "是否为",
+            "equals", "contains", "exactly", "whether",
+        )
+        return (
+            any(marker in text for marker in read_markers)
+            and any(marker in text for marker in value_markers)
+            and not any(marker in text for marker in exact_markers)
+        )
+
+    def _try_advance_visible_text_read_subgoal(
+        self,
+        session: UniversalAgentSessionState,
+        *,
+        graph: DynamicTaskGraph,
+        trusted_observation: Any,
+    ) -> DynamicTaskGraph | None:
+        current = graph.active_subgoal()
+        scene = getattr(trusted_observation, "scene", None)
+        if current is None or scene is None or not self._is_visible_text_read_subgoal(current):
+            return None
+        allowed_meanings = ("title", "heading", "error", "status_message")
+        candidates = []
+        for item in tuple(getattr(scene, "elements", ()) or ()):
+            meaning = str(getattr(item, "meaning", "") or "").casefold()
+            label = str(getattr(item, "label", "") or "").strip()
+            left, top, right, bottom = getattr(item, "bounds", (0, 0, 0, 0))
+            if (
+                str(getattr(item, "role", "")) in {"text", "dialog", "container"}
+                and any(marker in meaning for marker in allowed_meanings)
+                and label
+                and item.states.get("goal_relevant") is True
+                and item.states.get("fully_visible") is True
+                and float(item.confidence) >= MIN_TARGET_CONFIDENCE
+                and not self._candidate_has_unresolved_conflict(
+                    trusted_observation, item.element_id
+                )
+                and 0.02 <= left < right <= 0.98
+                and 0.02 <= top < bottom <= 0.98
+            ):
+                candidates.append(item)
+        if len(candidates) != 1:
+            return None
+        item = candidates[0]
+        visible_fact = (
+            "当前可信画面读取结果："
+            f"element_id={item.element_id}, role={item.role}, "
+            f"meaning={item.meaning}, label={item.label}。"
+        )
+        observed = self.bridge.observed_state(
+            graph=graph,
+            trusted_observation=trusted_observation,
+            action_outcome="not_applicable",
+            verification={"visible_evidence": [scene.summary, visible_fact]},
+        )
+        revised = self.deepseek_planner.replan(
+            graph,
+            observed,
+            trigger="subgoal_completed",
+            reason=(
+                "当前 read_only 子目标具有唯一、完整、高置信且无冲突的"
+                "文字结果候选；只能用 visible_evidence 中逐字结果完成当前节点，"
+                "不得推断预设值、外部状态或执行动作。"
+            ),
+        )
+        self._validate_graph_identity(
+            revised,
+            device_id=session.device_id,
+            previous=graph,
+            trusted_observation=trusted_observation,
+            session_id=session.session_id,
+            verified_app_surface_lineage=session.verified_app_surface_lineage,
+            physical_actions=session.physical_actions,
+        )
+        old = graph.active_subgoal()
+        new_old = next(
+            (candidate for candidate in revised.subgoals if candidate.subgoal_id == old.subgoal_id),
+            None,
+        )
+        if new_old is None or new_old.status != "completed":
+            return None
+        return revised
+
     def _try_advance_visible_presence_subgoal(
         self,
         session: UniversalAgentSessionState,
@@ -2063,6 +2195,9 @@ class UniversalAgentOrchestrator:
             device_id=session.device_id,
             previous=graph,
             trusted_observation=trusted_observation,
+            session_id=session.session_id,
+            verified_app_surface_lineage=session.verified_app_surface_lineage,
+            physical_actions=session.physical_actions,
         )
         if revised.revision != graph.revision + 1:
             raise UniversalAgentOrchestratorError(
@@ -2246,6 +2381,9 @@ class UniversalAgentOrchestrator:
             device_id=session.device_id,
             previous=graph,
             trusted_observation=trusted_observation,
+            session_id=session.session_id,
+            verified_app_surface_lineage=session.verified_app_surface_lineage,
+            physical_actions=session.physical_actions,
         )
         self._store_revised_graph(session, revised)
         if revised.status == "completed":
@@ -2316,6 +2454,8 @@ class UniversalAgentOrchestrator:
         before_observation: Any | None = None,
         previous_decision: Any | None = None,
         execution_result: Any | None = None,
+        verified_app_surface_lineage: VerifiedAppSurfaceLineage | None = None,
+        physical_actions: int = 0,
     ) -> None:
         scene = getattr(trusted_observation, "scene", None)
         if scene is None:
@@ -2352,6 +2492,14 @@ class UniversalAgentOrchestrator:
                 before_observation=before_observation,
                 previous_decision=previous_decision,
                 execution_result=execution_result,
+            ) and not cls._verified_lineage_proves_named_app_surface(
+                previous=previous,
+                completed_subgoal=item,
+                target_apps=referenced_app_pages,
+                trusted_observation=trusted_observation,
+                session_id=session_id,
+                verified_app_surface_lineage=verified_app_surface_lineage,
+                physical_actions=physical_actions,
             ):
                 raise UniversalAgentOrchestratorError(
                     "Launcher 或其他页面中的 App 入口不能证明目标 App 页面已在前台："
@@ -2528,6 +2676,138 @@ class UniversalAgentOrchestrator:
         return bool(surface_ids) and len(matching_expectations) == 1
 
     @classmethod
+    def _verified_lineage_proves_named_app_surface(
+        cls,
+        *,
+        previous: DynamicTaskGraph,
+        completed_subgoal: Any,
+        target_apps: tuple[Any, ...],
+        trusted_observation: Any,
+        session_id: str,
+        verified_app_surface_lineage: VerifiedAppSurfaceLineage | None,
+        physical_actions: int,
+    ) -> bool:
+        lineage = verified_app_surface_lineage
+        scene = getattr(trusted_observation, "scene", None)
+        if lineage is None or scene is None:
+            return False
+        if (
+            not session_id
+            or lineage.session_id != session_id
+            or lineage.task_id != previous.task_id
+            or lineage.device_id != previous.device_id
+            or lineage.physical_actions != physical_actions
+            or str(getattr(scene, "foreground_app_id", "")).casefold()
+            != lineage.functional_foreground_app_id.casefold()
+            or lineage.functional_foreground_app_id.casefold() == "launcher"
+        ):
+            return False
+        if not any(
+            str(app.app_id).casefold() == lineage.app_id.casefold()
+            and str(app.app_name).casefold() == lineage.app_name.casefold()
+            for app in target_apps
+        ):
+            return False
+        by_id = {item.subgoal_id: item for item in previous.subgoals}
+        source = by_id.get(lineage.source_subgoal_id)
+        if (
+            source is None
+            or source.status != "completed"
+            or not any(
+                str(ref).startswith(
+                    f"controller_transition:{lineage.source_receipt_id}:"
+                )
+                for ref in source.completion_evidence
+            )
+        ):
+            return False
+        pending = list(getattr(completed_subgoal, "depends_on", ()) or ())
+        visited: set[str] = set()
+        while pending:
+            dependency_id = pending.pop()
+            if dependency_id == lineage.source_subgoal_id:
+                return True
+            if dependency_id in visited:
+                continue
+            visited.add(dependency_id)
+            dependency = by_id.get(dependency_id)
+            if dependency is not None:
+                pending.extend(dependency.depends_on)
+        return False
+
+    @classmethod
+    def _build_verified_app_surface_lineage(
+        cls,
+        *,
+        session: UniversalAgentSessionState,
+        previous: DynamicTaskGraph,
+        revised: DynamicTaskGraph,
+        trusted_observation: Any,
+        receipt: VerifiedActionTransition | None,
+        controller_refs: tuple[ControllerTransitionEvidenceRef, ...],
+        before_observation: Any,
+        previous_decision: Any,
+        execution_result: Any,
+    ) -> VerifiedAppSurfaceLineage | None:
+        old_by_id = {item.subgoal_id: item for item in previous.subgoals}
+        for item in revised.subgoals:
+            old = old_by_id.get(item.subgoal_id)
+            if item.status != "completed" or old is None or old.status == "completed":
+                continue
+            text = " ".join((item.objective, *item.completion_conditions))
+            target_apps = cls._referenced_target_app_pages(
+                graph=previous,
+                presence_text=text,
+            )
+            if not target_apps or not cls._verified_transition_proves_named_app_surface(
+                previous=previous,
+                completed_subgoal=item,
+                target_apps=target_apps,
+                trusted_observation=trusted_observation,
+                session_id=session.session_id,
+                verified_transition=receipt,
+                controller_transition_evidence_refs=controller_refs,
+                before_observation=before_observation,
+                previous_decision=previous_decision,
+                execution_result=execution_result,
+            ):
+                continue
+            action = previous_decision.proposal.action
+            terms = cls._presence_binding_terms(
+                action.params.get("label"), action.params.get("target")
+            )
+            bound = [
+                app for app in target_apps
+                if cls._target_app_identity_terms(
+                    app.app_id, app.app_name
+                ).intersection(terms)
+            ]
+            expectations = action.params["formal_transition"]["expectations"]
+            surface_id = next(
+                str(expectation["value"])
+                for expectation in expectations
+                if expectation.get("predicate") == "surface.active_ref"
+                and expectation.get("operator") == "equals"
+            )
+            if len(bound) != 1 or receipt is None:
+                return None
+            return VerifiedAppSurfaceLineage(
+                session_id=session.session_id,
+                task_id=previous.task_id,
+                device_id=previous.device_id,
+                app_id=str(bound[0].app_id),
+                app_name=str(bound[0].app_name),
+                surface_id=surface_id,
+                source_receipt_id=receipt.receipt_id,
+                source_subgoal_id=receipt.subgoal_id,
+                functional_foreground_app_id=str(
+                    trusted_observation.scene.foreground_app_id
+                ),
+                physical_actions=session.physical_actions,
+            )
+        return None
+
+    @classmethod
     def _validate_graph_identity(
         cls,
         graph: DynamicTaskGraph,
@@ -2543,6 +2823,8 @@ class UniversalAgentOrchestrator:
         before_observation: Any | None = None,
         previous_decision: Any | None = None,
         execution_result: Any | None = None,
+        verified_app_surface_lineage: VerifiedAppSurfaceLineage | None = None,
+        physical_actions: int = 0,
     ) -> None:
         graph.validate()
         if graph.device_id != device_id:
@@ -2571,6 +2853,8 @@ class UniversalAgentOrchestrator:
                     before_observation=before_observation,
                     previous_decision=previous_decision,
                     execution_result=execution_result,
+                    verified_app_surface_lineage=verified_app_surface_lineage,
+                    physical_actions=physical_actions,
                 )
 
     @staticmethod
@@ -3049,6 +3333,19 @@ class UniversalAgentOrchestrator:
                 previous_decision=previous_decision,
                 execution_result=result,
             )
+            session.verified_app_surface_lineage = (
+                self._build_verified_app_surface_lineage(
+                    session=session,
+                    previous=previous_graph,
+                    revised=revised,
+                    trusted_observation=new_observation,
+                    receipt=receipt,
+                    controller_refs=controller_refs,
+                    before_observation=before_observation,
+                    previous_decision=previous_decision,
+                    execution_result=result,
+                )
+            )
         except Exception as exc:
             session.status = "blocked"
             session.failed_reason = f"DeepSeek 重规划失败：{exc}"
@@ -3431,6 +3728,14 @@ class UniversalAgentOrchestrator:
                 return blocked_decision
             session.trusted_observation = observation
             session.trusted_frames = tuple(frames)
+            lineage = session.verified_app_surface_lineage
+            if lineage is not None and (
+                lineage.physical_actions != session.physical_actions
+                or str(scene.foreground_app_id).casefold()
+                != lineage.functional_foreground_app_id.casefold()
+                or str(scene.foreground_app_id).casefold() == "launcher"
+            ):
+                session.verified_app_surface_lineage = None
             self._remember(
                 session,
                 session.evidence_store.write_trusted_observation(
@@ -3547,6 +3852,41 @@ class UniversalAgentOrchestrator:
                     )
                     self._write_terminal_snapshot(session)
                     return risk_decision
+
+            current = graph.active_subgoal()
+            if current is not None and current.external_impact == "read_only":
+                text_revised = self._try_advance_visible_text_read_subgoal(
+                    session,
+                    graph=graph,
+                    trusted_observation=observation,
+                )
+                if text_revised is not None:
+                    self._store_revised_graph(session, text_revised)
+                    if text_revised.status == "completed":
+                        session.status = "succeeded"
+                    else:
+                        next_subgoal = text_revised.active_subgoal()
+                        if next_subgoal is None:
+                            session.status = "blocked"
+                            session.failed_reason = (
+                                "只读文字结果推进后没有活动子目标。"
+                            )
+                        elif _requires_risk_confirmation(text_revised, next_subgoal):
+                            session.status = "awaiting_risk_confirmation"
+                            session.failed_reason = ""
+                            self._bind_risk_confirmation(session)
+                        else:
+                            session.status = "needs_reobservation"
+                            session.failed_reason = ""
+                    decision = SimpleNamespace(
+                        proposal=GenericStepProposal(
+                            status="finished",
+                            reason="唯一可信可见文字已由 DeepSeek 复核。",
+                            completion_evidence=(scene.summary,),
+                        )
+                    )
+                    self._write_terminal_snapshot(session)
+                    return decision
 
             if session.confirmed_risk_ids:
                 context = graph.to_qwen_context(
@@ -3883,6 +4223,8 @@ class UniversalAgentOrchestrator:
 
         session.status = "executing_one_action"
         session.confirm_stage = "executing"
+        if decision.proposal.action.action != "wait_for_change":
+            session.verified_app_surface_lineage = None
         try:
             result = session.adapter.execute(
                 requested_action=decision.proposal.action,
@@ -4595,6 +4937,17 @@ class UniversalAgentOrchestrator:
                 )
                 if visible_advances:
                     graph = revised
+                elif impact == "read_only":
+                    text_revised = self._try_advance_visible_text_read_subgoal(
+                        session,
+                        graph=graph,
+                        trusted_observation=observation,
+                    )
+                    if text_revised is not None:
+                        self._store_revised_graph(session, text_revised)
+                        revised = text_revised
+                        graph = text_revised
+                        visible_advances = 1
                 if (
                     impact == "read_only"
                     and not visible_advances

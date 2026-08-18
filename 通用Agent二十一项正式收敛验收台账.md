@@ -761,3 +761,55 @@ orchestrator/web 相关回归 `732/732`，Python 完整回归 `1466/1466`。完�
 adapter、DeepSeek、编排和 Web 相关回归 `887/887`，Python 完整回归 `1468/1468`。完整回归只有既知
 测试子进程 `ResourceWarning`，无断言失败。原视觉身份门保持；只有本地严格回执证明的 Launcher 到
 目标 App navigation-only 转换可使用该证据，后续页面内容仍须独立重观察。
+
+## 25. 唯一可见文字已识别但只读取值仍依赖 Qwen 再次选择
+
+### 25.1 验收台账与根因证据
+
+- 提交 `6702cf8` 加载后的 Browser 会话 `f74af265f44542349c2d6724efe829ea` 完成 Home 和打开
+  Browser 两次真实动作；`open_browser` 已由严格回执完成并推进到 `read_page_title`，证明第 24 项修复
+  在线生效。随后新 4 帧只读观察得到唯一 `role=text`、`meaning=page_title`、`label=要闻`、
+  `goal_relevant=true`、`fully_visible=true`、confidence 1.0 的候选。
+- Qwen 在 read_only 节点仍返回一个动作；本地 parser 正确以“read_only 禁止物理动作”阻塞，最终
+  `physical_actions=2`，没有第三动作。问题不是视觉缺少结果，而是确定性的结构化取值仍交给模型再次
+  选择 finished，造成模型随机性阻塞。
+- 现有本地可见推进只允许“定位/存在”类目标，并明确排除“读取文字”；因此即使可信观察已经给出唯一
+  逐字结果，本地也不会把它作为候选证据交给 DeepSeek 复核。
+
+### 25.2 通用修复、变化样本与边界
+
+- 新增只读文字结果门：仅对 read_only、目标明确要求读取标题/题头/错误提示/状态提示，且没有预设
+  exact expected value 时启用；要求唯一 goal-relevant 的 text/dialog/container 候选，meaning 明确为
+  title/heading/error/status message，label 非空、完整可见、高置信、无冲突且位于安全画面内。
+- 本地只把候选原始 `element_id/role/meaning/label` 写为 visible evidence，再让 DeepSeek 单次复核当前
+  read_only 节点；不会自行生成用户未看到的值，也不会执行动作。当前值需要等于/包含某个指定文字、
+  多候选、空 label、低置信、边缘裁切、非文字控件、external_state/unknown 或发生型结果继续失败关闭。
+- 变化样本覆盖页面主标题、对话框错误提示和状态提示；不包含 Browser/App 名称分支。
+
+## 26. 已验证 App surface 在立即只读重观察时缺少连续性载体
+
+### 26.1 验收台账与根因证据
+
+- 打开 Browser 的 typed receipt 严格证明 `surface_browser`，动作后功能分类为 `news_aggregator`；新目标
+  下的 0 动作重观察仍为同一 `news_aggregator`，但 observation/fingerprint 因重新取帧而变化。
+- 第 24 项回执只在完成 `open_browser` 当轮生效；若下一 read-only 节点完成，命名 App 身份门仍可能
+  再次要求当前功能分类逐字等于 `browser`。用旧 fingerprint 冒充当前画面或永久信任旧 receipt 都不安全。
+
+### 26.2 通用修复、失效边界与验证
+
+- 在 session 内保存本地只读 `VerifiedAppSurfaceLineage`：来源只能是第 24 项严格 Launcher→目标 App
+  matched 回执，绑定 session/task/device、目标 surface、source receipt/subgoal、动作后功能类和当时
+  物理动作计数。它不改写当前 observer 分类。
+- 仅当后继节点依赖该已完成启动节点、没有任何后续物理动作、当前仍为非 Launcher 且功能类与启动后
+  一致时，可用于证明“这份当前功能页面仍属于刚打开的目标 App”。任何新物理动作、Home/Launcher、
+  功能类变化、错误 task/device/session、缺 controller receipt 或无依赖关系立即失效。
+- lineage 只补 App 容器归属；标题/错误文字仍必须由第 25 项当前新观察独立证明，不能从回执推断。
+  session snapshot 保留脱敏结构化 lineage 供审计，终态不跨服务恢复。
+- 测试覆盖两个 App 的正例，以及新动作后复用、功能类变化、回到 Launcher、无依赖、错 receipt、指定
+  exact value、多候选和低置信反例。相关回归与一次完整回归全绿后才重载 Uvicorn；旧 blocked 会话不
+  恢复，以全新 Browser 会话验收。
+
+离线结果：唯一标题读取、exact/多候选拒绝及 surface lineage 正反定向 `4/4`，DeepSeek 与编排核心
+`381/381`，observer、Qwen、adapter、DeepSeek、编排和 Web 相关回归 `889/889`，Python 完整回归
+`1470/1470`。完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。目标切换后的标题读取不再
+调用 Qwen 选择动作；lineage 不改变 observer 功能分类，并在任何后续非 wait 物理动作前失效。

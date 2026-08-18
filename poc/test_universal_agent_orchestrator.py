@@ -37,6 +37,7 @@ from universal_agent_orchestrator import (
     PhaseOneNavigationPolicy,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
+    UniversalAgentSessionState,
     VerifiedAppSurfaceLineage,
     _action_digest,
     _action_equivalence_digest,
@@ -3039,6 +3040,118 @@ class UniversalAgentStartTests(unittest.TestCase):
             qwen_observer=qwen,
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
+        )
+
+    def test_named_app_page_ignores_incomplete_control_sharing_app_name(self) -> None:
+        base = _graph()
+        open_settings = replace(
+            base.subgoals[0],
+            subgoal_id="open_settings",
+            objective="打开设置应用",
+            completion_conditions=("设置主界面可见",),
+            constraints=(),
+        )
+        input_wifi = Subgoal(
+            subgoal_id="input_wifi",
+            objective="在搜索输入框中输入 wifi",
+            status="pending",
+            depends_on=(open_settings.subgoal_id,),
+            constraints=("不得选择任何搜索结果",),
+            completion_conditions=("输入框中显示 'wifi'",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        initial = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="打开设置并在搜索输入框输入 wifi",
+                target_apps=(
+                    TargetApp(app_id="com.android.settings", app_name="设置"),
+                ),
+                entities={"input_text": "wifi"},
+            ),
+            subgoals=(open_settings, input_wifi),
+            active_subgoal_id=open_settings.subgoal_id,
+            raw_user_goal="打开设置并在搜索输入框输入 wifi",
+        )
+        initial.validate()
+        scene = UIScene(
+            app_id="com.android.settings",
+            screen_id="settings_main",
+            summary="设置应用主界面，可见搜索框和连接选项。",
+            elements=(
+                UIElement(
+                    element_id="search-input",
+                    role="input",
+                    meaning="search_settings",
+                    label="搜索系统设置项",
+                    bounds=(0.12, 0.15, 0.9, 0.21),
+                    confidence=0.95,
+                    states={"goal_relevant": True, "value": ""},
+                ),
+                UIElement(
+                    element_id="page-title",
+                    role="text",
+                    meaning="page_title",
+                    label="设置",
+                    bounds=(0.12, 0.08, 0.3, 0.14),
+                    confidence=1.0,
+                    states={"goal_relevant": True, "fully_visible": True},
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint="settings-main-current",
+        )
+        revised = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    open_settings,
+                    status="completed",
+                    completion_evidence=(scene.summary,),
+                ),
+                replace(input_wifi, status="active"),
+            ),
+            active_subgoal_id=input_wifi.subgoal_id,
+        )
+        revised.validate()
+        planner = SequenceDeepSeekPlanner(initial, revised)
+        adapter = FakeAdapter(scene)
+        orchestrator = self._orchestrator(
+            planner,
+            FakeQwenObserver(),
+            adapter,
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = UniversalAgentSessionState(
+                session_id="session-settings-page-presence",
+                raw_goal=initial.raw_user_goal,
+                device_id=initial.device_id,
+                run_dir=Path(temp),
+                adapter=adapter,
+                evidence_store=AgentEvidenceStore(Path(temp)),
+                task_graph=initial,
+            )
+            result = orchestrator._try_advance_visible_presence_subgoal(
+                session,
+                graph=initial,
+                trusted_observation=FakeTrustedObservation(
+                    device_id=initial.device_id,
+                    scene=scene,
+                ),
+            )
+
+        self.assertEqual(revised, result)
+        self.assertEqual(1, len(planner.replan_calls))
+        observed = planner.replan_calls[0][1]
+        self.assertIn(scene.summary, observed.visible_evidence)
+        self.assertTrue(
+            any('"screen_id":"settings_main"' in item for item in observed.visible_evidence)
         )
 
     def test_browser_reload_element_cannot_prove_phone_desktop_presence(self) -> None:

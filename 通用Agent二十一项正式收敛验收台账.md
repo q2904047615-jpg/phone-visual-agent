@@ -1089,3 +1089,40 @@ observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `893/893`，Py
 constraint、Qwen 与 visual authority `145/145`，observer、Qwen、adapter、DeepSeek、编排和 Web 关联
 回归 `894/894`，Python 完整回归 `1479/1479`。完整回归只有既知测试子进程 `ResourceWarning`，
 无断言失败。
+
+## 34. App 页面身份被同名非身份元素阻断
+
+### 34.1 验收台账与根因证据
+
+- 提交 `a2d7637` 加载后，相同 Settings 原目标的新 session `cdfc7707390a4939935d6ab18f480430`
+  在 0 物理动作处 blocked。可信 scene 已明确为 `com.android.settings/settings_main`，并有完整可见的
+  `role=text / meaning=page_title / label=设置`；Qwen 也明确判断 `open_settings` 已完成。
+- 本地可见前缀门先用 target App、foreground App、screen identity 和 page title 证明“设置主界面可见”，
+  随后却遍历所有包含“设置”一词的元素。未完成 input audit 的“搜索系统设置项”输入框也共享该词且
+  缺 `fully_visible=true`，循环立即返回失败，完整 page title 没有机会成为页面身份事实。
+- 主要根因是 App/page **容器身份**已经被 scene 级证据证明后，仍被任意同名业务控件反向否决；不是
+  模型偶发、否定约束、输入候选、手机状态或机械臂。该 session 无 confirmation scope、无物理动作。
+
+### 34.2 同类样本、通用修复与边界
+
+- 现场样本为“设置主界面”与“搜索系统设置项”；变化样本覆盖“浏览器主界面”与“浏览器内搜索框”、
+  “相册首页”与“相册设置项”。只要 named page 已由结构化 `foreground_app_id/screen_id` 及独立
+  page title/heading/container 身份事实共同证明，普通 input/list item/button 中的同名片段不再参与
+  App 页面身份候选，也不能以自身缺少可见性状态否决容器身份。
+- scene-only 页面身份仍要求：任务图引用唯一 target App、当前 foreground 精确匹配、named visual
+  identity 由 page/title/heading/container 事实落地、scene 稳定可信；任何一项缺失仍失败关闭。普通
+  “某输入框/列表/按钮可见”等元素级 presence 继续要求唯一、完整、无冲突候选，不借用 scene identity。
+- 不增加 App 名称、页面标签、截图或坐标分支；只把已存在的 scene identity 与 element presence 两种
+  authority 分开，DeepSeek 仍只能逐字引用本轮 visible evidence 完成当前连续前缀。
+
+### 34.3 验证与停止条件
+
+- 补正测：完整 App page identity + 同名不完整 input 仍完成 open-App 前缀；反测：前台 App 错误、
+  缺 page identity、仅 Launcher App 入口、元素级输入框 presence 不得借此完成。
+- 运行编排/DeepSeek/Qwen/observer/adapter/Web 相关回归及一次完整 Python 回归，静态编译与
+  diff-check 全绿后本地提交并只重载项目 Uvicorn。旧 0 动作 session 不恢复；相同 Settings 原目标
+  只再建立一个新 session，任一物理动作失败立即停止。
+
+离线结果：现场 scene identity 与 Launcher/错误前台/无关元素反例 `4/4`，DeepSeek 与编排核心
+`386/386`，observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `895/895`，Python 完整回归
+`1480/1480`。完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。

@@ -2122,7 +2122,24 @@ class UniversalAgentOrchestrator:
             target_apps=referenced_app_pages,
         ):
             return None
-        if self._is_explicit_multi_presence_text(presence_text):
+        required_surfaces = self._presence_surface_classes(
+            *tuple(current.completion_conditions or ())
+        )
+        scene_identity_facts: tuple[str, ...] = ()
+        scene_only_app_page = bool(
+            referenced_app_pages
+            and required_surfaces
+            and required_surfaces.issubset({"page", "foreground_app"})
+        )
+        if scene_only_app_page:
+            # The named App/page container has already been grounded by the
+            # foreground identity and page-title/container-only facts above.
+            # A business control that happens to repeat the App name (for
+            # example, a search input) is not page-identity evidence and must
+            # neither grant nor veto this container-level presence claim.
+            candidates = ()
+            scene_identity_facts = self._scene_page_identity_facts(scene)
+        elif self._is_explicit_multi_presence_text(presence_text):
             candidates = self._multi_presence_candidates(
                 subgoal=current,
                 scene=scene,
@@ -2132,9 +2149,6 @@ class UniversalAgentOrchestrator:
                 return None
         else:
             completion_terms = self._presence_binding_terms(
-                *tuple(current.completion_conditions or ())
-            )
-            required_surfaces = self._presence_surface_classes(
                 *tuple(current.completion_conditions or ())
             )
             candidate = scene.unique_trusted_goal_element(
@@ -2254,6 +2268,7 @@ class UniversalAgentOrchestrator:
             verification={
                 "visible_evidence": [
                     scene.summary,
+                    *scene_identity_facts,
                     *candidate_facts,
                     *(fact for item in candidates for fact in item.evidence),
                 ]
@@ -2264,7 +2279,7 @@ class UniversalAgentOrchestrator:
             observed,
             trigger="subgoal_completed",
             reason=(
-                f"当前可信画面已经以{len(candidates)}个逐项语义绑定、"
+                "当前可信画面已经以严格 scene identity 或逐项语义绑定、"
                 f"高置信且无冲突的目标元素证明定位类 {current.external_impact} 子目标；"
                 f"本轮只能把当前 subgoal_id={current.subgoal_id} 标为 completed，"
                 "其 completion_evidence 必须逐字选择 visible_evidence 中至少一项；"

@@ -366,3 +366,26 @@ Uvicorn 后，用全新 session 从当前 Settings 前台先返回 Home，再完
 离线结果：observer 定向 `197/197`，观察、几何、adapter、通用 mock 与编排相关 `495/495`，
 Python 完整回归 `1446/1446`；静态编译和差异检查通过。完整回归只有既知测试子进程
 `ResourceWarning`，无断言失败。observer 版本更新为 v57。
+
+## 15. Qwen 完成一个前缀子目标后被误要求整个任务结束
+
+- v57 全新会话 `efd20d3a47e94e41b12fa3fee1d7ecc7` 在初始 Launcher 上 0 动作观察；
+  Qwen `finished` 仅声明当前 `return_home_initial` 已满足。DeepSeek revision 2 正确把该子目标标为
+  completed，并唯一激活 `open_browser`；本地 `_review_completion_candidate` 却只接受整个 graph
+  completed，否则统一 blocked。这使正常的多步骤目标在第一个已满足前缀处停止。
+- 根因是编排状态机把“当前 active subgoal 完成”与“整项任务完成”混为一个终态，不是 Qwen
+  误判、浏览器特例或动作候选问题。现场 Qwen 证据只引用 Launcher scene，DeepSeek 没有把
+  `open_browser` 误完成；两层证据本身正确。
+- 通用修复：复核后若整个 graph completed，仍 succeeded；否则只有当旧 active subgoal 在精确
+  `revision+1` 中确实 completed、且出现唯一不同的新 active subgoal 时，才接受为合法前缀推进。
+  下一节点若需风险确认则进入对应确认态；其余一律 `needs_reobservation`，清除旧 controller 决定
+  和 authority，用新观察生成新 Qwen 决策。旧子目标仍 active、缺失、跳过或图身份不匹配继续 blocked。
+- 正向样本为“初始桌面已满足 → 打开 App”两节点；变化样本为任意已满足页面前缀后进入下一个
+  navigation/read-only 节点。反向样本保留“DeepSeek 未完成旧子目标”和“直接声称整个任务完成但
+  证据不足”，均 0 动作 blocked。修复不复用旧 Qwen 决策、不自动执行下一动作、不放宽风险或视觉门禁。
+- 先运行 completion review 定向正反测试、DeepSeek/编排/web 相关回归和一次完整回归；全部通过后
+  本地提交、只重载 Uvicorn，再以原目标创建全新 browser session。旧 blocked session 不复用。
+
+离线结果：completion review、DeepSeek、编排与 web 相关回归 `540/540`，Python 完整回归
+`1447/1447`；完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。静态编译与差异检查
+通过，未改变观察器、模型 schema、动作候选、风险或硬件层。

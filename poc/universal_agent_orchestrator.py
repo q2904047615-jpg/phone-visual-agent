@@ -2185,15 +2185,45 @@ class UniversalAgentOrchestrator:
         if revised.status == "completed":
             session.status = "succeeded"
             session.failed_reason = ""
-        else:
-            session.status = "blocked"
-            session.failed_reason = (
-                "Qwen 的完成候选没有被 DeepSeek 新 revision 确认为完成。"
-            )
-            session.controller_decision = NavigationPolicyDecision(
-                allowed=False,
-                reason=session.failed_reason,
-            )
+            return revised
+
+        prior_subgoal_id = str(graph.active_subgoal_id or "")
+        prior_in_revised = next(
+            (
+                item
+                for item in revised.subgoals
+                if item.subgoal_id == prior_subgoal_id
+            ),
+            None,
+        )
+        current = revised.active_subgoal()
+        if (
+            prior_subgoal_id
+            and prior_in_revised is not None
+            and prior_in_revised.status == "completed"
+            and current is not None
+            and current.subgoal_id != prior_subgoal_id
+        ):
+            session.controller_decision = None
+            session.failed_reason = ""
+            if _requires_risk_confirmation(revised, current):
+                session.status = "awaiting_risk_confirmation"
+                self._bind_risk_confirmation(session)
+            else:
+                # Do not let one visual completion claim also select or execute
+                # the next graph node.  A new observation creates a fresh Qwen
+                # decision and authority scope for that newly active subgoal.
+                session.status = "needs_reobservation"
+            return revised
+
+        session.status = "blocked"
+        session.failed_reason = (
+            "Qwen 的完成候选没有被 DeepSeek 新 revision 确认为完成。"
+        )
+        session.controller_decision = NavigationPolicyDecision(
+            allowed=False,
+            reason=session.failed_reason,
+        )
         return revised
 
     @staticmethod
@@ -2924,6 +2954,11 @@ class UniversalAgentOrchestrator:
                 transition_record["disposition"] = (
                     "task_completed_after_qwen_review"
                     if session.status == "succeeded"
+                    else "advanced_after_qwen_completion_review"
+                    if session.status in {
+                        "needs_reobservation",
+                        "awaiting_risk_confirmation",
+                    }
                     else "blocked_completion_review"
                 )
                 if session.failed_reason:

@@ -3637,6 +3637,65 @@ class UniversalAgentStartTests(unittest.TestCase):
             )
         self.assertEqual("blocked", not_completed.status)
 
+    def test_qwen_finished_may_advance_one_completed_subgoal_then_reobserve(self) -> None:
+        base = _graph()
+        first = replace(
+            base.subgoals[0],
+            objective="确认当前公开列表可见",
+            completion_conditions=("公开列表可见",),
+        )
+        second = Subgoal(
+            subgoal_id="subgoal-2",
+            objective="查看下一公开详情",
+            status="pending",
+            depends_on=(first.subgoal_id,),
+            constraints=("不得改变任何账号状态",),
+            completion_conditions=("下一公开详情可见",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        initial = replace(
+            base,
+            subgoals=(first, second),
+            active_subgoal_id=first.subgoal_id,
+        )
+        initial.validate()
+        revised = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    first,
+                    status="completed",
+                    completion_evidence=("公开列表可见",),
+                ),
+                replace(second, status="active"),
+            ),
+            active_subgoal_id=second.subgoal_id,
+        )
+        revised.validate()
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                FakeDeepSeekPlanner(initial, replan_result=revised),
+                FakeQwenObserver("finished"),
+                FakeAdapter(_scene()),
+            ).start(
+                session_id="session-finished-prefix",
+                raw_goal="先确认公开列表，再查看下一公开详情",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("needs_reobservation", session.status)
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual("completed", session.task_graph.subgoals[0].status)
+        self.assertEqual("subgoal-2", session.task_graph.active_subgoal_id)
+        self.assertIsNone(session.controller_decision)
+        self.assertIsNone(session.confirmation_authority)
+        self.assertEqual(0, session.physical_actions)
+
     def test_protocol_or_identity_mismatch_fails_with_zero_actions(self) -> None:
         adapter = FakeAdapter(_scene())
         qwen = FakeQwenObserver(mutate_identity=("device_id", "device-other"))

@@ -1564,6 +1564,59 @@ class UniversalAgentOrchestrator:
             "refetched",
             "reconnected",
         )
+        completion_text = " ".join(
+            str(item or "").strip()
+            for item in tuple(
+                getattr(subgoal, "completion_conditions", ()) or ()
+            )
+            if str(item or "").strip()
+        ).casefold()
+        occurrence_or_absence_markers = (
+            "刷新",
+            "重新加载",
+            "重新载入",
+            "重新获取",
+            "重新读取",
+            "重新连接",
+            "加载完成",
+            "更新完成",
+            "同步完成",
+            "不可见",
+            "不存在",
+            "缺失",
+            "消失",
+            "移除",
+            "refresh",
+            "reload",
+            "reloaded",
+            "updated",
+            "synchronized",
+            "not visible",
+            "absent",
+            "missing",
+            "disappear",
+            "remove",
+            "retrieved",
+            "refetched",
+            "reconnected",
+        )
+        if (
+            completion_text
+            and any(marker in completion_text for marker in presence_markers)
+            and not any(
+                marker in completion_text for marker in value_verification_markers
+            )
+            and not any(
+                marker in completion_text
+                for marker in occurrence_or_absence_markers
+            )
+        ):
+            # An already-visible destination may satisfy an idempotent
+            # navigation node such as opening an App or returning Home.  The
+            # caller still requires grounded named-surface identity and unique
+            # current visual evidence.  Occurrence claims such as refresh and
+            # negative/absence states remain ineligible.
+            return True
         return any(marker in text for marker in presence_markers) and not any(
             marker in text for marker in value_verification_markers
         ) and not any(marker in text for marker in transition_markers)

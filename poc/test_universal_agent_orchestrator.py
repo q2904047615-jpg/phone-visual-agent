@@ -5440,6 +5440,25 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
             )
         )
 
+    def test_already_visible_navigation_destination_is_presence_completion(self) -> None:
+        cases = (
+            ("打开设置应用", "设置主界面可见"),
+            ("返回手机桌面", "手机桌面可见"),
+            ("进入目标详情页", "目标详情页面可见"),
+        )
+
+        for objective, completion_condition in cases:
+            with self.subTest(objective=objective):
+                subgoal = SimpleNamespace(
+                    objective=objective,
+                    completion_conditions=(completion_condition,),
+                )
+                self.assertTrue(
+                    UniversalAgentOrchestrator._is_presence_only_read_only_subgoal(
+                        subgoal
+                    )
+                )
+
     def test_absence_or_dismissal_is_not_zero_action_presence_completion(self) -> None:
         cases = (
             ("当前可见软键盘被收起且不可见", "当前画面中无软键盘"),

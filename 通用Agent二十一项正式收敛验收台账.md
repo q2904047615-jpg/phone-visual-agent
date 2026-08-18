@@ -1014,3 +1014,40 @@ DeepSeek、编排和 Web 关联回归 `891/891`，Python 完整回归 `1472/1472
 离线结果：role description 与 explicit literal 正反定向通过；DeepSeek 与编排核心 `384/384`，
 observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `892/892`，Python 完整回归 `1473/1473`。
 完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。
+
+## 32. 首次观察已满足导航目的地却仍要求执行旧动作
+
+### 32.1 验收台账与根因证据
+
+- 提交 `ba2437c` 加载后从设置首页启动完全相同目标，session
+  `8d3e9d230ec24b01b15cf87339d78473` 为 0 物理动作 blocked。Qwen 明确报告“画面已显示设置主界面，
+  open_settings 子目标已完成”，但当前节点仍停在 `open_settings`，合法候选只剩会离开设置的 Home，
+  因此没有执行错误动作。
+- 初始 start 路径已经调用 `_advance_visible_presence_prefix()`，但其词法门把 objective 和 completion
+  conditions 拼在一起；objective 中的“打开”被统一视为必须发生的 transition，即使正式后置状态
+  `设置主界面可见` 已被当前结构化 scene 证明，也禁止 0 动作完成。结果是系统无法适应“任务开始时
+  用户已在目标 App/目标页”的不同起始状态。
+- 主要根因是幂等导航目的地状态与必须发生的操作事件混为一类，不是 Qwen 没识别当前页；本次没有
+  创建 confirmation scope、机械臂动作或旧 scope 复用。
+
+### 32.2 通用修复、变化样本与边界
+
+- presence 门优先审查正式 completion conditions。若它们只声明一个当前可见目的地，且后续已有的
+  named-surface identity、foreground App、唯一候选、完整可见和冲突门全部通过，则“打开 App、进入
+  页面、返回桌面”等幂等导航节点可用 0 动作完成并激活后继。
+- 刷新/重新加载/重新获取/更新/同步等必须发生的事件，以及不可见、不存在、缺失、消失、移除等负
+  状态仍不能由普通 presence 证明；现有 `reload` 和 dismiss/keyboard absence 反例保持 false。
+- 不根据 App 名称、固定页面或截图判断；当前 completion 不具备 named identity 或 scene 不匹配目标
+  surface 时仍不推进。DeepSeek 仍需用当前 typed visual evidence 生成新 revision。
+
+### 32.3 验证与停止条件
+
+- 正测已在 App 主界面、已在目标详情页、已在 Launcher 三类幂等目的地；反测 reload、键盘不可见、
+  弹层消失、错误前台 App 和不匹配页面身份。
+- 运行编排、DeepSeek/Qwen/observer/adapter/Web 相关回归和一次完整 Python 回归，静态编译及
+  diff-check 全绿后本地提交并只重载 Uvicorn。旧会话不恢复；完全相同 Settings 原目标只建立一个
+  新 session，从当前设置首页验证动态跳过与后续输入。
+
+离线结果：幂等目的地与 occurrence/absence 正反定向通过；DeepSeek 与编排核心 `385/385`，
+observer、Qwen、adapter、DeepSeek、编排和 Web 关联回归 `893/893`，Python 完整回归 `1474/1474`。
+完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。

@@ -1205,6 +1205,7 @@ class DeepSeekTaskGraphPlanner:
                 raw_user_goal=text,
                 validate=False,
             )
+            graph = _normalize_initial_input_goal_objective(graph)
             graph = _normalize_initial_local_navigation(graph)
             graph = _normalize_initial_premature_completed_status(graph)
             graph = _normalize_unique_active_frontier(graph)
@@ -1226,6 +1227,7 @@ class DeepSeekTaskGraphPlanner:
                 raw_user_goal=text,
                 validate=False,
             )
+            graph = _normalize_initial_input_goal_objective(graph)
             graph = _normalize_initial_local_navigation(graph)
             graph = _normalize_initial_premature_completed_status(graph)
             graph = _normalize_unique_active_frontier(graph)
@@ -1251,6 +1253,7 @@ class DeepSeekTaskGraphPlanner:
                     raw_user_goal=text,
                     validate=False,
                 )
+                graph = _normalize_initial_input_goal_objective(graph)
                 graph = _normalize_initial_local_navigation(graph)
                 graph = _normalize_initial_premature_completed_status(graph)
                 graph = _normalize_unique_active_frontier(graph)
@@ -1269,6 +1272,7 @@ class DeepSeekTaskGraphPlanner:
                 raw_user_goal=text,
                 validate=False,
             )
+            graph = _normalize_initial_input_goal_objective(graph)
             graph = _normalize_initial_local_navigation(graph)
             graph = _normalize_initial_premature_completed_status(graph)
             graph = _normalize_unique_active_frontier(graph)
@@ -2159,6 +2163,59 @@ def _normalize_initial_premature_completed_status(
     ):
         return graph
     return replace(graph, status="running")
+
+
+def _normalize_initial_input_goal_objective(
+    graph: DynamicTaskGraph,
+) -> DynamicTaskGraph:
+    """Replace only a redundant low-level input objective with result states.
+
+    DeepSeek sometimes copies the user's natural-language input verb into the
+    top-level objective even though the same initial graph already contains
+    strict, unsatisfied input-state completion conditions.  Those conditions
+    are the graph's canonical result contract; using them avoids a second model
+    sample without weakening the low-level-instruction validator anywhere else.
+    """
+
+    try:
+        _reject_low_level_instruction(graph.goal.objective, "goal.objective")
+        return graph
+    except TaskGraphError:
+        pass
+    if not graph.completion_conditions or any(
+        condition.satisfied or condition.evidence
+        for condition in graph.completion_conditions
+    ):
+        return graph
+    input_text = graph.goal.entities.get("input_text")
+    if not isinstance(input_text, str) or not input_text.strip():
+        return graph
+    descriptions = tuple(
+        condition.description.strip()
+        for condition in graph.completion_conditions
+        if condition.description.strip()
+    )
+    if len(descriptions) != len(graph.completion_conditions):
+        return graph
+    for description in descriptions:
+        try:
+            _reject_low_level_instruction(
+                description,
+                "completion_conditions.description",
+            )
+        except TaskGraphError:
+            return graph
+    normalized = "；".join(descriptions)
+    if (
+        not LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(normalized)
+        or _compact_identity_text(input_text) not in _compact_identity_text(normalized)
+        or len(normalized) > 1000
+    ):
+        return graph
+    return replace(
+        graph,
+        goal=replace(graph.goal, objective=normalized),
+    )
 
 
 def _normalize_unique_active_frontier(graph: DynamicTaskGraph) -> DynamicTaskGraph:

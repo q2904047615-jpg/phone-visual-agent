@@ -1750,6 +1750,174 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             graph.constraints,
         )
 
+    def test_initial_input_goal_uses_structured_result_without_remote_repair(self):
+        payload = base_payload()
+        payload["goal"] = {
+            "objective": "在浏览器的唯一空白输入框中输入小写agent",
+            "target_apps": [{"app_id": "browser", "app_name": "浏览器"}],
+            "entities": {"input_text": "agent"},
+        }
+        payload["constraints"] = ["不要搜索、发送、刷新、提交或登录"]
+        payload["completion_conditions"] = [
+            {
+                "condition_id": "input_visible",
+                "description": "唯一空白输入框可见且可编辑",
+                "evidence_required": ["画面中可见唯一空白输入框"],
+                "satisfied": False,
+                "evidence": [],
+            },
+            {
+                "condition_id": "input_value",
+                "description": "唯一空白输入框中的内容为小写agent",
+                "evidence_required": ["输入框中显示小写agent"],
+                "satisfied": False,
+                "evidence": [],
+            },
+        ]
+        payload["risk_actions"] = []
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "open_browser",
+                "objective": "浏览器应用在前台可见",
+                "status": "active",
+                "depends_on": [],
+                "constraints": [],
+                "completion_conditions": ["浏览器应用在前台可见"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "input_value",
+                "objective": "唯一空白输入框中的内容为小写agent",
+                "status": "pending",
+                "depends_on": ["open_browser"],
+                "constraints": ["不要搜索、发送、刷新、提交或登录"],
+                "completion_conditions": ["输入框中显示小写agent"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+        ]
+        payload["active_subgoal_id"] = "open_browser"
+        provider = FakeProvider(payload)
+
+        graph = DeepSeekTaskGraphPlanner(provider).plan(
+            "打开浏览器并在唯一空白输入框留下agent，不搜索或提交",
+            device_id="phone-1",
+        )
+
+        self.assertEqual(
+            "唯一空白输入框可见且可编辑；唯一空白输入框中的内容为小写agent",
+            graph.goal.objective,
+        )
+        self.assertEqual("agent", graph.goal.entities["input_text"])
+        self.assertEqual(2, len(provider.messages))
+
+    def test_initial_cross_app_input_goal_uses_same_structured_result_rule(self):
+        payload = base_payload()
+        payload["goal"] = {
+            "objective": "在笔记应用的文本框输入draft42",
+            "target_apps": [{"app_id": "notes", "app_name": "笔记"}],
+            "entities": {"input_text": "draft42"},
+        }
+        payload["constraints"] = ["不得保存、同步或分享"]
+        payload["completion_conditions"] = [
+            {
+                "condition_id": "input_value",
+                "description": "当前文本框内容为draft42",
+                "evidence_required": ["文本框显示draft42"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ]
+        payload["risk_actions"] = []
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "input_value",
+                "objective": "当前文本框内容为draft42",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["不得保存、同步或分享"],
+                "completion_conditions": ["文本框显示draft42"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            }
+        ]
+        payload["active_subgoal_id"] = "input_value"
+        provider = FakeProvider(payload)
+
+        graph = DeepSeekTaskGraphPlanner(provider).plan(
+            "在笔记文本框留下draft42，不保存、同步或分享",
+            device_id="phone-1",
+        )
+
+        self.assertEqual("当前文本框内容为draft42", graph.goal.objective)
+        self.assertEqual(2, len(provider.messages))
+
+    def test_initial_input_goal_never_normalizes_low_level_or_claimed_completion(self):
+        cases = []
+        low_level_completion = base_payload()
+        low_level_completion["goal"]["objective"] = "输入文字agent"
+        low_level_completion["completion_conditions"][0]["description"] = (
+            "在输入框输入文字agent"
+        )
+        cases.append(low_level_completion)
+
+        claimed_completion = base_payload()
+        claimed_completion["goal"]["objective"] = "输入文字agent"
+        claimed_completion["completion_conditions"][0].update(
+            {
+                "description": "输入框内容为agent",
+                "satisfied": True,
+                "evidence": ["输入框显示agent"],
+            }
+        )
+        cases.append(claimed_completion)
+
+        no_completion = base_payload()
+        no_completion["goal"]["objective"] = "输入文字agent"
+        no_completion["completion_conditions"] = []
+        cases.append(no_completion)
+
+        missing_input_text = base_payload()
+        missing_input_text["goal"]["objective"] = "输入文字agent"
+        missing_input_text["completion_conditions"][0]["description"] = (
+            "输入框内容为agent"
+        )
+        cases.append(missing_input_text)
+
+        overlong = base_payload()
+        overlong["goal"]["objective"] = "输入文字agent"
+        overlong["completion_conditions"] = [
+            {
+                "condition_id": "input_value",
+                "description": "输入框内容为agent" + "可见" * 260,
+                "evidence_required": ["输入框显示agent"],
+                "satisfied": False,
+                "evidence": [],
+            },
+            {
+                "condition_id": "input_stable",
+                "description": "输入框内容保持稳定" + "可见" * 260,
+                "evidence_required": ["输入框内容稳定"],
+                "satisfied": False,
+                "evidence": [],
+            },
+        ]
+        cases.append(overlong)
+
+        for payload in cases:
+            with self.subTest(payload=payload["completion_conditions"]):
+                provider = FakeProvider(payload, copy.deepcopy(payload))
+                with self.assertRaises(TaskGraphError):
+                    DeepSeekTaskGraphPlanner(provider).plan(
+                        "在输入框中留下agent",
+                        device_id="phone-1",
+                    )
+                self.assertEqual(2, len(provider.messages))
+
     def test_initial_plan_second_low_level_protocol_violation_stays_blocked(self):
         first = base_payload()
         first["goal"]["objective"] = "向上滑动一次，让蓝色终点进入画面"

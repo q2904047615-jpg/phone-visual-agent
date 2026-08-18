@@ -81,6 +81,10 @@ COMMUNICATION_EFFECT_PATTERN = re.compile(
     r"(?:"
     r"(?:发送|发给|发(?:一条)?|回复|询问|通知|联系|沟通).{0,12}"
     r"(?:消息|私信|留言|需求|用户|联系人|对方)|"
+    r"发送内容(?:必须|应当|应|需要)(?:为|是|等于)|"
+    r"(?:消息|私信|留言).{0,20}(?:已发送|已经发送|发送成功|已回复|已通知)|"
+    r"(?:消息|私信|留言).{0,16}(?:并|然后|后再|再)发送"
+    r"(?!按钮|图标|控件|入口|按键)|"
     r"(?:给|向).{0,12}(?:留言|发送|发私信|发消息)|"
     r"(?:私信|留言).{0,8}(?:询问|回复|通知)|"
     r"\b(?:send|reply|message|notify|contact)\b.{0,24}"
@@ -234,6 +238,17 @@ LOCAL_INPUT_PREPARATION_STATE_PATTERN = re.compile(
     r"\b(?:visible|shown|present|editable|focused)\b"
     r"[^,.;\r\n]{0,24}\b(?:input|text|query|message)\s*(?:field|box|area)\b"
     r")",
+    re.IGNORECASE,
+)
+INPUT_CONTENT_STATE_CONSTRAINT_PATTERN = re.compile(
+    r"^\s*(?:当前)?输入内容"
+    r"(?:(?:必须|应当|应|需要)(?:为|是|等于)|保持为)\s*"
+    r"(?:“[^”\r\n]{1,100}”|\"[^\"\r\n]{1,100}\")\s*$",
+    re.IGNORECASE,
+)
+POST_EFFECT_VERIFICATION_PATTERN = re.compile(
+    r"(?:可见|显示|确认|核对|存在|已出现|记录|"
+    r"\b(?:visible|shown|confirm|verify|observe|recorded)\b)",
     re.IGNORECASE,
 )
 LOCAL_TEMPORARY_DRAFT_CLEAR_STATE_PATTERN = re.compile(
@@ -469,7 +484,12 @@ class Subgoal:
     risk_action_ids: tuple[str, ...]
     external_impact: str
 
-    def validate(self, *, input_text: Any = "") -> None:
+    def validate(
+        self,
+        *,
+        input_text: Any = "",
+        allow_post_effect_verification: bool = False,
+    ) -> None:
         _validate_id(self.subgoal_id, "子目标 ID")
         _require_text(self.objective, "subgoals.objective")
         if self.status not in SUBGOAL_STATUSES:
@@ -560,6 +580,7 @@ class Subgoal:
             and not proven_local_input_preparation
             and not proven_local_keyboard_mode
             and not proven_read_only_control_state
+            and not allow_post_effect_verification
             and self.external_impact in {
             "read_only",
             "navigation_only",
@@ -896,7 +917,15 @@ class DynamicTaskGraph:
             risk.validate()
         subgoals = _unique_by_id(self.subgoals, lambda item: item.subgoal_id, "子目标")
         for subgoal in subgoals.values():
-            subgoal.validate(input_text=self.goal.entities.get("input_text"))
+            post_effect_verification = _is_bound_post_effect_verification(
+                subgoal,
+                subgoals=subgoals,
+                risks=risks,
+            )
+            subgoal.validate(
+                input_text=self.goal.entities.get("input_text"),
+                allow_post_effect_verification=post_effect_verification,
+            )
             if subgoal.subgoal_id in subgoal.depends_on:
                 raise TaskGraphError(f"子目标不能依赖自身：{subgoal.subgoal_id}")
             missing_dependencies = set(subgoal.depends_on) - set(subgoals)
@@ -961,6 +990,12 @@ class DynamicTaskGraph:
                     subgoal.constraints,
                     subgoal.completion_conditions,
                 )
+            ):
+                inferred_types = frozenset()
+            if _is_bound_post_effect_verification(
+                subgoal,
+                subgoals=subgoals,
+                risks=risks,
             ):
                 inferred_types = frozenset()
             linked_types = {
@@ -3697,6 +3732,11 @@ def _reject_low_level_instruction(
     *,
     allow_negated: bool = False,
 ) -> None:
+    if (
+        path == "subgoals.constraints"
+        and INPUT_CONTENT_STATE_CONSTRAINT_PATTERN.fullmatch(value)
+    ):
+        return
     for match in LOW_LEVEL_INSTRUCTION_PATTERN.finditer(value):
         prefix = value[max(0, match.start() - 40) : match.start()].lower()
         if allow_negated and NEGATED_LOW_LEVEL_INSTRUCTION_PREFIX_PATTERN.search(
@@ -3745,6 +3785,51 @@ def _infer_external_risk_types(*values: str) -> frozenset[str]:
             field_inferred.add("unknown_external_effect")
         inferred.update(field_inferred)
     return frozenset(inferred)
+
+
+def _is_bound_post_effect_verification(
+    subgoal: Subgoal,
+    *,
+    subgoals: dict[str, Subgoal],
+    risks: dict[str, RiskAction],
+) -> bool:
+    if (
+        subgoal.external_impact != "read_only"
+        or subgoal.risk_action_ids
+        or len(subgoal.depends_on) != 1
+    ):
+        return False
+    predecessor = subgoals.get(subgoal.depends_on[0])
+    if (
+        predecessor is None
+        or predecessor.external_impact not in {"external_state", "unknown"}
+        or not predecessor.risk_action_ids
+    ):
+        return False
+    predecessor_risk_types = {
+        risks[risk_id].risk_type
+        for risk_id in predecessor.risk_action_ids
+        if risk_id in risks
+    }
+    if not predecessor_risk_types:
+        return False
+    effect_texts = tuple(
+        value
+        for value in (
+            subgoal.objective,
+            *subgoal.constraints,
+            *subgoal.completion_conditions,
+        )
+        if _infer_external_risk_types(value)
+    )
+    if not effect_texts or any(
+        not POST_EFFECT_VERIFICATION_PATTERN.search(value)
+        for value in effect_texts
+    ):
+        return False
+    inferred_types = set(_infer_external_risk_types(*effect_texts))
+    concrete_types = inferred_types - {"unknown_external_effect"}
+    return concrete_types <= predecessor_risk_types
 
 
 def _external_risk_patterns() -> dict[str, re.Pattern[str]]:
@@ -3941,6 +4026,11 @@ def _apply_local_risk_supplements(
         if current_foreground_keyboard_scope
         else set()
     )
+    declared_graph_risk_types = (
+        {item.risk_type for item in graph.risk_actions}
+        if graph is not None
+        else set()
+    )
     assessments = []
     for assessment in report.assessments:
         source = source_map[assessment.source_id]
@@ -3963,6 +4053,24 @@ def _apply_local_risk_supplements(
             if is_negated_constraint
             else _infer_external_risk_types(source.text)
         )
+        if (
+            assessment.subgoal_id is None
+            and source.source_kind == "goal_completion_condition"
+            and inferred == {"unknown_external_effect"}
+            and POST_EFFECT_VERIFICATION_PATTERN.search(source.text)
+            and len(declared_graph_risk_types) == 1
+        ):
+            bound_risk_types = tuple(sorted(declared_graph_risk_types))
+            assessment = replace(
+                assessment,
+                external_impact="external_state",
+                risk_types=bound_risk_types,
+                reason=(
+                    assessment.reason
+                    + "；本地校验将纯观察型后验完成证据绑定到全图唯一已声明风险"
+                ),
+            )
+            inferred = frozenset(bound_risk_types)
         negated_types = _infer_directly_negated_risk_types(source.text)
         model_types = frozenset(assessment.risk_types)
         if assessment.subgoal_id in read_only_risk_control_scopes:
@@ -4375,10 +4483,21 @@ def _validate_graph_against_risk_audit(
                 f"语义风险审计遗漏子目标，失败关闭为 unknown：{subgoal_id}"
             )
         impact, risk_types = _aggregate_audit_assessments(assessments)
+        post_effect_verification = _is_bound_post_effect_verification(
+            subgoal,
+            subgoals=subgoals,
+            risks=risks,
+        )
         safe_classification_disagreement = {
             impact,
             subgoal.external_impact,
         } <= {"read_only", "navigation_only"}
+        if (
+            post_effect_verification
+            and subgoal.external_impact == "read_only"
+            and impact in {"external_state", "unknown"}
+        ):
+            safe_classification_disagreement = True
         if impact != subgoal.external_impact and not safe_classification_disagreement:
             if impact == "unknown":
                 raise TaskGraphError(
@@ -4393,7 +4512,16 @@ def _validate_graph_against_risk_audit(
             for risk_id in subgoal.risk_action_ids
             if risk_id in risks
         }
-        missing = set(risk_types) - linked_types
+        audited_types = set(risk_types)
+        if post_effect_verification:
+            predecessor = subgoals[subgoal.depends_on[0]]
+            linked_types = {
+                risks[risk_id].risk_type
+                for risk_id in predecessor.risk_action_ids
+                if risk_id in risks
+            }
+            audited_types.discard("unknown_external_effect")
+        missing = audited_types - linked_types
         if missing:
             raise TaskGraphError(
                 f"语义风险审计要求子目标关联匹配风险：{subgoal_id} / "

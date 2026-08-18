@@ -2237,6 +2237,156 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 device_id="phone-1",
             )
 
+    def test_allows_input_content_as_exact_result_state_constraint(self):
+        constraints = (
+            "输入内容必须为“你好”",
+            "当前输入内容应为“A-1024”",
+            '输入内容保持为"Meeting at 8"',
+        )
+        for constraint in constraints:
+            with self.subTest(constraint=constraint):
+                payload = base_payload()
+                payload["subgoals"][0]["constraints"] = [constraint]
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    "准备指定的未提交文本状态",
+                    device_id="phone-1",
+                )
+                self.assertEqual(
+                    graph.subgoals[0].constraints,
+                    (constraint,),
+                )
+
+    def test_input_content_state_constraint_cannot_hide_low_level_action(self):
+        payload = base_payload()
+        payload["subgoals"][0]["constraints"] = [
+            "输入内容必须为“你好”并点击发送按钮"
+        ]
+        with self.assertRaisesRegex(TaskGraphError, "包含低层动作表达"):
+            DeepSeekTaskGraphPlanner(
+                FakeProvider(payload, copy.deepcopy(payload))
+            ).plan(
+                "目标",
+                device_id="phone-1",
+            )
+
+    def test_allows_read_only_verification_bound_to_external_predecessor(self):
+        payload = base_payload()
+        payload["goal"] = {
+            "objective": "向指定收件人发送消息并确认消息可见",
+            "target_apps": [{"app_id": "chat", "app_name": "聊天应用"}],
+            "entities": {"recipient": "文件传输助手", "input_text": "你好"},
+        }
+        payload["completion_conditions"] = [
+            {
+                "condition_id": "message_visible",
+                "description": "指定对话中可见刚发送的消息",
+                "evidence_required": ["当前对话身份正确", "刚发送的消息可见"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "send_message",
+                "description": "向指定收件人发送消息",
+                "external_effect": "消息进入指定收件人的聊天记录",
+                "risk_type": "message_or_communication",
+                "risk_level": "low",
+                "subgoal_ids": ["send_message"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "open_chat",
+                "objective": "指定收件人的聊天页面可见",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["收件人身份必须逐字一致"],
+                "completion_conditions": ["指定聊天页面可见"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "prepare_input",
+                "objective": "当前输入框内容为“你好”",
+                "status": "pending",
+                "depends_on": ["open_chat"],
+                "constraints": ["输入内容必须为“你好”"],
+                "completion_conditions": ["当前输入框内容为“你好”"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "send_message",
+                "objective": "消息已发送给指定收件人",
+                "status": "pending",
+                "depends_on": ["prepare_input"],
+                "constraints": ["发送内容必须为“你好”"],
+                "completion_conditions": ["消息已发送给指定收件人"],
+                "completion_evidence": [],
+                "risk_action_ids": ["send_message"],
+                "external_impact": "external_state",
+            },
+            {
+                "subgoal_id": "verify_message",
+                "objective": "在指定对话中可见刚发送的消息",
+                "status": "pending",
+                "depends_on": ["send_message"],
+                "constraints": ["必须确认刚发送的消息可见"],
+                "completion_conditions": ["刚发送的消息可见"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "read_only",
+            },
+        ]
+        payload["active_subgoal_id"] = "open_chat"
+        payload["status"] = "ready"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            "向文件传输助手发送你好，并确认消息可见。",
+            device_id="phone-1",
+        )
+
+        self.assertEqual("verify_message", graph.subgoals[-1].subgoal_id)
+        self.assertEqual("read_only", graph.subgoals[-1].external_impact)
+        self.assertEqual((), graph.subgoals[-1].risk_action_ids)
+
+    def test_post_effect_verification_requires_matching_predecessor_risk(self):
+        payload = base_payload()
+        payload["risk_actions"][0]["risk_type"] = "data_mutation"
+        payload["subgoals"][1]["objective"] = "消息已发送给联系人且可见"
+        payload["subgoals"][1]["completion_conditions"] = [
+            "确认消息已发送给联系人且可见"
+        ]
+        payload["subgoals"][1]["external_impact"] = "read_only"
+        payload["subgoals"][1]["risk_action_ids"] = []
+
+        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                "确认消息是否已发送给联系人。",
+                device_id="phone-1",
+            )
+
+    def test_message_sent_result_order_is_communication_effect(self):
+        for text in (
+            "消息“你好”已发送到指定对话",
+            "私信已经发送给指定联系人",
+            "留言发送成功并可见",
+            "输入消息“你好”并发送",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    frozenset({"message_or_communication"}),
+                    _infer_external_risk_types(text),
+                )
+        self.assertNotIn(
+            "message_or_communication",
+            _infer_external_risk_types("发送按钮可见"),
+        )
+
     def test_allows_negated_low_level_safety_constraint(self):
         payload = base_payload()
         payload["subgoals"][0]["constraints"] = ["不要点击广告"]

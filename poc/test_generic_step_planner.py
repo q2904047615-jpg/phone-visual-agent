@@ -4106,6 +4106,194 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual([], robot.actions)
         self.assertEqual(1, observer.calls)
 
+    def test_stable_frames_allow_input_field_bounds_drift_with_fresh_keyboard_geometry(self):
+        states = {
+            "goal_relevant": True,
+            "fully_visible": True,
+            "focused": True,
+            "value": "",
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "keyboard_case_mode": "lower",
+            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+        }
+
+        def input_scene(fingerprint, bounds, *, value=""):
+            return UIScene(
+                app_id="wechat",
+                screen_id="chat_file_transfer_helper",
+                summary="同一会话中的唯一聚焦输入框和 QWERTY 键盘",
+                elements=(
+                    UIElement(
+                        element_id="local_audited_input_1",
+                        role="input",
+                        meaning="application_text_input",
+                        label="",
+                        bounds=bounds,
+                        confidence=1.0,
+                        states={**states, "value": value},
+                    ),
+                ),
+                stable=True,
+                confidence=1.0,
+                fingerprint=fingerprint,
+                camera_alignment=aligned_camera_facts(),
+            )
+
+        planned = input_scene("planned", (0.14, 0.53, 0.69, 0.58))
+        fresh = input_scene("fresh", (0.24, 0.623, 0.80, 0.68))
+        target_text = "longinput2026abcdefghijklmnopqrstuvwxyz"
+        first_segment = "longinput"
+        after = input_scene(
+            "after",
+            (0.15, 0.53, 0.70, 0.60),
+            value=first_segment,
+        )
+        observer = FakeSceneObserver(
+            [fresh, after],
+            geometry_scenes=[planned, fresh],
+        )
+        robot = FakeRobot()
+        snapped_anchors = {
+            key: list(value)
+            for key, value in TEST_QWERTY_GEOMETRY["anchors"].items()
+        }
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+            qwerty_row_snapper=lambda _frames, _anchors: snapped_anchors,
+            require_local_qwerty_row_snap=True,
+        )
+
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="input-long-text",
+                action="input_verified_text",
+                params={
+                    "element_id": "local_audited_input_1",
+                    "target": "application_text_input",
+                    "role": "input",
+                    "label": "",
+                    "states": states,
+                    "text": target_text,
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {"value": first_segment},
+                        }
+                    },
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("input", first_segment)], robot.actions)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("matched", result.action_outcome)
+        self.assertEqual("fresh", result.before_scene.fingerprint)
+        self.assertEqual(
+            "stable_local_ocr",
+            robot.keyboard_layouts[0]["row_snap_source"],
+        )
+        self.assertEqual(
+            [
+                ("local_audited_input_1",),
+                ("local_audited_input_1",),
+            ],
+            observer.geometry_audit_calls,
+        )
+
+    def test_stable_frames_do_not_allow_input_mode_change_with_bounds_drift(self):
+        planned_states = {
+            "goal_relevant": True,
+            "fully_visible": True,
+            "focused": True,
+            "value": "",
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "keyboard_case_mode": "lower",
+            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+        }
+        planned = UIScene(
+            app_id="generic_app",
+            screen_id="editor",
+            summary="唯一聚焦输入框",
+            elements=(
+                UIElement(
+                    element_id="input",
+                    role="input",
+                    meaning="application_text_input",
+                    label="",
+                    bounds=(0.14, 0.53, 0.69, 0.58),
+                    confidence=1.0,
+                    states=planned_states,
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint="planned",
+            camera_alignment=aligned_camera_facts(),
+        )
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    bounds=(0.24, 0.623, 0.80, 0.68),
+                    states={
+                        **planned_states,
+                        "keyboard_input_mode": "chinese_pinyin",
+                    },
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        observer = FakeSceneObserver([fresh])
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+
+        with self.assertRaisesRegex(
+            GenericActionAdapterError,
+            "目标语义不再严格唯一",
+        ):
+            adapter.execute(
+                requested_action=SemanticAction(
+                    node_id="input-mode-changed",
+                    action="input_verified_text",
+                    params={
+                        "element_id": "input",
+                        "target": "application_text_input",
+                        "role": "input",
+                        "label": "",
+                        "states": planned_states,
+                        "text": "agent",
+                    },
+                ),
+                planned_scene=planned,
+                planned_frames=tuple(
+                    Image.new("RGB", (540, 960), "gray") for _ in range(4)
+                ),
+                goal=goal(),
+                confirmed=True,
+            )
+
+        self.assertEqual([], robot.actions)
+        self.assertEqual([], observer.geometry_audit_calls)
+
     def test_drag_uses_two_independently_audited_endpoint_scenes(self):
         def drag_scene(fingerprint, source_bounds, destination_bounds):
             return UIScene(

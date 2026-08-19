@@ -1309,6 +1309,17 @@ class GenericSingleActionAdapter:
                 rebind_planned_scene,
                 before,
                 local_frame_identity_verified=local_frame_identity_verified,
+                # A verified text-input action never executes at the input
+                # element's model-drawn center.  Once the original and fresh
+                # four-frame sets prove the pixels are unchanged, bind the
+                # unique focused input by its exact semantic/state identity
+                # and execute only from the fresh input-structure keyboard
+                # geometry below.  Tap, clear, long-press and drag retain the
+                # strict planned/fresh geometry-overlap gate.
+                require_geometry_overlap=not (
+                    local_frame_identity_verified
+                    and requested_action.action == "input_verified_text"
+                ),
             )
         except GenericActionAdapterError as exc:
             raise GenericActionAdapterError(

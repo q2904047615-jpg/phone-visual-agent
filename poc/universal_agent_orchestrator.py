@@ -3542,7 +3542,7 @@ class UniversalAgentOrchestrator:
             or str(getattr(result, "action_outcome", "")) != "matched"
             or int(getattr(result, "physical_actions", 0)) != 1
             or tuple(getattr(result, "verification_errors", ()))
-            or str(getattr(before_observation, "fingerprint", ""))
+            or str(getattr(resolved, "before_fingerprint", ""))
             != str(getattr(before_scene, "fingerprint", ""))
             or str(getattr(new_observation, "fingerprint", ""))
             != str(getattr(after_scene, "fingerprint", ""))

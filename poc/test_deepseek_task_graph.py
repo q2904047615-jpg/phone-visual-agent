@@ -4225,6 +4225,61 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 self.assertNotIn("input_text", graph.goal.entities)
                 self.assertEqual("read_only", graph.active_subgoal().external_impact)
 
+    def test_empty_input_preparation_state_does_not_bind_final_payload(self):
+        samples = (
+            "输入框可见且为空",
+            "唯一空白搜索框已聚焦且为空",
+            "the input field is visible and empty",
+        )
+        for objective in samples:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="navigation_only",
+                )
+                payload["goal"]["objective"] = "在空白输入框中输入 live21 但不要提交"
+                payload["goal"]["entities"]["input_text"] = "live21"
+                payload["constraints"] = ["当前步骤只定位空白输入框，不进行输入或提交"]
+                payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+                payload["subgoals"][0]["completion_conditions"] = [objective]
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    payload["goal"]["objective"],
+                    device_id="phone-1",
+                )
+
+                self.assertEqual("live21", graph.goal.entities["input_text"])
+                self.assertEqual(
+                    "navigation_only",
+                    graph.active_subgoal().external_impact,
+                )
+
+    def test_empty_input_preparation_cannot_hide_positive_input(self):
+        samples = (
+            "输入框可见且为空并输入 secret",
+            "the input field is visible and empty, then type secret",
+        )
+        for objective in samples:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="navigation_only",
+                )
+                payload["goal"]["objective"] = objective
+                payload["goal"]["entities"]["input_text"] = "live21"
+                payload["constraints"] = ["不得提交、发送、保存或发布"]
+                payload["subgoals"][0]["constraints"] = list(payload["constraints"])
+                payload["subgoals"][0]["completion_conditions"] = [objective]
+
+                with self.assertRaisesRegex(
+                    TaskGraphError,
+                    "子目标输入状态未绑定 canonical input_text",
+                ):
+                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                        objective,
+                        device_id="phone-1",
+                    )
+
     def test_empty_state_cannot_hide_unbound_positive_input(self):
         objective = "输入框为空并输入 secret"
         payload = single_subgoal_payload(

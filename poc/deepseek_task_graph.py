@@ -268,7 +268,9 @@ LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN = re.compile(
     r"(?:保留|留下).{0,20}(?:未发送|未提交|草稿|文字|文本|内容)|"
     r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域).{0,20}"
     r"(?:包含|含有|显示).{0,28}(?:未发送|未提交|草稿)|"
-    r"\b(?:input|text|query)\s*(?:field|box).{0,28}(?:contains?|shows?|value|text)\b)",
+    r"\b(?:input|text|query)\s*(?:field|box).{0,28}(?:contains?|shows?|value|text)\b|"
+    r"\b(?:input|text|query|message)\s*(?:field|box|area)\b"
+    r"[^\r\n]{0,60}\b(?:type|enter|write|fill|replace)\b)",
     re.IGNORECASE,
 )
 LOCAL_EDITABLE_CARRIER_ADJECTIVE_PATTERN = re.compile(
@@ -299,6 +301,19 @@ EXACT_EMPTY_LOCAL_INPUT_STATE_PATTERN = re.compile(
     r"^\s*(?:(?:confirm|verify)\s+)?(?:the\s+)?"
     r"(?:input|text|query|message)\s*(?:field|box|area)\s+"
     r"(?:is|remains?)\s+(?:empty|blank)\s*$",
+    re.IGNORECASE,
+)
+EXACT_EMPTY_LOCAL_INPUT_PREPARATION_STATE_PATTERN = re.compile(
+    r"^\s*(?:(?:确认|核对|验证|找到|定位)\s*)?(?:当前)?\s*(?:唯一)?\s*"
+    r"(?:(?:空白|空)\s*)?"
+    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)"
+    r"\s*(?:已|保持)?\s*(?:可见|显示|存在|可编辑|已聚焦|获得焦点|保持焦点)"
+    r"\s*(?:且|并且|、|和)\s*(?:仍|保持)?\s*"
+    r"(?:为|是|保持为)?\s*(?:空|空白|为空|无文字|没有文字|无文本|没有文本|无内容|内容为空)\s*$|"
+    r"^\s*(?:(?:confirm|verify|find|locate)\s+)?(?:the\s+)?(?:only\s+)?"
+    r"(?:(?:empty|blank)\s+)?(?:input|text|query|message)\s*(?:field|box|area)\s+"
+    r"(?:is\s+)?(?:visible|shown|present|editable|focused)\s+"
+    r"(?:and\s+)(?:is\s+|remains?\s+)?(?:empty|blank)\s*$",
     re.IGNORECASE,
 )
 LOW_LEVEL_NEGATION_SCOPE_RESET_PATTERN = re.compile(
@@ -2918,6 +2933,8 @@ def _describes_only_exact_empty_input_state(values: tuple[str, ...]) -> bool:
     )
     return bool(state_clauses) and all(
         EXACT_EMPTY_LOCAL_INPUT_STATE_PATTERN.fullmatch(value) is not None
+        or EXACT_EMPTY_LOCAL_INPUT_PREPARATION_STATE_PATTERN.fullmatch(value)
+        is not None
         for value in state_clauses
     )
 

@@ -1759,6 +1759,115 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual("matched", result.action_outcome)
         self.assertEqual(1, result.physical_actions)
 
+    def test_confirmed_chinese_input_accepts_localized_same_surface_identity(self):
+        before_states = {
+            "focused": True,
+            "value": "复杂输入",
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "chinese_pinyin",
+            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+            "goal_relevant": True,
+        }
+        before = UIScene(
+            app_id="微信",
+            screen_id="聊天界面",
+            summary="输入框显示既有中文，键盘已聚焦",
+            elements=(
+                UIElement(
+                    element_id="field",
+                    role="input",
+                    meaning="application_text_input",
+                    label="复杂输入",
+                    bounds=(0.11, 0.52, 0.70, 0.57),
+                    confidence=1.0,
+                    states=before_states,
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint="before",
+            camera_alignment=aligned_camera_facts(),
+        )
+        after = UIScene(
+            app_id="当前会话标题",
+            screen_id="chat_input",
+            summary="同一输入框显示验收的拼音和候选",
+            elements=(
+                replace(
+                    before.elements[0],
+                    bounds=(0.13, 0.535, 0.70, 0.58),
+                    states={
+                        **before_states,
+                        "ime_preedit_text": "yanshou",
+                        "ime_exact_candidate_text": "验收",
+                    },
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint="after",
+            camera_alignment=aligned_camera_facts(),
+        )
+        robot = FakeRobot()
+        action = SemanticAction(
+            node_id="input-next-chinese-segment",
+            action="input_verified_text",
+            params={
+                "element_id": "field",
+                "target": "application_text_input",
+                "role": "input",
+                "label": "复杂输入",
+                "states": before_states,
+                "text": "复杂输入验收",
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "application_text_input",
+                        "states": {
+                            "value": "复杂输入",
+                            "ime_preedit_text": "yanshou",
+                            "ime_exact_candidate_text": "验收",
+                        },
+                    }
+                },
+            },
+        )
+
+        result = self._adapter(
+            FakeSceneObserver([before, after, after]),
+            robot,
+        ).execute(
+            requested_action=action,
+            planned_scene=before,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("pinyin", "验收", "yanshou")], robot.actions)
+        self.assertEqual(
+            "matched",
+            result.action_outcome,
+            result.verification_errors,
+        )
+        self.assertEqual(1, result.physical_actions)
+
+    def test_input_surface_family_does_not_bridge_different_page_families(self):
+        self.assertTrue(
+            UniversalActionController._input_screen_identity_is_compatible(
+                "聊天界面",
+                "chat_input",
+            )
+        )
+        self.assertFalse(
+            UniversalActionController._input_screen_identity_is_compatible(
+                "聊天界面",
+                "search_input",
+            )
+        )
+        self.assertEqual(
+            "",
+            UniversalActionController._input_screen_identity_family("unknown"),
+        )
+
     def test_post_action_second_verified_scene_clears_transient_mismatch(self):
         states = {
             "focused": True,

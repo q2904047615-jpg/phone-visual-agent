@@ -1439,16 +1439,29 @@ class UniversalActionController:
         ):
             return True
 
-        if not cls._input_app_identity_is_compatible(
+        app_identity_compatible = cls._input_app_identity_is_compatible(
             before.foreground_app_id,
             after.foreground_app_id,
-        ):
-            return False
+        )
         if not cls._input_screen_identity_is_compatible(
             before.screen_id,
             after.screen_id,
         ):
             return False
+        if not app_identity_compatible:
+            if (
+                cls._input_app_identity_is_concrete_package(
+                    before.foreground_app_id
+                )
+                or cls._input_app_identity_is_concrete_package(
+                    after.foreground_app_id
+                )
+            ):
+                return False
+            before_family = cls._input_screen_identity_family(before.screen_id)
+            after_family = cls._input_screen_identity_family(after.screen_id)
+            if not before_family or before_family != after_family:
+                return False
         if not cls._input_regions_stably_overlap(
             before_input.bounds,
             after_input.bounds,
@@ -1489,6 +1502,16 @@ class UniversalActionController:
         return left in placeholders or right in placeholders
 
     @staticmethod
+    def _input_app_identity_is_concrete_package(value: str) -> bool:
+        normalized = str(value or "").strip().casefold()
+        return bool(
+            re.fullmatch(
+                r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+",
+                normalized,
+            )
+        )
+
+    @staticmethod
     def _input_screen_identity_is_compatible(before: str, after: str) -> bool:
         left = str(before or "").strip().casefold()
         right = str(after or "").strip().casefold()
@@ -1498,23 +1521,47 @@ class UniversalActionController:
         if left in placeholders or right in placeholders:
             return True
 
-        def family(value: str) -> str:
-            return re.split(r"[_\-\s/]+", value, maxsplit=1)[0]
-
-        stable_input_families = {
-            "chat",
-            "conversation",
-            "compose",
-            "editor",
-            "form",
-            "input",
-            "search",
-        }
-        left_family = family(left)
-        return (
-            left_family in stable_input_families
-            and left_family == family(right)
+        left_family = UniversalActionController._input_screen_identity_family(left)
+        return bool(
+            left_family
+            and left_family
+            == UniversalActionController._input_screen_identity_family(right)
         )
+
+    @staticmethod
+    def _input_screen_identity_family(value: str) -> str:
+        """Normalize generic editable-surface names across model languages.
+
+        Scene ``screen_id`` is model-described evidence and may alternate
+        between a UI family name and its localized wording.  These families
+        describe reusable input surfaces only; they do not name an App,
+        account, recipient, or control.
+        """
+
+        normalized = str(value or "").strip().casefold()
+        if not normalized or normalized in {"unknown", "current_screen"}:
+            return ""
+        family_markers = (
+            ("chat", ("chat", "conversation", "聊天", "会话")),
+            ("search", ("search", "搜索")),
+            ("compose", ("compose", "draft", "撰写", "草稿")),
+            ("editor", ("editor", "edit", "编辑")),
+            ("form", ("form", "表单")),
+            ("input", ("input", "输入")),
+        )
+        tokens = {
+            token
+            for token in re.split(r"[_\-\s/]+", normalized)
+            if token
+        }
+        for family, markers in family_markers:
+            if any(
+                marker in tokens
+                or (not marker.isascii() and marker in normalized)
+                for marker in markers
+            ):
+                return family
+        return ""
 
     @staticmethod
     def _input_regions_stably_overlap(

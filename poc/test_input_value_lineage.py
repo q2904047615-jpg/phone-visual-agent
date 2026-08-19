@@ -225,6 +225,34 @@ class TypedInputLineageTests(unittest.TestCase):
                 )
             )
 
+    def test_wrapped_input_height_change_keeps_same_surface_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = self.make_store(temp)
+            store.record_verified_literal_action(
+                device_id=DEVICE,
+                resolved_action=resolved(),
+                before_scene=before_scene(),
+                after_scene=scene(RAW_AFTER, "after-fp"),
+                hardware_receipt=receipt(),
+            )
+            matched = store.match_visual(
+                device_id=DEVICE,
+                app_id="sample.app",
+                screen_id="editor",
+                raw_value=RAW_AFTER,
+                input_bounds=(0.13, 0.59, 0.68, 0.69),
+            )
+            self.assertIsNotNone(matched)
+            self.assertIsNone(
+                store.match_visual(
+                    device_id=DEVICE,
+                    app_id="sample.app",
+                    screen_id="editor",
+                    raw_value=RAW_AFTER,
+                    input_bounds=(0.13, 0.64, 0.68, 0.74),
+                )
+            )
+
     def test_invalid_receipt_or_exact_chain_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = self.make_store(temp)

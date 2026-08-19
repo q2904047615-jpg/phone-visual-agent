@@ -55,7 +55,7 @@ def _bounds_compatible(
     first_center = ((first[0] + first[2]) / 2, (first[1] + first[3]) / 2)
     second_center = ((second[0] + second[2]) / 2, (second[1] + second[3]) / 2)
     return bool(
-        coverage >= 0.45
+        coverage >= 0.25
         and abs(first_center[0] - second_center[0]) <= 0.10
         and abs(first_center[1] - second_center[1]) <= 0.08
     )

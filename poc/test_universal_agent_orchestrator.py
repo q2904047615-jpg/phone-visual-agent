@@ -2829,6 +2829,60 @@ class ObservationBridgeTests(unittest.TestCase):
         self.assertNotIn("steps", str(payload).casefold())
         self.assertNotIn("coordinate", str(payload).casefold())
 
+    def test_projects_formal_surface_goals_without_inventing_target_apps(self) -> None:
+        identities = {
+            "device": ("device", "设备界面"),
+            "system": ("system", "系统界面"),
+            "current_surface": ("current_surface", "当前界面"),
+        }
+        for surface, expected_identity in identities.items():
+            with self.subTest(surface=surface):
+                graph = replace(
+                    _graph(),
+                    goal=GraphGoal(
+                        objective="确认正式目标表面可见",
+                        target_apps=(),
+                        entities={"target_surface": surface},
+                    ),
+                    raw_user_goal="确认当前手机表面可见",
+                )
+                graph.validate()
+
+                draft = self.bridge.goal_draft(graph)
+
+                self.assertEqual(expected_identity, (draft.app_id, draft.app_name))
+                self.assertEqual(surface, draft.entities["target_surface"])
+                self.assertEqual([], draft.entities["target_apps"])
+                self.assertEqual(
+                    surface,
+                    draft.entities["active_subgoal_visual_context"][
+                        "goal_entities"
+                    ]["target_surface"],
+                )
+
+    def test_rejects_missing_app_and_missing_formal_surface(self) -> None:
+        graph = replace(
+            _graph(),
+            status="blocked",
+            goal=GraphGoal(
+                objective="等待补充目标",
+                target_apps=(),
+                entities={},
+            ),
+            active_subgoal_id=None,
+            subgoals=tuple(
+                replace(item, status="blocked") for item in _graph().subgoals
+            ),
+            clarification_questions=("请补充目标 App 或目标表面",),
+        )
+        graph.validate()
+
+        with self.assertRaisesRegex(
+            UniversalAgentOrchestratorError,
+            "目标 App 或正式目标 surface",
+        ):
+            self.bridge.goal_draft(graph)
+
     def test_projection_preserves_goal_entities_constraints_and_completion(self) -> None:
         graph = _graph()
 

@@ -384,6 +384,11 @@ class ObservationBridge:
             "active_app",
         }
     )
+    _SURFACE_OBSERVATION_IDENTITIES = {
+        "device": ("device", "设备界面"),
+        "system": ("system", "系统界面"),
+        "current_surface": ("current_surface", "当前界面"),
+    }
 
     @classmethod
     def _active_app_entry_target_label(
@@ -438,9 +443,19 @@ class ObservationBridge:
 
     def goal_draft(self, graph: DynamicTaskGraph) -> GenericIntentDraft:
         graph.validate()
-        if not graph.goal.target_apps:
+        target_surface = str(
+            graph.goal.entities.get("target_surface") or ""
+        ).strip()
+        if graph.goal.target_apps:
+            primary_app_id = graph.goal.target_apps[0].app_id
+            primary_app_name = graph.goal.target_apps[0].app_name
+        elif target_surface in self._SURFACE_OBSERVATION_IDENTITIES:
+            primary_app_id, primary_app_name = (
+                self._SURFACE_OBSERVATION_IDENTITIES[target_surface]
+            )
+        else:
             raise UniversalAgentOrchestratorError(
-                "任务图没有目标 App，不能建立通用观察上下文。"
+                "任务图没有目标 App 或正式目标 surface，不能建立通用观察上下文。"
             )
         active = graph.active_subgoal()
         constraints = list(graph.constraints)
@@ -483,11 +498,10 @@ class ObservationBridge:
         account_effects = tuple(
             dict.fromkeys(item.risk_type for item in graph.risk_actions)
         )
-        primary_app = graph.goal.target_apps[0]
         draft = GenericIntentDraft(
             understood=True,
-            app_id=primary_app.app_id,
-            app_name=primary_app.app_name,
+            app_id=primary_app_id,
+            app_name=primary_app_name,
             objective=graph.goal.objective,
             entities=entities,
             constraints=tuple(dict.fromkeys(constraints)),

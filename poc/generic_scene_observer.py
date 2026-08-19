@@ -3066,6 +3066,7 @@ def _parse_targeted_scene_delta(
     payload = _extract_targeted_delta_json_object(raw)
     _normalize_targeted_delta_evidence_shorthand(payload)
     _normalize_targeted_delta_xywh_bounds_shorthand(payload)
+    _drop_out_of_range_non_goal_elements(payload, goal_context or {})
     if not _matches_targeted_delta_schema(payload):
         raise VisionAgentError(
             "目标精查结果不符合最小增量协议；只允许 protocol_version、"

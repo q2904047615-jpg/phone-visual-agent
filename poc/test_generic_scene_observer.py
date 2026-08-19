@@ -3853,6 +3853,77 @@ class GenericSceneObserverTests(unittest.TestCase):
                     fingerprint="local-fingerprint",
                 )
 
+    def test_targeted_delta_discards_only_explicit_non_goal_out_of_range_peripheral(self) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="local-fingerprint",
+        )
+        target = dict(scene_payload()["elements"][0])
+        target.update(
+            {
+                "element_id": "search_input_clipped",
+                "role": "input",
+                "meaning": "search_field",
+                "label": "",
+                "bounds": {"x": 0, "y": 0, "w": 1000, "h": 45},
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": False,
+                    "value": "",
+                },
+                "evidence": "顶部仅见输入框边缘",
+            }
+        )
+        peripheral = dict(scene_payload()["elements"][0])
+        peripheral.update(
+            {
+                "element_id": "keyboard_switch_hint",
+                "role": "button",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "英",
+                "bounds": {"x": 735, "y": 2265, "w": 90, "h": 110},
+                "states": {
+                    "goal_relevant": False,
+                    "fully_visible": True,
+                },
+                "evidence": "模型误用了源像素纵坐标",
+            }
+        )
+
+        parsed = _parse_targeted_scene_delta(
+            json.dumps(
+                targeted_delta_payload(elements=[target, peripheral]),
+                ensure_ascii=False,
+            ),
+            base_scene=base,
+            fingerprint="local-fingerprint",
+            goal_context={"objective": "确认搜索输入框状态"},
+        )
+        self.assertEqual(
+            ["search_input_clipped"],
+            [element.element_id for element in parsed.elements],
+        )
+
+        unsafe = targeted_delta_payload(
+            elements=[
+                target,
+                {
+                    **peripheral,
+                    "states": {
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                    },
+                },
+            ]
+        )
+        with self.assertRaisesRegex(VisionAgentError, "最小增量协议"):
+            _parse_targeted_scene_delta(
+                json.dumps(unsafe, ensure_ascii=False),
+                base_scene=base,
+                fingerprint="local-fingerprint",
+                goal_context={"objective": "确认搜索输入框状态"},
+            )
+
     def test_targeted_delta_rejects_legacy_scene_and_authority_fields(self) -> None:
         base = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),

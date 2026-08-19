@@ -1569,3 +1569,11 @@ observer、Qwen、DeepSeek、编排和 Web 关联回归 `879/879`，Python 完�
   将该可选子结构降为 `null`；它不能授权删除动作。非空错误标签、多余字段、非法 bounds 仍严格拒绝。
 - 现场正反回放 `1/1`，observer/Qwen/DeepSeek/编排/Web 关联 `880/880`，Python 完整回归
   `1496/1496`通过；另一次关联命令仅因输入了不存在的测试模块名产生 1 个 ImportError，已用正确测试集重跑全绿，不是产品断言失败。
+
+## 48. 最终新会话的 Home 物理动作未生效
+
+- 加载提交 `66fddc5` 后，新会话 `cbd822ebed8b4bfa83e5e1e271d7632e` 第 1 步唯一动作为 `home`。
+- 动作前为受隐私裁剪的微信文件传输助手画面；动作后两轮四帧观察仍为
+  `wechat/chat_window_file_transfer_helper`，空输入框和键盘仍可见，typed Launcher/Home 后置条件未满足。
+- 会话记录 `physical_actions=1`、`outcome=mismatched`、最终 `blocked`；没有打开 App、输入或发送。
+  该物理动作链已按规则停止，不得在同一现场状态自动重试或用代码补丁掩盖。

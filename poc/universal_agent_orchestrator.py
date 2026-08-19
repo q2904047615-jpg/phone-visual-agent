@@ -2673,6 +2673,7 @@ class UniversalAgentOrchestrator:
         prefix_valid = bool(
             newly_completed and newly_completed[0] == current.subgoal_id
         )
+        unsupported_subgoal_id = ""
         for subgoal_id in newly_completed:
             old_item = old_by_id[subgoal_id]
             new_item = new_by_id[subgoal_id]
@@ -2698,15 +2699,34 @@ class UniversalAgentOrchestrator:
                 or not new_item.completion_evidence
             ):
                 prefix_valid = False
+                unsupported_subgoal_id = subgoal_id
                 break
             accepted_prefix.append(subgoal_id)
         if not prefix_valid or not completed_current.completion_evidence:
-            raise UniversalAgentOrchestratorError(
-                "可见状态证据只能完成从当前节点开始、依赖连续满足的安全定位前缀，"
-                "且每个节点必须记录可见证据："
-                f"current={current.subgoal_id}, newly_completed={newly_completed}, "
-                f"current_evidence_count={len(completed_current.completion_evidence)}。"
+            narrowed = self._narrow_unproven_visible_successor(
+                previous=graph,
+                revised=revised,
+                current_subgoal_id=current.subgoal_id,
+                accepted_prefix=tuple(accepted_prefix),
+                unsupported_subgoal_id=unsupported_subgoal_id,
             )
+            if narrowed is None:
+                raise UniversalAgentOrchestratorError(
+                    "可见状态证据只能完成从当前节点开始、依赖连续满足的安全定位前缀，"
+                    "且每个节点必须记录可见证据："
+                    f"current={current.subgoal_id}, newly_completed={newly_completed}, "
+                    f"current_evidence_count={len(completed_current.completion_evidence)}。"
+                )
+            revised = narrowed
+            new_by_id = {item.subgoal_id: item for item in revised.subgoals}
+            newly_completed = tuple(
+                subgoal_id
+                for subgoal_id in old_ids
+                if old_by_id[subgoal_id].status != "completed"
+                and new_by_id[subgoal_id].status == "completed"
+            )
+            completed_current = new_by_id[current.subgoal_id]
+            prefix_valid = True
         for subgoal_id in old_ids:
             old_status = old_by_id[subgoal_id].status
             new_status = new_by_id[subgoal_id].status
@@ -2738,6 +2758,80 @@ class UniversalAgentOrchestrator:
                 "可见状态证据推进后必须精确激活一个后续子目标。"
             )
         return revised
+
+    @staticmethod
+    def _narrow_unproven_visible_successor(
+        *,
+        previous: DynamicTaskGraph,
+        revised: DynamicTaskGraph,
+        current_subgoal_id: str,
+        accepted_prefix: tuple[str, ...],
+        unsupported_subgoal_id: str,
+    ) -> DynamicTaskGraph | None:
+        """Keep only the locally proven part of a model-completed prefix.
+
+        The projection is deliberately one-way: it may revoke an unsupported
+        completion, but it can never complete a node, add evidence, or widen
+        action authority.  This lets a valid current visible checkpoint survive
+        when model prose over-claims one directly dependent reversible state.
+        """
+
+        if (
+            not accepted_prefix
+            or accepted_prefix[0] != current_subgoal_id
+            or not unsupported_subgoal_id
+        ):
+            return None
+        old_by_id = {item.subgoal_id: item for item in previous.subgoals}
+        new_by_id = {item.subgoal_id: item for item in revised.subgoals}
+        unsupported = old_by_id.get(unsupported_subgoal_id)
+        last_accepted_id = accepted_prefix[-1]
+        accepted = set(accepted_prefix)
+        previously_completed = {
+            item.subgoal_id
+            for item in previous.subgoals
+            if item.status == "completed"
+        }
+        if (
+            unsupported is None
+            or unsupported_subgoal_id not in new_by_id
+            or unsupported.status != "pending"
+            or new_by_id[unsupported_subgoal_id].status != "completed"
+            or unsupported.external_impact not in {"read_only", "navigation_only"}
+            or last_accepted_id not in unsupported.depends_on
+            or not all(
+                dependency in previously_completed or dependency in accepted
+                for dependency in unsupported.depends_on
+            )
+        ):
+            return None
+
+        normalized = []
+        for old_item in previous.subgoals:
+            subgoal_id = old_item.subgoal_id
+            if subgoal_id in accepted or old_item.status == "completed":
+                normalized.append(new_by_id[subgoal_id])
+            elif subgoal_id == unsupported_subgoal_id:
+                normalized.append(
+                    replace(
+                        old_item,
+                        status="active",
+                        completion_evidence=(),
+                    )
+                )
+            else:
+                normalized.append(
+                    replace(old_item, completion_evidence=())
+                )
+        narrowed = replace(
+            revised,
+            status="ready",
+            subgoals=tuple(normalized),
+            active_subgoal_id=unsupported_subgoal_id,
+            clarification_questions=previous.clarification_questions,
+        )
+        narrowed.validate()
+        return narrowed
 
     def _advance_visible_presence_prefix(
         self,

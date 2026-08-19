@@ -6274,6 +6274,191 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         self.assertEqual(0, session.physical_actions)
         self.assertEqual(0, adapter.execute_calls)
 
+    def test_visible_prefix_narrows_model_only_focus_claim_without_failing(self) -> None:
+        base = _graph()
+        page = replace(
+            base.subgoals[0],
+            subgoal_id="chat-visible",
+            objective="文件传输助手会话页面可见",
+            completion_conditions=("文件传输助手会话页面可见",),
+            external_impact="navigation_only",
+        )
+        focus = Subgoal(
+            subgoal_id="focus-input",
+            objective="聚焦当前唯一空白输入框",
+            status="pending",
+            depends_on=(page.subgoal_id,),
+            constraints=(),
+            completion_conditions=("输入框处于聚焦状态",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        type_text = Subgoal(
+            subgoal_id="type-text",
+            objective="输入框内容为 longinput",
+            status="pending",
+            depends_on=(focus.subgoal_id,),
+            constraints=(),
+            completion_conditions=("输入框内容逐字为 longinput",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        initial = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="在文件传输助手输入 longinput 但不发送",
+                target_apps=(TargetApp(app_id="wechat", app_name="微信"),),
+                entities={
+                    "recipient": "文件传输助手",
+                    "target_ui_label": "文件传输助手",
+                    "input_text": "longinput",
+                },
+            ),
+            subgoals=(page, focus, type_text),
+            active_subgoal_id=page.subgoal_id,
+            raw_user_goal="在文件传输助手输入 longinput 但不发送",
+        )
+        initial.validate()
+        scene = replace(
+            _scene(
+                role="input",
+                meaning="message_input",
+                label="",
+                states={"value": ""},
+                app_id="wechat",
+            ),
+            screen_id="文件传输助手",
+            # This wording is model prose, not a structured focus fact.
+            summary="文件传输助手会话页面可见，空输入框已激活。",
+        )
+        scene = replace(
+            scene,
+            elements=(
+                scene.elements[0],
+                UIElement(
+                    element_id="page-title",
+                    role="text",
+                    meaning="page_title",
+                    label="文件传输助手",
+                    bounds=(0.30, 0.04, 0.70, 0.10),
+                    confidence=1.0,
+                    states={"goal_relevant": False, "fully_visible": True},
+                    evidence=("页面顶部唯一会话标题",),
+                ),
+            ),
+        )
+        model_revised = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    page,
+                    status="completed",
+                    completion_evidence=(scene.summary,),
+                ),
+                replace(
+                    focus,
+                    status="completed",
+                    completion_evidence=(scene.summary,),
+                ),
+                replace(type_text, status="active"),
+            ),
+            active_subgoal_id=type_text.subgoal_id,
+        )
+        model_revised.validate()
+        planner = FakeDeepSeekPlanner(initial, replan_result=model_revised)
+        qwen = FakeQwenObserver()
+        adapter = FakeAdapter(scene)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(planner, qwen, adapter).start(
+                session_id="session-narrow-model-focus",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("needs_reobservation", session.status)
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual(
+            ["completed", "active", "pending"],
+            [item.status for item in session.task_graph.subgoals],
+        )
+        self.assertEqual("focus-input", session.task_graph.active_subgoal_id)
+        self.assertEqual((), session.task_graph.subgoals[1].completion_evidence)
+        self.assertEqual([], qwen.calls)
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual(0, adapter.execute_calls)
+
+    def test_visible_prefix_narrowing_never_activates_external_successor(self) -> None:
+        external_base = _external_graph()
+        external = replace(
+            external_base.subgoals[0],
+            status="pending",
+            depends_on=("page-visible",),
+        )
+        page = Subgoal(
+            subgoal_id="page-visible",
+            objective="目标页面可见",
+            status="active",
+            depends_on=(),
+            constraints=(),
+            completion_conditions=("目标页面可见",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        tail = Subgoal(
+            subgoal_id="result-visible",
+            objective="结果页面可见",
+            status="pending",
+            depends_on=(external.subgoal_id,),
+            constraints=(),
+            completion_conditions=("结果页面可见",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="read_only",
+        )
+        previous = replace(
+            external_base,
+            status="running",
+            subgoals=(page, external, tail),
+            active_subgoal_id=page.subgoal_id,
+        )
+        previous.validate()
+        revised = replace(
+            previous,
+            revision=2,
+            subgoals=(
+                replace(
+                    page,
+                    status="completed",
+                    completion_evidence=("目标页面可见",),
+                ),
+                replace(
+                    external,
+                    status="completed",
+                    completion_evidence=("模型声称外部结果可见",),
+                ),
+                replace(tail, status="active"),
+            ),
+            active_subgoal_id=tail.subgoal_id,
+        )
+        revised.validate()
+
+        narrowed = UniversalAgentOrchestrator._narrow_unproven_visible_successor(
+            previous=previous,
+            revised=revised,
+            current_subgoal_id=page.subgoal_id,
+            accepted_prefix=(page.subgoal_id,),
+            unsupported_subgoal_id=external.subgoal_id,
+        )
+
+        self.assertIsNone(narrowed)
+
     def test_already_visible_navigation_destination_is_presence_completion(self) -> None:
         cases = (
             ("打开设置应用", "设置主界面可见"),

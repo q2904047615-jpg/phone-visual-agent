@@ -564,6 +564,15 @@ class GenericSceneObserverTests(unittest.TestCase):
             literal_prompt,
         )
         self.assertIn(
+            "A small corner glyph, superscript digit, alternate symbol, swipe hint "
+            "or long-press hint printed on an alphabet key is NOT a literal key",
+            literal_prompt,
+        )
+        self.assertIn(
+            "Bounds must enclose the whole direct key, never only the secondary glyph",
+            literal_prompt,
+        )
+        self.assertIn(
             "An automatic visual line wrap inside a narrow editable field is "
             "presentation only",
             literal_prompt,
@@ -5253,6 +5262,129 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertFalse(
             scene.get_element("local_audited_input_1").states["goal_relevant"]
         )
+
+    def test_qwerty_secondary_digit_hint_is_not_a_direct_literal_key(self) -> None:
+        base_scene = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="frame-secondary-digit",
+        )
+
+        def audit(*, literal_bounds, include_numeric_switch):
+            return input_audit_payload(
+                application_inputs=[
+                    audited_application_input(
+                        structure_id="message-field",
+                        bounds=[150, 530, 700, 590],
+                        text="longinput",
+                    )
+                ],
+                keyboard={
+                    "visible": True,
+                    "bounds": [0, 580, 1000, 1000],
+                    "layout": "qwerty",
+                    "input_mode": "direct_latin",
+                    "case_mode": "lower",
+                    "qwerty_anchors": {
+                        "q": [80, 730], "p": [910, 730],
+                        "a": [130, 810], "l": [820, 810],
+                        "z": [240, 890], "m": [750, 890],
+                        "backspace": [880, 890],
+                    },
+                    "mode_switch": None,
+                    "backspace_key": None,
+                    "case_switch": None,
+                    "literal_keys": [
+                        {
+                            "value": "2", "label": "2",
+                            "key_kind": "character",
+                            "bounds": literal_bounds,
+                            "confidence": 1.0,
+                            "fully_visible": True,
+                        }
+                    ],
+                    "layout_switches": (
+                        [
+                            {
+                                "label": "123",
+                                "bounds": [20, 900, 180, 980],
+                                "confidence": 1.0,
+                                "current_layout": "qwerty",
+                                "target_layout": "numeric",
+                            }
+                        ]
+                        if include_numeric_switch
+                        else []
+                    ),
+                },
+            )
+
+        hint_scene = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(
+                audit(
+                    literal_bounds=[170, 690, 250, 750],
+                    include_numeric_switch=True,
+                ),
+                ensure_ascii=False,
+            ),
+            fingerprint="frame-secondary-digit",
+            goal_context={
+                "objective": "输入框逐字等于目标且不发送",
+                "entities": {
+                    "input_text": "longinput2026abcdefghijklmnopqrstuvwxyz"
+                },
+            },
+        )
+        target = hint_scene.unique_trusted_goal_element()
+        self.assertEqual(
+            "local_audited_keyboard_layout_switch_1",
+            target.element_id,
+        )
+        self.assertEqual("numeric", target.states["target_layout"])
+        self.assertNotIn(
+            "local_audited_literal_key_1",
+            {item.element_id for item in hint_scene.elements},
+        )
+
+        no_switch_scene = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(
+                audit(
+                    literal_bounds=[170, 690, 250, 750],
+                    include_numeric_switch=False,
+                ),
+                ensure_ascii=False,
+            ),
+            fingerprint="frame-secondary-digit-no-switch",
+            goal_context={
+                "objective": "输入框逐字等于目标且不发送",
+                "entities": {
+                    "input_text": "longinput2026abcdefghijklmnopqrstuvwxyz"
+                },
+            },
+        )
+        self.assertIsNone(no_switch_scene.unique_trusted_goal_element())
+
+        dedicated_row_scene = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(
+                audit(
+                    literal_bounds=[170, 590, 250, 650],
+                    include_numeric_switch=False,
+                ),
+                ensure_ascii=False,
+            ),
+            fingerprint="frame-dedicated-digit-row",
+            goal_context={
+                "objective": "输入框逐字等于目标且不发送",
+                "entities": {
+                    "input_text": "longinput2026abcdefghijklmnopqrstuvwxyz"
+                },
+            },
+        )
+        dedicated = dedicated_row_scene.unique_trusted_goal_element()
+        self.assertEqual("local_audited_literal_key_1", dedicated.element_id)
+        self.assertEqual("2", dedicated.states["key_value"])
 
     def test_numeric_live_audit_keeps_generic_backspace_geometry(self) -> None:
         base_scene = _parse_scene(

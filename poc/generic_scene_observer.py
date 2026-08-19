@@ -2401,7 +2401,7 @@ Distinguish three different visual structures; never merge them:
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
 5. keyboard.backspace_key: for any complete visible keyboard layout, report the one complete backspace/delete key as label, bounds, confidence and fully_visible. Use null when absent, clipped, ambiguous, or confused with an App delete control. This is read-only geometry and never authorizes clearing by itself.
-6. keyboard.literal_keys: the local, goal-derived whitelist is {json.dumps(literal_key_targets, ensure_ascii=False, separators=(',', ':'))}. Report only complete visible keys whose inserted value occurs in that exact whitelist, at most once per distinct value and at most eight total. Every literal-key object MUST contain exactly these six fields and never omit any of them: value, label, key_kind, bounds, confidence, fully_visible. When the whitelist is empty, literal_keys MUST be []. QWERTY alphabet letters and Chinese characters MUST NEVER be enumerated here, even when they occur in input_text, because qwerty_anchors and the verified pinyin transaction already represent them. Never enumerate a keyboard row. For a whitelisted space use value=" " and key_kind="space". For every other whitelisted key use key_kind="character" and require label to equal value literally. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
+6. keyboard.literal_keys: the local, goal-derived whitelist is {json.dumps(literal_key_targets, ensure_ascii=False, separators=(',', ':'))}. Report only complete visible keys whose inserted value occurs in that exact whitelist, at most once per distinct value and at most eight total. Every literal-key object MUST contain exactly these six fields and never omit any of them: value, label, key_kind, bounds, confidence, fully_visible. When the whitelist is empty, literal_keys MUST be []. QWERTY alphabet letters and Chinese characters MUST NEVER be enumerated here, even when they occur in input_text, because qwerty_anchors and the verified pinyin transaction already represent them. Never enumerate a keyboard row. For a whitelisted space use value=" " and key_kind="space". For every other whitelisted key use key_kind="character" and require label to equal value literally. The large central PRIMARY glyph of the whole directly tappable key MUST equal value. A small corner glyph, superscript digit, alternate symbol, swipe hint or long-press hint printed on an alphabet key is NOT a literal key and MUST NEVER be reported here. If the whitelisted value exists only as such a secondary hint, leave literal_keys empty and report a separately visible direction-explicit numeric/symbol layout switch instead. Bounds must enclose the whole direct key, never only the secondary glyph. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
 6. keyboard.layout_switches: enumerate only compact visible keys with an explicit destination layout: qwerty, numeric, or symbol. Copy the literal label and report current_layout and target_layout; never infer a destination from the goal alone.
 7. keyboard.case_mode and keyboard.case_switch apply only to direct_latin QWERTY. case_mode is lower, upper, or unknown from the visible letter glyphs. case_switch is null unless a complete visible shift/case key and its lower↔upper direction are independently clear.
 Determine keyboard.input_mode only from the current whole keyboard image, never from the goal or the JSON example. Visible Chinese composition/candidates, pinyin separators, or a current-mode label such as 中/中文/Pinyin prove chinese_pinyin. A visible current-mode label such as 英/EN/English/ABC/Latin together with a plain Latin QWERTY layout and no Chinese composition/candidate strip proves direct_latin. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
@@ -5581,6 +5581,15 @@ def _apply_input_structure_audit(
             raise UISceneError(
                 "literal_keys 包含当前输入目标白名单外的字符。"
             )
+        if keyboard_layout == "qwerty" and qwerty_geometry is not None:
+            literal_keys = [
+                item
+                for item in literal_keys
+                if not _literal_key_overlaps_qwerty_letter_cell(
+                    item,
+                    qwerty_geometry=qwerty_geometry,
+                )
+            ]
         layout_switches = _validated_keyboard_layout_switches(
             keyboard.get("layout_switches", []),
             keyboard_bounds=keyboard_bounds,
@@ -6279,6 +6288,56 @@ def _validated_keyboard_literal_keys(
             }
         )
     return result
+
+
+def _literal_key_overlaps_qwerty_letter_cell(
+    item: dict[str, Any],
+    *,
+    qwerty_geometry: dict[str, Any],
+) -> bool:
+    """Reject alternate glyphs painted inside an alphabet key cell.
+
+    The visual model supplies only the candidate box and seven row anchors.
+    The existing local QWERTY validator deterministically reconstructs every
+    alphabet-key center.  A non-letter literal candidate centered in one of
+    those cells is therefore a secondary/long-press hint, not a direct key.
+    A dedicated number row remains vertically separate and is unaffected.
+    """
+
+    bounds = item.get("bounds")
+    anchors = qwerty_geometry.get("anchors")
+    if (
+        not isinstance(bounds, list)
+        or len(bounds) != 4
+        or not isinstance(anchors, dict)
+    ):
+        return True
+    try:
+        profile = qwerty_keyboard_config_from_anchors(anchors)
+    except WorkflowNotReady:
+        return True
+    rows = profile.get("rows")
+    if not isinstance(rows, list) or len(rows) != 3:
+        return True
+    row_y = [float(row["y"]) for row in rows]
+    vertical_pitch = min(row_y[1] - row_y[0], row_y[2] - row_y[1])
+    if vertical_pitch <= 0:
+        return True
+    center_x = (float(bounds[0]) + float(bounds[2])) / 2000.0
+    center_y = (float(bounds[1]) + float(bounds[3])) / 2000.0
+    for row in rows:
+        keys = str(row.get("keys") or "")
+        x_start = float(row["x_start"])
+        x_step = float(row["x_step"])
+        y = float(row["y"])
+        if abs(center_y - y) > 0.45 * vertical_pitch:
+            continue
+        if any(
+            abs(center_x - (x_start + index * x_step)) <= 0.48 * x_step
+            for index in range(len(keys))
+        ):
+            return True
+    return False
 
 
 def _layout_switch_label_matches(label: str, target_layout: str) -> bool:

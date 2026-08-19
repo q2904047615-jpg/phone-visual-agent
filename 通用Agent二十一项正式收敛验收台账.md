@@ -1446,3 +1446,37 @@ observer、Qwen、DeepSeek、编排和 Web 关联回归 `873/873`，Python 完�
 离线结果：完整长结构、紧凑输出及相邻按钮正反定向 `4/4`，observer 回归 `205/205`，observer、
 Qwen、DeepSeek、编排和 Web 关联回归 `874/874`，Python 完整回归 `1490/1490`。完整回归只有
 既知测试子进程 `ResourceWarning`，无断言失败。
+
+## 44. 条件清空被拆成与 canonical 输入值冲突的高层节点
+
+### 44.1 验收台账与根因证据
+
+- v62 加载后的新微信启动目录 `generic_supervised_20260819_083258_1d1d25d8` 在观察前以
+  `physical_actions=0` 失败；DeepSeek 正确保留最终 `goal.entities.input_text=stage`，却另建
+  `clear_input_if_needed`，其完成状态为“输入框为空”，因此本地 canonical 绑定门拒绝该节点。
+- `verified_text_transaction.plan_next_verified_input(target, current)` 已负责根据真实输入框当前值确定
+  清空、切换输入模式或输入下一分段；把条件清空再建为高层子目标既重复实现细节，也让一个任务图同时
+  出现最终非空 canonical 值和中间空值的冲突。
+- 失败发生在 DeepSeek 初始任务图校验前，没有会话、Qwen、摄像头或机械动作；不能通过换措辞删除
+  “如有旧内容先清空”来规避。
+
+### 44.2 同类样本、通用修复与边界
+
+- 仅当用户原文明确要求“输入框已有内容时清空”、canonical `input_text` 为唯一非空目标、清空节点为
+  无风险 navigation_only、没有完成证据，且只有一个直接后继逐字绑定最终 canonical 值时，本地删除
+  这个冗余清空节点，把其前置依赖确定性转接给最终输入状态节点。
+- 若冗余节点当前 active，则把唯一最终输入后继设为 active；后续视觉观察仍根据真实 `states.value`
+  决定是否生成 `clear_verified_text`，因此不会跳过实际清空，也不会凭任务图直接授权任何动作。
+- 用户未明确要求清空、最终值缺失/空白、多个后继、云端/已保存数据、风险引用、已有完成证据、非条件
+  清空或后继未逐字绑定 canonical 值时不规范化，继续失败关闭。
+
+### 44.3 验证与停止条件
+
+- 用本次 `clear_input_if_needed -> type_stage` 形状和 active-clear 变化样本做正测；对未授权清空、持久
+  数据、双后继、风险节点和后继文字不符做反测，并保留 canonical 输入绑定既有测试。
+- 先运行 DeepSeek/语义 IR/编排相关回归，再运行一次完整 Python 回归；全绿后本地提交并只重载项目
+  Uvicorn。真机必须重新创建新会话，旧 0 动作失败目录不续跑。
+
+离线结果：条件清空、active 转交及歧义/持久数据/文字不符正反定向 `3/3`，DeepSeek、语义 IR 与
+编排关联回归 `414/414`，Python 完整回归 `1492/1492`。完整回归只有既知测试子进程
+`ResourceWarning`，无断言失败。

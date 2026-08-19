@@ -318,9 +318,26 @@ LOCAL_TEMPORARY_DRAFT_CLEAR_STATE_PATTERN = re.compile(
     r".{0,24}\b(?:empty|blank|cleared)\b)",
     re.IGNORECASE,
 )
+CONDITIONAL_LOCAL_INPUT_CLEAR_PATTERN = re.compile(
+    r"(?:(?:如果|若|如).{0,48}"
+    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域|草稿)"
+    r".{0,32}(?:已有|有内容|非空|不为空).{0,24}(?:清空|清除|置空)|"
+    r"(?:如果|若|如).{0,48}(?:已有|有内容|非空|不为空).{0,32}"
+    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域|草稿)"
+    r".{0,24}(?:清空|清除|置空)|"
+    r"\bif\b.{0,48}\b(?:input|text|draft)\b.{0,32}"
+    r"\b(?:nonempty|not\s+empty|has\s+(?:text|content))\b.{0,24}"
+    r"\b(?:clear|empty)\b)",
+    re.IGNORECASE,
+)
 PERSISTENT_DRAFT_STATE_PATTERN = re.compile(
     r"(?:已保存|云端|云同步|服务器|账号草稿|历史记录|文件|数据库|"
     r"\b(?:saved|cloud|synced|server|account|history|file|database)\b)",
+    re.IGNORECASE,
+)
+PERSISTENT_INPUT_CLEAR_PATTERN = re.compile(
+    r"(?:已保存|云端|云同步|服务器|账号草稿|历史记录|数据库|"
+    r"\b(?:saved|cloud|synced|server|account|history|database)\b)",
     re.IGNORECASE,
 )
 LOCAL_UNSUBMITTED_WORKFLOW_RISK_PATTERN = re.compile(
@@ -1519,6 +1536,7 @@ class DeepSeekTaskGraphPlanner:
         # allowed.  A malformed or unsafe semantic answer is never repaired by
         # another remote sample.
         graph = _normalize_initial_input_goal_objective(graph)
+        graph = _normalize_redundant_conditional_input_clear(graph)
         graph = _normalize_explicit_target_surface(graph, text)
         graph = _normalize_initial_local_navigation(graph)
         graph = _normalize_initial_premature_completed_status(graph)
@@ -1576,6 +1594,7 @@ class DeepSeekTaskGraphPlanner:
             observation,
             trigger=trigger,
         )
+        candidate = _normalize_redundant_conditional_input_clear(candidate)
         candidate = _normalize_unique_active_frontier(candidate)
         _validate_external_impact_revision(graph, candidate)
         _validate_preserved_risk_ids(graph, candidate)
@@ -2487,6 +2506,110 @@ def _normalize_initial_input_goal_objective(
     return replace(
         graph,
         goal=replace(graph.goal, objective=normalized),
+    )
+
+
+def _normalize_redundant_conditional_input_clear(
+    graph: DynamicTaskGraph,
+) -> DynamicTaskGraph:
+    """Fold a user-authorized conditional clear into the final input state.
+
+    ``verified_text_transaction`` already decides from the fresh observed value
+    whether clearing is needed.  This normalization removes only one redundant
+    high-level implementation node when the raw user request and its sole
+    canonical input successor prove the same deterministic transaction.
+    """
+
+    input_text = graph.goal.entities.get("input_text")
+    raw_goal = str(graph.raw_user_goal or "").strip()
+    if (
+        not isinstance(input_text, str)
+        or not input_text.strip()
+        or not raw_goal
+        or not CONDITIONAL_LOCAL_INPUT_CLEAR_PATTERN.search(raw_goal)
+        or PERSISTENT_INPUT_CLEAR_PATTERN.search(raw_goal)
+        or graph.risk_actions
+        or not LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN.search(raw_goal)
+    ):
+        return graph
+
+    candidates: list[tuple[Subgoal, Subgoal]] = []
+    for clear in graph.subgoals:
+        clear_text = "；".join((clear.objective, *clear.completion_conditions))
+        if (
+            clear.status not in {"pending", "active"}
+            or clear.completion_evidence
+            or clear.risk_action_ids
+            or clear.external_impact != "navigation_only"
+            or PERSISTENT_INPUT_CLEAR_PATTERN.search(clear_text)
+            or not CONDITIONAL_LOCAL_INPUT_CLEAR_PATTERN.search(clear_text)
+        ):
+            continue
+        successors = tuple(
+            item for item in graph.subgoals if clear.subgoal_id in item.depends_on
+        )
+        if len(successors) != 1:
+            continue
+        successor = successors[0]
+        successor_texts = (
+            successor.objective,
+            *successor.constraints,
+            *successor.completion_conditions,
+        )
+        if (
+            successor.status not in {"pending", "active"}
+            or successor.completion_evidence
+            or successor.risk_action_ids
+            or successor.external_impact != "navigation_only"
+            or not _state_description_binds_canonical_input_text(
+                successor_texts,
+                input_text,
+            )
+        ):
+            continue
+        candidates.append((clear, successor))
+    if len(candidates) != 1:
+        return graph
+
+    clear, successor = candidates[0]
+    active_ids = {
+        item.subgoal_id for item in graph.subgoals if item.status == "active"
+    }
+    if clear.subgoal_id in active_ids and active_ids != {clear.subgoal_id}:
+        return graph
+
+    replacement_dependencies: list[str] = []
+    for dependency_id in successor.depends_on:
+        values = (
+            clear.depends_on
+            if dependency_id == clear.subgoal_id
+            else (dependency_id,)
+        )
+        for value in values:
+            if value not in replacement_dependencies:
+                replacement_dependencies.append(value)
+    replacement = replace(
+        successor,
+        status=(
+            "active"
+            if graph.active_subgoal_id == clear.subgoal_id
+            else successor.status
+        ),
+        depends_on=tuple(replacement_dependencies),
+        constraints=tuple(dict.fromkeys((*clear.constraints, *successor.constraints))),
+    )
+    return replace(
+        graph,
+        subgoals=tuple(
+            replacement if item.subgoal_id == successor.subgoal_id else item
+            for item in graph.subgoals
+            if item.subgoal_id != clear.subgoal_id
+        ),
+        active_subgoal_id=(
+            successor.subgoal_id
+            if graph.active_subgoal_id == clear.subgoal_id
+            else graph.active_subgoal_id
+        ),
     )
 
 

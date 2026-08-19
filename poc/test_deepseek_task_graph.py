@@ -1,6 +1,7 @@
 import copy
 import json
 import unittest
+from dataclasses import replace
 
 from deepseek_task_graph import (
     ControllerTransitionEvidenceRef,
@@ -13,6 +14,7 @@ from deepseek_task_graph import (
     _infer_external_risk_types,
     _graph_from_payload,
     _named_visual_identity_anchor,
+    _normalize_redundant_conditional_input_clear,
     _normalize_unique_active_frontier,
     _quoted_visual_identity_anchor,
     _require_named_visual_identity_grounding,
@@ -4128,6 +4130,162 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                         objective + "；" + "；".join(constraints),
                         device_id="phone-1",
                     )
+
+    def test_conditional_input_clear_is_folded_into_canonical_input_transaction(self):
+        raw_goal = (
+            "进入文件传输助手；如果消息输入框已有内容，先将它清空，"
+            "再让输入框最终只显示 stage，但不要发送。"
+        )
+        payload = single_subgoal_payload(
+            "输入框最终只显示 stage",
+            external_impact="navigation_only",
+        )
+        payload["goal"].update(
+            objective=raw_goal,
+            target_apps=[{"app_id": "wechat", "app_name": "微信"}],
+            entities={"input_text": "stage", "recipient": "文件传输助手"},
+        )
+        payload["constraints"] = ["不要发送、提交、保存或发布。"]
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "chat_visible",
+                "objective": "文件传输助手聊天页面可见",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["仅导航"],
+                "completion_conditions": ["文件传输助手聊天页面可见"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "clear_input_if_needed",
+                "objective": "如果消息输入框已有内容，先将其清空",
+                "status": "pending",
+                "depends_on": ["chat_visible"],
+                "constraints": ["仅修改未发送的临时草稿，不发送"],
+                "completion_conditions": ["输入框为空（如果原本有内容）"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "type_stage",
+                "objective": "消息输入框最终只显示 stage",
+                "status": "pending",
+                "depends_on": ["clear_input_if_needed"],
+                "constraints": ["不要发送"],
+                "completion_conditions": ["输入框显示 stage"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+        ]
+        payload["active_subgoal_id"] = "chat_visible"
+
+        normalized_fixture = _normalize_redundant_conditional_input_clear(
+            _graph_from_payload(
+                payload,
+                task_id="task-clear-fixture",
+                device_id="phone-1",
+                revision=1,
+                raw_user_goal=raw_goal,
+            )
+        )
+        self.assertNotIn(
+            "clear_input_if_needed",
+            {item.subgoal_id for item in normalized_fixture.subgoals},
+        )
+
+        graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(payload),
+            enable_legacy_risk_diagnostics=False,
+        ).plan(
+            raw_goal,
+            device_id="phone-1",
+        )
+
+        self.assertNotIn(
+            "clear_input_if_needed",
+            {item.subgoal_id for item in graph.subgoals},
+        )
+        target = next(item for item in graph.subgoals if item.subgoal_id == "type_stage")
+        self.assertEqual(("chat_visible",), target.depends_on)
+        self.assertIn("仅修改未发送的临时草稿，不发送", target.constraints)
+
+    def test_conditional_input_clear_normalization_requires_unambiguous_authority(self):
+        raw_goal = (
+            "如果消息输入框已有内容就清空，再让输入框显示 stage；"
+            "不要发送、提交、保存或发布。"
+        )
+        payload = single_subgoal_payload(
+            "输入框显示 stage",
+            external_impact="navigation_only",
+        )
+        payload["goal"]["entities"]["input_text"] = "stage"
+        payload["constraints"] = ["不要发送、提交、保存或发布。"]
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "clear_if_needed",
+                "objective": "如果输入框已有内容就清空",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["仅处理未发送草稿"],
+                "completion_conditions": ["输入框为空（如果原本有内容）"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "target_state",
+                "objective": "输入框显示 stage",
+                "status": "pending",
+                "depends_on": ["clear_if_needed"],
+                "constraints": ["不要发送"],
+                "completion_conditions": ["输入框显示 stage"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+        ]
+        payload["active_subgoal_id"] = "clear_if_needed"
+        graph = _graph_from_payload(
+            payload,
+            task_id="task-clear",
+            device_id="phone-1",
+            revision=1,
+            raw_user_goal=raw_goal,
+        )
+
+        normalized = _normalize_redundant_conditional_input_clear(graph)
+
+        self.assertEqual("target_state", normalized.active_subgoal_id)
+        self.assertEqual(("target_state",), tuple(item.subgoal_id for item in normalized.subgoals))
+        self.assertEqual("active", normalized.subgoals[0].status)
+
+        variants = []
+        variants.append(replace(graph, raw_user_goal="让输入框显示 stage；不要发送。"))
+        variants.append(replace(graph, raw_user_goal=raw_goal + "并清除云端已保存草稿。"))
+        mismatched = replace(
+            graph.subgoals[1],
+            objective="输入框显示 other",
+            completion_conditions=("输入框显示 other",),
+        )
+        variants.append(replace(graph, subgoals=(graph.subgoals[0], mismatched)))
+        extra_successor = replace(
+            graph.subgoals[1],
+            subgoal_id="other_target",
+            objective="另一个输入框显示 stage",
+        )
+        variants.append(replace(graph, subgoals=(*graph.subgoals, extra_successor)))
+
+        for variant in variants:
+            with self.subTest(raw_goal=variant.raw_user_goal, count=len(variant.subgoals)):
+                unchanged = _normalize_redundant_conditional_input_clear(variant)
+                self.assertEqual(
+                    tuple(item.subgoal_id for item in variant.subgoals),
+                    tuple(item.subgoal_id for item in unchanged.subgoals),
+                )
 
     def test_editable_input_carrier_never_hides_saved_result(self):
         objective = "可编辑的地址输入区域内容为 codex，且草稿已保存"

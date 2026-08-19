@@ -442,6 +442,68 @@ class ObservationBridge:
         unique = tuple(dict.fromkeys(matches))
         return unique[0] if len(unique) == 1 else ""
 
+    @staticmethod
+    def _active_input_transaction_text(
+        graph: DynamicTaskGraph,
+        active: Any,
+    ) -> str:
+        """Project one typed input desired state into read-only observation.
+
+        A candidate-selection node may omit words such as ``input field`` even
+        though its formal desired state is still ``input.value_equals``.  The
+        observer needs that fact to run its independent input-structure audit,
+        but it must not infer the relation from a coincidental label match.
+        This local marker is therefore minted only from TaskSemanticIR and is
+        overwritten after copying model-authored goal entities.  It grants no
+        action or geometry authority.
+        """
+
+        if active is None or active.external_impact not in {
+            "navigation_only",
+            "read_only",
+        }:
+            return ""
+        try:
+            semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+        except TaskSemanticIRError:
+            # The normal formal-authority gate reports the exact error later.
+            # Observation projection must not create a fallback authority.
+            return ""
+        typed_subgoal = next(
+            (
+                item
+                for item in semantic_ir.subgoals
+                if item.subgoal_id == active.subgoal_id
+            ),
+            None,
+        )
+        if typed_subgoal is None:
+            return ""
+        desired_by_id = {
+            item.state_id: item for item in semantic_ir.desired_states
+        }
+        entities_by_id = {
+            item.entity_id: item for item in semantic_ir.entities
+        }
+        values: list[str] = []
+        for state_ref in typed_subgoal.desired_state_refs:
+            state = desired_by_id.get(state_ref)
+            if state is None or state.predicate != "input.value_equals":
+                continue
+            entity = entities_by_id.get(state.subject_ref)
+            value = state.value
+            if (
+                entity is None
+                or entity.role != "input_text"
+                or not isinstance(value, str)
+                or not value
+                or entity.value != value
+            ):
+                continue
+            values.append(value)
+        unique = tuple(dict.fromkeys(values))
+        return unique[0] if len(unique) == 1 else ""
+
     def goal_draft(self, graph: DynamicTaskGraph) -> GenericIntentDraft:
         graph.validate()
         target_surface = str(
@@ -473,9 +535,15 @@ class ObservationBridge:
             entities["original_goal_visual_context"] = graph.raw_user_goal.strip()
         if active is not None:
             active_goal_entities = dict(graph.goal.entities)
+            active_goal_entities.pop("active_input_transaction_text", None)
             active_app_label = self._active_app_entry_target_label(graph, active)
             if active_app_label:
                 active_goal_entities["target_ui_label"] = active_app_label
+            active_input_text = self._active_input_transaction_text(graph, active)
+            if active_input_text:
+                active_goal_entities["active_input_transaction_text"] = (
+                    active_input_text
+                )
             entities["active_subgoal_visual_context"] = {
                 "subgoal_id": active.subgoal_id,
                 "objective": active.objective,

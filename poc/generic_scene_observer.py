@@ -4707,6 +4707,15 @@ def _apply_icon_cluster_audit(
 
 def _goal_requests_input(context: dict[str, Any]) -> bool:
     focused = _active_subgoal_visual_context(context)
+    if _goal_active_input_transaction_text(context):
+        # A candidate-selection node may correctly describe only the visible
+        # literal (for example, a Chinese IME candidate) without repeating
+        # words such as "input field" or "keyboard".  The bridge mints this
+        # marker only from a typed ``input.value_equals`` desired state. It is
+        # a read-only audit trigger, not action authority: the dedicated input
+        # audit must still prove one application input, the matching preedit
+        # and one complete exact candidate before minting ``ime_exact_candidate``.
+        return True
     if focused is context:
         input_context: dict[str, Any] = context
     else:
@@ -4904,19 +4913,42 @@ def _input_audit_established_local_target(scene: UIScene) -> bool:
     )
 
 
-def _goal_has_explicit_input_text(context: dict[str, Any]) -> bool:
-    """Return true only when the graph supplied a concrete text-entry entity."""
+def _goal_explicit_input_text(context: dict[str, Any]) -> str:
+    """Return the active graph node's canonical text-entry payload, if any."""
 
     focused = _active_subgoal_visual_context(context)
     if focused is context:
         entities = context.get("entities")
     else:
         entities = focused.get("goal_entities")
-    return bool(
-        isinstance(entities, dict)
-        and isinstance(entities.get("input_text"), str)
-        and entities["input_text"].strip()
+    if not isinstance(entities, dict):
+        return ""
+    value = entities.get("input_text")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _goal_active_input_transaction_text(context: dict[str, Any]) -> str:
+    """Return a bridge-minted typed input desired state for this active node."""
+
+    focused = _active_subgoal_visual_context(context)
+    if focused is context:
+        return ""
+    entities = focused.get("goal_entities")
+    if not isinstance(entities, dict):
+        return ""
+    marker = entities.get("active_input_transaction_text")
+    explicit = _goal_explicit_input_text(context)
+    return (
+        marker
+        if isinstance(marker, str) and marker and marker == explicit
+        else ""
     )
+
+
+def _goal_has_explicit_input_text(context: dict[str, Any]) -> bool:
+    """Return true only when the graph supplied a concrete text-entry entity."""
+
+    return bool(_goal_explicit_input_text(context))
 
 
 def _goal_requests_keyboard_dismissal(context: dict[str, Any]) -> bool:

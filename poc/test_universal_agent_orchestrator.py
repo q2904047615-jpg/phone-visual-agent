@@ -2967,6 +2967,115 @@ class ObservationBridgeTests(unittest.TestCase):
             focus["completion_conditions"],
         )
 
+    def test_projects_only_typed_active_input_transaction_marker(self) -> None:
+        graph = DynamicTaskGraph(
+            task_id="task-input-candidate",
+            device_id="device-1",
+            revision=1,
+            status="running",
+            goal=GraphGoal(
+                objective="完成当前未提交的中文输入",
+                target_apps=(
+                    TargetApp(
+                        app_id="current_foreground",
+                        app_name="当前前台应用",
+                    ),
+                ),
+                entities={
+                    "input_text": "你好",
+                    "target_ui_label": "你好",
+                },
+            ),
+            constraints=("不要发送或提交",),
+            completion_conditions=(
+                CompletionCondition(
+                    condition_id="input-display",
+                    description="当前输入框逐字显示你好",
+                    evidence_required=("输入框显示你好",),
+                ),
+            ),
+            risk_actions=(),
+            subgoals=(
+                Subgoal(
+                    subgoal_id="select-candidate",
+                    objective="选择唯一逐字候选你好",
+                    status="active",
+                    depends_on=(),
+                    constraints=("不要发送或提交",),
+                    completion_conditions=("候选你好被选中",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+                Subgoal(
+                    subgoal_id="verify-input",
+                    objective="确认输入框逐字显示你好",
+                    status="pending",
+                    depends_on=("select-candidate",),
+                    constraints=("不要发送或提交",),
+                    completion_conditions=("输入框显示你好",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="read_only",
+                ),
+            ),
+            active_subgoal_id="select-candidate",
+            raw_user_goal="选择当前拼音候选你好并确认输入值，不要发送",
+        )
+        graph.validate()
+
+        focus = self.bridge.goal_draft(graph).entities[
+            "active_subgoal_visual_context"
+        ]
+
+        self.assertEqual(
+            "你好",
+            focus["goal_entities"]["active_input_transaction_text"],
+        )
+
+        unrelated = replace(
+            graph,
+            goal=replace(
+                graph.goal,
+                objective="显示结果列表",
+                entities={
+                    "input_text": "搜索",
+                    "target_ui_label": "搜索",
+                },
+            ),
+            completion_conditions=(
+                CompletionCondition(
+                    condition_id="results-visible",
+                    description="结果列表已显示",
+                    evidence_required=("结果列表可见",),
+                ),
+            ),
+            subgoals=(
+                Subgoal(
+                    subgoal_id="show-results",
+                    objective="显示结果列表",
+                    status="active",
+                    depends_on=(),
+                    constraints=(),
+                    completion_conditions=("结果列表可见",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+            ),
+            active_subgoal_id="show-results",
+            raw_user_goal="显示结果列表",
+        )
+        unrelated.validate()
+
+        unrelated_focus = self.bridge.goal_draft(unrelated).entities[
+            "active_subgoal_visual_context"
+        ]
+        self.assertNotIn(
+            "active_input_transaction_text",
+            unrelated_focus["goal_entities"],
+        )
+
     def test_current_open_app_node_projects_exact_app_label_without_mutating_graph(self) -> None:
         for app_id, app_name, verb in (
             ("browser", "浏览器", "打开"),

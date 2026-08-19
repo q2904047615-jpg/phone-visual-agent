@@ -5353,6 +5353,157 @@ class GenericSceneObserverTests(unittest.TestCase):
             scene.unique_trusted_goal_element().element_id,
         )
 
+    def test_exact_input_payload_candidate_node_runs_strict_input_audit(self) -> None:
+        compact = scene_payload()
+        compact["screen_id"] = "chat_interface"
+        compact["summary"] = "当前页面显示拼音候选栏和已聚焦的应用输入框。"
+        compact["overlays"] = ["keyboard"]
+        compact["elements"] = [
+            {
+                "element_id": "model-candidate",
+                "role": "button",
+                "meaning": "select_candidate",
+                "label": "你好",
+                "bounds": [80, 392, 220, 458],
+                "confidence": 0.99,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["拼音nihao对应的首个候选词"],
+            },
+            {
+                "element_id": "model-input",
+                "role": "input",
+                "meaning": "message_input_box",
+                "label": "",
+                "bounds": [80, 120, 920, 210],
+                "confidence": 0.98,
+                "states": {
+                    "goal_relevant": False,
+                    "fully_visible": True,
+                    "value": "",
+                },
+                "evidence": ["应用输入框当前为空"],
+            },
+        ]
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="message-field",
+                    bounds=[80, 120, 920, 210],
+                    text="",
+                )
+            ],
+            ime_preedit_regions=[
+                {
+                    "region_id": "candidate-strip",
+                    "bounds": [40, 380, 960, 470],
+                    "text": "nihao",
+                    "confidence": 0.98,
+                    "candidates": [
+                        {
+                            "text": "你好",
+                            "bounds": [80, 392, 220, 458],
+                            "confidence": 0.98,
+                            "fully_visible": True,
+                        },
+                        {
+                            "text": "拟好",
+                            "bounds": [250, 392, 390, 458],
+                            "confidence": 0.96,
+                            "fully_visible": True,
+                        },
+                    ],
+                }
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 480, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "qwerty_anchors": {
+                    "q": [115, 610], "p": [875, 610],
+                    "a": [157, 700], "l": [832, 700],
+                    "z": [241, 790], "m": [747, 790],
+                    "backspace": [875, 790],
+                },
+                "mode_switch": None,
+            },
+        )
+        provider = SequenceProvider([compact, audit])
+        observer = GenericSceneObserver(provider)
+        context = {
+            "objective": "完成当前未提交的中文输入",
+            "entities": {
+                "input_text": "你好",
+                "target_ui_label": "你好",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "select_candidate",
+                    "objective": "选择唯一逐字候选‘你好’",
+                    "constraints": ["不要发送或提交"],
+                    "completion_conditions": ["候选‘你好’被选中"],
+                    "external_impact": "navigation_only",
+                    "goal_entities": {
+                        "input_text": "你好",
+                        "target_ui_label": "你好",
+                        "active_input_transaction_text": "你好",
+                    },
+                },
+            },
+        }
+
+        scene = observer.observe(frames=stable_frames(), goal_context=context)
+
+        self.assertEqual(2, provider.calls)
+        self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
+        candidate = scene.get_element("local_audited_ime_candidate_1")
+        self.assertEqual("local_audited_ime_candidate_1", candidate.element_id)
+        self.assertEqual("ime_exact_candidate", candidate.meaning)
+        self.assertEqual("你好", candidate.label)
+        self.assertEqual("你好", candidate.states["expected_input_value"])
+        self.assertFalse(
+            scene.get_element("model-candidate").states["goal_relevant"]
+        )
+
+    def test_other_active_label_does_not_reactivate_input_audit(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = [
+            {
+                "element_id": "send-control",
+                "role": "button",
+                "meaning": "send_message",
+                "label": "发送",
+                "bounds": [780, 820, 940, 900],
+                "confidence": 0.99,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["输入框右侧唯一发送按钮"],
+            }
+        ]
+        provider = SequenceProvider([compact])
+        observer = GenericSceneObserver(provider)
+        context = {
+            "objective": "发送已准备的正文",
+            "entities": {
+                "input_text": "你好",
+                "target_ui_label": "发送",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "send_message",
+                    "objective": "发送已准备的正文",
+                    "constraints": [],
+                    "completion_conditions": ["正文已发送"],
+                    "external_impact": "external_state",
+                    "goal_entities": {
+                        "input_text": "你好",
+                        "target_ui_label": "发送",
+                    },
+                },
+            },
+        }
+
+        scene = observer.observe(frames=stable_frames(), goal_context=context)
+
+        self.assertEqual(1, provider.calls)
+        self.assertFalse(observer.last_diagnostics["input_structure_audit_used"])
+        self.assertEqual("send-control", scene.unique_trusted_goal_element().element_id)
+
     def test_rejected_input_audit_without_attested_reload_remains_fail_closed(self) -> None:
         compact = scene_payload()
         compact["elements"] = [

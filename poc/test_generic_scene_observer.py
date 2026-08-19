@@ -6765,6 +6765,103 @@ class GenericSceneObserverTests(unittest.TestCase):
             observer.last_diagnostics["foreground_app_identity_audit_used"]
         )
 
+    def test_runtime_package_foreground_gets_goal_independent_semantic_identity_audit(self) -> None:
+        cases = (
+            ("com.tencent.mm", "wechat"),
+            ("com.android.settings", "settings"),
+            ("org.mozilla.firefox", "browser"),
+        )
+        for runtime_package, semantic_app in cases:
+            with self.subTest(runtime_package=runtime_package):
+                compact = scene_payload()
+                compact["foreground_app_id"] = runtime_package
+                provider = SequenceProvider(
+                    [
+                        compact,
+                        targeted_delta_payload(elements=compact["elements"]),
+                        app_identity_audit_payload(
+                            semantic_app,
+                            evidence=["可见应用品牌界面与独立页面结构"],
+                        ),
+                    ]
+                )
+                observer = GenericSceneObserver(provider)
+
+                scene = observer.observe(
+                    frames=stable_frames(),
+                    goal_context={
+                        "app_id": semantic_app,
+                        "objective": "确认目标页面当前可见",
+                    },
+                )
+
+                self.assertEqual(semantic_app, scene.foreground_app_id)
+                self.assertEqual(3, provider.calls)
+                audit_text = provider.messages_seen[2][1]["content"][0]["text"]
+                self.assertNotIn(semantic_app, audit_text)
+                self.assertTrue(
+                    observer.last_diagnostics[
+                        "foreground_app_identity_audit_used"
+                    ]
+                )
+
+    def test_matching_runtime_package_target_does_not_add_identity_call(self) -> None:
+        compact = scene_payload()
+        compact["foreground_app_id"] = "com.example.reader"
+        provider = SequenceProvider(
+            [compact, targeted_delta_payload(elements=compact["elements"])]
+        )
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"app_id": "com.example.reader"},
+        )
+
+        self.assertEqual("com.example.reader", scene.foreground_app_id)
+        self.assertEqual(2, provider.calls)
+        self.assertFalse(
+            observer.last_diagnostics["foreground_app_identity_audit_used"]
+        )
+
+    def test_different_structured_semantic_app_does_not_get_reidentified(self) -> None:
+        compact = scene_payload()
+        compact["foreground_app_id"] = "calculator"
+        provider = SequenceProvider(
+            [compact, targeted_delta_payload(elements=compact["elements"])]
+        )
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"app_id": "settings"},
+        )
+
+        self.assertEqual("calculator", scene.foreground_app_id)
+        self.assertEqual(2, provider.calls)
+        self.assertFalse(
+            observer.last_diagnostics["foreground_app_identity_audit_used"]
+        )
+
+    def test_runtime_package_identity_audit_low_confidence_fails_closed(self) -> None:
+        compact = scene_payload()
+        compact["foreground_app_id"] = "com.example.reader"
+        provider = SequenceProvider(
+            [
+                compact,
+                targeted_delta_payload(elements=compact["elements"]),
+                app_identity_audit_payload("reader", confidence=0.70),
+            ]
+        )
+
+        scene = GenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context={"app_id": "reader"},
+        )
+
+        self.assertEqual("unknown", scene.foreground_app_id)
+        self.assertEqual(3, provider.calls)
+
     def test_foreground_app_identity_audit_rejects_unsafe_or_ambiguous_payloads(self) -> None:
         invalid_payloads = (
             app_identity_audit_payload("current_foreground"),

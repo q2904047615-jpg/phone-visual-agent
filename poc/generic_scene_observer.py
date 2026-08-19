@@ -1883,12 +1883,31 @@ _FOREGROUND_APP_IDENTITY_PLACEHOLDERS = frozenset(
     }
 )
 _FOREGROUND_APP_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_RUNTIME_PACKAGE_APP_ID_PATTERN = re.compile(
+    r"^(?:[a-z][a-z0-9_]*\.)+[a-z][a-z0-9_]*$"
+)
 _MIN_FOREGROUND_APP_IDENTITY_CONFIDENCE = 0.90
 
 
 def _is_foreground_app_identity_placeholder(value: str) -> bool:
     return str(value or "").strip().casefold() in (
         _FOREGROUND_APP_IDENTITY_PLACEHOLDERS
+    )
+
+
+def _is_runtime_package_app_identity(value: str) -> bool:
+    """Return whether an observed identity is an opaque runtime package name.
+
+    The compact observer may report a concrete Android package while DeepSeek
+    uses a short semantic App id.  A package is real scene evidence, but it is
+    not directly comparable with that semantic id.  Keep this shape-only so no
+    App name or package mapping can become action authority.
+    """
+
+    return bool(
+        _RUNTIME_PACKAGE_APP_ID_PATTERN.fullmatch(
+            str(value or "").strip().casefold()
+        )
     )
 
 
@@ -1901,14 +1920,17 @@ def _needs_foreground_app_identity_audit(
     foreground = str(scene.foreground_app_id or "").strip().casefold()
     if _is_foreground_app_identity_placeholder(foreground):
         return True
-    if foreground != "unknown":
-        return False
     target_app = str(context.get("app_id") or "").strip().casefold()
-    return bool(
+    named_target = bool(
         target_app
         and target_app != "unknown"
         and not _is_foreground_app_identity_placeholder(target_app)
     )
+    if foreground == "unknown":
+        return named_target
+    if not named_target or foreground == target_app:
+        return False
+    return _is_runtime_package_app_identity(foreground)
 
 
 def _foreground_app_identity_audit_prompt() -> str:

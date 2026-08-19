@@ -632,7 +632,6 @@ class Subgoal:
         self,
         *,
         input_text: Any = "",
-        allow_post_effect_verification: bool = False,
     ) -> None:
         _validate_id(self.subgoal_id, "子目标 ID")
         _require_text(self.objective, "subgoals.objective")
@@ -671,9 +670,6 @@ class Subgoal:
             raise TaskGraphError(
                 f"子目标外部影响分类无效：{self.external_impact}"
             )
-        inferred_risk_types = _infer_external_risk_types(
-            self.objective,
-        )
         scoped_input_texts = (
             self.objective,
             *self.constraints,
@@ -693,43 +689,6 @@ class Subgoal:
         ):
             raise TaskGraphError(
                 f"子目标输入状态未绑定 canonical input_text：{self.subgoal_id}"
-            )
-        proven_local_input = _is_explicitly_unsubmitted_local_input(
-            *scoped_input_texts,
-            input_text=input_text,
-        )
-        proven_local_input_preparation = _is_local_input_preparation_state(
-            self.objective,
-            *self.completion_conditions,
-            input_text=input_text,
-        )
-        proven_local_keyboard_mode = _is_reversible_local_keyboard_mode(
-            self.objective,
-            *self.constraints,
-            *self.completion_conditions,
-        )
-        proven_read_only_control_state = (
-            self.external_impact == "read_only"
-            and _is_read_only_risk_control_state(
-                self.objective,
-                self.constraints,
-                self.completion_conditions,
-            )
-        )
-        if (
-            inferred_risk_types
-            and not proven_local_input
-            and not proven_local_input_preparation
-            and not proven_local_keyboard_mode
-            and not proven_read_only_control_state
-            and not allow_post_effect_verification
-            and self.external_impact in {
-            "read_only",
-            "navigation_only",
-            }
-        ):
-            raise TaskGraphError(
-                f"子目标包含外部状态变化但未声明：{self.subgoal_id}"
             )
         if self.external_impact in {"external_state", "unknown"} and not self.risk_action_ids:
             raise TaskGraphError(
@@ -1120,14 +1079,8 @@ class DynamicTaskGraph:
             risk.validate()
         subgoals = _unique_by_id(self.subgoals, lambda item: item.subgoal_id, "子目标")
         for subgoal in subgoals.values():
-            post_effect_verification = _is_bound_post_effect_verification(
-                subgoal,
-                subgoals=subgoals,
-                risks=risks,
-            )
             subgoal.validate(
                 input_text=self.goal.entities.get("input_text"),
-                allow_post_effect_verification=post_effect_verification,
             )
             if subgoal.subgoal_id in subgoal.depends_on:
                 raise TaskGraphError(f"子目标不能依赖自身：{subgoal.subgoal_id}")
@@ -1155,76 +1108,6 @@ class DynamicTaskGraph:
                     raise TaskGraphError(
                         f"风险与子目标引用不对称：{risk.risk_id} / {subgoal_id}"
                     )
-        for subgoal in subgoals.values():
-            inferred_types = _infer_external_risk_types(
-                subgoal.objective,
-            )
-            if _is_explicitly_unsubmitted_local_input(
-                subgoal.objective,
-                *subgoal.constraints,
-                *subgoal.completion_conditions,
-                input_text=self.goal.entities.get("input_text"),
-            ):
-                # The helper already rechecks the whole scoped text after
-                # removing only a carrier's editable-capability adjective and
-                # refuses every concrete external effect.  Keep the graph
-                # validator aligned with that same formal proof.
-                inferred_types = frozenset()
-            if _is_local_input_preparation_state(
-                subgoal.objective,
-                *subgoal.completion_conditions,
-                input_text=self.goal.entities.get("input_text"),
-            ):
-                # Visibility/editability/focus are reversible carrier states.
-                # Remove only the generic ambiguity; concrete effects remain.
-                inferred_types = inferred_types - {"unknown_external_effect"}
-            if _is_reversible_local_keyboard_mode(
-                subgoal.objective,
-                *subgoal.constraints,
-                *subgoal.completion_conditions,
-            ):
-                inferred_types = inferred_types - {"unknown_external_effect"}
-            if (
-                subgoal.external_impact == "read_only"
-                and _is_read_only_risk_control_state(
-                    subgoal.objective,
-                    subgoal.constraints,
-                    subgoal.completion_conditions,
-                )
-            ):
-                inferred_types = frozenset()
-            if _is_bound_post_effect_verification(
-                subgoal,
-                subgoals=subgoals,
-                risks=risks,
-            ):
-                inferred_types = frozenset()
-            linked_types = {
-                risks[risk_id].risk_type for risk_id in subgoal.risk_action_ids
-            }
-            missing_types = inferred_types - linked_types
-            if missing_types:
-                raise TaskGraphError(
-                    f"子目标 {subgoal.subgoal_id} 缺少匹配的通用风险类型："
-                    + ", ".join(sorted(missing_types))
-                )
-        if (
-            self.status != "blocked"
-            and _describes_external_state_change(self.goal.objective)
-            and not _is_explicitly_unsubmitted_local_input(
-                self.raw_user_goal,
-                self.goal.objective,
-                *self.constraints,
-                input_text=self.goal.entities.get("input_text"),
-            )
-            and not _is_reversible_local_keyboard_mode(
-                self.raw_user_goal,
-                self.goal.objective,
-                *self.constraints,
-            )
-            and not risks
-        ):
-            raise TaskGraphError("外部状态目标必须声明风险动作并等待确认。")
         _reject_dependency_cycles(subgoals)
 
         active = [item.subgoal_id for item in self.subgoals if item.status == "active"]
@@ -1826,14 +1709,13 @@ class DeepSeekTaskGraphPlanner:
             sanitized_assessments.append(assessment)
         report = replace(report, assessments=tuple(sanitized_assessments))
         report = _apply_local_risk_supplements(report, sources, graph=graph)
-        # The model/text audit is retained only as migration telemetry.  It no
-        # longer has authority to add, remove or upgrade risks; formal risk is
-        # decided exclusively from TaskSemanticIR EffectIntent + local policy.
+        # This entire branch is an explicit migration/test mode and is disabled
+        # by the production Runtime.  It never mutates formal risk decisions.
         self.last_risk_audit = report
-        # Explicit legacy-diagnostic mode is test/migration-only.  It keeps the
-        # retired validator available for historical corpus replay, while the
-        # production Runtime disables this mode and therefore has exactly one
-        # semantic/risk authority.
+        # Production disables this entire branch, so only EffectIntent plus the
+        # local policy can decide runtime confirmation.  When explicitly
+        # enabled outside production, the retired validator remains available
+        # for historical corpus tests and migration audits only.
         _validate_graph_against_risk_audit(graph, report)
 
     def _require_provider(self) -> None:

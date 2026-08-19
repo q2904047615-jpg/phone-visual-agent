@@ -2,6 +2,7 @@ import copy
 import json
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 from deepseek_task_graph import (
     ControllerTransitionEvidenceRef,
@@ -1446,7 +1447,10 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         ]
         payload["subgoals"][0]["risk_action_ids"] = ["logout"]
 
-        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+        with self.assertRaisesRegex(
+            TaskGraphError,
+            "关联风险的子目标影响分类|语义风险审计.*冲突",
+        ):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 "退出当前账号",
                 device_id="phone-1",
@@ -2751,7 +2755,10 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         payload["subgoals"][1]["external_impact"] = "read_only"
         payload["subgoals"][1]["risk_action_ids"] = []
 
-        with self.assertRaisesRegex(TaskGraphError, "外部状态变化|语义风险审计.*冲突"):
+        with self.assertRaisesRegex(
+            TaskGraphError,
+            "风险与子目标引用不对称|语义风险审计.*冲突",
+        ):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 "确认消息是否已发送给联系人。",
                 device_id="phone-1",
@@ -2992,6 +2999,56 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual(graph.subgoals[0].external_impact, "navigation_only")
 
+    def test_real_swipe_message_collision_uses_formal_typed_risk_authority(self):
+        fixture_path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "universal_agent"
+            / "deepseek_swipe_message_collision.json"
+        )
+        payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+        provider = FakeProvider(payload)
+        planner = DeepSeekTaskGraphPlanner(
+            provider,
+            enable_legacy_risk_diagnostics=False,
+        )
+
+        graph = planner.plan(
+            payload["goal"]["objective"],
+            device_id="device-local-01",
+            task_id="swipe-message-collision",
+        )
+
+        self.assertEqual(len(provider.messages), 1)
+        self.assertEqual(graph.status, "ready")
+        self.assertEqual(graph.active_subgoal_id, "swipe_up")
+        self.assertEqual(graph.subgoals[0].external_impact, "navigation_only")
+        self.assertEqual(graph.risk_actions, ())
+        self.assertIsNotNone(planner.last_semantic_authority)
+        assert planner.last_semantic_authority is not None
+        self.assertEqual(planner.last_semantic_authority.semantic_ir.effects, ())
+        self.assertEqual(planner.last_semantic_authority.risk_decisions, ())
+
+    def test_navigation_wording_does_not_create_effect_intents(self):
+        objectives = (
+            "页面发生变化并显示历史消息",
+            "列表位置变化后出现更早内容",
+        )
+        for objective in objectives:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="navigation_only",
+                )
+                planner = DeepSeekTaskGraphPlanner(
+                    FakeProvider(payload),
+                    enable_legacy_risk_diagnostics=False,
+                )
+                graph = planner.plan(objective, device_id="phone-1")
+                self.assertEqual(graph.risk_actions, ())
+                assert planner.last_semantic_authority is not None
+                self.assertEqual(planner.last_semantic_authority.semantic_ir.effects, ())
+
     def test_exiting_account_still_requires_external_state_risk(self):
         objective = "退出当前账号"
         payload = single_subgoal_payload(
@@ -2999,7 +3056,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             external_impact="navigation_only",
         )
 
-        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+        with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 objective,
                 device_id="phone-1",
@@ -3011,7 +3068,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             objective,
             external_impact="navigation_only",
         )
-        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+        with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 objective,
                 device_id="phone-1",
@@ -3034,7 +3091,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     objective,
                     external_impact="read_only",
                 )
-                with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+                with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
                     DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                         objective,
                         device_id="phone-1",
@@ -3055,7 +3112,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     objective,
                     external_impact="read_only",
                 )
-                with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+                with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
                     DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                         objective,
                         device_id="phone-1",
@@ -3070,7 +3127,10 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         payload["risk_actions"][0]["subgoal_ids"] = ["target_state"]
         payload["subgoals"][0]["risk_action_ids"] = ["save_place"]
         payload["status"] = "awaiting_confirmation"
-        with self.assertRaisesRegex(TaskGraphError, "缺少匹配的通用风险类型"):
+        with self.assertRaisesRegex(
+            TaskGraphError,
+            "语义风险审计要求子目标关联匹配风险",
+        ):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 "向联系人发送消息",
                 device_id="phone-1",
@@ -3329,7 +3389,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             external_impact="navigation_only",
         )
 
-        with self.assertRaisesRegex(TaskGraphError, "外部状态|通用风险"):
+        with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 objective,
                 device_id="phone-1",
@@ -3452,7 +3512,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             external_impact="navigation_only",
         )
 
-        with self.assertRaisesRegex(TaskGraphError, "外部状态|通用风险"):
+        with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 objective,
                 device_id="phone-1",
@@ -3468,7 +3528,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             {"app_id": "current_foreground", "app_name": "当前前台应用"}
         ]
 
-        with self.assertRaisesRegex(TaskGraphError, "外部状态|通用风险"):
+        with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 objective,
                 device_id="phone-1",
@@ -5524,7 +5584,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             "不要搜索、提交、发送或发布。"
         ]
 
-        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+        with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 objective,
                 device_id="phone-1",
@@ -5547,7 +5607,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 )
                 payload["goal"]["entities"]["input_text"] = "Agent123"
 
-                with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+                with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
                     DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                         objective,
                         device_id="phone-1",
@@ -5565,7 +5625,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     result_state,
                     external_impact="navigation_only",
                 )
-                with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+                with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
                     DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                         result_state,
                         device_id="phone-1",
@@ -5596,7 +5656,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             external_impact="navigation_only",
         )
 
-        with self.assertRaisesRegex(TaskGraphError, "外部状态变化但未声明"):
+        with self.assertRaisesRegex(TaskGraphError, "语义风险审计.*冲突"):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 objective,
                 device_id="phone-1",

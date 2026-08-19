@@ -4163,7 +4163,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
                 self.assertEqual("wifi", graph.goal.entities["input_text"])
 
-    def test_canonical_input_literal_must_bind_same_state_clause_exactly(self):
+    def test_legacy_input_prose_cannot_replace_typed_canonical_payload(self):
         samples = (
             "当前输入框内容为 codex2",
             "当前输入框内容为 codex.com",
@@ -4183,14 +4183,19 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 payload["subgoals"][0]["constraints"] = list(constraints)
                 payload["subgoals"][0]["completion_conditions"] = [objective]
 
-                with self.assertRaisesRegex(
-                    TaskGraphError,
-                    "子目标输入状态未绑定 canonical input_text",
-                ):
-                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
-                        objective + "；" + "；".join(constraints),
-                        device_id="phone-1",
-                    )
+                planner = DeepSeekTaskGraphPlanner(FakeProvider(payload))
+                graph = planner.plan(
+                    objective + "；" + "；".join(constraints),
+                    device_id="phone-1",
+                )
+
+                self.assertEqual("codex", graph.goal.entities["input_text"])
+                typed_payload = next(
+                    item
+                    for item in planner.last_semantic_authority.semantic_ir.entities
+                    if item.role == "input_text"
+                )
+                self.assertEqual("codex", typed_payload.value)
 
     def test_exact_empty_input_state_does_not_require_canonical_payload(self):
         samples = (
@@ -4268,8 +4273,35 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             constraints=["不得改变输入框内容", "不得触发任何外部效果"],
             completion_conditions=["输入框可见且聚焦", "输入框内容为空"],
         )
+        payload["subgoals"].append(
+            {
+                "subgoal_id": "type_text",
+                "objective": "在聚焦的输入框中逐字输入“你好”",
+                "status": "pending",
+                "depends_on": ["focus_input"],
+                "constraints": ["不得发送、提交或搜索"],
+                "completion_conditions": ["输入框中显示“你好”"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            }
+        )
+        payload["subgoals"].append(
+            {
+                "subgoal_id": "verify_no_send",
+                "objective": "确认输入完成后未发送，且文字保留在输入框中",
+                "status": "pending",
+                "depends_on": ["type_text"],
+                "constraints": ["不得触发任何外部效果"],
+                "completion_conditions": ["输入框中仍显示“你好”", "未出现发送迹象"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "read_only",
+            }
+        )
 
-        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+        planner = DeepSeekTaskGraphPlanner(FakeProvider(payload))
+        graph = planner.plan(
             payload["goal"]["objective"],
             device_id="phone-1",
         )
@@ -4277,8 +4309,27 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual("focus_input", graph.active_subgoal_id)
         self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
         self.assertEqual("你好", graph.goal.entities["input_text"])
+        input_field = planner.last_semantic_authority.semantic_ir.input_fields[0]
+        self.assertNotIn("focus_input", input_field.source_subgoal_ids)
+        self.assertIn("type_text", input_field.source_subgoal_ids)
+        self.assertNotIn("verify_no_send", input_field.source_subgoal_ids)
+        constraints = {
+            item.constraint_id: item
+            for item in planner.last_semantic_authority.semantic_ir.constraints
+        }
+        verify_subgoal = next(
+            item
+            for item in planner.last_semantic_authority.semantic_ir.subgoals
+            if item.subgoal_id == "verify_no_send"
+        )
+        self.assertFalse(
+            any(
+                constraints[ref].kind == "required_action"
+                for ref in verify_subgoal.constraint_refs
+            )
+        )
 
-    def test_split_empty_preparation_cannot_hide_positive_input(self):
+    def test_split_empty_preparation_uses_typed_payload_not_legacy_literal(self):
         payload = single_subgoal_payload(
             "确保消息输入框聚焦且内容为空并输入 secret",
             external_impact="navigation_only",
@@ -4290,16 +4341,19 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             "输入框内容为空并输入 secret",
         ]
 
-        with self.assertRaisesRegex(
-            TaskGraphError,
-            "子目标输入状态未绑定 canonical input_text",
-        ):
-            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
-                payload["goal"]["objective"],
-                device_id="phone-1",
-            )
+        planner = DeepSeekTaskGraphPlanner(FakeProvider(payload))
+        graph = planner.plan(
+            payload["goal"]["objective"],
+            device_id="phone-1",
+        )
 
-    def test_empty_input_preparation_cannot_hide_positive_input(self):
+        self.assertEqual("live21", graph.goal.entities["input_text"])
+        self.assertIn(
+            graph.active_subgoal_id,
+            planner.last_semantic_authority.semantic_ir.input_fields[0].source_subgoal_ids,
+        )
+
+    def test_typed_payload_ignores_alternate_legacy_input_wording(self):
         samples = (
             "输入框可见且为空并输入 secret",
             "the input field is visible and empty, then type secret",
@@ -4316,16 +4370,18 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 payload["subgoals"][0]["constraints"] = list(payload["constraints"])
                 payload["subgoals"][0]["completion_conditions"] = [objective]
 
-                with self.assertRaisesRegex(
-                    TaskGraphError,
-                    "子目标输入状态未绑定 canonical input_text",
-                ):
-                    DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
-                        objective,
-                        device_id="phone-1",
-                    )
+                planner = DeepSeekTaskGraphPlanner(FakeProvider(payload))
+                graph = planner.plan(objective, device_id="phone-1")
 
-    def test_empty_state_cannot_hide_unbound_positive_input(self):
+                self.assertEqual("live21", graph.goal.entities["input_text"])
+                self.assertIn(
+                    graph.active_subgoal_id,
+                    planner.last_semantic_authority.semantic_ir.input_fields[
+                        0
+                    ].source_subgoal_ids,
+                )
+
+    def test_input_action_without_typed_payload_fails_closed(self):
         objective = "输入框为空并输入 secret"
         payload = single_subgoal_payload(
             objective,
@@ -4346,7 +4402,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             TaskGraphError,
-            "子目标输入状态未绑定 canonical input_text",
+            "typed input action 未绑定 InputFieldIntent",
         ):
             DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
                 objective,

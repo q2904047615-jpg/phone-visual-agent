@@ -676,6 +676,11 @@ class TaskSemanticIR:
                 raise TaskSemanticIRError(
                     f"input_field.{input_field.field_id} 引用未知 payload。"
                 )
+            payload = entities[input_field.payload_ref]
+            if payload.role != "input_text" or payload.entity_type != "text":
+                raise TaskSemanticIRError(
+                    f"input_field.{input_field.field_id} payload 必须是 typed input_text。"
+                )
             if set(input_field.recipient_refs) - set(entities):
                 raise TaskSemanticIRError(
                     f"input_field.{input_field.field_id} 引用未知 recipient。"
@@ -683,6 +688,21 @@ class TaskSemanticIR:
             if set(input_field.source_subgoal_ids) - set(subgoals):
                 raise TaskSemanticIRError(
                     f"input_field.{input_field.field_id} 引用未知 subgoal。"
+                )
+        for subgoal in subgoals.values():
+            requires_typed_input = any(
+                constraints[constraint_ref].kind == "required_action"
+                and constraints[constraint_ref].value == "input_verified_text"
+                for constraint_ref in subgoal.constraint_refs
+                if constraint_ref in constraints
+            )
+            if requires_typed_input and not any(
+                subgoal.subgoal_id in input_field.source_subgoal_ids
+                for input_field in input_fields.values()
+            ):
+                raise TaskSemanticIRError(
+                    "typed input action 未绑定 InputFieldIntent："
+                    f"{subgoal.subgoal_id}"
                 )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1545,6 +1565,11 @@ def compile_legacy_graph_shadow(
         ("tap_semantic", re.compile(r"点击|轻触|点按|tap|click", re.I)),
     )
     for subgoal_id, subgoal in subgoals.items():
+        # A read-only node can describe an already completed action (for
+        # example, "after input, verify no send").  It never owns a new
+        # physical action, so legacy wording must not mint required_action.
+        if str(getattr(subgoal, "external_impact", "") or "") == "read_only":
+            continue
         objective = str(getattr(subgoal, "objective", "") or "")
         for action_kind, pattern in action_patterns:
             if not pattern.search(objective):
@@ -1746,14 +1771,32 @@ def compile_legacy_graph_shadow(
                 surface_ref=default_surface,
             )
 
+    constraints_by_id = {
+        item.constraint_id: item for item in typed_constraints
+    }
+    semantic_subgoal_by_id = {
+        item.subgoal_id: item for item in semantic_subgoals
+    }
     recipient_refs = tuple(
         item.entity_id for item in entity_by_role.get("recipient", ())
     )
+    input_action_subgoal_ids = tuple(
+        subgoal.subgoal_id
+        for subgoal in semantic_subgoals
+        if any(
+            constraints_by_id[constraint_ref].kind == "required_action"
+            and constraints_by_id[constraint_ref].value == "input_verified_text"
+            for constraint_ref in subgoal.constraint_refs
+            if constraint_ref in constraints_by_id
+        )
+    )
+    input_entities = tuple(entity_by_role.get("input_text", ()))
     input_fields: list[InputFieldIntent] = []
-    for index, payload in enumerate(entity_by_role.get("input_text", ()), 1):
-        source_subgoal_ids = tuple(
+    for index, payload in enumerate(input_entities, 1):
+        literal_source_subgoal_ids = tuple(
             subgoal_id
             for subgoal_id, subgoal in subgoals.items()
+            if subgoal_id in input_action_subgoal_ids
             if isinstance(payload.value, str)
             and payload.value
             and payload.value in " ".join(
@@ -1765,6 +1808,19 @@ def compile_legacy_graph_shadow(
                             getattr(subgoal, "completion_conditions", ()) or ()
                         )
                     ),
+                ]
+            )
+        )
+        # With one canonical input field, the typed action itself is sufficient
+        # to bind ownership.  Legacy prose may omit, quote differently, or even
+        # contradict the literal; it is context only and cannot replace the
+        # canonical payload.  Multiple fields still require an unambiguous
+        # literal-to-subgoal projection until the transport exposes field refs.
+        source_subgoal_ids = tuple(
+            dict.fromkeys(
+                [
+                    *literal_source_subgoal_ids,
+                    *(input_action_subgoal_ids if len(input_entities) == 1 else ()),
                 ]
             )
         )
@@ -1781,12 +1837,6 @@ def compile_legacy_graph_shadow(
                 and ("\n" in payload.value or "\r" in payload.value),
             )
         )
-    constraints_by_id = {
-        item.constraint_id: item for item in typed_constraints
-    }
-    semantic_subgoal_by_id = {
-        item.subgoal_id: item for item in semantic_subgoals
-    }
     for input_field in input_fields:
         if not input_field.multiline:
             continue

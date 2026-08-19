@@ -292,68 +292,6 @@ LOCAL_INPUT_PREPARATION_STATE_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
-EXACT_EMPTY_LOCAL_INPUT_STATE_PATTERN = re.compile(
-    r"^\s*(?:(?:确认|核对|验证)\s*)?(?:当前)?\s*"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)"
-    r"\s*(?:内|中|里的?)?\s*(?:仍|保持)?\s*"
-    r"(?:为|是|保持为)?\s*"
-    r"(?:空|空白|为空|无文字|没有文字|无文本|没有文本|无内容|内容为空)\s*$|"
-    r"^\s*(?:(?:confirm|verify)\s+)?(?:the\s+)?"
-    r"(?:input|text|query|message)\s*(?:field|box|area)\s+"
-    r"(?:is|remains?)\s+(?:empty|blank)\s*$",
-    re.IGNORECASE,
-)
-EXACT_EMPTY_LOCAL_INPUT_PREPARATION_STATE_PATTERN = re.compile(
-    r"^\s*(?:(?:确认|核对|验证|找到|定位)\s*)?(?:当前)?\s*(?:唯一)?\s*"
-    r"(?:(?:空白|空)\s*)?"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)"
-    r"\s*(?:已|保持)?\s*(?:可见|显示|存在|可编辑|已聚焦|获得焦点|保持焦点)"
-    r"\s*(?:且|并且|、|和)\s*(?:仍|保持)?\s*"
-    r"(?:为|是|保持为)?\s*(?:空|空白|为空|无文字|没有文字|无文本|没有文本|无内容|内容为空)\s*$|"
-    r"^\s*(?:(?:confirm|verify|find|locate)\s+)?(?:the\s+)?(?:only\s+)?"
-    r"(?:(?:empty|blank)\s+)?(?:input|text|query|message)\s*(?:field|box|area)\s+"
-    r"(?:is\s+)?(?:visible|shown|present|editable|focused)\s+"
-    r"(?:and\s+)(?:is\s+|remains?\s+)?(?:empty|blank)\s*$",
-    re.IGNORECASE,
-)
-EXACT_LOCAL_INPUT_PREPARATION_ONLY_PATTERN = re.compile(
-    r"^(?!.*(?:逐字)?(?:输入(?!框|区域|内容)|写入|填入|键入)|"
-    r"\b(?:type|enter|write|fill|replace)\b)\s*"
-    r"(?:(?:确认|核对|验证|找到|定位|确保)\s*)?(?:当前)?\s*(?:唯一)?\s*"
-    r"(?:[A-Za-z0-9_\u4e00-\u9fff]{1,8})?"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)\s*"
-    r"(?:(?:处于|保持|为|是|已|仍)\s*)?"
-    r"(?:可见|显示|存在|可编辑|聚焦|已聚焦|获得焦点|保持焦点)(?:状态)?"
-    r"(?:\s*(?:且|并且|、|和)\s*"
-    r"(?:(?:处于|保持|为|是|已|仍)\s*)?"
-    r"(?:可见|显示|存在|可编辑|聚焦|已聚焦|获得焦点|保持焦点)(?:状态)?)*\s*$|"
-    r"^(?!.*\b(?:type|enter|write|fill|replace)\b)\s*"
-    r"(?:(?:confirm|verify|find|locate|ensure)\s+)?(?:the\s+)?(?:only\s+)?"
-    r"(?:[A-Za-z0-9_]{1,12}\s+)?"
-    r"(?:input|text|query|message)\s*(?:field|box|area)\s+"
-    r"(?:is\s+|remains?\s+)?(?:visible|shown|present|editable|focused)"
-    r"(?:\s+and\s+(?:is\s+|remains?\s+)?"
-    r"(?:visible|shown|present|editable|focused))*\s*$",
-    re.IGNORECASE,
-)
-EXACT_EMPTY_LOCAL_INPUT_WITH_PREPARATION_PATTERN = re.compile(
-    r"^(?!.*(?:逐字)?(?:输入(?!框|区域|内容)|写入|填入|键入)|"
-    r"\b(?:type|enter|write|fill|replace)\b)\s*"
-    r"(?:(?:确认|核对|验证|找到|定位|确保)\s*)?(?:当前)?\s*(?:唯一)?\s*"
-    r"(?:[A-Za-z0-9_\u4e00-\u9fff]{1,8})?"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)\s*"
-    r"(?:(?:处于|保持|为|是|已|仍)\s*)?"
-    r"(?:可见|显示|存在|可编辑|聚焦|已聚焦|获得焦点|保持焦点)(?:状态)?\s*"
-    r"(?:且|并且|、|和)\s*(?:内容\s*)?"
-    r"(?:为|是|保持为)?\s*(?:空|空白|为空|无文字|没有文字|无文本|没有文本|无内容|内容为空)\s*$|"
-    r"^(?!.*\b(?:type|enter|write|fill|replace)\b)\s*"
-    r"(?:(?:confirm|verify|find|locate|ensure)\s+)?(?:the\s+)?(?:only\s+)?"
-    r"(?:[A-Za-z0-9_]{1,12}\s+)?"
-    r"(?:input|text|query|message)\s*(?:field|box|area)\s+"
-    r"(?:is\s+|remains?\s+)?(?:visible|shown|present|editable|focused)\s+"
-    r"and\s+(?:is\s+|remains?\s+)?(?:empty|blank)\s*$",
-    re.IGNORECASE,
-)
 LOW_LEVEL_NEGATION_SCOPE_RESET_PATTERN = re.compile(
     r"[。；;！？!?\r\n]+|"
     r"\b(?:but|however|then|afterwards|next|may|can|need(?:s|ed)?\s+to)\b|"
@@ -692,11 +630,7 @@ class Subgoal:
     risk_action_ids: tuple[str, ...]
     external_impact: str
 
-    def validate(
-        self,
-        *,
-        input_text: Any = "",
-    ) -> None:
+    def validate(self) -> None:
         _validate_id(self.subgoal_id, "子目标 ID")
         _require_text(self.objective, "subgoals.objective")
         if self.status not in SUBGOAL_STATUSES:
@@ -734,30 +668,11 @@ class Subgoal:
             raise TaskGraphError(
                 f"子目标外部影响分类无效：{self.external_impact}"
             )
-        scoped_input_texts = (
-            self.objective,
-            *self.constraints,
-            *self.completion_conditions,
-        )
-        describes_local_input_state = any(
-            LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(value)
-            for value in scoped_input_texts
-        )
-        describes_only_exact_empty_input_state = _describes_only_exact_empty_input_state(
-            (self.objective, *self.completion_conditions)
-        )
-        if (
-            describes_local_input_state
-            and self.external_impact in {"read_only", "navigation_only"}
-            and not describes_only_exact_empty_input_state
-            and not _state_description_binds_canonical_input_text(
-                scoped_input_texts,
-                input_text if isinstance(input_text, str) else "",
-            )
-        ):
-            raise TaskGraphError(
-                f"子目标输入状态未绑定 canonical input_text：{self.subgoal_id}"
-            )
+        # Free-form legacy prose is not an input-value authority.  Canonical
+        # payload ownership is validated later by TaskSemanticIR's typed
+        # InputFieldIntent + required_action binding.  In particular, visible,
+        # focused, editable and empty preparation states must never be forced to
+        # repeat the future input payload merely because they mention a field.
         if self.external_impact in {"external_state", "unknown"} and not self.risk_action_ids:
             raise TaskGraphError(
                 f"外部状态或未知影响子目标必须关联风险并失败关闭：{self.subgoal_id}"
@@ -1147,9 +1062,7 @@ class DynamicTaskGraph:
             risk.validate()
         subgoals = _unique_by_id(self.subgoals, lambda item: item.subgoal_id, "子目标")
         for subgoal in subgoals.values():
-            subgoal.validate(
-                input_text=self.goal.entities.get("input_text"),
-            )
+            subgoal.validate()
             if subgoal.subgoal_id in subgoal.depends_on:
                 raise TaskGraphError(f"子目标不能依赖自身：{subgoal.subgoal_id}")
             missing_dependencies = set(subgoal.depends_on) - set(subgoals)
@@ -2952,35 +2865,6 @@ def _state_description_binds_canonical_input_text(
             ):
                 return True
     return False
-
-
-def _describes_only_exact_empty_input_state(values: tuple[str, ...]) -> bool:
-    """Allow a read-only/local empty-value fact without inventing input text.
-
-    An empty field is a typed visual state, not an input payload.  The legacy
-    transport therefore does not need ``goal.entities.input_text`` merely to
-    observe that exact state.  Every input-state clause must be the bounded
-    empty predicate; mixed clauses such as "empty and then type X" remain
-    outside this exception and fail the canonical-text gate.
-    """
-
-    state_clauses = tuple(
-        str(value or "").strip()
-        for value in values
-        if LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(str(value or ""))
-    )
-    if not state_clauses:
-        return False
-    empty_clause = lambda value: bool(
-        EXACT_EMPTY_LOCAL_INPUT_STATE_PATTERN.fullmatch(value)
-        or EXACT_EMPTY_LOCAL_INPUT_PREPARATION_STATE_PATTERN.fullmatch(value)
-        or EXACT_EMPTY_LOCAL_INPUT_WITH_PREPARATION_PATTERN.fullmatch(value)
-    )
-    return any(empty_clause(value) for value in state_clauses) and all(
-        empty_clause(value)
-        or EXACT_LOCAL_INPUT_PREPARATION_ONLY_PATTERN.fullmatch(value) is not None
-        for value in state_clauses
-    )
 
 
 def _is_local_input_preparation_state(

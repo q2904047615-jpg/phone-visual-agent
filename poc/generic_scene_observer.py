@@ -6136,8 +6136,12 @@ def _validated_keyboard_layout_switches(
         }:
             raise UISceneError("layout_switch 字段不符合协议。")
         label = str(item.get("label") or "").strip()
-        source = item.get("current_layout")
-        target = item.get("target_layout")
+        source = _normalized_keyboard_layout_token(
+            item.get("current_layout")
+        )
+        target = _normalized_keyboard_layout_token(
+            item.get("target_layout")
+        )
         if (
             source not in layouts
             or target not in layouts

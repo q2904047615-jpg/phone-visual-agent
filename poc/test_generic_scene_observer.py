@@ -4023,6 +4023,15 @@ class GenericSceneObserverTests(unittest.TestCase):
                         "layout": observed_layout,
                         "input_mode": "chinese_pinyin",
                         "mode_switch": None,
+                        "layout_switches": [
+                            {
+                                "label": "返回",
+                                "bounds": [60, 880, 200, 940],
+                                "confidence": 1.0,
+                                "current_layout": observed_layout,
+                                "target_layout": "qwerty",
+                            }
+                        ],
                     },
                 )
                 observer = GenericSceneObserver(
@@ -5393,6 +5402,44 @@ class GenericSceneObserverTests(unittest.TestCase):
                 current_layout="qwerty",
             ),
         )
+        self.assertEqual(
+            [
+                {
+                    "label": "ABC",
+                    "bounds": [80, 880, 200, 980],
+                    "confidence": 0.99,
+                    "current_layout": "symbol",
+                    "target_layout": "qwerty",
+                }
+            ],
+            _validated_keyboard_layout_switches(
+                [
+                    {
+                        "label": "ABC",
+                        "bounds": [80, 880, 200, 980],
+                        "confidence": 0.99,
+                        "current_layout": "symbol_grid",
+                        "target_layout": "qwerty",
+                    }
+                ],
+                keyboard_bounds=keyboard_bounds,
+                current_layout="symbol",
+            ),
+        )
+        with self.assertRaisesRegex(UISceneError, "方向或 bounds"):
+            _validated_keyboard_layout_switches(
+                [
+                    {
+                        "label": "ABC",
+                        "bounds": [80, 880, 200, 980],
+                        "confidence": 0.99,
+                        "current_layout": "symbols_custom",
+                        "target_layout": "qwerty",
+                    }
+                ],
+                keyboard_bounds=keyboard_bounds,
+                current_layout="symbol",
+            )
 
     def test_hidden_keyboard_only_attestation_rejects_structured_keyboard_conflict(self) -> None:
         compact = scene_payload()

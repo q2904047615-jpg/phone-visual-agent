@@ -14,6 +14,7 @@ from deepseek_task_graph import (
     _infer_external_risk_types,
     _graph_from_payload,
     _named_visual_identity_anchor,
+    _normalize_observed_concrete_input_clear,
     _normalize_redundant_conditional_input_clear,
     _normalize_unique_active_frontier,
     _quoted_visual_identity_anchor,
@@ -4286,6 +4287,257 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     tuple(item.subgoal_id for item in variant.subgoals),
                     tuple(item.subgoal_id for item in unchanged.subgoals),
                 )
+
+    def test_observed_concrete_clear_is_folded_into_canonical_input_transaction(self):
+        raw_goal = (
+            "如果消息输入框已有内容，先将它清空，"
+            "再让输入框最终只显示 stage，但不要发送。"
+        )
+        payload = base_payload()
+        payload["goal"].update(
+            objective="消息输入框最终只显示 stage，且内容保持未发送",
+            entities={"input_text": "stage"},
+        )
+        payload["constraints"] = ["不要发送、提交、保存或发布。"]
+        payload["risk_actions"] = []
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "clear_current_input",
+                "objective": "清空消息输入框中的现有内容",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["仅处理当前未发送草稿"],
+                "completion_conditions": ["消息输入框内容为空"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "target_state",
+                "objective": "消息输入框最终只显示 stage",
+                "status": "pending",
+                "depends_on": [],
+                "constraints": ["不要发送"],
+                "completion_conditions": ["消息输入框内容为 stage"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+        ]
+        payload["active_subgoal_id"] = "clear_current_input"
+        graph = _graph_from_payload(
+            payload,
+            task_id="task-observed-clear",
+            device_id="phone-1",
+            revision=2,
+            raw_user_goal=raw_goal,
+        )
+
+        def input_fact(element_id: str, value: str) -> str:
+            return json.dumps(
+                {
+                    "element_id": element_id,
+                    "role": "input",
+                    "label": value,
+                    "meaning": "application_text_input",
+                    "states": {
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "focused": True,
+                        "value": value,
+                    },
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+
+        observed = ObservedState(
+            scene_id="scene-input-nonempty",
+            summary="当前页面唯一输入框已有内容",
+            visible_evidence=("唯一目标输入框已聚焦",),
+            grounded_visual_facts=(input_fact("input-1", "codex"),),
+        )
+        normalized = _normalize_observed_concrete_input_clear(graph, observed)
+
+        self.assertEqual("target_state", normalized.active_subgoal_id)
+        self.assertEqual(
+            ("target_state",),
+            tuple(item.subgoal_id for item in normalized.subgoals),
+        )
+        self.assertEqual("active", normalized.subgoals[0].status)
+        self.assertIn("仅处理当前未发送草稿", normalized.subgoals[0].constraints)
+        normalized.validate()
+
+        empty = replace(
+            observed,
+            grounded_visual_facts=(input_fact("input-1", ""),),
+        )
+        duplicate = replace(
+            observed,
+            grounded_visual_facts=(
+                input_fact("input-1", "codex"),
+                input_fact("input-2", "other"),
+            ),
+        )
+        unauthorized = replace(
+            graph,
+            raw_user_goal="让消息输入框最终只显示 stage，不要发送。",
+        )
+        persistent = replace(
+            graph,
+            raw_user_goal=raw_goal + "并清除云端已保存草稿。",
+        )
+        wrong_frontier_target = replace(
+            graph.subgoals[1],
+            depends_on=("unrelated",),
+        )
+        wrong_frontier = replace(
+            graph,
+            subgoals=(graph.subgoals[0], wrong_frontier_target),
+        )
+        duplicate_target = replace(
+            graph.subgoals[1],
+            subgoal_id="target_state_2",
+        )
+        ambiguous_target = replace(
+            graph,
+            subgoals=(*graph.subgoals, duplicate_target),
+        )
+
+        for candidate, evidence in (
+            (graph, empty),
+            (graph, duplicate),
+            (unauthorized, observed),
+            (persistent, observed),
+            (wrong_frontier, observed),
+            (ambiguous_target, observed),
+        ):
+            with self.subTest(
+                raw_goal=candidate.raw_user_goal,
+                subgoals=len(candidate.subgoals),
+                facts=len(evidence.grounded_visual_facts),
+            ):
+                unchanged = _normalize_observed_concrete_input_clear(
+                    candidate,
+                    evidence,
+                )
+                self.assertIn(
+                    "clear_current_input",
+                    {item.subgoal_id for item in unchanged.subgoals},
+                )
+
+    def test_replan_folds_concrete_clear_after_nonempty_input_observation(self):
+        raw_goal = (
+            "进入目标页面；如果消息输入框已有内容，先将它清空，"
+            "再让输入框最终只显示 stage，但不要发送。"
+        )
+        initial = base_payload()
+        initial["goal"].update(
+            objective="消息输入框最终只显示 stage，且内容保持未发送",
+            entities={"input_text": "stage"},
+        )
+        initial["constraints"] = ["不要发送、提交、保存或发布。"]
+        initial["risk_actions"] = []
+        initial["completion_conditions"] = [
+            {
+                "condition_id": "input_final",
+                "description": "消息输入框内容为 stage 且保持未发送",
+                "evidence_required": ["目标输入框显示 stage"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ]
+        initial["subgoals"] = [
+            {
+                "subgoal_id": "open_target",
+                "objective": "目标页面可见",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["仅导航"],
+                "completion_conditions": ["目标页面可见"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "target_state",
+                "objective": "消息输入框最终只显示 stage",
+                "status": "pending",
+                "depends_on": ["open_target"],
+                "constraints": ["不要发送"],
+                "completion_conditions": ["消息输入框内容为 stage"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+        ]
+        initial["active_subgoal_id"] = "open_target"
+        revised = copy.deepcopy(initial)
+        ref_id = "controller_transition:receipt-matched:1"
+        revised["status"] = "running"
+        revised["subgoals"][0].update(
+            status="completed",
+            completion_evidence=[ref_id],
+        )
+        revised["subgoals"].insert(
+            1,
+            {
+                "subgoal_id": "clear_current_input",
+                "objective": "清空消息输入框中的现有内容",
+                "status": "active",
+                "depends_on": ["open_target"],
+                "constraints": ["仅处理当前未发送草稿"],
+                "completion_conditions": ["消息输入框内容为空"],
+                "completion_evidence": [],
+                "risk_action_ids": [],
+                "external_impact": "navigation_only",
+            },
+        )
+        revised["active_subgoal_id"] = "clear_current_input"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(initial)).plan(
+            raw_goal,
+            device_id="phone-1",
+        )
+        observed = matched_controller_observation(graph)
+        fact = json.dumps(
+            {
+                "element_id": "input-1",
+                "role": "input",
+                "label": "codex",
+                "meaning": "application_text_input",
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "focused": True,
+                    "value": "codex",
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        observed = replace(
+            observed,
+            summary="目标页面可见，唯一输入框已有内容",
+            visible_evidence=("目标页面可见", "唯一目标输入框已聚焦"),
+            grounded_visual_facts=(fact,),
+        )
+
+        result = DeepSeekTaskGraphPlanner(FakeProvider(revised)).replan(
+            graph,
+            observed,
+            trigger="action_result_matched",
+            reason="控制器已验证目标页面导航完成",
+        )
+
+        self.assertNotIn(
+            "clear_current_input",
+            {item.subgoal_id for item in result.subgoals},
+        )
+        self.assertEqual("target_state", result.active_subgoal_id)
+        target = next(item for item in result.subgoals if item.subgoal_id == "target_state")
+        self.assertEqual("active", target.status)
+        self.assertIn("仅处理当前未发送草稿", target.constraints)
 
     def test_editable_input_carrier_never_hides_saved_result(self):
         objective = "可编辑的地址输入区域内容为 codex，且草稿已保存"

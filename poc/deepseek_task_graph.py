@@ -330,6 +330,15 @@ CONDITIONAL_LOCAL_INPUT_CLEAR_PATTERN = re.compile(
     r"\b(?:clear|empty)\b)",
     re.IGNORECASE,
 )
+CONCRETE_LOCAL_INPUT_CLEAR_PATTERN = re.compile(
+    r"(?:(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域|草稿)"
+    r".{0,32}(?:清空|清除|置空|为空|空白|无内容|内容为空)|"
+    r"(?:清空|清除|置空).{0,32}"
+    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域|草稿)|"
+    r"\b(?:clear|empty)\b.{0,32}\b(?:input|text|draft)\b|"
+    r"\b(?:input|text|draft)\b.{0,32}\b(?:clear|empty|blank)\b)",
+    re.IGNORECASE,
+)
 PERSISTENT_DRAFT_STATE_PATTERN = re.compile(
     r"(?:已保存|云端|云同步|服务器|账号草稿|历史记录|文件|数据库|"
     r"\b(?:saved|cloud|synced|server|account|history|file|database)\b)",
@@ -1595,6 +1604,7 @@ class DeepSeekTaskGraphPlanner:
             trigger=trigger,
         )
         candidate = _normalize_redundant_conditional_input_clear(candidate)
+        candidate = _normalize_observed_concrete_input_clear(candidate, observation)
         candidate = _normalize_unique_active_frontier(candidate)
         _validate_external_impact_revision(graph, candidate)
         _validate_preserved_risk_ids(graph, candidate)
@@ -2607,6 +2617,146 @@ def _normalize_redundant_conditional_input_clear(
         ),
         active_subgoal_id=(
             successor.subgoal_id
+            if graph.active_subgoal_id == clear.subgoal_id
+            else graph.active_subgoal_id
+        ),
+    )
+
+
+def _observed_unique_nonempty_target_input(observation: ObservedState) -> bool:
+    """Prove one focused local input currently makes a conditional clear true."""
+
+    matches: list[str] = []
+    for raw_fact in observation.grounded_visual_facts:
+        try:
+            fact = json.loads(raw_fact)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(fact, dict) or fact.get("role") != "input":
+            continue
+        states = fact.get("states")
+        if not isinstance(states, dict):
+            continue
+        value = states.get("value")
+        if (
+            isinstance(value, str)
+            and value != ""
+            and states.get("goal_relevant") is True
+            and states.get("fully_visible") is True
+            and states.get("focused") is True
+        ):
+            matches.append(str(fact.get("element_id") or ""))
+    return len(matches) == 1 and bool(matches[0])
+
+
+def _normalize_observed_concrete_input_clear(
+    graph: DynamicTaskGraph,
+    observation: ObservedState,
+) -> DynamicTaskGraph:
+    """Fold a concrete clear produced after a trusted nonempty input observation.
+
+    A replan may resolve the user's conditional wording into a concrete clear
+    once the trusted scene proves that the condition is true.  The action layer
+    already owns the atomic clear-to-canonical-value transaction, so retaining
+    a separate high-level clear node would duplicate that transaction.
+    """
+
+    input_text = graph.goal.entities.get("input_text")
+    raw_goal = str(graph.raw_user_goal or "").strip()
+    if (
+        not isinstance(input_text, str)
+        or not input_text.strip()
+        or not raw_goal
+        or not CONDITIONAL_LOCAL_INPUT_CLEAR_PATTERN.search(raw_goal)
+        or PERSISTENT_INPUT_CLEAR_PATTERN.search(raw_goal)
+        or graph.risk_actions
+        or not LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN.search(raw_goal)
+        or not _observed_unique_nonempty_target_input(observation)
+    ):
+        return graph
+
+    canonical_targets = tuple(
+        item
+        for item in graph.subgoals
+        if item.status in {"pending", "active"}
+        and not item.completion_evidence
+        and not item.risk_action_ids
+        and item.external_impact == "navigation_only"
+        and _state_description_binds_canonical_input_text(
+            (item.objective, *item.constraints, *item.completion_conditions),
+            input_text,
+        )
+    )
+    if len(canonical_targets) != 1:
+        return graph
+    target = canonical_targets[0]
+
+    clear_candidates = tuple(
+        item
+        for item in graph.subgoals
+        if item.subgoal_id != target.subgoal_id
+        and item.status in {"pending", "active"}
+        and not item.completion_evidence
+        and not item.risk_action_ids
+        and item.external_impact == "navigation_only"
+        and CONCRETE_LOCAL_INPUT_CLEAR_PATTERN.search(
+            "；".join((item.objective, *item.completion_conditions))
+        )
+        and not PERSISTENT_INPUT_CLEAR_PATTERN.search(
+            "；".join((item.objective, *item.constraints, *item.completion_conditions))
+        )
+    )
+    if len(clear_candidates) != 1:
+        return graph
+    clear = clear_candidates[0]
+
+    direct_predecessor = clear.subgoal_id in target.depends_on
+    same_frontier = (
+        clear.status == "active"
+        and target.status == "pending"
+        and graph.active_subgoal_id == clear.subgoal_id
+        and target.depends_on == clear.depends_on
+    )
+    dependents = tuple(
+        item.subgoal_id
+        for item in graph.subgoals
+        if clear.subgoal_id in item.depends_on
+    )
+    if (
+        not (direct_predecessor or same_frontier)
+        or any(item != target.subgoal_id for item in dependents)
+    ):
+        return graph
+
+    replacement_dependencies: list[str] = []
+    for dependency_id in target.depends_on:
+        values = (
+            clear.depends_on
+            if dependency_id == clear.subgoal_id
+            else (dependency_id,)
+        )
+        for value in values:
+            if value not in replacement_dependencies:
+                replacement_dependencies.append(value)
+    replacement = replace(
+        target,
+        status=(
+            "active"
+            if graph.active_subgoal_id == clear.subgoal_id
+            else target.status
+        ),
+        depends_on=tuple(replacement_dependencies),
+        constraints=tuple(dict.fromkeys((*clear.constraints, *target.constraints))),
+    )
+    return replace(
+        graph,
+        subgoals=tuple(
+            replacement if item.subgoal_id == target.subgoal_id else item
+            for item in graph.subgoals
+            if item.subgoal_id != clear.subgoal_id
+        ),
+        active_subgoal_id=(
+            target.subgoal_id
             if graph.active_subgoal_id == clear.subgoal_id
             else graph.active_subgoal_id
         ),

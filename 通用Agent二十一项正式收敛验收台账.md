@@ -1512,3 +1512,37 @@ Qwen、DeepSeek、编排和 Web 关联回归 `874/874`，Python 完整回归 `14
 离线结果：合并式 App 内页导航及重复/近似/不完整/错误前台正反例 `3/3`，Qwen
 与编排核心 `285/285`，observer、Qwen、DeepSeek、编排和 Web 关联回归 `877/877`，
 Python 完整回归 `1493/1493`。完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。
+
+## 46. 条件清空在非空观察后被具体化为独立节点
+
+### 46.1 验收台账与根因证据
+
+- 新会话 `b6a8ea09522d454d80162c999361e98d` 从 Launcher 点击唯一“微信”入口并 matched，动作后四帧
+  可信观察已到达文件传输助手，且唯一目标输入框为 `value=codex`、`focused=true`、
+  `fully_visible=true`、`direct_latin`。
+- DeepSeek 根据“当前确实非空”将用户的“如果已有内容则清空”具体化为 `clear_input`；
+  旧归一器只接受节点本身仍带“如果”措辞且唯一直接后继是 canonical 输入节点的形状，
+  因此在第二个物理动作前以“未绑定 canonical input_text”停止。
+- 该会话最终 `blocked`、`physical_actions=1`，没有清空、输入或发送；旧会话不可续跑。
+
+### 46.2 同类样本、通用修复与边界
+
+- 新增“已观察条件清空”的确定性归一：原始用户目标必须逐字授权非空时清空，必须
+  有唯一 canonical `input_text`，当前 typed `grounded_visual_facts` 必须只有一个完整、目标相关、
+  已聚焦且非空的 input，任务图必须只有一个绑定该 canonical 值的本地最终输入节点。
+- 仅对无风险、无完成证据、`navigation_only`、非持久数据清除的唯一本地清空节点生效；
+  它与最终输入节点必须是直接前后继，或位于同一已验证依赖前沿。归一后仍由
+  `verified_text_transaction` 根据新观察决定清空并将输入框直接收敛到 canonical 最终值。
+- 原目标未授权条件清空、输入框已空/重复/未聚焦/不完整、持久草稿或云端数据、
+  canonical 节点缺失/重复、依赖关系不唯一或任一外部效果均不归一，继续 0 动作阻断。
+
+### 46.3 验证与停止条件
+
+- 正测覆盖非空 typed input + 具体化清空 + 直接/同前沿 canonical 节点；反测覆盖空值、
+  重复 input、缺失用户授权、持久清除、错误依赖和重复 canonical 目标。
+- 运行 DeepSeek/编排核心、关联回归和一次完整 Python 回归；全绿后本地提交、只重载项目
+  Uvicorn，再从当前文件传输助手页面创建全新会话。任一物理动作不匹配立即停止。
+
+离线结果：新归一器正反与完整 replan 链 `5/5`，DeepSeek 与编排核心 `396/396`，
+observer、Qwen、DeepSeek、编排和 Web 关联回归 `879/879`，Python 完整回归 `1495/1495`。
+完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。

@@ -61,7 +61,7 @@ from system_navigation_privacy import (
 )
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v61"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v62"
 POST_NAVIGATION_RESULT_OBSERVATION_PHASE = "verified_navigation_result_v1"
 POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
 POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被重新观察"]
@@ -77,7 +77,10 @@ COMPACT_OUTPUT_TOKENS = 2600
 # Its output budget must therefore cover the same strict worst-case structure.
 TARGETED_OUTPUT_TOKENS = COMPACT_OUTPUT_TOKENS
 FOREGROUND_APP_IDENTITY_AUDIT_TOKENS = 300
-INPUT_STRUCTURE_AUDIT_TOKENS = 1000
+# The strict input schema can include application inputs, IME candidates and a
+# complete keyboard structure in one response.  It needs the same ceiling as a
+# compact scene; actual billing still follows emitted tokens, not this ceiling.
+INPUT_STRUCTURE_AUDIT_TOKENS = COMPACT_OUTPUT_TOKENS
 SYSTEM_UI_AUDIT_TOKENS = 600
 ICON_CLUSTER_AUDIT_TOKENS = 700
 ELEMENT_GEOMETRY_AUDIT_TOKENS = 500
@@ -2255,7 +2258,8 @@ keyboard.case_switch uses the same five field names, but current_mode and target
 Do not plan, suggest, authorize, or perform any action.
 {coordinate_contract}
 Use text="" for a visibly empty application field. Copy placeholders and visible_editable_cues literally; do not infer them from the goal. right_button describes a trailing utility control; it is structural evidence only and is never authorized for activation. Set it to null when no separate trailing control is visible.
-Return exactly this JSON schema and no other fields:
+Return exactly this JSON schema and no other fields. Emit one compact minified
+JSON object on a single line, without Markdown or explanatory whitespace:
 {{"protocol_version":"{INPUT_STRUCTURE_AUDIT_VERSION}",
 "application_inputs":[{{"structure_id":"app-input-1","bounds":[0,0,1000,1000],
 "fully_visible":true,"text":"","placeholder":"visible placeholder or empty",
@@ -5125,10 +5129,9 @@ def _apply_input_structure_audit(
             }:
                 raise UISceneError("应用输入结构字段不符合协议。")
             button = item.get("right_button")
-            if _can_discard_incomplete_separate_right_button(item, button):
-                # The incomplete adjacent control grants no authority and is
-                # spatially disjoint from the application input. Discard only
-                # that optional object; never widen or move the input bounds.
+            if _can_discard_separate_right_button(item, button):
+                # A separate adjacent control grants no authority. Discard
+                # only that optional object; never widen or move the input.
                 item["right_button"] = None
                 button = None
             if button is not None and (
@@ -6149,17 +6152,17 @@ def _is_incomplete_optional_keyboard_mode_switch(value: Any) -> bool:
     return isinstance(value, dict) and set(value) < required
 
 
-def _can_discard_incomplete_separate_right_button(
+def _can_discard_separate_right_button(
     input_item: Any,
     value: Any,
 ) -> bool:
-    """Discard only a schema-subset control proven outside the input bounds."""
+    """Discard a schema-valid control proven outside the input bounds."""
 
     required = {"label", "bounds", "confidence"}
     if (
         not isinstance(input_item, dict)
         or not isinstance(value, dict)
-        or not set(value) < required
+        or not set(value).issubset(required)
         or "bounds" not in value
         or not _valid_1000_bounds(input_item.get("bounds"))
         or not _valid_1000_bounds(value.get("bounds"))

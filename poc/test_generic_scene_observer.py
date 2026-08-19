@@ -486,6 +486,8 @@ class GenericSceneObserverTests(unittest.TestCase):
             prompt,
         )
         self.assertIn("Never omit confidence or target_mode", prompt)
+        self.assertIn("compact minified", prompt)
+        self.assertIn("single line", prompt)
         self.assertIn("the local, goal-derived whitelist is []", prompt)
         self.assertIn("Never enumerate a keyboard row", prompt)
         self.assertEqual(
@@ -6164,7 +6166,101 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual((0.704, 0.078, 0.836, 0.129), button.bounds)
         self.assertFalse(button.states["goal_relevant"])
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
-        self.assertEqual([2600, 2600, 1000], provider.max_tokens_seen)
+        self.assertEqual([2600, 2600, 2600], provider.max_tokens_seen)
+
+    def test_input_audit_budget_accepts_complete_verbose_keyboard_structure(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        candidates = [
+            {
+                "text": f"candidate-{index}",
+                "bounds": [40 + index * 110, 600, 130 + index * 110, 645],
+                "confidence": 0.98,
+                "fully_visible": True,
+            }
+            for index in range(8)
+        ]
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[150, 530, 700, 590],
+                    text="codex",
+                    right_button={
+                        "label": "发送",
+                        "bounds": [780, 530, 920, 590],
+                        "confidence": 0.98,
+                    },
+                )
+            ],
+            ime_preedit_regions=[
+                {
+                    "region_id": "ime-preedit-1",
+                    "bounds": [0, 590, 1000, 650],
+                    "text": "",
+                    "confidence": 0.98,
+                    "candidates": candidates,
+                }
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 650, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [80, 730],
+                    "p": [920, 730],
+                    "a": [150, 810],
+                    "l": [850, 810],
+                    "z": [250, 890],
+                    "m": [750, 890],
+                    "backspace": [880, 890],
+                },
+                "mode_switch": {
+                    "label": "英",
+                    "bounds": [750, 930, 820, 980],
+                    "confidence": 0.98,
+                    "current_mode": "direct_latin",
+                    "target_mode": "chinese_pinyin",
+                },
+                "backspace_key": {
+                    "label": "⌫",
+                    "bounds": [850, 870, 950, 910],
+                    "confidence": 0.98,
+                    "fully_visible": True,
+                },
+                "case_switch": {
+                    "label": "⇧",
+                    "bounds": [40, 870, 130, 920],
+                    "confidence": 0.98,
+                    "current_mode": "lower",
+                    "target_mode": "upper",
+                },
+                "literal_keys": [],
+                "layout_switches": [
+                    {
+                        "label": "123",
+                        "bounds": [120, 930, 220, 980],
+                        "confidence": 0.98,
+                        "current_layout": "qwerty",
+                        "target_layout": "numeric",
+                    }
+                ],
+            },
+        )
+        verbose_response = json.dumps(audit, ensure_ascii=False, indent=2)
+        self.assertGreater(len(verbose_response), 2600)
+        provider = SequenceProvider([empty, empty, verbose_response])
+
+        scene = GenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "清空当前输入框中的旧文字"},
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(candidate)
+        self.assertEqual("codex", candidate.states["value"])
+        self.assertEqual([2600, 2600, 2600], provider.max_tokens_seen)
 
     def test_incomplete_disjoint_right_button_is_discarded_without_input_widening(self) -> None:
         empty = scene_payload()

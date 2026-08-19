@@ -378,6 +378,7 @@ class UniversalActionController:
                 "input_exact_literal_key",
                 "switch_keyboard_layout",
                 "switch_keyboard_case",
+                "switch_keyboard_input_mode",
             }:
                 self._validate_input_auxiliary_tap(
                     element,
@@ -842,6 +843,20 @@ class UniversalActionController:
                 or expected_states != {"value": prior_value, "keyboard_case_mode": target}
             ):
                 raise UniversalActionError("键盘大小写切换方向或后置条件无效。")
+        elif element.meaning == "switch_keyboard_input_mode":
+            current = states.get("current_mode")
+            target = states.get("target_mode")
+            if (
+                states.get("keyboard_input_mode_switch") is not True
+                or input_element.states.get("keyboard_layout") != "qwerty"
+                or input_element.states.get("keyboard_input_mode") != current
+                or current not in {"direct_latin", "chinese_pinyin"}
+                or target not in {"direct_latin", "chinese_pinyin"}
+                or current == target
+                or expected_states
+                != {"value": prior_value, "keyboard_input_mode": target}
+            ):
+                raise UniversalActionError("键盘输入模式切换方向或后置条件无效。")
 
     def verify_after_action(
         self,

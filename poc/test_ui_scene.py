@@ -1192,6 +1192,126 @@ class UISceneTests(unittest.TestCase):
         resolved = UniversalActionController().resolve_one(action, scene(field, key))
         self.assertEqual(key.center, resolved.normalized_point)
 
+    def test_keyboard_input_mode_switch_is_bound_to_input_and_exact_postcondition(self) -> None:
+        field = element(
+            "field",
+            "application_text_input",
+            role="input",
+            states={
+                "focused": True,
+                "value": "draft",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+                "goal_relevant": False,
+            },
+        )
+        mode_switch = element(
+            "mode-switch",
+            "switch_keyboard_input_mode",
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "keyboard_input_mode_switch": True,
+                "current_mode": "direct_latin",
+                "target_mode": "chinese_pinyin",
+                "prior_input_value": "draft",
+                "input_element_id": "field",
+            },
+        )
+        expected_effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {
+                    "value": "draft",
+                    "keyboard_input_mode": "chinese_pinyin",
+                },
+            }
+        }
+        action = SemanticAction(
+            node_id="switch-input-mode",
+            action="tap_semantic",
+            params={
+                "element_id": "mode-switch",
+                "target": "switch_keyboard_input_mode",
+                "role": "button",
+                "label": "switch_keyboard_input_mode",
+                "expected_effect": expected_effect,
+            },
+        )
+
+        resolved = UniversalActionController().resolve_one(
+            action,
+            scene(field, mode_switch),
+        )
+
+        self.assertEqual(mode_switch.center, resolved.normalized_point)
+        self.assertEqual("draft", resolved.prior_input_value)
+        self.assertEqual("draft", resolved.expected_input_value)
+        for bad_effect in (
+            {
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {"keyboard_input_mode": "chinese_pinyin"},
+                }
+            },
+            {
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {
+                        "value": "draft",
+                        "keyboard_input_mode": "direct_latin",
+                    },
+                }
+            },
+        ):
+            with self.subTest(bad_effect=bad_effect), self.assertRaises(
+                UniversalActionError
+            ):
+                UniversalActionController().resolve_one(
+                    replace(
+                        action,
+                        params={**action.params, "expected_effect": bad_effect},
+                    ),
+                    scene(field, mode_switch),
+                )
+        mismatched_field = replace(
+            field,
+            states={**field.states, "keyboard_input_mode": "chinese_pinyin"},
+        )
+        with self.assertRaisesRegex(UniversalActionError, "输入模式切换方向"):
+            UniversalActionController().resolve_one(
+                action,
+                scene(mismatched_field, mode_switch),
+            )
+
+        reverse_switch = replace(
+            mode_switch,
+            states={
+                **mode_switch.states,
+                "current_mode": "chinese_pinyin",
+                "target_mode": "direct_latin",
+            },
+        )
+        reverse_action = replace(
+            action,
+            params={
+                **action.params,
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "application_text_input",
+                        "states": {
+                            "value": "draft",
+                            "keyboard_input_mode": "direct_latin",
+                        },
+                    }
+                },
+            },
+        )
+        UniversalActionController().resolve_one(
+            reverse_action,
+            scene(mismatched_field, reverse_switch),
+        )
+
     def test_long_press_requires_safe_bounds_and_visual_postcondition(self) -> None:
         edge = UIElement(
             element_id="edge",

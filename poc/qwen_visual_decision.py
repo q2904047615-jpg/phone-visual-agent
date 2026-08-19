@@ -1811,6 +1811,7 @@ def _selection_choices(
                     or item["states"].get("input_literal_key") is True
                     or item["states"].get("keyboard_layout_switch") is True
                     or item["states"].get("keyboard_case_switch") is True
+                    or item["states"].get("keyboard_input_mode_switch") is True
                 )
             )
         )
@@ -1937,6 +1938,24 @@ def _selection_choices(
                             "states": {
                                 "value": item["states"].get("prior_input_value"),
                                 "keyboard_case_mode": item["states"].get("target_mode"),
+                            },
+                        }
+                    }
+                elif (
+                    action == "tap_semantic"
+                    and str(item.get("meaning") or "")
+                    == "switch_keyboard_input_mode"
+                    and isinstance(item.get("states"), Mapping)
+                    and item["states"].get("keyboard_input_mode_switch") is True
+                ):
+                    expected_result = {
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {
+                                "value": item["states"].get("prior_input_value"),
+                                "keyboard_input_mode": item["states"].get(
+                                    "target_mode"
+                                ),
                             },
                         }
                     }

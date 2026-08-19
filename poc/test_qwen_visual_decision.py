@@ -1635,7 +1635,28 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 "input_element_id": "field",
             },
         )
-        observation = trusted_observation(self.frames, elements=(field, literal))
+        mode_switch = UIElement(
+            element_id="local_audited_keyboard_mode_switch_1",
+            role="button",
+            meaning="switch_keyboard_input_mode",
+            label="中",
+            bounds=(0.72, 0.87, 0.82, 0.97),
+            confidence=0.98,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "keyboard_input_mode_switch": True,
+                "current_mode": "direct_latin",
+                "target_mode": "chinese_pinyin",
+                "prior_input_value": "draft",
+                "next_input_value": "你好",
+                "input_element_id": "field",
+            },
+        )
+        observation = trusted_observation(
+            self.frames,
+            elements=(field, literal, mode_switch),
+        )
         choices = _selection_choices(
             parsed, observation, frozenset({"tap_semantic", "input_verified_text"})
         )
@@ -1644,6 +1665,22 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual(
             {"element_state": {"meaning": "application_text_input", "states": {"value": "draft "}}},
             choice["expected_result"],
+        )
+        mode_choice = next(
+            item for item in choices if item["element_id"] == mode_switch.element_id
+        )
+        self.assertEqual("tap_semantic", mode_choice["action"])
+        self.assertEqual(
+            {
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {
+                        "value": "draft",
+                        "keyboard_input_mode": "chinese_pinyin",
+                    },
+                }
+            },
+            mode_choice["expected_result"],
         )
 
     def test_search_result_prohibition_keeps_unique_unfocused_input_focus_choice(self) -> None:

@@ -1096,6 +1096,11 @@ def compile_visual_action_shadow(
             continue
 
         tap_affordance = affordance_by_pair.get((element_ref, "tap_semantic"))
+        if element.role == "input" and element.states.get("focused") is True:
+            # The typed focus postcondition is already satisfied.  Keeping a
+            # tap candidate here lets Qwen spend a physical action on a no-op
+            # instead of choosing the bound input transaction.
+            tap_affordance = None
         if tap_affordance is not None:
             surface_binding = next(
                 (

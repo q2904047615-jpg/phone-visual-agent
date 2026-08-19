@@ -385,6 +385,36 @@ class VisualActionShadowTests(unittest.TestCase):
         self.assertEqual(expectation.predicate, "element.state.value")
         self.assertEqual(expectation.value, "任意文本 42")
         self.assertFalse(candidate.transition.exploratory)
+        self.assertFalse(
+            any(
+                item.action_kind == "tap_semantic"
+                and item.parameters.get("element_id") == input_element.element_id
+                for item in report.candidates
+            )
+        )
+
+    def test_unfocused_input_retains_single_focus_candidate(self):
+        input_element = make_element(
+            role="input",
+            label="消息",
+            states={"focused": False, "value": ""},
+        )
+        report = compile_visual_action_shadow(
+            make_scene(input_element),
+            make_ir(role="target_ui_label", value="消息"),
+            ALL_ACTIONS,
+        )
+        focus_candidates = [
+            item
+            for item in report.candidates
+            if item.action_kind == "tap_semantic"
+            and item.parameters.get("element_id") == input_element.element_id
+        ]
+        self.assertEqual(1, len(focus_candidates))
+        self.assertEqual(
+            "element.state.focused",
+            focus_candidates[0].transition.expectations[0].predicate,
+        )
 
     def test_local_literal_key_uses_exact_input_value_transition(self):
         input_element = make_element(

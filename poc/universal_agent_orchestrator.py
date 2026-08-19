@@ -1856,11 +1856,11 @@ class UniversalAgentOrchestrator:
         return False
 
     @classmethod
-    def _verified_focused_input_fact(
+    def _verified_focused_input_element(
         cls,
         trusted_observation: Any,
-    ) -> str | None:
-        """Return one local fact only when focus is uniquely scene-proven."""
+    ) -> Any | None:
+        """Return the unique trusted focused input, without minting authority."""
 
         scene = getattr(trusted_observation, "scene", None)
         if scene is None:
@@ -1884,7 +1884,18 @@ class UniversalAgentOrchestrator:
                 candidates.append(item)
         if len(candidates) != 1:
             return None
-        item = candidates[0]
+        return candidates[0]
+
+    @classmethod
+    def _verified_focused_input_fact(
+        cls,
+        trusted_observation: Any,
+    ) -> str | None:
+        """Return one local fact only when focus is uniquely scene-proven."""
+
+        item = cls._verified_focused_input_element(trusted_observation)
+        if item is None:
+            return None
         return (
             "当前可信画面的局部控件状态："
             f"element_id={item.element_id}, role=input, focused=true。"
@@ -1929,6 +1940,24 @@ class UniversalAgentOrchestrator:
             for condition in conditions
         ):
             return None
+        empty_markers = (
+            "为空",
+            "空白",
+            "内容为空",
+            "empty",
+        )
+        if any(
+            any(marker in condition for marker in empty_markers)
+            for condition in conditions
+        ):
+            item = cls._verified_focused_input_element(trusted_observation)
+            if item is None or (getattr(item, "states", {}) or {}).get("value") != "":
+                return None
+            return (
+                "当前可信画面的局部控件状态："
+                f"element_id={item.element_id}, role=input, "
+                'focused=true, value=""。'
+            )
         return cls._verified_focused_input_fact(trusted_observation)
 
     @staticmethod
@@ -2580,11 +2609,18 @@ class UniversalAgentOrchestrator:
             "bounds_inside_safe_frame=true。"
             for item in candidates
         )
-        focused_input_fact = self._verified_focused_input_fact(
-            trusted_observation
-        )
-        local_state_facts = (
-            (focused_input_fact,) if focused_input_fact is not None else ()
+        local_state_facts = tuple(
+            dict.fromkeys(
+                fact
+                for item in graph.subgoals
+                for fact in (
+                    self._zero_action_visible_state_fact(
+                        item,
+                        trusted_observation,
+                    ),
+                )
+                if fact is not None
+            )
         )
         observed = self.bridge.observed_state(
             graph=graph,
@@ -2636,6 +2672,36 @@ class UniversalAgentOrchestrator:
             )
         old_by_id = {item.subgoal_id: item for item in graph.subgoals}
         new_by_id = {item.subgoal_id: item for item in revised.subgoals}
+        normalized_subgoals = []
+        normalized_state_evidence = False
+        visible_evidence = set(observed.visible_evidence)
+        for subgoal_id in old_ids:
+            old_item = old_by_id[subgoal_id]
+            new_item = new_by_id[subgoal_id]
+            state_fact = self._zero_action_visible_state_fact(
+                old_item,
+                trusted_observation,
+            )
+            if (
+                old_item.status != "completed"
+                and new_item.status == "completed"
+                and state_fact is not None
+                and state_fact in visible_evidence
+                and state_fact not in new_item.completion_evidence
+            ):
+                new_item = replace(
+                    new_item,
+                    completion_evidence=(
+                        *new_item.completion_evidence,
+                        state_fact,
+                    ),
+                )
+                normalized_state_evidence = True
+            normalized_subgoals.append(new_item)
+        if normalized_state_evidence:
+            revised = replace(revised, subgoals=tuple(normalized_subgoals))
+            revised.validate()
+            new_by_id = {item.subgoal_id: item for item in revised.subgoals}
         if (
             revised.goal != graph.goal
             or revised.constraints != graph.constraints

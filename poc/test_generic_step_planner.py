@@ -1759,6 +1759,93 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual("matched", result.action_outcome)
         self.assertEqual(1, result.physical_actions)
 
+    def test_post_action_second_verified_scene_clears_transient_mismatch(self):
+        states = {
+            "focused": True,
+            "value": "",
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "chinese_pinyin",
+            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+            "goal_relevant": True,
+        }
+        before = UIScene(
+            app_id="chat",
+            screen_id="conversation",
+            summary="消息输入框和中文键盘可见",
+            elements=(
+                UIElement(
+                    element_id="field",
+                    role="input",
+                    meaning="application_text_input",
+                    label="消息",
+                    bounds=(0.1, 0.1, 0.9, 0.2),
+                    confidence=0.97,
+                    states=states,
+                ),
+            ),
+            stable=True,
+            confidence=0.96,
+            fingerprint="before",
+        )
+        transient = replace(
+            before,
+            summary="首轮暂态观察遗漏输入框",
+            elements=(),
+            fingerprint="transient",
+        )
+        after = replace(
+            before,
+            summary="输入框与逐字中文候选均已验证",
+            elements=(
+                replace(
+                    before.elements[0],
+                    states={
+                        **states,
+                        "ime_preedit_text": "fuzashuru",
+                        "ime_exact_candidate_text": "复杂输入",
+                    },
+                ),
+            ),
+            fingerprint="after",
+        )
+        robot = FakeRobot()
+        action = SemanticAction(
+            node_id="input-chinese-segment",
+            action="input_verified_text",
+            params={
+                "element_id": "field",
+                "target": "application_text_input",
+                "role": "input",
+                "label": "消息",
+                "states": states,
+                "text": "复杂输入",
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "application_text_input",
+                        "states": {
+                            "value": "",
+                            "ime_preedit_text": "fuzashuru",
+                            "ime_exact_candidate_text": "复杂输入",
+                        },
+                    }
+                },
+            },
+        )
+        observer = FakeSceneObserver([before, transient, after])
+
+        result = self._adapter(observer, robot).execute(
+            requested_action=action,
+            planned_scene=before,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("pinyin", "复杂输入", "fuzashuru")], robot.actions)
+        self.assertEqual(3, observer.calls)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("matched", result.action_outcome)
+        self.assertEqual((), result.verification_errors)
+
     def test_confirmed_clear_uses_exact_observed_count_and_fresh_qwerty_geometry(self):
         def input_scene(fingerprint, element_id, value):
             return UIScene(

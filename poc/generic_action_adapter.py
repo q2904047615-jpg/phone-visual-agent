@@ -977,7 +977,7 @@ class GenericSingleActionAdapter:
                     paths,
                     all_paths,
                     tuple(observation_errors),
-                    tuple(verification_errors),
+                    (),
                 )
             except UniversalActionError as exc:
                 last_error = exc

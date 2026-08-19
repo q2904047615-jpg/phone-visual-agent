@@ -3507,6 +3507,242 @@ class UniversalAgentOrchestrator:
                 "确认作用域与当前 task/device/revision/subgoal/risk/observation 不一致。"
             )
 
+    @staticmethod
+    def _verified_input_transaction_microstep(
+        *,
+        graph: DynamicTaskGraph,
+        previous_decision: Any,
+        result: Any,
+        before_observation: Any,
+        new_observation: Any,
+    ) -> bool:
+        """Recognize one controller-verified step inside canonical text input.
+
+        DeepSeek owns the high-level task graph, but it must not reinterpret an
+        unfinished deterministic text transaction after every locally audited
+        fragment or keyboard-mode switch.  This predicate grants no action
+        authority: it runs only after the one-shot action was consumed and the
+        adapter verified a fresh after-scene.  The next action still requires a
+        new Qwen decision, policy decision and confirmation scope.
+        """
+
+        current = graph.active_subgoal()
+        canonical = graph.goal.entities.get("input_text")
+        resolved = getattr(result, "resolved_action", None)
+        before_scene = getattr(result, "before_scene", None)
+        after_scene = getattr(result, "after_scene", None)
+        if (
+            current is None
+            or current.external_impact != "navigation_only"
+            or not isinstance(canonical, str)
+            or not canonical
+            or resolved is None
+            or before_scene is None
+            or after_scene is None
+            or str(getattr(result, "action_outcome", "")) != "matched"
+            or int(getattr(result, "physical_actions", 0)) != 1
+            or tuple(getattr(result, "verification_errors", ()))
+            or str(getattr(before_observation, "fingerprint", ""))
+            != str(getattr(before_scene, "fingerprint", ""))
+            or str(getattr(new_observation, "fingerprint", ""))
+            != str(getattr(after_scene, "fingerprint", ""))
+        ):
+            return False
+
+        proposal_action = getattr(
+            getattr(previous_decision, "proposal", None),
+            "action",
+            None,
+        )
+        if proposal_action is None:
+            return False
+
+        auxiliary_meanings = {
+            "ime_exact_candidate",
+            "input_exact_literal_key",
+            "switch_keyboard_layout",
+            "switch_keyboard_case",
+            "switch_keyboard_input_mode",
+        }
+        before_input_id = ""
+        auxiliary = None
+        if str(getattr(resolved, "kind", "")) == "input_verified_text":
+            before_input_id = str(
+                getattr(resolved, "target_element_id", "") or ""
+            ).strip()
+            if (
+                str(getattr(proposal_action, "action", ""))
+                != "input_verified_text"
+                or str(getattr(resolved, "text", "")) != canonical
+            ):
+                return False
+        elif str(getattr(resolved, "kind", "")) == "tap_semantic":
+            target_id = str(
+                getattr(resolved, "target_element_id", "") or ""
+            ).strip()
+            try:
+                auxiliary = before_scene.get_element(
+                    target_id,
+                    min_confidence=MIN_TARGET_CONFIDENCE,
+                )
+            except UISceneError:
+                return False
+            if (
+                str(getattr(proposal_action, "action", "")) != "tap_semantic"
+                or auxiliary.meaning not in auxiliary_meanings
+                or auxiliary.states.get("fully_visible") is not True
+            ):
+                return False
+            before_input_id = str(
+                auxiliary.states.get("input_element_id") or ""
+            ).strip()
+        else:
+            return False
+
+        expected_effect = getattr(resolved, "expected_effect", None)
+        expected_element = (
+            expected_effect.get("element_state")
+            if isinstance(expected_effect, Mapping)
+            else None
+        )
+        expected_states = (
+            expected_element.get("states")
+            if isinstance(expected_element, Mapping)
+            else None
+        )
+        expected_meaning = (
+            str(expected_element.get("meaning") or "").strip()
+            if isinstance(expected_element, Mapping)
+            else ""
+        )
+        if (
+            not before_input_id
+            or not expected_meaning
+            or not isinstance(expected_states, dict)
+            or not isinstance(expected_states.get("value"), str)
+        ):
+            return False
+        try:
+            before_input = before_scene.get_element(
+                before_input_id,
+                min_confidence=MIN_TARGET_CONFIDENCE,
+            )
+        except UISceneError:
+            return False
+        prior_value = before_input.states.get("value")
+        if (
+            before_input.role != "input"
+            or before_input.states.get("focused") is not True
+            or not isinstance(prior_value, str)
+            or not canonical.startswith(prior_value)
+        ):
+            return False
+        try:
+            input_step = plan_next_verified_input(canonical, prior_value)
+        except (ValueError, VerifiedTextTransactionError):
+            return False
+        if input_step is None:
+            return False
+
+        expected_value = expected_states["value"]
+        if not canonical.startswith(expected_value):
+            return False
+        if auxiliary is None:
+            if (
+                getattr(resolved, "prior_input_value", None) != prior_value
+                or getattr(resolved, "input_fragment", None)
+                != input_step.segment
+                or getattr(resolved, "input_method", None) != input_step.kind
+                or getattr(resolved, "expected_input_value", None)
+                != input_step.expected_value
+            ):
+                return False
+            exact_expected_states = (
+                {
+                    "value": input_step.current_text,
+                    "ime_preedit_text": input_step.pinyin,
+                    "ime_exact_candidate_text": input_step.segment,
+                }
+                if input_step.kind == "chinese_pinyin"
+                else {"value": input_step.expected_value}
+            )
+            if expected_states != exact_expected_states:
+                return False
+        else:
+            states = auxiliary.states
+            if states.get("prior_input_value") != prior_value:
+                return False
+            if auxiliary.meaning == "input_exact_literal_key":
+                if (
+                    input_step.kind != "literal_key"
+                    or states.get("key_value") != input_step.segment
+                    or states.get("expected_input_value")
+                    != input_step.expected_value
+                    or expected_states != {"value": input_step.expected_value}
+                ):
+                    return False
+            elif auxiliary.meaning == "ime_exact_candidate":
+                if (
+                    input_step.kind != "chinese_pinyin"
+                    or auxiliary.label != input_step.segment
+                    or states.get("expected_input_value")
+                    != input_step.expected_value
+                    or expected_states != {"value": input_step.expected_value}
+                ):
+                    return False
+            elif auxiliary.meaning == "switch_keyboard_layout":
+                desired_layout = (
+                    "numeric"
+                    if input_step.segment.isdecimal()
+                    else "qwerty"
+                    if (
+                        input_step.kind in {"direct_latin", "chinese_pinyin"}
+                        or input_step.segment == " "
+                        or input_step.segment.isalpha()
+                    )
+                    else "symbol"
+                )
+                if expected_states != {
+                    "value": prior_value,
+                    "keyboard_layout": desired_layout,
+                }:
+                    return False
+            elif auxiliary.meaning == "switch_keyboard_case":
+                if (
+                    not input_step.required_case_mode
+                    or expected_states
+                    != {
+                        "value": prior_value,
+                        "keyboard_case_mode": input_step.required_case_mode,
+                    }
+                ):
+                    return False
+            elif auxiliary.meaning == "switch_keyboard_input_mode":
+                if (
+                    states.get("target_mode") != input_step.required_mode
+                    or expected_states
+                    != {
+                        "value": prior_value,
+                        "keyboard_input_mode": input_step.required_mode,
+                    }
+                ):
+                    return False
+
+        after_inputs = tuple(
+            element
+            for element in after_scene.elements
+            if element.role == "input"
+            and float(element.confidence) >= MIN_TARGET_CONFIDENCE
+            and element.states.get("visible") is not False
+            and element.states.get("focused") is True
+            and element.meaning == expected_meaning
+            and all(
+                element.states.get(key) == value
+                for key, value in expected_states.items()
+            )
+        )
+        return len(after_inputs) == 1
+
     def _advance_after_observation(
         self,
         session: UniversalAgentSessionState,
@@ -3548,6 +3784,13 @@ class UniversalAgentOrchestrator:
             raise UniversalAgentOrchestratorError(
                 "动作后重规划缺少上一子目标、决策或确认权威。"
             )
+        input_transaction_microstep = self._verified_input_transaction_microstep(
+            graph=previous_graph,
+            previous_decision=previous_decision,
+            result=result,
+            before_observation=before_observation,
+            new_observation=new_observation,
+        )
         wait_transition = (
             result.resolved_action.kind == "wait_for_change"
             and int(result.physical_actions) == 0
@@ -3583,7 +3826,10 @@ class UniversalAgentOrchestrator:
                 ),
             )
             receipt.validate()
-            if previous_current.external_impact == "navigation_only":
+            if (
+                previous_current.external_impact == "navigation_only"
+                and not input_transaction_microstep
+            ):
                 controller_refs = tuple(
                     ControllerTransitionEvidenceRef(
                         ref_id=(
@@ -3646,6 +3892,8 @@ class UniversalAgentOrchestrator:
             ),
             "disposition": "replanning",
         }
+        if input_transaction_microstep:
+            transition_record["input_transaction_progress"] = True
 
         def persist_transition() -> None:
             session.last_post_action_transition = dict(transition_record)
@@ -3666,50 +3914,53 @@ class UniversalAgentOrchestrator:
         session.risk_confirmation_authority = None
         session.confirmed_risk_ids = ()
         try:
-            revised = self.deepseek_planner.replan(
-                previous_graph,
-                observed,
-                trigger=(
-                    "observation_changed"
-                    if wait_transition
-                    else "action_result_matched"
-                    if matched
-                    else "action_result_mismatch"
-                ),
-                reason=(
-                    "wait_for_change 未产生物理动作；仅依据新的可信画面重规划。"
-                    if wait_transition
-                    else
-                    "一个动作已经执行并由新的可信画面验证。"
-                    if matched
-                    else "动作已执行，但新画面没有证明预期语义变化，必须重规划。"
-                ),
-            )
-            self._validate_graph_identity(
-                revised,
-                device_id=session.device_id,
-                previous=previous_graph,
-                trusted_observation=new_observation,
-                session_id=session.session_id,
-                verified_transition=receipt,
-                controller_transition_evidence_refs=controller_refs,
-                before_observation=before_observation,
-                previous_decision=previous_decision,
-                execution_result=result,
-            )
-            session.verified_app_surface_lineage = (
-                self._build_verified_app_surface_lineage(
-                    session=session,
+            if input_transaction_microstep:
+                revised = previous_graph
+            else:
+                revised = self.deepseek_planner.replan(
+                    previous_graph,
+                    observed,
+                    trigger=(
+                        "observation_changed"
+                        if wait_transition
+                        else "action_result_matched"
+                        if matched
+                        else "action_result_mismatch"
+                    ),
+                    reason=(
+                        "wait_for_change 未产生物理动作；仅依据新的可信画面重规划。"
+                        if wait_transition
+                        else "一个动作已经执行并由新的可信画面验证。"
+                        if matched
+                        else "动作已执行，但新画面没有证明预期语义变化，必须重规划。"
+                    ),
+                )
+            if not input_transaction_microstep:
+                self._validate_graph_identity(
+                    revised,
+                    device_id=session.device_id,
                     previous=previous_graph,
-                    revised=revised,
                     trusted_observation=new_observation,
-                    receipt=receipt,
-                    controller_refs=controller_refs,
+                    session_id=session.session_id,
+                    verified_transition=receipt,
+                    controller_transition_evidence_refs=controller_refs,
                     before_observation=before_observation,
                     previous_decision=previous_decision,
                     execution_result=result,
                 )
-            )
+                session.verified_app_surface_lineage = (
+                    self._build_verified_app_surface_lineage(
+                        session=session,
+                        previous=previous_graph,
+                        revised=revised,
+                        trusted_observation=new_observation,
+                        receipt=receipt,
+                        controller_refs=controller_refs,
+                        before_observation=before_observation,
+                        previous_decision=previous_decision,
+                        execution_result=result,
+                    )
+                )
         except Exception as exc:
             session.status = "blocked"
             session.failed_reason = f"DeepSeek 重规划失败：{exc}"
@@ -3730,11 +3981,12 @@ class UniversalAgentOrchestrator:
         )
         if receipt is not None:
             transition_record["receipt_consumed_revision"] = revised.revision
-        self._remember(
-            session,
-            session.evidence_store.write_task_graph(revised),
-            session.evidence_store.write_risk_audit(revised),
-        )
+        if not input_transaction_microstep:
+            self._remember(
+                session,
+                session.evidence_store.write_task_graph(revised),
+                session.evidence_store.write_risk_audit(revised),
+            )
         if revised.status == "completed":
             session.status = "succeeded"
             transition_record["disposition"] = "task_completed"

@@ -6630,6 +6630,268 @@ class UniversalAgentRiskConfirmationTests(unittest.TestCase):
 
 
 class UniversalAgentConfirmTests(unittest.TestCase):
+    @staticmethod
+    def _input_graph() -> DynamicTaskGraph:
+        base = _graph()
+        graph = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="当前输入框逐字显示指定文本且尚未提交",
+                entities={"input_text": "live21"},
+            ),
+            constraints=("不得提交当前文字",),
+            completion_conditions=(
+                replace(
+                    base.completion_conditions[0],
+                    description="当前输入框逐字显示 live21 且尚未提交",
+                    evidence_required=("当前输入框逐字显示 live21",),
+                ),
+            ),
+            subgoals=(
+                replace(
+                    base.subgoals[0],
+                    objective="当前输入框逐字显示 live21 且尚未提交",
+                    constraints=("不得提交当前文字",),
+                    completion_conditions=("当前输入框逐字显示 live21",),
+                ),
+            ),
+            raw_user_goal="在当前输入框输入 live21，但不要提交",
+        )
+        graph.validate()
+        return graph
+
+    @staticmethod
+    def _input_scene(
+        value: str,
+        *,
+        fingerprint: str,
+        auxiliary: UIElement | None = None,
+    ) -> UIScene:
+        elements = [
+            UIElement(
+                element_id="input-1",
+                role="input",
+                meaning="application_text_input",
+                label="",
+                bounds=(0.08, 0.58, 0.82, 0.66),
+                confidence=0.98,
+                states={
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "focused": True,
+                    "visible": True,
+                    "value": value,
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                    "keyboard_case_mode": "lower",
+                },
+                evidence=("唯一聚焦输入框",),
+            )
+        ]
+        if auxiliary is not None:
+            elements.append(auxiliary)
+        scene = UIScene(
+            app_id="example",
+            screen_id="compose",
+            summary="输入框与软键盘可见",
+            elements=tuple(elements),
+            stable=True,
+            confidence=0.97,
+            fingerprint=fingerprint,
+        )
+        scene.validate()
+        return scene
+
+    def test_verified_direct_input_fragment_keeps_high_level_graph(self) -> None:
+        graph = self._input_graph()
+        before = self._input_scene("", fingerprint="input-before")
+        after = self._input_scene("live", fingerprint="input-after")
+        action = SemanticAction(
+            node_id="input-step",
+            action="input_verified_text",
+            params={"text": "live21"},
+        )
+        result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=before,
+            after_scene=after,
+            resolved_action=ResolvedSemanticAction(
+                node_id="input-step",
+                kind="input_verified_text",
+                text="live21",
+                input_fragment="live",
+                input_method="direct_latin",
+                prior_input_value="",
+                expected_input_value="live",
+                target_element_id="input-1",
+                before_fingerprint=before.fingerprint,
+                expected_effect={
+                    "element_state": {
+                        "meaning": "application_text_input",
+                        "states": {"value": "live"},
+                    }
+                },
+            ),
+        )
+        decision = SimpleNamespace(
+            proposal=GenericStepProposal(status="action", action=action)
+        )
+
+        self.assertTrue(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=decision,
+                result=result,
+                before_observation=SimpleNamespace(fingerprint=before.fingerprint),
+                new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+            )
+        )
+
+    def test_verified_literal_key_keeps_high_level_graph(self) -> None:
+        graph = self._input_graph()
+        key = UIElement(
+            element_id="key-2",
+            role="button",
+            meaning="input_exact_literal_key",
+            label="2",
+            bounds=(0.18, 0.78, 0.25, 0.85),
+            confidence=0.98,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "input_literal_key": True,
+                "input_element_id": "input-1",
+                "key_value": "2",
+                "prior_input_value": "live",
+                "expected_input_value": "live2",
+            },
+            evidence=("数字键 2 完整可见",),
+        )
+        before = self._input_scene(
+            "live", fingerprint="key-before", auxiliary=key
+        )
+        after = self._input_scene("live2", fingerprint="key-after")
+        expected_effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": "live2"},
+            }
+        }
+        action = SemanticAction(
+            node_id="key-step",
+            action="tap_semantic",
+            params={"expected_effect": expected_effect},
+        )
+        result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=before,
+            after_scene=after,
+            resolved_action=ResolvedSemanticAction(
+                node_id="key-step",
+                kind="tap_semantic",
+                target_element_id="key-2",
+                before_fingerprint=before.fingerprint,
+                expected_effect=expected_effect,
+            ),
+        )
+        decision = SimpleNamespace(
+            proposal=GenericStepProposal(status="action", action=action)
+        )
+
+        self.assertTrue(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=decision,
+                result=result,
+                before_observation=SimpleNamespace(fingerprint=before.fingerprint),
+                new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+            )
+        )
+
+    def test_input_microstep_rejects_wrong_after_value(self) -> None:
+        graph = self._input_graph()
+        before = self._input_scene("", fingerprint="wrong-before")
+        after = self._input_scene("lixe", fingerprint="wrong-after")
+        action = SemanticAction(
+            node_id="wrong-step",
+            action="input_verified_text",
+            params={"text": "live21"},
+        )
+        result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=before,
+            after_scene=after,
+            resolved_action=ResolvedSemanticAction(
+                node_id="wrong-step",
+                kind="input_verified_text",
+                text="live21",
+                input_fragment="live",
+                input_method="direct_latin",
+                prior_input_value="",
+                expected_input_value="live",
+                target_element_id="input-1",
+                before_fingerprint=before.fingerprint,
+                expected_effect={
+                    "element_state": {
+                        "meaning": "application_text_input",
+                        "states": {"value": "live"},
+                    }
+                },
+            ),
+        )
+        decision = SimpleNamespace(
+            proposal=GenericStepProposal(status="action", action=action)
+        )
+
+        self.assertFalse(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=decision,
+                result=result,
+                before_observation=SimpleNamespace(fingerprint=before.fingerprint),
+                new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+            )
+        )
+
+    def test_verified_input_microstep_skips_deepseek_and_mints_fresh_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, planner, qwen, adapter = self._started(temp)
+            old_scope = dict(session.snapshot()["confirmation_scope"])
+            with patch.object(
+                orchestrator,
+                "_verified_input_transaction_microstep",
+                return_value=True,
+            ):
+                result = orchestrator.confirm_one(
+                    session,
+                    _confirmation(session),
+                )
+            persisted = json.loads(
+                (Path(temp) / "post_action_transition_step_1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(1, session.task_graph.revision)
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertTrue(persisted["input_transaction_progress"])
+        self.assertEqual("advanced_to_new_confirmation", persisted["disposition"])
+        new_scope = session.snapshot()["confirmation_scope"]
+        self.assertNotEqual(old_scope["observation_id"], new_scope["observation_id"])
+        self.assertNotEqual(old_scope["fingerprint"], new_scope["fingerprint"])
+        self.assertNotEqual(old_scope["action_digest"], new_scope["action_digest"])
+
     def test_authority_digest_is_exact_while_progress_digest_is_semantic(self) -> None:
         first = SemanticAction(
             node_id="decision-a",

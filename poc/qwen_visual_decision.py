@@ -3365,7 +3365,16 @@ def _canonicalize_trusted_scene(
                 elements[left],
                 elements[right],
             )
-            if overlap["intersection_over_smaller"] >= 0.85 and compatible:
+            exact_same_role = bool(
+                elements[left].label.strip()
+                and elements[left].label.strip().casefold()
+                == elements[right].label.strip().casefold()
+                and elements[left].role == elements[right].role
+            )
+            if compatible and (
+                overlap["intersection_over_smaller"] >= 0.85
+                or (exact_same_role and overlap["iou"] >= 0.5)
+            ):
                 union(left, right)
             elif overlap["iou"] >= 0.5:
                 conflicts.append(
@@ -3446,10 +3455,27 @@ def _trusted_target_local_candidate(
     return candidate
 
 
-def _canonical_element_rank(element: UIElement) -> tuple[int, float, float]:
+def _canonical_element_rank(element: UIElement) -> tuple[int, int, float, float]:
     left, top, right, bottom = element.bounds
     area = (right - left) * (bottom - top)
+    locally_audited_input_control = int(
+        element.element_id.startswith("local_audited_")
+        and (
+            (
+                element.meaning == "ime_exact_candidate"
+                and element.states.get("ime_candidate") is True
+            )
+            or (
+                element.meaning == "input_exact_literal_key"
+                and element.states.get("input_literal_key") is True
+            )
+            or element.states.get("keyboard_layout_switch") is True
+            or element.states.get("keyboard_case_switch") is True
+            or element.states.get("keyboard_input_mode_switch") is True
+        )
+    )
     return (
+        locally_audited_input_control,
         ROLE_PRIORITY.get(element.role, 0),
         float(element.confidence),
         -area,

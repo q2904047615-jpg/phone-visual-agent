@@ -2598,6 +2598,87 @@ class QwenVisualDecisionTests(unittest.TestCase):
         )
         self.assertEqual(decision.proposal.status, "action")
 
+    def test_exact_label_overlapping_ime_duplicates_collapse_to_local_audit(self) -> None:
+        generic = UIElement(
+            element_id="e1",
+            role="button",
+            meaning="select_candidate",
+            label="你好",
+            bounds=(0.095, 0.615, 0.215, 0.655),
+            confidence=1.0,
+            states={"goal_relevant": False, "fully_visible": True},
+            evidence=("拼音候选栏首个候选",),
+        )
+        audited = UIElement(
+            element_id="local_audited_ime_candidate_1",
+            role="button",
+            meaning="ime_exact_candidate",
+            label="你好",
+            bounds=(0.11, 0.61, 0.23, 0.65),
+            confidence=1.0,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "ime_candidate": True,
+                "input_element_id": "input-1",
+                "prior_input_value": "",
+                "expected_input_value": "你好",
+                "pinyin": "nihao",
+            },
+            evidence=("输入结构审计确认唯一逐字候选",),
+        )
+
+        observation = trusted_observation(
+            self.frames,
+            scene=scene_for(self.frames, elements=(generic, audited)),
+            observation_id="obs_77777777777777777777777777777777",
+        )
+
+        self.assertEqual(
+            [item.element_id for item in observation.scene.elements],
+            [audited.element_id],
+        )
+        self.assertEqual(
+            dict(observation.candidate_aliases)[generic.element_id],
+            audited.element_id,
+        )
+        self.assertTrue(
+            any(
+                item["kind"] == "duplicate_visual_object_collapsed"
+                and item["canonical_element_id"] == audited.element_id
+                for item in observation.candidate_conflicts
+            )
+        )
+
+    def test_separate_same_label_buttons_remain_ambiguous(self) -> None:
+        elements = (
+            UIElement(
+                element_id="first_save",
+                role="button",
+                meaning="save_first_item",
+                label="保存",
+                bounds=(0.1, 0.4, 0.3, 0.48),
+                confidence=0.97,
+            ),
+            UIElement(
+                element_id="second_save",
+                role="button",
+                meaning="save_second_item",
+                label="保存",
+                bounds=(0.1, 0.6, 0.3, 0.68),
+                confidence=0.97,
+            ),
+        )
+
+        observation = trusted_observation(
+            self.frames,
+            scene=scene_for(self.frames, elements=elements),
+            observation_id="obs_88888888888888888888888888888888",
+        )
+
+        self.assertEqual(len(observation.scene.elements), 2)
+        self.assertEqual(observation.candidate_aliases, ())
+
     def test_overlapping_semantic_conflict_is_recorded_not_silently_merged(self) -> None:
         elements = (
             UIElement(

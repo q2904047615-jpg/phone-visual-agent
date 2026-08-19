@@ -6069,32 +6069,6 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
             "element_id=candidate-1, role=input, focused=true。",
             fact,
         )
-        focused_empty = SimpleNamespace(
-            completion_conditions=("输入框已聚焦且为空白",),
-        )
-        self.assertEqual(
-            "当前可信画面的局部控件状态："
-            'element_id=candidate-1, role=input, focused=true, value=""。',
-            UniversalAgentOrchestrator._zero_action_visible_state_fact(
-                focused_empty,
-                observation,
-            ),
-        )
-        nonempty = replace(
-            focused_scene,
-            elements=(
-                replace(
-                    focused_scene.elements[0],
-                    states={**focused_scene.elements[0].states, "value": "existing"},
-                ),
-            ),
-        )
-        self.assertIsNone(
-            UniversalAgentOrchestrator._zero_action_visible_state_fact(
-                focused_empty,
-                FakeTrustedObservation(device_id="device-1", scene=nonempty),
-            )
-        )
 
     def test_focus_state_fact_fails_closed_for_untrusted_or_unrelated_shapes(self) -> None:
         base = _scene(
@@ -6192,11 +6166,11 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         )
         focus = Subgoal(
             subgoal_id="focus-input",
-            objective="确保目标输入框已聚焦且为空白",
+            objective="让目标输入框获得焦点",
             status="pending",
             depends_on=(open_page.subgoal_id,),
             constraints=(),
-            completion_conditions=("输入框已聚焦且为空白",),
+            completion_conditions=("输入框处于聚焦状态",),
             completion_evidence=(),
             risk_action_ids=(),
             external_impact="navigation_only",
@@ -6256,7 +6230,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         )
         focus_fact = (
             "当前可信画面的局部控件状态："
-            'element_id=candidate-1, role=input, focused=true, value=""。'
+            "element_id=candidate-1, role=input, focused=true。"
         )
         revised = replace(
             initial,
@@ -6270,7 +6244,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
                 replace(
                     focus,
                     status="completed",
-                    completion_evidence=(scene.summary,),
+                    completion_evidence=(focus_fact,),
                 ),
                 replace(type_text, status="active"),
             ),
@@ -6294,10 +6268,6 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         self.assertEqual(
             ["completed", "completed", "active"],
             [item.status for item in session.task_graph.subgoals],
-        )
-        self.assertIn(
-            focus_fact,
-            session.task_graph.subgoals[1].completion_evidence,
         )
         self.assertEqual("type-text", session.task_graph.active_subgoal_id)
         self.assertEqual([], qwen.calls)

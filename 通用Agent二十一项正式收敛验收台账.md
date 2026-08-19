@@ -1557,3 +1557,15 @@ observer、Qwen、DeepSeek、编排和 Web 关联回归 `879/879`，Python 完�
 完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。
 按真实导航阶段基础 input 形状修正后再次运行同样的 `3/3`、`396/396`、`879/879`与
 `1495/1495`，全部通过。
+
+## 47. 清空后可选退格子结构使空输入框证据一并丢失
+
+- 新会话 `265e991d20734019acc90d9d96529910` 的 Home、打开 App、`clear_verified_text` 各执行一次；
+  第 3 动作后真实画面已从 `codex` 变成空输入框，但 verification 因无法重新唯一绑定
+  输入框而 `mismatched`；会话按规则终止，没有输入或发送。
+- 失败原始响应已落盘：`application_inputs` 唯一空输入框、键盘边界和 QWERTY anchors 均合法，
+  只有可选 `backspace_key.label=""`。旧解析因该无权子结构拒绝整份审计，丢失已正确识别的空输入值。
+- 通用修复只在已有有效 application input、`backspace_key` 键集精确且唯一缺口为空 label 时，
+  将该可选子结构降为 `null`；它不能授权删除动作。非空错误标签、多余字段、非法 bounds 仍严格拒绝。
+- 现场正反回放 `1/1`，observer/Qwen/DeepSeek/编排/Web 关联 `880/880`，Python 完整回归
+  `1496/1496`通过；另一次关联命令仅因输入了不存在的测试模块名产生 1 个 ImportError，已用正确测试集重跑全绿，不是产品断言失败。

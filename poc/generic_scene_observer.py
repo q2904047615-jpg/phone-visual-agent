@@ -5263,8 +5263,21 @@ def _apply_input_structure_audit(
                 raw_qwerty_anchors,
                 keyboard_bounds=keyboard_bounds,
             )
+        raw_backspace_key = keyboard.get("backspace_key")
+        if (
+            trusted_input is not None
+            and isinstance(raw_backspace_key, dict)
+            and set(raw_backspace_key) == {
+                "label", "bounds", "confidence", "fully_visible"
+            }
+            and not str(raw_backspace_key.get("label") or "").strip()
+        ):
+            # An empty literal cannot identify or authorize a delete key. Drop
+            # only this optional non-authoritative substructure so an otherwise
+            # valid application input can still prove its post-action value.
+            raw_backspace_key = None
         generic_backspace_geometry = _validated_keyboard_backspace_key(
-            keyboard.get("backspace_key"),
+            raw_backspace_key,
             keyboard_bounds=keyboard_bounds,
         )
         raw_mode_switch = keyboard.get("mode_switch")

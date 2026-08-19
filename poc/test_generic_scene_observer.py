@@ -5000,6 +5000,71 @@ class GenericSceneObserverTests(unittest.TestCase):
                 },
             )
 
+    def test_empty_optional_backspace_label_does_not_discard_valid_input(self) -> None:
+        base_scene = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="frame-empty-backspace-label",
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="message-field",
+                    bounds=[153, 540, 690, 590],
+                    text="",
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 600, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [100, 730], "p": [890, 730],
+                    "a": [140, 810], "l": [850, 810],
+                    "z": [260, 890], "m": [750, 890],
+                    "backspace": [890, 890],
+                },
+                "mode_switch": None,
+                "backspace_key": {
+                    "label": "",
+                    "bounds": [830, 860, 960, 920],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                },
+                "case_switch": None,
+                "literal_keys": [],
+                "layout_switches": [],
+            },
+        )
+        scene = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="frame-empty-backspace-label",
+            goal_context={
+                "objective": "消息输入框最终只显示 stage，不要发送",
+                "entities": {"input_text": "stage"},
+            },
+        )
+
+        field = scene.get_element("local_audited_input_1")
+        self.assertIsNotNone(field)
+        self.assertEqual("", field.states["value"])
+        self.assertEqual("direct_latin", field.states["keyboard_input_mode"])
+
+        invalid = json.loads(json.dumps(audit, ensure_ascii=False))
+        invalid["keyboard"]["backspace_key"]["label"] = "机器人"
+        with self.assertRaisesRegex(VisionAgentError, "backspace_key"):
+            _apply_input_structure_audit(
+                base_scene,
+                json.dumps(invalid, ensure_ascii=False),
+                fingerprint="frame-invalid-backspace-label",
+                goal_context={
+                    "objective": "消息输入框最终只显示 stage，不要发送",
+                    "entities": {"input_text": "stage"},
+                },
+            )
+
     def test_input_audit_mints_layout_and_case_switches_only_for_next_step(self) -> None:
         base_scene = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),

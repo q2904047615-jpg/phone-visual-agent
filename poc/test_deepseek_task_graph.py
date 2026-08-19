@@ -4192,6 +4192,67 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                         device_id="phone-1",
                     )
 
+    def test_exact_empty_input_state_does_not_require_canonical_payload(self):
+        samples = (
+            "确认输入框仍为空",
+            "输入框内无文字",
+            "the input field remains empty",
+        )
+        for objective in samples:
+            with self.subTest(objective=objective):
+                payload = single_subgoal_payload(
+                    objective,
+                    external_impact="read_only",
+                )
+                payload["goal"].update(
+                    objective=objective,
+                    target_apps=[
+                        {"app_id": "current_foreground", "app_name": "当前前台应用"}
+                    ],
+                    entities={"target_surface": "current_surface"},
+                )
+                payload["completion_conditions"][0].update(
+                    description=objective,
+                    evidence_required=[objective],
+                )
+                payload["subgoals"][0]["completion_conditions"] = [objective]
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                    objective,
+                    device_id="phone-1",
+                )
+
+                self.assertNotIn("input_text", graph.goal.entities)
+                self.assertEqual("read_only", graph.active_subgoal().external_impact)
+
+    def test_empty_state_cannot_hide_unbound_positive_input(self):
+        objective = "输入框为空并输入 secret"
+        payload = single_subgoal_payload(
+            objective,
+            external_impact="navigation_only",
+        )
+        payload["goal"].update(
+            objective=objective,
+            target_apps=[
+                {"app_id": "current_foreground", "app_name": "当前前台应用"}
+            ],
+            entities={"target_surface": "current_surface"},
+        )
+        payload["completion_conditions"][0].update(
+            description=objective,
+            evidence_required=["输入框显示逐字正文"],
+        )
+        payload["subgoals"][0]["completion_conditions"] = [objective]
+
+        with self.assertRaisesRegex(
+            TaskGraphError,
+            "子目标输入状态未绑定 canonical input_text",
+        ):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                objective,
+                device_id="phone-1",
+            )
+
     def test_conditional_input_clear_is_folded_into_canonical_input_transaction(self):
         raw_goal = (
             "进入文件传输助手；如果消息输入框已有内容，先将它清空，"

@@ -290,6 +290,17 @@ LOCAL_INPUT_PREPARATION_STATE_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+EXACT_EMPTY_LOCAL_INPUT_STATE_PATTERN = re.compile(
+    r"^\s*(?:(?:确认|核对|验证)\s*)?(?:当前)?\s*"
+    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)"
+    r"\s*(?:内|中|里的?)?\s*(?:仍|保持)?\s*"
+    r"(?:为|是|保持为)?\s*"
+    r"(?:空|空白|为空|无文字|没有文字|无文本|没有文本|无内容|内容为空)\s*$|"
+    r"^\s*(?:(?:confirm|verify)\s+)?(?:the\s+)?"
+    r"(?:input|text|query|message)\s*(?:field|box|area)\s+"
+    r"(?:is|remains?)\s+(?:empty|blank)\s*$",
+    re.IGNORECASE,
+)
 LOW_LEVEL_NEGATION_SCOPE_RESET_PATTERN = re.compile(
     r"[。；;！？!?\r\n]+|"
     r"\b(?:but|however|then|afterwards|next|may|can|need(?:s|ed)?\s+to)\b|"
@@ -679,9 +690,13 @@ class Subgoal:
             LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(value)
             for value in scoped_input_texts
         )
+        describes_only_exact_empty_input_state = _describes_only_exact_empty_input_state(
+            (self.objective, *self.completion_conditions)
+        )
         if (
             describes_local_input_state
             and self.external_impact in {"read_only", "navigation_only"}
+            and not describes_only_exact_empty_input_state
             and not _state_description_binds_canonical_input_text(
                 scoped_input_texts,
                 input_text if isinstance(input_text, str) else "",
@@ -2884,6 +2899,27 @@ def _state_description_binds_canonical_input_text(
             ):
                 return True
     return False
+
+
+def _describes_only_exact_empty_input_state(values: tuple[str, ...]) -> bool:
+    """Allow a read-only/local empty-value fact without inventing input text.
+
+    An empty field is a typed visual state, not an input payload.  The legacy
+    transport therefore does not need ``goal.entities.input_text`` merely to
+    observe that exact state.  Every input-state clause must be the bounded
+    empty predicate; mixed clauses such as "empty and then type X" remain
+    outside this exception and fail the canonical-text gate.
+    """
+
+    state_clauses = tuple(
+        str(value or "").strip()
+        for value in values
+        if LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(str(value or ""))
+    )
+    return bool(state_clauses) and all(
+        EXACT_EMPTY_LOCAL_INPUT_STATE_PATTERN.fullmatch(value) is not None
+        for value in state_clauses
+    )
 
 
 def _is_local_input_preparation_state(

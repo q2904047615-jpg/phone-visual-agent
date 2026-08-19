@@ -4011,28 +4011,62 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual({"q", "p", "a", "l", "z", "m", "backspace"}, set(geometry["anchors"]))
 
     def test_input_audit_normalizes_symbols_layout_without_relaxing_schema(self) -> None:
-        empty = scene_payload()
-        empty["elements"] = []
-        audit = input_audit_payload(
-            application_inputs=[audited_application_input(text=".com")],
-            keyboard={
-                "visible": True,
-                "bounds": [0, 360, 1000, 1000],
-                "layout": " Symbols ",
-                "input_mode": "chinese_pinyin",
-                "mode_switch": None,
-            },
-        )
-        observer = GenericSceneObserver(SequenceProvider([empty, empty, audit]))
+        for observed_layout in (" Symbols ", "symbol_grid"):
+            with self.subTest(observed_layout=observed_layout):
+                empty = scene_payload()
+                empty["elements"] = []
+                audit = input_audit_payload(
+                    application_inputs=[audited_application_input(text=".com")],
+                    keyboard={
+                        "visible": True,
+                        "bounds": [0, 360, 1000, 1000],
+                        "layout": observed_layout,
+                        "input_mode": "chinese_pinyin",
+                        "mode_switch": None,
+                    },
+                )
+                observer = GenericSceneObserver(
+                    SequenceProvider([empty, empty, audit])
+                )
 
-        scene = observer.observe(
-            frames=stable_frames(),
-            goal_context={"objective": "确认输入框内容已经是 .com"},
+                scene = observer.observe(
+                    frames=stable_frames(),
+                    goal_context={"objective": "确认输入框内容已经是 .com"},
+                )
+
+                candidate = scene.unique_trusted_goal_element()
+                self.assertIsNotNone(candidate)
+                self.assertEqual("symbol", candidate.states["keyboard_layout"])
+
+    def test_scene_normalizes_exact_symbol_grid_layout_alias(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "input-top",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "",
+                "bounds": [150, 440, 850, 530],
+                "confidence": 0.98,
+                "states": {
+                    "goal_relevant": True,
+                    "value": "2026",
+                    "focused": True,
+                    "keyboard_layout": "symbol_grid",
+                    "keyboard_input_mode": "chinese_pinyin",
+                },
+                "evidence": ["输入框和符号键盘可见"],
+            }
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="scene-symbol-grid-alias",
+            goal_context={"objective": "确认输入框内容已经是2026"},
+            camera_layout_orientation="portrait",
         )
 
-        candidate = scene.unique_trusted_goal_element()
-        self.assertIsNotNone(candidate)
-        self.assertEqual("symbol", candidate.states["keyboard_layout"])
+        self.assertEqual("symbol", scene.elements[0].states["keyboard_layout"])
 
     def test_input_audit_keeps_unknown_layout_fail_closed(self) -> None:
         empty = scene_payload()

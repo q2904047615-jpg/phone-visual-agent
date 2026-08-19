@@ -5016,6 +5016,18 @@ def _scene_reports_keyboard(scene: UIScene) -> bool:
     )
 
 
+def _normalized_keyboard_layout_token(value: Any) -> Any:
+    """Normalize only exact, single-meaning aliases of formal layouts."""
+
+    if not isinstance(value, str):
+        return value
+    normalized = value.strip().casefold()
+    return {
+        "symbols": "symbol",
+        "symbol_grid": "symbol",
+    }.get(normalized, normalized)
+
+
 def _apply_input_structure_audit(
     scene: UIScene,
     raw: str,
@@ -5066,9 +5078,9 @@ def _apply_input_structure_audit(
         keyboard_visible = keyboard.get("visible")
         keyboard_layout = keyboard.get("layout")
         if isinstance(keyboard_layout, str):
-            normalized_layout = keyboard_layout.strip().casefold()
-            if normalized_layout == "symbols":
-                normalized_layout = "symbol"
+            normalized_layout = _normalized_keyboard_layout_token(
+                keyboard_layout
+            )
             if normalized_layout in {"qwerty", "numeric", "symbol", "unknown"}:
                 keyboard_layout = normalized_layout
                 keyboard["layout"] = normalized_layout
@@ -6628,6 +6640,8 @@ def _normalize_known_scene_enums(payload: dict[str, Any]) -> None:
             if not isinstance(value, str):
                 continue
             normalized = value.strip().casefold()
+            if field == "keyboard_layout":
+                normalized = _normalized_keyboard_layout_token(normalized)
             if field in {
                 "keyboard_input_mode",
                 "current_mode",

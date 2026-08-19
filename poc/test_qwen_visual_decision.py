@@ -19,6 +19,7 @@ from qwen_visual_decision import (
     _decision_retry_prompt,
     _exact_text_candidate_block,
     _launcher_app_entry_candidate_ids,
+    _required_exact_candidate_ids,
     _scene_matches_target_app_surface,
     _selection_choices,
 )
@@ -737,6 +738,104 @@ class QwenVisualDecisionTests(unittest.TestCase):
         parsed = QwenTaskContext.from_dict(context)
         self.assertIn("张三", parsed.exact_text_requirements)
         self.assertNotIn("张三", parsed.identity_text_requirements)
+
+    def test_non_element_action_uses_exact_title_only_as_surface_identity(self) -> None:
+        raw = task_context(task_id="task_swipe_identity", revision=17)
+        raw["goal"]["entities"] = {"target_ui_label": "文件传输助手"}
+        raw["current_subgoal"].update(
+            objective="在当前文件传输助手聊天中向上滑动一次",
+            completion_conditions=["聊天记录区域内容发生变化"],
+        )
+        parsed = QwenTaskContext.from_dict(raw)
+
+        def with_required_action(action: str) -> QwenTaskContext:
+            return replace(
+                parsed,
+                semantic_ir=TaskSemanticIR(
+                    task_id=parsed.task_id,
+                    device_id=parsed.device_id,
+                    revision=parsed.revision,
+                    raw_goal="在当前文件传输助手聊天中向上滑动一次",
+                    surfaces=(
+                        SurfaceRef(
+                            surface_id="surface_current",
+                            kind="current_surface",
+                        ),
+                    ),
+                    entities=(),
+                    effects=(),
+                    constraints=(
+                        ConstraintIntent(
+                            constraint_id="constraint_action",
+                            kind="required_action",
+                            value=action,
+                            authoritative=True,
+                        ),
+                    ),
+                    subgoals=(
+                        SemanticSubgoal(
+                            subgoal_id=str(parsed.current_subgoal["subgoal_id"]),
+                            surface_ref="surface_current",
+                            status="active",
+                            external_impact="navigation_only",
+                            constraint_refs=("constraint_action",),
+                        ),
+                    ),
+                ),
+            )
+
+        title = UIElement(
+            element_id="page_title",
+            role="text",
+            meaning="page_title",
+            label="文件传输助手",
+            bounds=(0.35, 0.01, 0.65, 0.06),
+            confidence=0.99,
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        message_list = UIElement(
+            element_id="message_list",
+            role="container",
+            meaning="message_list_area",
+            label="聊天记录列表",
+            bounds=(0.0, 0.06, 1.0, 0.7),
+            confidence=0.99,
+            states={"fully_visible": True, "scrollable": True},
+        )
+        observation = trusted_observation(
+            self.frames,
+            elements=(title, message_list),
+            observation_id="obs_17171717171717171717171717171717",
+        )
+
+        swipe_context = with_required_action("swipe")
+        self.assertIsNone(_exact_text_candidate_block(swipe_context, observation))
+        self.assertEqual(set(), _required_exact_candidate_ids(swipe_context, observation))
+        choices = _selection_choices(
+            swipe_context,
+            observation,
+            frozenset({"swipe"}),
+        )
+        self.assertEqual(
+            {"up", "down", "left", "right"},
+            {item["direction"] for item in choices},
+        )
+
+        missing_identity = trusted_observation(
+            self.frames,
+            elements=(message_list,),
+            observation_id="obs_18181818181818181818181818181818",
+        )
+        self.assertEqual(
+            "exact_text_missing",
+            _exact_text_candidate_block(swipe_context, missing_identity)[1],
+        )
+
+        tap_context = with_required_action("tap_semantic")
+        self.assertEqual(
+            "exact_text_missing",
+            _exact_text_candidate_block(tap_context, observation)[1],
+        )
 
     def decide(
         self,

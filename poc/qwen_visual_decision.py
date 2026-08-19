@@ -3500,6 +3500,24 @@ def _exact_text_candidate_block(
     if _launcher_app_entry_candidate_ids(context, observation):
         return None
     for required_text in context.exact_text_requirements:
+        identity_matches = _identity_scoped_exact_text_matches(
+            context,
+            observation,
+            required_text,
+        )
+        if identity_matches is not None:
+            if not identity_matches:
+                return (
+                    f"当前可信页面身份中不存在逐字一致文字：{required_text}",
+                    "exact_text_missing",
+                )
+            if len(identity_matches) != 1:
+                return (
+                    f"逐字一致页面身份不唯一：{required_text}，"
+                    f"共{len(identity_matches)}个",
+                    "exact_text_ambiguous",
+                )
+            continue
         matches = _matching_exact_text_candidates(
             context,
             observation,
@@ -3526,6 +3544,20 @@ def _required_exact_candidate_ids(
         return set()
     result: set[str] = set()
     for required_text in context.exact_text_requirements:
+        identity_matches = _identity_scoped_exact_text_matches(
+            context,
+            observation,
+            required_text,
+        )
+        if identity_matches is not None:
+            if len(identity_matches) != 1:
+                raise GenericStepPlanningError(
+                    "逐字一致页面身份缺少本地唯一可信候选。"
+                )
+            # Swipe/back/home/wait/reveal-navigation do not act on the title
+            # or identity anchor itself.  The exact text proves the current
+            # surface only; it must not become an element-bound action target.
+            continue
         matches = _matching_exact_text_candidates(
             context,
             observation,
@@ -3592,6 +3624,41 @@ def _matching_identity_text_candidates(
         )
         and required_text in (element.label, *element.evidence)
     ]
+
+
+_IDENTITY_SCOPED_EXACT_TEXT_ACTIONS = frozenset(
+    {
+        "swipe",
+        "back",
+        "home",
+        "reveal_system_navigation",
+        "wait_for_change",
+    }
+)
+
+
+def _identity_scoped_exact_text_matches(
+    context: QwenTaskContext,
+    observation: TrustedObservation,
+    required_text: str,
+) -> list[str] | None:
+    """Resolve exact text as surface identity for non-element actions.
+
+    A literal carried by the legacy transport may name the current page or
+    container (for example a conversation title) while the typed active
+    action is a viewport gesture or a coordinate-free system action.  In that
+    case the literal must still be uniquely visible, but binding the physical
+    action to that title would invert the entity relation.  Element-bound
+    actions deliberately keep the existing strict target requirement.
+    """
+
+    required_actions = _typed_required_action_kinds(context)
+    if (
+        len(required_actions) != 1
+        or not required_actions.issubset(_IDENTITY_SCOPED_EXACT_TEXT_ACTIONS)
+    ):
+        return None
+    return _matching_identity_text_candidates(observation, required_text)
 
 
 def _matching_exact_text_candidates(

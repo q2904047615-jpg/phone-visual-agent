@@ -6011,11 +6011,15 @@ def _validated_keyboard_backspace_key(
         label,
         re.IGNORECASE,
     ):
-        raise UISceneError("backspace_key 缺少逐字可见退格图形。")
+        # An exact-shaped but semantically unsupported optional claim cannot
+        # authorize deletion. Revoke only this candidate so independent input
+        # facts or a literal key can still be used; a clear operation will
+        # remain blocked because no backspace geometry is minted.
+        return None
     if value.get("fully_visible") is not True or not _valid_1000_bounds(
         value.get("bounds")
     ):
-        raise UISceneError("backspace_key 必须完整可见且 bounds 有效。")
+        return None
     confidence = _audit_confidence(value.get("confidence"), "backspace_key")
     bounds = tuple(float(part) for part in value["bounds"])
     if confidence < 0.9 or not _bounds_inside(
@@ -6149,7 +6153,10 @@ def _validated_keyboard_layout_switches(
             or source != current_layout
             or not _valid_1000_bounds(item.get("bounds"))
         ):
-            raise UISceneError("layout_switch 方向或 bounds 无效。")
+            # Keep strict schema/type checks, but revoke an unsupported
+            # optional direction instead of allowing it to veto an unrelated
+            # valid literal key. No local switch element is minted from it.
+            continue
         bounds = tuple(float(part) for part in item["bounds"])
         confidence = _audit_confidence(item.get("confidence"), "layout_switch")
         if (

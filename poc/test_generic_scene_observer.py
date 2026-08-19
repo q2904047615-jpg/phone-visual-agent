@@ -45,6 +45,7 @@ from generic_scene_observer import (
     _strip_model_authored_local_attestations,
     _targeted_prompt,
     _validated_keyboard_layout_switches,
+    _validated_keyboard_backspace_key,
     _validated_keyboard_literal_keys,
 )
 from ocr_runtime import OcrMatch
@@ -5299,16 +5300,21 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         invalid = json.loads(json.dumps(audit, ensure_ascii=False))
         invalid["keyboard"]["backspace_key"]["label"] = "机器人"
-        with self.assertRaisesRegex(VisionAgentError, "backspace_key"):
-            _apply_input_structure_audit(
-                base_scene,
-                json.dumps(invalid, ensure_ascii=False),
-                fingerprint="frame-invalid-backspace-label",
-                goal_context={
-                    "objective": "消息输入框最终只显示 stage，不要发送",
-                    "entities": {"input_text": "stage"},
-                },
-            )
+        scene_without_backspace = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(invalid, ensure_ascii=False),
+            fingerprint="frame-invalid-backspace-label",
+            goal_context={
+                "objective": "消息输入框最终只显示 stage，不要发送",
+                "entities": {"input_text": "stage"},
+            },
+        )
+        self.assertEqual(
+            "qwerty",
+            scene_without_backspace.get_element(
+                "local_audited_input_1"
+            ).states["keyboard_geometry"]["type"],
+        )
 
     def test_input_audit_mints_layout_and_case_switches_only_for_next_step(self) -> None:
         base_scene = _parse_scene(
@@ -5402,6 +5408,32 @@ class GenericSceneObserverTests(unittest.TestCase):
                 current_layout="qwerty",
             ),
         )
+        with self.assertRaisesRegex(UISceneError, "字段不符合协议"):
+            _validated_keyboard_layout_switches(
+                [
+                    {
+                        "label": "ABC",
+                        "bounds": [80, 880, 200, 980],
+                        "confidence": 0.99,
+                        "current_layout": "symbol",
+                        "target_layout": "qwerty",
+                        "action": "tap",
+                    }
+                ],
+                keyboard_bounds=keyboard_bounds,
+                current_layout="symbol",
+            )
+        with self.assertRaisesRegex(UISceneError, "字段不符合协议"):
+            _validated_keyboard_backspace_key(
+                {
+                    "label": "⌫",
+                    "bounds": [800, 820, 940, 900],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                    "action": "tap",
+                },
+                keyboard_bounds=keyboard_bounds,
+            )
         self.assertEqual(
             [
                 {
@@ -5426,7 +5458,8 @@ class GenericSceneObserverTests(unittest.TestCase):
                 current_layout="symbol",
             ),
         )
-        with self.assertRaisesRegex(UISceneError, "方向或 bounds"):
+        self.assertEqual(
+            [],
             _validated_keyboard_layout_switches(
                 [
                     {
@@ -5439,7 +5472,84 @@ class GenericSceneObserverTests(unittest.TestCase):
                 ],
                 keyboard_bounds=keyboard_bounds,
                 current_layout="symbol",
-            )
+            ),
+        )
+
+    def test_valid_literal_key_survives_invalid_optional_keyboard_claims(
+        self,
+    ) -> None:
+        base_scene = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="frame-symbol-optional-claims",
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="message-field",
+                    bounds=[150, 530, 680, 590],
+                    text="复杂输入验收2026",
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 600, 1000, 1000],
+                "layout": "symbol_grid",
+                "input_mode": "chinese_pinyin",
+                "case_mode": "unknown",
+                "qwerty_anchors": None,
+                "mode_switch": None,
+                "backspace_key": {
+                    "label": "✘",
+                    "bounds": [220, 820, 360, 880],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                },
+                "case_switch": None,
+                "literal_keys": [
+                    {
+                        "value": "：",
+                        "label": "：",
+                        "key_kind": "character",
+                        "bounds": [360, 660, 500, 720],
+                        "confidence": 1.0,
+                        "fully_visible": True,
+                    }
+                ],
+                "layout_switches": [
+                    {
+                        "label": "常用",
+                        "bounds": [80, 660, 220, 720],
+                        "confidence": 1.0,
+                        "current_layout": "symbol_grid",
+                        "target_layout": "frequent",
+                    },
+                    {
+                        "label": "返回",
+                        "bounds": [80, 880, 220, 940],
+                        "confidence": 1.0,
+                        "current_layout": "symbol_grid",
+                        "target_layout": "previous",
+                    },
+                ],
+            },
+        )
+
+        scene = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="frame-symbol-optional-claims",
+            goal_context={
+                "objective": "输入框最终逐字显示复杂输入验收2026：且不发送",
+                "entities": {"input_text": "复杂输入验收2026："},
+            },
+        )
+
+        target = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(target)
+        self.assertEqual("local_audited_literal_key_1", target.element_id)
+        self.assertEqual("：", target.states["key_value"])
+        field = scene.get_element("local_audited_input_1")
+        self.assertNotIn("keyboard_geometry", field.states)
 
     def test_hidden_keyboard_only_attestation_rejects_structured_keyboard_conflict(self) -> None:
         compact = scene_payload()

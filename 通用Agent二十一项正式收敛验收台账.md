@@ -1480,3 +1480,35 @@ Qwen、DeepSeek、编排和 Web 关联回归 `874/874`，Python 完整回归 `14
 离线结果：条件清空、active 转交及歧义/持久数据/文字不符正反定向 `3/3`，DeepSeek、语义 IR 与
 编排关联回归 `414/414`，Python 完整回归 `1492/1492`。完整回归只有既知测试子进程
 `ResourceWarning`，无断言失败。
+
+## 45. 合并式 App 内页导航在 Launcher 提前要求内页逐字标签
+
+### 45.1 验收台账与根因证据
+
+- 新会话 `d1b1cd45681e48cebf924fa50b749ab3` 的 Home 动作 matched；revision 3 活动子目标为“打开微信
+  并进入文件传输助手聊天页面”，Launcher trusted scene 唯一显示完整“微信”入口。
+- DeepSeek 合法地把 App 进入和内页定位合成一个高层导航节点；Qwen 本地 exact-text 前置门却在候选
+  生成前无条件要求全局 `target_ui_label=文件传输助手`，因此在 Launcher 以 `physical_actions=0`
+  blocked，根本没有机会使用 typed App surface 的“微信”入口。
+- 这是任意“进入 App 内某页/对象”的分层可见性缺口；要求 DeepSeek 永远拆成两个固定步骤会把模型
+  编排格式误当能力合同，也不能适应其他 App 的合并式目标。
+
+### 45.2 同类样本、通用修复与边界
+
+- 仅当当前 scene 是 Launcher、活动 semantic subgoal 绑定一个 typed App surface，且 trusted scene 中
+  恰好一个完整高置信候选的逐字 label 等于该 App 的 `app_name` 时，暂缓本轮内页 exact/recipient 门。
+- 同一轮动作候选收窄为这个唯一 App 入口的正式 `tap_semantic`；不得选择 Home、滑动、其他 App 或
+  内页对象。动作后必须重新观察，进入 App 后暂缓立即失效，原内页逐字标签/收件人身份门恢复。
+- App 入口缺失、重复、近似名、不完整、低置信、当前不是 Launcher、typed surface 缺失或正式视觉
+  权威没有生成对应 tap 候选时不暂缓，继续 0 动作阻塞。
+
+### 45.3 验证与停止条件
+
+- 正测合并“打开 App 并进入内页”在 Launcher 只保留唯一 App tap；反测重复/近似/不完整入口、错误
+  前台 App，以及进入 App 后内页标签仍必须逐字匹配。保留 Launcher 入口不能直接证明内页完成的既有测。
+- 运行 Qwen/编排核心和一次完整 Python 回归；全绿后本地提交并只重载项目 Uvicorn，再创建一个全新
+  会话。旧 blocked 会话不续跑，任一物理动作不匹配即停止。
+
+离线结果：合并式 App 内页导航及重复/近似/不完整/错误前台正反例 `3/3`，Qwen
+与编排核心 `285/285`，observer、Qwen、DeepSeek、编排和 Web 关联回归 `877/877`，
+Python 完整回归 `1493/1493`。完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。

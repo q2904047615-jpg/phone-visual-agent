@@ -17,6 +17,8 @@ from qwen_visual_decision import (
     QwenVisualDecisionObserver,
     TrustedObservation,
     _decision_retry_prompt,
+    _exact_text_candidate_block,
+    _launcher_app_entry_candidate_ids,
     _scene_matches_target_app_surface,
     _selection_choices,
 )
@@ -602,6 +604,119 @@ class QwenVisualDecisionTests(unittest.TestCase):
             ("tap_semantic", "file-transfer"),
             tuple((item["action"], item.get("element_id")) for item in choices),
         )
+
+    def test_launcher_defers_inner_literal_only_for_unique_typed_app_entry(self) -> None:
+        raw = task_context()
+        raw["goal"]["entities"].update(
+            recipient="文件传输助手",
+            target_ui_label="文件传输助手",
+        )
+        raw["current_subgoal"].update(
+            objective="打开微信并进入文件传输助手聊天页面",
+            completion_conditions=["文件传输助手聊天页面可见"],
+        )
+        parsed = QwenTaskContext.from_dict(raw)
+        parsed = replace(
+            parsed,
+            semantic_ir=TaskSemanticIR(
+                task_id=parsed.task_id,
+                device_id=parsed.device_id,
+                revision=parsed.revision,
+                raw_goal="打开微信并进入文件传输助手聊天页面",
+                surfaces=(
+                    SurfaceRef(
+                        surface_id="surface_wechat",
+                        kind="app",
+                        app_id="wechat",
+                        app_name="微信",
+                    ),
+                ),
+                entities=(
+                    SemanticEntity(
+                        entity_id="entity_recipient",
+                        entity_type="party",
+                        role="recipient",
+                        value="文件传输助手",
+                        source_span=SourceSpan(7, 13),
+                        authority="user_literal",
+                    ),
+                ),
+                effects=(),
+                subgoals=(
+                    SemanticSubgoal(
+                        subgoal_id=str(parsed.current_subgoal["subgoal_id"]),
+                        surface_ref="surface_wechat",
+                        status="active",
+                        external_impact="navigation_only",
+                    ),
+                ),
+            ),
+        )
+
+        def launcher_scene(*elements: UIElement) -> UIScene:
+            return UIScene(
+                app_id="launcher",
+                screen_id="home_screen",
+                summary="手机主屏幕",
+                elements=elements,
+                stable=True,
+                confidence=0.99,
+                fingerprint=scene_for(self.frames).fingerprint,
+            )
+
+        app_entry = UIElement(
+            element_id="open-wechat",
+            role="button",
+            meaning="open_wechat",
+            label="微信",
+            bounds=(0.36, 0.63, 0.59, 0.78),
+            confidence=0.99,
+            states={"goal_relevant": True, "fully_visible": True},
+        )
+        observation = trusted_observation(
+            self.frames,
+            scene=launcher_scene(app_entry),
+        )
+
+        self.assertEqual(
+            ("open-wechat",),
+            _launcher_app_entry_candidate_ids(parsed, observation),
+        )
+        self.assertIsNone(_exact_text_candidate_block(parsed, observation))
+        choices = _selection_choices(
+            parsed,
+            observation,
+            frozenset({"home", "swipe", "tap_semantic"}),
+        )
+        self.assertEqual(
+            [("tap_semantic", "open-wechat")],
+            [(item["action"], item.get("element_id")) for item in choices],
+        )
+
+        variants = (
+            launcher_scene(
+                app_entry,
+                replace(
+                    app_entry,
+                    element_id="duplicate",
+                    bounds=(0.66, 0.63, 0.89, 0.78),
+                ),
+            ),
+            launcher_scene(replace(app_entry, label="微信助手")),
+            launcher_scene(
+                replace(app_entry, states={"goal_relevant": True, "fully_visible": False})
+            ),
+            replace(
+                launcher_scene(app_entry),
+                app_id="微信",
+                screen_id="微信消息列表",
+            ),
+        )
+        for scene in variants:
+            with self.subTest(app_id=scene.app_id, count=len(scene.elements)):
+                variant = trusted_observation(self.frames, scene=scene)
+                self.assertEqual((), _launcher_app_entry_candidate_ids(parsed, variant))
+                self.assertIsNotNone(_exact_text_candidate_block(parsed, variant))
 
     def test_recipient_exact_text_applies_only_to_bound_subgoal(self) -> None:
         context = task_context()

@@ -1627,6 +1627,7 @@ def _selection_choices(
         and str(item.get("element_id") or "").strip()
     )
     choices: list[dict[str, Any]] = []
+    launcher_entry_ids = _launcher_app_entry_candidate_ids(context, observation)
     formal_report = None
     if context.semantic_ir is not None:
         try:
@@ -1742,6 +1743,8 @@ def _selection_choices(
         )
 
     for action in sorted(available_action_kinds):
+        if launcher_entry_ids and action != "tap_semantic":
+            continue
         if force_launcher_entry and action != "home":
             continue
         if action in {"back", "home", "reveal_system_navigation", "wait_for_change"}:
@@ -1771,6 +1774,10 @@ def _selection_choices(
         eligible = tuple(
             item
             for item in candidates
+            if (
+                not launcher_entry_ids
+                or str(item.get("element_id") or "") in launcher_entry_ids
+            )
             if str(item.get("role") or "") not in {"keyboard_key", "dialog"}
             and isinstance(item.get("states"), Mapping)
             and (
@@ -3443,12 +3450,55 @@ def _bounds_overlap(
     }
 
 
+def _launcher_app_entry_candidate_ids(
+    context: QwenTaskContext,
+    observation: TrustedObservation,
+) -> tuple[str, ...]:
+    """Return one typed App entry before applying inner-page text gates."""
+
+    semantic_ir = context.semantic_ir
+    scene = observation.scene
+    if semantic_ir is None:
+        return ()
+    current_identity = f"{scene.foreground_app_id} {scene.screen_id}".casefold()
+    if not any(token in current_identity for token in ("launcher", "home_screen", "desktop")):
+        return ()
+    active_id = str(context.current_subgoal.get("subgoal_id") or "")
+    typed_subgoal = next(
+        (item for item in semantic_ir.subgoals if item.subgoal_id == active_id),
+        None,
+    )
+    surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
+    target_surface = (
+        surfaces.get(typed_subgoal.surface_ref)
+        if typed_subgoal is not None
+        else None
+    )
+    if target_surface is None or target_surface.kind != "app":
+        return ()
+    app_name = str(target_surface.app_name or "").strip()
+    if not app_name:
+        return ()
+    matches = tuple(
+        element.element_id
+        for element in scene.elements
+        if element.role in {"button", "icon", "list_item"}
+        and element.label == app_name
+        and float(element.confidence) >= MIN_TARGET_CONFIDENCE
+        and element.states.get("goal_relevant") is True
+        and element.states.get("fully_visible") is True
+    )
+    return matches if len(matches) == 1 else ()
+
+
 def _exact_text_candidate_block(
     context: QwenTaskContext,
     observation: TrustedObservation,
 ) -> tuple[str, str] | None:
     """Reject missing or ambiguous structured exact-text targets locally."""
 
+    if _launcher_app_entry_candidate_ids(context, observation):
+        return None
     for required_text in context.exact_text_requirements:
         matches = _matching_exact_text_candidates(
             context,
@@ -3472,6 +3522,8 @@ def _required_exact_candidate_ids(
     context: QwenTaskContext,
     observation: TrustedObservation,
 ) -> set[str]:
+    if _launcher_app_entry_candidate_ids(context, observation):
+        return set()
     result: set[str] = set()
     for required_text in context.exact_text_requirements:
         matches = _matching_exact_text_candidates(
@@ -3491,6 +3543,8 @@ def _identity_text_candidate_block(
     context: QwenTaskContext,
     observation: TrustedObservation,
 ) -> tuple[str, str] | None:
+    if _launcher_app_entry_candidate_ids(context, observation):
+        return None
     for required_text in context.identity_text_requirements:
         matches = _matching_identity_text_candidates(observation, required_text)
         if not matches:
@@ -3504,6 +3558,8 @@ def _required_identity_candidate_ids(
     context: QwenTaskContext,
     observation: TrustedObservation,
 ) -> set[str]:
+    if _launcher_app_entry_candidate_ids(context, observation):
+        return set()
     result: set[str] = set()
     for required_text in context.identity_text_requirements:
         matches = _matching_identity_text_candidates(observation, required_text)

@@ -3312,6 +3312,138 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual("fresh_input", rebound.params["element_id"])
         self.assertEqual("text_input_field", rebound.params["target"])
 
+    def test_rebind_accepts_unknown_to_known_keyboard_case_enrichment(self):
+        planned_states = {
+            "goal_relevant": True,
+            "fully_visible": True,
+            "value": "",
+            "focused": True,
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "chinese_pinyin",
+            "keyboard_case_mode": "unknown",
+        }
+        planned = UIScene(
+            app_id="chat",
+            screen_id="conversation",
+            summary="唯一空白输入框已聚焦",
+            elements=(
+                UIElement(
+                    element_id="planned_input",
+                    role="input",
+                    meaning="application_text_input",
+                    label="",
+                    bounds=(0.15, 0.54, 0.69, 0.59),
+                    confidence=1.0,
+                    states=planned_states,
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh_states = dict(planned_states)
+        fresh_states.update(
+            {
+                "goal_relevant": False,
+                "keyboard_case_mode": "lower",
+            }
+        )
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    element_id="fresh_input",
+                    bounds=(0.153, 0.54, 0.69, 0.585),
+                    states=fresh_states,
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        adapter = self._adapter(FakeSceneObserver([]), FakeRobot())
+
+        rebound = adapter._rebind_action(
+            SemanticAction(
+                node_id="input-long-text",
+                action="input_verified_text",
+                params={
+                    "element_id": "planned_input",
+                    "target": "application_text_input",
+                    "role": "input",
+                    "label": "",
+                    "states": planned_states,
+                    "text": "复杂输入验收2026",
+                    "formal_candidate_id": "candidate-long-text",
+                },
+            ),
+            planned,
+            fresh,
+        )
+
+        self.assertEqual("fresh_input", rebound.params["element_id"])
+        self.assertEqual("lower", rebound.params["states"]["keyboard_case_mode"])
+
+    def test_rebind_rejects_known_keyboard_case_change(self):
+        planned_states = {
+            "fully_visible": True,
+            "value": "",
+            "focused": True,
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "keyboard_case_mode": "lower",
+        }
+        planned = UIScene(
+            app_id="form",
+            screen_id="edit",
+            summary="输入框已聚焦",
+            elements=(
+                UIElement(
+                    element_id="planned_input",
+                    role="input",
+                    meaning="application_text_input",
+                    label="",
+                    bounds=(0.1, 0.2, 0.9, 0.3),
+                    confidence=1.0,
+                    states=planned_states,
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh_states = dict(planned_states)
+        fresh_states["keyboard_case_mode"] = "upper"
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    element_id="fresh_input",
+                    states=fresh_states,
+                ),
+            ),
+            fingerprint="fresh",
+        )
+        adapter = self._adapter(FakeSceneObserver([]), FakeRobot())
+
+        with self.assertRaisesRegex(
+            GenericActionAdapterError,
+            "目标语义不再严格唯一",
+        ):
+            adapter._rebind_action(
+                SemanticAction(
+                    node_id="input-latin",
+                    action="input_verified_text",
+                    params={
+                        "element_id": "planned_input",
+                        "target": "application_text_input",
+                        "role": "input",
+                        "label": "",
+                        "states": planned_states,
+                        "text": "agent",
+                        "formal_candidate_id": "candidate-latin",
+                    },
+                ),
+                planned,
+                fresh,
+            )
+
     def test_changed_target_region_before_confirmation_stops_without_robot_action(self):
         planned = scene("planned")
         fresh = scene("fresh", bounds=(0.65, 0.65, 0.85, 0.85))

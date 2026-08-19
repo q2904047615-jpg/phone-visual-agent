@@ -1692,7 +1692,33 @@ class GenericSingleActionAdapter:
                 key: value
                 for key, value in states.items()
                 if key not in {"goal_relevant", "keyboard_geometry"}
+                and not (
+                    key == "keyboard_case_mode"
+                    and str(value or "").strip().casefold() == "unknown"
+                )
             }
+
+        def compatible_rebind_states(
+            original_states: dict[str, Any],
+            current_states: dict[str, Any],
+        ) -> tuple[dict[str, Any], dict[str, Any]]:
+            """Return comparable state views without treating unknown as fact.
+
+            ``keyboard_case_mode=unknown`` is an explicit lack of an
+            observation, not a claim that the keyboard has a third case mode.
+            A subsequent local audit may resolve it to ``lower`` or ``upper``
+            while every action-relevant input precondition remains unchanged.
+            Only that originally unknown field is removed from the fresh view;
+            known case changes and every other stable state still fail closed.
+            """
+
+            original_stable = stable_rebind_states(original_states)
+            current_stable = stable_rebind_states(current_states)
+            if str(
+                original_states.get("keyboard_case_mode") or ""
+            ).strip().casefold() == "unknown":
+                current_stable.pop("keyboard_case_mode", None)
+            return original_stable, current_stable
 
         def rebind_element(prefix: str = "") -> UIElement:
             original_id = str(
@@ -1885,8 +1911,12 @@ class GenericSingleActionAdapter:
                     and original.role == "input"
                     and current.role == "input"
                     and current.label == original.label
-                    and stable_rebind_states(dict(current.states))
-                    == stable_rebind_states(dict(original.states))
+                    and compatible_rebind_states(
+                        dict(original.states), dict(current.states)
+                    )[1]
+                    == compatible_rebind_states(
+                        dict(original.states), dict(current.states)
+                    )[0]
                 )
                 if not (
                     labelled_drag_endpoint
@@ -1902,8 +1932,12 @@ class GenericSingleActionAdapter:
                         "确认时目标语义已经变化，旧确认失效："
                         f"{original.meaning} -> {current.meaning}。"
                     )
-            original_stable_states = stable_rebind_states(dict(original.states))
-            current_stable_states = stable_rebind_states(dict(current.states))
+            (
+                original_stable_states,
+                current_stable_states,
+            ) = compatible_rebind_states(
+                dict(original.states), dict(current.states)
+            )
             states_match = current_stable_states == original_stable_states
             if (
                 not states_match

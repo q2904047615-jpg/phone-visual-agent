@@ -3726,6 +3726,42 @@ def _matching_surface_identity_candidates(
     ]
 
 
+def _surface_descriptor_identity_candidate_ids(
+    scene: UIScene,
+    required_text: str,
+) -> tuple[str, ...]:
+    """Bind a generic page descriptor to its visible literal title.
+
+    A legacy ``target_ui_label`` can name the current page while the physical
+    target is a separate input or button.  Only a strict generic type suffix
+    plus a shorter visible title establishes this relation.  Exact labels stay
+    element targets; zero or multiple titles never grant action authority.
+    """
+
+    required = str(required_text or "").strip()
+    if not required:
+        return ()
+    matches = tuple(
+        element.element_id
+        for element in scene.elements
+        if float(element.confidence) >= MIN_TARGET_CONFIDENCE
+        and element.states.get("visible") is not False
+        and element.role != "input"
+        and (
+            element.states.get("identity_anchor") is True
+            or element.states.get("goal_relevant") is True
+            or element.meaning.strip().casefold()
+            in {"conversation_title", "page_title"}
+        )
+        and _surface_identity_text_matches(element.label, required)
+    )
+    has_descriptor_title = any(
+        element.element_id in matches and element.label.strip() != required
+        for element in scene.elements
+    )
+    return matches if has_descriptor_title else ()
+
+
 def _identity_scoped_exact_text_matches(
     context: QwenTaskContext,
     observation: TrustedObservation,
@@ -3741,6 +3777,12 @@ def _identity_scoped_exact_text_matches(
     actions deliberately keep the existing strict target requirement.
     """
 
+    descriptor_matches = _surface_descriptor_identity_candidate_ids(
+        observation.scene,
+        required_text,
+    )
+    if descriptor_matches:
+        return list(descriptor_matches)
     required_actions = _typed_required_action_kinds(context)
     if (
         len(required_actions) != 1

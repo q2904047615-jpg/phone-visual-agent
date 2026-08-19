@@ -1523,7 +1523,15 @@ def compile_legacy_graph_shadow(
         ("long_press", re.compile(r"长按|long[ _-]?press", re.I)),
         ("drag", re.compile(r"拖动|拖拽|drag", re.I)),
         ("swipe", re.compile(r"滑动|上划|下划|左划|右划|swipe", re.I)),
-        ("input_verified_text", re.compile(r"输入|填写|键入|type|input", re.I)),
+        (
+            "input_verified_text",
+            re.compile(
+                r"输入(?!框|法|区域|状态|控件|字段|页面|界面|模式|键盘)|填写|键入|"
+                r"\btype\b|\binput\b(?!\s*(?:field|box|area|control|state|"
+                r"mode|method|page|screen|keyboard)\b)",
+                re.I,
+            ),
+        ),
         ("home", re.compile(r"home\s*键|回到主页|回到主桌面", re.I)),
         (
             "back",

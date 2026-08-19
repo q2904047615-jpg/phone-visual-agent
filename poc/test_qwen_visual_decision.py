@@ -940,6 +940,54 @@ class QwenVisualDecisionTests(unittest.TestCase):
             _exact_text_candidate_block(parsed, ambiguous)[1],
         )
 
+    def test_page_descriptor_does_not_become_input_element_label(self) -> None:
+        raw = task_context(task_id="task_page_input", revision=21)
+        raw["goal"]["entities"] = {
+            "target_ui_label": "文件传输助手聊天页面",
+            "input_text": "live21",
+        }
+        raw["current_subgoal"].update(
+            objective="在唯一空白消息输入框中输入 live21",
+            completion_conditions=["输入框内容为 live21"],
+        )
+        context = QwenTaskContext.from_dict(raw)
+        title = UIElement(
+            element_id="title",
+            role="text",
+            meaning="page_title",
+            label="文件传输助手",
+            bounds=(0.3, 0.01, 0.7, 0.07),
+            confidence=0.99,
+            states={"goal_relevant": False, "fully_visible": True},
+        )
+        field = UIElement(
+            element_id="field",
+            role="input",
+            meaning="application_text_input",
+            label="",
+            bounds=(0.1, 0.8, 0.9, 0.9),
+            confidence=0.99,
+            states={"goal_relevant": True, "fully_visible": True, "value": ""},
+        )
+        observation = trusted_observation(
+            self.frames,
+            elements=(title, field),
+            observation_id="obs_23232323232323232323232323232323",
+        )
+
+        self.assertIsNone(_exact_text_candidate_block(context, observation))
+        self.assertEqual(set(), _required_exact_candidate_ids(context, observation))
+
+        missing_title = trusted_observation(
+            self.frames,
+            elements=(field,),
+            observation_id="obs_24242424242424242424242424242424",
+        )
+        self.assertEqual(
+            "exact_text_missing",
+            _exact_text_candidate_block(context, missing_title)[1],
+        )
+
     def decide(
         self,
         provider,

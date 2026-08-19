@@ -124,6 +124,62 @@ class RawResponseProvider:
 
 
 class TaskSemanticIRTests(unittest.TestCase):
+    def test_input_carrier_presence_does_not_mint_input_action(self):
+        payload = current_send_failure_payload()
+        payload["subgoals"][0]["objective"] = (
+            "文件传输助手聊天页面和唯一空白消息输入框可见"
+        )
+        payload["subgoals"][0]["completion_conditions"] = [
+            "唯一空白消息输入框可见"
+        ]
+        payload["subgoals"][1]["objective"] = (
+            "在唯一空白消息输入框中输入“你好”"
+        )
+        graph = graph_from_payload(payload)
+
+        authority = compile_formal_semantic_authority(graph)
+        constraints = {
+            item.constraint_id: item for item in authority.semantic_ir.constraints
+        }
+        actions_by_subgoal = {
+            item.subgoal_id: {
+                constraints[ref].value
+                for ref in item.constraint_refs
+                if constraints[ref].kind == "required_action"
+            }
+            for item in authority.semantic_ir.subgoals
+        }
+
+        self.assertNotIn("input_verified_text", actions_by_subgoal["open_wechat"])
+        self.assertIn("input_verified_text", actions_by_subgoal["send_message"])
+
+    def test_english_input_carrier_presence_does_not_mint_input_action(self):
+        payload = current_send_failure_payload()
+        payload["subgoals"][0]["objective"] = (
+            "The only input field is visible and empty"
+        )
+        payload["subgoals"][0]["completion_conditions"] = [
+            "The input field is visible"
+        ]
+        payload["subgoals"][1]["objective"] = "Type 你好 in the input field"
+        graph = graph_from_payload(payload)
+
+        authority = compile_formal_semantic_authority(graph)
+        constraints = {
+            item.constraint_id: item for item in authority.semantic_ir.constraints
+        }
+        actions_by_subgoal = {
+            item.subgoal_id: {
+                constraints[ref].value
+                for ref in item.constraint_refs
+                if constraints[ref].kind == "required_action"
+            }
+            for item in authority.semantic_ir.subgoals
+        }
+
+        self.assertNotIn("input_verified_text", actions_by_subgoal["open_wechat"])
+        self.assertIn("input_verified_text", actions_by_subgoal["send_message"])
+
     def test_current_send_failure_projects_to_automatic_typed_effect(self):
         report = compile_legacy_graph_shadow(graph_from_payload())
 

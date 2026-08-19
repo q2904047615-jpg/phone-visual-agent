@@ -1456,6 +1456,62 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertFalse(denied.allowed)
         self.assertIn("键盘模式", denied.reason)
 
+    def test_page_descriptor_identity_does_not_replace_input_target(self) -> None:
+        field = UIElement(
+            element_id="candidate-1",
+            role="input",
+            meaning="application_text_input",
+            label="",
+            bounds=(0.1, 0.8, 0.9, 0.9),
+            confidence=0.97,
+            states={
+                "focused": True,
+                "value": "",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+                "goal_relevant": True,
+                "fully_visible": True,
+            },
+            evidence=("空白消息输入框",),
+        )
+        title = UIElement(
+            element_id="title",
+            role="text",
+            meaning="page_title",
+            label="文件传输助手",
+            bounds=(0.3, 0.01, 0.7, 0.07),
+            confidence=0.99,
+            states={"goal_relevant": False, "fully_visible": True},
+            evidence=("顶部标题",),
+        )
+        scene = UIScene(
+            app_id="wechat",
+            screen_id="file_transfer_assistant_chat",
+            summary="文件传输助手聊天页面，空白消息输入框已聚焦",
+            elements=(field, title),
+            stable=True,
+            confidence=0.99,
+            fingerprint="frame-page-input",
+        )
+        decision = _decision(scene, action_kind="input_verified_text")
+        decision.proposal.action.params["text"] = "agent"
+
+        result = self.policy.evaluate(
+            task_context=_context(
+                entities={
+                    "target_ui_label": "文件传输助手聊天页面",
+                    "input_text": "agent",
+                },
+                subgoal_objective="在唯一空白消息输入框中输入 agent",
+                subgoal_completion_conditions=("输入框内容为 agent",),
+            ),
+            trusted_observation=decision.trusted_observation,
+            decision=decision,
+        )
+
+        self.assertTrue(result.allowed, result.reason)
+        self.assertEqual("input", result.canonical_class)
+
     def test_allows_only_locally_bound_exact_ime_candidate(self) -> None:
         field = UIElement(
             element_id="field",

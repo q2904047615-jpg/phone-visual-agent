@@ -33,6 +33,7 @@ from qwen_visual_decision import (
     QwenTaskContext,
     TrustedObservation,
     _scene_matches_target_app_surface,
+    _surface_descriptor_identity_candidate_ids,
 )
 from ui_scene import (
     MIN_TARGET_CONFIDENCE,
@@ -6839,7 +6840,16 @@ class PhaseOneNavigationPolicy:
             if isinstance(goal_entities, Mapping)
             else ""
         )
-        if exact_target_label and element.label.strip() != exact_target_label:
+        surface_identity_ids = (
+            _surface_descriptor_identity_candidate_ids(scene, exact_target_label)
+            if exact_target_label
+            else ()
+        )
+        if (
+            exact_target_label
+            and len(surface_identity_ids) != 1
+            and element.label.strip() != exact_target_label
+        ):
             return self._deny("动作候选没有逐字绑定 goal.entities.target_ui_label。")
         if element.states.get("fully_visible") is False:
             return self._deny("元素绑定动作的目标控件已被观察为不完整可见。")

@@ -20,6 +20,12 @@ from generic_scene_observer import (
     POST_NAVIGATION_RESULT_OBJECTIVE,
     POST_NAVIGATION_RESULT_OBSERVATION_PHASE,
 )
+from input_value_lineage import (
+    InputValueLineageError,
+    TypedInputLineage,
+    TypedInputLineageStore,
+    build_pending_literal_lineage,
+)
 from ocr_runtime import recognize as recognize_ocr
 from observation_images import measure_local_stability
 from orientation_safety import (
@@ -689,6 +695,7 @@ class GenericSingleActionAdapter:
         | None = None,
         require_local_qwerty_row_snap: bool = False,
         device_id: str,
+        input_lineage_store: TypedInputLineageStore | None = None,
     ) -> None:
         self.capture = capture
         self.observer = observer
@@ -707,6 +714,7 @@ class GenericSingleActionAdapter:
         )
         self.qwerty_row_snapper = qwerty_row_snapper
         self.require_local_qwerty_row_snap = bool(require_local_qwerty_row_snap)
+        self.input_lineage_store = input_lineage_store
         try:
             self.device_id = validate_device_id(device_id)
         except OrientationSafetyError as exc:
@@ -777,10 +785,7 @@ class GenericSingleActionAdapter:
                 time.sleep(self.frame_interval)
         paths = self._save_frames(frames, evidence_dir, prefix)
         try:
-            scene = self.observer.observe(
-                frames=frames,
-                goal_context=goal.to_dict(),
-            )
+            scene = self._observe_scene(frames, goal.to_dict())
         except RuntimeError as exc:
             diagnostic_paths = persist_observer_failure_diagnostic(
                 self.observer,
@@ -793,6 +798,22 @@ class GenericSingleActionAdapter:
                 evidence=paths + diagnostic_paths,
             ) from exc
         return scene, frames, paths
+
+    def _observe_scene(
+        self,
+        frames: list[Image.Image] | tuple[Image.Image, ...],
+        goal_context: dict[str, Any],
+        *,
+        input_lineage_override: TypedInputLineage | None = None,
+    ) -> UIScene:
+        kwargs: dict[str, Any] = {
+            "frames": list(frames),
+            "goal_context": goal_context,
+        }
+        if getattr(self.observer, "input_lineage_store", None) is not None:
+            kwargs["device_id"] = self.device_id
+            kwargs["input_lineage_override"] = input_lineage_override
+        return self.observer.observe(**kwargs)
 
     def capture_scene(
         self,
@@ -899,6 +920,7 @@ class GenericSingleActionAdapter:
         *,
         before: UIScene,
         resolved: ResolvedSemanticAction,
+        input_lineage_override: TypedInputLineage | None,
         evidence_dir: Path | None,
         evidence_prefix: str,
     ) -> tuple[
@@ -940,9 +962,10 @@ class GenericSingleActionAdapter:
                 ) from exc
             all_paths += paths
             try:
-                after = self.observer.observe(
-                    frames=frames,
-                    goal_context=observation_context,
+                after = self._observe_scene(
+                    frames,
+                    observation_context,
+                    input_lineage_override=input_lineage_override,
                 )
             except RuntimeError as exc:
                 last_error = exc
@@ -1140,10 +1163,7 @@ class GenericSingleActionAdapter:
             before = planned_scene
             if requested_action.action in self.GEOMETRY_BOUND_KINDS:
                 try:
-                    before = self.observer.observe(
-                        frames=before_frames,
-                        goal_context=goal.to_dict(),
-                    )
+                    before = self._observe_scene(before_frames, goal.to_dict())
                 except RuntimeError as exc:
                     diagnostic_paths = persist_observer_failure_diagnostic(
                         self.observer,
@@ -1716,6 +1736,18 @@ class GenericSingleActionAdapter:
             if callable(clear_authorization):
                 clear_authorization()
 
+        pending_input_lineage: TypedInputLineage | None = None
+        if hardware_receipt is not None:
+            try:
+                pending_input_lineage = build_pending_literal_lineage(
+                    device_id=self.device_id,
+                    resolved_action=resolved.to_dict(),
+                    before_scene=before.to_dict(),
+                    hardware_receipt=hardware_receipt,
+                )
+            except (InputValueLineageError, TypeError, ValueError):
+                pending_input_lineage = None
+
         try:
             (
                 after,
@@ -1728,6 +1760,7 @@ class GenericSingleActionAdapter:
                 goal,
                 before=before,
                 resolved=resolved,
+                input_lineage_override=pending_input_lineage,
                 evidence_dir=evidence_dir,
                 evidence_prefix=evidence_prefix,
             )
@@ -1759,6 +1792,25 @@ class GenericSingleActionAdapter:
                 verification_errors = verification_errors + (
                     f"控制器完成证据复核失败：{exc}",
                 )
+
+        if (
+            not verification_errors
+            and self.input_lineage_store is not None
+            and hardware_receipt is not None
+        ):
+            try:
+                self.input_lineage_store.record_verified_literal_action(
+                    device_id=self.device_id,
+                    resolved_action=resolved.to_dict(),
+                    before_scene=before.to_dict(),
+                    after_scene=after.to_dict(),
+                    hardware_receipt=hardware_receipt,
+                )
+            except (InputValueLineageError, OSError, TypeError, ValueError):
+                # The lineage is only a future read-only disambiguation hint.
+                # Failure to persist it must not rewrite a correctly verified
+                # physical action, and it never grants action authority.
+                pass
 
         return GenericActionExecutionResult(
             requested_action=requested_action,

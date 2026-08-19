@@ -55,6 +55,7 @@ from verified_text_transaction import (
     VerifiedTextTransactionError,
     plan_next_verified_input,
 )
+from input_value_lineage import TypedInputLineage, TypedInputLineageStore
 from system_navigation_privacy import (
     SYSTEM_NAVIGATION_PRIVACY_VIEW_VERSION,
     privacy_minimized_system_navigation_view,
@@ -214,8 +215,14 @@ def _geometry_evidence_literal_labels(
 class GenericSceneObserver:
     """Qwen reports the current scene; it never chooses or executes actions."""
 
-    def __init__(self, provider: Any) -> None:
+    def __init__(
+        self,
+        provider: Any,
+        *,
+        input_lineage_store: TypedInputLineageStore | None = None,
+    ) -> None:
         self.provider = provider
+        self.input_lineage_store = input_lineage_store
         self.last_raw_response = ""
         self.last_diagnostics: dict[str, Any] = {}
         self._stage_lock = threading.RLock()
@@ -628,6 +635,8 @@ class GenericSceneObserver:
         *,
         frames: list[Image.Image],
         goal_context: dict[str, Any] | None = None,
+        device_id: str | None = None,
+        input_lineage_override: TypedInputLineage | None = None,
     ) -> UIScene:
         self.last_raw_response = ""
         model_identity = public_model_identity(self.provider.status())
@@ -655,6 +664,7 @@ class GenericSceneObserver:
         input_structure_audit_used = False
         input_structure_audit_retry_used = False
         input_structure_audit_isolated_from_attested_non_input = False
+        input_lineage_used = False
         system_ui_audit_used = False
         system_ui_audit_retry_used = False
         system_ui_audit_confidence: float | None = None
@@ -1108,6 +1118,50 @@ class GenericSceneObserver:
                 input_audit_current_value = _unique_scene_input_value(scene)
                 if input_audit_current_value is None:
                     input_audit_current_value = preliminary_input_value_hint
+                verified_input_lineage: TypedInputLineage | None = None
+                if (
+                    input_lineage_override is not None
+                    and isinstance(device_id, str)
+                    and isinstance(input_audit_current_value, str)
+                    and input_lineage_override.matches_visual(
+                        device_id=device_id,
+                        app_id=scene.app_id,
+                        screen_id=scene.screen_id,
+                        raw_value=input_audit_current_value,
+                    )
+                ):
+                    verified_input_lineage = input_lineage_override
+                if (
+                    verified_input_lineage is None
+                    and self.input_lineage_store is not None
+                    and isinstance(device_id, str)
+                    and device_id.strip()
+                ):
+                    preliminary_inputs = tuple(
+                        element
+                        for element in scene.elements
+                        if element.role == "input"
+                        and element.meaning == "application_text_input"
+                        and element.states.get("focused") is True
+                    )
+                    preliminary_bounds = (
+                        preliminary_inputs[0].bounds
+                        if len(preliminary_inputs) == 1
+                        else None
+                    )
+                    verified_input_lineage = self.input_lineage_store.match_visual(
+                        device_id=device_id,
+                        app_id=scene.app_id,
+                        screen_id=scene.screen_id,
+                        raw_value=input_audit_current_value,
+                        input_bounds=preliminary_bounds,
+                    )
+                    if verified_input_lineage is not None:
+                        input_audit_current_value = verified_input_lineage.exact_value
+                        input_lineage_used = True
+                if verified_input_lineage is not None:
+                    input_audit_current_value = verified_input_lineage.exact_value
+                    input_lineage_used = True
                 self._set_stage("waiting_input_structure_audit")
                 audit_content: list[dict[str, Any]] = [
                     {
@@ -1136,6 +1190,8 @@ class GenericSceneObserver:
                             raw,
                             fingerprint=fingerprint,
                             goal_context=context,
+                            verified_input_lineage=verified_input_lineage,
+                            device_id=device_id,
                         ),
                         visual_obstructions,
                         fingerprint=fingerprint,
@@ -1193,6 +1249,8 @@ class GenericSceneObserver:
                                 raw,
                                 fingerprint=fingerprint,
                                 goal_context=context,
+                                verified_input_lineage=verified_input_lineage,
+                                device_id=device_id,
                             ),
                             visual_obstructions,
                             fingerprint=fingerprint,
@@ -1349,6 +1407,7 @@ class GenericSceneObserver:
                     else None
                 ),
                 "input_structure_audit_used": input_structure_audit_used,
+                "input_lineage_used": input_lineage_used,
                 "input_structure_audit_retry_used": (
                     input_structure_audit_retry_used
                 ),
@@ -5112,6 +5171,8 @@ def _apply_input_structure_audit(
     *,
     fingerprint: str,
     goal_context: dict[str, Any],
+    verified_input_lineage: TypedInputLineage | None = None,
+    device_id: str | None = None,
 ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
@@ -5377,6 +5438,21 @@ def _apply_input_structure_audit(
 
         switch_is_goal = _goal_requests_keyboard_mode_switch(goal_context)
         trusted_input = matches[0] if len(matches) == 1 else None
+        if trusted_input is not None and verified_input_lineage is not None:
+            raw_lineage_text = trusted_input["text"]
+            lineage_bounds = tuple(
+                float(part) / 1000.0 for part in trusted_input["input_bounds"]
+            )
+            if verified_input_lineage.matches_visual(
+                device_id=str(device_id or ""),
+                app_id=scene.app_id,
+                screen_id=scene.screen_id,
+                raw_value=raw_lineage_text,
+                input_bounds=lineage_bounds,
+            ):
+                trusted_input = dict(trusted_input)
+                trusted_input["lineage_visual_text"] = raw_lineage_text
+                trusted_input["text"] = verified_input_lineage.exact_value
         exact_ime_candidate: dict[str, Any] | None = None
         input_step = None
         if trusted_input is not None and _goal_has_explicit_input_text(goal_context):
@@ -5656,6 +5732,11 @@ def _apply_input_structure_audit(
             input_evidence = list(trusted_input["visible_editable_cues"])
             if trusted_input["text"]:
                 input_evidence.insert(0, f"应用输入框当前文字：{trusted_input['text']}")
+                lineage_visual_text = trusted_input.get("lineage_visual_text")
+                if isinstance(lineage_visual_text, str):
+                    input_evidence.append(
+                        f"视觉折行转写：{lineage_visual_text}；本地逐键连续性逐字核对通过"
+                    )
             elif trusted_input["placeholder"]:
                 input_evidence.insert(0, f"应用输入框为空，占位提示：{trusted_input['placeholder']}")
             if not keyboard_visible:

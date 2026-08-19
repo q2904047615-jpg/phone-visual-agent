@@ -36,6 +36,7 @@ from generic_action_adapter import (
     stable_qwerty_ocr_anchors,
 )
 from generic_scene_observer import GenericSceneObserver
+from input_value_lineage import TypedInputLineageStore
 from generic_step_planner import GenericStepPlanner, GenericStepPlanningError
 from deepseek_task_graph import DeepSeekTaskGraphPlanner, TaskGraphError
 from qwen_visual_decision import QwenVisualDecisionObserver
@@ -959,7 +960,13 @@ class Runtime:
         self.vision_provider = DashScopeVisionProvider()
         self.intent_provider = DeepSeekIntentProvider()
         self.generic_intent_parser = GenericIntentParser(self.intent_provider)
-        self.generic_scene_observer = GenericSceneObserver(self.vision_provider)
+        self.input_lineage_store = TypedInputLineageStore(
+            WEB_OUTPUT_DIR / "state"
+        )
+        self.generic_scene_observer = GenericSceneObserver(
+            self.vision_provider,
+            input_lineage_store=self.input_lineage_store,
+        )
         self.generic_step_planner = GenericStepPlanner(self.intent_provider)
         self.deepseek_task_graph_planner = DeepSeekTaskGraphPlanner(
             self.intent_provider,
@@ -984,6 +991,7 @@ class Runtime:
                     MockRobotController,
                 ),
                 device_id=device_id,
+                input_lineage_store=self.input_lineage_store,
             ),
             device_registry=self.device_task_registry,
         )
@@ -1071,6 +1079,7 @@ class Runtime:
                     MockRobotController,
                 ),
                 device_id=device_id,
+                input_lineage_store=self.input_lineage_store,
             ),
             device_registry=self.device_task_registry,
         )
@@ -1714,6 +1723,7 @@ def observe_generic_scene(
             scene = runtime.generic_scene_observer.observe(
                 frames=frames,
                 goal_context=body.goal,
+                device_id=runtime.device_controllers.default_device_id,
             )
         except VisionAgentError as exc:
             failure_dir = WEB_OUTPUT_DIR / (
@@ -1752,6 +1762,7 @@ def _new_generic_action_adapter() -> GenericSingleActionAdapter:
             MockRobotController,
         ),
         device_id=runtime.device_controllers.default_device_id,
+        input_lineage_store=runtime.input_lineage_store,
     )
 
 

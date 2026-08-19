@@ -644,6 +644,7 @@ class GenericSceneObserver:
         foreground_app_identity_audit_evidence: tuple[str, ...] = ()
         compact_geometry_discarded = False
         compact_input_geometry_isolated = False
+        preliminary_input_value_hint: str | None = None
         icon_cluster_audit_used = False
         icon_cluster_audit_candidate_count = 0
         icon_cluster_audit_reload_attested = False
@@ -742,7 +743,11 @@ class GenericSceneObserver:
 
             def parse_compact_response(value: str) -> UIScene:
                 nonlocal compact_geometry_discarded, compact_input_geometry_isolated
+                nonlocal preliminary_input_value_hint
                 payload = _extract_compact_json_object(value)
+                preliminary_input_value_hint = _unique_payload_input_value(
+                    payload
+                )
                 compact_input_geometry_isolated = (
                     _strip_preliminary_input_geometry_for_dedicated_audit(
                         payload,
@@ -1100,6 +1105,9 @@ class GenericSceneObserver:
             if _should_audit_prefilled_input(scene, context):
                 input_structure_audit_used = True
                 input_audit_base_scene = scene
+                input_audit_current_value = _unique_scene_input_value(scene)
+                if input_audit_current_value is None:
+                    input_audit_current_value = preliminary_input_value_hint
                 self._set_stage("waiting_input_structure_audit")
                 audit_content: list[dict[str, Any]] = [
                     {
@@ -1107,6 +1115,7 @@ class GenericSceneObserver:
                         "text": _input_structure_audit_prompt(
                             context,
                             roi_bounds=None,
+                            current_input_text=input_audit_current_value,
                         ),
                     },
                     image_part,
@@ -1153,6 +1162,7 @@ class GenericSceneObserver:
                                     context,
                                     roi_bounds=input_retry_roi,
                                     crop_local=True,
+                                    current_input_text=input_audit_current_value,
                                 ),
                             },
                             {
@@ -2211,7 +2221,22 @@ cluster_complete=false and cluster_bounds=null.
 """
 
 
-def _input_audit_literal_key_targets(context: dict[str, Any]) -> tuple[str, ...]:
+def _unique_scene_input_value(scene: UIScene) -> str | None:
+    """Return one observed input value, never a guessed goal value."""
+
+    values = [
+        item.states.get("value")
+        for item in scene.elements
+        if item.role == "input" and isinstance(item.states.get("value"), str)
+    ]
+    return values[0] if len(values) == 1 else None
+
+
+def _input_audit_literal_key_targets(
+    context: dict[str, Any],
+    *,
+    current_input_text: str | None = None,
+) -> tuple[str, ...]:
     """Return the bounded non-letter key whitelist for the active input goal."""
 
     entities = context.get("goal_entities")
@@ -2220,6 +2245,17 @@ def _input_audit_literal_key_targets(context: dict[str, Any]) -> tuple[str, ...]
     text = entities.get("input_text") if isinstance(entities, dict) else None
     if not isinstance(text, str):
         return ()
+    if current_input_text is not None:
+        try:
+            next_step = plan_next_verified_input(text, current_input_text)
+        except (ValueError, VerifiedTextTransactionError):
+            next_step = None
+        else:
+            if next_step is None:
+                return ()
+            if next_step.kind == "literal_key":
+                return (next_step.segment,)
+            return ()
     targets: list[str] = []
     for character in text:
         if character in {"\r", "\n", "\t"} or character.isalpha():
@@ -2236,9 +2272,13 @@ def _input_structure_audit_prompt(
     *,
     roi_bounds: tuple[int, int, int, int] | None,
     crop_local: bool = False,
+    current_input_text: str | None = None,
 ) -> str:
     context = _observation_goal_context(context)
-    literal_key_targets = _input_audit_literal_key_targets(context)
+    literal_key_targets = _input_audit_literal_key_targets(
+        context,
+        current_input_text=current_input_text,
+    )
     if crop_local:
         if roi_bounds is None:
             raise ValueError("crop-local 输入审计必须绑定 ROI。")
@@ -3877,6 +3917,23 @@ def _strip_preliminary_input_geometry_for_dedicated_audit(
     if isolated:
         payload["elements"] = retained
     return isolated
+
+
+def _unique_payload_input_value(payload: dict[str, Any]) -> str | None:
+    """Read one preliminary input value only as an audit-selection hint."""
+
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return None
+    values = [
+        item["states"].get("value")
+        for item in elements
+        if isinstance(item, dict)
+        and str(item.get("role") or "").strip() == "input"
+        and isinstance(item.get("states"), dict)
+        and isinstance(item["states"].get("value"), str)
+    ]
+    return values[0] if len(values) == 1 else None
 
 
 def _drop_out_of_range_non_goal_elements(

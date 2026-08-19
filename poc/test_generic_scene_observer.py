@@ -498,11 +498,108 @@ class GenericSceneObserverTests(unittest.TestCase):
                 {"entities": {"input_text": "draft message."}}
             ),
         )
+        mixed_context = {
+            "entities": {"input_text": "复杂输入验收2026:123+45"}
+        }
+        self.assertEqual(
+            ("1",),
+            _input_audit_literal_key_targets(
+                mixed_context,
+                current_input_text="复杂输入验收2026:",
+            ),
+        )
+        self.assertEqual(
+            ("2",),
+            _input_audit_literal_key_targets(
+                mixed_context,
+                current_input_text="复杂输入验收2026:1",
+            ),
+        )
+        self.assertEqual(
+            (),
+            _input_audit_literal_key_targets(
+                {"entities": {"input_text": "复杂输入验收2026:长"}},
+                current_input_text="复杂输入验收2026:",
+            ),
+        )
+        self.assertEqual(
+            ("2", "0", "6", ":", "1", "3", "+", "4"),
+            _input_audit_literal_key_targets(
+                mixed_context,
+                current_input_text="不一致前缀",
+            ),
+        )
         direct_prompt = _input_structure_audit_prompt(
             {"entities": {"input_text": "wifi"}},
             roi_bounds=None,
         )
         self.assertIn("the local, goal-derived whitelist is []", direct_prompt)
+
+    def test_observer_limits_literal_key_prompt_to_observed_next_character(
+        self,
+    ) -> None:
+        preliminary = scene_payload()
+        preliminary["elements"] = [
+            {
+                "element_id": "model-input",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "复杂输入验收2026:",
+                "bounds": [150, 530, 690, 590],
+                "confidence": 0.98,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "value": "复杂输入验收2026:",
+                    "focused": True,
+                    "keyboard_layout": "numeric",
+                    "keyboard_input_mode": "unknown",
+                },
+                "evidence": ["输入框逐字显示当前前缀"],
+            }
+        ]
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    text="复杂输入验收2026:",
+                    bounds=[150, 530, 690, 590],
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 600, 1000, 1000],
+                "layout": "numeric",
+                "input_mode": "unknown",
+                "mode_switch": None,
+                "literal_keys": [
+                    {
+                        "value": "1",
+                        "label": "1",
+                        "key_kind": "character",
+                        "bounds": [180, 690, 340, 750],
+                        "confidence": 1.0,
+                        "fully_visible": True,
+                    }
+                ],
+            },
+        )
+        provider = SequenceProvider([preliminary, audit])
+
+        scene = GenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "输入框最终逐字显示复杂输入验收2026:123+45",
+                "entities": {"input_text": "复杂输入验收2026:123+45"},
+            },
+        )
+
+        prompt = provider.messages_seen[1][1]["content"][0]["text"]
+        self.assertIn('the local, goal-derived whitelist is ["1"]', prompt)
+        self.assertNotIn('["2","0","6",":","1","3","+","4"]', prompt)
+        self.assertEqual(
+            "1",
+            scene.unique_trusted_goal_element().states["key_value"],
+        )
 
     def test_literal_ocr_geometry_is_limited_to_text_bearing_selector_roles(self) -> None:
         for role in ("text", "button", "tab", "list_item"):

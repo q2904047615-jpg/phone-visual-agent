@@ -20,6 +20,7 @@ from generic_action_adapter import (
 )
 from generic_intent import GenericIntentDraft
 from generic_scene_observer import GenericSceneObserver, _local_frame_fingerprint
+from input_value_lineage import TypedInputLineageStore
 from orientation_safety import (
     OrientationFrameMismatchError,
     _claim_audit_seal,
@@ -2136,6 +2137,135 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual("stable_local_ocr", robot.keyboard_layouts[0]["row_snap_source"])
         self.assertEqual(1, result.physical_actions)
         self.assertEqual("matched", result.action_outcome)
+
+    def test_matched_direct_input_persists_lineage_and_clear_discards_it(self):
+        def input_scene(fingerprint, value, *, goal_relevant=True):
+            return UIScene(
+                app_id="generic_app",
+                screen_id="editor",
+                summary="唯一聚焦输入框",
+                elements=(
+                    UIElement(
+                        element_id="field",
+                        role="input",
+                        meaning="application_text_input",
+                        label=value,
+                        bounds=(0.13, 0.54, 0.69, 0.61),
+                        confidence=1.0,
+                        states={
+                            "focused": True,
+                            "fully_visible": True,
+                            "value": value,
+                            "keyboard_layout": "qwerty",
+                            "keyboard_input_mode": "direct_latin",
+                            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+                            "goal_relevant": goal_relevant,
+                        },
+                        evidence=(f"应用输入框当前文字：{value}",),
+                    ),
+                ),
+                stable=True,
+                confidence=1.0,
+                fingerprint=fingerprint,
+                camera_alignment=aligned_camera_facts(),
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            store = TypedInputLineageStore(Path(temp))
+            before = input_scene("before", "")
+            after = input_scene("after", "longinput")
+            robot = FakeRobot()
+            result = self._adapter(
+                FakeSceneObserver([before, after]),
+                robot,
+                input_lineage_store=store,
+            ).execute(
+                requested_action=SemanticAction(
+                    node_id="type-segment",
+                    action="input_verified_text",
+                    params={
+                        "element_id": "field",
+                        "target": "application_text_input",
+                        "role": "input",
+                        "label": "",
+                        "states": dict(before.elements[0].states),
+                        "text": "longinput",
+                        "expected_effect": {
+                            "element_state": {
+                                "meaning": "application_text_input",
+                                "states": {"value": "longinput"},
+                            }
+                        },
+                    },
+                ),
+                planned_scene=before,
+                goal=goal(),
+                confirmed=True,
+            )
+            self.assertEqual("matched", result.action_outcome)
+            self.assertEqual("longinput", store.load("test-device").exact_value)
+
+            clear_after = input_scene("cleared", "", goal_relevant=False)
+            clear_result = self._adapter(
+                FakeSceneObserver([after, clear_after]),
+                FakeRobot(),
+                input_lineage_store=store,
+            ).execute(
+                requested_action=SemanticAction(
+                    node_id="clear-segment",
+                    action="clear_verified_text",
+                    params={
+                        "element_id": "field",
+                        "target": "application_text_input",
+                        "role": "input",
+                        "label": "longinput",
+                        "states": dict(after.elements[0].states),
+                        "expected_effect": {
+                            "element_state": {
+                                "meaning": "application_text_input",
+                                "states": {"value": ""},
+                            }
+                        },
+                    },
+                ),
+                planned_scene=after,
+                goal=goal(),
+                confirmed=True,
+            )
+            self.assertEqual("matched", clear_result.action_outcome)
+            self.assertIsNone(store.load("test-device"))
+
+            bad_store = TypedInputLineageStore(Path(temp) / "bad")
+            wrong_after = input_scene("wrong-after", "longinpuw")
+            mismatch = self._adapter(
+                FakeSceneObserver([before, wrong_after, wrong_after]),
+                FakeRobot(),
+                input_lineage_store=bad_store,
+            ).execute(
+                requested_action=SemanticAction(
+                    node_id="type-mismatch",
+                    action="input_verified_text",
+                    params={
+                        "element_id": "field",
+                        "target": "application_text_input",
+                        "role": "input",
+                        "label": "",
+                        "states": dict(before.elements[0].states),
+                        "text": "longinput",
+                        "expected_effect": {
+                            "element_state": {
+                                "meaning": "application_text_input",
+                                "states": {"value": "longinput"},
+                            }
+                        },
+                    },
+                ),
+                planned_scene=before,
+                goal=goal(),
+                confirmed=True,
+            )
+            self.assertEqual("mismatched", mismatch.action_outcome)
+            self.assertIsNone(bad_store.load("test-device"))
 
     def test_confirmed_input_accepts_unique_overlapping_post_input_alias(self):
         def input_scene(

@@ -25,6 +25,7 @@ from input_value_lineage import (
     TypedInputLineage,
     TypedInputLineageStore,
     build_pending_literal_lineage,
+    build_pending_text_lineage,
 )
 from ocr_runtime import recognize as recognize_ocr
 from observation_images import measure_local_stability
@@ -1758,6 +1759,15 @@ class GenericSingleActionAdapter:
                 )
             except (InputValueLineageError, TypeError, ValueError):
                 pending_input_lineage = None
+        elif resolved.kind == "input_verified_text":
+            try:
+                pending_input_lineage = build_pending_text_lineage(
+                    device_id=self.device_id,
+                    resolved_action=resolved.to_dict(),
+                    before_scene=before.to_dict(),
+                )
+            except (InputValueLineageError, TypeError, ValueError):
+                pending_input_lineage = None
 
         try:
             (
@@ -1804,20 +1814,27 @@ class GenericSingleActionAdapter:
                     f"控制器完成证据复核失败：{exc}",
                 )
 
-        if (
-            not verification_errors
-            and self.input_lineage_store is not None
-            and hardware_receipt is not None
-        ):
+        if not verification_errors and self.input_lineage_store is not None:
             try:
-                self.input_lineage_store.record_verified_literal_action(
-                    device_id=self.device_id,
-                    resolved_action=resolved.to_dict(),
-                    before_scene=before.to_dict(),
-                    after_scene=after.to_dict(),
-                    hardware_receipt=hardware_receipt,
-                    after_frames=after_frames,
-                )
+                if resolved.kind == "input_verified_text":
+                    self.input_lineage_store.record_verified_text_action(
+                        device_id=self.device_id,
+                        resolved_action=resolved.to_dict(),
+                        before_scene=before.to_dict(),
+                        after_scene=after.to_dict(),
+                        after_frames=after_frames,
+                    )
+                elif resolved.kind == "clear_verified_text":
+                    self.input_lineage_store.discard(self.device_id)
+                elif hardware_receipt is not None:
+                    self.input_lineage_store.record_verified_literal_action(
+                        device_id=self.device_id,
+                        resolved_action=resolved.to_dict(),
+                        before_scene=before.to_dict(),
+                        after_scene=after.to_dict(),
+                        hardware_receipt=hardware_receipt,
+                        after_frames=after_frames,
+                    )
             except (InputValueLineageError, OSError, TypeError, ValueError):
                 # The lineage is only a future read-only disambiguation hint.
                 # Failure to persist it must not rewrite a correctly verified

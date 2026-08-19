@@ -16,6 +16,7 @@ from input_value_lineage import (
     TypedInputLineageStore,
     _surface_descriptor,
     build_pending_literal_lineage,
+    build_pending_text_lineage,
 )
 from ui_scene import UIScene
 
@@ -160,6 +161,37 @@ def receipt() -> dict:
         "seller_event_barrier_confirmed": True,
         "round_trip_position_confirmed": True,
         "mechanical_contact_ack": False,
+    }
+
+
+def resolved_text(*, prior: str = "", fragment: str = "longinput") -> dict:
+    expected = prior + fragment
+    return {
+        "node_id": "node-text-1",
+        "kind": "input_verified_text",
+        "normalized_point": [0.4, 0.6],
+        "normalized_end_point": None,
+        "text": expected,
+        "input_fragment": fragment,
+        "input_method": "direct_latin",
+        "input_pinyin": None,
+        "prior_input_value": prior,
+        "expected_input_value": expected,
+        "delete_count": None,
+        "direction": None,
+        "hold_seconds": None,
+        "path_distance": None,
+        "target_element_id": "input-1",
+        "destination_element_id": None,
+        "before_fingerprint": "before-fp",
+        "expected_effect": {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": expected},
+            }
+        },
+        "formal_candidate_id": "candidate-text-1",
+        "formal_transition": {},
     }
 
 
@@ -481,6 +513,95 @@ class TypedInputLineageTests(unittest.TestCase):
                 input_bounds=(0.13, 0.54, 0.69, 0.61),
             )
         )
+
+    def test_verified_direct_text_action_persists_and_matches_soft_wrap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = self.make_store(temp)
+            action = resolved_text()
+            record = store.record_verified_text_action(
+                device_id=DEVICE,
+                resolved_action=action,
+                before_scene=scene("", "before-fp"),
+                after_scene=scene("long\ninput", "after-fp"),
+                after_frames=surface_frames(),
+            )
+            self.assertEqual("longinput", record.exact_value)
+            self.assertEqual("verified_live_text_action", record.source)
+            self.assertEqual(
+                record,
+                store.match_visual(
+                    device_id=DEVICE,
+                    app_id="sample.app",
+                    screen_id="editor",
+                    raw_value="long\ninput",
+                    input_bounds=(0.13, 0.54, 0.69, 0.61),
+                ),
+            )
+
+    def test_pending_direct_text_lineage_never_persists_or_accepts_pinyin(self) -> None:
+        action = resolved_text()
+        pending = build_pending_text_lineage(
+            device_id=DEVICE,
+            resolved_action=action,
+            before_scene=scene("", "before-fp"),
+            recorded_at_epoch=1000.0,
+        )
+        self.assertEqual("pending_verified_text_action", pending.source)
+        self.assertEqual((), pending.surface_descriptors)
+        self.assertTrue(
+            pending.matches_visual(
+                device_id=DEVICE,
+                app_id="sample.app",
+                screen_id="editor",
+                raw_value="long\ninput",
+                now_epoch=1000.0,
+            )
+        )
+        pinyin = dict(action)
+        pinyin["input_method"] = "chinese_pinyin"
+        with self.assertRaises(InputValueLineageError):
+            build_pending_text_lineage(
+                device_id=DEVICE,
+                resolved_action=pinyin,
+                before_scene=scene("", "before-fp"),
+            )
+
+    def test_direct_text_lineage_rejects_broken_chain_and_missing_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = self.make_store(temp)
+            broken = resolved_text()
+            broken["expected_input_value"] = "different"
+            with self.assertRaises(InputValueLineageError):
+                store.record_verified_text_action(
+                    device_id=DEVICE,
+                    resolved_action=broken,
+                    before_scene=scene("", "before-fp"),
+                    after_scene=scene("longinput", "after-fp"),
+                    after_frames=surface_frames(),
+                )
+            with self.assertRaises(InputValueLineageError):
+                store.record_verified_text_action(
+                    device_id=DEVICE,
+                    resolved_action=resolved_text(),
+                    before_scene=scene("", "before-fp"),
+                    after_scene=scene("longinput", "after-fp"),
+                    after_frames=surface_frames()[:3],
+                )
+
+    def test_successful_clear_discards_only_that_device_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = self.make_store(temp)
+            store.record_verified_text_action(
+                device_id=DEVICE,
+                resolved_action=resolved_text(),
+                before_scene=scene("", "before-fp"),
+                after_scene=scene("longinput", "after-fp"),
+                after_frames=surface_frames(),
+            )
+            self.assertIsNotNone(store.load(DEVICE))
+            store.discard(DEVICE)
+            self.assertIsNone(store.load(DEVICE))
+            store.discard(DEVICE)
 
     def test_recover_persisted_execution_requires_four_existing_frames(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

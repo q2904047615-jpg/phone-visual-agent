@@ -229,11 +229,13 @@ class TypedInputLineage:
             not _valid_surface_descriptor(item) for item in self.surface_descriptors
         ):
             raise InputValueLineageError("输入值连续性的局部画面描述无效。")
-        if self.source != "pending_verified_literal_action" and len(
-            self.surface_descriptors
-        ) != 4:
+        pending_sources = {
+            "pending_verified_literal_action",
+            "pending_verified_text_action",
+        }
+        if self.source not in pending_sources and len(self.surface_descriptors) != 4:
             raise InputValueLineageError("持久输入值连续性必须绑定动作后四帧。")
-        if self.source == "pending_verified_literal_action" and self.surface_descriptors:
+        if self.source in pending_sources and self.surface_descriptors:
             raise InputValueLineageError("临时输入值连续性不能伪造持久画面描述。")
         if isinstance(self.recorded_at_epoch, bool) or not isinstance(
             self.recorded_at_epoch, (int, float)
@@ -374,6 +376,14 @@ class TypedInputLineageStore:
             raise
         return destination
 
+    def discard(self, device_id: str) -> None:
+        """Remove only the stale non-empty value for one verified device."""
+
+        try:
+            self._path(device_id).unlink()
+        except FileNotFoundError:
+            return
+
     def load(self, device_id: str) -> TypedInputLineage | None:
         path = self._path(device_id)
         if not path.is_file():
@@ -443,6 +453,29 @@ class TypedInputLineageStore:
         self.write(record)
         return record
 
+    def record_verified_text_action(
+        self,
+        *,
+        device_id: str,
+        resolved_action: dict[str, Any],
+        before_scene: dict[str, Any],
+        after_scene: dict[str, Any],
+        after_frames: tuple[Image.Image, ...],
+        source: str = "verified_live_text_action",
+    ) -> TypedInputLineage:
+        record = _record_from_text_execution(
+            device_id=device_id,
+            resolved=resolved_action,
+            before_scene=before_scene,
+            after_scene=after_scene,
+            recorded_at_epoch=float(self.clock()),
+            source=source,
+            surface_fallback=self.load(device_id),
+            surface_frames=after_frames,
+        )
+        self.write(record)
+        return record
+
     def recover_from_session_file(self, path: Path) -> TypedInputLineage:
         session_path = Path(path)
         payload = json.loads(session_path.read_text(encoding="utf-8"))
@@ -476,18 +509,92 @@ class TypedInputLineageStore:
                 raise InputValueLineageError(
                     "历史执行的动作后帧无法解码。"
                 ) from exc
-        record = _record_from_execution(
-            device_id=device_id,
-            resolved=execution.get("resolved_action"),
-            before_scene=execution.get("before_scene"),
-            after_scene=execution.get("after_scene"),
-            hardware_receipt=execution.get("hardware_receipt"),
-            recorded_at_epoch=float(self.clock()),
-            source="verified_persisted_literal_execution",
-            surface_frames=tuple(loaded_after_frames),
-        )
+        resolved_action = execution.get("resolved_action")
+        if (
+            isinstance(resolved_action, dict)
+            and resolved_action.get("kind") == "input_verified_text"
+        ):
+            if (
+                execution.get("action_outcome") != "matched"
+                or execution.get("verification_errors") not in (None, [], ())
+            ):
+                raise InputValueLineageError(
+                    "历史文字分段没有通过动作后 exact verifier。"
+                )
+            record = _record_from_text_execution(
+                device_id=device_id,
+                resolved=resolved_action,
+                before_scene=execution.get("before_scene"),
+                after_scene=execution.get("after_scene"),
+                recorded_at_epoch=float(self.clock()),
+                source="verified_persisted_text_execution",
+                surface_frames=tuple(loaded_after_frames),
+            )
+        else:
+            record = _record_from_execution(
+                device_id=device_id,
+                resolved=resolved_action,
+                before_scene=execution.get("before_scene"),
+                after_scene=execution.get("after_scene"),
+                hardware_receipt=execution.get("hardware_receipt"),
+                recorded_at_epoch=float(self.clock()),
+                source="verified_persisted_literal_execution",
+                surface_frames=tuple(loaded_after_frames),
+            )
         self.write(record)
         return record
+
+
+def build_pending_text_lineage(
+    *,
+    device_id: str,
+    resolved_action: dict[str, Any],
+    before_scene: dict[str, Any],
+    recorded_at_epoch: float | None = None,
+) -> TypedInputLineage:
+    """Bind one returned text transaction to its immediate visual result."""
+
+    parts = _validated_text_action_chain(resolved_action, before_scene)
+    before_input, prior, expected, _fragment = parts
+    app_id = before_scene.get("app_id")
+    screen_id = before_scene.get("screen_id")
+    before_fingerprint = before_scene.get("fingerprint")
+    if any(
+        not isinstance(value, str) or not value.strip() or value == "unknown"
+        for value in (app_id, screen_id, before_fingerprint)
+    ):
+        raise InputValueLineageError("临时文字连续性缺少明确输入表面。")
+    action_digest = _canonical_digest(resolved_action)
+    receipt_digest = _canonical_digest(
+        {
+            "protocol_version": "2026-08-20-verified-text-transaction-v1",
+            "stage": "controller_call_returned",
+            "device_id": device_id,
+            "action_digest": action_digest,
+            "before_fingerprint": before_fingerprint,
+            "expected_value": expected,
+        }
+    )
+    record = TypedInputLineage(
+        version=TYPED_INPUT_LINEAGE_VERSION,
+        device_id=device_id,
+        exact_value=expected,
+        app_id=app_id,
+        screen_id=screen_id,
+        input_meaning="application_text_input",
+        input_bounds=_valid_bounds(before_input["bounds"]),
+        before_fingerprint=before_fingerprint,
+        after_fingerprint="pending-visual-verification",
+        action_digest=action_digest,
+        receipt_digest=receipt_digest,
+        surface_descriptors=(),
+        recorded_at_epoch=(
+            time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
+        ),
+        source="pending_verified_text_action",
+    )
+    record.validate()
+    return record
 
 
 def build_pending_literal_lineage(
@@ -605,6 +712,142 @@ def _single_input(scene: dict[str, Any], *, expected_value: str | None = None) -
     if len(candidates) != 1:
         raise InputValueLineageError("场景没有唯一可信聚焦输入框。")
     return candidates[0]
+
+
+def _validated_text_action_chain(
+    resolved: Any,
+    before_scene: Any,
+) -> tuple[dict[str, Any], str, str, str]:
+    if (
+        not isinstance(resolved, dict)
+        or resolved.get("kind") != "input_verified_text"
+        or resolved.get("input_method") != "direct_latin"
+        or not isinstance(before_scene, dict)
+    ):
+        raise InputValueLineageError("文字连续性只接受已解析的英文直输分段。")
+    prior = resolved.get("prior_input_value")
+    expected = resolved.get("expected_input_value")
+    fragment = resolved.get("input_fragment")
+    expected_effect = resolved.get("expected_effect")
+    expected_state = (
+        expected_effect.get("element_state")
+        if isinstance(expected_effect, dict)
+        else None
+    )
+    expected_states = (
+        expected_state.get("states")
+        if isinstance(expected_state, dict)
+        else None
+    )
+    if (
+        not isinstance(prior, str)
+        or not isinstance(expected, str)
+        or not isinstance(fragment, str)
+        or not fragment
+        or any("\n" in value or "\r" in value for value in (prior, expected, fragment))
+        or expected != prior + fragment
+        or expected_state is None
+        or expected_state.get("meaning") != "application_text_input"
+        or expected_states != {"value": expected}
+    ):
+        raise InputValueLineageError("文字输入分段的 prior/fragment/expected 链无效。")
+    return _single_input(before_scene, expected_value=prior), prior, expected, fragment
+
+
+def _record_from_text_execution(
+    *,
+    device_id: str,
+    resolved: Any,
+    before_scene: Any,
+    after_scene: Any,
+    recorded_at_epoch: float,
+    source: str,
+    surface_fallback: TypedInputLineage | None = None,
+    surface_frames: tuple[Image.Image, ...] | None = None,
+) -> TypedInputLineage:
+    if not isinstance(after_scene, dict):
+        raise InputValueLineageError("文字连续性缺少动作后场景。")
+    before_input, prior, expected, _fragment = _validated_text_action_chain(
+        resolved,
+        before_scene,
+    )
+    before_fingerprint = before_scene.get("fingerprint")
+    after_fingerprint = after_scene.get("fingerprint")
+    if (
+        not isinstance(before_fingerprint, str)
+        or not isinstance(after_fingerprint, str)
+        or before_fingerprint == after_fingerprint
+    ):
+        raise InputValueLineageError("文字连续性缺少变化后的 fingerprint。")
+    after_input = _single_input(after_scene)
+    raw_after = after_input["states"]["value"]
+    if (
+        _collapsed_visual_text(raw_after) != expected
+        or not any(raw_after in str(item) for item in after_input.get("evidence", []))
+        or not _bounds_compatible(
+            _valid_bounds(before_input["bounds"]),
+            _valid_bounds(after_input["bounds"]),
+        )
+    ):
+        raise InputValueLineageError("动作后文字值或输入表面与 exact 分段不一致。")
+    app_id = after_scene.get("app_id")
+    screen_id = after_scene.get("screen_id")
+    fallback_compatible = bool(
+        surface_fallback is not None
+        and surface_fallback.device_id == device_id
+        and surface_fallback.exact_value == prior
+        and _bounds_compatible(
+            surface_fallback.input_bounds,
+            _valid_bounds(before_input["bounds"]),
+        )
+        and _surface_identity_compatible(
+            recorded_app_id=surface_fallback.app_id,
+            recorded_screen_id=surface_fallback.screen_id,
+            current_app_id=str(before_scene.get("app_id") or ""),
+            current_screen_id=str(before_scene.get("screen_id") or ""),
+            exact_value=prior,
+        )
+    )
+    if fallback_compatible:
+        app_id = surface_fallback.app_id
+        screen_id = surface_fallback.screen_id
+    if not isinstance(app_id, str) or not app_id.strip() or app_id == "unknown":
+        raise InputValueLineageError("文字连续性缺少明确 app_id。")
+    if not isinstance(screen_id, str) or not screen_id.strip() or screen_id == "unknown":
+        raise InputValueLineageError("文字连续性缺少明确 screen_id。")
+    action_digest = _canonical_digest(resolved)
+    receipt_digest = _canonical_digest(
+        {
+            "protocol_version": "2026-08-20-verified-text-transaction-v1",
+            "stage": "post_action_exact_verified",
+            "device_id": device_id,
+            "action_digest": action_digest,
+            "before_fingerprint": before_fingerprint,
+            "after_fingerprint": after_fingerprint,
+            "expected_value": expected,
+        }
+    )
+    record = TypedInputLineage(
+        version=TYPED_INPUT_LINEAGE_VERSION,
+        device_id=device_id,
+        exact_value=expected,
+        app_id=app_id,
+        screen_id=screen_id,
+        input_meaning="application_text_input",
+        input_bounds=_valid_bounds(after_input["bounds"]),
+        before_fingerprint=before_fingerprint,
+        after_fingerprint=after_fingerprint,
+        action_digest=action_digest,
+        receipt_digest=receipt_digest,
+        surface_descriptors=_surface_descriptors(
+            surface_frames,
+            _valid_bounds(after_input["bounds"]),
+        ),
+        recorded_at_epoch=recorded_at_epoch,
+        source=source,
+    )
+    record.validate()
+    return record
 
 
 def _record_from_execution(

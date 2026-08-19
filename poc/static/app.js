@@ -36,6 +36,7 @@ const statusNames = {
   ready: "准备执行",
   awaiting_confirmation: "等待当前动作确认",
   awaiting_risk_confirmation: "等待风险范围确认",
+  needs_effect_verification: "等待只读效果结果复核",
   paused_after_action: "已完成一步",
   running: "执行中",
   succeeded: "目标完成",
@@ -271,6 +272,7 @@ function renderTrace() {
     stopped: "停止",
     awaiting_confirmation: "等待动作确认",
     awaiting_risk_confirmation: "等待风险确认",
+    needs_effect_verification: "等待只读效果结果复核",
     observing: "观察中",
     unknown: "旧记录未提供",
   };

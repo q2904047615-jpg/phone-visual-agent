@@ -481,6 +481,45 @@ class TaskSemanticIRTests(unittest.TestCase):
         )
         self.assertNotEqual(preview.preview_digest, changed.preview_digest)
 
+    def test_effect_result_with_payload_text_is_not_misclassified_as_input_value(self):
+        authority = compile_formal_semantic_authority(graph_from_payload())
+        effect_states = tuple(
+            item
+            for item in authority.semantic_ir.desired_states
+            if item.source_subgoal_id == "send_message"
+        )
+        self.assertEqual(1, len(effect_states))
+        self.assertEqual("effect.result_visible", effect_states[0].predicate)
+        requirement = next(
+            item
+            for item in authority.semantic_ir.evidence_requirements
+            if item.desired_state_ref == effect_states[0].state_id
+        )
+        self.assertEqual(
+            ("visual_claim", "effect_receipt"),
+            requirement.allowed_sources,
+        )
+
+        payload = current_send_failure_payload()
+        next(
+            item for item in payload["subgoals"] if item["subgoal_id"] == "send_message"
+        )["completion_conditions"] = ["发送动作已执行"]
+        receipt_only = compile_formal_semantic_authority(
+            graph_from_payload(payload)
+        )
+        applied = next(
+            item
+            for item in receipt_only.semantic_ir.desired_states
+            if item.source_subgoal_id == "send_message"
+        )
+        self.assertEqual("effect.applied", applied.predicate)
+        applied_requirement = next(
+            item
+            for item in receipt_only.semantic_ir.evidence_requirements
+            if item.desired_state_ref == applied.state_id
+        )
+        self.assertEqual(("effect_receipt",), applied_requirement.allowed_sources)
+
     def test_multiple_recipients_and_input_fields_compile_to_typed_refs(self):
         payload = current_send_failure_payload()
         payload["goal"]["entities"] = {

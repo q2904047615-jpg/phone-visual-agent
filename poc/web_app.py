@@ -1508,6 +1508,7 @@ def device() -> dict[str, Any]:
                 "awaiting_confirmation",
                 "paused_after_action",
                 "needs_reobservation",
+                "needs_effect_verification",
             }
         ]
     status["generic_supervised_execution"] = {

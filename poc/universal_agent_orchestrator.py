@@ -861,6 +861,7 @@ class UniversalAgentSessionState:
     last_confirmation_failure: dict[str, Any] | None = None
     capability_gap: dict[str, Any] | None = None
     effect_previews: tuple[dict[str, Any], ...] = ()
+    effect_verification: dict[str, Any] | None = None
     semantic_task_context: Any = field(default=None, repr=False)
     confirm_stage: str = ""
     failed_reason: str = ""
@@ -979,6 +980,11 @@ class UniversalAgentSessionState:
                 else None
             ),
             "effect_previews": [dict(item) for item in self.effect_previews],
+            "effect_verification": (
+                dict(self.effect_verification)
+                if self.effect_verification is not None
+                else None
+            ),
             "device_capability": (
                 self.adapter.capability_snapshot().to_dict()
                 if callable(getattr(self.adapter, "capability_snapshot", None))
@@ -3817,6 +3823,131 @@ class UniversalAgentOrchestrator:
         # IME candidate carrying an identical literal).
         return len(after_inputs) == 1 and expected_value != canonical
 
+    @staticmethod
+    def _build_effect_verification(
+        session: UniversalAgentSessionState,
+        *,
+        graph: DynamicTaskGraph,
+        subgoal: Any,
+        receipt: VerifiedActionTransition,
+        consumed_revision: int,
+    ) -> dict[str, Any]:
+        """Bind one matched external effect to a read-only result check.
+
+        The receipt proves only that the exact effect action ran once.  It is
+        deliberately not exposed as visual completion evidence; a later fresh
+        scene still has to provide the result claim.
+        """
+
+        receipt.validate()
+        semantic_ir = getattr(session.semantic_task_context, "semantic_ir", None)
+        effects = tuple(
+            effect
+            for effect in tuple(getattr(semantic_ir, "effects", ()) or ())
+            if subgoal.subgoal_id in tuple(effect.source_subgoal_ids)
+        )
+        if len(effects) != 1:
+            raise UniversalAgentOrchestratorError(
+                "外部效果结果复核要求当前子目标唯一绑定一个 EffectIntent。"
+            )
+        effect = effects[0]
+        previews = tuple(
+            item
+            for item in session.effect_previews
+            if str(item.get("effect_id") or "") == effect.effect_id
+        )
+        if len(previews) != 1:
+            raise UniversalAgentOrchestratorError(
+                "外部效果结果复核缺少唯一 EffectPreview。"
+            )
+        preview = previews[0]
+        preview_digest = str(preview.get("preview_digest") or "")
+        if (
+            subgoal.external_impact != "external_state"
+            or receipt.outcome != "matched"
+            or receipt.physical_actions != 1
+            or receipt.session_id != session.session_id
+            or receipt.task_id != graph.task_id
+            or receipt.device_id != graph.device_id
+            or receipt.prior_revision != graph.revision
+            or receipt.subgoal_id != subgoal.subgoal_id
+            or str(preview.get("task_id") or "") != graph.task_id
+            or str(preview.get("device_id") or "") != graph.device_id
+            or int(preview.get("revision") or 0) != graph.revision
+            or str(preview.get("effect_kind") or "") != effect.kind
+            or not re.fullmatch(r"[0-9a-f]{64}", preview_digest)
+        ):
+            raise UniversalAgentOrchestratorError(
+                "外部效果结果复核的 receipt/EffectIntent/preview 绑定不一致。"
+            )
+        return {
+            "protocol_version": "2026-08-19-effect-result-verification-v1",
+            "status": "pending",
+            "session_id": session.session_id,
+            "task_id": graph.task_id,
+            "device_id": graph.device_id,
+            "effect_id": effect.effect_id,
+            "effect_kind": effect.kind,
+            "effect_preview_digest": preview_digest,
+            "subgoal_id": subgoal.subgoal_id,
+            "receipt_id": receipt.receipt_id,
+            "receipt_prior_revision": receipt.prior_revision,
+            "receipt_after_observation_id": receipt.after_observation_id,
+            "receipt_after_fingerprint": receipt.after_fingerprint,
+            "consumed_revision": consumed_revision,
+            "verification_attempts": 0,
+        }
+
+    @staticmethod
+    def _validate_pending_effect_verification(
+        session: UniversalAgentSessionState,
+        graph: DynamicTaskGraph,
+    ) -> dict[str, Any]:
+        pending = session.effect_verification
+        if not isinstance(pending, dict) or pending.get("status") != "pending":
+            raise UniversalAgentOrchestratorError("当前没有待处理的外部效果只读复核。")
+        previews = tuple(
+            item
+            for item in session.effect_previews
+            if str(item.get("effect_id") or "") == pending.get("effect_id")
+        )
+        subgoal = next(
+            (
+                item
+                for item in graph.subgoals
+                if item.subgoal_id == pending.get("subgoal_id")
+            ),
+            None,
+        )
+        transition = session.last_post_action_transition or {}
+        receipt = transition.get("receipt") or {}
+        if (
+            pending.get("protocol_version")
+            != "2026-08-19-effect-result-verification-v1"
+            or pending.get("session_id") != session.session_id
+            or pending.get("task_id") != graph.task_id
+            or pending.get("device_id") != graph.device_id
+            or pending.get("consumed_revision") != graph.revision
+            or pending.get("verification_attempts") != 0
+            or subgoal is None
+            or subgoal.external_impact != "external_state"
+            or len(previews) != 1
+            or previews[0].get("preview_digest")
+            != pending.get("effect_preview_digest")
+            or receipt.get("receipt_id") != pending.get("receipt_id")
+            or receipt.get("outcome") != "matched"
+            or receipt.get("physical_actions") != 1
+            or receipt.get("subgoal_id") != pending.get("subgoal_id")
+            or receipt.get("after_observation_id")
+            != pending.get("receipt_after_observation_id")
+            or receipt.get("after_fingerprint")
+            != pending.get("receipt_after_fingerprint")
+        ):
+            raise UniversalAgentOrchestratorError(
+                "待复核外部效果与当前 session/graph/receipt/preview 不一致。"
+            )
+        return dict(pending)
+
     def _advance_after_observation(
         self,
         session: UniversalAgentSessionState,
@@ -4064,6 +4195,43 @@ class UniversalAgentOrchestrator:
         if revised.status == "completed":
             session.status = "succeeded"
             transition_record["disposition"] = "task_completed"
+            persist_transition()
+            return
+        if (
+            matched
+            and receipt is not None
+            and previous_current.external_impact == "external_state"
+        ):
+            try:
+                session.effect_verification = self._build_effect_verification(
+                    session,
+                    graph=previous_graph,
+                    subgoal=previous_current,
+                    receipt=receipt,
+                    consumed_revision=revised.revision,
+                )
+            except Exception as exc:
+                session.status = "blocked"
+                session.failed_reason = f"外部效果只读复核绑定失败：{exc}"
+                transition_record["disposition"] = (
+                    "blocked_effect_verification_binding"
+                )
+                transition_record["diagnostic"] = session.failed_reason
+                persist_transition()
+                return
+            session.status = "needs_effect_verification"
+            session.failed_reason = ""
+            session.qwen_decision = None
+            session.controller_decision = None
+            session.confirmation_authority = None
+            session.risk_confirmation_authority = None
+            session.confirmed_risk_ids = ()
+            transition_record["disposition"] = (
+                "pending_read_only_effect_result_verification"
+            )
+            transition_record["effect_verification"] = dict(
+                session.effect_verification
+            )
             persist_transition()
             return
         if controller_refs:
@@ -4332,6 +4500,145 @@ class UniversalAgentOrchestrator:
         )
         persist_transition()
 
+    def _complete_pending_effect_verification(
+        self,
+        session: UniversalAgentSessionState,
+        *,
+        graph: DynamicTaskGraph,
+        observation: Any,
+        before_actions: int,
+    ) -> Any:
+        pending = self._validate_pending_effect_verification(session, graph)
+        observed = self.bridge.observed_state(
+            graph=graph,
+            trusted_observation=observation,
+            action_outcome="not_applicable",
+            verification={
+                "visible_evidence": [observation.scene.summary],
+                "blocked_reasons": [],
+            },
+        )
+        try:
+            revised = self.deepseek_planner.replan(
+                graph,
+                observed,
+                trigger="observation_changed",
+                reason=(
+                    "外部效果动作已有严格一次性 matched receipt；本轮仅用新鲜"
+                    " typed visual claim 复核结果，禁止规划或重复任何效果动作。"
+                ),
+            )
+            self._validate_graph_identity(
+                revised,
+                device_id=session.device_id,
+                previous=graph,
+                trusted_observation=observation,
+            )
+        except Exception as exc:
+            failed = {
+                **pending,
+                "status": "failed",
+                "verification_attempts": 1,
+                "verification_observation_id": observation.observation_id,
+                "verification_fingerprint": observation.fingerprint,
+                "reason": f"外部效果只读结果复核失败：{exc}",
+            }
+            session.effect_verification = failed
+            session.status = "blocked"
+            session.failed_reason = failed["reason"]
+            session.qwen_decision = None
+            session.controller_decision = NavigationPolicyDecision(
+                allowed=False,
+                reason=session.failed_reason,
+            )
+            if session.physical_actions != before_actions:
+                raise UniversalAgentOrchestratorError(
+                    "外部效果只读复核失败路径错误地改变了物理动作计数。"
+                )
+            decision = SimpleNamespace(
+                proposal=GenericStepProposal(
+                    status="blocked",
+                    reason=session.failed_reason,
+                )
+            )
+            self._write_terminal_snapshot(session)
+            return decision
+
+        session.qwen_decision = None
+        session.controller_decision = None
+        session.confirmation_authority = None
+        session.risk_confirmation_authority = None
+        session.confirmed_risk_ids = ()
+        result_subgoal = next(
+            (
+                item
+                for item in revised.subgoals
+                if item.subgoal_id == pending["subgoal_id"]
+            ),
+            None,
+        )
+        current_visual_refs = {
+            item.ref_id for item in observed.visual_claim_evidence_refs
+        }
+        visual_result_proven = bool(
+            revised.status == "completed"
+            and result_subgoal is not None
+            and result_subgoal.status == "completed"
+            and set(result_subgoal.completion_evidence).intersection(
+                current_visual_refs
+            )
+        )
+        if visual_result_proven or revised.status != "completed":
+            session.task_graph = revised
+            session.goal_draft = self.bridge.goal_draft(revised)
+            self._remember(
+                session,
+                session.evidence_store.write_task_graph(revised),
+                session.evidence_store.write_risk_audit(revised),
+            )
+        final = {
+            **pending,
+            "status": "verified" if visual_result_proven else "failed",
+            "verification_attempts": 1,
+            "verification_observation_id": observation.observation_id,
+            "verification_fingerprint": observation.fingerprint,
+            "visual_claim_refs": sorted(
+                set(result_subgoal.completion_evidence).intersection(
+                    current_visual_refs
+                )
+                if result_subgoal is not None
+                else ()
+            ),
+        }
+        session.effect_verification = final
+        if visual_result_proven:
+            session.status = "succeeded"
+            session.failed_reason = ""
+            proposal = GenericStepProposal(
+                status="finished",
+                reason="新的可信画面已证明一次性外部效果结果。",
+                completion_evidence=tuple(final["visual_claim_refs"][:3]),
+            )
+        else:
+            session.status = "blocked"
+            session.failed_reason = (
+                "新的只读观察仍未以当前 typed visual claim 证明外部效果结果；"
+                "效果动作不会重试。"
+            )
+            final["reason"] = session.failed_reason
+            session.effect_verification = final
+            proposal = GenericStepProposal(
+                status="blocked",
+                reason=session.failed_reason,
+            )
+        if session.physical_actions != before_actions:
+            raise UniversalAgentOrchestratorError(
+                "外部效果只读复核错误地改变了物理动作计数。"
+            )
+        decision = SimpleNamespace(proposal=proposal)
+        self._write_terminal_snapshot(session)
+        return decision
+
     def refresh_decision(self, session: UniversalAgentSessionState) -> Any:
         """Capture a fresh trusted scene and replace the pending decision.
 
@@ -4356,16 +4663,22 @@ class UniversalAgentOrchestrator:
         if graph is None or goal is None:
             raise UniversalAgentOrchestratorError("当前会话缺少任务图或目标投影。")
         self._validate_graph_identity(graph, device_id=session.device_id)
+        pending_effect = None
+        if session.status == "needs_effect_verification":
+            pending_effect = self._validate_pending_effect_verification(
+                session,
+                graph,
+            )
         current = graph.active_subgoal()
         impact = current.external_impact if current is not None else "unknown"
-        if session.status == "awaiting_risk_confirmation":
+        if pending_effect is None and session.status == "awaiting_risk_confirmation":
             raise UniversalAgentOrchestratorError(
                 "当前子目标必须先确认风险范围，禁止提前调用 Qwen。"
             )
-        if current is None or (
+        if pending_effect is None and (current is None or (
             _requires_risk_confirmation(graph, current)
             and not session.confirmed_risk_ids
-        ):
+        )):
             raise UniversalAgentOrchestratorError(
                 f"当前 {impact} 子目标缺少有效风险确认。"
             )
@@ -4434,6 +4747,14 @@ class UniversalAgentOrchestrator:
                     observation,
                 ),
             )
+
+            if pending_effect is not None:
+                return self._complete_pending_effect_verification(
+                    session,
+                    graph=graph,
+                    observation=observation,
+                    before_actions=before_actions,
+                )
 
             current = graph.active_subgoal()
             if current is not None and current.external_impact == "read_only":
@@ -5283,6 +5604,7 @@ class UniversalAgentOrchestrator:
                 session.auto_pause_reason = {
                     "awaiting_confirmation": "已执行一个已确认动作；下一动作需要重新确认。",
                     "awaiting_risk_confirmation": "下一子目标需要单独确认风险范围。",
+                    "needs_effect_verification": "外部效果已执行一次，等待只读结果复核。",
                     "succeeded": "目标已由新画面和 DeepSeek revision 证明完成。",
                     "blocked": "当前视觉决策或本地策略已阻止继续。",
                     "failed": "当前动作或验证失败，禁止自动重试。",

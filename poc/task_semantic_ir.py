@@ -1665,7 +1665,29 @@ def compile_legacy_graph_shadow(
         input_entities = tuple(entity_by_role.get("input_text", ()))
         effect_refs = effect_refs_by_subgoal.get(source_subgoal_id, [])
         compact_description = description.casefold()
-        if (
+        if len(effect_refs) == 1:
+            subject_ref = effect_refs[0]
+            receipt_only = any(
+                marker in compact_description
+                for marker in (
+                    "动作已执行",
+                    "操作已执行",
+                    "效果已触发",
+                    "已触发操作",
+                    "action executed",
+                    "effect applied",
+                )
+            )
+            predicate = (
+                "effect.applied" if receipt_only else "effect.result_visible"
+            )
+            value = True
+            sources = (
+                ("effect_receipt",)
+                if receipt_only
+                else ("visual_claim", "effect_receipt")
+            )
+        elif (
             len(input_entities) == 1
             and isinstance(input_entities[0].value, str)
             and input_entities[0].value
@@ -1675,19 +1697,6 @@ def compile_legacy_graph_shadow(
             predicate = "input.value_equals"
             value: Any = input_entities[0].value
             sources = ("visual_claim",)
-        elif len(effect_refs) == 1:
-            subject_ref = effect_refs[0]
-            predicate = (
-                "effect.result_visible"
-                if any(marker in compact_description for marker in ("可见", "显示", "确认", "verify", "visible"))
-                else "effect.applied"
-            )
-            value = True
-            sources = (
-                ("visual_claim", "effect_receipt")
-                if predicate == "effect.result_visible"
-                else ("effect_receipt",)
-            )
         elif any(
             term and term in compact_description
             for term in surface_by_app_term

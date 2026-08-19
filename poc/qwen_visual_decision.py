@@ -3636,6 +3636,75 @@ _IDENTITY_SCOPED_EXACT_TEXT_ACTIONS = frozenset(
     }
 )
 
+_SURFACE_IDENTITY_TYPE_SUFFIXES = frozenset(
+    {
+        "页",
+        "页面",
+        "界面",
+        "屏幕",
+        "窗口",
+        "主页",
+        "首页",
+        "聊天页",
+        "聊天页面",
+        "对话页",
+        "对话页面",
+        "详情页",
+        "详情页面",
+        "列表页",
+        "列表页面",
+        "设置页",
+        "设置页面",
+        " page",
+        " screen",
+        " window",
+        " chat page",
+        " conversation page",
+        " detail page",
+        " list page",
+        " settings page",
+    }
+)
+
+
+def _surface_identity_text_matches(label: str, required_text: str) -> bool:
+    """Match one literal title plus a bounded generic surface-type suffix."""
+
+    literal = label.strip()
+    required = required_text.strip()
+    if not literal or not required:
+        return False
+    if literal == required:
+        return True
+    if required.startswith(literal):
+        return required[len(literal) :].casefold() in _SURFACE_IDENTITY_TYPE_SUFFIXES
+    if literal.startswith(required):
+        return literal[len(required) :].casefold() in _SURFACE_IDENTITY_TYPE_SUFFIXES
+    return False
+
+
+def _matching_surface_identity_candidates(
+    observation: TrustedObservation,
+    required_text: str,
+) -> list[str]:
+    return [
+        element.element_id
+        for element in observation.scene.elements
+        if float(element.confidence) >= MIN_TARGET_CONFIDENCE
+        and element.states.get("visible") is not False
+        and element.role != "input"
+        and (
+            element.states.get("identity_anchor") is True
+            or element.states.get("goal_relevant") is True
+            or element.meaning.strip().casefold()
+            in {
+                "conversation_title",
+                "page_title",
+            }
+        )
+        and _surface_identity_text_matches(element.label, required_text)
+    ]
+
 
 def _identity_scoped_exact_text_matches(
     context: QwenTaskContext,
@@ -3658,7 +3727,7 @@ def _identity_scoped_exact_text_matches(
         or not required_actions.issubset(_IDENTITY_SCOPED_EXACT_TEXT_ACTIONS)
     ):
         return None
-    return _matching_identity_text_candidates(observation, required_text)
+    return _matching_surface_identity_candidates(observation, required_text)
 
 
 def _matching_exact_text_candidates(

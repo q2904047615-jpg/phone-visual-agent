@@ -837,6 +837,100 @@ class QwenVisualDecisionTests(unittest.TestCase):
             _exact_text_candidate_block(tap_context, observation)[1],
         )
 
+    def test_non_element_surface_identity_accepts_only_generic_type_suffix(self) -> None:
+        raw = task_context(task_id="task_surface_suffix", revision=19)
+        raw["goal"]["entities"] = {"target_ui_label": "设置页面"}
+        raw["current_subgoal"].update(
+            objective="收起键盘并保持在设置页面",
+            completion_conditions=["软键盘已收起"],
+        )
+        parsed = QwenTaskContext.from_dict(raw)
+        parsed = replace(
+            parsed,
+            semantic_ir=TaskSemanticIR(
+                task_id=parsed.task_id,
+                device_id=parsed.device_id,
+                revision=parsed.revision,
+                raw_goal="收起键盘并保持在设置页面",
+                surfaces=(SurfaceRef(surface_id="surface_current", kind="current_surface"),),
+                entities=(),
+                effects=(),
+                constraints=(
+                    ConstraintIntent(
+                        constraint_id="constraint_action",
+                        kind="required_action",
+                        value="back",
+                        authoritative=True,
+                    ),
+                ),
+                subgoals=(
+                    SemanticSubgoal(
+                        subgoal_id=str(parsed.current_subgoal["subgoal_id"]),
+                        surface_ref="surface_current",
+                        status="active",
+                        external_impact="navigation_only",
+                        constraint_refs=("constraint_action",),
+                    ),
+                ),
+            ),
+        )
+
+        def identity(label: str, element_id: str = "title") -> UIElement:
+            bounds = (
+                (0.3, 0.01, 0.7, 0.07)
+                if element_id != "title_b"
+                else (0.3, 0.09, 0.7, 0.15)
+            )
+            return UIElement(
+                element_id=element_id,
+                role="text",
+                meaning="page_title",
+                label=label,
+                bounds=bounds,
+                confidence=0.99,
+                states={"goal_relevant": True, "fully_visible": True},
+            )
+
+        settings = trusted_observation(self.frames, elements=(identity("设置"),))
+        self.assertIsNone(_exact_text_candidate_block(parsed, settings))
+
+        raw_chat = task_context(task_id="task_chat_suffix", revision=20)
+        raw_chat["goal"]["entities"] = {"target_ui_label": "文件传输助手聊天页面"}
+        raw_chat["current_subgoal"].update(
+            objective="收起键盘并保持在文件传输助手聊天页面",
+            completion_conditions=["软键盘已收起"],
+        )
+        chat_context = replace(
+            QwenTaskContext.from_dict(raw_chat),
+            semantic_ir=replace(parsed.semantic_ir, task_id="task_chat_suffix", revision=20),
+        )
+        chat = trusted_observation(
+            self.frames,
+            elements=(identity("文件传输助手"),),
+            observation_id="obs_20202020202020202020202020202020",
+        )
+        self.assertIsNone(_exact_text_candidate_block(chat_context, chat))
+
+        partial = trusted_observation(
+            self.frames,
+            elements=(identity("文件传输"),),
+            observation_id="obs_21212121212121212121212121212121",
+        )
+        self.assertEqual(
+            "exact_text_missing",
+            _exact_text_candidate_block(chat_context, partial)[1],
+        )
+
+        ambiguous = trusted_observation(
+            self.frames,
+            elements=(identity("设置", "title_a"), identity("设置页面", "title_b")),
+            observation_id="obs_22222222222222222222222222222222",
+        )
+        self.assertEqual(
+            "exact_text_ambiguous",
+            _exact_text_candidate_block(parsed, ambiguous)[1],
+        )
+
     def decide(
         self,
         provider,

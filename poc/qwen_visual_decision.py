@@ -1627,6 +1627,13 @@ def _selection_choices(
         and str(item.get("element_id") or "").strip()
     )
     choices: list[dict[str, Any]] = []
+    keyboard_dismissal_context = bool(
+        _current_subgoal_requests_keyboard_dismissal(context)
+        and _trusted_scene_proves_visible_keyboard(
+            observation.scene,
+            formal=context.semantic_ir is not None,
+        )
+    )
     launcher_entry_ids = _launcher_app_entry_candidate_ids(context, observation)
     formal_report = None
     if context.semantic_ir is not None:
@@ -1757,6 +1764,16 @@ def _selection_choices(
                 action,
                 expected_result=expected_result,
                 authority_candidate=formal_candidate(action),
+                **(
+                    {
+                        "selection_context": {
+                            "contextual_effect": "dismiss_visible_soft_keyboard",
+                            "preserves_current_app_surface": True,
+                        }
+                    }
+                    if action == "back" and keyboard_dismissal_context
+                    else {}
+                ),
             )
             continue
         if action == "swipe":
@@ -2013,6 +2030,9 @@ def _selection_decision_prompt(
 4. global_constraints和current_subgoal.constraints是选择前硬过滤；无法安全满足时blocked。
 5. current_external_impact=read_only时只能finished/blocked，除非目标明确要求等待异步变化且choices含wait_for_change。
 6. choices中的action、element_id、direction和expected_result都由本地控制器绑定；禁止复制、改写或另行输出。
+   selection_context只用于解释上下文相关原语：当back的contextual_effect为
+   dismiss_visible_soft_keyboard且preserves_current_app_surface=true时，该动作表示收起当前已证明可见的
+   软键盘并保持当前App页面，不得把它误判为离开当前页面。selection_context不会进入机械执行参数。
 7. input_verified_text的文字由DeepSeek结构化目标和本地控制器逐字绑定，你只选择对应choice_id；
    不得在输出中重复、改写或补全文字。
 8. choices没有合适动作时blocked；不得返回choices之外的动作名称或element_id。
@@ -2349,7 +2369,7 @@ def _parse_model_decision(
         next_action = {
             key: value
             for key, value in choice.items()
-            if key not in {"choice_id", "expected_result"}
+            if key not in {"choice_id", "expected_result", "selection_context"}
         }
         next_action["kind"] = next_action.pop("action")
         if next_action["kind"] == "input_verified_text":

@@ -1359,6 +1359,20 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual("action", decision.proposal.status)
         self.assertEqual("back", decision.proposal.action.action)
         self.assertEqual({"scene_changed": True}, decision.expected_result)
+        self.assertNotIn("selection_context", decision.proposal.action.params)
+        choices = _selection_choices(
+            QwenTaskContext.from_dict(context),
+            observation,
+            frozenset({"back"}),
+        )
+        self.assertEqual(1, len(choices))
+        self.assertEqual(
+            {
+                "contextual_effect": "dismiss_visible_soft_keyboard",
+                "preserves_current_app_surface": True,
+            },
+            choices[0]["selection_context"],
+        )
         self.assertEqual(["back"], observer.last_diagnostics["available_action_kinds"])
         self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
 
@@ -1392,6 +1406,15 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn(
             "tap_semantic",
             observer.last_diagnostics["available_action_kinds"],
+        )
+        choices = _selection_choices(
+            QwenTaskContext.from_dict(context),
+            observation,
+            frozenset({"back", "tap_semantic"}),
+        )
+        self.assertTrue(choices)
+        self.assertTrue(
+            all("selection_context" not in choice for choice in choices)
         )
 
     def test_keyboard_key_is_never_an_element_action_target(self) -> None:

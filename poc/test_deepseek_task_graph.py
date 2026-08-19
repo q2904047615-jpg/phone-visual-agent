@@ -5099,6 +5099,74 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
 
         self.assertEqual((), graph.risk_actions)
         self.assertTrue(all(not item.risk_action_ids for item in graph.subgoals))
+
+    def test_initial_plan_removes_negated_send_risk_from_generic_navigation_states(self):
+        raw_goal = (
+            "从列表进入一个没有草稿标记的普通会话，最终底部唯一消息输入框"
+            "逐字为空、已聚焦且软键盘可见；不得输入文字或发送消息。"
+        )
+        payload = single_subgoal_payload(
+            "从列表进入一个没有草稿标记的普通会话",
+            external_impact="navigation_only",
+        )
+        payload["goal"]["objective"] = raw_goal
+        payload["goal"]["entities"] = {
+            "target_ui_label": "没有草稿标记的普通会话"
+        }
+        payload["constraints"] = ["不得输入任何文字", "不得发送消息"]
+        payload["risk_actions"] = [
+            {
+                "risk_id": "send_message",
+                "description": "发送消息",
+                "external_effect": "消息可能被发送给聊天对象并产生通信影响",
+                "risk_type": "message_or_communication",
+                "risk_level": "high",
+                "subgoal_ids": ["enter_conversation", "focus_empty_input"],
+                "confirmation_required": True,
+            }
+        ]
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "enter_conversation",
+                "objective": "从列表进入一个没有草稿标记的普通会话",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["不得输入任何文字", "不得发送消息"],
+                "completion_conditions": ["普通会话页面在前台可见"],
+                "completion_evidence": [],
+                "risk_action_ids": ["send_message"],
+                "external_impact": "navigation_only",
+            },
+            {
+                "subgoal_id": "focus_empty_input",
+                "objective": "底部唯一消息输入框逐字为空、已聚焦且软键盘可见",
+                "status": "pending",
+                "depends_on": ["enter_conversation"],
+                "constraints": ["不得输入任何文字", "不得发送消息"],
+                "completion_conditions": [
+                    "底部唯一消息输入框为空",
+                    "输入框已聚焦",
+                    "软键盘可见",
+                ],
+                "completion_evidence": [],
+                "risk_action_ids": ["send_message"],
+                "external_impact": "navigation_only",
+            },
+        ]
+        payload["active_subgoal_id"] = "enter_conversation"
+        payload["status"] = "ready"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            raw_goal,
+            device_id="phone-1",
+        )
+
+        self.assertEqual((), graph.risk_actions)
+        self.assertEqual(
+            ["navigation_only", "navigation_only"],
+            [item.external_impact for item in graph.subgoals],
+        )
+        self.assertTrue(all(not item.risk_action_ids for item in graph.subgoals))
         self.assertTrue(
             all(item.external_impact == "navigation_only" for item in graph.subgoals)
         )

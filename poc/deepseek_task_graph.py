@@ -1960,11 +1960,18 @@ def _subgoal_is_safe_without_forbidden_risk(
             subgoal.objective,
             *subgoal.completion_conditions,
         )
+    # This migration check only decides whether a model-invented risk that is
+    # explicitly prohibited everywhere can be removed before typed projection.
+    # Requiring particular page-state words here made ordinary safe states such
+    # as a focused empty field depend on a growing UI vocabulary.  A legacy
+    # transport may also have derived ``external_state`` solely from that same
+    # invented risk, so its enum is not independently authoritative here.  The
+    # generic boundary is instead the absence of any positive external effect
+    # in the subgoal's requested result. Direct prohibition of every risk
+    # action, whole-graph positive-result checks and formal TaskSemanticIR
+    # policy remain separate mandatory gates in the caller and projection.
     positive_text = "；".join((subgoal.objective, *subgoal.completion_conditions))
-    return bool(
-        LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(positive_text)
-        or REVERSIBLE_NAVIGATION_EFFECT_PATTERN.search(positive_text)
-    ) and not any(
+    return not any(
         _has_unnegated_effect_match(pattern, positive_text)
         for pattern in _external_risk_patterns().values()
     )
@@ -1976,11 +1983,39 @@ def _purely_forbidden_initial_risks(
     local_unsubmitted_input_ids: set[str],
     local_input_preparation_ids: set[str],
 ) -> tuple[set[str], set[str]]:
+    def linked_subgoals_share_dependency_component(
+        linked_ids: tuple[str, ...],
+    ) -> bool:
+        if len(linked_ids) <= 1:
+            return True
+        adjacency: dict[str, set[str]] = {
+            subgoal_id: set() for subgoal_id in subgoals
+        }
+        for item in subgoals.values():
+            for dependency_id in item.depends_on:
+                if dependency_id not in adjacency:
+                    continue
+                adjacency[item.subgoal_id].add(dependency_id)
+                adjacency[dependency_id].add(item.subgoal_id)
+        pending = [linked_ids[0]]
+        reached: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current in reached:
+                continue
+            reached.add(current)
+            pending.extend(adjacency.get(current, ()))
+        return set(linked_ids) <= reached
+
     removable_ids: set[str] = set()
     safe_subgoal_ids: set[str] = set()
     for risk in graph.risk_actions:
         linked = tuple(subgoals.get(item) for item in risk.subgoal_ids)
-        if not linked or any(item is None for item in linked):
+        if (
+            not linked
+            or any(item is None for item in linked)
+            or not linked_subgoals_share_dependency_component(risk.subgoal_ids)
+        ):
             continue
         anchors = _risk_effect_action_anchors(
             risk.description,

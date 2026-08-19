@@ -1184,6 +1184,12 @@ class GenericSingleActionAdapter:
                             scene=before,
                             element_ids=fresh_ids,
                         )
+            before = self._apply_local_input_geometry_consensus(
+                requested_action,
+                rebind_planned_scene,
+                before,
+                local_frame_identity_verified=local_frame_identity_verified,
+            )
             rebound = self._rebind_action(
                 requested_action,
                 rebind_planned_scene,
@@ -1643,6 +1649,113 @@ class GenericSingleActionAdapter:
             orientation_credential=orientation_credential,
         )
 
+    def _local_input_geometry_consensus_bounds(
+        self,
+        requested: SemanticAction,
+        original: UIElement,
+        current: UIElement,
+        *,
+        prefix: str = "",
+        local_frame_identity_verified: bool = False,
+    ) -> tuple[float, float, float, float] | None:
+        """Return only the rectangle independently attributed by both audits."""
+
+        def stable_states(element: UIElement) -> dict[str, Any]:
+            return {
+                key: value
+                for key, value in element.states.items()
+                if key not in {"goal_relevant", "keyboard_geometry"}
+            }
+
+        if not (
+            local_frame_identity_verified
+            and requested.action == "tap_semantic"
+            and prefix == ""
+            and original.element_id == current.element_id
+            and original.element_id.startswith("local_audited_")
+            and original.meaning == current.meaning
+            and original.meaning in self.LOCAL_INPUT_AUXILIARY_MEANINGS
+            and original.role == current.role
+            and original.role in {"button", "icon"}
+            and original.label == current.label
+            and bool(original.label.strip())
+            and stable_states(original) == stable_states(current)
+            and original.states.get("independent_geometry_verified") is True
+            and current.states.get("independent_geometry_verified") is True
+            and original.states.get("geometry_audit_source")
+            == "element_geometry_audit"
+            and current.states.get("geometry_audit_source")
+            == "element_geometry_audit"
+        ):
+            return None
+        left = max(original.bounds[0], current.bounds[0])
+        top = max(original.bounds[1], current.bounds[1])
+        right = min(original.bounds[2], current.bounds[2])
+        bottom = min(original.bounds[3], current.bounds[3])
+        if not (left < right and top < bottom):
+            return None
+        intersection = (right - left) * (bottom - top)
+        original_width = original.bounds[2] - original.bounds[0]
+        original_height = original.bounds[3] - original.bounds[1]
+        current_width = current.bounds[2] - current.bounds[0]
+        current_height = current.bounds[3] - current.bounds[1]
+        smaller_area = min(
+            original_width * original_height,
+            current_width * current_height,
+        )
+        smaller_coverage = intersection / smaller_area if smaller_area > 0 else 0.0
+        center_delta_x = abs(original.center[0] - current.center[0])
+        center_delta_y = abs(original.center[1] - current.center[1])
+        narrow_consensus = bool(
+            smaller_coverage >= 0.25
+            and center_delta_x
+            <= max(0.05, 0.30 * max(original_width, current_width))
+            and center_delta_y
+            <= max(0.03, 0.75 * max(original_height, current_height))
+        )
+        wider_consensus = bool(
+            smaller_coverage >= 0.40
+            and center_delta_x
+            <= max(0.10, 0.50 * max(original_width, current_width))
+            and center_delta_y
+            <= max(0.03, 0.75 * max(original_height, current_height))
+        )
+        return (left, top, right, bottom) if narrow_consensus or wider_consensus else None
+
+    def _apply_local_input_geometry_consensus(
+        self,
+        requested: SemanticAction,
+        planned_scene: UIScene,
+        fresh_scene: UIScene,
+        *,
+        local_frame_identity_verified: bool = False,
+    ) -> UIScene:
+        if requested.action != "tap_semantic":
+            return fresh_scene
+        element_id = str(requested.params.get("element_id") or "").strip()
+        try:
+            original = planned_scene.get_element(element_id)
+            current = fresh_scene.get_element(element_id)
+        except UISceneError:
+            return fresh_scene
+        consensus = self._local_input_geometry_consensus_bounds(
+            requested,
+            original,
+            current,
+            local_frame_identity_verified=local_frame_identity_verified,
+        )
+        if consensus is None:
+            return fresh_scene
+        return replace(
+            fresh_scene,
+            elements=tuple(
+                replace(element, bounds=consensus)
+                if element.element_id == element_id
+                else element
+                for element in fresh_scene.elements
+            ),
+        )
+
     def _rebind_action(
         self,
         requested: SemanticAction,
@@ -1990,39 +2103,33 @@ class GenericSingleActionAdapter:
                 and center_delta_y
                 <= max(0.02, 0.50 * max(original_height, current_height))
             )
-            stable_audited_local_input_target = bool(
-                local_frame_identity_verified
-                and requested.action == "tap_semantic"
-                and prefix == ""
-                and original.element_id == current.element_id
-                and original.element_id.startswith("local_audited_")
-                and original.meaning == current.meaning
-                and original.meaning in self.LOCAL_INPUT_AUXILIARY_MEANINGS
-                and original.role == current.role
-                and original.role in {"button", "icon"}
-                and original.states.get("independent_geometry_verified") is True
-                and current.states.get("independent_geometry_verified") is True
-                and original.states.get("geometry_audit_source")
-                == "element_geometry_audit"
-                and current.states.get("geometry_audit_source")
-                == "element_geometry_audit"
-                and intersection > 0
-                and smaller_coverage >= 0.25
-                and center_delta_x
-                <= max(0.05, 0.30 * max(original_width, current_width))
-                and center_delta_y
-                <= max(0.03, 0.75 * max(original_height, current_height))
+            local_input_consensus_bounds = (
+                self._local_input_geometry_consensus_bounds(
+                    requested,
+                    original,
+                    current,
+                    prefix=prefix,
+                    local_frame_identity_verified=local_frame_identity_verified,
+                )
             )
             if (
                 require_geometry_overlap
                 and overlap < 0.60
                 and not tight_loose_same_target
-                and not stable_audited_local_input_target
+                and local_input_consensus_bounds is None
             ):
                 raise GenericActionAdapterError(
                     "确认时目标区域已明显移动，旧确认失效："
                     f"iou={overlap:.3f}, smaller_coverage={smaller_coverage:.3f}, "
                     f"center_delta=({center_delta_x:.3f},{center_delta_y:.3f})。"
+                )
+            if local_input_consensus_bounds is not None:
+                # Neither model crop owns the execution point.  The overlap is
+                # the only region independently attributed to the same exact
+                # local input target by both audits, so execute at its center.
+                return replace(
+                    current,
+                    bounds=local_input_consensus_bounds,
                 )
             return current
 

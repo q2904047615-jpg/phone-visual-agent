@@ -808,6 +808,24 @@ class GenericActionAdapterTests(unittest.TestCase):
             planned_fingerprint,
             audited=True,
         )
+        planned_audited = replace(
+            planned_audited,
+            elements=tuple(
+                replace(element, bounds=(0.40, 0.68, 0.60, 0.74))
+                if element.element_id == "local_audited_literal_key_1"
+                else element
+                for element in planned_audited.elements
+            ),
+        )
+        fresh_audited = replace(
+            fresh_audited,
+            elements=tuple(
+                replace(element, bounds=(0.32, 0.664, 0.52, 0.724))
+                if element.element_id == "local_audited_literal_key_1"
+                else element
+                for element in fresh_audited.elements
+            ),
+        )
         after = self._literal_input_scene(
             "after-live2",
             value="live2",
@@ -877,7 +895,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual((), result.verification_errors)
         self.assertEqual("matched", result.action_outcome)
-        self.assertEqual([("tap", 220, 735)], robot.actions)
+        self.assertEqual([("tap", 460, 702)], robot.actions)
         self.assertEqual(
             [
                 ("local_audited_literal_key_1",),
@@ -3257,10 +3275,10 @@ class GenericActionAdapterTests(unittest.TestCase):
                 fingerprint=fingerprint,
             )
 
-        planned = literal_key_scene("planned", (0.25, 0.68, 0.41, 0.74))
-        # The same low-profile key can move by about 5% of full-frame width
-        # between two independent model crops while retaining strong overlap.
-        fresh = literal_key_scene("fresh", (0.296, 0.701, 0.456, 0.761))
+        planned = literal_key_scene("planned", (0.40, 0.68, 0.60, 0.74))
+        # The same low-profile key can move by 8% of full-frame width between
+        # two independent model crops while retaining a substantial consensus.
+        fresh = literal_key_scene("fresh", (0.32, 0.664, 0.52, 0.724))
         requested = SemanticAction(
             node_id="append-next-literal",
             action="tap_semantic",
@@ -3274,10 +3292,20 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
         adapter = self._adapter(FakeSceneObserver([]), FakeRobot())
 
-        rebound = adapter._rebind_action(
+        consensus_scene = adapter._apply_local_input_geometry_consensus(
             requested,
             planned,
             fresh,
+            local_frame_identity_verified=True,
+        )
+        self.assertEqual(
+            (0.40, 0.68, 0.52, 0.724),
+            consensus_scene.elements[0].bounds,
+        )
+        rebound = adapter._rebind_action(
+            requested,
+            planned,
+            consensus_scene,
             local_frame_identity_verified=True,
         )
 
@@ -3285,8 +3313,9 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(fresh.elements[0].states, rebound.params["states"])
 
         for moved_bounds in (
-            (0.45, 0.68, 0.61, 0.74),
-            (0.25, 0.75, 0.41, 0.81),
+            (0.52, 0.696, 0.68, 0.756),
+            (0.60, 0.68, 0.80, 0.74),
+            (0.40, 0.75, 0.60, 0.81),
         ):
             with self.subTest(moved_bounds=moved_bounds):
                 with self.assertRaisesRegex(

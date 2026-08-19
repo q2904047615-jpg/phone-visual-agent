@@ -1470,6 +1470,12 @@ class DeepSeekTaskGraphPlanner:
         candidate = _normalize_redundant_conditional_input_clear(candidate)
         candidate = _normalize_observed_concrete_input_clear(candidate, observation)
         candidate = _normalize_unique_active_frontier(candidate)
+        # Replanning can preserve a legacy model confirmation flag while the
+        # formal typed policy classifies the same ordinary external effect as
+        # automatic.  Make that transport internally self-consistent before
+        # validation; the formal projector below remains the sole authority
+        # that can grant automatic execution or require confirmation.
+        candidate = _normalize_initial_confirmation_status(candidate)
         _validate_external_impact_revision(graph, candidate)
         _validate_preserved_risk_ids(graph, candidate)
         candidate.validate()

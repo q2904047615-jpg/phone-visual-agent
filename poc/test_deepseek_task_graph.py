@@ -6163,6 +6163,65 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         self.assertEqual("save_target", graph.active_subgoal_id)
         self.assertEqual(("save_place",), graph.active_subgoal().risk_action_ids)
 
+    def test_replan_normalizes_legacy_confirmation_before_formal_policy(self):
+        initial = base_payload()
+        initial["status"] = "running"
+        initial["subgoals"][0]["status"] = "skipped"
+        initial["subgoals"][1]["status"] = "active"
+        initial["subgoals"][1]["depends_on"] = []
+        initial["active_subgoal_id"] = "save_target"
+        revised = copy.deepcopy(initial)
+        planner = FormalDeepSeekTaskGraphPlanner(FakeProvider(initial, revised))
+        graph = planner.plan("目标", device_id="phone-1")
+        unchanged = ObservedState(
+            scene_id="scene-unchanged",
+            summary="目标地点详情仍然可见",
+            visible_evidence=("页面显示目标地点详情",),
+            last_action_outcome="not_applicable",
+        )
+
+        result = planner.replan(
+            graph,
+            unchanged,
+            trigger="observation_changed",
+            reason="只读观察已更新",
+        )
+
+        self.assertEqual(2, result.revision)
+        self.assertEqual("ready", result.status)
+        self.assertFalse(result.risk_actions[0].confirmation_required)
+        self.assertEqual("save_target", result.active_subgoal_id)
+
+    def test_replan_transport_normalization_cannot_disable_payment_confirmation(self):
+        initial = active_external_payload()
+        initial["goal"]["objective"] = "为订单付款"
+        initial["subgoals"][1]["objective"] = "订单进入付款完成状态"
+        initial["subgoals"][1]["completion_conditions"] = ["页面显示付款完成"]
+        initial["risk_actions"][0]["description"] = "为订单付款"
+        initial["risk_actions"][0]["external_effect"] = "产生一笔资金交易"
+        initial["risk_actions"][0]["risk_type"] = "transaction_or_payment"
+        initial["risk_actions"][0]["confirmation_required"] = False
+        initial["status"] = "ready"
+        revised = copy.deepcopy(initial)
+        planner = FormalDeepSeekTaskGraphPlanner(FakeProvider(initial, revised))
+        graph = planner.plan("为订单付款", device_id="phone-1")
+        unchanged = ObservedState(
+            scene_id="payment-scene",
+            summary="付款页面仍然可见",
+            visible_evidence=("页面显示待付款订单",),
+            last_action_outcome="not_applicable",
+        )
+
+        result = planner.replan(
+            graph,
+            unchanged,
+            trigger="observation_changed",
+            reason="只读观察已更新",
+        )
+
+        self.assertEqual("awaiting_confirmation", result.status)
+        self.assertTrue(result.risk_actions[0].confirmation_required)
+
     def test_unknown_impact_enters_confirmation_without_auto_advance(self):
         payload = base_payload()
         payload["risk_actions"] = [

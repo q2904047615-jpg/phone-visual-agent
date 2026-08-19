@@ -240,6 +240,54 @@ class VisualActionShadowTests(unittest.TestCase):
         self.assertEqual(expectation.value, "任意文本 42")
         self.assertFalse(candidate.transition.exploratory)
 
+    def test_local_literal_key_uses_exact_input_value_transition(self):
+        input_element = make_element(
+            element_id="input-1",
+            role="input",
+            label="live",
+            meaning="application_text_input",
+            states={
+                "focused": True,
+                "value": "live",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+            },
+        )
+        literal_key = make_element(
+            element_id="key-2",
+            role="button",
+            label="2",
+            meaning="input_exact_literal_key",
+            bounds=(0.18, 0.70, 0.26, 0.77),
+            states={
+                "input_literal_key": True,
+                "input_element_id": "input-1",
+                "prior_input_value": "live",
+                "expected_input_value": "live2",
+            },
+        )
+        report = compile_visual_action_shadow(
+            make_scene(input_element, literal_key, screen_id="compose"),
+            make_ir(
+                role="input_text",
+                value="live21",
+                raw_goal="当前输入区域最终显示 live21",
+                payload=True,
+            ),
+            ALL_ACTIONS,
+        )
+        candidate = next(
+            item
+            for item in report.candidates
+            if item.action_kind == "tap_semantic"
+            and item.parameters.get("element_id") == "key-2"
+        )
+
+        expectation = candidate.transition.expectations[0]
+        self.assertEqual("element.state.value", expectation.predicate)
+        self.assertEqual("live2", expectation.value)
+        self.assertFalse(candidate.transition.exploratory)
+
     def test_duplicate_literal_never_grants_effect_binding(self):
         scene = make_scene(
             make_element("first", label="小组", role="list_item"),

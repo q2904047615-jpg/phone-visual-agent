@@ -385,12 +385,40 @@ class UniversalActionController:
                     expected_effect,
                     formal=bool(formal_candidate_id),
                 )
-            return self._point_action(
+            resolved = self._point_action(
                 action,
                 element,
                 expected_effect,
                 scene.fingerprint,
             )
+            if element.meaning in {
+                "ime_exact_candidate",
+                "input_exact_literal_key",
+                "switch_keyboard_layout",
+                "switch_keyboard_case",
+                "switch_keyboard_input_mode",
+            }:
+                expected_element = expected_effect.get("element_state")
+                expected_states = (
+                    expected_element.get("states")
+                    if isinstance(expected_element, dict)
+                    else None
+                )
+                expected_value = (
+                    expected_states.get("value")
+                    if isinstance(expected_states, dict)
+                    else None
+                )
+                if not isinstance(expected_value, str):
+                    raise UniversalActionError(
+                        "输入辅助键缺少精确输入值后置条件。"
+                    )
+                resolved = replace(
+                    resolved,
+                    prior_input_value=element.states.get("prior_input_value"),
+                    expected_input_value=expected_value,
+                )
+            return resolved
         if action.action == "dismiss_overlay":
             if not action.params.get("target"):
                 action = SemanticAction(

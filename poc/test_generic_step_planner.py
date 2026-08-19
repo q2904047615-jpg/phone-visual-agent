@@ -722,6 +722,194 @@ class GenericActionAdapterTests(unittest.TestCase):
             **kwargs,
         )
 
+    @staticmethod
+    def _literal_input_scene(
+        fingerprint,
+        *,
+        value="live",
+        include_key=True,
+        audited=False,
+    ):
+        input_element = UIElement(
+            element_id="local_audited_input_1",
+            role="input",
+            meaning="application_text_input",
+            label=value,
+            bounds=(0.15, 0.53, 0.70, 0.59),
+            confidence=1.0,
+            states={
+                "goal_relevant": False,
+                "fully_visible": True,
+                "focused": True,
+                "visible": True,
+                "value": value,
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+                "keyboard_case_mode": "lower",
+            },
+            evidence=(f"应用输入框当前文字：{value}", "caret"),
+        )
+        elements = [input_element]
+        if include_key:
+            elements.append(
+                UIElement(
+                    element_id="local_audited_literal_key_1",
+                    role="button",
+                    meaning="input_exact_literal_key",
+                    label="2",
+                    bounds=(0.18, 0.70, 0.26, 0.77),
+                    confidence=1.0,
+                    states={
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "input_literal_key": True,
+                        "key_value": "2",
+                        "prior_input_value": "live",
+                        "expected_input_value": "live2",
+                        "input_element_id": "local_audited_input_1",
+                        **(
+                            {
+                                "independent_geometry_verified": True,
+                                "geometry_audit_source": "element_geometry_audit",
+                            }
+                            if audited
+                            else {}
+                        ),
+                    },
+                    evidence=("输入结构审计确认下一字符对应唯一完整可见键位",),
+                )
+            )
+        result = UIScene(
+            app_id="wechat",
+            screen_id="conversation",
+            summary="聚焦输入框与键盘可见",
+            elements=tuple(elements),
+            stable=True,
+            confidence=1.0,
+            fingerprint=fingerprint,
+            camera_alignment=aligned_camera_facts(),
+        )
+        result.validate()
+        return result
+
+    def test_missing_local_literal_key_is_reaudited_on_confirmation_frames(self):
+        gray = Image.new("RGB", (540, 960), "gray")
+        planned_fingerprint = _local_frame_fingerprint(gray)
+        planned = self._literal_input_scene(planned_fingerprint)
+        fresh_missing = self._literal_input_scene(
+            planned_fingerprint,
+            include_key=False,
+        )
+        planned_audited = self._literal_input_scene(
+            planned_fingerprint,
+            audited=True,
+        )
+        fresh_audited = self._literal_input_scene(
+            planned_fingerprint,
+            audited=True,
+        )
+        after = self._literal_input_scene(
+            "after-live2",
+            value="live2",
+            include_key=False,
+        )
+        observer = FakeSceneObserver(
+            [fresh_missing, after, after],
+            geometry_scenes=[planned_audited, fresh_audited],
+        )
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+        key = planned.get_element("local_audited_literal_key_1")
+        expected_effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": "live2"},
+            }
+        }
+
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="literal-2",
+                action="tap_semantic",
+                params={
+                    "formal_candidate_id": "candidate-literal-2",
+                    "formal_report_digest": "a" * 64,
+                    "formal_transition": {
+                        "transition_id": "transition-literal-2",
+                        "precondition_claim_ids": ["claim-input-live"],
+                        "expectations": [
+                            {
+                                "subject_ref": "element.local_audited_input_1",
+                                "predicate": "element.state.value",
+                                "operator": "equals",
+                                "value": "live2",
+                            }
+                        ],
+                        "exploratory": False,
+                    },
+                    "element_id": key.element_id,
+                    "target": key.meaning,
+                    "role": key.role,
+                    "label": key.label,
+                    "states": dict(key.states),
+                    "expected_effect": expected_effect,
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=(gray, gray.copy(), gray.copy(), gray.copy()),
+            goal=GenericIntentDraft(
+                understood=True,
+                app_id="current_foreground",
+                app_name="当前应用",
+                objective="当前输入框显示 live21 且尚未提交",
+                entities={"input_text": "live21"},
+                success_criteria={"input": "live21"},
+            ),
+            confirmed=True,
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual((), result.verification_errors)
+        self.assertEqual("matched", result.action_outcome)
+        self.assertEqual([("tap", 220, 735)], robot.actions)
+        self.assertEqual(
+            [
+                ("local_audited_literal_key_1",),
+                ("local_audited_literal_key_1",),
+            ],
+            observer.geometry_audit_calls,
+        )
+
+    def test_missing_ordinary_button_cannot_use_input_auxiliary_recovery(self):
+        planned = scene("ordinary-planned")
+        requested = SemanticAction(
+            node_id="ordinary",
+            action="tap_semantic",
+            params={
+                "formal_candidate_id": "candidate-ordinary",
+                "element_id": planned.elements[0].element_id,
+                "target": planned.elements[0].meaning,
+                "role": planned.elements[0].role,
+                "label": planned.elements[0].label,
+                "states": dict(planned.elements[0].states),
+                "expected_effect": {"scene_changed": True},
+            },
+        )
+
+        self.assertIsNone(
+            GenericSingleActionAdapter._local_input_auxiliary_recovery_target(
+                requested,
+                planned,
+                replace(planned, elements=(), fingerprint="fresh-empty"),
+            )
+        )
+
     def test_completed_navigation_observes_result_without_source_target(self):
         planned = scene("planned")
         fresh = replace(planned, fingerprint="fresh")

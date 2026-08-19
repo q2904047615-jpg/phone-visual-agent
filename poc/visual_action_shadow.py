@@ -1071,6 +1071,27 @@ def compile_visual_action_shadow(
                     "equals",
                     surface_binding.object_ref,
                 )
+            elif element.meaning in {
+                "ime_exact_candidate",
+                "input_exact_literal_key",
+                "switch_keyboard_layout",
+                "switch_keyboard_case",
+                "switch_keyboard_input_mode",
+            }:
+                expected_input_value = (
+                    element.states.get("expected_input_value")
+                    if element.meaning
+                    in {"ime_exact_candidate", "input_exact_literal_key"}
+                    else element.states.get("prior_input_value")
+                )
+                if not isinstance(expected_input_value, str):
+                    continue
+                expectation = StateExpectation(
+                    element_ref,
+                    "element.state.value",
+                    "equals",
+                    expected_input_value,
+                )
             elif element.role == "input":
                 expectation = StateExpectation(
                     element_ref,
@@ -1138,6 +1159,14 @@ def compile_visual_action_shadow(
                         not effect_ref
                         and surface_binding is None
                         and element.role != "input"
+                        and element.meaning
+                        not in {
+                            "ime_exact_candidate",
+                            "input_exact_literal_key",
+                            "switch_keyboard_layout",
+                            "switch_keyboard_case",
+                            "switch_keyboard_input_mode",
+                        }
                     ),
                 )
             )

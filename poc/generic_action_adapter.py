@@ -476,6 +476,15 @@ class GenericSingleActionAdapter:
             "drag",
         }
     )
+    LOCAL_INPUT_AUXILIARY_MEANINGS = frozenset(
+        {
+            "ime_exact_candidate",
+            "input_exact_literal_key",
+            "switch_keyboard_layout",
+            "switch_keyboard_case",
+            "switch_keyboard_input_mode",
+        }
+    )
 
     @staticmethod
     def _has_local_independent_geometry_attestation(
@@ -559,6 +568,96 @@ class GenericSingleActionAdapter:
             supported_actions=self.supported_action_kinds(),
             raw_profile=raw_profile,
         )
+
+    @classmethod
+    def _local_input_auxiliary_recovery_target(
+        cls,
+        requested: SemanticAction,
+        planned_scene: UIScene,
+        fresh_scene: UIScene,
+    ) -> UIElement | None:
+        """Return a strict local input descriptor omitted by a fresh full pass.
+
+        Ordinary buttons never use this path.  The target must have been minted
+        by the canonical input-structure audit, remain fully bound to one
+        focused input and be completely absent from the fresh semantic scene.
+        Its geometry is still re-audited on the fresh confirmation frames
+        before the controller may resolve an action.
+        """
+
+        if requested.action != "tap_semantic" or not str(
+            requested.params.get("formal_candidate_id") or ""
+        ).strip():
+            return None
+        target_id = str(requested.params.get("element_id") or "").strip()
+        try:
+            target = planned_scene.get_element(target_id)
+        except UISceneError:
+            return None
+        states = target.states
+        marker_by_meaning = {
+            "ime_exact_candidate": "ime_candidate",
+            "input_exact_literal_key": "input_literal_key",
+            "switch_keyboard_layout": "keyboard_layout_switch",
+            "switch_keyboard_case": "keyboard_case_switch",
+            "switch_keyboard_input_mode": "keyboard_input_mode_switch",
+        }
+        marker = marker_by_meaning.get(target.meaning)
+        if (
+            target.meaning not in cls.LOCAL_INPUT_AUXILIARY_MEANINGS
+            or target.role not in {"button", "icon"}
+            or not target.label.strip()
+            or marker is None
+            or states.get(marker) is not True
+            or states.get("goal_relevant") is not True
+            or states.get("fully_visible") is not True
+            or requested.params.get("target") != target.meaning
+            or requested.params.get("role") != target.role
+            or requested.params.get("label") != target.label
+            or requested.params.get("states") != states
+        ):
+            return None
+        input_id = str(states.get("input_element_id") or "").strip()
+        prior_value = states.get("prior_input_value")
+        try:
+            input_element = planned_scene.get_element(input_id)
+        except UISceneError:
+            return None
+        if (
+            input_element.role != "input"
+            or input_element.states.get("focused") is not True
+            or not isinstance(prior_value, str)
+            or input_element.states.get("value") != prior_value
+        ):
+            return None
+        expected = requested.params.get("expected_effect")
+        expected_element = (
+            expected.get("element_state")
+            if isinstance(expected, dict)
+            else None
+        )
+        expected_states = (
+            expected_element.get("states")
+            if isinstance(expected_element, dict)
+            else None
+        )
+        if (
+            not isinstance(expected_element, dict)
+            or expected_element.get("meaning") != input_element.meaning
+            or not isinstance(expected_states, dict)
+            or not isinstance(expected_states.get("value"), str)
+        ):
+            return None
+        # A visible same-label control is not an omission.  It must go through
+        # the ordinary semantic rebinding path so meaning/role/state drift or
+        # duplication remains fail-closed.
+        if any(
+            element.label == target.label
+            and element.role in {"button", "icon"}
+            for element in fresh_scene.elements
+        ):
+            return None
+        return target
 
     def capability_gap(
         self,
@@ -985,39 +1084,24 @@ class GenericSingleActionAdapter:
                     raise GenericActionAdapterError(
                         "当前观察器没有独立目标几何审计，拒绝几何绑定动作。"
                     )
-                semantic_rebound = self._rebind_action(
-                    requested_action,
-                    planned_scene,
-                    before,
-                    local_frame_identity_verified=local_frame_identity_verified,
-                    require_geometry_overlap=False,
-                )
-                if requested_action.action == "drag":
-                    planned_ids = (
-                        str(requested_action.params.get("source_element_id") or ""),
-                        str(requested_action.params.get("destination_element_id") or ""),
-                    )
-                    fresh_ids = (
-                        str(semantic_rebound.params.get("source_element_id") or ""),
-                        str(semantic_rebound.params.get("destination_element_id") or ""),
-                    )
-                else:
-                    planned_ids = (
-                        str(requested_action.params.get("element_id") or ""),
-                    )
-                    fresh_ids = (
-                        str(semantic_rebound.params.get("element_id") or ""),
-                    )
-                if not (
-                    self._has_local_independent_geometry_attestation(
+                local_input_recovery = (
+                    self._local_input_auxiliary_recovery_target(
+                        requested_action,
                         planned_scene,
-                        planned_ids,
-                    )
-                    and self._has_local_independent_geometry_attestation(
                         before,
-                        fresh_ids,
                     )
-                ):
+                )
+                if local_input_recovery is not None:
+                    planned_ids = (local_input_recovery.element_id,)
+                    # The full-scene confirmation pass omitted a model-generated
+                    # ordinary keyboard control.  Keep only the old descriptor,
+                    # bind it to a fingerprint from the actual fresh stable
+                    # frames, and require two independent crop audits before
+                    # semantic rebinding.  No old geometry survives this path.
+                    fresh_seed_scene = replace(
+                        planned_scene,
+                        fingerprint=frame_fingerprint(before_frames[-1]),
+                    )
                     rebind_planned_scene = audit_geometry(
                         frames=tuple(planned_frames),
                         scene=planned_scene,
@@ -1025,9 +1109,81 @@ class GenericSingleActionAdapter:
                     )
                     before = audit_geometry(
                         frames=before_frames,
-                        scene=before,
-                        element_ids=fresh_ids,
+                        scene=fresh_seed_scene,
+                        element_ids=planned_ids,
                     )
+                else:
+                    semantic_rebound = self._rebind_action(
+                        requested_action,
+                        planned_scene,
+                        before,
+                        local_frame_identity_verified=(
+                            local_frame_identity_verified
+                        ),
+                        require_geometry_overlap=False,
+                    )
+                    if requested_action.action == "drag":
+                        planned_ids = (
+                            str(
+                                requested_action.params.get(
+                                    "source_element_id"
+                                )
+                                or ""
+                            ),
+                            str(
+                                requested_action.params.get(
+                                    "destination_element_id"
+                                )
+                                or ""
+                            ),
+                        )
+                        fresh_ids = (
+                            str(
+                                semantic_rebound.params.get(
+                                    "source_element_id"
+                                )
+                                or ""
+                            ),
+                            str(
+                                semantic_rebound.params.get(
+                                    "destination_element_id"
+                                )
+                                or ""
+                            ),
+                        )
+                    else:
+                        planned_ids = (
+                            str(
+                                requested_action.params.get("element_id")
+                                or ""
+                            ),
+                        )
+                        fresh_ids = (
+                            str(
+                                semantic_rebound.params.get("element_id")
+                                or ""
+                            ),
+                        )
+                    if not (
+                        self._has_local_independent_geometry_attestation(
+                            planned_scene,
+                            planned_ids,
+                        )
+                        and self._has_local_independent_geometry_attestation(
+                            before,
+                            fresh_ids,
+                        )
+                    ):
+                        rebind_planned_scene = audit_geometry(
+                            frames=tuple(planned_frames),
+                            scene=planned_scene,
+                            element_ids=planned_ids,
+                        )
+                        before = audit_geometry(
+                            frames=before_frames,
+                            scene=before,
+                            element_ids=fresh_ids,
+                        )
             rebound = self._rebind_action(
                 requested_action,
                 rebind_planned_scene,

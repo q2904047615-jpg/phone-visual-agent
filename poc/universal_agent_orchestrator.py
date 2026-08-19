@@ -3809,7 +3809,13 @@ class UniversalAgentOrchestrator:
                 for key, value in expected_states.items()
             )
         )
-        return len(after_inputs) == 1
+        # Only an unfinished verified prefix remains inside the deterministic
+        # input transaction.  Once the fresh after-scene proves the canonical
+        # value itself, this is a terminal input step: return to the normal
+        # typed receipt / DeepSeek completion path instead of asking Qwen to
+        # enumerate the same text again (for example, input value and a stale
+        # IME candidate carrying an identical literal).
+        return len(after_inputs) == 1 and expected_value != canonical
 
     def _advance_after_observation(
         self,

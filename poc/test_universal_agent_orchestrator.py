@@ -6859,6 +6859,78 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             )
         )
 
+    def test_verified_direct_input_canonical_value_exits_microstep(self) -> None:
+        graph = self._input_graph()
+        graph = replace(
+            graph,
+            goal=replace(
+                graph.goal,
+                objective="当前输入框逐字显示 agent 且尚未提交",
+                entities={"input_text": "agent"},
+            ),
+            completion_conditions=(
+                replace(
+                    graph.completion_conditions[0],
+                    description="当前输入框逐字显示 agent 且尚未提交",
+                    evidence_required=("当前输入框逐字显示 agent",),
+                ),
+            ),
+            subgoals=(
+                replace(
+                    graph.subgoals[0],
+                    objective="当前输入框逐字显示 agent 且尚未提交",
+                    completion_conditions=("当前输入框逐字显示 agent",),
+                ),
+            ),
+            raw_user_goal="在当前输入框输入 agent，但不要提交",
+        )
+        graph.validate()
+        before = self._input_scene("", fingerprint="direct-final-before")
+        after = self._input_scene("agent", fingerprint="direct-final-after")
+        expected_effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": "agent"},
+            },
+            "goal_complete_on_success": True,
+        }
+        action = SemanticAction(
+            node_id="direct-final-step",
+            action="input_verified_text",
+            params={"text": "agent", "expected_effect": expected_effect},
+        )
+        result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=before,
+            after_scene=after,
+            resolved_action=ResolvedSemanticAction(
+                node_id="direct-final-step",
+                kind="input_verified_text",
+                text="agent",
+                input_fragment="agent",
+                input_method="direct_latin",
+                prior_input_value="",
+                expected_input_value="agent",
+                target_element_id="input-1",
+                before_fingerprint=before.fingerprint,
+                expected_effect=expected_effect,
+            ),
+        )
+
+        self.assertFalse(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=SimpleNamespace(
+                    proposal=GenericStepProposal(status="action", action=action)
+                ),
+                result=result,
+                before_observation=SimpleNamespace(fingerprint=before.fingerprint),
+                new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+            )
+        )
+
     def test_verified_pinyin_preedit_uses_fresh_rebound_scene_and_continues_to_candidate(self) -> None:
         graph = self._input_graph()
         graph = replace(
@@ -6979,6 +7051,51 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             )
         )
 
+        final_after = self._input_scene("你好", fingerprint="candidate-after")
+        final_effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": "你好"},
+            },
+            "goal_complete_on_success": True,
+        }
+        final_action = SemanticAction(
+            node_id="candidate-step",
+            action="tap_semantic",
+            params={"expected_effect": final_effect},
+        )
+        final_result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=after,
+            after_scene=final_after,
+            resolved_action=ResolvedSemanticAction(
+                node_id="candidate-step",
+                kind="tap_semantic",
+                target_element_id=candidate.element_id,
+                before_fingerprint=after.fingerprint,
+                expected_effect=final_effect,
+            ),
+        )
+
+        self.assertFalse(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=SimpleNamespace(
+                    proposal=GenericStepProposal(
+                        status="action",
+                        action=final_action,
+                    )
+                ),
+                result=final_result,
+                before_observation=SimpleNamespace(fingerprint=after.fingerprint),
+                new_observation=SimpleNamespace(
+                    fingerprint=final_after.fingerprint
+                ),
+            )
+        )
+
     def test_verified_literal_key_keeps_high_level_graph(self) -> None:
         graph = self._input_graph()
         key = UIElement(
@@ -7039,6 +7156,72 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 result=result,
                 before_observation=SimpleNamespace(fingerprint=before.fingerprint),
                 new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+            )
+        )
+
+        final_key = replace(
+            key,
+            element_id="key-1",
+            label="1",
+            states={
+                **key.states,
+                "key_value": "1",
+                "prior_input_value": "live2",
+                "expected_input_value": "live21",
+            },
+        )
+        final_before = self._input_scene(
+            "live2",
+            fingerprint="final-key-before",
+            auxiliary=final_key,
+        )
+        final_after = self._input_scene(
+            "live21",
+            fingerprint="final-key-after",
+        )
+        final_effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": "live21"},
+            },
+            "goal_complete_on_success": True,
+        }
+        final_action = SemanticAction(
+            node_id="final-key-step",
+            action="tap_semantic",
+            params={"expected_effect": final_effect},
+        )
+        final_result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=final_before,
+            after_scene=final_after,
+            resolved_action=ResolvedSemanticAction(
+                node_id="final-key-step",
+                kind="tap_semantic",
+                target_element_id=final_key.element_id,
+                before_fingerprint=final_before.fingerprint,
+                expected_effect=final_effect,
+            ),
+        )
+
+        self.assertFalse(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=SimpleNamespace(
+                    proposal=GenericStepProposal(
+                        status="action",
+                        action=final_action,
+                    )
+                ),
+                result=final_result,
+                before_observation=SimpleNamespace(
+                    fingerprint=final_before.fingerprint
+                ),
+                new_observation=SimpleNamespace(
+                    fingerprint=final_after.fingerprint
+                ),
             )
         )
 

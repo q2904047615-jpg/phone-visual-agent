@@ -1956,10 +1956,34 @@ class GenericSingleActionAdapter:
                 and center_delta_y
                 <= max(0.02, 0.50 * max(original_height, current_height))
             )
+            stable_audited_local_input_target = bool(
+                local_frame_identity_verified
+                and requested.action == "tap_semantic"
+                and prefix == ""
+                and original.element_id == current.element_id
+                and original.element_id.startswith("local_audited_")
+                and original.meaning == current.meaning
+                and original.meaning in self.LOCAL_INPUT_AUXILIARY_MEANINGS
+                and original.role == current.role
+                and original.role in {"button", "icon"}
+                and original.states.get("independent_geometry_verified") is True
+                and current.states.get("independent_geometry_verified") is True
+                and original.states.get("geometry_audit_source")
+                == "element_geometry_audit"
+                and current.states.get("geometry_audit_source")
+                == "element_geometry_audit"
+                and intersection > 0
+                and smaller_coverage >= 0.25
+                and center_delta_x
+                <= max(0.03, 0.25 * max(original_width, current_width))
+                and center_delta_y
+                <= max(0.025, 0.75 * max(original_height, current_height))
+            )
             if (
                 require_geometry_overlap
                 and overlap < 0.60
                 and not tight_loose_same_target
+                and not stable_audited_local_input_target
             ):
                 raise GenericActionAdapterError(
                     "确认时目标区域已明显移动，旧确认失效："

@@ -2951,6 +2951,127 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual([("tap", 210, 240)], robot.actions)
 
+    def test_rebind_accepts_narrow_strict_local_input_audit_jitter(self):
+        states = {
+            "goal_relevant": True,
+            "fully_visible": True,
+            "ime_candidate": True,
+            "input_element_id": "local_audited_input_1",
+            "prior_input_value": "",
+            "expected_input_value": "你好",
+            "pinyin": "nihao",
+            "independent_geometry_verified": True,
+            "geometry_audit_source": "element_geometry_audit",
+        }
+
+        def candidate_scene(fingerprint, bounds):
+            return UIScene(
+                app_id="chat",
+                screen_id="conversation",
+                summary="唯一逐字输入法候选可见",
+                elements=(
+                    UIElement(
+                        element_id="local_audited_ime_candidate_1",
+                        role="button",
+                        meaning="ime_exact_candidate",
+                        label="你好",
+                        bounds=bounds,
+                        confidence=1.0,
+                        states=states,
+                        evidence=("输入结构审计确认唯一逐字候选你好",),
+                    ),
+                ),
+                stable=True,
+                confidence=0.98,
+                fingerprint=fingerprint,
+            )
+
+        planned = candidate_scene("planned", (0.10, 0.61, 0.24, 0.635))
+        fresh = candidate_scene("fresh", (0.09, 0.626, 0.192, 0.654))
+        requested = SemanticAction(
+            node_id="select-exact-candidate",
+            action="tap_semantic",
+            params={
+                "element_id": planned.elements[0].element_id,
+                "target": planned.elements[0].meaning,
+                "role": planned.elements[0].role,
+                "label": planned.elements[0].label,
+                "states": dict(planned.elements[0].states),
+                "formal_candidate_id": "candidate-exact-nihao",
+            },
+        )
+        adapter = self._adapter(FakeSceneObserver([]), FakeRobot())
+
+        rebound = adapter._rebind_action(
+            requested,
+            planned,
+            fresh,
+            local_frame_identity_verified=True,
+        )
+
+        self.assertEqual(
+            "local_audited_ime_candidate_1",
+            rebound.params["element_id"],
+        )
+        self.assertEqual(fresh.elements[0].states, rebound.params["states"])
+
+        with self.assertRaisesRegex(
+            GenericActionAdapterError,
+            "目标区域已明显移动",
+        ):
+            adapter._rebind_action(
+                requested,
+                planned,
+                fresh,
+                local_frame_identity_verified=False,
+            )
+
+    def test_rebind_keeps_global_geometry_gate_for_nonlocal_audited_control(self):
+        attested_states = {
+            "independent_geometry_verified": True,
+            "geometry_audit_source": "element_geometry_audit",
+        }
+        planned = replace(
+            scene("planned", bounds=(0.10, 0.61, 0.24, 0.635)),
+            elements=(
+                replace(
+                    scene("planned").elements[0],
+                    states=attested_states,
+                    evidence=("独立几何审计",),
+                    bounds=(0.10, 0.61, 0.24, 0.635),
+                ),
+            ),
+        )
+        fresh = replace(
+            planned,
+            fingerprint="fresh",
+            elements=(
+                replace(planned.elements[0], bounds=(0.09, 0.626, 0.192, 0.654)),
+            ),
+        )
+        requested = SemanticAction(
+            node_id="ordinary-button",
+            action="tap_semantic",
+            params={
+                "element_id": planned.elements[0].element_id,
+                "target": planned.elements[0].meaning,
+                "role": planned.elements[0].role,
+                "label": planned.elements[0].label,
+                "states": dict(planned.elements[0].states),
+            },
+        )
+
+        with self.assertRaisesRegex(
+            GenericActionAdapterError,
+            "目标区域已明显移动",
+        ):
+            self._adapter(FakeSceneObserver([]), FakeRobot())._rebind_action(
+                requested,
+                planned,
+                fresh,
+                local_frame_identity_verified=True,
+            )
+
     def test_rebind_rejects_non_overlapping_geometry_even_on_verified_static_frame(self):
         planned = scene("planned", bounds=(0.08, 0.225, 0.34, 0.255))
         fresh = replace(planned, fingerprint="fresh")

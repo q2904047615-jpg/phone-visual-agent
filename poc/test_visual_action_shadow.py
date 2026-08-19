@@ -6,7 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from task_semantic_ir import EffectIntent, SemanticEntity, SurfaceRef, TaskSemanticIR
+from task_semantic_ir import (
+    EffectIntent,
+    SemanticEntity,
+    SemanticSubgoal,
+    SurfaceRef,
+    TaskSemanticIR,
+)
 from ui_scene import UIElement, UIScene
 from visual_action_shadow import (
     StateExpectation,
@@ -156,7 +162,7 @@ class VisualActionShadowTests(unittest.TestCase):
         self.assertNotIn("evidence", encoded)
         self.assertRegex(report.claims[0].source_digest, r"^[0-9a-f]{64}$")
 
-    def test_unique_literal_generates_typed_element_candidate(self):
+    def test_unique_effect_target_is_not_mistaken_for_effect_control(self):
         report = compile_visual_action_shadow(
             make_scene(make_element(label="项目群", role="list_item")),
             make_ir(role="recipient", value="项目群", effect_kind="send_message"),
@@ -167,11 +173,11 @@ class VisualActionShadowTests(unittest.TestCase):
         ]
         self.assertEqual(len(element_candidates), 1)
         candidate = element_candidates[0]
-        self.assertEqual(candidate.effect_ref, "effect_primary")
-        self.assertFalse(candidate.transition.exploratory)
+        self.assertEqual(candidate.effect_ref, "")
+        self.assertTrue(candidate.transition.exploratory)
         self.assertEqual(
             candidate.transition.expectations[0].predicate,
-            "effect.applied",
+            "surface.focused_entity_ref",
         )
         relation_kinds = {
             item.relation
@@ -180,6 +186,146 @@ class VisualActionShadowTests(unittest.TestCase):
         }
         self.assertIn("exact_literal_match", relation_kinds)
         self.assertIn("binds_effect_target", relation_kinds)
+
+    @staticmethod
+    def _external_effect_ir(effect_kind: str) -> TaskSemanticIR:
+        surface = SurfaceRef(
+            surface_id="surface_effect",
+            kind="app",
+            app_id="synthetic.effect",
+            app_name="合成效果页",
+        )
+        target = SemanticEntity(
+            entity_id="entity_target",
+            entity_type="party",
+            role="recipient",
+            value="目标对象",
+        )
+        payload = SemanticEntity(
+            entity_id="entity_payload",
+            entity_type="text",
+            role="input_text",
+            value="正文内容",
+        )
+        effect = EffectIntent(
+            effect_id="effect_primary",
+            kind=effect_kind,
+            target_refs=(target.entity_id,),
+            payload_refs=(payload.entity_id,),
+            source_subgoal_ids=("effect_step",),
+        )
+        return TaskSemanticIR(
+            task_id="task_effect",
+            device_id="device_effect",
+            revision=1,
+            raw_goal="对目标对象执行给定效果",
+            surfaces=(surface,),
+            entities=(target, payload),
+            effects=(effect,),
+            subgoals=(
+                SemanticSubgoal(
+                    subgoal_id="effect_step",
+                    surface_ref=surface.surface_id,
+                    status="active",
+                    external_impact="external_state",
+                    effect_refs=(effect.effect_id,),
+                ),
+            ),
+        )
+
+    def test_only_unique_canonical_send_control_receives_effect_authority(self):
+        report = compile_visual_action_authority(
+            make_scene(
+                make_element(
+                    element_id="recipient",
+                    role="list_item",
+                    meaning="conversation_target",
+                    label="目标对象",
+                    bounds=(0.05, 0.08, 0.95, 0.18),
+                ),
+                make_element(
+                    element_id="input",
+                    role="input",
+                    meaning="application_text_input",
+                    label="正文内容",
+                    bounds=(0.08, 0.72, 0.70, 0.82),
+                    states={"focused": True, "value": "正文内容"},
+                ),
+                make_element(
+                    element_id="send",
+                    role="button",
+                    meaning="send_message",
+                    label="发送",
+                    bounds=(0.76, 0.72, 0.95, 0.82),
+                ),
+                make_element(
+                    element_id="back",
+                    role="button",
+                    meaning="back",
+                    label="返回",
+                    bounds=(0.01, 0.01, 0.09, 0.07),
+                ),
+                app_id="synthetic.effect",
+                screen_id="conversation",
+            ),
+            self._external_effect_ir("send_message"),
+            ALL_ACTIONS,
+        )
+        effect_candidates = [
+            item
+            for item in report.candidates
+            if item.action_kind == "tap_semantic" and item.effect_ref
+        ]
+        self.assertEqual(1, len(effect_candidates))
+        self.assertEqual("send", effect_candidates[0].parameters["element_id"])
+        self.assertEqual("effect_primary", effect_candidates[0].effect_ref)
+        self.assertEqual(
+            "effect.applied",
+            effect_candidates[0].transition.expectations[0].predicate,
+        )
+
+    def test_duplicate_effect_controls_grant_no_effect_authority(self):
+        report = compile_visual_action_authority(
+            make_scene(
+                make_element(
+                    element_id="send_a",
+                    meaning="send_message",
+                    label="发送",
+                ),
+                make_element(
+                    element_id="send_b",
+                    meaning="send_message",
+                    label="发送",
+                    bounds=(0.5, 0.2, 0.8, 0.3),
+                ),
+                app_id="synthetic.effect",
+            ),
+            self._external_effect_ir("send_message"),
+            ALL_ACTIONS,
+        )
+        self.assertFalse(any(item.effect_ref for item in report.candidates))
+
+    def test_comment_and_follow_effect_families_use_structured_meaning(self):
+        for effect_kind, meaning in (
+            ("publish_content", "comment"),
+            ("relationship_change", "follow"),
+        ):
+            with self.subTest(effect_kind=effect_kind):
+                report = compile_visual_action_authority(
+                    make_scene(
+                        make_element(
+                            element_id="effect_control",
+                            meaning=meaning,
+                            label="任意本地化标签",
+                        ),
+                        app_id="synthetic.effect",
+                    ),
+                    self._external_effect_ir(effect_kind),
+                    ALL_ACTIONS,
+                )
+                matches = [item for item in report.candidates if item.effect_ref]
+                self.assertEqual(1, len(matches))
+                self.assertEqual("effect_control", matches[0].parameters["element_id"])
 
     def test_launcher_icon_binds_target_surface_without_app_branch(self):
         surface = SurfaceRef(
@@ -386,7 +532,7 @@ class VisualActionShadowTests(unittest.TestCase):
         ordinary = next(
             item for item in report.candidates if item.action_kind == "tap_semantic"
         )
-        self.assertFalse(ordinary.transition.exploratory)
+        self.assertTrue(ordinary.transition.exploratory)
         self.assertNotEqual(
             ordinary.transition.expectations[0].predicate,
             "scene.changed",

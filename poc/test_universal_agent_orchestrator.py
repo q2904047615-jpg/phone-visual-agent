@@ -6505,7 +6505,7 @@ class UniversalAgentRiskConfirmationTests(unittest.TestCase):
         )
         qwen = FakeQwenObserver()
         adapter = FakeExecutingAdapter(
-            _scene(),
+            _scene(meaning="send_message", label="发送"),
             _scene(fingerprint="frame-b", meaning="open_more", label="查看更多"),
         )
         orchestrator = UniversalAgentOrchestrator(

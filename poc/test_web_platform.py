@@ -4504,8 +4504,15 @@ class ApiEndToEndTests(unittest.TestCase):
             if len(initial.goal.target_apps) == 1
             else "sample.app"
         )
+        active_subgoal = initial.active_subgoal()
+        before_scene = (
+            _scene(meaning="send_message", label="发送")
+            if active_subgoal is not None
+            and active_subgoal.external_impact == "external_state"
+            else _scene()
+        )
         adapter = FakeExecutingAdapter(
-            replace(_scene(), app_id=target_app_id),
+            replace(before_scene, app_id=target_app_id),
             replace(
                 _scene(
                     fingerprint="frame-after-api",

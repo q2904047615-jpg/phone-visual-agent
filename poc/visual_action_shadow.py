@@ -15,6 +15,33 @@ VISUAL_ACTION_AUTHORITY_PROTOCOL = "2026-08-19-visual-action-authority-v1"
 VISUAL_CLAIM_PROTOCOL = "2026-08-18-visual-claim-v1-shadow"
 SHADOW_SELECTION_PROTOCOL = "2026-08-18-shadow-candidate-selection-v1"
 
+_EFFECT_CONTROL_MEANINGS = {
+    "send_message": frozenset({"send_message"}),
+    "publish_content": frozenset(
+        {"publish_content", "publish", "post_content", "comment", "reply"}
+    ),
+    "relationship_change": frozenset(
+        {"follow", "unfollow", "subscribe", "unsubscribe", "favorite", "unfavorite"}
+    ),
+    "membership_change": frozenset(
+        {"join", "leave", "invite", "remove_member"}
+    ),
+}
+
+
+def _element_realizes_effect(element: UIElement, effect_kind: str) -> bool:
+    """Bind a typed effect only to its canonical visible action control."""
+
+    meanings = _EFFECT_CONTROL_MEANINGS.get(effect_kind, frozenset())
+    return bool(
+        meanings
+        and element.role in {"button", "icon", "toggle"}
+        and element.meaning in meanings
+        and element.states.get("visible") is not False
+        and element.states.get("enabled") is not False
+        and element.states.get("fully_visible") is True
+    )
+
 MIN_ELEMENT_CONFIDENCE = 0.72
 MIN_READY_CANDIDATES = 1
 MAX_READY_CANDIDATES = 24
@@ -1003,6 +1030,20 @@ def compile_visual_action_shadow(
             for effect_ref in subgoal.effect_refs
         )
     )
+    effects_by_id = {effect.effect_id: effect for effect in semantic_ir.effects}
+    unique_effect_control_by_ref: dict[str, str] = {}
+    for effect_ref in active_external_effect_refs:
+        effect = effects_by_id.get(effect_ref)
+        if effect is None:
+            continue
+        matches = [
+            element.element_id
+            for element in sorted_elements
+            if _element_eligible(element)
+            and _element_realizes_effect(element, effect.kind)
+        ]
+        if len(matches) == 1:
+            unique_effect_control_by_ref[effect_ref] = matches[0]
     # Element candidates require a unique exact entity/surface binding. A model
     # boolean such as goal_relevant never grants eligibility here.
     for element in sorted_elements:
@@ -1115,30 +1156,16 @@ def compile_visual_action_shadow(
                         "changed",
                     )
                 )
-            effect_ref = ""
-            effects = sorted(
-                {
-                    effect_id
-                    for effect_id, entity_id, relation_kind in relation_effects_by_element.get(
-                        element.element_id, ()
-                    )
-                    if len(exact_elements_by_entity.get(entity_id, ())) == 1
-                    and relation_kind == "binds_effect_target"
-                }
+            effect_ref = next(
+                (
+                    active_effect_ref
+                    for active_effect_ref, control_element_id in
+                    unique_effect_control_by_ref.items()
+                    if control_element_id == element.element_id
+                ),
+                "",
             )
-            if len(effects) == 1:
-                effect_ref = effects[0]
-                expectation = StateExpectation(
-                    effect_ref,
-                    "effect.applied",
-                    "equals",
-                    True,
-                )
-            elif not effects and len(active_external_effect_refs) == 1:
-                # Qwen selects which visible control realizes the already
-                # authorized typed effect.  The model cannot change the effect
-                # identity, target, payload or local policy.
-                effect_ref = active_external_effect_refs[0]
+            if effect_ref:
                 expectation = StateExpectation(
                     effect_ref,
                     "effect.applied",

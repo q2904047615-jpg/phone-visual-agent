@@ -1805,6 +1805,7 @@ class GenericSingleActionAdapter:
                     before_scene=before.to_dict(),
                     after_scene=after.to_dict(),
                     hardware_receipt=hardware_receipt,
+                    after_frames=after_frames,
                 )
             except (InputValueLineageError, OSError, TypeError, ValueError):
                 # The lineage is only a future read-only disambiguation hint.

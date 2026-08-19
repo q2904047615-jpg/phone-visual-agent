@@ -6,12 +6,15 @@ import time
 import unittest
 from pathlib import Path
 
+from PIL import Image, ImageDraw
+
 from generic_scene_observer import _apply_input_structure_audit
 from input_value_lineage import (
     InputValueLineageError,
     TYPED_INPUT_LINEAGE_VERSION,
     TypedInputLineage,
     TypedInputLineageStore,
+    _surface_descriptor,
     build_pending_literal_lineage,
 )
 from ui_scene import UIScene
@@ -21,6 +24,29 @@ DEVICE = "device-test-01"
 PRIOR = "long2026:123@"
 EXPECTED = PRIOR + "7"
 RAW_AFTER = "long2026:\n123@7"
+
+
+def surface_frame(*, unrelated: bool = False, variation: int = 0) -> Image.Image:
+    image = Image.new("RGB", (810, 1440), "white" if not unrelated else "#202020")
+    draw = ImageDraw.Draw(image)
+    if unrelated:
+        draw.rectangle((100, 770, 710, 930), fill="#101010", outline="#f00000", width=8)
+        draw.line((100, 930, 710, 770), fill="#ffffff", width=12)
+    else:
+        draw.rounded_rectangle(
+            (105, 775, 560, 910),
+            radius=20,
+            fill="#f4f4f4",
+            outline="#b0b0b0",
+            width=3,
+        )
+        draw.line((135, 825 + variation, 520, 825 + variation), fill="#303030", width=5)
+        draw.line((135, 862 + variation, 420, 862 + variation), fill="#303030", width=5)
+    return image
+
+
+def surface_frames() -> tuple[Image.Image, ...]:
+    return tuple(surface_frame(variation=index % 2) for index in range(4))
 
 
 def scene(
@@ -189,6 +215,7 @@ class TypedInputLineageTests(unittest.TestCase):
                 before_scene=before_scene(),
                 after_scene=scene(RAW_AFTER, "after-fp"),
                 hardware_receipt=receipt(),
+                after_frames=surface_frames(),
             )
             self.assertEqual(record.exact_value, EXPECTED)
             loaded = store.match_visual(
@@ -212,6 +239,7 @@ class TypedInputLineageTests(unittest.TestCase):
                 before_scene=before_scene(),
                 after_scene=scene(RAW_AFTER, "after-fp"),
                 hardware_receipt=receipt(),
+                after_frames=surface_frames(),
             )
             cases = (
                 {"device_id": "other", "app_id": "sample.app", "screen_id": "editor", "raw_value": RAW_AFTER},
@@ -241,6 +269,7 @@ class TypedInputLineageTests(unittest.TestCase):
                 before_scene=before_scene(),
                 after_scene=scene(RAW_AFTER, "after-fp"),
                 hardware_receipt=receipt(),
+                after_frames=surface_frames(),
             )
             matched = store.match_visual(
                 device_id=DEVICE,
@@ -269,6 +298,7 @@ class TypedInputLineageTests(unittest.TestCase):
                 before_scene=before_scene(),
                 after_scene=scene(RAW_AFTER, "after-fp"),
                 hardware_receipt=receipt(),
+                after_frames=surface_frames(),
             )
             self.assertTrue(
                 record.matches_visual(
@@ -285,6 +315,50 @@ class TypedInputLineageTests(unittest.TestCase):
                     app_id="another.app",
                     screen_id="editor_composing",
                     raw_value=RAW_AFTER,
+                    now_epoch=1000.0,
+                )
+            )
+
+    def test_local_surface_descriptor_bridges_arbitrary_model_identity_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = self.make_store(temp)
+            record = store.record_verified_literal_action(
+                device_id=DEVICE,
+                resolved_action=resolved(),
+                before_scene=before_scene(),
+                after_scene=scene(RAW_AFTER, "after-fp"),
+                hardware_receipt=receipt(),
+                after_frames=surface_frames(),
+            )
+            self.assertTrue(
+                record.matches_visual(
+                    device_id=DEVICE,
+                    app_id="arbitrary.model.name",
+                    screen_id="unrelated_model_screen_name",
+                    raw_value=RAW_AFTER,
+                    input_bounds=(0.13, 0.59, 0.68, 0.69),
+                    now_epoch=1000.0,
+                    current_frame=surface_frame(variation=1),
+                )
+            )
+            self.assertFalse(
+                record.matches_visual(
+                    device_id=DEVICE,
+                    app_id="arbitrary.model.name",
+                    screen_id="unrelated_model_screen_name",
+                    raw_value=RAW_AFTER,
+                    input_bounds=(0.13, 0.59, 0.68, 0.69),
+                    now_epoch=1000.0,
+                    current_frame=surface_frame(unrelated=True),
+                )
+            )
+            self.assertFalse(
+                record.matches_visual(
+                    device_id=DEVICE,
+                    app_id="arbitrary.model.name",
+                    screen_id="unrelated_model_screen_name",
+                    raw_value=RAW_AFTER,
+                    input_bounds=(0.13, 0.59, 0.68, 0.69),
                     now_epoch=1000.0,
                 )
             )
@@ -307,6 +381,7 @@ class TypedInputLineageTests(unittest.TestCase):
                 before_scene=before_scene(),
                 after_scene=scene(RAW_AFTER, "after-fp"),
                 hardware_receipt=receipt(),
+                after_frames=surface_frames(),
             )
             next_prior = EXPECTED
             next_expected = next_prior + "."
@@ -356,6 +431,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     screen_id="editor_composing",
                 ),
                 hardware_receipt=receipt(),
+                after_frames=surface_frames(),
             )
             self.assertEqual(second.exact_value, next_expected)
             self.assertEqual(second.app_id, first.app_id)
@@ -373,6 +449,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     before_scene=before_scene(),
                     after_scene=scene(RAW_AFTER, "after-fp"),
                     hardware_receipt=bad_receipt,
+                    after_frames=surface_frames(),
                 )
             bad_action = resolved()
             bad_action["expected_input_value"] = EXPECTED + "x"
@@ -383,6 +460,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     before_scene=before_scene(),
                     after_scene=scene(RAW_AFTER, "after-fp"),
                     hardware_receipt=receipt(),
+                    after_frames=surface_frames(),
                 )
 
     def test_pending_lineage_uses_same_exact_chain_without_persisting(self) -> None:
@@ -410,7 +488,7 @@ class TypedInputLineageTests(unittest.TestCase):
             paths = []
             for index in range(8):
                 path = root / f"frame-{index}.jpg"
-                path.write_bytes(b"evidence")
+                surface_frame(variation=index % 2).save(path, format="JPEG")
                 paths.append(str(path))
             payload = {
                 "device_id": DEVICE,
@@ -450,10 +528,24 @@ class TypedInputLineageTests(unittest.TestCase):
             after_fingerprint="after-fp",
             action_digest="a" * 64,
             receipt_digest="b" * 64,
+            surface_descriptors=tuple(
+                _surface_descriptor(
+                    surface_frame(variation=index % 2),
+                    (0.13, 0.54, 0.69, 0.61),
+                )
+                for index in range(4)
+            ),
             recorded_at_epoch=time.time(),
             source="verified_live_literal_action",
         )
-        base = UIScene.from_dict(scene("li\nvex", "current-fp"))
+        base = UIScene.from_dict(
+            scene(
+                "li\nvex",
+                "current-fp",
+                app_id="arbitrary.model.name",
+                screen_id="unrelated_model_screen_name",
+            )
+        )
         goal = {
             "objective": "让输入框显示 livex7",
             "entities": {"input_text": "livex7"},
@@ -465,6 +557,7 @@ class TypedInputLineageTests(unittest.TestCase):
             goal_context=goal,
             verified_input_lineage=record,
             device_id=DEVICE,
+            lineage_frame=surface_frame(variation=1),
         )
         input_element = audited.get_element("local_audited_input_1")
         key = audited.get_element("local_audited_literal_key_1")
@@ -486,6 +579,13 @@ class TypedInputLineageTests(unittest.TestCase):
             after_fingerprint="after-fp",
             action_digest="a" * 64,
             receipt_digest="b" * 64,
+            surface_descriptors=tuple(
+                _surface_descriptor(
+                    surface_frame(variation=index % 2),
+                    (0.13, 0.54, 0.69, 0.61),
+                )
+                for index in range(4)
+            ),
             recorded_at_epoch=time.time(),
             source="verified_live_literal_action",
         )

@@ -1128,6 +1128,7 @@ class GenericSceneObserver:
                         app_id=scene.app_id,
                         screen_id=scene.screen_id,
                         raw_value=input_audit_current_value,
+                        current_frame=frame,
                     )
                 ):
                     verified_input_lineage = input_lineage_override
@@ -1155,6 +1156,7 @@ class GenericSceneObserver:
                         screen_id=scene.screen_id,
                         raw_value=input_audit_current_value,
                         input_bounds=preliminary_bounds,
+                        current_frame=frame,
                     )
                     if verified_input_lineage is not None:
                         input_audit_current_value = verified_input_lineage.exact_value
@@ -1192,6 +1194,7 @@ class GenericSceneObserver:
                             goal_context=context,
                             verified_input_lineage=verified_input_lineage,
                             device_id=device_id,
+                            lineage_frame=frame,
                         ),
                         visual_obstructions,
                         fingerprint=fingerprint,
@@ -1251,6 +1254,7 @@ class GenericSceneObserver:
                                 goal_context=context,
                                 verified_input_lineage=verified_input_lineage,
                                 device_id=device_id,
+                                lineage_frame=frame,
                             ),
                             visual_obstructions,
                             fingerprint=fingerprint,
@@ -5173,6 +5177,7 @@ def _apply_input_structure_audit(
     goal_context: dict[str, Any],
     verified_input_lineage: TypedInputLineage | None = None,
     device_id: str | None = None,
+    lineage_frame: Image.Image | None = None,
 ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
@@ -5449,6 +5454,7 @@ def _apply_input_structure_audit(
                 screen_id=scene.screen_id,
                 raw_value=raw_lineage_text,
                 input_bounds=lineage_bounds,
+                current_frame=lineage_frame,
             ):
                 trusted_input = dict(trusted_input)
                 trusted_input["lineage_visual_text"] = raw_lineage_text

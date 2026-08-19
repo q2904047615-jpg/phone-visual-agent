@@ -1075,6 +1075,120 @@ class UniversalAgentOrchestrator:
             )
         return actions
 
+    @staticmethod
+    def _lineage_matches_observed_foreground(
+        lineage: VerifiedAppSurfaceLineage,
+        foreground_app_id: str,
+    ) -> bool:
+        foreground = str(foreground_app_id or "").strip().casefold()
+        if not foreground or foreground == "launcher":
+            return False
+        return foreground in {
+            str(lineage.functional_foreground_app_id or "").strip().casefold(),
+            str(lineage.app_id or "").strip().casefold(),
+            str(lineage.app_name or "").strip().casefold(),
+        }
+
+    @classmethod
+    def _bind_verified_lineage_to_qwen_context(
+        cls,
+        session: UniversalAgentSessionState,
+        context: QwenTaskContext,
+        trusted_observation: Any,
+    ) -> QwenTaskContext:
+        """Rebind a typed App surface to its receipt-proven runtime package.
+
+        The App entry receipt is the only source of this alias.  It is scoped to
+        the same session/task/device/action count and only remains usable by a
+        descendant of the completed entry subgoal on the same observed App.
+        """
+
+        lineage = session.verified_app_surface_lineage
+        graph = session.task_graph
+        semantic_ir = context.semantic_ir
+        scene = getattr(trusted_observation, "scene", None)
+        if lineage is None or graph is None or semantic_ir is None or scene is None:
+            return context
+        if (
+            lineage.session_id != session.session_id
+            or lineage.task_id != graph.task_id
+            or lineage.task_id != context.task_id
+            or lineage.device_id != session.device_id
+            or lineage.device_id != graph.device_id
+            or lineage.device_id != context.device_id
+            or lineage.physical_actions != session.physical_actions
+            or not cls._lineage_matches_observed_foreground(
+                lineage,
+                str(getattr(scene, "foreground_app_id", "")),
+            )
+        ):
+            return context
+
+        by_id = {item.subgoal_id: item for item in graph.subgoals}
+        source = by_id.get(lineage.source_subgoal_id)
+        current = graph.active_subgoal()
+        if (
+            source is None
+            or source.status != "completed"
+            or current is None
+            or not any(
+                str(value).startswith(
+                    f"controller_transition:{lineage.source_receipt_id}:"
+                )
+                for value in source.completion_evidence
+            )
+        ):
+            return context
+        pending = list(current.depends_on)
+        visited: set[str] = set()
+        lineage_is_ancestor = False
+        while pending:
+            dependency_id = pending.pop()
+            if dependency_id == lineage.source_subgoal_id:
+                lineage_is_ancestor = True
+                break
+            if dependency_id in visited:
+                continue
+            visited.add(dependency_id)
+            dependency = by_id.get(dependency_id)
+            if dependency is not None:
+                pending.extend(dependency.depends_on)
+        if not lineage_is_ancestor:
+            return context
+
+        matching_surfaces = tuple(
+            surface
+            for surface in semantic_ir.surfaces
+            if surface.surface_id == lineage.surface_id
+            and surface.kind == "app"
+            and surface.app_id.casefold() == lineage.app_id.casefold()
+            and surface.app_name.casefold() == lineage.app_name.casefold()
+        )
+        if len(matching_surfaces) != 1:
+            return context
+        target_surface = matching_surfaces[0]
+        if _scene_matches_target_app_surface(scene, target_surface):
+            return context
+        rebound_surface = replace(
+            target_surface,
+            app_id=lineage.functional_foreground_app_id,
+        )
+        rebound_ir = replace(
+            semantic_ir,
+            surfaces=tuple(
+                rebound_surface
+                if item.surface_id == target_surface.surface_id
+                else item
+                for item in semantic_ir.surfaces
+            ),
+        )
+        rebound_context = replace(context, semantic_ir=rebound_ir)
+        try:
+            rebound_context.validate()
+        except Exception:
+            return context
+        return rebound_context
+
     def _decide_next_action(
         self,
         session: UniversalAgentSessionState,
@@ -1166,6 +1280,11 @@ class UniversalAgentOrchestrator:
                     }
                     for preview in semantic_authority.effect_previews
                 )
+        context = self._bind_verified_lineage_to_qwen_context(
+            session,
+            context,
+            trusted_observation,
+        )
         session.semantic_task_context = context
         available_actions = self._available_action_kinds(session)
         semantic_ir = context.semantic_ir
@@ -3865,9 +3984,10 @@ class UniversalAgentOrchestrator:
             lineage = session.verified_app_surface_lineage
             if lineage is not None and (
                 lineage.physical_actions != session.physical_actions
-                or str(scene.foreground_app_id).casefold()
-                != lineage.functional_foreground_app_id.casefold()
-                or str(scene.foreground_app_id).casefold() == "launcher"
+                or not self._lineage_matches_observed_foreground(
+                    lineage,
+                    str(scene.foreground_app_id),
+                )
             ):
                 session.verified_app_surface_lineage = None
             self._remember(

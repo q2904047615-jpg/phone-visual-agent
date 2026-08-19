@@ -29,6 +29,8 @@ from generic_action_adapter import (
 from semantic_executor import SemanticAction
 from ui_scene import SystemUIFacts, UIElement, UIScene
 from universal_action_controller import ResolvedSemanticAction
+from qwen_visual_decision import QwenTaskContext, _scene_matches_target_app_surface
+from task_semantic_ir import compile_formal_semantic_authority
 from universal_agent_orchestrator import (
     AgentEvidenceStore,
     EvidenceStoreError,
@@ -4662,6 +4664,108 @@ class UniversalAgentStartTests(unittest.TestCase):
                 verified_app_surface_lineage=lineage,
                 physical_actions=2,
             )
+
+    def test_verified_app_entry_lineage_rebinds_runtime_package_for_next_step(self) -> None:
+        base = self._named_app_page_graph(app_id="wechat", app_name="微信")
+        graph = self._advance_named_app_page_graph(base)
+        source = replace(
+            graph.subgoals[0],
+            completion_evidence=("controller_transition:receipt-wechat:1",),
+        )
+        graph = replace(graph, subgoals=(source, *graph.subgoals[1:]))
+        graph.validate()
+        semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+        context = replace(
+            QwenTaskContext.from_dict(graph.to_qwen_context()),
+            semantic_ir=semantic_ir,
+        )
+        scene = replace(
+            _scene(),
+            app_id="com.tencent.mm",
+            screen_id="wechat_chat_list",
+        )
+        lineage = VerifiedAppSurfaceLineage(
+            session_id="session-wechat",
+            task_id=graph.task_id,
+            device_id=graph.device_id,
+            app_id="wechat",
+            app_name="微信",
+            surface_id="surface_wechat",
+            source_receipt_id="receipt-wechat",
+            source_subgoal_id=source.subgoal_id,
+            functional_foreground_app_id="com.tencent.mm",
+            physical_actions=1,
+        )
+        session = SimpleNamespace(
+            session_id="session-wechat",
+            device_id=graph.device_id,
+            task_graph=graph,
+            physical_actions=1,
+            verified_app_surface_lineage=lineage,
+        )
+
+        rebound = UniversalAgentOrchestrator._bind_verified_lineage_to_qwen_context(
+            session,
+            context,
+            SimpleNamespace(scene=scene),
+        )
+
+        target = next(
+            item for item in rebound.semantic_ir.surfaces
+            if item.surface_id == "surface_wechat"
+        )
+        self.assertEqual("com.tencent.mm", target.app_id)
+        self.assertTrue(_scene_matches_target_app_surface(scene, target))
+
+        session.physical_actions = 2
+        unchanged = UniversalAgentOrchestrator._bind_verified_lineage_to_qwen_context(
+            session,
+            context,
+            SimpleNamespace(scene=scene),
+        )
+        original = next(
+            item for item in unchanged.semantic_ir.surfaces
+            if item.surface_id == "surface_wechat"
+        )
+        self.assertEqual("wechat", original.app_id)
+
+    def test_verified_lineage_survives_exact_display_name_observation(self) -> None:
+        lineage = VerifiedAppSurfaceLineage(
+            session_id="session-wechat",
+            task_id="task-wechat",
+            device_id="device-1",
+            app_id="wechat",
+            app_name="微信",
+            surface_id="surface_wechat",
+            source_receipt_id="receipt-wechat",
+            source_subgoal_id="open-wechat",
+            functional_foreground_app_id="com.tencent.mm",
+            physical_actions=1,
+        )
+        self.assertTrue(
+            UniversalAgentOrchestrator._lineage_matches_observed_foreground(
+                lineage,
+                "微信",
+            )
+        )
+        self.assertTrue(
+            UniversalAgentOrchestrator._lineage_matches_observed_foreground(
+                lineage,
+                "com.tencent.mm",
+            )
+        )
+        self.assertFalse(
+            UniversalAgentOrchestrator._lineage_matches_observed_foreground(
+                lineage,
+                "launcher",
+            )
+        )
+        self.assertFalse(
+            UniversalAgentOrchestrator._lineage_matches_observed_foreground(
+                lineage,
+                "com.example.other",
+            )
+        )
 
     def test_visible_text_read_rejects_exact_or_ambiguous_results(self) -> None:
         subgoal = SimpleNamespace(

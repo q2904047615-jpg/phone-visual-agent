@@ -1372,3 +1372,37 @@ Qwen、DeepSeek、编排和 Web 关联回归 `870/870`，Python 完整回归 `14
 离线结果：显示名精确/近似、微信式列表项和跨 App 反例 `3/3`，Qwen 与编排核心 `282/282`，
 observer、Qwen、DeepSeek、编排和 Web 关联回归 `871/871`，Python 完整回归 `1487/1487`。
 完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。
+
+## 42. 已验证 App 入口 lineage 未参与下一轮候选身份
+
+### 42.1 验收台账与根因证据
+
+- 第 41 项加载后的 0 动作微信列表复核成功，但本轮 trusted scene 使用
+  `foreground_app_id=com.tencent.mm`；typed App surface 仍为 `app_id=wechat/app_name=微信`，单凭逐字
+  显示名合同不能关联真实包名。
+- 现有 `VerifiedAppSurfaceLineage` 已在真实 App 入口动作后记录 session/task/device、typed app_id/name、
+  来源 receipt/subgoal、真实前台包名和物理动作计数；但它只参与完成证据校验，没有参与下一轮 Qwen
+  正式候选编译。
+- refresh 还要求新 `foreground_app_id` 与 lineage 包名逐字相等，因此同一页面被观察为“微信”时会清空
+  正确 lineage。主要根因是已有动态身份凭据未接入消费者，而不是缺少微信包名映射。
+
+### 42.2 同类样本、通用修复与边界
+
+- 对同一 session/task/device/action-count，只有来源子目标已用对应 controller receipt 完成、当前子目标
+  依赖链可追溯到该来源、当前前台等于 lineage 的真实包名/typed app_id/app_name 时，才将下一轮 Qwen
+  context 中对应 App surface 的 app_id 本地重绑定为真实包名。
+- 重绑定只作用于当前派生的 Qwen TaskSemanticIR，不改 DeepSeek 原图、不写全局映射、不跨 session 保存；
+  App 名、包名和来源关系全部来自一次真实 App 入口 receipt。
+- wrong session/task/device/action-count、receipt 缺失、非依赖后继、其他前台 App、Launcher 或非法包名均
+  不使用 lineage；refresh 只在包名、typed ID 和显示名三种 lineage 内表示都不匹配时清除。
+
+### 42.3 验证与停止条件
+
+- 新增 verified entry 将 `wechat/微信` 动态重绑定到构造包名的正测，以及 action-count 漂移、Launcher、
+  其他 App 和显示名表示切换反测；保留所有旧 scope、lineage 完成证据和跨 App 反例。
+- 运行编排/Qwen 相关回归和一次完整 Python 回归；全绿后本地提交并只重载项目 Uvicorn。随后从 Home
+  建立一个新微信会话，让真实 App 入口重新铸造 lineage；任一动作失败即停止，不复用旧会话。
+
+离线结果：lineage 动态包名重绑定与显示名保留正反测 `2/2`，Qwen 与编排核心 `284/284`，
+observer、Qwen、DeepSeek、编排和 Web 关联回归 `873/873`，Python 完整回归 `1489/1489`。
+完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。

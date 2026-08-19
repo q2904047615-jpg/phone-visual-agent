@@ -316,7 +316,18 @@ class VisualActionShadowTests(unittest.TestCase):
 
     def test_exploratory_navigation_has_typed_weak_change(self):
         report = compile_visual_action_shadow(
-            make_scene(make_element(states={"scrollable": True})), make_ir(), ALL_ACTIONS
+            make_scene(
+                make_element(
+                    element_id="results_viewport",
+                    role="container",
+                    meaning="results_viewport",
+                    states={"scrollable": True, "scroll_axis": "vertical"},
+                    evidence=("三条同类结果纵向排列",),
+                ),
+                make_element(),
+            ),
+            make_ir(),
+            ALL_ACTIONS,
         )
         swipe = next(item for item in report.candidates if item.action_kind == "swipe")
         self.assertTrue(swipe.transition.exploratory)
@@ -332,6 +343,39 @@ class VisualActionShadowTests(unittest.TestCase):
             ordinary.transition.expectations[0].predicate,
             "scene.changed",
         )
+
+    def test_swipe_authority_rejects_untyped_or_unevidenced_scroll_flags(self):
+        variants = (
+            make_element(states={"scrollable": True}),
+            make_element(
+                role="container",
+                states={"scrollable": True, "scroll_axis": "vertical"},
+                evidence=(),
+            ),
+            make_element(
+                role="container",
+                states={"scrollable": True, "scroll_axis": "unknown"},
+            ),
+            make_element(
+                role="container",
+                states={
+                    "scrollable": True,
+                    "scroll_axis": "vertical",
+                    "fully_visible": False,
+                },
+            ),
+        )
+        for variant in variants:
+            with self.subTest(role=variant.role, states=variant.states):
+                report = compile_visual_action_shadow(
+                    make_scene(variant),
+                    make_ir(),
+                    ALL_ACTIONS,
+                )
+                self.assertNotIn(
+                    "swipe",
+                    {item.action_kind for item in report.candidates},
+                )
 
     def test_long_press_is_available_only_as_typed_exploration(self):
         report = compile_visual_action_shadow(

@@ -6750,8 +6750,19 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             replan_result=replace(initial, revision=2),
         )
         adapter = FakeExecutingAdapter(
-            _scene(),
-            _scene(fingerprint="frame-b"),
+            _scene(
+                role="container",
+                meaning="content_viewport",
+                label="",
+                states={"scroll_axis": "vertical"},
+            ),
+            _scene(
+                fingerprint="frame-b",
+                role="container",
+                meaning="content_viewport",
+                label="",
+                states={"scroll_axis": "vertical"},
+            ),
         )
         qwen = FakeQwenObserver(action_kind="swipe")
         with tempfile.TemporaryDirectory() as temp:

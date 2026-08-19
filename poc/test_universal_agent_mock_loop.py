@@ -82,7 +82,11 @@ def scene(
                 label="",
                 bounds=(0.05, 0.18, 0.95, 0.9),
                 confidence=0.98,
-                states={"scrollable": True},
+                states={
+                    "fully_visible": True,
+                    "scrollable": True,
+                    "scroll_axis": "vertical",
+                },
                 evidence=("合成内容区域仍可继续浏览",),
             ),
         )

@@ -650,6 +650,20 @@ def _element_eligible(element: UIElement) -> bool:
     )
 
 
+def _element_proves_scrollable_viewport(element: UIElement) -> bool:
+    """Grant swipe affordance only from a typed, evidenced viewport fact."""
+
+    return (
+        element.role == "container"
+        and float(element.confidence) >= MIN_ELEMENT_CONFIDENCE
+        and element.states.get("visible") is not False
+        and element.states.get("fully_visible") is True
+        and element.states.get("scrollable") is True
+        and element.states.get("scroll_axis") in {"vertical", "horizontal"}
+        and any(str(item).strip() for item in element.evidence)
+    )
+
+
 def _unique_exact_matches(
     elements: tuple[UIElement, ...],
     entity: SemanticEntity,
@@ -939,7 +953,7 @@ def compile_visual_action_shadow(
     for action_kind in sorted(available):
         if action_kind in {"back", "home", "reveal_system_navigation", "swipe", "wait_for_change"}:
             if action_kind == "swipe" and not any(
-                element.states.get("scrollable") is True
+                _element_proves_scrollable_viewport(element)
                 for element in sorted_elements
             ):
                 continue

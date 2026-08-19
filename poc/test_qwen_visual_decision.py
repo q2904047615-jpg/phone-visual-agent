@@ -182,7 +182,11 @@ def settings_list_elements() -> tuple[UIElement, ...]:
             label="",
             bounds=(0.08, 0.22, 0.92, 0.92),
             confidence=0.95,
-            states={"scrollable": True},
+            states={
+                "fully_visible": True,
+                "scrollable": True,
+                "scroll_axis": "vertical",
+            },
             evidence=("多个纵向列表项",),
         ),
         UIElement(
@@ -800,7 +804,12 @@ class QwenVisualDecisionTests(unittest.TestCase):
             label="聊天记录列表",
             bounds=(0.0, 0.06, 1.0, 0.7),
             confidence=0.99,
-            states={"fully_visible": True, "scrollable": True},
+            states={
+                "fully_visible": True,
+                "scrollable": True,
+                "scroll_axis": "vertical",
+            },
+            evidence=("多条聊天记录纵向排列",),
         )
         observation = trusted_observation(
             self.frames,

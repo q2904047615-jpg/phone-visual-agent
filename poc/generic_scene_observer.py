@@ -2028,6 +2028,13 @@ def _compact_prompt(context: dict[str, Any]) -> str:
     的页面主标题：role=text、meaning=page_title、label逐字抄录、goal_relevant:true，并明确
     fully_visible。清晰主标题可直接作为screen_id；普通正文、卡片说明、按钮文字和浏览器标题栏
     不能冒充页面主标题。看不清、存在多个同级主标题或标题不完整时保持screen_id=unknown。
+17. 如果当前目标明确要求滑动/上划/下划/左划/右划，并且原图能明确证明一个可滚动视口，必须把
+    该视口作为一个role=container元素报告。只有以下任一视觉条件成立才算证明：同一视口内至少两个
+    重复同类条目按同一轴排列；或相关边缘存在被裁切的后续内容；或属于页面内容的连续轨道明确接触
+    相关边缘。该container必须紧框完整可见的内容视口，states必须逐项包含
+    goal_relevant:true、fully_visible:true、scrollable:true、scroll_axis:"vertical"或"horizontal"，
+    evidence必须说明实际看见的重复结构或边缘延续。单张卡片、工具栏、页面边框、目标动作文字本身
+    都不能证明scrollable；无法证明时不得输出该状态，也不得猜测。
 
 只返回下列完整JSON，不要Markdown：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
@@ -2082,6 +2089,11 @@ summary_addendum必须记录“对应边缘存在部分可见的后续内容，�
 如果当前是分步流程、时间线或结构化长页面，且属于页面内容的连续引导轨、连接线或内容轨道明确延伸
 并接触原图边缘，summary_addendum必须记录“对应边缘存在明确的页面延续标记，内容仍可继续浏览”。装饰线、
 手机边框和机械臂控制器标线不算；不得猜测边缘外是什么，也不得把该标记写成可操作目标。
+如果当前目标明确要求滑动/上划/下划/左划/右划，并且原图能明确证明同一视口内至少两个重复同类
+条目按同一轴排列，或相关边缘存在被裁切后续内容/连续内容轨，必须把完整可见内容视口报告为
+role=container，states逐项包含goal_relevant:true、fully_visible:true、scrollable:true以及
+scroll_axis:"vertical"或"horizontal"，evidence说明实际视觉证据。单张卡片、工具栏、页面边框或
+目标文字本身不能证明scrollable；证据不足就省略，绝不能为了产生滑动候选而猜测。
 若目标以序数指定列表条目，必须把目标及其之前所有同列、同类、完整可见兄弟项分别写入elements，
 逐字抄录label并紧框自身；只把按垂直中心从上到下排序后位于指定序位的条目标成goal_relevant:true，
 前序证明项写false。缺少任一前序项、超过{MAX_COMPACT_ELEMENTS}个元素或无法证明同列顺序时不得猜测目标。

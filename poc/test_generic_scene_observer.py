@@ -4971,6 +4971,80 @@ class GenericSceneObserverTests(unittest.TestCase):
             scene.get_element("local_audited_input_1").states["goal_relevant"]
         )
 
+    def test_numeric_live_audit_keeps_generic_backspace_geometry(self) -> None:
+        base_scene = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="frame-live-numeric",
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="message-field",
+                    bounds=[150, 530, 700, 590],
+                    text="live",
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 660, 1000, 1000],
+                "layout": "numeric",
+                "input_mode": "chinese_pinyin",
+                "case_mode": "unknown",
+                "qwerty_anchors": None,
+                "mode_switch": None,
+                "backspace_key": {
+                    "label": "⌫",
+                    "bounds": [820, 680, 980, 740],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                },
+                "case_switch": None,
+                "literal_keys": [
+                    {
+                        "value": "1", "label": "1", "key_kind": "character",
+                        "bounds": [260, 680, 400, 740], "confidence": 1.0,
+                        "fully_visible": True,
+                    },
+                    {
+                        "value": "2", "label": "2", "key_kind": "character",
+                        "bounds": [420, 680, 580, 740], "confidence": 1.0,
+                        "fully_visible": True,
+                    },
+                ],
+                "layout_switches": [
+                    {
+                        "label": "返回", "bounds": [220, 880, 380, 940],
+                        "confidence": 1.0, "current_layout": "numeric",
+                        "target_layout": "qwerty",
+                    }
+                ],
+            },
+        )
+        current = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="frame-live-numeric",
+            goal_context={
+                "objective": "输入框最终逐字显示 live21 且不发送",
+                "entities": {"input_text": "live21"},
+            },
+        )
+
+        target = current.unique_trusted_goal_element()
+        self.assertEqual("local_audited_literal_key_1", target.element_id)
+        self.assertEqual("2", target.states["key_value"])
+        self.assertEqual("live2", target.states["expected_input_value"])
+        field = current.get_element("local_audited_input_1")
+        self.assertEqual("numeric", field.states["keyboard_layout"])
+        self.assertEqual(
+            {
+                "type": "generic",
+                "anchors": {"backspace": [900.0, 710.0]},
+                "source": "input_structure_audit",
+            },
+            field.states["keyboard_geometry"],
+        )
+
     def test_input_audit_rejects_literal_key_outside_goal_whitelist(self) -> None:
         base_scene = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),

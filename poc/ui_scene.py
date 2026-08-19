@@ -287,21 +287,40 @@ class UIElement:
                 )
         if "keyboard_geometry" in self.states:
             geometry = self.states["keyboard_geometry"]
-            expected_anchors = {"q", "p", "a", "l", "z", "m", "backspace"}
             anchors = geometry.get("anchors") if isinstance(geometry, dict) else None
             if (
                 self.role != "input"
-                or self.states.get("keyboard_layout") != "qwerty"
                 or self.states.get("focused") is not True
                 or not isinstance(geometry, dict)
                 or set(geometry) != {"type", "anchors", "source"}
-                or geometry.get("type") != "qwerty"
                 or geometry.get("source") != "input_structure_audit"
                 or not isinstance(anchors, dict)
-                or set(anchors) != expected_anchors
             ):
                 raise UISceneError(
-                    "states.keyboard_geometry 只允许保存输入结构审计绑定的聚焦 QWERTY 几何。"
+                    "states.keyboard_geometry 只允许保存输入结构审计绑定的聚焦键盘几何。"
+                )
+            geometry_type = geometry.get("type")
+            if geometry_type == "qwerty":
+                expected_anchors = {"q", "p", "a", "l", "z", "m", "backspace"}
+                if (
+                    self.states.get("keyboard_layout") != "qwerty"
+                    or set(anchors) != expected_anchors
+                ):
+                    raise UISceneError(
+                        "QWERTY keyboard_geometry 必须绑定完整七点 anchors。"
+                    )
+            elif geometry_type == "generic":
+                if (
+                    self.states.get("keyboard_layout")
+                    not in {"qwerty", "numeric", "symbol"}
+                    or set(anchors) != {"backspace"}
+                ):
+                    raise UISceneError(
+                        "generic keyboard_geometry 只允许绑定完整可见的唯一退格键。"
+                    )
+            else:
+                raise UISceneError(
+                    "states.keyboard_geometry.type 只允许 qwerty 或 generic。"
                 )
             for key, point in anchors.items():
                 if (

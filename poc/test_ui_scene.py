@@ -1058,6 +1058,83 @@ class UISceneTests(unittest.TestCase):
         )
         self.assertEqual("a" * 20, long_text.input_fragment)
 
+    def test_generic_keyboard_geometry_is_strictly_backspace_only(self) -> None:
+        parsed = UIElement.from_dict(
+            {
+                "element_id": "field",
+                "role": "input",
+                "meaning": "message_input",
+                "bounds": [100, 100, 900, 200],
+                "confidence": 0.95,
+                "states": {
+                    "focused": True,
+                    "keyboard_layout": "numeric",
+                    "keyboard_geometry": {
+                        "type": "generic",
+                        "anchors": {"backspace": [900, 720]},
+                        "source": "input_structure_audit",
+                    },
+                },
+            },
+            coordinate_scale=1000,
+        )
+        self.assertEqual(
+            {"backspace": [900, 720]},
+            parsed.states["keyboard_geometry"]["anchors"],
+        )
+
+        invalid_states = (
+            {
+                "focused": True,
+                "keyboard_layout": "numeric",
+                "keyboard_geometry": {
+                    "type": "generic",
+                    "anchors": {},
+                    "source": "input_structure_audit",
+                },
+            },
+            {
+                "focused": True,
+                "keyboard_layout": "symbol",
+                "keyboard_geometry": {
+                    "type": "generic",
+                    "anchors": {"backspace": [900, 720], "a": [100, 600]},
+                    "source": "input_structure_audit",
+                },
+            },
+            {
+                "focused": False,
+                "keyboard_layout": "numeric",
+                "keyboard_geometry": {
+                    "type": "generic",
+                    "anchors": {"backspace": [900, 720]},
+                    "source": "input_structure_audit",
+                },
+            },
+            {
+                "focused": True,
+                "keyboard_layout": "numeric",
+                "keyboard_geometry": {
+                    "type": "generic",
+                    "anchors": {"backspace": [900, 720]},
+                    "source": "vision_model",
+                },
+            },
+        )
+        for states in invalid_states:
+            with self.subTest(states=states), self.assertRaises(UISceneError):
+                UIElement.from_dict(
+                    {
+                        "element_id": "field",
+                        "role": "input",
+                        "meaning": "message_input",
+                        "bounds": [100, 100, 900, 200],
+                        "confidence": 0.95,
+                        "states": states,
+                    },
+                    coordinate_scale=1000,
+                )
+
     def test_verified_uppercase_segment_requires_visible_upper_case_mode(self) -> None:
         field = element(
             "field", "消息", role="input",

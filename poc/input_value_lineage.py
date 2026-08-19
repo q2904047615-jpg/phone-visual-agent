@@ -65,6 +65,35 @@ def _collapsed_visual_text(value: str) -> str:
     return value.replace("\r", "").replace("\n", "")
 
 
+def _surface_identity_compatible(
+    *,
+    recorded_app_id: str,
+    recorded_screen_id: str,
+    current_app_id: str,
+    current_screen_id: str,
+    exact_value: str,
+) -> bool:
+    current_app = str(current_app_id or "").strip()
+    current_screen = str(current_screen_id or "").strip()
+    if not current_screen or current_screen == "unknown":
+        return False
+    if current_app not in {recorded_app_id, "unknown"}:
+        return False
+    screen_related = bool(
+        current_screen == recorded_screen_id
+        or current_screen.startswith(recorded_screen_id + "_")
+        or recorded_screen_id.startswith(current_screen + "_")
+    )
+    if not screen_related:
+        return False
+    if current_app == recorded_app_id:
+        return True
+    # An unknown visual App label cannot replace a known identity. It may only
+    # preserve a sufficiently distinctive exact-value chain on the same
+    # semantically related input surface.
+    return len(exact_value) >= 8
+
+
 @dataclass(frozen=True)
 class TypedInputLineage:
     version: str
@@ -179,8 +208,13 @@ class TypedInputLineage:
         now = time.time() if now_epoch is None else float(now_epoch)
         if (
             device_id != self.device_id
-            or app_id != self.app_id
-            or screen_id != self.screen_id
+            or not _surface_identity_compatible(
+                recorded_app_id=self.app_id,
+                recorded_screen_id=self.screen_id,
+                current_app_id=app_id,
+                current_screen_id=screen_id,
+                exact_value=self.exact_value,
+            )
             or now < self.recorded_at_epoch
             or now - self.recorded_at_epoch > ttl_seconds
             or not isinstance(raw_value, str)
@@ -291,6 +325,7 @@ class TypedInputLineageStore:
             hardware_receipt=hardware_receipt,
             recorded_at_epoch=float(self.clock()),
             source=source,
+            surface_fallback=self.load(device_id),
         )
         self.write(record)
         return record
@@ -457,6 +492,7 @@ def _record_from_execution(
     hardware_receipt: Any,
     recorded_at_epoch: float,
     source: str,
+    surface_fallback: TypedInputLineage | None = None,
 ) -> TypedInputLineage:
     if not isinstance(resolved, dict) or resolved.get("kind") != "tap_semantic":
         raise InputValueLineageError("只有已验证的逐字符点击能形成输入值连续性。")
@@ -525,6 +561,25 @@ def _record_from_execution(
         raise InputValueLineageError("动作后输入值或输入表面与 exact 回执不一致。")
     app_id = after_scene.get("app_id")
     screen_id = after_scene.get("screen_id")
+    fallback_compatible = bool(
+        surface_fallback is not None
+        and surface_fallback.device_id == device_id
+        and surface_fallback.exact_value == prior
+        and _bounds_compatible(
+            surface_fallback.input_bounds,
+            _valid_bounds(before_input["bounds"]),
+        )
+        and _surface_identity_compatible(
+            recorded_app_id=surface_fallback.app_id,
+            recorded_screen_id=surface_fallback.screen_id,
+            current_app_id=str(before_scene.get("app_id") or ""),
+            current_screen_id=str(before_scene.get("screen_id") or ""),
+            exact_value=prior,
+        )
+    )
+    if fallback_compatible:
+        app_id = surface_fallback.app_id
+        screen_id = surface_fallback.screen_id
     if not isinstance(app_id, str) or not app_id.strip() or app_id == "unknown":
         raise InputValueLineageError("输入值连续性缺少明确 app_id。")
     if not isinstance(screen_id, str) or not screen_id.strip() or screen_id == "unknown":

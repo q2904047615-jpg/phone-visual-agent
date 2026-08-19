@@ -23,12 +23,19 @@ EXPECTED = PRIOR + "7"
 RAW_AFTER = "long2026:\n123@7"
 
 
-def scene(value: str, fingerprint: str, *, bounds=(0.13, 0.54, 0.69, 0.61)) -> dict:
+def scene(
+    value: str,
+    fingerprint: str,
+    *,
+    bounds=(0.13, 0.54, 0.69, 0.61),
+    app_id="sample.app",
+    screen_id="editor",
+) -> dict:
     return {
         "protocol_version": "2026-08-14-ui-scene-v3",
-        "foreground_app_id": "sample.app",
-        "app_id": "sample.app",
-        "screen_id": "editor",
+        "foreground_app_id": app_id,
+        "app_id": app_id,
+        "screen_id": screen_id,
         "summary": "唯一输入框和键盘可见",
         "system_ui": {
             "immersive_or_fullscreen": False,
@@ -252,6 +259,107 @@ class TypedInputLineageTests(unittest.TestCase):
                     input_bounds=(0.13, 0.64, 0.68, 0.74),
                 )
             )
+
+    def test_unknown_app_requires_related_screen_and_distinctive_value(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = self.make_store(temp)
+            record = store.record_verified_literal_action(
+                device_id=DEVICE,
+                resolved_action=resolved(),
+                before_scene=before_scene(),
+                after_scene=scene(RAW_AFTER, "after-fp"),
+                hardware_receipt=receipt(),
+            )
+            self.assertTrue(
+                record.matches_visual(
+                    device_id=DEVICE,
+                    app_id="unknown",
+                    screen_id="editor_composing",
+                    raw_value=RAW_AFTER,
+                    now_epoch=1000.0,
+                )
+            )
+            self.assertFalse(
+                record.matches_visual(
+                    device_id=DEVICE,
+                    app_id="another.app",
+                    screen_id="editor_composing",
+                    raw_value=RAW_AFTER,
+                    now_epoch=1000.0,
+                )
+            )
+            self.assertFalse(
+                record.matches_visual(
+                    device_id=DEVICE,
+                    app_id="unknown",
+                    screen_id="unrelated_surface",
+                    raw_value=RAW_AFTER,
+                    now_epoch=1000.0,
+                )
+            )
+
+    def test_next_verified_key_inherits_prior_known_surface_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = self.make_store(temp)
+            first = store.record_verified_literal_action(
+                device_id=DEVICE,
+                resolved_action=resolved(),
+                before_scene=before_scene(),
+                after_scene=scene(RAW_AFTER, "after-fp"),
+                hardware_receipt=receipt(),
+            )
+            next_prior = EXPECTED
+            next_expected = next_prior + "."
+            next_action = resolved()
+            next_action["prior_input_value"] = next_prior
+            next_action["expected_input_value"] = next_expected
+            next_action["target_element_id"] = "key-dot"
+            next_action["expected_effect"]["element_state"]["states"] = {
+                "value": next_expected
+            }
+            next_before = scene(
+                next_prior,
+                "after-fp",
+                app_id="unknown",
+                screen_id="editor_composing",
+            )
+            next_before["elements"].append(
+                {
+                    "element_id": "key-dot",
+                    "role": "button",
+                    "meaning": "input_exact_literal_key",
+                    "bounds": [0.2, 0.75, 0.3, 0.82],
+                    "confidence": 1.0,
+                    "label": ".",
+                    "states": {
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "input_literal_key": True,
+                        "key_value": ".",
+                        "prior_input_value": next_prior,
+                        "expected_input_value": next_expected,
+                        "input_element_id": "input-1",
+                        "independent_geometry_verified": True,
+                        "geometry_audit_source": "element_geometry_audit",
+                    },
+                    "evidence": ["唯一完整可见键位"],
+                }
+            )
+            second = store.record_verified_literal_action(
+                device_id=DEVICE,
+                resolved_action=next_action,
+                before_scene=next_before,
+                after_scene=scene(
+                    "long2026:\n123@7.",
+                    "next-fp",
+                    app_id="unknown",
+                    screen_id="editor_composing",
+                ),
+                hardware_receipt=receipt(),
+            )
+            self.assertEqual(second.exact_value, next_expected)
+            self.assertEqual(second.app_id, first.app_id)
+            self.assertEqual(second.screen_id, first.screen_id)
 
     def test_invalid_receipt_or_exact_chain_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

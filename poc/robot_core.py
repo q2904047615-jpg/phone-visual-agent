@@ -784,6 +784,25 @@ class RobotController:
             hold_seconds=float(load_workflow_config()["vision_agent"]["tap_hold"]),
         )
 
+    def resolve_calibrated_target_grid_point(
+        self,
+        x: int,
+        y: int,
+        target_bounds: tuple[float, float, float, float],
+        frame_size: tuple[int, int],
+    ) -> tuple[int, int]:
+        """Resolve one dual-audited local target inside measured coverage."""
+
+        from tap_calibration import resolve_target_grid_point_within_calibration
+
+        return resolve_target_grid_point_within_calibration(
+            x,
+            y,
+            target_bounds,
+            frame_size,
+            self.calibration_path,
+        )
+
     def vision_dismiss_overlay_relative(self, x: int, y: int) -> tuple[int, int]:
         """Dismiss one observed overlay through its separately verified entry."""
 

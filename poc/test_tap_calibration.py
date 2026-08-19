@@ -18,6 +18,7 @@ from tap_calibration import (
     build_calibration,
     corrected_grid_point,
     fit_affine,
+    resolve_target_grid_point_within_calibration,
     reveal_system_navigation_path,
 )
 from run_xy_calibration import (
@@ -358,6 +359,107 @@ class TapCalibrationMathTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(TapCalibrationError, "实测标定区域之外"):
                 corrected_grid_point(735, 910, (540, 960), path)
+
+    def test_dual_audited_edge_target_resolves_inside_measured_hull(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tap.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "enabled": True,
+                        "validated": True,
+                        "frame_size": [810, 1440],
+                        "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                        "coverage": {
+                            "sufficient": True,
+                            "normalized_hull": [
+                                [0.11742892459826947, 0.48922863099374564],
+                                [0.12855377008652658, 0.020152883947185545],
+                                [0.5018541409147095, 0.017373175816539264],
+                                [0.8825710754017305, 0.014593467685892982],
+                                [0.8825710754017305, 0.9652536483669215],
+                                [0.5006180469715699, 0.9645587213342599],
+                                [0.1211372064276885, 0.9631688672689368],
+                            ],
+                            "normalized_bounds": [
+                                0.11742892459826947,
+                                0.014593467685892982,
+                                0.8825710754017305,
+                                0.9652536483669215,
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            point = resolve_target_grid_point_within_calibration(
+                895,
+                829,
+                (0.802, 0.797861, 0.988, 0.859861),
+                (810, 1440),
+                path,
+            )
+
+            self.assertEqual((842, 829), point)
+            self.assertEqual(point, corrected_grid_point(*point, (810, 1440), path))
+
+    def test_calibrated_target_center_already_inside_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tap.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "enabled": True,
+                        "validated": True,
+                        "frame_size": [540, 960],
+                        "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                        "coverage": {
+                            "sufficient": True,
+                            "normalized_hull": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]],
+                            "normalized_bounds": [0.1, 0.1, 0.9, 0.9],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                (500, 500),
+                resolve_target_grid_point_within_calibration(
+                    500, 500, (0.45, 0.45, 0.55, 0.55), (540, 960), path
+                ),
+            )
+
+    def test_calibrated_target_rejects_insufficient_overlap_and_large_shift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tap.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "enabled": True,
+                        "validated": True,
+                        "frame_size": [540, 960],
+                        "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                        "coverage": {
+                            "sufficient": True,
+                            "normalized_hull": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]],
+                            "normalized_bounds": [0.1, 0.1, 0.9, 0.9],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(TapCalibrationError, "二维覆盖不足"):
+                resolve_target_grid_point_within_calibration(
+                    950, 500, (0.88, 0.45, 0.99, 0.55), (540, 960), path
+                )
+            with self.assertRaisesRegex(TapCalibrationError, "偏离视觉目标中心过远"):
+                resolve_target_grid_point_within_calibration(
+                    990, 500, (0.70, 0.45, 1.00, 0.55), (540, 960), path
+                )
 
     def test_legacy_active_calibration_without_coverage_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:

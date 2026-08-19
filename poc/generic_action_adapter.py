@@ -1030,6 +1030,7 @@ class GenericSingleActionAdapter:
         safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
         evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
         local_frame_identity_verified = False
+        local_input_consensus_applied = False
         confirmation_frame_delta: float | None = None
         if planned_frames:
             before_frames, before_paths = self._capture_confirmation_frames(
@@ -1184,12 +1185,14 @@ class GenericSingleActionAdapter:
                             scene=before,
                             element_ids=fresh_ids,
                         )
-            before = self._apply_local_input_geometry_consensus(
+            consensus_scene = self._apply_local_input_geometry_consensus(
                 requested_action,
                 rebind_planned_scene,
                 before,
                 local_frame_identity_verified=local_frame_identity_verified,
             )
+            local_input_consensus_applied = consensus_scene is not before
+            before = consensus_scene
             rebound = self._rebind_action(
                 requested_action,
                 rebind_planned_scene,
@@ -1217,6 +1220,49 @@ class GenericSingleActionAdapter:
                 f"确认前控制器拒绝动作：{exc}",
                 evidence=before_paths,
             ) from exc
+
+        if local_input_consensus_applied and resolved.kind == "tap_semantic":
+            resolver = getattr(
+                self.robot,
+                "resolve_calibrated_target_grid_point",
+                None,
+            )
+            if callable(resolver):
+                try:
+                    target = before.get_element(
+                        str(resolved.target_element_id or ""),
+                        min_confidence=self.controller.min_confidence,
+                    )
+                    if resolved.normalized_point is None:
+                        raise GenericActionAdapterError("局部输入目标缺少共识落点。")
+                    preferred_x = round(resolved.normalized_point[0] * 1000)
+                    preferred_y = round(resolved.normalized_point[1] * 1000)
+                    resolved_x, resolved_y = resolver(
+                        preferred_x,
+                        preferred_y,
+                        target.bounds,
+                        before_frames[-1].size,
+                    )
+                    if (
+                        isinstance(resolved_x, bool)
+                        or isinstance(resolved_y, bool)
+                        or not isinstance(resolved_x, int)
+                        or not isinstance(resolved_y, int)
+                        or not 0 <= resolved_x <= 1000
+                        or not 0 <= resolved_y <= 1000
+                    ):
+                        raise GenericActionAdapterError(
+                            "机械标定没有返回合法的局部目标落点。"
+                        )
+                    resolved = replace(
+                        resolved,
+                        normalized_point=(resolved_x / 1000.0, resolved_y / 1000.0),
+                    )
+                except (UISceneError, RuntimeError, ValueError) as exc:
+                    raise GenericActionAdapterError(
+                        f"局部输入目标与实测标定区域无法形成安全落点：{exc}",
+                        evidence=before_paths,
+                    ) from exc
 
         if resolved.kind not in self.PHYSICAL_KINDS and resolved.kind != "wait_for_change":
             raise GenericActionAdapterError(

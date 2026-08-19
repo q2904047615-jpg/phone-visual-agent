@@ -159,6 +159,7 @@ class FakeRobot:
     def __init__(self):
         self.actions = []
         self.keyboard_layouts = []
+        self.calibrated_target_requests = []
         self.device_id = "test-device"
         self._armed = None
         self._long_press_receipt = None
@@ -184,6 +185,14 @@ class FakeRobot:
         self._consume("tap_semantic")
         self.actions.append(("tap", x, y))
         return (x, y)
+
+    def resolve_calibrated_target_grid_point(
+        self, x, y, target_bounds, frame_size
+    ):
+        self.calibrated_target_requests.append(
+            (x, y, tuple(target_bounds), tuple(frame_size))
+        )
+        return x, y
 
     def vision_dismiss_overlay_relative(self, x, y):
         self._consume("dismiss_overlay")
@@ -897,6 +906,10 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual("matched", result.action_outcome)
         self.assertEqual([("tap", 460, 702)], robot.actions)
         self.assertEqual(
+            [(460, 702, (0.4, 0.68, 0.52, 0.724), (540, 960))],
+            robot.calibrated_target_requests,
+        )
+        self.assertEqual(
             [
                 ("local_audited_literal_key_1",),
                 ("local_audited_literal_key_1",),
@@ -972,6 +985,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(1, result.physical_actions)
+        self.assertEqual([], robot.calibrated_target_requests)
         self.assertEqual(2, len(observer.goal_contexts))
         confirmation_focus = observer.goal_contexts[0]["entities"][
             "active_subgoal_visual_context"

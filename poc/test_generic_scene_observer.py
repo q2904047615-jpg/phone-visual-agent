@@ -492,6 +492,11 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn("single line", prompt)
         self.assertIn("the local, goal-derived whitelist is []", prompt)
         self.assertIn("Never enumerate a keyboard row", prompt)
+        self.assertIn(
+            "the bottom edge is always 1000, never a source-pixel or "
+            "conventional display height",
+            prompt,
+        )
         self.assertEqual(
             (" ", "."),
             _input_audit_literal_key_targets(
@@ -541,6 +546,23 @@ class GenericSceneObserverTests(unittest.TestCase):
             roi_bounds=None,
         )
         self.assertIn("the local, goal-derived whitelist is []", direct_prompt)
+
+        literal_prompt = _input_structure_audit_prompt(
+            {"entities": {"input_text": "复杂输入验收2026:123+45-6@7."}},
+            roi_bounds=None,
+            current_input_text="复杂输入验收2026:123+45-6",
+        )
+        self.assertIn('the local, goal-derived whitelist is ["@"]', literal_prompt)
+        self.assertIn(
+            '"literal_keys":[{"value":"@","label":"@",'
+            '"key_kind":"character","bounds":[0,0,1000,1000],'
+            '"confidence":0.0,"fully_visible":true}]',
+            literal_prompt,
+        )
+        self.assertIn(
+            "Every literal-key object MUST contain exactly these six fields",
+            literal_prompt,
+        )
 
     def test_observer_limits_literal_key_prompt_to_observed_next_character(
         self,

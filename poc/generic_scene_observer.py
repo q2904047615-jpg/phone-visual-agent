@@ -2279,6 +2279,24 @@ def _input_structure_audit_prompt(
         context,
         current_input_text=current_input_text,
     )
+    literal_keys_example = []
+    if literal_key_targets:
+        example_value = literal_key_targets[0]
+        literal_keys_example = [
+            {
+                "value": example_value,
+                "label": "Space" if example_value == " " else example_value,
+                "key_kind": "space" if example_value == " " else "character",
+                "bounds": [0, 0, 1000, 1000],
+                "confidence": 0.0,
+                "fully_visible": True,
+            }
+        ]
+    literal_keys_example_json = json.dumps(
+        literal_keys_example,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     if crop_local:
         if roi_bounds is None:
             raise ValueError("crop-local 输入审计必须绑定 ROI。")
@@ -2305,6 +2323,8 @@ def _input_structure_audit_prompt(
             "All bounds MUST use Image 1 full-frame normalized coordinates "
             "0..1000. Here 0 and 1000 are the four edges of Image 1. Never copy "
             "Image 1 source-pixel coordinates, regardless of its width or "
+            "height. A phone aspect ratio never changes this scale: the bottom "
+            "edge is always 1000, never a source-pixel or conventional display "
             "height. If a structure cannot be bounded in this coordinate "
             "system, omit it instead of clipping or converting it."
         )
@@ -2318,7 +2338,7 @@ Distinguish three different visual structures; never merge them:
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
 5. keyboard.backspace_key: for any complete visible keyboard layout, report the one complete backspace/delete key as label, bounds, confidence and fully_visible. Use null when absent, clipped, ambiguous, or confused with an App delete control. This is read-only geometry and never authorizes clearing by itself.
-6. keyboard.literal_keys: the local, goal-derived whitelist is {json.dumps(literal_key_targets, ensure_ascii=False, separators=(',', ':'))}. Report only complete visible keys whose inserted value occurs in that exact whitelist, at most once per distinct value and at most eight total. When the whitelist is empty, literal_keys MUST be []. QWERTY alphabet letters and Chinese characters MUST NEVER be enumerated here, even when they occur in input_text, because qwerty_anchors and the verified pinyin transaction already represent them. Never enumerate a keyboard row. For a whitelisted space use value=" " and key_kind="space". For every other whitelisted key use key_kind="character" and require label to equal value literally. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
+6. keyboard.literal_keys: the local, goal-derived whitelist is {json.dumps(literal_key_targets, ensure_ascii=False, separators=(',', ':'))}. Report only complete visible keys whose inserted value occurs in that exact whitelist, at most once per distinct value and at most eight total. Every literal-key object MUST contain exactly these six fields and never omit any of them: value, label, key_kind, bounds, confidence, fully_visible. When the whitelist is empty, literal_keys MUST be []. QWERTY alphabet letters and Chinese characters MUST NEVER be enumerated here, even when they occur in input_text, because qwerty_anchors and the verified pinyin transaction already represent them. Never enumerate a keyboard row. For a whitelisted space use value=" " and key_kind="space". For every other whitelisted key use key_kind="character" and require label to equal value literally. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
 6. keyboard.layout_switches: enumerate only compact visible keys with an explicit destination layout: qwerty, numeric, or symbol. Copy the literal label and report current_layout and target_layout; never infer a destination from the goal alone.
 7. keyboard.case_mode and keyboard.case_switch apply only to direct_latin QWERTY. case_mode is lower, upper, or unknown from the visible letter glyphs. case_switch is null unless a complete visible shift/case key and its lower↔upper direction are independently clear.
 Determine keyboard.input_mode only from the current whole keyboard image, never from the goal or the JSON example. Visible Chinese composition/candidates, pinyin separators, or a current-mode label such as 中/中文/Pinyin prove chinese_pinyin. A visible current-mode label such as 英/EN/English/ABC/Latin together with a plain Latin QWERTY layout and no Chinese composition/candidate strip proves direct_latin. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
@@ -2345,7 +2365,7 @@ JSON object on a single line, without Markdown or explanatory whitespace:
 "keyboard":{{"visible":true,"bounds":[0,0,1000,1000],"layout":"qwerty",
 "input_mode":"unknown","case_mode":"unknown","qwerty_anchors":{{"q":[0,0],"p":[0,0],"a":[0,0],"l":[0,0],"z":[0,0],"m":[0,0],"backspace":[0,0]}},"mode_switch":null,
 "backspace_key":{{"label":"⌫","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true}},
-"case_switch":null,"literal_keys":[],
+"case_switch":null,"literal_keys":{literal_keys_example_json},
 "layout_switches":[{{"label":"123","bounds":[0,0,1000,1000],"confidence":0.0,"current_layout":"qwerty","target_layout":"numeric"}}]}}}}
 When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","case_mode":"unknown","qwerty_anchors":null,"mode_switch":null,"backspace_key":null,"case_switch":null,"literal_keys":[],"layout_switches":[]}}.
 Return empty arrays when their geometry is not visible. Never merge a clipped structure with a complete structure, and never copy an IME pre-edit region into application_inputs.

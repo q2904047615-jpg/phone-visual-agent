@@ -5879,6 +5879,236 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
             )
         )
 
+    def test_unique_focused_input_mints_one_local_zero_action_state_fact(self) -> None:
+        focused_scene = _scene(
+            role="input",
+            meaning="application_text_input",
+            label="",
+            states={"focused": True, "value": ""},
+        )
+        observation = FakeTrustedObservation(
+            device_id="device-1",
+            scene=focused_scene,
+        )
+        subgoal = SimpleNamespace(
+            completion_conditions=("输入框处于聚焦状态",),
+        )
+
+        fact = UniversalAgentOrchestrator._zero_action_visible_state_fact(
+            subgoal,
+            observation,
+        )
+
+        self.assertEqual(
+            "当前可信画面的局部控件状态："
+            "element_id=candidate-1, role=input, focused=true。",
+            fact,
+        )
+
+    def test_focus_state_fact_fails_closed_for_untrusted_or_unrelated_shapes(self) -> None:
+        base = _scene(
+            role="input",
+            meaning="application_text_input",
+            label="",
+            states={"focused": True, "value": ""},
+        )
+        focus_subgoal = SimpleNamespace(
+            completion_conditions=("输入框处于聚焦状态",),
+        )
+        value_subgoal = SimpleNamespace(
+            completion_conditions=("输入框内容为 codex",),
+        )
+        duplicate = replace(
+            base,
+            elements=(
+                base.elements[0],
+                replace(base.elements[0], element_id="candidate-2"),
+            ),
+        )
+        cases = {
+            "not_focused": replace(
+                base,
+                elements=(
+                    replace(
+                        base.elements[0],
+                        states={**base.elements[0].states, "focused": False},
+                    ),
+                ),
+            ),
+            "wrong_role": replace(
+                base,
+                elements=(replace(base.elements[0], role="button"),),
+            ),
+            "low_confidence": replace(
+                base,
+                elements=(replace(base.elements[0], confidence=0.70),),
+            ),
+            "not_goal_relevant": replace(
+                base,
+                elements=(
+                    replace(
+                        base.elements[0],
+                        states={
+                            **base.elements[0].states,
+                            "goal_relevant": False,
+                        },
+                    ),
+                ),
+            ),
+            "duplicate": duplicate,
+        }
+        for name, scene in cases.items():
+            with self.subTest(case=name):
+                observation = FakeTrustedObservation(
+                    device_id="device-1",
+                    scene=scene,
+                )
+                self.assertIsNone(
+                    UniversalAgentOrchestrator._zero_action_visible_state_fact(
+                        focus_subgoal,
+                        observation,
+                    )
+                )
+
+        conflicted = FakeTrustedObservation(
+            device_id="device-1",
+            scene=base,
+        )
+        conflicted.candidate_conflicts = (
+            {"kind": "ambiguous", "element_ids": ["candidate-1"]},
+        )
+        self.assertIsNone(
+            UniversalAgentOrchestrator._zero_action_visible_state_fact(
+                focus_subgoal,
+                conflicted,
+            )
+        )
+        self.assertIsNone(
+            UniversalAgentOrchestrator._zero_action_visible_state_fact(
+                value_subgoal,
+                FakeTrustedObservation(device_id="device-1", scene=base),
+            )
+        )
+
+    def test_visible_page_and_focused_input_advance_as_one_safe_prefix(self) -> None:
+        base = _graph()
+        open_page = replace(
+            base.subgoals[0],
+            subgoal_id="local-tool-page-visible",
+            objective="本地工具首页可见",
+            completion_conditions=("本地工具应用界面可见",),
+            external_impact="navigation_only",
+        )
+        focus = Subgoal(
+            subgoal_id="focus-input",
+            objective="让目标输入框获得焦点",
+            status="pending",
+            depends_on=(open_page.subgoal_id,),
+            constraints=(),
+            completion_conditions=("输入框处于聚焦状态",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        type_text = Subgoal(
+            subgoal_id="type-text",
+            objective="输入框内容为 codex",
+            status="pending",
+            depends_on=(focus.subgoal_id,),
+            constraints=(),
+            completion_conditions=("输入框内容逐字为 codex",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        initial = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="确认本地工具输入框内容为 codex",
+                target_apps=(
+                    TargetApp(app_id="local_tool", app_name="本地工具"),
+                ),
+                entities={"target_ui_label": "输入框", "input_text": "codex"},
+            ),
+            subgoals=(open_page, focus, type_text),
+            active_subgoal_id=open_page.subgoal_id,
+            raw_user_goal="确认本地工具输入框内容为 codex",
+        )
+        initial.validate()
+        scene = replace(
+            _scene(
+                role="input",
+                meaning="application_text_input",
+                label="",
+                states={"focused": True, "value": ""},
+                app_id="local_tool",
+            ),
+            screen_id="local_tool_home",
+            summary="本地工具应用界面可见，唯一输入框已聚焦。",
+        )
+        scene = replace(
+            scene,
+            elements=(
+                scene.elements[0],
+                UIElement(
+                    element_id="page-title",
+                    role="text",
+                    meaning="page_title",
+                    label="本地工具",
+                    bounds=(0.30, 0.04, 0.70, 0.10),
+                    confidence=1.0,
+                    states={"goal_relevant": False, "fully_visible": True},
+                    evidence=("页面顶部唯一主标题",),
+                ),
+            ),
+        )
+        focus_fact = (
+            "当前可信画面的局部控件状态："
+            "element_id=candidate-1, role=input, focused=true。"
+        )
+        revised = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    open_page,
+                    status="completed",
+                    completion_evidence=(scene.summary,),
+                ),
+                replace(
+                    focus,
+                    status="completed",
+                    completion_evidence=(focus_fact,),
+                ),
+                replace(type_text, status="active"),
+            ),
+            active_subgoal_id=type_text.subgoal_id,
+        )
+        revised.validate()
+        planner = FakeDeepSeekPlanner(initial, replan_result=revised)
+        qwen = FakeQwenObserver()
+        adapter = FakeAdapter(scene)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(planner, qwen, adapter).start(
+                session_id="session-visible-focus-prefix",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("needs_reobservation", session.status)
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual(
+            ["completed", "completed", "active"],
+            [item.status for item in session.task_graph.subgoals],
+        )
+        self.assertEqual("type-text", session.task_graph.active_subgoal_id)
+        self.assertEqual([], qwen.calls)
+        self.assertEqual(0, session.physical_actions)
+        self.assertEqual(0, adapter.execute_calls)
+
     def test_already_visible_navigation_destination_is_presence_completion(self) -> None:
         cases = (
             ("打开设置应用", "设置主界面可见"),

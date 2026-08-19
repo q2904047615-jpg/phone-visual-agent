@@ -1780,6 +1780,82 @@ class UniversalAgentOrchestrator:
                 return True
         return False
 
+    @classmethod
+    def _verified_focused_input_fact(
+        cls,
+        trusted_observation: Any,
+    ) -> str | None:
+        """Return one local fact only when focus is uniquely scene-proven."""
+
+        scene = getattr(trusted_observation, "scene", None)
+        if scene is None:
+            return None
+        candidates = []
+        for item in tuple(getattr(scene, "elements", ()) or ()):
+            states = getattr(item, "states", {}) or {}
+            left, top, right, bottom = getattr(item, "bounds", (0, 0, 0, 0))
+            if (
+                str(getattr(item, "role", "") or "") == "input"
+                and states.get("goal_relevant") is True
+                and states.get("focused") is True
+                and float(getattr(item, "confidence", 0.0)) >= 0.90
+                and 0.02 <= left < right <= 0.98
+                and 0.02 <= top < bottom <= 0.98
+                and not cls._candidate_has_unresolved_conflict(
+                    trusted_observation,
+                    str(getattr(item, "element_id", "") or ""),
+                )
+            ):
+                candidates.append(item)
+        if len(candidates) != 1:
+            return None
+        item = candidates[0]
+        return (
+            "当前可信画面的局部控件状态："
+            f"element_id={item.element_id}, role=input, focused=true。"
+        )
+
+    @classmethod
+    def _zero_action_visible_state_fact(
+        cls,
+        subgoal: Any,
+        trusted_observation: Any,
+    ) -> str | None:
+        """Bind a safe state-only checkpoint to an exact local scene fact.
+
+        This deliberately recognizes only focus as a reversible, structured UI
+        state.  Input values, keyboard modes, external results, and other state
+        claims keep their existing dedicated evidence contracts.
+        """
+
+        conditions = tuple(
+            str(item or "").strip().casefold()
+            for item in tuple(getattr(subgoal, "completion_conditions", ()) or ())
+            if str(item or "").strip()
+        )
+        if not conditions:
+            return None
+        focus_patterns = (
+            re.compile(
+                r"(?:输入框|文本框|输入区域).{0,10}"
+                r"(?:已|处于|保持|获得)?(?:聚焦|焦点)"
+            ),
+            re.compile(
+                r"焦点.{0,10}(?:位于|保持在|处于)?"
+                r"(?:输入框|文本框|输入区域)"
+            ),
+            re.compile(
+                r"(?:input|textbox|text field).{0,20}"
+                r"(?:is |remains |has )?(?:focused|focus)"
+            ),
+        )
+        if any(
+            not any(pattern.search(condition) for pattern in focus_patterns)
+            for condition in conditions
+        ):
+            return None
+        return cls._verified_focused_input_fact(trusted_observation)
+
     @staticmethod
     def _presence_binding_terms(*values: Any) -> frozenset[str]:
         """Return bounded literal terms for a zero-action presence check."""
@@ -2429,6 +2505,12 @@ class UniversalAgentOrchestrator:
             "bounds_inside_safe_frame=true。"
             for item in candidates
         )
+        focused_input_fact = self._verified_focused_input_fact(
+            trusted_observation
+        )
+        local_state_facts = (
+            (focused_input_fact,) if focused_input_fact is not None else ()
+        )
         observed = self.bridge.observed_state(
             graph=graph,
             trusted_observation=trusted_observation,
@@ -2438,6 +2520,7 @@ class UniversalAgentOrchestrator:
                     scene.summary,
                     *scene_identity_facts,
                     *candidate_facts,
+                    *local_state_facts,
                     *(fact for item in candidates for fact in item.evidence),
                 ]
             },
@@ -2449,9 +2532,11 @@ class UniversalAgentOrchestrator:
             reason=(
                 "当前可信画面已经以严格 scene identity 或逐项语义绑定、"
                 f"高置信且无冲突的目标元素证明定位类 {current.external_impact} 子目标；"
-                f"本轮只能把当前 subgoal_id={current.subgoal_id} 标为 completed，"
-                "其 completion_evidence 必须逐字选择 visible_evidence 中至少一项；"
-                "最多激活一个直接后继，其他节点不得越级完成。不得推断元素值、"
+                f"本轮必须先把当前 subgoal_id={current.subgoal_id} 标为 completed，"
+                "其 completion_evidence 必须逐字选择 visible_evidence 中至少一项。"
+                "只有直接依赖连续、且 visible_evidence 已提供对应逐字本地控件状态事实的"
+                "可逆状态节点可以同时完成；最多激活一个直接后继，其他节点不得越级完成。"
+                "不得推断元素值、"
                 "外部状态或执行动作；无法满足这些约束时必须 blocked。"
             ),
         )
@@ -2520,9 +2605,20 @@ class UniversalAgentOrchestrator:
                 dependency in completed_before or dependency in accepted_prefix
                 for dependency in old_item.depends_on
             )
+            state_fact = self._zero_action_visible_state_fact(
+                old_item,
+                trusted_observation,
+            )
+            presence_eligible = self._is_presence_only_read_only_subgoal(
+                old_item
+            )
+            state_eligible = bool(
+                state_fact
+                and state_fact in new_item.completion_evidence
+            )
             if (
                 old_item.external_impact not in {"read_only", "navigation_only"}
-                or not self._is_presence_only_read_only_subgoal(old_item)
+                or not (presence_eligible or state_eligible)
                 or not dependencies_ready
                 or not new_item.completion_evidence
             ):

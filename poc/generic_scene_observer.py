@@ -2352,6 +2352,7 @@ keyboard.case_switch uses the same five field names, but current_mode and target
 Do not plan, suggest, authorize, or perform any action.
 {coordinate_contract}
 Use text="" for a visibly empty application field. Copy placeholders and visible_editable_cues literally; do not infer them from the goal. right_button describes a trailing utility control; it is structural evidence only and is never authorized for activation. Set it to null when no separate trailing control is visible.
+An automatic visual line wrap inside a narrow editable field is presentation only: join the continuous visible glyph sequence and do not insert "\\n" into text. Report a newline character only when the image independently proves an actual user-entered line break; if that distinction is not visually provable, do not invent a newline from row layout alone.
 Return exactly this JSON schema and no other fields. Emit one compact minified
 JSON object on a single line, without Markdown or explanatory whitespace:
 {{"protocol_version":"{INPUT_STRUCTURE_AUDIT_VERSION}",

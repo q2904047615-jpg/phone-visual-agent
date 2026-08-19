@@ -917,6 +917,81 @@ class GenericActionAdapterTests(unittest.TestCase):
             observer.geometry_audit_calls,
         )
 
+    def test_literal_key_receipt_reconciles_only_proven_visual_soft_wrap(self):
+        before = self._literal_input_scene("before", value="live", audited=True)
+        expected_effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": "live2"},
+            }
+        }
+        resolved = ResolvedSemanticAction(
+            node_id="literal-2",
+            kind="tap_semantic",
+            normalized_point=(0.22, 0.735),
+            target_element_id="local_audited_literal_key_1",
+            before_fingerprint=before.fingerprint,
+            expected_effect=expected_effect,
+        )
+        wrapped = self._literal_input_scene(
+            "after-live2",
+            value="li\nve2",
+            include_key=False,
+        )
+
+        reconciled = GenericSingleActionAdapter._reconcile_literal_key_visual_wrap(
+            resolved,
+            before,
+            wrapped,
+        )
+
+        input_element = reconciled.get_element("local_audited_input_1")
+        self.assertEqual("live2", input_element.states["value"])
+        self.assertEqual("live2", input_element.label)
+        self.assertIn("本地逐键回执确认该换行为控件视觉软折行", input_element.evidence)
+        UniversalActionController().verify_after_action(resolved, before, reconciled)
+
+        wrong_text = self._literal_input_scene(
+            "after-wrong",
+            value="li\nve3",
+            include_key=False,
+        )
+        missing_evidence_input = wrapped.get_element("local_audited_input_1")
+        missing_evidence = replace(
+            wrapped,
+            elements=(
+                replace(missing_evidence_input, evidence=("可见输入框",)),
+            ),
+        )
+        for unsafe_after in (wrong_text, missing_evidence):
+            with self.subTest(fingerprint=unsafe_after.fingerprint):
+                self.assertIs(
+                    unsafe_after,
+                    GenericSingleActionAdapter._reconcile_literal_key_visual_wrap(
+                        resolved,
+                        before,
+                        unsafe_after,
+                    ),
+                )
+
+        newline_target = replace(
+            resolved,
+            expected_effect={
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {"value": "live\n2"},
+                }
+            },
+        )
+        self.assertIs(
+            wrapped,
+            GenericSingleActionAdapter._reconcile_literal_key_visual_wrap(
+                newline_target,
+                before,
+                wrapped,
+            ),
+        )
+
     def test_missing_ordinary_button_cannot_use_input_auxiliary_recovery(self):
         planned = scene("ordinary-planned")
         requested = SemanticAction(

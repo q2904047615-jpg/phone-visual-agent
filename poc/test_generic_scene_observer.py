@@ -563,6 +563,11 @@ class GenericSceneObserverTests(unittest.TestCase):
             "Every literal-key object MUST contain exactly these six fields",
             literal_prompt,
         )
+        self.assertIn(
+            "An automatic visual line wrap inside a narrow editable field is "
+            "presentation only",
+            literal_prompt,
+        )
 
     def test_observer_limits_literal_key_prompt_to_observed_next_character(
         self,

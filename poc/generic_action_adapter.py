@@ -969,6 +969,12 @@ class GenericSingleActionAdapter:
                     ) from exc
                 continue
 
+            after = self._reconcile_literal_key_visual_wrap(
+                resolved,
+                before,
+                after,
+            )
+
             try:
                 self.controller.verify_after_action(resolved, before, after)
                 return (
@@ -1002,6 +1008,91 @@ class GenericSingleActionAdapter:
             tuple(observation_errors),
             tuple(verification_errors),
         )
+
+    @staticmethod
+    def _reconcile_literal_key_visual_wrap(
+        resolved: ResolvedSemanticAction,
+        before: UIScene,
+        after: UIScene,
+    ) -> UIScene:
+        """Remove presentation-only line wraps under one exact key receipt."""
+
+        if resolved.kind != "tap_semantic" or not resolved.target_element_id:
+            return after
+        try:
+            key = before.get_element(resolved.target_element_id)
+        except UISceneError:
+            return after
+        if key.meaning != "input_exact_literal_key":
+            return after
+        states = key.states
+        prior = states.get("prior_input_value")
+        key_value = states.get("key_value")
+        expected = states.get("expected_input_value")
+        input_id = str(states.get("input_element_id") or "").strip()
+        expected_state = resolved.expected_effect.get("element_state")
+        expected_states = (
+            expected_state.get("states")
+            if isinstance(expected_state, dict)
+            else None
+        )
+        if (
+            not isinstance(prior, str)
+            or not isinstance(key_value, str)
+            or len(key_value) != 1
+            or key_value in {"\r", "\n"}
+            or "\r" in prior
+            or "\n" in prior
+            or expected != prior + key_value
+            or not isinstance(expected, str)
+            or "\r" in expected
+            or "\n" in expected
+            or expected_states != {"value": expected}
+            or not input_id
+        ):
+            return after
+        candidates = tuple(
+            element
+            for element in after.elements
+            if element.element_id == input_id
+            and element.role == "input"
+            and element.meaning == "application_text_input"
+            and float(element.confidence) >= 0.9
+            and element.states.get("fully_visible") is True
+            and element.states.get("focused") is True
+        )
+        if len(candidates) != 1:
+            return after
+        candidate = candidates[0]
+        observed = candidate.states.get("value")
+        if (
+            not isinstance(observed, str)
+            or not ({"\r", "\n"} & set(observed))
+            or observed.count("\r") + observed.count("\n") > 3
+            or observed.replace("\r", "").replace("\n", "") != expected
+            or not any(observed in str(item) for item in candidate.evidence)
+        ):
+            return after
+        replacement = replace(
+            candidate,
+            label=(
+                expected
+                if candidate.label == observed
+                else candidate.label
+            ),
+            states={**candidate.states, "value": expected},
+            evidence=candidate.evidence
+            + ("本地逐键回执确认该换行为控件视觉软折行",),
+        )
+        reconciled = replace(
+            after,
+            elements=tuple(
+                replacement if element.element_id == input_id else element
+                for element in after.elements
+            ),
+        )
+        reconciled.validate()
+        return reconciled
 
     def _post_observation_retryable(self, error: Exception) -> bool:
         diagnostics = getattr(self.observer, "last_diagnostics", {})

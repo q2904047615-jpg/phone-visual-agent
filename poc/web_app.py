@@ -117,9 +117,10 @@ DEVICE_REGISTRY_PATH = Path(
         Path(__file__).with_name("device_registry.json"),
     )
 )
-LEGACY_WORKFLOWS_ENABLED = str(
-    os.environ.get("PHONE_AGENT_ENABLE_LEGACY_WORKFLOWS", "")
-).strip().lower() in {"1", "true", "yes", "on"}
+# The fixed-App workflow runtime is permanently retired.  Historical route
+# tests can still monkeypatch this module-local flag, but no production launch
+# configuration can restore the old execution path.
+LEGACY_WORKFLOWS_ENABLED = False
 
 
 def current_code_revision() -> str:
@@ -962,7 +963,6 @@ class Runtime:
         self.generic_step_planner = GenericStepPlanner(self.intent_provider)
         self.deepseek_task_graph_planner = DeepSeekTaskGraphPlanner(
             self.intent_provider,
-            enable_legacy_risk_diagnostics=False,
         )
         self.qwen_visual_decision_observer = QwenVisualDecisionObserver(
             self.vision_provider

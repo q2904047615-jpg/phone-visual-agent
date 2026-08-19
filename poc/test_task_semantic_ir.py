@@ -371,7 +371,6 @@ class TaskSemanticIRTests(unittest.TestCase):
         provider = OneResponseProvider(current_send_failure_payload())
         planner = DeepSeekTaskGraphPlanner(
             provider,
-            enable_legacy_risk_diagnostics=False,
         )
 
         graph = planner.plan(RAW_GOAL, device_id="device-local-01", task_id="9abc")
@@ -392,6 +391,20 @@ class TaskSemanticIRTests(unittest.TestCase):
         )
         self.assertFalse(planner.last_semantic_shadow.execution_allowed)
 
+    def test_formal_planner_no_longer_accepts_legacy_risk_audit_controls(self):
+        provider = OneResponseProvider(current_send_failure_payload())
+
+        with self.assertRaises(TypeError):
+            DeepSeekTaskGraphPlanner(
+                provider,
+                enable_legacy_risk_diagnostics=True,
+            )
+        with self.assertRaises(TypeError):
+            DeepSeekTaskGraphPlanner(
+                provider,
+                risk_audit_provider=provider,
+            )
+
     def test_unknown_effect_failure_artifact_records_formal_authority_error(self):
         payload = current_send_failure_payload()
         payload["risk_actions"][0]["risk_type"] = "unknown_external_effect"
@@ -399,7 +412,6 @@ class TaskSemanticIRTests(unittest.TestCase):
         payload["subgoals"][1]["completion_conditions"] = ["处理结果可见"]
         planner = DeepSeekTaskGraphPlanner(
             OneResponseProvider(payload),
-            enable_legacy_risk_diagnostics=False,
         )
         with self.assertRaises(TaskGraphError) as caught:
             planner.plan(RAW_GOAL, device_id="device-local-01", task_id="9abc")
@@ -421,7 +433,6 @@ class TaskSemanticIRTests(unittest.TestCase):
         provider = OneResponseProvider(current_send_failure_payload())
         planner = DeepSeekTaskGraphPlanner(
             provider,
-            enable_legacy_risk_diagnostics=False,
         )
         original_compiler = __import__("deepseek_task_graph").compile_legacy_graph_shadow
 
@@ -521,7 +532,6 @@ class TaskSemanticIRTests(unittest.TestCase):
     def test_new_request_clears_stale_shadow_before_json_parse(self):
         planner = DeepSeekTaskGraphPlanner(
             RawResponseProvider("{"),
-            enable_legacy_risk_diagnostics=False,
         )
         planner.last_semantic_shadow = compile_legacy_graph_shadow(graph_from_payload())
         planner.last_semantic_shadow_error = "stale"

@@ -4,10 +4,13 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+import deepseek_task_graph as task_graph_module
+from deepseek_semantic_risk_audit import SemanticRiskAuditor
+
 from deepseek_task_graph import (
     ControllerTransitionEvidenceRef,
     DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION,
-    DeepSeekTaskGraphPlanner,
+    DeepSeekTaskGraphPlanner as FormalDeepSeekTaskGraphPlanner,
     ObservedState,
     TaskGraphError,
     VerifiedActionTransition,
@@ -22,6 +25,62 @@ from deepseek_task_graph import (
     _require_named_visual_identity_grounding,
     named_visual_identity_is_grounded,
 )
+
+
+class DeepSeekTaskGraphPlanner(FormalDeepSeekTaskGraphPlanner):
+    """Historical audit corpus harness, isolated from the production planner.
+
+    Production no longer imports, creates or invokes the retired remote audit.
+    The legacy assertions below remain useful as an offline corpus and run the
+    old diagnostic explicitly inside this test-only wrapper.
+    """
+
+    def __init__(self, provider, *, risk_audit_provider=None, **kwargs):
+        super().__init__(provider, **kwargs)
+        self.risk_auditor = SemanticRiskAuditor(risk_audit_provider or provider)
+        self.last_risk_audit = None
+
+    @property
+    def risk_audit_call_count(self):
+        return self.risk_auditor.call_count
+
+    def _run_historical_audit(self, graph):
+        sources = task_graph_module._risk_audit_sources(graph)
+        report = self.risk_auditor.audit(sources)
+        sanitized = []
+        for assessment in report.assessments:
+            try:
+                task_graph_module._reject_low_level_instruction(
+                    assessment.reason,
+                    "risk_audit.reason",
+                )
+            except TaskGraphError:
+                assessment = replace(
+                    assessment,
+                    reason=(
+                        f"语义风险审计分类为 {assessment.external_impact}；"
+                        "原始展示理由因包含低层操作表达已隔离"
+                    ),
+                )
+            sanitized.append(assessment)
+        report = replace(report, assessments=tuple(sanitized))
+        report = task_graph_module._apply_local_risk_supplements(
+            report,
+            sources,
+            graph=graph,
+        )
+        self.last_risk_audit = report
+        task_graph_module._validate_graph_against_risk_audit(graph, report)
+
+    def plan(self, *args, **kwargs):
+        graph = super().plan(*args, **kwargs)
+        self._run_historical_audit(graph)
+        return graph
+
+    def replan(self, *args, **kwargs):
+        graph = super().replan(*args, **kwargs)
+        self._run_historical_audit(graph)
+        return graph
 
 
 class FakeProvider:
@@ -3008,9 +3067,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
         )
         payload = json.loads(fixture_path.read_text(encoding="utf-8"))
         provider = FakeProvider(payload)
-        planner = DeepSeekTaskGraphPlanner(
+        planner = FormalDeepSeekTaskGraphPlanner(
             provider,
-            enable_legacy_risk_diagnostics=False,
         )
 
         graph = planner.plan(
@@ -3040,9 +3098,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     objective,
                     external_impact="navigation_only",
                 )
-                planner = DeepSeekTaskGraphPlanner(
+                planner = FormalDeepSeekTaskGraphPlanner(
                     FakeProvider(payload),
-                    enable_legacy_risk_diagnostics=False,
                 )
                 graph = planner.plan(objective, device_id="phone-1")
                 self.assertEqual(graph.risk_actions, ())
@@ -4475,9 +4532,8 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
             {item.subgoal_id for item in normalized_fixture.subgoals},
         )
 
-        graph = DeepSeekTaskGraphPlanner(
+        graph = FormalDeepSeekTaskGraphPlanner(
             FakeProvider(payload),
-            enable_legacy_risk_diagnostics=False,
         ).plan(
             raw_goal,
             device_id="phone-1",

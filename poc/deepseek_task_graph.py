@@ -8,15 +8,6 @@ from dataclasses import asdict, dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Any, Protocol
 
-from deepseek_semantic_risk_audit import (
-    EXTERNAL_IMPACTS as SUBGOAL_EXTERNAL_IMPACTS,
-    RISK_TYPES,
-    AuditSource,
-    JsonRiskAuditProvider,
-    RiskAuditAssessment,
-    SemanticRiskAuditReport,
-    SemanticRiskAuditor,
-)
 from generic_intent import GenericIntentError, _parse_json_object
 from task_semantic_ir import (
     SemanticRiskAuthorityReport,
@@ -31,6 +22,23 @@ from task_semantic_ir import (
 
 
 DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-11-deepseek-task-graph-v3"
+SUBGOAL_EXTERNAL_IMPACTS = frozenset(
+    {"read_only", "navigation_only", "external_state", "unknown"}
+)
+RISK_TYPES = frozenset(
+    {
+        "message_or_communication",
+        "content_publication",
+        "account_relationship_change",
+        "membership_change",
+        "permission_role_change",
+        "data_mutation",
+        "data_deletion",
+        "transaction_or_payment",
+        "account_or_permission_change",
+        "unknown_external_effect",
+    }
+)
 GRAPH_STATUSES = frozenset(
     {"ready", "running", "awaiting_confirmation", "completed", "blocked"}
 )
@@ -1356,30 +1364,19 @@ class DeepSeekTaskGraphPlanner:
         self,
         provider: JsonTaskGraphProvider,
         *,
-        risk_audit_provider: JsonRiskAuditProvider | None = None,
-        enable_legacy_risk_diagnostics: bool = True,
         semantic_risk_policy: LocalRiskPolicyConfig | None = None,
     ) -> None:
         self.provider = provider
-        self.risk_auditor = SemanticRiskAuditor(risk_audit_provider or provider)
-        self.legacy_risk_diagnostics_enabled = bool(
-            enable_legacy_risk_diagnostics
-        )
         self.semantic_risk_policy = (
             semantic_risk_policy
             if semantic_risk_policy is not None
             else load_local_risk_policy(DEFAULT_LOCAL_RISK_POLICY_PATH)
         )
         self.last_raw_response = ""
-        self.last_risk_audit: SemanticRiskAuditReport | None = None
         self.last_semantic_authority: SemanticRiskAuthorityReport | None = None
         self.last_semantic_authority_error = ""
         self.last_semantic_shadow: SemanticShadowReport | None = None
         self.last_semantic_shadow_error = ""
-
-    @property
-    def risk_audit_call_count(self) -> int:
-        return self.risk_auditor.call_count
 
     def plan(
         self,
@@ -1411,7 +1408,11 @@ class DeepSeekTaskGraphPlanner:
         graph = _normalize_initial_input_goal_objective(graph)
         graph = _normalize_redundant_conditional_input_clear(graph)
         graph = _normalize_explicit_target_surface(graph, text)
-        graph = _normalize_initial_local_navigation(graph)
+        # Migration-only transport cleanup: this can delete a model-invented
+        # legacy risk that contradicts an explicitly local/reversible typed
+        # state, but it cannot reject a task, request confirmation, or grant an
+        # action.  TaskSemanticIR + local policy below are the sole authority.
+        graph = _normalize_legacy_transport_for_typed_projection(graph)
         graph = _normalize_initial_premature_completed_status(graph)
         graph = _normalize_unique_active_frontier(graph)
         graph = _normalize_initial_confirmation_status(graph)
@@ -1422,7 +1423,6 @@ class DeepSeekTaskGraphPlanner:
         graph = self._apply_formal_semantic_authority(graph)
         self._capture_semantic_shadow(graph)
         graph.validate()
-        self._audit_and_validate_graph(graph)
         if (
             graph.status == "completed"
             or any(item.status == "completed" for item in graph.subgoals)
@@ -1632,7 +1632,6 @@ class DeepSeekTaskGraphPlanner:
                 "read_only 完成复核不能继续保留 read_only 活动子目标；"
                 "当前证据足够时应完成，证据不足时应阻塞，或推进到后续非只读子目标。"
             )
-        self._audit_and_validate_graph(candidate)
         _validate_revision(graph, candidate, observation)
 
     def _request_graph(
@@ -1665,39 +1664,6 @@ class DeepSeekTaskGraphPlanner:
         if validate:
             graph.validate()
         return graph
-
-    def _audit_and_validate_graph(self, graph: DynamicTaskGraph) -> None:
-        if not self.legacy_risk_diagnostics_enabled:
-            self.last_risk_audit = None
-            return
-        sources = _risk_audit_sources(graph)
-        report = self.risk_auditor.audit(sources)
-        sanitized_assessments = []
-        for assessment in report.assessments:
-            try:
-                _reject_low_level_instruction(
-                    assessment.reason,
-                    "risk_audit.reason",
-                )
-            except TaskGraphError:
-                assessment = replace(
-                    assessment,
-                    reason=(
-                        f"语义风险审计分类为 {assessment.external_impact}；"
-                        "原始展示理由因包含低层操作表达已隔离"
-                    ),
-                )
-            sanitized_assessments.append(assessment)
-        report = replace(report, assessments=tuple(sanitized_assessments))
-        report = _apply_local_risk_supplements(report, sources, graph=graph)
-        # This entire branch is an explicit migration/test mode and is disabled
-        # by the production Runtime.  It never mutates formal risk decisions.
-        self.last_risk_audit = report
-        # Production disables this entire branch, so only EffectIntent plus the
-        # local policy can decide runtime confirmation.  When explicitly
-        # enabled outside production, the retired validator remains available
-        # for historical corpus tests and migration audits only.
-        _validate_graph_against_risk_audit(graph, report)
 
     def _require_provider(self) -> None:
         if not self.provider.configured:
@@ -2056,8 +2022,15 @@ def _purely_forbidden_initial_risks(
     return removable_ids, safe_subgoal_ids
 
 
-def _normalize_initial_local_navigation(graph: DynamicTaskGraph) -> DynamicTaskGraph:
-    """Remove only self-contradictory low-risk markers from proven local navigation."""
+def _normalize_legacy_transport_for_typed_projection(
+    graph: DynamicTaskGraph,
+) -> DynamicTaskGraph:
+    """Remove self-contradictory legacy markers before typed projection.
+
+    This compatibility conversion has no denial, confirmation, Qwen, or
+    physical-action authority.  The returned graph is immediately compiled
+    into TaskSemanticIR and adjudicated by the local versioned policy.
+    """
 
     if graph.status not in {"ready", "running", "awaiting_confirmation"}:
         return graph
@@ -4406,6 +4379,11 @@ def _has_unnegated_effect_match(pattern: re.Pattern[str], value: str) -> bool:
 
 
 def _risk_audit_sources(graph: DynamicTaskGraph) -> tuple[AuditSource, ...]:
+    # Historical regression helper only.  The formal planner no longer imports or
+    # invokes the legacy free-text risk auditor; keep its dependency lazy so the
+    # production authority path cannot acquire that auditor by module import.
+    from deepseek_semantic_risk_audit import AuditSource
+
     sources = [
         AuditSource(
             source_id="raw_goal",

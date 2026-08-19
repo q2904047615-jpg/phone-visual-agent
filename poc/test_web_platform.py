@@ -4348,6 +4348,12 @@ class StoreAndQueueTests(unittest.TestCase):
 
 
 class DeviceControllerRegistryTests(unittest.TestCase):
+    def test_legacy_fixed_workflows_cannot_be_reenabled_by_environment(self) -> None:
+        source = Path(web_app.__file__).read_text(encoding="utf-8")
+
+        self.assertFalse(web_app.LEGACY_WORKFLOWS_ENABLED)
+        self.assertNotIn("PHONE_AGENT_ENABLE_LEGACY_WORKFLOWS", source)
+
     def test_default_real_device_advertises_only_actions_with_live_evidence(self) -> None:
         registry = web_app.DeviceControllerRegistry(web_app.DEVICE_REGISTRY_PATH, mock=False)
         controller = registry.controller(registry.default_device_id)

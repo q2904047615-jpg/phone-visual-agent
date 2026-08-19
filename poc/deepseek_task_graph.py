@@ -2623,8 +2623,13 @@ def _normalize_redundant_conditional_input_clear(
     )
 
 
-def _observed_unique_nonempty_target_input(observation: ObservedState) -> bool:
-    """Prove one focused local input currently makes a conditional clear true."""
+def _observed_unique_nonempty_input(observation: ObservedState) -> bool:
+    """Prove one visible scene input makes a conditional clear true.
+
+    This fact only normalizes the high-level graph.  It never authorizes an
+    input action; the later input-targeted observation must still prove focus,
+    full visibility, keyboard mode, and exact canonical value independently.
+    """
 
     matches: list[str] = []
     for raw_fact in observation.grounded_visual_facts:
@@ -2641,9 +2646,6 @@ def _observed_unique_nonempty_target_input(observation: ObservedState) -> bool:
         if (
             isinstance(value, str)
             and value != ""
-            and states.get("goal_relevant") is True
-            and states.get("fully_visible") is True
-            and states.get("focused") is True
         ):
             matches.append(str(fact.get("element_id") or ""))
     return len(matches) == 1 and bool(matches[0])
@@ -2671,7 +2673,7 @@ def _normalize_observed_concrete_input_clear(
         or PERSISTENT_INPUT_CLEAR_PATTERN.search(raw_goal)
         or graph.risk_actions
         or not LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN.search(raw_goal)
-        or not _observed_unique_nonempty_target_input(observation)
+        or not _observed_unique_nonempty_input(observation)
     ):
         return graph
 

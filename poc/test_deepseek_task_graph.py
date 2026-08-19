@@ -4507,9 +4507,7 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 "label": "codex",
                 "meaning": "application_text_input",
                 "states": {
-                    "goal_relevant": True,
-                    "fully_visible": True,
-                    "focused": True,
+                    "goal_relevant": False,
                     "value": "codex",
                 },
             },

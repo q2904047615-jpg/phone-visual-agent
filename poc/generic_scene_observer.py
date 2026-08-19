@@ -1944,7 +1944,7 @@ the foreground. Use "unknown" when the visible chrome and content do not establi
 one category with high confidence. Never return a referential placeholder such as
 current_foreground, current_app, foreground_app, target_app, or active_app.
 
-Evidence must contain one or two short visible identity cues from the phone screen.
+Evidence must contain one to three short visible identity cues from the phone screen.
 Do not mention coordinates, bounds, PX/MM, robot controls, calibration, or any tap,
 press, swipe, drag, execution, or suggestion. This audit grants no action authority
 and must not describe a workflow.
@@ -2519,7 +2519,7 @@ def _strict_foreground_app_identity_audit(
     evidence = payload["evidence"]
     if (
         not isinstance(evidence, list)
-        or not 1 <= len(evidence) <= 2
+        or not 1 <= len(evidence) <= 3
         or any(
             not camera_alignment_evidence_is_safe(item)
             or len(str(item).strip()) > 120

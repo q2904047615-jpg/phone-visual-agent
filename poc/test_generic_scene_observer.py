@@ -6883,6 +6883,21 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(3, provider.calls)
 
     def test_foreground_app_identity_audit_rejects_unsafe_or_ambiguous_payloads(self) -> None:
+        accepted = app_identity_audit_payload(
+            "settings",
+            evidence=[
+                "顶部标题显示设置",
+                "搜索系统设置项可见",
+                "WLAN与蓝牙菜单可见",
+            ],
+        )
+        app_id, confidence, evidence = _strict_foreground_app_identity_audit(
+            json.dumps(accepted, ensure_ascii=False)
+        )
+        self.assertEqual("settings", app_id)
+        self.assertEqual(0.98, confidence)
+        self.assertEqual(3, len(evidence))
+
         invalid_payloads = (
             app_identity_audit_payload("current_foreground"),
             {
@@ -6892,6 +6907,10 @@ class GenericSceneObserverTests(unittest.TestCase):
             app_identity_audit_payload(
                 "browser",
                 evidence=["点击右上角并使用坐标 x=10"],
+            ),
+            app_identity_audit_payload(
+                "browser",
+                evidence=["身份线索一", "身份线索二", "身份线索三", "身份线索四"],
             ),
         )
         duplicate = (

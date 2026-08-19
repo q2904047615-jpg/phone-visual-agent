@@ -316,6 +316,44 @@ EXACT_EMPTY_LOCAL_INPUT_PREPARATION_STATE_PATTERN = re.compile(
     r"(?:and\s+)(?:is\s+|remains?\s+)?(?:empty|blank)\s*$",
     re.IGNORECASE,
 )
+EXACT_LOCAL_INPUT_PREPARATION_ONLY_PATTERN = re.compile(
+    r"^(?!.*(?:逐字)?(?:输入(?!框|区域|内容)|写入|填入|键入)|"
+    r"\b(?:type|enter|write|fill|replace)\b)\s*"
+    r"(?:(?:确认|核对|验证|找到|定位|确保)\s*)?(?:当前)?\s*(?:唯一)?\s*"
+    r"(?:[A-Za-z0-9_\u4e00-\u9fff]{1,8})?"
+    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)\s*"
+    r"(?:(?:处于|保持|为|是|已|仍)\s*)?"
+    r"(?:可见|显示|存在|可编辑|聚焦|已聚焦|获得焦点|保持焦点)(?:状态)?"
+    r"(?:\s*(?:且|并且|、|和)\s*"
+    r"(?:(?:处于|保持|为|是|已|仍)\s*)?"
+    r"(?:可见|显示|存在|可编辑|聚焦|已聚焦|获得焦点|保持焦点)(?:状态)?)*\s*$|"
+    r"^(?!.*\b(?:type|enter|write|fill|replace)\b)\s*"
+    r"(?:(?:confirm|verify|find|locate|ensure)\s+)?(?:the\s+)?(?:only\s+)?"
+    r"(?:[A-Za-z0-9_]{1,12}\s+)?"
+    r"(?:input|text|query|message)\s*(?:field|box|area)\s+"
+    r"(?:is\s+|remains?\s+)?(?:visible|shown|present|editable|focused)"
+    r"(?:\s+and\s+(?:is\s+|remains?\s+)?"
+    r"(?:visible|shown|present|editable|focused))*\s*$",
+    re.IGNORECASE,
+)
+EXACT_EMPTY_LOCAL_INPUT_WITH_PREPARATION_PATTERN = re.compile(
+    r"^(?!.*(?:逐字)?(?:输入(?!框|区域|内容)|写入|填入|键入)|"
+    r"\b(?:type|enter|write|fill|replace)\b)\s*"
+    r"(?:(?:确认|核对|验证|找到|定位|确保)\s*)?(?:当前)?\s*(?:唯一)?\s*"
+    r"(?:[A-Za-z0-9_\u4e00-\u9fff]{1,8})?"
+    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)\s*"
+    r"(?:(?:处于|保持|为|是|已|仍)\s*)?"
+    r"(?:可见|显示|存在|可编辑|聚焦|已聚焦|获得焦点|保持焦点)(?:状态)?\s*"
+    r"(?:且|并且|、|和)\s*(?:内容\s*)?"
+    r"(?:为|是|保持为)?\s*(?:空|空白|为空|无文字|没有文字|无文本|没有文本|无内容|内容为空)\s*$|"
+    r"^(?!.*\b(?:type|enter|write|fill|replace)\b)\s*"
+    r"(?:(?:confirm|verify|find|locate|ensure)\s+)?(?:the\s+)?(?:only\s+)?"
+    r"(?:[A-Za-z0-9_]{1,12}\s+)?"
+    r"(?:input|text|query|message)\s*(?:field|box|area)\s+"
+    r"(?:is\s+|remains?\s+)?(?:visible|shown|present|editable|focused)\s+"
+    r"and\s+(?:is\s+|remains?\s+)?(?:empty|blank)\s*$",
+    re.IGNORECASE,
+)
 LOW_LEVEL_NEGATION_SCOPE_RESET_PATTERN = re.compile(
     r"[。；;！？!?\r\n]+|"
     r"\b(?:but|however|then|afterwards|next|may|can|need(?:s|ed)?\s+to)\b|"
@@ -2931,10 +2969,16 @@ def _describes_only_exact_empty_input_state(values: tuple[str, ...]) -> bool:
         for value in values
         if LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(str(value or ""))
     )
-    return bool(state_clauses) and all(
-        EXACT_EMPTY_LOCAL_INPUT_STATE_PATTERN.fullmatch(value) is not None
+    if not state_clauses:
+        return False
+    empty_clause = lambda value: bool(
+        EXACT_EMPTY_LOCAL_INPUT_STATE_PATTERN.fullmatch(value)
         or EXACT_EMPTY_LOCAL_INPUT_PREPARATION_STATE_PATTERN.fullmatch(value)
-        is not None
+        or EXACT_EMPTY_LOCAL_INPUT_WITH_PREPARATION_PATTERN.fullmatch(value)
+    )
+    return any(empty_clause(value) for value in state_clauses) and all(
+        empty_clause(value)
+        or EXACT_LOCAL_INPUT_PREPARATION_ONLY_PATTERN.fullmatch(value) is not None
         for value in state_clauses
     )
 

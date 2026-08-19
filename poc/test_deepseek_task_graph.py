@@ -4254,6 +4254,51 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                     graph.active_subgoal().external_impact,
                 )
 
+    def test_split_focus_and_empty_preparation_does_not_bind_final_payload(self):
+        payload = single_subgoal_payload(
+            "确保消息输入框处于聚焦状态且内容为空",
+            external_impact="navigation_only",
+        )
+        payload["goal"]["objective"] = "在消息输入框中输入你好但不要发送"
+        payload["goal"]["entities"]["input_text"] = "你好"
+        payload["constraints"] = ["不得发送、提交或搜索"]
+        payload["subgoals"][0].update(
+            subgoal_id="focus_input",
+            objective="确保消息输入框处于聚焦状态且内容为空",
+            constraints=["不得改变输入框内容", "不得触发任何外部效果"],
+            completion_conditions=["输入框可见且聚焦", "输入框内容为空"],
+        )
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+            payload["goal"]["objective"],
+            device_id="phone-1",
+        )
+
+        self.assertEqual("focus_input", graph.active_subgoal_id)
+        self.assertEqual("navigation_only", graph.active_subgoal().external_impact)
+        self.assertEqual("你好", graph.goal.entities["input_text"])
+
+    def test_split_empty_preparation_cannot_hide_positive_input(self):
+        payload = single_subgoal_payload(
+            "确保消息输入框聚焦且内容为空并输入 secret",
+            external_impact="navigation_only",
+        )
+        payload["goal"]["objective"] = "在消息输入框中输入 live21"
+        payload["goal"]["entities"]["input_text"] = "live21"
+        payload["subgoals"][0]["completion_conditions"] = [
+            "输入框可见且聚焦",
+            "输入框内容为空并输入 secret",
+        ]
+
+        with self.assertRaisesRegex(
+            TaskGraphError,
+            "子目标输入状态未绑定 canonical input_text",
+        ):
+            DeepSeekTaskGraphPlanner(FakeProvider(payload)).plan(
+                payload["goal"]["objective"],
+                device_id="phone-1",
+            )
+
     def test_empty_input_preparation_cannot_hide_positive_input(self):
         samples = (
             "输入框可见且为空并输入 secret",

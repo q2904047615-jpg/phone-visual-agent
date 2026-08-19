@@ -3882,17 +3882,29 @@ class GenericSceneObserverTests(unittest.TestCase):
             }
         )
 
-        parsed = _parse_targeted_scene_delta(
-            json.dumps(
-                targeted_delta_payload(elements=[element], confidence=1.0),
-                ensure_ascii=False,
-            ),
-            base_scene=base,
-            fingerprint="local-fingerprint",
+        valid_bounds = (
+            {"x": 145, "y": 535, "w": 560, "h": 45},
+            {"x": 145, "y": 535, "width": 560, "height": 45},
         )
+        for bounds in valid_bounds:
+            with self.subTest(valid_bounds=bounds):
+                parsed = _parse_targeted_scene_delta(
+                    json.dumps(
+                        targeted_delta_payload(
+                            elements=[{**element, "bounds": bounds}],
+                            confidence=1.0,
+                        ),
+                        ensure_ascii=False,
+                    ),
+                    base_scene=base,
+                    fingerprint="local-fingerprint",
+                )
 
-        self.assertEqual((0.145, 0.535, 0.705, 0.58), parsed.elements[0].bounds)
-        self.assertEqual("lxs,", parsed.elements[0].states["value"])
+                self.assertEqual(
+                    (0.145, 0.535, 0.705, 0.58),
+                    parsed.elements[0].bounds,
+                )
+                self.assertEqual("lxs,", parsed.elements[0].states["value"])
 
         for invalid_bounds in (
             {"x": 145, "y": 535, "w": 560},
@@ -3900,6 +3912,10 @@ class GenericSceneObserverTests(unittest.TestCase):
             {"x": 145, "y": 535, "w": -1, "h": 45},
             {"x": 900, "y": 535, "w": 560, "h": 45},
             {"x": True, "y": 535, "w": 560, "h": 45},
+            {"x": 145, "y": 535, "w": 560, "height": 45},
+            {"x": 145, "y": 535, "width": 560, "height": 45, "r": 705},
+            {"x": 145, "y": 535, "width": "560", "height": 45},
+            {"x": 145, "y": 535, "width": 560, "height": 0},
         ):
             with self.subTest(bounds=invalid_bounds), self.assertRaisesRegex(
                 VisionAgentError,

@@ -3007,7 +3007,7 @@ def _normalize_targeted_delta_evidence_shorthand(payload: Any) -> None:
 
 
 def _normalize_targeted_delta_xywh_bounds_shorthand(payload: Any) -> None:
-    """Normalize only an exact, finite crop-scale x/y/w/h bounds object."""
+    """Normalize only exact finite x/y/w/h or x/y/width/height bounds."""
 
     if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
         return
@@ -3015,9 +3015,15 @@ def _normalize_targeted_delta_xywh_bounds_shorthand(payload: Any) -> None:
         if not isinstance(element, dict):
             continue
         bounds = element.get("bounds")
-        if not isinstance(bounds, dict) or set(bounds) != {"x", "y", "w", "h"}:
+        if not isinstance(bounds, dict):
             continue
-        values = tuple(bounds[key] for key in ("x", "y", "w", "h"))
+        if set(bounds) == {"x", "y", "w", "h"}:
+            keys = ("x", "y", "w", "h")
+        elif set(bounds) == {"x", "y", "width", "height"}:
+            keys = ("x", "y", "width", "height")
+        else:
+            continue
+        values = tuple(bounds[key] for key in keys)
         if (
             any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in values)
             or any(not math.isfinite(float(value)) for value in values)

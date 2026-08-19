@@ -2009,9 +2009,9 @@ class GenericSingleActionAdapter:
                 and intersection > 0
                 and smaller_coverage >= 0.25
                 and center_delta_x
-                <= max(0.03, 0.25 * max(original_width, current_width))
+                <= max(0.05, 0.30 * max(original_width, current_width))
                 and center_delta_y
-                <= max(0.025, 0.75 * max(original_height, current_height))
+                <= max(0.03, 0.75 * max(original_height, current_height))
             )
             if (
                 require_geometry_overlap

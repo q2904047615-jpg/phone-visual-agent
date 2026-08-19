@@ -3222,6 +3222,84 @@ class GenericActionAdapterTests(unittest.TestCase):
                 local_frame_identity_verified=False,
             )
 
+    def test_rebind_accepts_dual_audited_literal_key_frame_jitter(self):
+        states = {
+            "goal_relevant": True,
+            "fully_visible": True,
+            "input_literal_key": True,
+            "key_value": "1",
+            "input_element_id": "local_audited_input_1",
+            "prior_input_value": "复杂输入验收2026:",
+            "expected_input_value": "复杂输入验收2026:1",
+            "independent_geometry_verified": True,
+            "geometry_audit_source": "element_geometry_audit",
+        }
+
+        def literal_key_scene(fingerprint, bounds):
+            return UIScene(
+                app_id="editor",
+                screen_id="input",
+                summary="唯一下一字符键位可见",
+                elements=(
+                    UIElement(
+                        element_id="local_audited_literal_key_1",
+                        role="button",
+                        meaning="input_exact_literal_key",
+                        label="1",
+                        bounds=bounds,
+                        confidence=1.0,
+                        states=states,
+                        evidence=("输入结构审计确认下一字符对应唯一完整可见键位",),
+                    ),
+                ),
+                stable=True,
+                confidence=0.98,
+                fingerprint=fingerprint,
+            )
+
+        planned = literal_key_scene("planned", (0.25, 0.68, 0.41, 0.74))
+        # The same low-profile key can move by about 5% of full-frame width
+        # between two independent model crops while retaining strong overlap.
+        fresh = literal_key_scene("fresh", (0.296, 0.701, 0.456, 0.761))
+        requested = SemanticAction(
+            node_id="append-next-literal",
+            action="tap_semantic",
+            params={
+                "element_id": planned.elements[0].element_id,
+                "target": planned.elements[0].meaning,
+                "role": planned.elements[0].role,
+                "label": planned.elements[0].label,
+                "states": dict(planned.elements[0].states),
+            },
+        )
+        adapter = self._adapter(FakeSceneObserver([]), FakeRobot())
+
+        rebound = adapter._rebind_action(
+            requested,
+            planned,
+            fresh,
+            local_frame_identity_verified=True,
+        )
+
+        self.assertEqual(fresh.elements[0].element_id, rebound.params["element_id"])
+        self.assertEqual(fresh.elements[0].states, rebound.params["states"])
+
+        for moved_bounds in (
+            (0.45, 0.68, 0.61, 0.74),
+            (0.25, 0.75, 0.41, 0.81),
+        ):
+            with self.subTest(moved_bounds=moved_bounds):
+                with self.assertRaisesRegex(
+                    GenericActionAdapterError,
+                    "目标区域已明显移动",
+                ):
+                    adapter._rebind_action(
+                        requested,
+                        planned,
+                        literal_key_scene("moved", moved_bounds),
+                        local_frame_identity_verified=True,
+                    )
+
     def test_rebind_keeps_global_geometry_gate_for_nonlocal_audited_control(self):
         attested_states = {
             "independent_geometry_verified": True,

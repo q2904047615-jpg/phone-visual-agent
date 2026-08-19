@@ -151,4 +151,8 @@
 - 阶段 1 已完成。
 - 阶段 2 已完成严格单会话真机闭环验收。session `18c29c4db30246d1a3ffaa8f5116f047` 从新鲜桌面目标出发，在同一 universal-agent session 依次完成 `tap_semantic` 打开系统设置和 `home` 返回桌面两个真实动作；每步均有动作前后 4 帧、新 observation/fingerprint、matched typed receipt 和 revision `1→2→3`，最终 `status=succeeded`、任务图 `completed`、`active_subgoal=null`，无旧 scope 复用、无自动重试。报告位于 `poc/output/web/generic_supervised_20260817_111820_18c29c4d/report.json`。
 - 独立 `/api/agent/generic-scene` 四帧只读复核为 `executed=false`、`physical_action_requested=false`，确认最终 `launcher/home_screen` 稳定可见；它只是补充，未替代上述两动作同会话证据。
-- 真正阶段 3 现在允许开始，但尚未完成。阶段 3 仍必须以至少 3 个不同真实 App 的陌生命令、真实画面和物理动作证据完成；不能复用阶段 2 session，也不能用离线测试或同一浏览器中的多个页面替代。
+- 阶段 3 已完成三个不同真实 App 的真机验收，且未复用阶段 2 session：Browser session
+  `61f26496f1a046118468e922eacb5741` 为 `succeeded/3 actions`；Settings session
+  `3756155cb1a04e9bad66ed216f0d97bf` 为 `succeeded/2 actions`；WeChat session
+  `778e5031798048f5abe0f02676d337e2` 为 `succeeded/2 actions`。三者每步均为 matched、终态
+  active_subgoal=null，并有真实画面、动作前后证据和报告；不能用后续离线测试覆盖或降低此标准。

@@ -465,6 +465,26 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
     def test_target_app_surface_rejects_near_package_and_non_title_mentions(self) -> None:
         target = SimpleNamespace(app_id="settings", app_name="设置")
+        exact_display_name = scene_for(
+            self.frames,
+            app_id="设置",
+            screen_id="settings_main",
+            elements=(),
+        )
+        self.assertTrue(
+            _scene_matches_target_app_surface(exact_display_name, target)
+        )
+
+        near_display_name = scene_for(
+            self.frames,
+            app_id="设置助手",
+            screen_id="helper_main",
+            elements=(),
+        )
+        self.assertFalse(
+            _scene_matches_target_app_surface(near_display_name, target)
+        )
+
         exact_package = scene_for(
             self.frames,
             app_id="com.android.settings",
@@ -511,6 +531,76 @@ class QwenVisualDecisionTests(unittest.TestCase):
         )
         self.assertFalse(
             _scene_matches_target_app_surface(near_package_with_body_mention, target)
+        )
+
+    def test_exact_foreground_app_name_keeps_in_app_literal_navigation_choice(self) -> None:
+        parsed = QwenTaskContext.from_dict(task_context())
+        semantic_ir = TaskSemanticIR(
+            task_id=parsed.task_id,
+            device_id=parsed.device_id,
+            revision=parsed.revision,
+            raw_goal="进入微信中的文件传输助手",
+            surfaces=(
+                SurfaceRef(
+                    surface_id="surface_wechat",
+                    kind="app",
+                    app_id="wechat",
+                    app_name="微信",
+                ),
+            ),
+            entities=(
+                SemanticEntity(
+                    entity_id="entity_recipient",
+                    entity_type="party",
+                    role="recipient",
+                    value="文件传输助手",
+                    source_span=SourceSpan(6, 12),
+                    authority="user_literal",
+                ),
+            ),
+            effects=(),
+            subgoals=(
+                SemanticSubgoal(
+                    subgoal_id=str(
+                        parsed.current_subgoal.get("subgoal_id") or "locate_target"
+                    ),
+                    surface_ref="surface_wechat",
+                    status="active",
+                    external_impact="navigation_only",
+                ),
+            ),
+        )
+        parsed = replace(parsed, semantic_ir=semantic_ir)
+        current_scene = UIScene(
+            app_id="微信",
+            screen_id="微信消息列表",
+            summary="微信消息列表中可见文件传输助手。",
+            elements=(
+                UIElement(
+                    element_id="file-transfer",
+                    role="list_item",
+                    meaning="chat_entry",
+                    label="文件传输助手",
+                    bounds=(0.08, 0.22, 0.93, 0.32),
+                    confidence=0.99,
+                    states={"visible": True, "fully_visible": True},
+                ),
+            ),
+            stable=True,
+            confidence=0.98,
+            fingerprint=scene_for(self.frames).fingerprint,
+        )
+        observation = trusted_observation(self.frames, scene=current_scene)
+
+        choices = _selection_choices(
+            parsed,
+            observation,
+            frozenset({"home", "tap_semantic"}),
+        )
+
+        self.assertIn(
+            ("tap_semantic", "file-transfer"),
+            tuple((item["action"], item.get("element_id")) for item in choices),
         )
 
     def test_recipient_exact_text_applies_only_to_bound_subgoal(self) -> None:

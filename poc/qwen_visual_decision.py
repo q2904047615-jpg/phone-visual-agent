@@ -1590,6 +1590,13 @@ def _scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> bo
     app_name = str(getattr(target_surface, "app_name", "") or "").strip().casefold()
     if not app_name:
         return False
+    # The observer contract permits foreground_app_id to be either a stable
+    # semantic/package identifier or the exact visible App display name.  The
+    # latter is still a dedicated top-level identity field, not arbitrary body
+    # text.  Exact equality therefore proves the same typed App surface while
+    # near names and Launcher entry labels remain rejected.
+    if foreground == app_name:
+        return True
     title_matches = tuple(
         element
         for element in scene.elements

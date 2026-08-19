@@ -1338,3 +1338,37 @@ Python 完整回归 `1484/1484`。完整回归只有既知测试子进程 `Resou
 离线结果：唯一终态正测与四类未决事实反例 `2/2`，DeepSeek 与编排核心 `390/390`，observer、
 Qwen、DeepSeek、编排和 Web 关联回归 `870/870`，Python 完整回归 `1486/1486`。完整回归只有
 既知测试子进程 `ResourceWarning`，无断言失败。
+
+## 41. 前台 App 显示名未进入正式表面身份合同
+
+### 41.1 验收台账与根因证据
+
+- 微信 session `f9fb72d6bf1e445d82ffeee41f4203dc` 第一步真实打开微信并 `matched`；动作后
+  trusted scene 为 `app_id=微信/screen_id=微信消息列表`，唯一 `list_item`“文件传输助手”置信度 1.0、
+  `goal_relevant=true/fully_visible=true`，但第二步 0 动作 blocked。
+- 对 revision 3 与 trusted observation 做离线正式权威重放，`compile_visual_action_authority` 确实生成
+  了绑定 `entity_recipient` 和 element e1 的 `tap_semantic`；候选只在 Qwen 选择层
+  `force_launcher_entry` 过滤后消失。
+- 主要根因是 `_scene_matches_target_app_surface` 只认可包名、包名末段或独立标题控件，没有认可观察
+  协议允许的结构化 `foreground_app_id=App显示名`，因此把真实微信页面误判为目标 App 外页面。
+
+### 41.2 同类样本、通用修复与边界
+
+- 正样本为任意 trusted scene 的专用 `foreground_app_id` 与 typed `SurfaceRef.app_name` 逐字相等；
+  变化样本覆盖中文 App 名及非包名显示名。
+- 表面身份合同增加这一个精确等价形式，并由 Qwen 候选过滤和最终 controller 共同复用；不添加 App
+  映射表、微信名称分支、控件、步骤或坐标。
+- 近似显示名、近似包名、正文提及、非标题控件和 Launcher 上同名 App 入口仍不构成前台身份；
+  只有 top-level foreground identity 的逐字相等才成立。
+
+### 41.3 验证与停止条件
+
+- 增加显示名精确/近似正反测，以及微信式 App 内唯一列表项仍保留正式 tap 候选的集成测试；保留
+  跨 App 时只提供 Home、Launcher 同名入口不能证明前台 App 的既有反测。
+- 运行 Qwen/编排核心、关联回归和一次完整 Python 回归；全绿后本地提交并只重载项目 Uvicorn。
+  不恢复旧 blocked session，先用 0 动作重观察当前微信列表；通过后才建立一个新会话继续第三 App
+  验收，任一真实动作失败即停止。
+
+离线结果：显示名精确/近似、微信式列表项和跨 App 反例 `3/3`，Qwen 与编排核心 `282/282`，
+observer、Qwen、DeepSeek、编排和 Web 关联回归 `871/871`，Python 完整回归 `1487/1487`。
+完整回归只有既知测试子进程 `ResourceWarning`，无断言失败。

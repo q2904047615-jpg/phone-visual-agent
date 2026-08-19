@@ -122,6 +122,21 @@ TEST_QWERTY_LAYOUT = {
 
 
 class PhysicalNavigationSafetyTests(unittest.TestCase):
+    @staticmethod
+    def _click_barrier_receipt():
+        return {
+            "version": "2026-08-19-seller-gui-click-barrier-v1",
+            "channel": "left_button_atomic_click",
+            "seller_event_barrier_confirmed": True,
+            "round_trip_position_confirmed": True,
+            "requested_mouse_hold_seconds": 0.35,
+            "barrier_offset_pixels": 3,
+            "changed_pixels": 240,
+            "return_changed_pixels": 235,
+            "barrier_elapsed_ms": 35.0,
+            "mechanical_contact_ack": False,
+        }
+
     def test_live_preview_uses_passive_capture_without_active_capture_path(self):
         controller = RobotController(title="test")
         frame = Image.new("RGB", (540, 1038), "white")
@@ -200,7 +215,10 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             patch.object(controller, "_capture_phone", return_value=frame),
             patch.object(controller, "_checkpoint"),
             patch("robot_core.legacy.configure_single_click_count") as configure,
-            patch("robot_core.legacy.click_client_point") as click,
+            patch(
+                "robot_core.legacy.click_client_point",
+                return_value=self._click_barrier_receipt(),
+            ) as click,
             patch("robot_core.legacy.move_cursor_outside_camera"),
             patch(
                 "robot_core.load_workflow_config",
@@ -217,7 +235,197 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             937,
             countdown=0,
             hold_seconds=0.35,
+            require_event_barrier=True,
         )
+        receipt = controller.consume_last_click_receipt()
+        self.assertTrue(receipt["seller_event_barrier_confirmed"])
+        self.assertFalse(receipt["mechanical_contact_ack"])
+        self.assertIsNone(controller.consume_last_click_receipt())
+        profile = controller.hardware_capability_profile()["actions"]["back"]
+        self.assertEqual("gui_event_barrier", profile["transport_ack"])
+        self.assertFalse(profile["mechanical_contact_ack"])
+
+    def test_click_event_barrier_confirms_round_trip_and_restores_cursor(self):
+        class FakeUser32:
+            def __init__(self):
+                self.positions = []
+                self.events = []
+
+            def ClientToScreen(self, _hwnd, point):
+                point._obj.x += 10
+                point._obj.y += 20
+                return 1
+
+            def GetCursorPos(self, point):
+                point._obj.x = 7
+                point._obj.y = 9
+                return 1
+
+            def ShowWindow(self, *_args):
+                return 1
+
+            def SetForegroundWindow(self, *_args):
+                return 1
+
+            def SetCursorPos(self, x, y):
+                self.positions.append((x, y))
+                return 1
+
+            def mouse_event(self, event, *_args):
+                self.events.append(event)
+
+            def GetAsyncKeyState(self, *_args):
+                return 0
+
+        fake = FakeUser32()
+        baseline = np.zeros((45, 180, 3), dtype=np.int16)
+        with (
+            patch("robot_gui_poc.user32", fake),
+            patch("robot_gui_poc.client_geometry", return_value=(0, 0, 540, 1038)),
+            patch("robot_gui_poc._stable_seller_position_baseline", return_value=baseline),
+            patch("robot_gui_poc._capture_seller_position_overlay", return_value=baseline),
+            patch(
+                "robot_gui_poc._wait_for_seller_position_state",
+                side_effect=((240, 0.01), (235, 0.02)),
+            ) as wait_state,
+            patch("robot_gui_poc.time.sleep"),
+        ):
+            receipt = robot_gui_poc.click_client_point(
+                123,
+                270,
+                937,
+                countdown=0,
+                hold_seconds=0.35,
+                require_event_barrier=True,
+            )
+
+        self.assertEqual(
+            [robot_gui_poc.MOUSEEVENTF_LEFTDOWN, robot_gui_poc.MOUSEEVENTF_LEFTUP],
+            fake.events,
+        )
+        self.assertEqual((7, 9), fake.positions[-1])
+        self.assertIn((283, 957), fake.positions)
+        self.assertIn((280, 957), fake.positions)
+        self.assertEqual(2, wait_state.call_count)
+        self.assertTrue(receipt["seller_event_barrier_confirmed"])
+        self.assertTrue(receipt["round_trip_position_confirmed"])
+        self.assertFalse(receipt["mechanical_contact_ack"])
+
+    def test_click_event_barrier_timeout_restores_cursor_without_second_click(self):
+        class FakeUser32:
+            def __init__(self):
+                self.positions = []
+                self.events = []
+
+            def ClientToScreen(self, _hwnd, point):
+                return 1
+
+            def GetCursorPos(self, point):
+                point._obj.x = 11
+                point._obj.y = 12
+                return 1
+
+            def ShowWindow(self, *_args):
+                return 1
+
+            def SetForegroundWindow(self, *_args):
+                return 1
+
+            def SetCursorPos(self, x, y):
+                self.positions.append((x, y))
+                return 1
+
+            def mouse_event(self, event, *_args):
+                self.events.append(event)
+
+            def GetAsyncKeyState(self, *_args):
+                return 0
+
+        fake = FakeUser32()
+        baseline = np.zeros((45, 180, 3), dtype=np.int16)
+        with (
+            patch("robot_gui_poc.user32", fake),
+            patch("robot_gui_poc.client_geometry", return_value=(0, 0, 540, 1038)),
+            patch("robot_gui_poc._stable_seller_position_baseline", return_value=baseline),
+            patch(
+                "robot_gui_poc._wait_for_seller_position_state",
+                side_effect=RuntimeError("控制端事件栅栏超时"),
+            ),
+            patch("robot_gui_poc.time.sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "事件栅栏超时"):
+                robot_gui_poc.click_client_point(
+                    123,
+                    270,
+                    937,
+                    countdown=0,
+                    hold_seconds=0.35,
+                    require_event_barrier=True,
+                )
+
+        self.assertEqual(
+            [robot_gui_poc.MOUSEEVENTF_LEFTDOWN, robot_gui_poc.MOUSEEVENTF_LEFTUP],
+            fake.events,
+        )
+        self.assertEqual((11, 12), fake.positions[-1])
+
+    def test_click_hold_exception_releases_button_and_restores_cursor(self):
+        class FakeUser32:
+            def __init__(self):
+                self.positions = []
+                self.events = []
+
+            def ClientToScreen(self, _hwnd, point):
+                return 1
+
+            def GetCursorPos(self, point):
+                point._obj.x = 13
+                point._obj.y = 14
+                return 1
+
+            def ShowWindow(self, *_args):
+                return 1
+
+            def SetForegroundWindow(self, *_args):
+                return 1
+
+            def SetCursorPos(self, x, y):
+                self.positions.append((x, y))
+                return 1
+
+            def mouse_event(self, event, *_args):
+                self.events.append(event)
+
+            def GetAsyncKeyState(self, *_args):
+                return 0
+
+        fake = FakeUser32()
+        sleeps = iter((RuntimeError("hold interrupted"), None))
+
+        def sleep_side_effect(_seconds):
+            outcome = next(sleeps)
+            if isinstance(outcome, Exception):
+                raise outcome
+
+        with (
+            patch("robot_gui_poc.user32", fake),
+            patch("robot_gui_poc.client_geometry", return_value=(0, 0, 540, 1038)),
+            patch("robot_gui_poc.time.sleep", side_effect=sleep_side_effect),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "hold interrupted"):
+                robot_gui_poc.click_client_point(
+                    123,
+                    270,
+                    937,
+                    countdown=0,
+                    hold_seconds=0.35,
+                )
+
+        self.assertEqual(
+            [robot_gui_poc.MOUSEEVENTF_LEFTDOWN, robot_gui_poc.MOUSEEVENTF_LEFTUP],
+            fake.events,
+        )
+        self.assertEqual((13, 14), fake.positions[-1])
 
     def test_drag_is_fail_closed_until_device_marks_it_verified(self):
         controller = RobotController(title="test")

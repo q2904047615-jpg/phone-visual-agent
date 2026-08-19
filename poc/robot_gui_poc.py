@@ -698,7 +698,9 @@ def click_client_point(
     y: int,
     countdown: int,
     hold_seconds: float,
-) -> None:
+    *,
+    require_event_barrier: bool = False,
+) -> dict[str, object] | None:
     _, _, width, height = client_geometry(hwnd)
     if not (0 <= x < width and 0 <= y < height):
         raise ValueError(f"点击位置 ({x}, {y}) 超出窗口客户区 {width}×{height}。")
@@ -713,6 +715,11 @@ def click_client_point(
     user32.GetCursorPos(ctypes.byref(old_cursor))
     user32.ShowWindow(hwnd, SW_RESTORE)
     user32.SetForegroundWindow(hwnd)
+    if require_event_barrier:
+        # Let Windows finish activating the seller window before establishing
+        # the event-order baseline.  Per-key text input keeps its existing fast
+        # path and is intentionally outside this single-action batch.
+        time.sleep(0.1)
 
     for remaining in range(countdown, 0, -1):
         if user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000:
@@ -720,13 +727,67 @@ def click_client_point(
         print(f"{remaining} 秒后执行物理点击；按 Esc 取消……", flush=True)
         time.sleep(1)
 
-    user32.SetCursorPos(screen_point.x, screen_point.y)
-    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    # 实机验证表明 0.08 秒过短：机械臂会下压，但手机可能收不到触摸。
-    time.sleep(hold_seconds)
-    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-    time.sleep(0.12)
-    user32.SetCursorPos(old_cursor.x, old_cursor.y)
+    pressed = False
+    changed_pixels = 0
+    return_changed_pixels = 0
+    barrier_seconds = 0.0
+    try:
+        user32.SetCursorPos(screen_point.x, screen_point.y)
+        target_state = (
+            _stable_seller_position_baseline(hwnd)
+            if require_event_barrier
+            else None
+        )
+        user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        pressed = True
+        # 实机验证表明 0.08 秒过短：机械臂会下压，但手机可能收不到触摸。
+        time.sleep(hold_seconds)
+        user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        pressed = False
+
+        if require_event_barrier:
+            assert target_state is not None
+            offset = (
+                SELLER_POSITION_BARRIER_OFFSET
+                if x + SELLER_POSITION_BARRIER_OFFSET < width
+                else -SELLER_POSITION_BARRIER_OFFSET
+            )
+            barrier_started = time.monotonic()
+            user32.SetCursorPos(screen_point.x + offset, screen_point.y)
+            changed_pixels, _ = _wait_for_seller_position_state(
+                hwnd,
+                target_state,
+                expect_changed=True,
+            )
+            offset_state = _capture_seller_position_overlay(hwnd)
+            user32.SetCursorPos(screen_point.x, screen_point.y)
+            return_changed_pixels, _ = _wait_for_seller_position_state(
+                hwnd,
+                offset_state,
+                expect_changed=True,
+            )
+            barrier_seconds = time.monotonic() - barrier_started
+        time.sleep(0.12)
+    finally:
+        if pressed:
+            user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            time.sleep(0.12)
+        user32.SetCursorPos(old_cursor.x, old_cursor.y)
+
+    if not require_event_barrier:
+        return None
+    return {
+        "version": "2026-08-19-seller-gui-click-barrier-v1",
+        "channel": "left_button_atomic_click",
+        "seller_event_barrier_confirmed": True,
+        "round_trip_position_confirmed": True,
+        "requested_mouse_hold_seconds": float(hold_seconds),
+        "barrier_offset_pixels": abs(int(offset)),
+        "changed_pixels": int(changed_pixels),
+        "return_changed_pixels": int(return_changed_pixels),
+        "barrier_elapsed_ms": round(barrier_seconds * 1000.0, 3),
+        "mechanical_contact_ack": False,
+    }
 
 
 def _capture_seller_position_overlay(hwnd: int) -> np.ndarray:

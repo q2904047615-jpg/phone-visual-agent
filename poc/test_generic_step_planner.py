@@ -266,6 +266,29 @@ class PhysicalGateDriftRobot(FakeRobot):
             centered_mae=73.09,
         )
 
+
+class ClickReceiptRobot(FakeRobot):
+    def __init__(self, *, valid=True):
+        super().__init__()
+        self.valid = valid
+        self._click_receipt = None
+
+    def vision_android_home(self):
+        result = super().vision_android_home()
+        self._click_receipt = {
+            "version": "2026-08-19-seller-gui-click-barrier-v1",
+            "channel": "left_button_atomic_click",
+            "seller_event_barrier_confirmed": self.valid,
+            "round_trip_position_confirmed": True,
+            "mechanical_contact_ack": False,
+        }
+        return result
+
+    def consume_last_click_receipt(self):
+        receipt = self._click_receipt
+        self._click_receipt = None
+        return receipt
+
 class GenericSingleActionAdapter(_GenericSingleActionAdapter):
     def __init__(self, *args, device_id="test-device", **kwargs):
         super().__init__(*args, device_id=device_id, **kwargs)
@@ -1281,6 +1304,50 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(2, observer.calls)
         self.assertEqual(1, observer.home_audit_calls)
+
+    def test_home_records_single_click_transport_receipt(self):
+        planned = scene("planned", screen_id="settings_home", app_id="settings")
+        fresh = scene("before", screen_id="settings_home", app_id="settings")
+        after = scene("after", screen_id="android_home", app_id="launcher")
+        observer = FakeSceneObserver([fresh, after])
+        robot = ClickReceiptRobot()
+
+        result = self._adapter(observer, robot).execute(
+            requested_action=SemanticAction(
+                node_id="return-to-launcher",
+                action="home",
+                params={"expected_effect": {"scene_changed": True, "app_id": "launcher"}},
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("home",)], robot.actions)
+        self.assertTrue(result.hardware_receipt["seller_event_barrier_confirmed"])
+        self.assertFalse(result.hardware_receipt["mechanical_contact_ack"])
+        self.assertIsNone(robot.consume_last_click_receipt())
+
+    def test_invalid_home_click_receipt_stops_before_post_action_observation(self):
+        planned = scene("planned", screen_id="settings_home", app_id="settings")
+        fresh = scene("before", screen_id="settings_home", app_id="settings")
+        observer = FakeSceneObserver([fresh])
+        robot = ClickReceiptRobot(valid=False)
+
+        with self.assertRaisesRegex(GenericActionAdapterError, "单击事件栅栏凭据"):
+            self._adapter(observer, robot).execute(
+                requested_action=SemanticAction(
+                    node_id="return-to-launcher",
+                    action="home",
+                    params={"expected_effect": {"scene_changed": True, "app_id": "launcher"}},
+                ),
+                planned_scene=planned,
+                goal=goal(),
+                confirmed=True,
+            )
+
+        self.assertEqual([("home",)], robot.actions)
+        self.assertEqual(1, observer.calls)
 
     def test_confirmed_tap_executes_exactly_once_and_reobserves(self):
         planned = scene("planned", bounds=(0.1, 0.2, 0.3, 0.4))

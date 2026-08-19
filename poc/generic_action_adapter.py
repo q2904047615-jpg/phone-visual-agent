@@ -1367,6 +1367,31 @@ class GenericSingleActionAdapter:
                 robot_result = method(start_x, start_y, end_x, end_y)
             elif resolved.kind == "wait_for_change":
                 time.sleep(max(0.5, self.post_action_settle))
+            if resolved.kind in {
+                "tap_semantic",
+                "dismiss_overlay",
+                "back",
+                "home",
+            }:
+                receipt_consumer = getattr(
+                    self.robot,
+                    "consume_last_click_receipt",
+                    None,
+                )
+                if callable(receipt_consumer):
+                    raw_receipt = receipt_consumer()
+                    if (
+                        not isinstance(raw_receipt, dict)
+                        or raw_receipt.get("seller_event_barrier_confirmed") is not True
+                        or raw_receipt.get("round_trip_position_confirmed") is not True
+                        or raw_receipt.get("mechanical_contact_ack") is not False
+                    ):
+                        raise GenericActionAdapterError(
+                            "机械臂没有返回有效的单击事件栅栏凭据。",
+                            physical_actions=physical_actions,
+                            evidence=before_paths,
+                        )
+                    hardware_receipt = dict(raw_receipt)
         except GenericActionAdapterError:
             raise
         except OrientationSafetyError as exc:

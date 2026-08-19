@@ -547,6 +547,7 @@ class RobotController:
         # the seller window capture routine at the same time. On Windows that
         # occasionally returns a transient, truncated client bitmap.
         self.capture_lock = threading.RLock()
+        self._last_click_receipt: dict[str, Any] | None = None
         self._last_long_press_receipt: dict[str, Any] | None = None
         default_actions = {
             "tap_semantic",
@@ -599,7 +600,14 @@ class RobotController:
                 "one_physical_action_per_receipt": action != "wait_for_change",
                 "fresh_visual_postcondition_required": True,
                 "transport_ack": "gui_event_barrier"
-                if action == "long_press"
+                if action
+                in {
+                    "tap_semantic",
+                    "dismiss_overlay",
+                    "back",
+                    "home",
+                    "long_press",
+                }
                 else "local_call_return",
                 "mechanical_contact_ack": False,
             }
@@ -647,6 +655,11 @@ class RobotController:
     def consume_last_long_press_receipt(self) -> dict[str, Any] | None:
         receipt = self._last_long_press_receipt
         self._last_long_press_receipt = None
+        return dict(receipt) if receipt is not None else None
+
+    def consume_last_click_receipt(self) -> dict[str, Any] | None:
+        receipt = self._last_click_receipt
+        self._last_click_receipt = None
         return dict(receipt) if receipt is not None else None
 
     def _require_verified_action(self, action: str, label: str) -> None:
@@ -931,6 +944,7 @@ class RobotController:
     ) -> tuple[int, int]:
         if not (0 <= x <= 1000 and 0 <= y <= 1000):
             raise ValueError("视觉 Agent 坐标必须在0～1000之间。")
+        self._last_click_receipt = None
         hwnd, _title = legacy.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution(action, frame)
@@ -955,19 +969,24 @@ class RobotController:
         # the old screen coordinate again after the keyboard moves the layout.
         # Every visual-agent tap is one atomic action, so force single-click.
         legacy.configure_single_click_count(hwnd)
-        legacy.click_client_point(
+        receipt = legacy.click_client_point(
             hwnd,
             point[0],
             point[1],
             countdown=0,
             hold_seconds=hold_seconds,
+            require_event_barrier=True,
         )
+        if not isinstance(receipt, dict):
+            raise RuntimeError("控制端没有返回单击事件栅栏凭据。")
+        self._last_click_receipt = dict(receipt)
         legacy.move_cursor_outside_camera(hwnd)
         return point
 
     def _vision_nav_tap(
         self, x_ratio: float, y_ratio: float, *, action: str
     ) -> tuple[int, int]:
+        self._last_click_receipt = None
         hwnd, _title = legacy.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution(action, frame)
@@ -986,7 +1005,7 @@ class RobotController:
         # otherwise one Back/Home request can issue multiple physical taps and
         # make the observed transition non-deterministic.
         legacy.configure_single_click_count(hwnd)
-        legacy.click_client_point(
+        receipt = legacy.click_client_point(
             hwnd,
             point[0],
             point[1],
@@ -994,7 +1013,11 @@ class RobotController:
             hold_seconds=float(
                 load_workflow_config()["vision_agent"]["tap_hold"]
             ),
+            require_event_barrier=True,
         )
+        if not isinstance(receipt, dict):
+            raise RuntimeError("控制端没有返回单击事件栅栏凭据。")
+        self._last_click_receipt = dict(receipt)
         legacy.move_cursor_outside_camera(hwnd)
         return point
 

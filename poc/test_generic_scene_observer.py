@@ -42,6 +42,7 @@ from generic_scene_observer import (
     _snap_reload_audit_to_local_glyph,
     _strict_icon_cluster_audit_payload,
     _strict_foreground_app_identity_audit,
+    _strip_preliminary_keyboard_containers_for_dedicated_audit,
     _strip_model_authored_local_attestations,
     _targeted_prompt,
     _validated_keyboard_layout_switches,
@@ -3472,6 +3473,23 @@ class GenericSceneObserverTests(unittest.TestCase):
         first["elements"][0]["meaning"] = "message_input"
         first["elements"][0]["states"] = {"goal_relevant": True, "focused": True}
         first["elements"][0]["bounds"] = [60, 1750, 940, 1880]
+        first["elements"].append(
+            {
+                "element_id": "passive-keyboard-container",
+                "role": "container",
+                "meaning": "soft_keyboard_area",
+                "label": "QWERTY Keyboard",
+                "bounds": [0, 640, 1000, 1000],
+                "confidence": 1.0,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                },
+                "evidence": ["底部可见完整字母键盘区域"],
+            }
+        )
         audit = input_audit_payload(
             application_inputs=[
                 audited_application_input(text="", placeholder="请输入")
@@ -3494,6 +3512,49 @@ class GenericSceneObserverTests(unittest.TestCase):
             "local_audited_input_1",
             scene.unique_trusted_goal_element().element_id,
         )
+        self.assertNotIn(
+            "passive-keyboard-container",
+            {item.element_id for item in scene.elements},
+        )
+
+    def test_passive_keyboard_container_isolation_keeps_ambiguous_items_strict(self) -> None:
+        context = {
+            "objective": "输入框内容为 codex 且不提交",
+            "entities": {"input_text": "codex"},
+        }
+        base = {
+            "element_id": "candidate",
+            "role": "container",
+            "meaning": "soft_keyboard_area",
+            "label": "QWERTY Keyboard",
+            "bounds": [0, 640, 1000, 1000],
+            "confidence": 1.0,
+            "states": {
+                "goal_relevant": True,
+                "keyboard_layout": "qwerty",
+            },
+            "evidence": ["底部字母键盘区域"],
+        }
+        variants = {
+            "action-bearing": {**base, "states": {**base["states"], "plan": "tap"}},
+            "input-role": {**base, "role": "input"},
+            "non-keyboard": {**base, "meaning": "content_panel"},
+            "missing-keyboard-state": {
+                **base,
+                "states": {"goal_relevant": True, "fully_visible": True},
+            },
+            "invalid-bounds": {**base, "bounds": [0, 640, 1001, 1000]},
+        }
+        for name, candidate in variants.items():
+            with self.subTest(name=name):
+                payload = {"elements": [candidate]}
+                self.assertFalse(
+                    _strip_preliminary_keyboard_containers_for_dedicated_audit(
+                        payload,
+                        context,
+                    )
+                )
+                self.assertEqual([candidate], payload["elements"])
 
     def test_empty_input_audit_retries_once_without_using_first_result(self) -> None:
         first = scene_payload()

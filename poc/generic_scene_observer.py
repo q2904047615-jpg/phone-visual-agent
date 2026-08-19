@@ -764,6 +764,13 @@ class GenericSceneObserver:
                         context,
                     )
                 )
+                compact_input_geometry_isolated = (
+                    _strip_preliminary_keyboard_containers_for_dedicated_audit(
+                        payload,
+                        context,
+                    )
+                    or compact_input_geometry_isolated
+                )
                 compact_geometry_discarded = (
                     _discard_compact_elements_for_targeted_geometry_recovery(
                         payload,
@@ -3996,6 +4003,132 @@ def _strip_preliminary_input_geometry_for_dedicated_audit(
             and not contains_action_like_key(item)
         )
         if removable_input:
+            isolated = True
+            continue
+        retained.append(item)
+    if isolated:
+        payload["elements"] = retained
+    return isolated
+
+
+def _strip_preliminary_keyboard_containers_for_dedicated_audit(
+    payload: dict[str, Any],
+    goal_context: dict[str, Any],
+) -> bool:
+    """Remove passive compact keyboard containers before strict input audit.
+
+    A keyboard-wide container is neither an application input nor an
+    actionable key.  During an active input goal the later independent input
+    structure audit is the sole authority for keyboard layout, mode and key
+    geometry.  We therefore discard only an exact, well-formed passive scene
+    element whose role/meaning/states unambiguously describe that redundant
+    keyboard container.  Malformed, action-bearing or otherwise ambiguous
+    elements remain so the normal scene parser can fail closed.
+    """
+
+    if not _goal_requests_input(goal_context):
+        return False
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return False
+    exact_fields = {
+        "element_id",
+        "role",
+        "meaning",
+        "label",
+        "bounds",
+        "confidence",
+        "states",
+        "evidence",
+    }
+    action_like = {
+        "action",
+        "actions",
+        "plan",
+        "step",
+        "steps",
+        "tap",
+        "swipe",
+        "command",
+        "coordinates",
+    }
+
+    def contains_action_like_key(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                str(key).strip().casefold() in action_like
+                or contains_action_like_key(part)
+                for key, part in value.items()
+            )
+        if isinstance(value, list):
+            return any(contains_action_like_key(part) for part in value)
+        return False
+
+    retained: list[Any] = []
+    isolated = False
+    for item in elements:
+        states = item.get("states") if isinstance(item, dict) else None
+        meaning = (
+            str(item.get("meaning") or "").strip().casefold()
+            if isinstance(item, dict)
+            else ""
+        )
+        meaning_tokens = {
+            token
+            for token in re.split(r"[^a-z0-9]+", meaning)
+            if token
+        }
+        confidence = item.get("confidence") if isinstance(item, dict) else None
+        removable_keyboard_container = (
+            isinstance(item, dict)
+            and set(item) == exact_fields
+            and isinstance(item.get("element_id"), str)
+            and bool(item["element_id"].strip())
+            and str(item.get("role") or "").strip() == "container"
+            and isinstance(item.get("meaning"), str)
+            and "keyboard" in meaning_tokens
+            and isinstance(item.get("label"), str)
+            and _valid_1000_bounds(item.get("bounds"))
+            and not isinstance(confidence, bool)
+            and isinstance(confidence, (int, float))
+            and math.isfinite(float(confidence))
+            and 0.0 <= float(confidence) <= 1.0
+            and isinstance(states, dict)
+            and set(states).issubset(
+                {
+                    "goal_relevant",
+                    "fully_visible",
+                    "keyboard_layout",
+                    "keyboard_input_mode",
+                }
+            )
+            and (
+                "keyboard_layout" in states
+                or "keyboard_input_mode" in states
+            )
+            and (
+                "goal_relevant" not in states
+                or isinstance(states["goal_relevant"], bool)
+            )
+            and (
+                "fully_visible" not in states
+                or isinstance(states["fully_visible"], bool)
+            )
+            and (
+                "keyboard_layout" not in states
+                or states["keyboard_layout"]
+                in {"qwerty", "numeric", "symbol", "unknown"}
+            )
+            and (
+                "keyboard_input_mode" not in states
+                or states["keyboard_input_mode"]
+                in {"direct_latin", "chinese_pinyin", "unknown"}
+            )
+            and isinstance(item.get("evidence"), list)
+            and all(isinstance(part, str) for part in item["evidence"])
+            and not contains_action_like_key(item)
+        )
+        if removable_keyboard_container:
             isolated = True
             continue
         retained.append(item)

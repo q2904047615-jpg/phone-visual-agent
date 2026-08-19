@@ -3848,8 +3848,10 @@ def _canonicalize_literal_visible_evidence_clauses(
     visible = tuple(observation.visible_evidence)
     visible_set = frozenset(visible)
     typed_refs_by_fact: dict[str, set[str]] = {}
+    typed_refs_by_claim_id: dict[str, set[str]] = {}
     for item in observation.visual_claim_evidence_refs:
         typed_refs_by_fact.setdefault(item.fact, set()).add(item.ref_id)
+        typed_refs_by_claim_id.setdefault(item.claim_id, set()).add(item.ref_id)
 
     def authority_value(source: str) -> str:
         refs = typed_refs_by_fact.get(source, set())
@@ -3871,6 +3873,11 @@ def _canonicalize_literal_visible_evidence_clauses(
             if claim.startswith(("controller_transition:", "visual_claim:")):
                 result.append(claim)
                 continue
+            if re.fullmatch(r"[0-9a-f]{64}", claim):
+                matching_refs = typed_refs_by_claim_id.get(claim, set())
+                if len(matching_refs) == 1:
+                    result.append(next(iter(matching_refs)))
+                    continue
             if claim in visible_set:
                 result.append(authority_value(claim))
                 continue

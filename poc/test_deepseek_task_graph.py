@@ -14,6 +14,7 @@ from deepseek_task_graph import (
     ObservedState,
     TaskGraphError,
     VerifiedActionTransition,
+    VisualClaimEvidenceRef,
     _compact_identity_text,
     _infer_external_risk_types,
     _graph_from_payload,
@@ -7209,6 +7210,129 @@ class DeepSeekTaskGraphTests(unittest.TestCase):
                 trigger="subgoal_completed",
                 reason="模型只复制了证据片段",
             )
+
+    def test_canonicalizes_unique_current_visual_claim_id_to_full_ref(self):
+        initial_payload = base_payload()
+        initial_payload["goal"]["objective"] = "当前唯一输入框显示你好后保存结果"
+        initial_payload["subgoals"][0]["objective"] = "当前唯一输入框显示你好"
+        initial_payload["subgoals"][0]["completion_conditions"] = [
+            "当前唯一输入框显示你好"
+        ]
+        candidate_payload = copy.deepcopy(initial_payload)
+        claim_id = "2" * 64
+        scene_id = "scene-current-input"
+        full_ref = f"visual_claim:{scene_id}:{claim_id}"
+        candidate_payload["subgoals"][0]["status"] = "completed"
+        candidate_payload["subgoals"][0]["completion_evidence"] = [claim_id]
+        candidate_payload["subgoals"][1]["status"] = "active"
+        candidate_payload["active_subgoal_id"] = "save_target"
+        candidate_payload["status"] = "awaiting_confirmation"
+        previous = _graph_from_payload(
+            initial_payload,
+            task_id="task-claim",
+            device_id="phone-1",
+            revision=1,
+            raw_user_goal="目标",
+        )
+        candidate = _graph_from_payload(
+            candidate_payload,
+            task_id="task-claim",
+            device_id="phone-1",
+            revision=2,
+            raw_user_goal="目标",
+        )
+        observed = ObservedState(
+            scene_id=scene_id,
+            summary="当前唯一输入框显示你好",
+            visible_evidence=("当前唯一输入框显示你好",),
+            visual_claim_evidence_refs=(
+                VisualClaimEvidenceRef(
+                    ref_id=full_ref,
+                    claim_id=claim_id,
+                    scene_id=scene_id,
+                    subject_ref="element:input-1",
+                    predicate="element.snapshot",
+                    fact='{"element_id":"input-1","states":{"value":"你好"}}',
+                ),
+            ),
+        )
+
+        normalized = task_graph_module._canonicalize_literal_visible_evidence_clauses(
+            previous,
+            candidate,
+            observed,
+        )
+
+        self.assertEqual(
+            (full_ref,),
+            normalized.subgoals[0].completion_evidence,
+        )
+        task_graph_module._validate_revision(previous, normalized, observed)
+
+    def test_does_not_canonicalize_unknown_or_ambiguous_claim_id(self):
+        initial_payload = base_payload()
+        claim_id = "3" * 64
+        candidate_payload = copy.deepcopy(initial_payload)
+        candidate_payload["subgoals"][0]["status"] = "completed"
+        candidate_payload["subgoals"][0]["completion_evidence"] = [claim_id]
+        candidate_payload["subgoals"][1]["status"] = "active"
+        candidate_payload["active_subgoal_id"] = "save_target"
+        candidate_payload["status"] = "awaiting_confirmation"
+        previous = _graph_from_payload(
+            initial_payload,
+            task_id="task-claim-negative",
+            device_id="phone-1",
+            revision=1,
+            raw_user_goal="目标",
+        )
+        candidate = _graph_from_payload(
+            candidate_payload,
+            task_id="task-claim-negative",
+            device_id="phone-1",
+            revision=2,
+            raw_user_goal="目标",
+        )
+        unknown = ObservedState(
+            scene_id="scene-current",
+            summary="当前页面",
+            visible_evidence=("当前页面",),
+        )
+        ambiguous = ObservedState(
+            scene_id="scene-current",
+            summary="当前页面",
+            visible_evidence=("当前页面",),
+            visual_claim_evidence_refs=(
+                VisualClaimEvidenceRef(
+                    ref_id="visual_claim:scene-current:first",
+                    claim_id=claim_id,
+                    scene_id="scene-current",
+                    subject_ref="element:first",
+                    predicate="element.snapshot",
+                    fact="first",
+                ),
+                VisualClaimEvidenceRef(
+                    ref_id="visual_claim:scene-current:second",
+                    claim_id=claim_id,
+                    scene_id="scene-current",
+                    subject_ref="element:second",
+                    predicate="element.snapshot",
+                    fact="second",
+                ),
+            ),
+        )
+
+        for observed in (unknown, ambiguous):
+            normalized = task_graph_module._canonicalize_literal_visible_evidence_clauses(
+                previous,
+                candidate,
+                observed,
+            )
+            self.assertEqual(
+                (claim_id,),
+                normalized.subgoals[0].completion_evidence,
+            )
+            with self.assertRaisesRegex(TaskGraphError, "当前观察之外"):
+                task_graph_module._validate_revision(previous, normalized, observed)
 
     def test_completed_graph_requires_all_global_evidence(self):
         payload = base_payload()

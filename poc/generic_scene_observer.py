@@ -5466,7 +5466,12 @@ def _apply_input_structure_audit(
         )
         literal_key_targets = set(
             _input_audit_literal_key_targets(
-                _observation_goal_context(goal_context)
+                _observation_goal_context(goal_context),
+                current_input_text=(
+                    trusted_input["text"]
+                    if trusted_input is not None
+                    else None
+                ),
             )
         )
         if any(item["value"] not in literal_key_targets for item in literal_keys):

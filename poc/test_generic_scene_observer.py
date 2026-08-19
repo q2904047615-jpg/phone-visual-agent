@@ -516,6 +516,13 @@ class GenericSceneObserverTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
+            ("5",),
+            _input_audit_literal_key_targets(
+                {"entities": {"input_text": "复杂输入验收2026:123+45-6@7."}},
+                current_input_text="复杂输入验收2026:123+4",
+            ),
+        )
+        self.assertEqual(
             (),
             _input_audit_literal_key_targets(
                 {"entities": {"input_text": "复杂输入验收2026:长"}},
@@ -5250,11 +5257,6 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "case_switch": None,
                 "literal_keys": [
                     {
-                        "value": "1", "label": "1", "key_kind": "character",
-                        "bounds": [260, 680, 400, 740], "confidence": 1.0,
-                        "fully_visible": True,
-                    },
-                    {
                         "value": "2", "label": "2", "key_kind": "character",
                         "bounds": [420, 680, 580, 740], "confidence": 1.0,
                         "fully_visible": True,
@@ -5293,6 +5295,78 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
             field.states["keyboard_geometry"],
         )
+
+    def test_input_audit_parser_uses_exact_observed_next_literal_beyond_prefix_cap(
+        self,
+    ) -> None:
+        target = "复杂输入验收2026:123+45-6@7."
+        for current, expected in (
+            ("复杂输入验收2026:123+4", "5"),
+            ("复杂输入验收2026:123+45", "-"),
+        ):
+            with self.subTest(current=current, expected=expected):
+                base_scene = _parse_scene(
+                    json.dumps(scene_payload(), ensure_ascii=False),
+                    fingerprint="frame-literal-parser",
+                )
+                audit = input_audit_payload(
+                    application_inputs=[
+                        audited_application_input(
+                            structure_id="message-field",
+                            bounds=[150, 530, 700, 590],
+                            text=current,
+                        )
+                    ],
+                    keyboard={
+                        "visible": True,
+                        "bounds": [0, 640, 1000, 1000],
+                        "layout": "numeric",
+                        "input_mode": "direct_latin",
+                        "case_mode": "unknown",
+                        "qwerty_anchors": None,
+                        "mode_switch": None,
+                        "backspace_key": None,
+                        "case_switch": None,
+                        "literal_keys": [
+                            {
+                                "value": expected,
+                                "label": expected,
+                                "key_kind": "character",
+                                "bounds": [420, 750, 580, 810],
+                                "confidence": 1.0,
+                                "fully_visible": True,
+                            }
+                        ],
+                        "layout_switches": [],
+                    },
+                )
+                scene = _apply_input_structure_audit(
+                    base_scene,
+                    json.dumps(audit, ensure_ascii=False),
+                    fingerprint="frame-literal-parser",
+                    goal_context={
+                        "objective": "输入框逐字等于目标且不发送",
+                        "entities": {"input_text": target},
+                    },
+                )
+                key = scene.unique_trusted_goal_element()
+                self.assertEqual(expected, key.states["key_value"])
+                self.assertEqual(current + expected, key.states["expected_input_value"])
+
+                wrong = json.loads(json.dumps(audit, ensure_ascii=False))
+                wrong["keyboard"]["literal_keys"][0].update(
+                    {"value": "6", "label": "6"}
+                )
+                with self.assertRaisesRegex(VisionAgentError, "白名单外"):
+                    _apply_input_structure_audit(
+                        base_scene,
+                        json.dumps(wrong, ensure_ascii=False),
+                        fingerprint="frame-literal-parser-wrong",
+                        goal_context={
+                            "objective": "输入框逐字等于目标且不发送",
+                            "entities": {"input_text": target},
+                        },
+                    )
 
     def test_input_audit_rejects_literal_key_outside_goal_whitelist(self) -> None:
         base_scene = _parse_scene(

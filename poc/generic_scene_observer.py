@@ -3026,10 +3026,10 @@ def _parse_scene(
             camera_alignment_override.validate()
             payload["camera_alignment"] = camera_alignment_override.to_dict()
         _normalize_compact_scene_payload(payload)
+        _normalize_known_scene_enums(payload)
         _strip_model_authored_local_attestations(payload)
         _normalize_non_target_keyboard_switch(payload, goal_context or {})
         _normalize_reload_goal_safety(payload, goal_context or {})
-        _normalize_known_scene_enums(payload)
         _strip_preliminary_elements_for_keyboard_mode_audit(
             payload,
             goal_context or {},
@@ -6443,6 +6443,23 @@ def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:
         item["states"].pop("reload_visual_audit", None)
         item["states"].pop("independent_geometry_verified", None)
         item["states"].pop("geometry_audit_source", None)
+        states = item["states"]
+        if states.get("keyboard_input_mode_switch") is True:
+            modes = {"direct_latin", "chinese_pinyin"}
+            current_mode = states.get("current_mode")
+            target_mode = states.get("target_mode")
+            if (
+                current_mode not in modes
+                or target_mode not in modes
+                or current_mode == target_mode
+            ):
+                # Revoke an incomplete model-authored permission claim.  A
+                # later local input-structure audit may mint a directional
+                # switch again from the same pixels; this normalization never
+                # creates a target or guesses the missing direction.
+                states.pop("keyboard_input_mode_switch", None)
+                states.pop("current_mode", None)
+                states.pop("target_mode", None)
 
 
 def _normalize_non_target_keyboard_switch(

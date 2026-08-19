@@ -42,6 +42,7 @@ from generic_scene_observer import (
     _snap_reload_audit_to_local_glyph,
     _strict_icon_cluster_audit_payload,
     _strict_foreground_app_identity_audit,
+    _strip_model_authored_local_attestations,
     _targeted_prompt,
     _validated_keyboard_layout_switches,
     _validated_keyboard_literal_keys,
@@ -915,6 +916,113 @@ class GenericSceneObserverTests(unittest.TestCase):
                 frames=stable_frames(),
                 goal_context={"objective": "把当前键盘切换到英文直输模式"},
             )
+
+    def test_invalid_model_keyboard_mode_switch_claim_is_revoked(self) -> None:
+        for current_mode, target_mode in (
+            ("symbol", "unknown"),
+            ("direct_latin", "direct_latin"),
+        ):
+            with self.subTest(
+                current_mode=current_mode,
+                target_mode=target_mode,
+            ):
+                payload = scene_payload()
+                payload["elements"] = [
+                    {
+                        "element_id": "model-symbol-key",
+                        "role": "button",
+                        "meaning": "switch_keyboard_input_mode",
+                        "label": "符",
+                        "bounds": [60, 890, 200, 960],
+                        "confidence": 1.0,
+                        "states": {
+                            "goal_relevant": False,
+                            "fully_visible": True,
+                            "keyboard_input_mode_switch": True,
+                            "current_mode": current_mode,
+                            "target_mode": target_mode,
+                        },
+                        "evidence": ["键盘左下角可见符号键"],
+                    }
+                ]
+
+                _strip_model_authored_local_attestations(payload)
+
+                states = payload["elements"][0]["states"]
+                self.assertNotIn("keyboard_input_mode_switch", states)
+                self.assertNotIn("current_mode", states)
+                self.assertNotIn("target_mode", states)
+                self.assertEqual("符", payload["elements"][0]["label"])
+                self.assertEqual(
+                    "switch_keyboard_input_mode",
+                    payload["elements"][0]["meaning"],
+                )
+
+    def test_invalid_model_keyboard_switch_claim_no_longer_blocks_scene_parse(
+        self,
+    ) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "model-symbol-key",
+                "role": "button",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "符",
+                "bounds": [60, 890, 200, 960],
+                "confidence": 1.0,
+                "states": {
+                    "goal_relevant": False,
+                    "fully_visible": True,
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "symbol",
+                    "target_mode": "unknown",
+                },
+                "evidence": ["键盘左下角可见符号键"],
+            }
+        ]
+
+        scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="invalid-model-switch-claim",
+            goal_context={
+                "objective": "在当前输入框继续输入2026",
+                "entities": {"input_text": "2026"},
+            },
+            camera_layout_orientation="portrait",
+        )
+
+        states = scene.elements[0].states
+        self.assertNotIn("keyboard_input_mode_switch", states)
+        self.assertNotIn("current_mode", states)
+        self.assertNotIn("target_mode", states)
+
+    def test_valid_model_keyboard_mode_switch_direction_remains_strict(self) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "model-language-key",
+                "role": "button",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "中",
+                "bounds": [730, 890, 830, 960],
+                "confidence": 1.0,
+                "states": {
+                    "goal_relevant": False,
+                    "fully_visible": True,
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+                "evidence": ["键盘底部可见语言模式键"],
+            }
+        ]
+
+        _strip_model_authored_local_attestations(payload)
+
+        states = payload["elements"][0]["states"]
+        self.assertIs(states["keyboard_input_mode_switch"], True)
+        self.assertEqual("chinese_pinyin", states["current_mode"])
+        self.assertEqual("direct_latin", states["target_mode"])
 
     def test_keyboard_mode_goal_does_not_hide_protocol_extra_compact_element(self) -> None:
         compact = scene_payload()
@@ -5550,7 +5658,9 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         self.assertEqual(3, provider.calls)
 
-    def test_input_goal_keeps_malformed_keyboard_switch_fail_closed(self) -> None:
+    def test_input_goal_revokes_same_mode_claim_but_still_requires_strict_audit(
+        self,
+    ) -> None:
         payload = scene_payload()
         payload["elements"] = [
             {
@@ -5570,11 +5680,13 @@ class GenericSceneObserverTests(unittest.TestCase):
             }
         ]
 
-        with self.assertRaisesRegex(VisionAgentError, "keyboard_input_mode_switch"):
-            GenericSceneObserver(FakeProvider(payload)).observe(
+        provider = FakeProvider(payload)
+        with self.assertRaises(VisionAgentError):
+            GenericSceneObserver(provider).observe(
                 frames=stable_frames(),
                 goal_context={"objective": "让当前输入框显示 agent"},
             )
+        self.assertEqual(2, provider.calls)
 
     def test_non_input_goal_cannot_hide_action_field_on_keyboard_switch(self) -> None:
         payload = scene_payload()

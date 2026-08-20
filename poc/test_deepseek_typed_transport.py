@@ -2,7 +2,13 @@ import copy
 import json
 import unittest
 
-from deepseek_task_graph import DeepSeekTaskGraphPlanner, ObservedState, TaskGraphError
+from deepseek_task_graph import (
+    DeepSeekTaskGraphPlanner,
+    ObservedState,
+    TaskGraphError,
+    _named_visual_identity_anchor,
+    named_visual_identity_is_grounded,
+)
 
 
 class FakeProvider:
@@ -57,6 +63,30 @@ def payload(*, objective="进入普通会话并聚焦空输入框", effects=()):
 
 
 class TypedPlannerTransportTests(unittest.TestCase):
+    def test_functional_page_modifiers_are_not_treated_as_page_names(self):
+        for text in (
+            "可输入搜索内容的页面可见",
+            "用于填写订单编号的界面可见",
+            "能够编辑草稿的视图出现",
+            "editable input page is visible",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual("", _named_visual_identity_anchor((text,)))
+                self.assertTrue(named_visual_identity_is_grounded((text,), ()))
+
+    def test_real_named_pages_still_require_structured_identity(self):
+        unrelated_facts = ('{"app_id":"settings","screen_id":"main"}',)
+        for text in (
+            "系统设置搜索页面可见",
+            "订单详情页面可见",
+            "张三的聊天页面可见",
+        ):
+            with self.subTest(text=text):
+                self.assertNotEqual("", _named_visual_identity_anchor((text,)))
+                self.assertFalse(
+                    named_visual_identity_is_grounded((text,), unrelated_facts)
+                )
+
     def test_forbidden_effect_words_do_not_create_or_block_navigation(self):
         raw = payload()
         graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(

@@ -2121,6 +2121,14 @@ _TEMPORAL_REFERENTIAL_VISUAL_CONTAINER_PATTERN = re.compile(
     r"[^，。；;\r\n]*?后(?:的)?(?:页面|界面|屏幕|视图)(?:中|内|上)?",
     re.IGNORECASE,
 )
+_FUNCTIONAL_VISUAL_CONTAINER_MODIFIER_PATTERN = re.compile(
+    r"(?:可|能|能够|可以|用于|供|允许|支持|包含|带有|显示|展示|存在|具有|提供)"
+    r"[^，。；;\r\n]{0,80}的\s*$|"
+    r"(?:editable|searchable|input|entry|selection|results?|"
+    r"used\s+to|intended\s+for|allows?|supports?|contains?|shows?)"
+    r"(?:[\s_-]+[a-z0-9]+){0,8}\s*$",
+    re.IGNORECASE,
+)
 _VISUAL_IDENTITY_GENERIC_TOKENS = (
     "原来的",
     "原有的",
@@ -2264,6 +2272,14 @@ def _named_visual_identity_anchor(texts: tuple[str, ...]) -> str:
             if container is not None
             else identity_value
         )
+        # A relative clause describing what a container permits or contains is
+        # a functional state, not a stable page name.  Its evidence is still
+        # validated by the normal visual-claim gates; it simply must not be
+        # compared as though the clause were a title such as "订单详情页面".
+        if _FUNCTIONAL_VISUAL_CONTAINER_MODIFIER_PATTERN.search(
+            identity_name.strip()
+        ):
+            continue
         cleaned = identity_name.casefold()
         for token in _VISUAL_IDENTITY_GENERIC_TOKENS:
             cleaned = cleaned.replace(token, " ")

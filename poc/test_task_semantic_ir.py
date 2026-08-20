@@ -387,6 +387,58 @@ class TaskSemanticIRTests(unittest.TestCase):
             authority.semantic_ir.input_fields[0].source_subgoal_ids,
         )
 
+    def test_input_validation_title_without_typed_payload_does_not_mint_input_action(self):
+        payload = current_send_failure_payload()
+        payload["goal"]["objective"] = (
+            "刷新当前页面，直到看到标题为长文本输入验收且有空白输入框"
+        )
+        payload["goal"]["entities"] = {}
+        payload["effect_intents"] = []
+        payload["completion_conditions"] = [
+            {
+                "condition_id": "validation_page_visible",
+                "description": "长文本输入验收标题和空白输入框可见",
+                "evidence_required": ["标题和空白输入框同时可见"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        ]
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "sg_refresh_until_title",
+                "objective": "刷新当前页面，直到看到标题为长文本输入验收且有空白输入框",
+                "status": "active",
+                "depends_on": [],
+                "constraints": [],
+                "completion_conditions": ["长文本输入验收标题和空白输入框可见"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            }
+        ]
+        payload["active_subgoal_id"] = "sg_refresh_until_title"
+
+        authority = compile_formal_semantic_authority(
+            _graph_from_payload(
+                payload,
+                task_id="input-validation-title-task",
+                device_id="device-local-01",
+                revision=1,
+                raw_user_goal=payload["goal"]["objective"],
+            )
+        )
+        constraints = {
+            item.constraint_id: item for item in authority.semantic_ir.constraints
+        }
+        action_values = {
+            constraints[ref].value
+            for ref in authority.semantic_ir.subgoals[0].constraint_refs
+            if constraints[ref].kind == "required_action"
+        }
+
+        self.assertNotIn("input_verified_text", action_values)
+        self.assertEqual((), authority.semantic_ir.input_fields)
+
     def test_current_send_failure_projects_to_automatic_typed_effect(self):
         report = compile_runtime_graph_semantics(graph_from_payload())
 

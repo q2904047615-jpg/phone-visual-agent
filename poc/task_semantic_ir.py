@@ -1586,6 +1586,14 @@ def compile_runtime_graph_semantics(
         for action_kind, pattern in action_patterns:
             if not pattern.search(objective):
                 continue
+            # A visible title, mode name, or capability description may contain
+            # the word "input" without requesting any text entry.  Only a
+            # canonical typed payload can authorize the input action catalog;
+            # prose alone is never an input value.
+            if action_kind == "input_verified_text" and not entity_by_role.get(
+                "input_text"
+            ):
+                continue
             constraint_id = f"constraint_action_{len(typed_constraints) + 1}"
             typed_constraints.append(
                 ConstraintIntent(

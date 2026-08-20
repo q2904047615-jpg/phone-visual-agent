@@ -18,6 +18,7 @@ from qwen_visual_decision import (
     TrustedObservation,
     _decision_retry_prompt,
     _exact_text_candidate_block,
+    _identity_text_candidate_block,
     _launcher_app_entry_candidate_ids,
     _required_exact_candidate_ids,
     _scene_matches_target_app_surface,
@@ -743,9 +744,118 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn("张三", parsed.identity_text_requirements)
 
         context["current_subgoal"]["objective"] = "打开唯一匹配的张三聊天入口"
+        context["goal"]["entities"]["target_ui_label"] = "张三"
         parsed = QwenTaskContext.from_dict(context)
-        self.assertIn("张三", parsed.exact_text_requirements)
+        self.assertEqual(("张三",), parsed.exact_text_requirements)
         self.assertNotIn("张三", parsed.identity_text_requirements)
+
+    def test_duplicate_recipient_target_label_becomes_identity_on_input_subgoal(self) -> None:
+        context = task_context(task_id="task_recipient_input_identity", revision=5)
+        context["goal"]["entities"] = {
+            "recipient": "文件传输助手",
+            "target_ui_label": "文件传输助手",
+            "input_text": "longinputvalidation2026:123+45-6@7.",
+        }
+        context["current_subgoal"].update(
+            subgoal_id="type_input",
+            objective=(
+                "在文件传输助手的唯一消息输入框中逐字输入 "
+                "longinputvalidation2026:123+45-6@7. 并保持未发送"
+            ),
+            completion_conditions=[
+                "输入框中的文字为 longinputvalidation2026:123+45-6@7.",
+                "消息未发送",
+            ],
+        )
+        context["effect_gate"]["scope"]["subgoal_id"] = "type_input"
+        parsed = QwenTaskContext.from_dict(context)
+
+        self.assertNotIn("文件传输助手", parsed.exact_text_requirements)
+        self.assertEqual(
+            ("文件传输助手",),
+            parsed.identity_text_requirements,
+        )
+
+        title = UIElement(
+            element_id="page-title",
+            role="text",
+            meaning="page_title",
+            label="文件传输助手",
+            bounds=(0.35, 0.04, 0.65, 0.09),
+            confidence=1.0,
+            states={"goal_relevant": False, "fully_visible": True},
+            evidence=("顶部唯一会话标题",),
+        )
+        input_element = UIElement(
+            element_id="input-1",
+            role="input",
+            meaning="application_text_input",
+            label="",
+            bounds=(0.14, 0.915, 0.63, 0.965),
+            confidence=0.95,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "value": "",
+                "soft_keyboard_visible": False,
+            },
+            evidence=("empty input bar",),
+        )
+        observation = trusted_observation(
+            self.frames,
+            scene=scene_for(
+                self.frames,
+                elements=(title, input_element),
+                app_id="wechat",
+                screen_id="chat_window_file_transfer_helper",
+                summary="具名会话页面与唯一空输入框可见",
+            ),
+        )
+
+        self.assertIsNone(_exact_text_candidate_block(parsed, observation))
+        self.assertIsNone(_identity_text_candidate_block(parsed, observation))
+        choices = _selection_choices(
+            parsed,
+            observation,
+            frozenset({"tap_semantic", "input_verified_text"}),
+        )
+        self.assertEqual(
+            [("tap_semantic", "input-1")],
+            [(item["action"], item.get("element_id")) for item in choices],
+        )
+
+        missing_identity = trusted_observation(
+            self.frames,
+            scene=replace(observation.scene, elements=(input_element,)),
+            observation_id="obs_abcdef0123456789abcdef0123456789",
+        )
+        self.assertIsNotNone(
+            _identity_text_candidate_block(parsed, missing_identity)
+        )
+
+        different_field = copy.deepcopy(context)
+        different_field["goal"]["entities"]["target_ui_label"] = "备注"
+        different_field["current_subgoal"]["objective"] = (
+            "在文件传输助手页面的备注输入框输入指定文字"
+        )
+        different_parsed = QwenTaskContext.from_dict(different_field)
+        self.assertIn("备注", different_parsed.exact_text_requirements)
+        self.assertIn(
+            "文件传输助手",
+            different_parsed.identity_text_requirements,
+        )
+
+        multi_recipient = copy.deepcopy(context)
+        del multi_recipient["goal"]["entities"]["recipient"]
+        multi_recipient["goal"]["entities"]["recipients"] = ["张三", "李四"]
+        multi_recipient["goal"]["entities"]["target_ui_label"] = "李四"
+        multi_recipient["current_subgoal"]["objective"] = (
+            "在李四的唯一消息输入框中输入指定文字并保持未发送"
+        )
+        multi_parsed = QwenTaskContext.from_dict(multi_recipient)
+        self.assertEqual(("李四",), multi_parsed.identity_text_requirements)
+        self.assertNotIn("李四", multi_parsed.exact_text_requirements)
+        self.assertNotIn("张三", multi_parsed.exact_text_requirements)
 
     def test_non_element_action_uses_exact_title_only_as_surface_identity(self) -> None:
         raw = task_context(task_id="task_swipe_identity", revision=17)

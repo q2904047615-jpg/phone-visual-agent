@@ -525,7 +525,15 @@ class QwenTaskContext(Mapping[str, Any]):
         if target_label is not None:
             if not isinstance(target_label, str) or not target_label.strip():
                 raise VisionAgentError("goal.entities.target_ui_label 格式无效。")
-            values.append(target_label.strip())
+            normalized_target = target_label.strip()
+            # The planner may preserve the same user literal in both the
+            # recipient and legacy target-label fields.  On a later input
+            # subgoal that literal identifies the current surface; it does
+            # not name the (often unlabelled) input control.  Keep the
+            # independent identity gate below, but do not require the same
+            # string a second time as the physical action target.
+            if normalized_target not in self.identity_text_requirements:
+                values.append(normalized_target)
         for recipient in self.recipient_values:
             if subgoal_targets_recipient_control(recipient, self.current_subgoal):
                 if recipient not in values:

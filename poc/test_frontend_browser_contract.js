@@ -612,6 +612,8 @@ test("typed effect graph executes at most one bound action after one effect appr
     assert.match(goalText, /确认作用域 · active · 后端 scope 与当前权威任务、观察和动作字段一致/);
     assert.match(await page.locator("#actionContent").innerText(), /Qwen 唯一动作尚未产生/);
     await page.locator("#reviewAction").click();
+    assert.equal(await page.locator("#riskTitle").innerText(), "确认当前登录或付款范围");
+    assert.equal(await page.locator("#riskLevel").innerText(), "需要确认 · 仅限登录或付款");
     assert.match(await page.locator("#riskWarning").innerText(), /typed EffectIntent 一致/);
     assert.match(await page.locator("#riskReason").innerText(), /financial_transaction/);
     assert.match(await page.locator("#riskReason").innerText(), /演示商户/);

@@ -872,11 +872,11 @@ function openRiskDialog() {
     return toast(error.message, true);
   }
   document.querySelector("#riskTitle").textContent = effectPhase
-    ? "确认当前子目标的效果范围"
-    : (highAttention ? "确认外部状态动作" : "确认当前单步动作");
+    ? "确认当前登录或付款范围"
+    : (highAttention ? "确认登录或付款动作" : "确认当前单步动作");
   const level = document.querySelector("#riskLevel");
   level.className = `risk-level ${highAttention ? "high" : "guarded"}`;
-  level.textContent = highAttention ? "高关注 · 可能改变账号或对外产生影响" : "受控动作 · 仅授权当前一步";
+  level.textContent = highAttention ? "需要确认 · 仅限登录或付款" : "受控动作 · 仅授权当前一步";
   document.querySelector("#riskGoal").textContent = view.objective;
   document.querySelector("#riskAction").textContent = view.visualAction.actionType
     ? `${actionLabel(view.visualAction)} · ${view.visualAction.semanticTarget}`

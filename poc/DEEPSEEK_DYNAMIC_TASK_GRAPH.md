@@ -23,8 +23,9 @@ DeepSeek 的正式响应只能包含：
 类型化响应先形成 `TaskSemanticIR`，再由版本化本地策略为每个 effect 生成 `local_policy`。模型不能自行升降风险。
 
 - 普通发送、关注、评论、发布、收藏、订阅和一般数据修改默认自动；
-- 登录/身份认证、资金交易、敏感权限、不可逆账号删除和不可逆数据删除需要一次效果确认；
-- `unknown` 不能靠确认取得执行权限。
+- 只有登录/身份认证和资金交易需要一次效果确认；
+- 敏感权限、账号/数据删除及其他普通效果按当前用户政策自动；
+- `unknown` 不是风险类别，不能靠确认取得权限；若无法形成现有通用动作与可验证结果，应报告明确的语义或能力缺口。
 
 效果确认使用 `effect_ids` 和 `/approve-effect`，绑定 session、task、device、revision、subgoal、当前观察、decision 和 action digest。旧确认、其他效果或其他 revision 不能复用。
 

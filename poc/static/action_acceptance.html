@@ -21,7 +21,9 @@
     #swipe-start, #swipe-end { position: absolute; left: -24px; width: calc(100vw - 72px); padding: 16px; border-radius: 14px; text-align: center; font-weight: 800; }
     #swipe-start { top: 0; background: #384c6b; }
     #swipe-end { bottom: 12vh; background: #1565ff; }
-    input { width: 100%; padding: 18px; border: 3px solid #36d9ff; border-radius: 14px; background: #06101c; color: #fff; font-size: 22px; }
+    input, textarea { width: 100%; padding: 18px; border: 3px solid #36d9ff; border-radius: 14px; background: #06101c; color: #fff; font-size: 22px; }
+    textarea { min-height: 150px; resize: none; }
+    label { display: block; margin: 14px 0 6px; font-weight: 800; }
     #hold-target { height: 170px; display: grid; place-items: center; border: 4px dashed #ffbe3d; border-radius: 22px; background: #3d2c0d; font-size: 24px; font-weight: 800; touch-action: none; }
     #drag-stage { position: relative; height: 420px; border: 3px solid #36d9ff; border-radius: 22px; overflow: hidden; touch-action: none; }
     #drag-source { position: absolute; left: 28px; top: 160px; width: 92px; height: 92px; display: grid; place-items: center; border-radius: 18px; background: #ff4fe1; color: #18051a; font-weight: 900; z-index: 2; }
@@ -73,6 +75,9 @@
         <a class="mode-link" href="/actions?mode=tap">语义点击</a>
         <a class="mode-link" href="/actions?mode=back">系统返回</a>
         <a class="mode-link" href="/actions?mode=input">输入并核对文字</a>
+        <a class="mode-link" href="/actions?mode=input-long">长文本分段输入</a>
+        <a class="mode-link" href="/actions?mode=input-multiline">多行文字与真实换行</a>
+        <a class="mode-link" href="/actions?mode=input-multifield">两个字段分别输入</a>
         <a class="mode-link" href="/actions?mode=long_press">长按目标</a>
         <a class="mode-link" href="/actions?mode=drag">拖动目标</a>
         <a class="mode-link" href="/actions?mode=replan">异常重规划：页面自行切换只读入口</a>
@@ -110,6 +115,52 @@
         document.querySelector('#input-state').textContent = `当前：${input.value}`;
         if (input.value === 'agent') report('input_verified_text', 'passed', {value: input.value});
       });
+    }
+
+    function showLongInput() {
+      const target = 'longinputvalidation2026:1234567890ABC';
+      content.innerHTML = `<div class="card"><strong>动作：分段输入超过单段上限的长文本</strong><p>目标文字：${target}</p>
+        <label for="long-input">长文本</label><input id="long-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="长文本">
+        <p id="long-input-state" class="muted">尚未匹配</p></div>`;
+      const input = document.querySelector('#long-input');
+      input.addEventListener('input', () => {
+        document.querySelector('#long-input-state').textContent = `当前长度：${input.value.length}`;
+        if (input.value === target) report('input_verified_text', 'passed', {field: '长文本', value: input.value, segmented: true}, 'long-input');
+      });
+    }
+
+    function showMultilineInput() {
+      const target = 'first line\nsecond line';
+      content.innerHTML = `<div class="card"><strong>动作：输入两行文字</strong><p>第一行：first line<br>第二行：second line</p>
+        <label for="multiline-input">正文</label><textarea id="multiline-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="正文"></textarea>
+        <p id="multiline-state" class="muted">尚未匹配</p></div>`;
+      const input = document.querySelector('#multiline-input');
+      let newlineReported = false;
+      input.addEventListener('input', () => {
+        document.querySelector('#multiline-state').textContent = `当前：${JSON.stringify(input.value)}`;
+        if (!newlineReported && input.value.includes('\n')) {
+          newlineReported = true;
+          report('press_enter', 'passed', {field: '正文', exact_prefix: input.value.split('\n')[0] + '\n'}, 'multiline-enter');
+        }
+        if (input.value === target) report('input_verified_text', 'passed', {field: '正文', value: input.value, multiline: true}, 'multiline-input');
+      });
+    }
+
+    function showMultifieldInput() {
+      content.innerHTML = `<div class="card"><strong>动作：分别填写两个字段</strong>
+        <label for="subject-input">主题</label><input id="subject-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="主题">
+        <label for="body-input">正文</label><textarea id="body-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="正文"></textarea>
+        <p id="multifield-state" class="muted">主题和正文均尚未匹配</p></div>`;
+      const subject = document.querySelector('#subject-input');
+      const body = document.querySelector('#body-input');
+      const verify = () => {
+        document.querySelector('#multifield-state').textContent = `主题：${subject.value || '空'}；正文：${body.value || '空'}`;
+        if (subject.value === '周报' && body.value === '本周完成') {
+          report('input_verified_text', 'passed', {fields: {subject: subject.value, body: body.value}}, 'multifield-input');
+        }
+      };
+      subject.addEventListener('input', verify);
+      body.addEventListener('input', verify);
     }
 
     function showLongPress() {
@@ -234,7 +285,7 @@
       }, {once: true});
     }
 
-    ({index: showIndex, swipe: showSwipe, tap: showTap, input: showInput, long_press: showLongPress, drag: showDrag, back: showBack, replan: showReplan, 'replan-replacement': showReplanReplacement, sequence: showSequence}[mode] || showIndex)();
+    ({index: showIndex, swipe: showSwipe, tap: showTap, input: showInput, 'input-long': showLongInput, 'input-multiline': showMultilineInput, 'input-multifield': showMultifieldInput, long_press: showLongPress, drag: showDrag, back: showBack, replan: showReplan, 'replan-replacement': showReplanReplacement, sequence: showSequence}[mode] || showIndex)();
   </script>
 </body>
 </html>

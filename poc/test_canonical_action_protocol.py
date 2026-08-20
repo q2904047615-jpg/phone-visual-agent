@@ -28,6 +28,7 @@ ALL_ACTIONS = frozenset(
         "home",
         "reveal_system_navigation",
         "input_verified_text",
+        "press_enter",
         "clear_verified_text",
         "long_press",
         "drag",
@@ -247,6 +248,102 @@ class CanonicalActionProtocolTests(unittest.TestCase):
         self.assertEqual(
             "draftmore",
             matches[0].transition.expectations[0].value,
+        )
+
+    def test_multiline_enter_is_a_distinct_canonical_action(self) -> None:
+        semantic_ir = input_ir(active="type_last_char")
+        semantic_ir = replace(
+            semantic_ir,
+            entities=tuple(
+                replace(item, value="first\nsecond")
+                if item.role == "input_text"
+                else item
+                for item in semantic_ir.entities
+            ),
+            input_fields=(
+                replace(
+                    semantic_ir.input_fields[0],
+                    field_label="正文",
+                    multiline=True,
+                ),
+            ),
+            constraints=(
+                ConstraintIntent(
+                    constraint_id="constraint.input",
+                    kind="required_action",
+                    value="input_verified_text",
+                    source_text="typed input",
+                    authoritative=True,
+                ),
+                ConstraintIntent(
+                    constraint_id="constraint.enter",
+                    kind="required_action",
+                    value="press_enter",
+                    source_text="multiline input",
+                    authoritative=True,
+                ),
+            ),
+            subgoals=tuple(
+                replace(
+                    item,
+                    constraint_refs=("constraint.input", "constraint.enter"),
+                )
+                if item.subgoal_id == "type_last_char"
+                else item
+                for item in semantic_ir.subgoals
+            ),
+        )
+        current_scene = scene(
+            element(
+                "input",
+                label="正文",
+                meaning="application_text_input",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "first",
+                    "input_field_id": "field_primary",
+                    "input_field_label": "正文",
+                    "input_multiline": True,
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                },
+            ),
+            element(
+                "enter",
+                label="↵",
+                meaning="input_exact_enter_key",
+                states={
+                    "input_enter_key": True,
+                    "key_action": "newline",
+                    "key_value": "\n",
+                    "prior_input_value": "first",
+                    "expected_input_value": "first\n",
+                    "input_element_id": "input",
+                    "input_field_id": "field_primary",
+                },
+                bounds=(0.8, 0.8, 0.94, 0.92),
+            ),
+        )
+        report = compile_canonical_action_catalog(
+            current_scene,
+            semantic_ir,
+            {"tap_semantic", "input_verified_text", "press_enter"},
+        )
+        matches = [
+            candidate
+            for candidate in report.candidates
+            if candidate.action_kind == "press_enter"
+        ]
+        self.assertEqual(1, len(matches))
+        self.assertEqual("enter", matches[0].parameters["element_id"])
+        self.assertEqual("first\n", matches[0].transition.expectations[0].value)
+        self.assertFalse(
+            any(
+                item.action_kind == "tap_semantic"
+                and item.parameters.get("element_id") == "enter"
+                for item in report.candidates
+            )
         )
 
     def test_batch_input_is_absent_when_typed_step_is_not_executable(self) -> None:

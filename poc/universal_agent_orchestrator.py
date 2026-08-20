@@ -475,32 +475,29 @@ class ObservationBridge:
         return unique[0] if len(unique) == 1 else ""
 
     @staticmethod
-    def _active_input_transaction_text(
+    def _active_input_transaction(
         graph: DynamicTaskGraph,
         active: Any,
-    ) -> str:
-        """Project one typed input desired state into read-only observation.
+    ) -> dict[str, Any]:
+        """Project one typed input field into read-only observation.
 
-        A candidate-selection node may omit words such as ``input field`` even
-        though its formal desired state is still ``input.value_equals``.  The
-        observer needs that fact to run its independent input-structure audit,
-        but it must not infer the relation from a coincidental label match.
-        This local marker is therefore minted only from TaskSemanticIR and is
-        overwritten after copying model-authored goal entities.  It grants no
-        action or geometry authority.
+        The projection is minted only from TaskSemanticIR and overwritten after
+        copying model-authored entities.  ``field_label`` remains a literal
+        visual selector, while ``field_id`` is only a stable local identity.
+        Neither field grants geometry or action authority.
         """
 
         if active is None or active.external_impact not in {
             "navigation_only",
             "read_only",
         }:
-            return ""
+            return {}
         try:
             semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
         except TaskSemanticIRError:
             # The normal formal-authority gate reports the exact error later.
             # Observation projection must not create a fallback authority.
-            return ""
+            return {}
         typed_subgoal = next(
             (
                 item
@@ -510,31 +507,42 @@ class ObservationBridge:
             None,
         )
         if typed_subgoal is None:
-            return ""
-        desired_by_id = {
-            item.state_id: item for item in semantic_ir.desired_states
-        }
+            return {}
         entities_by_id = {
             item.entity_id: item for item in semantic_ir.entities
         }
-        values: list[str] = []
-        for state_ref in typed_subgoal.desired_state_refs:
-            state = desired_by_id.get(state_ref)
-            if state is None or state.predicate != "input.value_equals":
-                continue
-            entity = entities_by_id.get(state.subject_ref)
-            value = state.value
-            if (
-                entity is None
-                or entity.role != "input_text"
-                or not isinstance(value, str)
-                or not value
-                or entity.value != value
-            ):
-                continue
-            values.append(value)
-        unique = tuple(dict.fromkeys(values))
-        return unique[0] if len(unique) == 1 else ""
+        fields = tuple(
+            item
+            for item in semantic_ir.input_fields
+            if typed_subgoal.subgoal_id in item.source_subgoal_ids
+        )
+        if len(fields) != 1:
+            return {}
+        field = fields[0]
+        payload = entities_by_id.get(field.payload_ref)
+        if (
+            payload is None
+            or payload.role != "input_text"
+            or not isinstance(payload.value, str)
+            or not payload.value
+        ):
+            return {}
+        return {
+            "text": payload.value,
+            "field_id": field.field_id,
+            "field_label": field.field_label,
+            "multiline": field.multiline,
+        }
+
+    @classmethod
+    def _active_input_transaction_text(
+        cls,
+        graph: DynamicTaskGraph,
+        active: Any,
+    ) -> str:
+        transaction = cls._active_input_transaction(graph, active)
+        value = transaction.get("text")
+        return value if isinstance(value, str) else ""
 
     def goal_draft(self, graph: DynamicTaskGraph) -> GenericIntentDraft:
         graph.validate()
@@ -567,14 +575,31 @@ class ObservationBridge:
             entities["original_goal_visual_context"] = graph.raw_user_goal.strip()
         if active is not None:
             active_goal_entities = dict(graph.goal.entities)
-            active_goal_entities.pop("active_input_transaction_text", None)
+            for local_marker in (
+                "active_input_transaction_text",
+                "active_input_field_id",
+                "active_input_field_label",
+                "active_input_multiline",
+            ):
+                active_goal_entities.pop(local_marker, None)
             active_app_label = self._active_app_entry_target_label(graph, active)
             if active_app_label:
                 active_goal_entities["target_ui_label"] = active_app_label
-            active_input_text = self._active_input_transaction_text(graph, active)
-            if active_input_text:
+            active_input = self._active_input_transaction(graph, active)
+            active_input_text = active_input.get("text")
+            if isinstance(active_input_text, str) and active_input_text:
                 active_goal_entities["active_input_transaction_text"] = (
                     active_input_text
+                )
+                active_goal_entities["active_input_field_id"] = active_input[
+                    "field_id"
+                ]
+                if active_input.get("field_label"):
+                    active_goal_entities["active_input_field_label"] = active_input[
+                        "field_label"
+                    ]
+                active_goal_entities["active_input_multiline"] = bool(
+                    active_input.get("multiline")
                 )
             entities["active_subgoal_visual_context"] = {
                 "subgoal_id": active.subgoal_id,
@@ -5199,6 +5224,7 @@ class UniversalAgentOrchestrator:
             "tap_semantic",
             "dismiss_overlay",
             "input_verified_text",
+            "press_enter",
             "clear_verified_text",
             "long_press",
         }:
@@ -6186,6 +6212,7 @@ class PhaseOneNavigationPolicy:
             "tap_semantic",
             "dismiss_overlay",
             "input_verified_text",
+            "press_enter",
             "clear_verified_text",
             "long_press",
             "drag",
@@ -6373,6 +6400,7 @@ class PhaseOneNavigationPolicy:
                     "tap_semantic",
                     "dismiss_overlay",
                     "input_verified_text",
+                    "press_enter",
                     "long_press",
                 }
                 or local_candidate is None

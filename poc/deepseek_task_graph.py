@@ -333,12 +333,21 @@ class GraphGoal:
             if not isinstance(input_fields, list) or not 1 <= len(input_fields) <= MAX_INPUT_FIELDS:
                 raise TaskGraphError("goal.entities.input_fields 必须为1～32个输入字段。")
             field_ids: set[str] = set()
+            field_labels: set[str] = set()
             for index, item in enumerate(input_fields):
-                if not isinstance(item, dict) or set(item) != {"field_id", "text"}:
+                if (
+                    not isinstance(item, dict)
+                    or set(item) not in (
+                        {"field_id", "text"},
+                        {"field_id", "field_label", "text"},
+                    )
+                ):
                     raise TaskGraphError(
-                        f"goal.entities.input_fields[{index}] 只允许 field_id/text。"
+                        f"goal.entities.input_fields[{index}] 只允许 field_id/"
+                        "可选field_label/text。"
                     )
                 field_id = item.get("field_id")
+                field_label = item.get("field_label", "")
                 text = item.get("text")
                 if not isinstance(field_id, str) or not ID_PATTERN.fullmatch(field_id):
                     raise TaskGraphError(
@@ -347,6 +356,23 @@ class GraphGoal:
                 if field_id in field_ids:
                     raise TaskGraphError("goal.entities.input_fields.field_id 重复。")
                 field_ids.add(field_id)
+                if (
+                    not isinstance(field_label, str)
+                    or len(field_label) > 120
+                    or field_label != field_label.strip()
+                    or "\n" in field_label
+                    or "\r" in field_label
+                ):
+                    raise TaskGraphError(
+                        f"goal.entities.input_fields[{index}].field_label 无效。"
+                    )
+                if field_label:
+                    folded_label = field_label.casefold()
+                    if folded_label in field_labels:
+                        raise TaskGraphError(
+                            "goal.entities.input_fields.field_label 重复。"
+                        )
+                    field_labels.add(folded_label)
                 if (
                     not isinstance(text, str)
                     or not text
@@ -1510,6 +1536,9 @@ Shell、ADB、keycode、main.exe 指令或其他可直接驱动设备的控制�
    只有带明确 role、用户字面来源和显式 relation/effect binding 的 entity 才能进入动作 authority，
    未绑定键只能作 planner context，模型不能借它扩大 Qwen 或控制器权限。recipient/input_text、
    recipients/input_fields、target_ui_label、target_surface、spatial_hint 是通用常见结构，不是封闭白名单。
+   多字段输入时，input_fields 每项使用 field_id、field_label、text：field_id 是稳定ASCII身份，
+   field_label 必须逐字复制该字段在页面上的可见标签或占位提示，text 是用户要求写入的逐字正文；
+   不得用“第一个/第二个”替代可见字段标签。
    device/system/current_surface 目标可将 target_apps 留空并设置 target_surface；
    App 目标仍应使用 target_apps。
 3. 只能有一个 active 子目标；其依赖必须已经 completed（初始图通常无依赖）。

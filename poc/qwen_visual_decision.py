@@ -54,7 +54,7 @@ MIN_DECISION_CONFIDENCE = 0.72
 MIN_TRUSTED_FRAME_SHARPNESS = 4.0
 SINGLE_ELEMENT_ACTIONS = frozenset(
     {
-        "tap_semantic", "dismiss_overlay", "input_verified_text",
+        "tap_semantic", "dismiss_overlay", "input_verified_text", "press_enter",
         "clear_verified_text", "long_press",
     }
 )
@@ -1090,6 +1090,15 @@ class QwenVisualDecision:
                         raise GenericStepPlanningError(
                             "输入文字没有逐字复用DeepSeek结构化 input_text。"
                         )
+                if action.action == "press_enter":
+                    if (
+                        element.meaning != "input_exact_enter_key"
+                        or element.states.get("input_enter_key") is not True
+                        or element.states.get("key_action") != "newline"
+                    ):
+                        raise GenericStepPlanningError(
+                            "换行动作必须绑定本地审计的可见 newline 键。"
+                        )
                 if action.action == "clear_verified_text":
                     if element.role != "input":
                         raise GenericStepPlanningError("清空动作必须绑定 input 候选。")
@@ -1788,7 +1797,7 @@ back/home/reveal_system_navigation是无元素、无坐标的系统动作，不�
    页面内导航候选又被明确排除，且可信scene证明system_ui.navigation_bar_visible=true、设备能力包含
    back，则应使用无element_id、无坐标的back；绝不能把back伪装成页面元素tap_semantic。
 2. page_state只是语义描述，禁止elements、bounds或任何可执行候选字段。
-3. tap_semantic/dismiss_overlay/input_verified_text/long_press只能引用可信观察中现有且置信度>=0.72的唯一element_id；
+3. tap_semantic/dismiss_overlay/input_verified_text/press_enter/long_press只能引用可信观察中现有且置信度>=0.72的唯一element_id；
    target/role/label/states必须逐字复制，target_region.bounds必须逐项复制候选原始bounds。
    role=keyboard_key绝不能作为动作目标。若目标要求本地临时输入值为空，且观察同时提供非空、已聚焦
    input和states.local_text_clear=true的独立button/icon，只能选择该独立清空控件，不能选择输入框本体
@@ -2568,6 +2577,9 @@ def _parse_action(
         "dismiss_overlay": {"element_id", "target", "role", "label", "states"},
         "input_verified_text": {
             "element_id", "target", "role", "label", "states", "text",
+        },
+        "press_enter": {
+            "element_id", "target", "role", "label", "states",
         },
         "clear_verified_text": {
             "element_id", "target", "role", "label", "states",

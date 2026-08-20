@@ -64,6 +64,7 @@ SUPPORTED_ACTIONS = frozenset(
         "home",
         "reveal_system_navigation",
         "input_verified_text",
+        "press_enter",
         "clear_verified_text",
         "long_press",
         "drag",
@@ -1096,9 +1097,29 @@ def compile_canonical_action_catalog(
         if "drag" in available:
             supported.add("drag")
         if element.role == "input" and element.states.get("focused") is True:
+            active_field = active_input_fields[0] if len(active_input_fields) == 1 else None
+            field_identity_matches = bool(
+                active_field is not None
+                and (
+                    (
+                        element.states.get("input_field_id")
+                        == active_field.field_id
+                        and (
+                            not active_field.field_label
+                            or element.states.get("input_field_label")
+                            == active_field.field_label
+                        )
+                    )
+                    or (
+                        len(semantic_ir.input_fields) == 1
+                        and not active_field.field_label
+                    )
+                )
+            )
             if (
                 "input_verified_text" in available
                 and len(active_input_payload_entities) == 1
+                and field_identity_matches
                 and _verified_text_affordance_ready(
                     element,
                     active_input_payload_entities[0].value,
@@ -1107,6 +1128,13 @@ def compile_canonical_action_catalog(
                 supported.add("input_verified_text")
             if "clear_verified_text" in available and bool(element.states.get("value")):
                 supported.add("clear_verified_text")
+        if (
+            "press_enter" in available
+            and element.meaning == "input_exact_enter_key"
+            and element.states.get("input_enter_key") is True
+            and element.states.get("key_action") == "newline"
+        ):
+            supported.add("press_enter")
         if "dismiss_overlay" in available and scene.overlays and element.role in {"button", "icon"}:
             supported.add("dismiss_overlay")
         for action_kind in sorted(supported):
@@ -1218,6 +1246,7 @@ def compile_canonical_action_catalog(
             elif element.meaning in {
                 "ime_exact_candidate",
                 "input_exact_literal_key",
+                "input_exact_enter_key",
                 "switch_keyboard_layout",
                 "switch_keyboard_case",
                 "switch_keyboard_input_mode",
@@ -1226,6 +1255,7 @@ def compile_canonical_action_catalog(
                     element.states.get("expected_input_value")
                     if element.meaning
                     in {"ime_exact_candidate", "input_exact_literal_key"}
+                    or element.meaning == "input_exact_enter_key"
                     else element.states.get("prior_input_value")
                 )
                 if not isinstance(expected_input_value, str):
@@ -1328,6 +1358,7 @@ def compile_canonical_action_catalog(
                         not in {
                             "ime_exact_candidate",
                             "input_exact_literal_key",
+                            "input_exact_enter_key",
                             "switch_keyboard_layout",
                             "switch_keyboard_case",
                             "switch_keyboard_input_mode",
@@ -1335,6 +1366,42 @@ def compile_canonical_action_catalog(
                     ),
                 )
             )
+
+        enter_affordance = affordance_by_pair.get((element_ref, "press_enter"))
+        if enter_affordance is not None:
+            expected_value = element.states.get("expected_input_value")
+            input_element_id = str(
+                element.states.get("input_element_id") or ""
+            ).strip()
+            input_element = next(
+                (
+                    item
+                    for item in sorted_elements
+                    if item.element_id == input_element_id and item.role == "input"
+                ),
+                None,
+            )
+            if isinstance(expected_value, str) and input_element is not None:
+                candidates.append(
+                    _candidate(
+                        action_kind="press_enter",
+                        subject_refs=(element_ref,),
+                        affordance_ids=(enter_affordance.affordance_id,),
+                        relation_ids=tuple(sorted(set(unique_relation_ids))),
+                        precondition_claim_ids=tuple(
+                            element_claim_ids[element.element_id]
+                        ),
+                        expectations=(
+                            StateExpectation(
+                                _element_ref(input_element.element_id),
+                                "element.state.value",
+                                "equals",
+                                expected_value,
+                            ),
+                        ),
+                        parameters={"element_id": element.element_id},
+                    )
+                )
 
         input_affordance = affordance_by_pair.get((element_ref, "input_verified_text"))
         if input_affordance is not None:
@@ -1580,15 +1647,16 @@ def compile_canonical_action_catalog(
     action_priority = {
         "tap_semantic": 0,
         "input_verified_text": 1,
-        "clear_verified_text": 2,
-        "dismiss_overlay": 3,
-        "long_press": 4,
-        "drag": 5,
-        "home": 6,
-        "reveal_system_navigation": 7,
-        "back": 8,
-        "swipe": 9,
-        "wait_for_change": 10,
+        "press_enter": 2,
+        "clear_verified_text": 3,
+        "dismiss_overlay": 4,
+        "long_press": 5,
+        "drag": 6,
+        "home": 7,
+        "reveal_system_navigation": 8,
+        "back": 9,
+        "swipe": 10,
+        "wait_for_change": 11,
     }
     unique_candidates = {item.candidate_id: item for item in candidates}
     element_by_id = {item.element_id: item for item in sorted_elements}
@@ -1601,6 +1669,11 @@ def compile_canonical_action_catalog(
             if "input_verified_text" in active_required_actions:
                 if action_kind == "input_verified_text":
                     pass
+                elif (
+                    action_kind == "press_enter"
+                    and "press_enter" in active_required_actions
+                ):
+                    pass
                 elif action_kind == "tap_semantic":
                     required_element = element_by_id.get(
                         str(candidate.parameters.get("element_id") or "")
@@ -1611,6 +1684,7 @@ def compile_canonical_action_catalog(
                         in {
                             "ime_exact_candidate",
                             "input_exact_literal_key",
+                            "input_exact_enter_key",
                             "switch_keyboard_layout",
                             "switch_keyboard_case",
                             "switch_keyboard_input_mode",
@@ -1626,7 +1700,11 @@ def compile_canonical_action_catalog(
                     return False
             elif action_kind not in active_required_actions:
                 return False
-        if action_kind in {"input_verified_text", "clear_verified_text"}:
+        if action_kind in {
+            "input_verified_text",
+            "press_enter",
+            "clear_verified_text",
+        }:
             return bool(active_input_payload_refs)
         if action_kind == "tap_semantic":
             element_id = str(candidate.parameters.get("element_id") or "")
@@ -1646,12 +1724,32 @@ def compile_canonical_action_catalog(
             if element.meaning in {
                 "ime_exact_candidate",
                 "input_exact_literal_key",
+                "input_exact_enter_key",
                 "switch_keyboard_layout",
                 "switch_keyboard_case",
                 "switch_keyboard_input_mode",
             }:
+                if element.meaning == "input_exact_enter_key":
+                    return False
                 return bool(active_input_payload_refs)
             if element.role == "input":
+                if len(active_input_fields) == 1:
+                    active_field = active_input_fields[0]
+                    return bool(
+                        (
+                            element.states.get("input_field_id")
+                            == active_field.field_id
+                            and (
+                                not active_field.field_label
+                                or element.states.get("input_field_label")
+                                == active_field.field_label
+                            )
+                        )
+                        or (
+                            len(semantic_ir.input_fields) == 1
+                            and not active_field.field_label
+                        )
+                    )
                 return active_targets_input
             target_surface = surfaces.get(active_subgoal.surface_ref)
             if target_surface is not None and target_surface.kind == "app":

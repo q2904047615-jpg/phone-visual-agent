@@ -404,8 +404,9 @@ def audited_application_input(
     placeholder: str = "",
     confidence: float = 0.98,
     right_button: dict | None = None,
+    field_labels: list[str] | None = None,
 ) -> dict:
-    return {
+    value = {
         "structure_id": structure_id,
         "bounds": bounds or [110, 40, 850, 110],
         "fully_visible": fully_visible,
@@ -415,6 +416,9 @@ def audited_application_input(
         "confidence": confidence,
         "right_button": right_button,
     }
+    if field_labels is not None:
+        value["field_labels"] = list(field_labels)
+    return value
 
 
 class GenericSceneObserverTests(unittest.TestCase):
@@ -7908,6 +7912,86 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         self.assertIsNone(scene.unique_trusted_goal_element())
         self.assertFalse(any(item.role == "input" for item in scene.elements))
+
+    def test_multifield_audit_selects_visible_field_and_mints_only_newline_enter(self) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="f" * 64,
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "fill_body",
+                    "objective": "正文内容逐字等于目标文本",
+                    "constraints": [],
+                    "completion_conditions": [],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "第一行\n第二行",
+                        "active_input_field_id": "body",
+                        "active_input_field_label": "正文",
+                        "active_input_multiline": True,
+                    },
+                }
+            }
+        }
+        common_keyboard = {
+            "visible": True,
+            "bounds": [40, 560, 960, 980],
+            "layout": "qwerty",
+            "input_mode": "chinese_pinyin",
+            "mode_switch": None,
+            "enter_key": {
+                "label": "↵",
+                "bounds": [800, 850, 930, 940],
+                "confidence": 0.98,
+                "fully_visible": True,
+                "key_action": "newline",
+            },
+        }
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="subject",
+                    bounds=[100, 160, 900, 235],
+                    text="主题值",
+                    field_labels=["主题"],
+                ),
+                audited_application_input(
+                    structure_id="body",
+                    bounds=[100, 330, 900, 430],
+                    text="第一行",
+                    field_labels=["正文"],
+                ),
+            ],
+            keyboard=common_keyboard,
+        )
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="第一行",
+        )
+        target = projected.get_element("local_audited_input_1")
+        self.assertEqual("body", target.states["input_field_id"])
+        self.assertEqual("正文", target.states["input_field_label"])
+        self.assertEqual("第一行", target.states["value"])
+        enter = projected.get_element("local_audited_enter_key_1")
+        self.assertEqual("input_exact_enter_key", enter.meaning)
+        self.assertEqual("第一行\n", enter.states["expected_input_value"])
+
+        audit["keyboard"]["enter_key"]["key_action"] = "send"
+        rejected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="第一行",
+        )
+        self.assertFalse(
+            any(item.meaning == "input_exact_enter_key" for item in rejected.elements)
+        )
 
     def test_input_audit_rejects_protocol_external_fields(self) -> None:
         empty = scene_payload()

@@ -540,8 +540,12 @@ class TaskSemanticIRTests(unittest.TestCase):
         payload["goal"]["entities"] = {
             "recipients": ["张三", "李四"],
             "input_fields": [
-                {"field_id": "subject", "text": "主题"},
-                {"field_id": "body", "text": "第一行\n第二行"},
+                {"field_id": "subject", "field_label": "主题", "text": "主题"},
+                {
+                    "field_id": "body",
+                    "field_label": "正文",
+                    "text": "第一行\n第二行",
+                },
             ],
         }
         payload["subgoals"][1]["objective"] = "为张三和李四填写主题与正文"
@@ -565,6 +569,10 @@ class TaskSemanticIRTests(unittest.TestCase):
         self.assertEqual(
             {"subject", "body"},
             {item.field_id for item in authority.semantic_ir.input_fields},
+        )
+        self.assertEqual(
+            {"主题", "正文"},
+            {item.field_label for item in authority.semantic_ir.input_fields},
         )
         self.assertTrue(
             any(item.multiline for item in authority.semantic_ir.input_fields)

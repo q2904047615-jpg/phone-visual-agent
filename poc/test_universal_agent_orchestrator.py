@@ -1029,6 +1029,11 @@ class ObservationBridgeTests(unittest.TestCase):
             "你好",
             focus["goal_entities"]["active_input_transaction_text"],
         )
+        self.assertEqual(
+            "input_field_1",
+            focus["goal_entities"]["active_input_field_id"],
+        )
+        self.assertFalse(focus["goal_entities"]["active_input_multiline"])
 
         unrelated = replace(
             graph,

@@ -2397,7 +2397,11 @@ def _input_audit_literal_key_targets(
     entities = context.get("goal_entities")
     if not isinstance(entities, dict):
         entities = context.get("entities")
-    text = entities.get("input_text") if isinstance(entities, dict) else None
+    text = None
+    if isinstance(entities, dict):
+        text = entities.get("active_input_transaction_text")
+        if not isinstance(text, str) or not text:
+            text = entities.get("input_text")
     if not isinstance(text, str):
         return ()
     if current_input_text is not None:
@@ -2408,7 +2412,10 @@ def _input_audit_literal_key_targets(
         else:
             if next_step is None:
                 return ()
-            if next_step.kind == "literal_key":
+            if next_step.kind == "literal_key" and next_step.segment not in {
+                "\r",
+                "\n",
+            }:
                 return (next_step.segment,)
             return ()
     targets: list[str] = []
@@ -2452,6 +2459,27 @@ def _input_structure_audit_prompt(
         ensure_ascii=False,
         separators=(",", ":"),
     )
+    active_field_id, active_field_label, active_multiline = (
+        _goal_active_input_field(context)
+    )
+    target_text = (
+        _goal_active_input_transaction_text(context)
+        or _goal_explicit_input_text(context)
+    )
+    enter_required = False
+    if target_text and current_input_text is not None and active_multiline:
+        try:
+            next_input_step = plan_next_verified_input(
+                target_text,
+                current_input_text,
+            )
+        except (ValueError, VerifiedTextTransactionError):
+            next_input_step = None
+        enter_required = bool(
+            next_input_step is not None
+            and next_input_step.kind == "literal_key"
+            and next_input_step.segment == "\n"
+        )
     if crop_local:
         if roi_bounds is None:
             raise ValueError("crop-local 输入审计必须绑定 ROI。")
@@ -2488,13 +2516,14 @@ You are a read-only, app-independent UI structure auditor. The normal scene obse
 Goal context (evidence selection only): {json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
 {image_contract}
 Distinguish three different visual structures; never merge them:
-1. application_inputs: editable search/address/form fields in the App content area. Include an empty field only when a complete border plus a visible placeholder, caret, focus highlight, or other literal editable cue is visible.
+1. application_inputs: editable search/address/form fields in the App content area. Include an empty field only when a complete border plus a visible placeholder, caret, focus highlight, or other literal editable cue is visible. field_labels must contain only literal labels visibly attached to that field (for example a nearby form label or its placeholder), never the local field_id. The active field selector is field_id={json.dumps(active_field_id, ensure_ascii=False)} and visible field_label={json.dumps(active_field_label, ensure_ascii=False)}; use the label only to enumerate visible evidence, never infer it from the goal.
 2. ime_preedit_regions: the input method's composition/candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Enumerate only complete visible candidate words inside each region; candidates are read-only facts and never application inputs.
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
 5. keyboard.backspace_key: for any complete visible keyboard layout, report the one complete backspace/delete key as label, bounds, confidence and fully_visible. Use null when absent, clipped, ambiguous, or confused with an App delete control. This is read-only geometry and never authorizes clearing by itself.
 6. keyboard.literal_keys: the local, goal-derived whitelist is {json.dumps(literal_key_targets, ensure_ascii=False, separators=(',', ':'))}. Report only complete visible keys whose inserted value occurs in that exact whitelist, at most once per distinct value and at most eight total. Every literal-key object MUST contain exactly these six fields and never omit any of them: value, label, key_kind, bounds, confidence, fully_visible. When the whitelist is empty, literal_keys MUST be []. QWERTY alphabet letters and Chinese characters MUST NEVER be enumerated here, even when they occur in input_text, because qwerty_anchors and the verified pinyin transaction already represent them. Never enumerate a keyboard row. For a whitelisted space use value=" " and key_kind="space". For every other whitelisted key use key_kind="character" and require label to equal value literally. The large central PRIMARY glyph of the whole directly tappable key MUST equal value. A small corner glyph, superscript digit, alternate symbol, swipe hint or long-press hint printed on an alphabet key is NOT a literal key and MUST NEVER be reported here. If the whitelisted value exists only as such a secondary hint, leave literal_keys empty and report a separately visible direction-explicit numeric/symbol layout switch instead. Bounds must enclose the whole direct key, never only the secondary glyph. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
-6. keyboard.layout_switches: enumerate only compact visible keys with an explicit destination layout: qwerty, numeric, or symbol. Copy the literal label and report current_layout and target_layout; never infer a destination from the goal alone.
+7. keyboard.enter_key: report at most one complete visible keyboard action key using exactly label, bounds, confidence, fully_visible and key_action. key_action must be one of newline, send, search, done, next, unknown and must describe the key's current visible behavior, never the requested goal. A plain multiline Return/Enter key may be newline. A key visibly labelled or iconographically acting as Send/Search/Done/Next must use that action and can never authorize a newline. The current transaction needs a newline={str(enter_required).lower()} and multiline={str(active_multiline).lower()}, but those facts do not change the visual classification.
+8. keyboard.layout_switches: enumerate only compact visible keys with an explicit destination layout: qwerty, numeric, or symbol. Copy the literal label and report current_layout and target_layout; never infer a destination from the goal alone.
 7. keyboard.case_mode and keyboard.case_switch apply only to direct_latin QWERTY. case_mode is lower, upper, or unknown from the visible letter glyphs. case_switch is null unless a complete visible shift/case key and its lower↔upper direction are independently clear.
 Determine keyboard.input_mode only from the current whole keyboard image, never from the goal or the JSON example. Visible Chinese composition/candidates, pinyin separators, or a current-mode label such as 中/中文/Pinyin prove chinese_pinyin. A visible current-mode label such as 英/EN/English/ABC/Latin together with a plain Latin QWERTY layout and no Chinese composition/candidate strip proves direct_latin. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
 keyboard.mode_switch.current_mode MUST equal keyboard.input_mode whenever input_mode is known. Treat an unambiguous single-mode label on the key as the current visible mode: 中/中文/Pinyin means chinese_pinyin; 英/EN/English/ABC/Latin means direct_latin. If the label could instead name a destination and the current whole-keyboard state is not independently clear, do not guess a direction; set mode_switch to null.
@@ -2512,7 +2541,7 @@ Return exactly this JSON schema and no other fields. Emit one compact minified
 JSON object on a single line, without Markdown or explanatory whitespace:
 {{"protocol_version":"{INPUT_STRUCTURE_AUDIT_VERSION}",
 "application_inputs":[{{"structure_id":"app-input-1","bounds":[0,0,1000,1000],
-"fully_visible":true,"text":"","placeholder":"visible placeholder or empty",
+"fully_visible":true,"text":"","placeholder":"visible placeholder or empty","field_labels":["literal visible field label"],
 "visible_editable_cues":["literal visible cue"],"confidence":0.0,
 "right_button":null}}],
 "ime_preedit_regions":[{{"region_id":"ime-preedit-1","bounds":[0,0,1000,1000],
@@ -2521,9 +2550,10 @@ JSON object on a single line, without Markdown or explanatory whitespace:
 "keyboard":{{"visible":true,"bounds":[0,0,1000,1000],"layout":"qwerty",
 "input_mode":"unknown","case_mode":"unknown","qwerty_anchors":{{"q":[0,0],"p":[0,0],"a":[0,0],"l":[0,0],"z":[0,0],"m":[0,0],"backspace":[0,0]}},"mode_switch":null,
 "backspace_key":{{"label":"⌫","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true}},
+"enter_key":{{"label":"↵","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true,"key_action":"newline"}},
 "case_switch":null,"literal_keys":{literal_keys_example_json},
 "layout_switches":[{{"label":"123","bounds":[0,0,1000,1000],"confidence":0.0,"current_layout":"qwerty","target_layout":"numeric"}}]}}}}
-When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","case_mode":"unknown","qwerty_anchors":null,"mode_switch":null,"backspace_key":null,"case_switch":null,"literal_keys":[],"layout_switches":[]}}.
+When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","case_mode":"unknown","qwerty_anchors":null,"mode_switch":null,"backspace_key":null,"enter_key":null,"case_switch":null,"literal_keys":[],"layout_switches":[]}}.
 Return empty arrays when their geometry is not visible. Never merge a clipped structure with a complete structure, and never copy an IME pre-edit region into application_inputs.
 """
 
@@ -2641,6 +2671,12 @@ def _map_input_structure_crop_audit_to_full(
             backspace_key["bounds"] = map_bounds(
                 backspace_key["bounds"],
                 "keyboard.backspace_key.bounds",
+            )
+        enter_key = keyboard.get("enter_key")
+        if isinstance(enter_key, dict) and "bounds" in enter_key:
+            enter_key["bounds"] = map_bounds(
+                enter_key["bounds"],
+                "keyboard.enter_key.bounds",
             )
         case_switch = keyboard.get("case_switch")
         if isinstance(case_switch, dict) and "bounds" in case_switch:
@@ -5332,18 +5368,38 @@ def _goal_active_input_transaction_text(context: dict[str, Any]) -> str:
     if not isinstance(entities, dict):
         return ""
     marker = entities.get("active_input_transaction_text")
-    explicit = _goal_explicit_input_text(context)
-    return (
-        marker
-        if isinstance(marker, str) and marker and marker == explicit
-        else ""
-    )
+    return marker if isinstance(marker, str) and marker else ""
+
+
+def _goal_active_input_field(context: dict[str, Any]) -> tuple[str, str, bool]:
+    """Return bridge-minted field identity, visible label and multiline flag."""
+
+    focused = _active_subgoal_visual_context(context)
+    if focused is context:
+        return ("", "", False)
+    entities = focused.get("goal_entities")
+    if not isinstance(entities, dict):
+        return ("", "", False)
+    field_id = entities.get("active_input_field_id")
+    field_label = entities.get("active_input_field_label", "")
+    multiline = entities.get("active_input_multiline", False)
+    if (
+        not isinstance(field_id, str)
+        or not field_id
+        or not isinstance(field_label, str)
+        or not isinstance(multiline, bool)
+    ):
+        return ("", "", False)
+    return (field_id, field_label, multiline)
 
 
 def _goal_has_explicit_input_text(context: dict[str, Any]) -> bool:
     """Return true only when the graph supplied a concrete text-entry entity."""
 
-    return bool(_goal_explicit_input_text(context))
+    return bool(
+        _goal_explicit_input_text(context)
+        or _goal_active_input_transaction_text(context)
+    )
 
 
 def _goal_requests_keyboard_dismissal(context: dict[str, Any]) -> bool:
@@ -5560,6 +5616,7 @@ def _apply_input_structure_audit(
         optional_keyboard_fields = {
             "qwerty_anchors",
             "backspace_key",
+            "enter_key",
             "case_mode",
             "case_switch",
             "literal_keys",
@@ -5621,6 +5678,7 @@ def _apply_input_structure_audit(
                 keyboard_case_mode = "unknown"
                 keyboard["mode_switch"] = None
                 keyboard["backspace_key"] = None
+                keyboard["enter_key"] = None
                 keyboard["case_switch"] = None
                 keyboard["literal_keys"] = []
                 keyboard["layout_switches"] = []
@@ -5629,6 +5687,7 @@ def _apply_input_structure_audit(
             keyboard.get("bounds") is not None
             or keyboard.get("mode_switch") is not None
             or keyboard.get("backspace_key") is not None
+            or keyboard.get("enter_key") is not None
             or keyboard.get("case_switch") is not None
             or keyboard.get("literal_keys") not in (None, [])
             or keyboard.get("layout_switches") not in (None, [])
@@ -5706,7 +5765,7 @@ def _apply_input_structure_audit(
 
         matches: list[dict[str, Any]] = []
         for item in application_inputs:
-            if not isinstance(item, dict) or set(item) != {
+            required_input_fields = {
                 "structure_id",
                 "bounds",
                 "fully_visible",
@@ -5715,7 +5774,12 @@ def _apply_input_structure_audit(
                 "visible_editable_cues",
                 "confidence",
                 "right_button",
-            }:
+            }
+            if (
+                not isinstance(item, dict)
+                or not required_input_fields.issubset(item)
+                or set(item) - required_input_fields - {"field_labels"}
+            ):
                 raise UISceneError("应用输入结构字段不符合协议。")
             button = item.get("right_button")
             if _can_discard_separate_right_button(item, button):
@@ -5741,6 +5805,23 @@ def _apply_input_structure_audit(
             ):
                 raise UISceneError("visible_editable_cues 必须是最多4项的字符串数组。")
             cues = [value.strip()[:120] for value in cues if value.strip()]
+            raw_field_labels = item.get("field_labels", [])
+            if (
+                not isinstance(raw_field_labels, list)
+                or len(raw_field_labels) > 6
+                or any(
+                    not isinstance(value, str)
+                    or not value.strip()
+                    or len(value.strip()) > 120
+                    or "\n" in value
+                    or "\r" in value
+                    for value in raw_field_labels
+                )
+            ):
+                raise UISceneError("field_labels 必须是最多6项的非空可见字符串数组。")
+            field_labels = tuple(
+                dict.fromkeys(value.strip() for value in raw_field_labels)
+            )
             if not item["fully_visible"] or confidence < 0.9:
                 continue
             text = str(item.get("text") or "").strip()
@@ -5797,6 +5878,7 @@ def _apply_input_structure_audit(
                     "text": text,
                     "placeholder": placeholder,
                     "visible_editable_cues": cues,
+                    "field_labels": field_labels,
                     "input_bounds": input_bounds,
                     "right_button": button_match,
                     "confidence": min(
@@ -5809,7 +5891,22 @@ def _apply_input_structure_audit(
             )
 
         switch_is_goal = _goal_requests_keyboard_mode_switch(goal_context)
-        trusted_input = matches[0] if len(matches) == 1 else None
+        active_field_id, active_field_label, active_multiline = (
+            _goal_active_input_field(goal_context)
+        )
+        if active_field_label:
+            field_matches = [
+                item
+                for item in matches
+                if sum(
+                    label.casefold() == active_field_label.casefold()
+                    for label in item["field_labels"]
+                )
+                == 1
+            ]
+            trusted_input = field_matches[0] if len(field_matches) == 1 else None
+        else:
+            trusted_input = matches[0] if len(matches) == 1 else None
         if (
             trusted_input is not None
             and not trusted_input["text"]
@@ -5908,7 +6005,14 @@ def _apply_input_structure_audit(
                 if focused_context is not goal_context
                 else goal_context.get("entities")
             )
-            target_text = entities.get("input_text") if isinstance(entities, dict) else None
+            target_text = (
+                _goal_active_input_transaction_text(goal_context)
+                or (
+                    entities.get("input_text")
+                    if isinstance(entities, dict)
+                    else None
+                )
+            )
             try:
                 input_step = plan_next_verified_input(target_text, trusted_input["text"])
             except (ValueError, VerifiedTextTransactionError):
@@ -5956,6 +6060,10 @@ def _apply_input_structure_audit(
             raw_backspace_key = None
         generic_backspace_geometry = _validated_keyboard_backspace_key(
             raw_backspace_key,
+            keyboard_bounds=keyboard_bounds,
+        )
+        enter_key = _validated_keyboard_enter_key(
+            keyboard.get("enter_key"),
             keyboard_bounds=keyboard_bounds,
         )
         raw_mode_switch = keyboard.get("mode_switch")
@@ -6045,6 +6153,7 @@ def _apply_input_structure_audit(
             case_mode=keyboard_case_mode,
         )
         exact_literal_key: dict[str, Any] | None = None
+        exact_enter_key: dict[str, Any] | None = None
         exact_layout_switch: dict[str, Any] | None = None
         exact_case_switch: dict[str, Any] | None = None
         if input_step is not None:
@@ -6058,6 +6167,16 @@ def _apply_input_structure_audit(
                 ]
                 if len(exact_switches) == 1:
                     exact_layout_switch = exact_switches[0]
+            elif (
+                input_step.kind == "literal_key"
+                and input_step.segment == "\n"
+            ):
+                if (
+                    active_multiline
+                    and enter_key is not None
+                    and enter_key["key_action"] == "newline"
+                ):
+                    exact_enter_key = enter_key
             elif input_step.kind == "literal_key":
                 exact_keys = [
                     item for item in literal_keys
@@ -6124,6 +6243,7 @@ def _apply_input_structure_audit(
                 for item in (
                     exact_ime_candidate,
                     exact_literal_key,
+                    exact_enter_key,
                     exact_layout_switch,
                     exact_case_switch,
                 )
@@ -6152,6 +6272,11 @@ def _apply_input_structure_audit(
                 "fully_visible": True,
                 "value": trusted_input["text"],
             }
+            if active_field_id:
+                states["input_field_id"] = active_field_id
+                states["input_multiline"] = active_multiline
+            if active_field_label:
+                states["input_field_label"] = active_field_label
             if not keyboard_visible:
                 # Absence is useful task evidence only when the dedicated
                 # full-frame input audit explicitly reports keyboard.visible=false.
@@ -6291,6 +6416,33 @@ def _apply_input_structure_audit(
                     },
                     "evidence": [
                         "输入结构审计确认下一字符对应唯一完整可见键位"
+                    ],
+                }
+            )
+        if exact_enter_key is not None and input_step is not None:
+            elements.append(
+                {
+                    "element_id": "local_audited_enter_key_1",
+                    "role": "button",
+                    "meaning": "input_exact_enter_key",
+                    "label": exact_enter_key["label"],
+                    "bounds": [
+                        part / 1000.0 for part in exact_enter_key["bounds"]
+                    ],
+                    "confidence": exact_enter_key["confidence"],
+                    "states": {
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "input_enter_key": True,
+                        "key_action": "newline",
+                        "key_value": "\n",
+                        "prior_input_value": input_step.current_text,
+                        "expected_input_value": input_step.expected_value,
+                        "input_element_id": "local_audited_input_1",
+                        "input_field_id": active_field_id,
+                    },
+                    "evidence": [
+                        "输入结构审计确认当前多行字段的唯一完整可见换行键"
                     ],
                 }
             )
@@ -6680,6 +6832,51 @@ def _validated_keyboard_backspace_key(
             round((bounds[1] + bounds[3]) / 2),
         ],
         "confidence": confidence,
+    }
+
+
+def _validated_keyboard_enter_key(
+    value: Any,
+    *,
+    keyboard_bounds: tuple[float, float, float, float] | None,
+) -> dict[str, Any] | None:
+    """Validate a visible keyboard action key without changing its semantics."""
+
+    if value is None:
+        return None
+    if keyboard_bounds is None:
+        raise UISceneError("回车键必须绑定完整可见键盘区域。")
+    if not isinstance(value, dict) or set(value) != {
+        "label",
+        "bounds",
+        "confidence",
+        "fully_visible",
+        "key_action",
+    }:
+        raise UISceneError("输入结构审计 enter_key 字段不符合协议。")
+    key_action = value.get("key_action")
+    if key_action not in {"newline", "send", "search", "done", "next", "unknown"}:
+        raise UISceneError("输入结构审计 enter_key.key_action 无效。")
+    label = str(value.get("label") or "").strip()
+    if (
+        not label
+        or value.get("fully_visible") is not True
+        or not _valid_1000_bounds(value.get("bounds"))
+    ):
+        return None
+    confidence = _audit_confidence(value.get("confidence"), "enter_key")
+    bounds = tuple(float(part) for part in value["bounds"])
+    if confidence < 0.9 or not _bounds_inside(
+        bounds,
+        keyboard_bounds,
+        tolerance=12,
+    ):
+        return None
+    return {
+        "label": label,
+        "bounds": [round(part) for part in bounds],
+        "confidence": confidence,
+        "key_action": key_action,
     }
 
 

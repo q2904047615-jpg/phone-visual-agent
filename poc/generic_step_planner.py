@@ -21,6 +21,7 @@ ALLOWED_STEP_ACTIONS = frozenset(
         "home",
         "wait_for_change",
         "input_verified_text",
+        "press_enter",
         "clear_verified_text",
         "long_press",
         "drag",
@@ -64,6 +65,7 @@ class GenericStepProposal:
                 "tap_semantic",
                 "dismiss_overlay",
                 "input_verified_text",
+                "press_enter",
                 "clear_verified_text",
                 "long_press",
             }:

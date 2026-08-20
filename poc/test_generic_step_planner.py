@@ -283,8 +283,7 @@ class ClickReceiptRobot(FakeRobot):
         self.valid = valid
         self._click_receipt = None
 
-    def vision_android_home(self):
-        result = super().vision_android_home()
+    def _record_click_receipt(self):
         self._click_receipt = {
             "version": "2026-08-19-seller-gui-click-barrier-v1",
             "channel": "left_button_atomic_click",
@@ -292,6 +291,15 @@ class ClickReceiptRobot(FakeRobot):
             "round_trip_position_confirmed": True,
             "mechanical_contact_ack": False,
         }
+
+    def vision_tap_relative(self, x, y):
+        result = super().vision_tap_relative(x, y)
+        self._record_click_receipt()
+        return result
+
+    def vision_android_home(self):
+        result = super().vision_android_home()
+        self._record_click_receipt()
         return result
 
     def consume_last_click_receipt(self):
@@ -738,6 +746,119 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
         )
         controller.verify_after_action(resolved, before, after)
 
+    def test_press_enter_requires_newline_key_and_verifies_exact_multiline_value(self):
+        controller = UniversalActionController()
+        before = UIScene(
+            app_id="generic_app",
+            screen_id="editor",
+            summary="正文多行输入框和换行键可见",
+            elements=(
+                UIElement(
+                    element_id="field",
+                    role="input",
+                    meaning="application_text_input",
+                    label="正文",
+                    bounds=(0.1, 0.1, 0.9, 0.3),
+                    confidence=0.98,
+                    states={
+                        "focused": True,
+                        "value": "first",
+                        "input_multiline": True,
+                    },
+                ),
+                UIElement(
+                    element_id="enter",
+                    role="button",
+                    meaning="input_exact_enter_key",
+                    label="↵",
+                    bounds=(0.78, 0.78, 0.94, 0.9),
+                    confidence=0.98,
+                    states={
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "input_enter_key": True,
+                        "key_action": "newline",
+                        "key_value": "\n",
+                        "prior_input_value": "first",
+                        "expected_input_value": "first\n",
+                        "input_element_id": "field",
+                    },
+                ),
+            ),
+            stable=True,
+            confidence=0.98,
+            fingerprint="before-enter",
+        )
+        action = SemanticAction(
+            node_id="formal-enter",
+            action="press_enter",
+            params={
+                "element_id": "enter",
+                "target": "input_exact_enter_key",
+                "role": "button",
+                "label": "↵",
+                "states": {"key_action": "newline"},
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "application_text_input",
+                        "states": {"value": "first\n"},
+                    }
+                },
+                "formal_candidate_id": "candidate.enter",
+                "formal_report_digest": "c" * 64,
+                "formal_transition": {
+                    "transition_id": "transition.enter",
+                    "precondition_claim_ids": ["claim.enter"],
+                    "expectations": [
+                        {
+                            "subject_ref": "element.field",
+                            "predicate": "element.state.value",
+                            "operator": "equals",
+                            "value": "first\n",
+                        }
+                    ],
+                    "exploratory": False,
+                },
+            },
+        )
+        resolved = controller.resolve_one(action, before, confirmed=True)
+        self.assertEqual("press_enter", resolved.kind)
+        self.assertEqual("field", resolved.input_element_id)
+        after = UIScene(
+            app_id="generic_app",
+            screen_id="editor",
+            summary="正文已有真实换行",
+            elements=(
+                UIElement(
+                    element_id="field",
+                    role="input",
+                    meaning="application_text_input",
+                    label="正文",
+                    bounds=(0.1, 0.1, 0.9, 0.3),
+                    confidence=0.98,
+                    states={"focused": True, "value": "first\n"},
+                ),
+            ),
+            stable=True,
+            confidence=0.98,
+            fingerprint="after-enter",
+        )
+        controller.verify_after_action(resolved, before, after)
+
+        send_key = replace(
+            before.elements[1],
+            states={**before.elements[1].states, "key_action": "send"},
+        )
+        with self.assertRaisesRegex(UniversalActionError, "newline"):
+            controller.resolve_one(
+                replace(
+                    action,
+                    params={**action.params, "states": {"key_action": "send"}},
+                ),
+                replace(before, elements=(before.elements[0], send_key)),
+                confirmed=True,
+            )
+
 
 class GenericActionAdapterTests(unittest.TestCase):
     def _adapter(self, observer, robot, **kwargs):
@@ -935,6 +1056,119 @@ class GenericActionAdapterTests(unittest.TestCase):
             ],
             observer.geometry_audit_calls,
         )
+
+    def test_press_enter_executes_one_verified_tap_and_matches_exact_newline(self):
+        gray = Image.new("RGB", (540, 960), "gray")
+        fingerprint = _local_frame_fingerprint(gray)
+
+        def enter_scene(value, *, audited=False, include_key=True, fp=fingerprint):
+            source = self._literal_input_scene(
+                fp,
+                value=value,
+                include_key=include_key,
+                audited=audited,
+            )
+            elements = []
+            for item in source.elements:
+                if item.role == "input":
+                    elements.append(
+                        replace(
+                            item,
+                            label="正文",
+                            states={**item.states, "input_multiline": True},
+                        )
+                    )
+                else:
+                    elements.append(
+                        replace(
+                            item,
+                            element_id="local_audited_enter_key_1",
+                            meaning="input_exact_enter_key",
+                            label="↵",
+                            states={
+                                **item.states,
+                                "input_literal_key": False,
+                                "input_enter_key": True,
+                                "key_action": "newline",
+                                "key_value": "\n",
+                                "prior_input_value": "first",
+                                "expected_input_value": "first\n",
+                            },
+                        )
+                    )
+            return replace(source, elements=tuple(elements))
+
+        planned = enter_scene("first")
+        audited = enter_scene("first", audited=True)
+        after = enter_scene(
+            "first\n",
+            include_key=False,
+            fp="after-enter",
+        )
+        observer = FakeSceneObserver(
+            [planned, after, after],
+            geometry_scenes=[audited, audited],
+        )
+        robot = ClickReceiptRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+        key = planned.get_element("local_audited_enter_key_1")
+        expected_effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": "first\n"},
+            }
+        }
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="enter",
+                action="press_enter",
+                params={
+                    "formal_candidate_id": "candidate-enter",
+                    "formal_report_digest": "a" * 64,
+                    "formal_transition": {
+                        "transition_id": "transition-enter",
+                        "precondition_claim_ids": ["claim-enter"],
+                        "expectations": [
+                            {
+                                "subject_ref": "element.local_audited_input_1",
+                                "predicate": "element.state.value",
+                                "operator": "equals",
+                                "value": "first\n",
+                            }
+                        ],
+                        "exploratory": False,
+                    },
+                    "element_id": key.element_id,
+                    "target": key.meaning,
+                    "role": key.role,
+                    "label": key.label,
+                    "states": dict(key.states),
+                    "expected_effect": expected_effect,
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=(gray, gray.copy(), gray.copy(), gray.copy()),
+            goal=GenericIntentDraft(
+                understood=True,
+                app_id="current_foreground",
+                app_name="当前应用",
+                objective="正文逐字为 first 换行 second",
+                entities={"input_text": "first\nsecond"},
+                success_criteria={"input": "first\nsecond"},
+            ),
+            confirmed=True,
+        )
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("matched", result.action_outcome)
+        self.assertEqual("press_enter", result.resolved_action.kind)
+        self.assertEqual([("tap", 220, 735)], robot.actions)
+        self.assertTrue(result.hardware_receipt["seller_event_barrier_confirmed"])
 
     def test_literal_key_receipt_reconciles_only_proven_visual_soft_wrap(self):
         before = self._literal_input_scene("before", value="live", audited=True)
@@ -1349,6 +1583,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertIn("tap_semantic", supported)
         self.assertIn("reveal_system_navigation", supported)
         self.assertIn("input_verified_text", supported)
+        self.assertIn("press_enter", supported)
         self.assertIn("clear_verified_text", supported)
         self.assertIn("long_press", supported)
         self.assertIn("drag", supported)

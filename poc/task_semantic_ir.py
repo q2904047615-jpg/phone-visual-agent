@@ -520,6 +520,7 @@ class SemanticSubgoal:
 class InputFieldIntent:
     field_id: str
     payload_ref: str
+    field_label: str = ""
     recipient_refs: tuple[str, ...] = ()
     source_subgoal_ids: tuple[str, ...] = ()
     multiline: bool = False
@@ -527,6 +528,14 @@ class InputFieldIntent:
     def validate(self) -> None:
         _validate_id(self.field_id, "input_field.field_id")
         _validate_id(self.payload_ref, "input_field.payload_ref")
+        if (
+            not isinstance(self.field_label, str)
+            or len(self.field_label) > 120
+            or self.field_label != self.field_label.strip()
+            or "\n" in self.field_label
+            or "\r" in self.field_label
+        ):
+            raise TaskSemanticIRError("input_field.field_label 无效。")
         for field_name, values in (
             ("recipient_refs", self.recipient_refs),
             ("source_subgoal_ids", self.source_subgoal_ids),
@@ -543,6 +552,7 @@ class InputFieldIntent:
         return {
             "field_id": self.field_id,
             "payload_ref": self.payload_ref,
+            "field_label": self.field_label,
             "recipient_refs": list(self.recipient_refs),
             "source_subgoal_ids": list(self.source_subgoal_ids),
             "multiline": self.multiline,
@@ -1273,6 +1283,7 @@ def compile_runtime_graph_semantics(
         raise TaskSemanticIRError("goal.entities 必须是映射。")
     entities: list[SemanticEntity] = []
     input_field_id_by_entity: dict[str, str] = {}
+    input_field_label_by_entity: dict[str, str] = {}
     raw_recipients = raw_entities.get("recipients")
     if isinstance(raw_recipients, list):
         for index, value in enumerate(raw_recipients, 1):
@@ -1317,6 +1328,10 @@ def compile_runtime_graph_semantics(
                 )
             )
             input_field_id_by_entity[entity_id] = field_name
+            field_label = spec.get("field_label")
+            input_field_label_by_entity[entity_id] = (
+                field_label if isinstance(field_label, str) else ""
+            )
     for index, key in enumerate(sorted(raw_entities, key=lambda item: str(item))):
         if key in {"recipients", "input_fields"}:
             continue
@@ -1840,6 +1855,7 @@ def compile_runtime_graph_semantics(
                     f"input_field_{index}",
                 ),
                 payload_ref=payload.entity_id,
+                field_label=input_field_label_by_entity.get(payload.entity_id, ""),
                 recipient_refs=recipient_refs,
                 source_subgoal_ids=source_subgoal_ids,
                 multiline=isinstance(payload.value, str)

@@ -459,6 +459,7 @@ class GenericSingleActionAdapter:
             "back",
             "home",
             "input_verified_text",
+            "press_enter",
             "clear_verified_text",
             "long_press",
             "drag",
@@ -469,6 +470,7 @@ class GenericSingleActionAdapter:
             "tap_semantic",
             "dismiss_overlay",
             "input_verified_text",
+            "press_enter",
             "clear_verified_text",
             "long_press",
             "drag",
@@ -479,6 +481,7 @@ class GenericSingleActionAdapter:
             "tap_semantic",
             "dismiss_overlay",
             "input_verified_text",
+            "press_enter",
             "clear_verified_text",
             "long_press",
             "drag",
@@ -488,6 +491,7 @@ class GenericSingleActionAdapter:
         {
             "ime_exact_candidate",
             "input_exact_literal_key",
+            "input_exact_enter_key",
             "switch_keyboard_layout",
             "switch_keyboard_case",
             "switch_keyboard_input_mode",
@@ -555,6 +559,8 @@ class GenericSingleActionAdapter:
             supported.add("home")
         if available("input_verified_text", "vision_type_text_with_layout"):
             supported.add("input_verified_text")
+        if available("tap_semantic", "vision_tap_relative"):
+            supported.add("press_enter")
         if (
             bool(declared.get("input_verified_text", True))
             and callable(getattr(self.robot, "vision_clear_text", None))
@@ -593,7 +599,7 @@ class GenericSingleActionAdapter:
         before the controller may resolve an action.
         """
 
-        if requested.action != "tap_semantic" or not str(
+        if requested.action not in {"tap_semantic", "press_enter"} or not str(
             requested.params.get("formal_candidate_id") or ""
         ).strip():
             return None
@@ -606,6 +612,7 @@ class GenericSingleActionAdapter:
         marker_by_meaning = {
             "ime_exact_candidate": "ime_candidate",
             "input_exact_literal_key": "input_literal_key",
+            "input_exact_enter_key": "input_enter_key",
             "switch_keyboard_layout": "keyboard_layout_switch",
             "switch_keyboard_case": "keyboard_case_switch",
             "switch_keyboard_input_mode": "keyboard_input_mode_switch",
@@ -873,7 +880,11 @@ class GenericSingleActionAdapter:
     ) -> bool:
         """Return whether the action must preserve a readable input surface."""
 
-        if resolved.kind in {"input_verified_text", "clear_verified_text"}:
+        if resolved.kind in {
+            "input_verified_text",
+            "press_enter",
+            "clear_verified_text",
+        }:
             return True
         element_state = resolved.expected_effect.get("element_state")
         return bool(
@@ -1638,6 +1649,8 @@ class GenericSingleActionAdapter:
                 hardware_action = (
                     "input_verified_text"
                     if resolved.kind == "clear_verified_text"
+                    else "tap_semantic"
+                    if resolved.kind == "press_enter"
                     else resolved.kind
                 )
                 arm(
@@ -1656,7 +1669,11 @@ class GenericSingleActionAdapter:
         robot_result: Any = None
         hardware_receipt: dict[str, Any] | None = None
         try:
-            if resolved.kind in {"tap_semantic", "dismiss_overlay"}:
+            if resolved.kind in {
+                "tap_semantic",
+                "press_enter",
+                "dismiss_overlay",
+            }:
                 if resolved.normalized_point is None:
                     raise GenericActionAdapterError("点击动作缺少已校验落点。")
                 x = max(0, min(1000, round(resolved.normalized_point[0] * 1000)))
@@ -1774,6 +1791,7 @@ class GenericSingleActionAdapter:
                 time.sleep(max(0.5, self.post_action_settle))
             if resolved.kind in {
                 "tap_semantic",
+                "press_enter",
                 "dismiss_overlay",
                 "back",
                 "home",
@@ -2091,6 +2109,7 @@ class GenericSingleActionAdapter:
             "tap_semantic",
             "dismiss_overlay",
             "input_verified_text",
+            "press_enter",
             "clear_verified_text",
             "long_press",
         }

@@ -143,6 +143,9 @@ class ActionAcceptancePageTests(unittest.TestCase):
             "mode=tap",
             "mode=back",
             "mode=input",
+            "mode=input-long",
+            "mode=input-multiline",
+            "mode=input-multifield",
             "mode=long_press",
             "mode=drag",
             "mode=replan",
@@ -159,16 +162,24 @@ class ActionAcceptancePageTests(unittest.TestCase):
             "拖动目标",
             "目标文字：agent",
             "input.value === 'agent'",
+            "longinputvalidation2026:1234567890ABC",
+            "first line\\nsecond line",
+            "placeholder=\"主题\"",
+            "placeholder=\"正文\"",
+            "press_enter",
             'href="/actions">返回验收模式选择',
         ):
             self.assertIn(marker, page)
         for app_name in ("微信", "抖音", "支付宝"):
             self.assertNotIn(app_name, page)
-        self.assertNotIn("placeholder=", page)
 
     def test_root_can_redirect_only_to_explicit_generic_action_modes(self) -> None:
         self.assertIsNone(root_action_location(None))
         self.assertEqual("/actions?mode=input", root_action_location("input"))
+        self.assertEqual(
+            "/actions?mode=input-multifield",
+            root_action_location("input-multifield"),
+        )
         self.assertEqual(
             "/actions?mode=long_press",
             root_action_location("long_press"),

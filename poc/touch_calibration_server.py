@@ -22,6 +22,9 @@ ROOT_ACTION_MODES = frozenset(
         "tap",
         "back",
         "input",
+        "input-long",
+        "input-multiline",
+        "input-multifield",
         "long_press",
         "drag",
         "replan",
@@ -173,6 +176,7 @@ class ActionEventStore:
             "tap_semantic",
             "back",
             "input_verified_text",
+            "press_enter",
             "long_press",
             "drag",
         }

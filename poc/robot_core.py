@@ -619,7 +619,7 @@ class RobotController:
             "max_fields": 32,
             "max_targets": 32,
             "segments": ["direct_latin", "chinese_pinyin", "visible_literal_key"],
-            "newline": "requires_fresh_visible_enter_key",
+            "newline": "visible_multiline_enter_key_only",
             "unsupported_character_policy": "structured_capability_gap",
         }
         actions["clear_verified_text"] = {
@@ -635,8 +635,14 @@ class RobotController:
             "mechanical_contact_ack": False,
         }
         actions["press_enter"] = {
-            "enabled": False,
-            "gap_reason": "requires_fresh_visible_enter_key",
+            "enabled": bool(enabled.get("tap_semantic")),
+            "primitive": "vision_tap_relative",
+            "requires": [
+                "fresh_visible_enter_key",
+                "key_action_newline",
+                "active_multiline_input_field",
+                "exact_post_action_input_value",
+            ],
         }
         actions["pinch"] = {
             "enabled": False,

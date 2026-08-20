@@ -434,6 +434,7 @@ def test_context_with_semantic_ir(
                     "long_press",
                     "drag",
                     "input_verified_text",
+                    "press_enter",
                     "clear_verified_text",
                     "home",
                     "back",
@@ -1596,6 +1597,66 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 "element_state": {
                     "meaning": "draft_input",
                     "states": {"value": ""},
+                }
+            },
+            decision.expected_result,
+        )
+
+    def test_minimal_press_enter_choice_uses_local_newline_candidate(self) -> None:
+        context = task_context(task_id="task_minimal_enter", revision=4)
+        context["goal"]["entities"] = {"input_text": "first\nsecond"}
+        context["current_subgoal"]["objective"] = "在当前多行正文中插入真实换行"
+        field = UIElement(
+            element_id="field",
+            role="input",
+            meaning="application_text_input",
+            label="正文",
+            bounds=(0.08, 0.1, 0.92, 0.3),
+            confidence=0.98,
+            states={
+                "focused": True,
+                "value": "first",
+                "input_multiline": True,
+                "fully_visible": True,
+                "goal_relevant": False,
+            },
+            evidence=("正文多行输入框已聚焦",),
+        )
+        enter = UIElement(
+            element_id="enter",
+            role="button",
+            meaning="input_exact_enter_key",
+            label="↵",
+            bounds=(0.78, 0.78, 0.94, 0.9),
+            confidence=0.98,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "input_enter_key": True,
+                "key_action": "newline",
+                "key_value": "\n",
+                "prior_input_value": "first",
+                "expected_input_value": "first\n",
+                "input_element_id": "field",
+            },
+            evidence=("本地输入结构审计确认换行键",),
+        )
+        observation = trusted_observation(self.frames, elements=(field, enter))
+        _observer, decision = self.decide(
+            FakeProvider(
+                minimal_selection_payload(status="action", choice_id="choice_1")
+            ),
+            context=context,
+            observation=observation,
+            available_action_kinds={"press_enter"},
+        )
+        self.assertEqual("press_enter", decision.proposal.action.action)
+        self.assertEqual("enter", decision.proposal.action.params["element_id"])
+        self.assertEqual(
+            {
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {"value": "first\n"},
                 }
             },
             decision.expected_result,

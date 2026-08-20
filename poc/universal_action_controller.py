@@ -298,6 +298,7 @@ class ResolvedSemanticAction:
     hold_seconds: float | None = None
     path_distance: float | None = None
     target_element_id: str | None = None
+    input_element_id: str | None = None
     destination_element_id: str | None = None
     before_fingerprint: str = ""
     expected_effect: dict[str, Any] = field(default_factory=dict)
@@ -346,6 +347,7 @@ class UniversalActionController:
                     "tap_semantic",
                     "dismiss_overlay",
                     "input_verified_text",
+                    "press_enter",
                     "clear_verified_text",
                     "long_press",
                 }
@@ -420,6 +422,30 @@ class UniversalActionController:
                     expected_input_value=expected_value,
                 )
             return resolved
+        if action.action == "press_enter":
+            element = self._resolve_target(action, scene)
+            if element.meaning != "input_exact_enter_key":
+                raise UniversalActionError(
+                    "press_enter 必须绑定本地审计的唯一换行键。"
+                )
+            self._validate_input_auxiliary_tap(
+                element,
+                scene,
+                expected_effect,
+                formal=bool(formal_candidate_id),
+            )
+            resolved = self._point_action(
+                action,
+                element,
+                expected_effect,
+                scene.fingerprint,
+            )
+            return replace(
+                resolved,
+                prior_input_value=element.states.get("prior_input_value"),
+                expected_input_value=element.states.get("expected_input_value"),
+                input_element_id=element.states.get("input_element_id"),
+            )
         if action.action == "dismiss_overlay":
             if not action.params.get("target"):
                 action = SemanticAction(
@@ -817,6 +843,21 @@ class UniversalActionController:
                 or expected_states != {"value": expected_value}
             ):
                 raise UniversalActionError("逐键输入没有绑定唯一下一字符和精确结果。")
+        elif element.meaning == "input_exact_enter_key":
+            key_value = states.get("key_value")
+            expected_value = states.get("expected_input_value")
+            if (
+                states.get("input_enter_key") is not True
+                or states.get("key_action") != "newline"
+                or key_value != "\n"
+                or expected_value != prior_value + "\n"
+                or expected_states != {"value": expected_value}
+            ):
+                raise UniversalActionError(
+                    "换行键没有绑定 multiline newline 与精确输入结果。"
+                )
+            if input_element.states.get("input_multiline") is not True:
+                raise UniversalActionError("当前输入框没有本地多行字段凭据。")
         elif element.meaning == "switch_keyboard_layout":
             current = states.get("current_layout")
             target = states.get("target_layout")
@@ -910,7 +951,11 @@ class UniversalActionController:
             raise UniversalActionError(
                 f"动作后页面不符合预期：{after.screen_id} != {expected_screen}"
             )
-        if resolved.kind in {"input_verified_text", "clear_verified_text"}:
+        if resolved.kind in {
+            "input_verified_text",
+            "press_enter",
+            "clear_verified_text",
+        }:
             self._verify_exact_input_value(resolved, before, after)
         if resolved.formal_candidate_id:
             self._verify_formal_transition(resolved, before, after)
@@ -1338,14 +1383,25 @@ class UniversalActionController:
         before: UIScene,
         after: UIScene,
     ) -> None:
-        expected = resolved.expected_input_value if resolved.kind == "input_verified_text" else resolved.text
-        target_id = str(resolved.target_element_id or "").strip()
+        expected = (
+            resolved.expected_input_value
+            if resolved.kind in {"input_verified_text", "press_enter"}
+            else resolved.text
+        )
+        target_id = str(
+            resolved.input_element_id or resolved.target_element_id or ""
+        ).strip()
         if expected is None or not target_id:
             raise UniversalActionError("输入动作缺少精确文字或目标输入框身份。")
         if resolved.kind == "input_verified_text" and (
             not expected or not resolved.input_fragment or not resolved.input_method
         ):
             raise UniversalActionError("输入动作缺少精确文字或目标输入框身份。")
+        if resolved.kind == "press_enter" and (
+            resolved.prior_input_value is None
+            or expected != resolved.prior_input_value + "\n"
+        ):
+            raise UniversalActionError("换行动作缺少精确前缀或 newline 后置值。")
         if resolved.kind == "clear_verified_text":
             if expected != "" or resolved.delete_count is None:
                 raise UniversalActionError("清空动作缺少空值或精确退格次数。")

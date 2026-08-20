@@ -720,6 +720,120 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         self.assertFalse(denied.allowed)
         self.assertIn("跨 surface", denied.reason)
 
+    def test_formal_input_transaction_candidate_must_bind_current_typed_subgoal(
+        self,
+    ) -> None:
+        transition_payload = {"transition_id": "transition-input-1"}
+        scene = _scene(
+            meaning="draft_input",
+            label="",
+            role="input",
+            states={"focused": True, "value": "draft"},
+        )
+        candidate = SimpleNamespace(
+            action_kind="clear_verified_text",
+            parameters={"element_id": "candidate-1"},
+            effect_ref="",
+            transition=SimpleNamespace(to_dict=lambda: transition_payload),
+        )
+        action = SemanticAction(
+            node_id="clear-input",
+            action="clear_verified_text",
+            params={
+                "element_id": "candidate-1",
+                "formal_candidate_id": "candidate-formal-input-1",
+                "formal_report_digest": "digest-input-1",
+                "formal_transition": transition_payload,
+            },
+        )
+        semantic_ir = SimpleNamespace(
+            subgoals=(
+                SimpleNamespace(
+                    subgoal_id="open-app",
+                    surface_ref="surface-app",
+                ),
+                SimpleNamespace(
+                    subgoal_id="type-text",
+                    surface_ref="surface-app",
+                ),
+            ),
+            surfaces=(
+                SimpleNamespace(
+                    surface_id="surface-app",
+                    kind="app",
+                    app_id="gallery",
+                    app_name="图片工具",
+                ),
+            ),
+            effects=(),
+            input_fields=(
+                SimpleNamespace(source_subgoal_ids=("type-text",)),
+            ),
+        )
+
+        def context(subgoal_id: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                current_subgoal={"subgoal_id": subgoal_id},
+                current_execution_class="navigate",
+                semantic_ir=semantic_ir,
+            )
+
+        with (
+            patch(
+                "visual_action_shadow.compile_visual_action_authority",
+                return_value=object(),
+            ),
+            patch(
+                "visual_action_shadow.select_shadow_candidate",
+                return_value=SimpleNamespace(candidate=candidate),
+            ),
+        ):
+            denied = self.policy._formal_candidate_decision(
+                task_context=context("open-app"),
+                scene=scene,
+                action=action,
+                available_action_kinds=frozenset({"clear_verified_text"}),
+            )
+            allowed = self.policy._formal_candidate_decision(
+                task_context=context("type-text"),
+                scene=scene,
+                action=action,
+                available_action_kinds=frozenset({"clear_verified_text"}),
+            )
+
+        self.assertFalse(denied.allowed)
+        self.assertIn("不属于当前 typed 子目标", denied.reason)
+        self.assertTrue(allowed.allowed, allowed.reason)
+
+        input_candidate = SimpleNamespace(
+            **{
+                **vars(candidate),
+                "action_kind": "input_verified_text",
+            },
+        )
+        input_action = replace(
+            action,
+            action="input_verified_text",
+        )
+        with (
+            patch(
+                "visual_action_shadow.compile_visual_action_authority",
+                return_value=object(),
+            ),
+            patch(
+                "visual_action_shadow.select_shadow_candidate",
+                return_value=SimpleNamespace(candidate=input_candidate),
+            ),
+        ):
+            input_denied = self.policy._formal_candidate_decision(
+                task_context=context("open-app"),
+                scene=scene,
+                action=input_action,
+                available_action_kinds=frozenset({"input_verified_text"}),
+            )
+        self.assertFalse(input_denied.allowed)
+        self.assertIn("不属于当前 typed 子目标", input_denied.reason)
+
     def test_allows_swipe_for_navigation_only_subgoal(self) -> None:
         scene = _scene()
 
@@ -5241,6 +5355,44 @@ class UniversalAgentStartTests(unittest.TestCase):
         self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
         self.assertEqual(0, session.physical_actions)
 
+    def test_exact_target_app_id_can_ground_deep_page_without_app_title(self) -> None:
+        graph = self._named_app_page_graph(
+            app_id="local_tool",
+            app_name="本地工具",
+        )
+        planner = FakeDeepSeekPlanner(
+            graph,
+            replan_result=self._advance_named_app_page_graph(graph),
+        )
+        deep_page = replace(
+            _scene(
+                meaning="draft_input",
+                label="",
+                role="input",
+                states={"goal_relevant": True, "fully_visible": True},
+            ),
+            app_id="local_tool",
+            screen_id="conversation_detail",
+            summary="当前是一个深层会话页面，底部输入区域可见。",
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                planner,
+                FakeQwenObserver(),
+                FakeAdapter(deep_page),
+            ).start(
+                session_id="session-target-app-deep-page",
+                raw_goal=graph.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual("safe-followup", session.task_graph.active_subgoal_id)
+        self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
+        self.assertEqual(0, session.physical_actions)
+
     def test_shared_generic_app_token_does_not_match_other_foreground(self) -> None:
         graph = self._named_app_page_graph(
             app_id="target_app",
@@ -5256,6 +5408,17 @@ class UniversalAgentStartTests(unittest.TestCase):
         self.assertFalse(
             UniversalAgentOrchestrator._scene_foreground_matches_target_app_page(
                 scene=other_app_scene,
+                target_apps=graph.goal.target_apps,
+            )
+        )
+        unknown_scene = replace(
+            other_app_scene,
+            app_id="unknown",
+            screen_id="unknown_screen",
+        )
+        self.assertFalse(
+            UniversalAgentOrchestrator._scene_foreground_matches_target_app_page(
+                scene=unknown_scene,
                 target_apps=graph.goal.target_apps,
             )
         )

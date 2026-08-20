@@ -2405,20 +2405,30 @@ class UniversalAgentOrchestrator:
                 *tuple(current.completion_conditions or ()),
             )
         )
-        if not self._scene_named_presence_is_grounded(
-            scene=scene,
-            texts=(current.objective, *tuple(current.completion_conditions or ())),
-        ):
-            return None
         referenced_app_pages = self._referenced_target_app_pages(
             graph=graph,
             presence_text=presence_text,
             subgoal_id=current.subgoal_id,
         )
-        if referenced_app_pages and not self._scene_foreground_matches_target_app_page(
-            scene=scene,
-            target_apps=referenced_app_pages,
+        foreground_matches_referenced_app = bool(
+            referenced_app_pages
+            and self._scene_foreground_matches_target_app_page(
+                scene=scene,
+                target_apps=referenced_app_pages,
+            )
+        )
+        if not (
+            foreground_matches_referenced_app
+            or self._scene_named_presence_is_grounded(
+                scene=scene,
+                texts=(
+                    current.objective,
+                    *tuple(current.completion_conditions or ()),
+                ),
+            )
         ):
+            return None
+        if referenced_app_pages and not foreground_matches_referenced_app:
             return None
         required_surfaces = self._presence_surface_classes(
             *tuple(current.completion_conditions or ())
@@ -6894,6 +6904,58 @@ class PhaseOneNavigationPolicy:
             if typed_subgoal is not None
             else None
         )
+        input_payload_refs = {
+            str(getattr(field, "payload_ref", "") or "")
+            for field in tuple(getattr(semantic_ir, "input_fields", ()) or ())
+        }
+        input_source_subgoal_ids = {
+            str(subgoal_id)
+            for field in tuple(getattr(semantic_ir, "input_fields", ()) or ())
+            for subgoal_id in tuple(
+                getattr(field, "source_subgoal_ids", ()) or ()
+            )
+        }
+        input_source_subgoal_ids.update(
+            str(getattr(state, "source_subgoal_id", "") or "")
+            for state in tuple(
+                getattr(semantic_ir, "desired_states", ()) or ()
+            )
+            if str(getattr(state, "subject_ref", "") or "")
+            in input_payload_refs
+            and str(getattr(state, "predicate", "") or "")
+            == "input.value_equals"
+            and str(getattr(state, "source_subgoal_id", "") or "")
+        )
+        input_transaction_action = action_kind in {
+            "input_verified_text",
+            "clear_verified_text",
+        }
+        if action_kind == "tap_semantic" and element_ids:
+            try:
+                input_transaction_action = (
+                    scene.get_element(
+                        element_ids[0],
+                        min_confidence=self.min_confidence,
+                    ).meaning
+                    in {
+                        "ime_exact_candidate",
+                        "input_exact_literal_key",
+                        "switch_keyboard_layout",
+                        "switch_keyboard_case",
+                        "switch_keyboard_input_mode",
+                    }
+                )
+            except UISceneError:
+                return self._deny(
+                    "正式 input transaction 候选无法绑定当前可信元素。"
+                )
+        if (
+            input_transaction_action
+            and current_subgoal_id not in input_source_subgoal_ids
+        ):
+            return self._deny(
+                "正式 input transaction 候选不属于当前 typed 子目标。"
+            )
         current_surface_kind = "launcher" if any(
             token in f"{scene.foreground_app_id} {scene.screen_id}".casefold()
             for token in ("launcher", "home_screen", "desktop")

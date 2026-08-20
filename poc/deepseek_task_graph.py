@@ -1495,6 +1495,7 @@ class DeepSeekTaskGraphPlanner:
         except GenericIntentError as exc:
             raise TaskGraphError(str(exc)) from exc
         payload = _normalize_explicit_ui_label_payload(payload, raw_user_goal)
+        payload = _normalize_local_refresh_execution_class(payload)
         graph = _graph_from_payload(
             payload,
             task_id=task_id,
@@ -3241,6 +3242,66 @@ def _normalize_explicit_ui_label_payload(
                 subgoal["completion_conditions"] = [
                     replace_label(item) for item in completion
                 ]
+    return value
+
+
+def _normalize_local_refresh_execution_class(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep a reversible current-page refresh out of typed effect authority."""
+
+    if not isinstance(payload, dict):
+        return payload
+    effects = payload.get("effect_intents")
+    subgoals = payload.get("subgoals")
+    if effects != [] or not isinstance(subgoals, list):
+        return payload
+    refresh_pattern = re.compile(
+        r"(?:刷新|重新加载|重新载入).{0,16}(?:当前)?(?:页面|网页|标签页)|"
+        r"(?:当前)?(?:页面|网页|标签页).{0,16}(?:刷新|重新加载|重新载入)|"
+        r"\b(?:refresh|reload)\b.{0,24}\b(?:current\s+)?(?:page|tab|view)\b|"
+        r"\b(?:current\s+)?(?:page|tab|view)\b.{0,24}\b(?:refresh|reload)\b",
+        re.IGNORECASE,
+    )
+    external_effect_pattern = re.compile(
+        r"发送|提交|保存|发布|删除|关注|评论|点赞|收藏|加入|登录|退出登录|"
+        r"付款|支付|购买|下单|同步|上传|send|submit|save|publish|delete|"
+        r"follow|comment|like|favorite|join|log\s*in|sign\s*in|pay|purchase|"
+        r"place\s+order|sync|upload",
+        re.IGNORECASE,
+    )
+    changed = False
+    normalized_subgoals: list[Any] = []
+    for item in subgoals:
+        if not isinstance(item, dict):
+            normalized_subgoals.append(item)
+            continue
+        context = " ".join(
+            [
+                str(item.get("objective") or ""),
+                *(
+                    str(value)
+                    for value in item.get("completion_conditions", [])
+                    if isinstance(value, str)
+                ),
+            ]
+        )
+        if (
+            item.get("execution_class") == "effect"
+            and item.get("effect_ids") == []
+            and refresh_pattern.search(context)
+            and not external_effect_pattern.search(context)
+        ):
+            normalized = dict(item)
+            normalized["execution_class"] = "navigate"
+            normalized_subgoals.append(normalized)
+            changed = True
+        else:
+            normalized_subgoals.append(item)
+    if not changed:
+        return payload
+    value = json.loads(json.dumps(payload, ensure_ascii=False))
+    value["subgoals"] = normalized_subgoals
     return value
 
 

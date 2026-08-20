@@ -66,6 +66,42 @@ def payload(*, objective="进入普通会话并聚焦空输入框", effects=()):
 
 
 class TypedPlannerTransportTests(unittest.TestCase):
+    def test_current_page_refresh_cannot_be_upgraded_to_unbound_effect(self):
+        for objective in (
+            "点击当前浏览器顶部可见的刷新图标，重新加载当前页面",
+            "Reload the current page",
+        ):
+            with self.subTest(objective=objective):
+                raw = payload(objective=objective)
+                raw["subgoals"][0]["execution_class"] = "effect"
+                raw["subgoals"][0]["effect_ids"] = []
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                    objective,
+                    device_id="phone-1",
+                )
+                self.assertEqual((), graph.risk_actions)
+                self.assertEqual(
+                    "navigation_only",
+                    graph.subgoals[0].external_impact,
+                )
+
+        for objective in (
+            "刷新当前页面后提交表单",
+            "刷新当前页面并登录账号",
+            "Reload the current page and pay",
+        ):
+            with self.subTest(unsafe=objective), self.assertRaisesRegex(
+                TaskGraphError,
+                "effect 子目标必须引用",
+            ):
+                raw = payload(objective=objective)
+                raw["subgoals"][0]["execution_class"] = "effect"
+                raw["subgoals"][0]["effect_ids"] = []
+                DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                    objective,
+                    device_id="phone-1",
+                )
+
     def test_functional_page_modifiers_are_not_treated_as_page_names(self):
         for text in (
             "可输入搜索内容的页面可见",

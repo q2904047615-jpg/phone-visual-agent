@@ -118,7 +118,7 @@
     }
 
     function showLongInput() {
-      const target = 'longinputvalidation2026:1234567890ABC';
+      const target = 'abcdefghijklmnopqrstuvwxyzabcdefghijk';
       content.innerHTML = `<div class="card"><strong>动作：分段输入超过单段上限的长文本</strong><p>目标文字：${target}</p>
         <label for="long-input">长文本</label><input id="long-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="长文本">
         <p id="long-input-state" class="muted">尚未匹配</p></div>`;

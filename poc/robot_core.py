@@ -24,6 +24,7 @@ from ocr_runtime import (
     recognize as recognize_ocr,
 )
 from verified_text_transaction import (
+    MAX_DIRECT_LATIN_SEGMENT_CHARS,
     VerifiedTextTransactionError,
     plan_next_verified_input,
 )
@@ -615,7 +616,7 @@ class RobotController:
         actions["drag"]["duration_ms"] = {"fixed": 800}
         actions["input_verified_text"]["text"] = {
             "canonical_max_chars": 4000,
-            "max_chars_per_physical_step": 30,
+            "max_chars_per_physical_step": MAX_DIRECT_LATIN_SEGMENT_CHARS,
             "max_fields": 32,
             "max_targets": 32,
             "segments": ["direct_latin", "chinese_pinyin", "visible_literal_key"],

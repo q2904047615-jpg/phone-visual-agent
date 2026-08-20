@@ -162,7 +162,7 @@ class ActionAcceptancePageTests(unittest.TestCase):
             "拖动目标",
             "目标文字：agent",
             "input.value === 'agent'",
-            "longinputvalidation2026:1234567890ABC",
+            "abcdefghijklmnopqrstuvwxyzabcdefghijk",
             "first line\\nsecond line",
             "placeholder=\"主题\"",
             "placeholder=\"正文\"",

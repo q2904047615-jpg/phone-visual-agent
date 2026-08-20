@@ -1421,6 +1421,20 @@ def compile_canonical_action_catalog(
                 payload_entities = list(active_input_payload_entities)
             if len(payload_entities) == 1:
                 payload = payload_entities[0]
+                try:
+                    deterministic_input_step = plan_from_input_states(
+                        payload.value,
+                        element.states,
+                    )
+                except (ValueError, VerifiedTextTransactionError):
+                    deterministic_input_step = None
+                if deterministic_input_step is None:
+                    continue
+                expected_input_value = (
+                    deterministic_input_step.expected_value
+                    if deterministic_input_step.kind == "direct_latin"
+                    else payload.value
+                )
                 payload_effects = sorted(
                     effect.effect_id
                     for effect in semantic_ir.effects
@@ -1438,7 +1452,7 @@ def compile_canonical_action_catalog(
                                 element_ref,
                                 "element.state.value",
                                 "equals",
-                                payload.value,
+                                expected_input_value,
                             ),
                         ),
                         effect_ref=payload_effects[0] if len(payload_effects) == 1 else "",

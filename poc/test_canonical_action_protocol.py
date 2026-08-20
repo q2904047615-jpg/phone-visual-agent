@@ -11,6 +11,7 @@ from task_semantic_ir import (
     TaskSemanticIR,
 )
 from ui_scene import UIElement, UIScene
+from verified_text_transaction import plan_from_input_states
 from canonical_action_protocol import (
     CANONICAL_ACTION_PROTOCOL,
     CanonicalActionProtocolError,
@@ -308,6 +309,52 @@ class CanonicalActionProtocolTests(unittest.TestCase):
             "draftmore",
             matches[0].transition.expectations[0].value,
         )
+
+    def test_long_qwerty_candidate_binds_only_next_deterministic_segment(self) -> None:
+        semantic_ir = input_ir(active="type_last_char")
+        payload = next(
+            item for item in semantic_ir.entities if item.role == "input_text"
+        )
+        target = "abcdefghijklmnopqrstuvwxyzabcdefghijk"
+        semantic_ir = replace(
+            semantic_ir,
+            entities=tuple(
+                replace(item, value=target) if item is payload else item
+                for item in semantic_ir.entities
+            ),
+        )
+        current_scene = scene(
+            element(
+                "input",
+                label="长文本",
+                meaning="application_text_input",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                    "keyboard_case_mode": "lower",
+                },
+            )
+        )
+        report = compile_canonical_action_catalog(
+            current_scene,
+            semantic_ir,
+            {"tap_semantic", "input_verified_text"},
+        )
+        candidate = next(
+            item
+            for item in report.candidates
+            if item.action_kind == "input_verified_text"
+        )
+        expected = plan_from_input_states(
+            target,
+            current_scene.get_element("input").states,
+        ).expected_value
+        self.assertEqual(expected, candidate.transition.expectations[0].value)
+        self.assertNotEqual(target, candidate.transition.expectations[0].value)
+        self.assertEqual(20, len(candidate.transition.expectations[0].value))
 
     def test_multiline_enter_is_a_distinct_canonical_action(self) -> None:
         semantic_ir = input_ir(active="type_last_char")

@@ -12,6 +12,7 @@ class VerifiedTextTransactionError(ValueError):
 
 
 _CHINESE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+\Z")
+MAX_DIRECT_LATIN_SEGMENT_CHARS = 20
 
 
 def local_pinyin(text: str) -> str:
@@ -109,7 +110,10 @@ def plan_next_verified_input(
     elif first in "abcdefghijklmnopqrstuvwxyz":
         segment = ""
         for char in remaining:
-            if char not in "abcdefghijklmnopqrstuvwxyz" or len(segment) >= 20:
+            if (
+                char not in "abcdefghijklmnopqrstuvwxyz"
+                or len(segment) >= MAX_DIRECT_LATIN_SEGMENT_CHARS
+            ):
                 break
             segment += char
         step = VerifiedInputStep(
@@ -124,7 +128,10 @@ def plan_next_verified_input(
     elif first in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
         segment = ""
         for char in remaining:
-            if char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" or len(segment) >= 20:
+            if (
+                char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                or len(segment) >= MAX_DIRECT_LATIN_SEGMENT_CHARS
+            ):
                 break
             segment += char
         step = VerifiedInputStep(

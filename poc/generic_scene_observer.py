@@ -5432,12 +5432,14 @@ def _evidenced_composite_symbol_layout(
     goal_context: dict[str, Any],
     current_input_text: str | None,
 ) -> str | None:
-    """Normalize a composite symbol label only from the next visible key.
+    """Normalize a composite numeric/symbol label from the next visible key.
 
     Composite names are descriptive model output, not a new layout enum.  A
     token is accepted only when every component is known, it explicitly names
     the symbol layer, and the current typed transaction independently derives
-    one symbol whose exact whole key is uniquely visible on this keyboard.
+    one numeric or symbol character whose exact whole key is uniquely visible
+    on this keyboard.  Letters and spaces remain qwerty-only and cannot turn a
+    composite surface into input authority.
     """
 
     if not isinstance(value, str) or keyboard_bounds is None:
@@ -5469,16 +5471,15 @@ def _evidenced_composite_symbol_layout(
             current_input_text=current_input_text,
         )
     )
-    if (
-        len(literal_targets) != 1
-        or _preferred_keyboard_layout(next(iter(literal_targets))) != "symbol"
-    ):
+    if len(literal_targets) != 1:
+        return None
+    target = next(iter(literal_targets))
+    if _preferred_keyboard_layout(target) not in {"numeric", "symbol"}:
         return None
     literal_keys = _validated_keyboard_literal_keys(
         keyboard.get("literal_keys", []),
         keyboard_bounds=keyboard_bounds,
     )
-    target = next(iter(literal_targets))
     if sum(item["value"] == target for item in literal_keys) != 1:
         return None
     return "symbol"

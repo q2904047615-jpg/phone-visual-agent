@@ -4426,6 +4426,36 @@ class GenericSceneObserverTests(unittest.TestCase):
                     ],
                 )
 
+        for layout, digit in (
+            ("numeric_symbol", "1"),
+            ("numeric_symbol_grid", "7"),
+        ):
+            with self.subTest(layout=layout, digit=digit):
+                digit_key = {
+                    **exact_key,
+                    "value": digit,
+                    "label": digit,
+                }
+                scene = _apply_input_structure_audit(
+                    base_scene,
+                    json.dumps(payload(layout, [digit_key]), ensure_ascii=False),
+                    fingerprint="frame-composite-number",
+                    goal_context={
+                        "objective": "输入框逐字等于目标且不发送",
+                        "entities": {"input_text": current_value + digit},
+                    },
+                    coarse_input_value=current_value,
+                )
+                key = scene.unique_trusted_goal_element()
+                self.assertEqual("local_audited_literal_key_1", key.element_id)
+                self.assertEqual(digit, key.states["key_value"])
+                self.assertEqual(
+                    "symbol",
+                    scene.get_element("local_audited_input_1").states[
+                        "keyboard_layout"
+                    ],
+                )
+
         negative_cases = {
             "unknown_component": payload("symbols_custom", [exact_key]),
             "not_symbol_composite": payload("qwerty_numeric", [exact_key]),
@@ -4462,23 +4492,35 @@ class GenericSceneObserverTests(unittest.TestCase):
                         coarse_input_value=current_value,
                     )
 
-        with self.assertRaisesRegex(VisionAgentError, "keyboard.layout"):
-            _apply_input_structure_audit(
-                base_scene,
-                json.dumps(
-                    payload(
-                        "numeric_symbol",
-                        [{**exact_key, "value": "2", "label": "2"}],
-                    ),
-                    ensure_ascii=False,
-                ),
-                fingerprint="frame-composite-symbol-number-target",
-                goal_context={
-                    "objective": "输入框逐字等于目标且不发送",
-                    "entities": {"input_text": current_value + "2"},
-                },
-                coarse_input_value=current_value,
-            )
+        for qwerty_target, key_kind, label in (
+            ("a", "character", "a"),
+            (" ", "space", "空格"),
+        ):
+            with self.subTest(qwerty_target=repr(qwerty_target)):
+                with self.assertRaisesRegex(VisionAgentError, "keyboard.layout"):
+                    _apply_input_structure_audit(
+                        base_scene,
+                        json.dumps(
+                            payload(
+                                "numeric_symbol",
+                                [
+                                    {
+                                        **exact_key,
+                                        "value": qwerty_target,
+                                        "label": label,
+                                        "key_kind": key_kind,
+                                    }
+                                ],
+                            ),
+                            ensure_ascii=False,
+                        ),
+                        fingerprint="frame-composite-symbol-qwerty-target",
+                        goal_context={
+                            "objective": "输入框逐字等于目标且不发送",
+                            "entities": {"input_text": current_value + qwerty_target},
+                        },
+                        coarse_input_value=current_value,
+                    )
 
     def test_scene_normalizes_exact_symbol_grid_layout_alias(self) -> None:
         payload = scene_payload()

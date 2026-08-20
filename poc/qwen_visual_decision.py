@@ -1324,10 +1324,6 @@ class QwenVisualDecisionObserver:
         privacy_minimized_system_home = (
             _task_requests_coordinate_free_system_home(context)
         )
-        if privacy_minimized_system_home:
-            available_actions = frozenset(
-                {"home"} if "home" in available_actions else set()
-            )
         # These are the same read-only frames that established the trusted
         # observation, so apply the observer's one-leading-frame tolerance.
         # Confirmation-time recapture and post-action verification use their

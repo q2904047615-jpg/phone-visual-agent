@@ -3370,6 +3370,70 @@ class QwenVisualDecisionTests(unittest.TestCase):
         )
         self.assertEqual("home", decision.proposal.action.action)
 
+    def test_privacy_home_keeps_full_canonical_catalog_digest(self) -> None:
+        raw_context = task_context(task_id="task_home_digest", revision=7)
+        raw_context["current_subgoal"]["objective"] = "回到手机主屏幕"
+        raw_context["current_subgoal"]["completion_conditions"] = [
+            "手机主屏幕可见"
+        ]
+        parsed = QwenTaskContext.from_dict(raw_context)
+        semantic_ir = TaskSemanticIR(
+            task_id=parsed.task_id,
+            device_id=parsed.device_id,
+            revision=parsed.revision,
+            raw_goal="回到手机主屏幕",
+            surfaces=(SurfaceRef("surface_launcher", "launcher"),),
+            entities=(),
+            effects=(),
+            constraints=(
+                ConstraintIntent(
+                    constraint_id="constraint.home",
+                    kind="required_action",
+                    value="home",
+                    authoritative=True,
+                ),
+            ),
+            subgoals=(
+                SemanticSubgoal(
+                    subgoal_id="current_target",
+                    surface_ref="surface_launcher",
+                    status="active",
+                    external_impact="navigation_only",
+                    constraint_refs=("constraint.home",),
+                ),
+            ),
+        )
+        context = replace(parsed, semantic_ir=semantic_ir)
+        current_scene = scene_for(
+            self.frames,
+            app_id="unknown",
+            screen_id="unknown",
+            elements=(),
+        )
+        observation = trusted_observation(self.frames, scene=current_scene)
+        available = frozenset({"home", "tap_semantic", "swipe"})
+        provider = FakeProvider(
+            minimal_selection_payload(status="action", choice_id="choice_1")
+        )
+
+        _observer, decision = self.decide(
+            provider,
+            context=context,
+            observation=observation,
+            available_action_kinds=available,
+        )
+        expected = compile_canonical_action_catalog(
+            observation.scene,
+            semantic_ir,
+            available,
+        )
+
+        self.assertEqual("home", decision.proposal.action.action)
+        self.assertEqual(
+            expected.report_digest,
+            decision.proposal.action.params["formal_report_digest"],
+        )
+
     def test_explicit_system_home_privacy_view_rejects_other_actions(self) -> None:
         context = task_context(task_id="task_home_only", revision=6)
         context["current_subgoal"]["objective"] = "返回手机桌面"
@@ -3380,7 +3444,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         _observer, decision = self.decide(
             provider,
             context=context,
-            available_action_kinds={"home", "tap_semantic", "swipe"},
+            available_action_kinds={"home"},
         )
 
         self.assertEqual("blocked", decision.proposal.status)

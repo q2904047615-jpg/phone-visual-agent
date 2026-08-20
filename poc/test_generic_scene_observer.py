@@ -5692,18 +5692,23 @@ class GenericSceneObserverTests(unittest.TestCase):
                 wrong["keyboard"]["literal_keys"][0].update(
                     {"value": "6", "label": "6"}
                 )
-                with self.assertRaisesRegex(VisionAgentError, "白名单外"):
-                    _apply_input_structure_audit(
-                        base_scene,
-                        json.dumps(wrong, ensure_ascii=False),
-                        fingerprint="frame-literal-parser-wrong",
-                        goal_context={
-                            "objective": "输入框逐字等于目标且不发送",
-                            "entities": {"input_text": target},
-                        },
+                projected = _apply_input_structure_audit(
+                    base_scene,
+                    json.dumps(wrong, ensure_ascii=False),
+                    fingerprint="frame-literal-parser-wrong",
+                    goal_context={
+                        "objective": "输入框逐字等于目标且不发送",
+                        "entities": {"input_text": target},
+                    },
+                )
+                self.assertFalse(
+                    any(
+                        item.states.get("key_value") == "6"
+                        for item in projected.elements
                     )
+                )
 
-    def test_input_audit_rejects_literal_key_outside_goal_whitelist(self) -> None:
+    def test_input_audit_discards_literal_key_outside_goal_whitelist(self) -> None:
         base_scene = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),
             fingerprint="frame-literal-whitelist",
@@ -5741,16 +5746,239 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         )
 
-        with self.assertRaisesRegex(VisionAgentError, "白名单外"):
-            _apply_input_structure_audit(
-                base_scene,
-                json.dumps(audit, ensure_ascii=False),
-                fingerprint="frame-literal-whitelist",
-                goal_context={
-                    "objective": "输入 wifi",
-                    "entities": {"input_text": "wifi"},
+        projected = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="frame-literal-whitelist",
+            goal_context={
+                "objective": "输入 wifi",
+                "entities": {"input_text": "wifi"},
+            },
+        )
+        self.assertFalse(
+            any(item.states.get("key_value") == "w" for item in projected.elements)
+        )
+
+    def test_input_audit_projects_optional_extras_and_keeps_exact_layout_switch(
+        self,
+    ) -> None:
+        current_value = "longinputvalidation2026"
+        target_value = current_value + ":123+45-6@7."
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "coarse-input",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": current_value,
+                "bounds": [120, 530, 700, 590],
+                "confidence": 1.0,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "value": current_value,
+                    "focused": True,
+                },
+                "evidence": [current_value],
+            }
+        ]
+        base_scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-optional-input-extras",
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="app-input-1",
+                    bounds=[130, 540, 700, 590],
+                    text=current_value,
+                )
+            ],
+            ime_preedit_regions=[
+                {
+                    "region_id": "ime-preedit-1",
+                    "bounds": [80, 600, 920, 660],
+                    "text": current_value,
+                    "confidence": 1.0,
+                    "candidates": [],
+                }
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 660, 1000, 1000],
+                "layout": "numeric",
+                "input_mode": "direct_latin",
+                "case_mode": "unknown",
+                "qwerty_anchors": None,
+                "mode_switch": None,
+                "backspace_key": None,
+                "case_switch": None,
+                "literal_keys": [
+                    {
+                        "value": value,
+                        "label": value,
+                        "key_kind": "character",
+                        "bounds": bounds,
+                        "confidence": 1.0,
+                        "fully_visible": True,
+                    }
+                    for value, bounds in (
+                        ("+", [20, 790, 180, 850]),
+                        ("@", [820, 790, 980, 850]),
+                    )
+                ],
+                "layout_switches": [
+                    {
+                        "label": "!?#",
+                        "bounds": [20, 850, 180, 910],
+                        "confidence": 1.0,
+                        "current_layout": "numeric",
+                        "target_layout": "symbol",
+                    }
+                ],
+            },
+        )
+
+        projected = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="frame-optional-input-extras",
+            goal_context={
+                "objective": "输入框逐字等于目标且不发送",
+                "entities": {"input_text": target_value},
+            },
+            coarse_input_value=current_value,
+        )
+
+        target = projected.unique_trusted_goal_element()
+        self.assertEqual("local_audited_keyboard_layout_switch_1", target.element_id)
+        self.assertEqual("symbol", target.states["target_layout"])
+        self.assertFalse(
+            any(
+                item.states.get("key_value") in {"+", "@"}
+                for item in projected.elements
+            )
+        )
+
+    def test_input_audit_recovers_same_frame_direct_latin_value_not_long_candidate(
+        self,
+    ) -> None:
+        current_value = "longinputvalidation2026"
+        target_value = current_value + ":123+45-6@7."
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "coarse-input",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": current_value,
+                "bounds": [120, 530, 700, 590],
+                "confidence": 1.0,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "value": current_value,
+                    "focused": True,
+                },
+                "evidence": [current_value],
+            }
+        ]
+        base_scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-same-value-preedit",
+        )
+
+        def parsed(*, input_mode: str, preedit_text: str, coarse_value: str):
+            audit = input_audit_payload(
+                application_inputs=[
+                    audited_application_input(
+                        structure_id="app-input-1",
+                        bounds=[140, 530, 710, 590],
+                        text="",
+                    )
+                ],
+                ime_preedit_regions=[
+                    {
+                        "region_id": "ime-preedit-1",
+                        "bounds": [100, 600, 900, 660],
+                        "text": preedit_text,
+                        "confidence": 1.0,
+                        "candidates": [
+                            {
+                                "text": preedit_text,
+                                "bounds": [100, 600, 850, 660],
+                                "confidence": 1.0,
+                                "fully_visible": True,
+                            }
+                        ],
+                    }
+                ],
+                keyboard={
+                    "visible": True,
+                    "bounds": [0, 660, 1000, 1000],
+                    "layout": "numeric",
+                    "input_mode": input_mode,
+                    "case_mode": "unknown",
+                    "qwerty_anchors": None,
+                    "mode_switch": None,
+                    "backspace_key": None,
+                    "case_switch": None,
+                    "literal_keys": [],
+                    "layout_switches": [
+                        {
+                            "label": "!?#",
+                            "bounds": [10, 890, 190, 950],
+                            "confidence": 1.0,
+                            "current_layout": "numeric",
+                            "target_layout": "symbol",
+                        }
+                    ],
                 },
             )
+            return _apply_input_structure_audit(
+                base_scene,
+                json.dumps(audit, ensure_ascii=False),
+                fingerprint="frame-same-value-preedit",
+                goal_context={
+                    "objective": "输入框逐字等于目标且不发送",
+                    "entities": {"input_text": target_value},
+                },
+                coarse_input_value=coarse_value,
+            )
+
+        recovered = parsed(
+            input_mode="direct_latin",
+            preedit_text=current_value,
+            coarse_value=current_value,
+        )
+        field = recovered.get_element("local_audited_input_1")
+        self.assertEqual(current_value, field.states["value"])
+        self.assertEqual(
+            "local_audited_keyboard_layout_switch_1",
+            recovered.unique_trusted_goal_element().element_id,
+        )
+
+        for input_mode, preedit_text, coarse_value in (
+            ("direct_latin", "different-visible-value", current_value),
+            ("direct_latin", current_value, "different-coarse-value"),
+            ("chinese_pinyin", current_value, current_value),
+        ):
+            with self.subTest(
+                input_mode=input_mode,
+                preedit_text=preedit_text,
+                coarse_value=coarse_value,
+            ):
+                rejected = parsed(
+                    input_mode=input_mode,
+                    preedit_text=preedit_text,
+                    coarse_value=coarse_value,
+                )
+                rejected_field = rejected.get_element("local_audited_input_1")
+                self.assertEqual("", rejected_field.states["value"])
+                self.assertNotIn(
+                    "same_frame_visible_cue_text",
+                    rejected_field.states,
+                )
 
     def test_empty_optional_backspace_label_does_not_discard_valid_input(self) -> None:
         base_scene = _parse_scene(

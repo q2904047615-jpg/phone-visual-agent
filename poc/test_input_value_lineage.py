@@ -787,16 +787,22 @@ class TypedInputLineageTests(unittest.TestCase):
         }
         for lineage, cue in ((None, PRIOR), (record, PRIOR + "x")):
             with self.subTest(lineage=lineage is not None, cue=cue):
-                with self.assertRaisesRegex(VisionAgentError, "白名单外"):
-                    _apply_input_structure_audit(
-                        UIScene.from_dict(before),
-                        state_switch_audit_raw(cue=cue),
-                        fingerprint="after-state-fp",
-                        goal_context=goal,
-                        verified_input_lineage=lineage,
-                        device_id=DEVICE,
-                        lineage_frame=surface_frame(),
+                projected = _apply_input_structure_audit(
+                    UIScene.from_dict(before),
+                    state_switch_audit_raw(cue=cue),
+                    fingerprint="after-state-fp",
+                    goal_context=goal,
+                    verified_input_lineage=lineage,
+                    device_id=DEVICE,
+                    lineage_frame=surface_frame(),
+                )
+                self.assertFalse(
+                    any(
+                        element.meaning == "input_exact_literal_key"
+                        and element.states.get("goal_relevant") is True
+                        for element in projected.elements
                     )
+                )
         without_cue = _apply_input_structure_audit(
             UIScene.from_dict(before),
             state_switch_audit_raw(cue=""),

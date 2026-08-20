@@ -1211,6 +1211,7 @@ class GenericSceneObserver:
                             raw,
                             fingerprint=fingerprint,
                             goal_context=context,
+                            coarse_input_value=input_audit_current_value,
                             verified_input_lineage=verified_input_lineage,
                             device_id=device_id,
                             lineage_frame=frame,
@@ -1271,6 +1272,7 @@ class GenericSceneObserver:
                                 raw,
                                 fingerprint=fingerprint,
                                 goal_context=context,
+                                coarse_input_value=input_audit_current_value,
                                 verified_input_lineage=verified_input_lineage,
                                 device_id=device_id,
                                 lineage_frame=frame,
@@ -5415,6 +5417,7 @@ def _apply_input_structure_audit(
     *,
     fingerprint: str,
     goal_context: dict[str, Any],
+    coarse_input_value: str | None = None,
     verified_input_lineage: TypedInputLineage | None = None,
     device_id: str | None = None,
     lineage_frame: Image.Image | None = None,
@@ -5546,8 +5549,6 @@ def _apply_input_structure_audit(
                 }:
                     raise UISceneError("IME候选字段不符合协议。")
                 candidate_text = str(candidate.get("text") or "").strip()
-                if not candidate_text or len(candidate_text) > 20:
-                    raise UISceneError("IME候选文字格式无效。")
                 if not _valid_1000_bounds(candidate.get("bounds")):
                     raise UISceneError("IME候选 bounds 无效。")
                 candidate_bounds = tuple(float(value) for value in candidate["bounds"])
@@ -5558,6 +5559,13 @@ def _apply_input_structure_audit(
                     raise UISceneError("IME候选 fully_visible 必须是布尔值。")
                 if not _bounds_inside(candidate_bounds, bounds, tolerance=12):
                     raise UISceneError("IME候选必须完整位于对应预编辑区内。")
+                # Candidate text is optional action authority.  A model may
+                # enumerate a visible but irrelevant long preedit string here.
+                # After its schema and geometry are validated, discard that
+                # non-authoritative item instead of letting it veto a separately
+                # grounded application input.  It can never become an action.
+                if not candidate_text or len(candidate_text) > 20:
+                    continue
                 if candidate["fully_visible"] and candidate_confidence >= 0.9:
                     candidates.append(
                         {
@@ -5683,6 +5691,55 @@ def _apply_input_structure_audit(
 
         switch_is_goal = _goal_requests_keyboard_mode_switch(goal_context)
         trusted_input = matches[0] if len(matches) == 1 else None
+        if (
+            trusted_input is not None
+            and not trusted_input["text"]
+            and isinstance(coarse_input_value, str)
+            and coarse_input_value
+            and _unique_scene_input_value(scene) == coarse_input_value
+            and keyboard_input_mode == "direct_latin"
+            and len(trusted_preedits) == 1
+            and trusted_preedits[0]["text"] == coarse_input_value
+            and not trusted_preedits[0]["candidates"]
+            and trusted_input["visible_editable_cues"]
+        ):
+            focused_context = _active_subgoal_visual_context(goal_context)
+            focused_entities = (
+                focused_context.get("goal_entities")
+                if focused_context is not goal_context
+                else goal_context.get("entities")
+            )
+            focused_target_text = (
+                focused_entities.get("input_text")
+                if isinstance(focused_entities, dict)
+                else None
+            )
+            input_box = tuple(float(value) for value in trusted_input["input_bounds"])
+            preedit_box = tuple(float(value) for value in trusted_preedits[0]["bounds"])
+            horizontal_overlap = max(
+                0.0,
+                min(input_box[2], preedit_box[2])
+                - max(input_box[0], preedit_box[0]),
+            )
+            smaller_width = min(
+                input_box[2] - input_box[0],
+                preedit_box[2] - preedit_box[0],
+            )
+            vertical_gap = max(
+                0.0,
+                preedit_box[1] - input_box[3],
+                input_box[1] - preedit_box[3],
+            )
+            if (
+                isinstance(focused_target_text, str)
+                and focused_target_text.startswith(coarse_input_value)
+                and smaller_width > 0
+                and horizontal_overlap / smaller_width >= 0.60
+                and vertical_gap <= 100
+            ):
+                trusted_input = dict(trusted_input)
+                trusted_input["same_frame_visible_cue_text"] = coarse_input_value
+                trusted_input["text"] = coarse_input_value
         if trusted_input is not None and verified_input_lineage is not None:
             raw_lineage_text = trusted_input["text"]
             lineage_bounds = tuple(
@@ -5832,10 +5889,12 @@ def _apply_input_structure_audit(
                 ),
             )
         )
-        if any(item["value"] not in literal_key_targets for item in literal_keys):
-            raise UISceneError(
-                "literal_keys 包含当前输入目标白名单外的字符。"
-            )
+        # Schema-valid visible keys outside the locally derived unique next
+        # character are non-authoritative observations.  Project them away;
+        # never let them become scene elements or action candidates.
+        literal_keys = [
+            item for item in literal_keys if item["value"] in literal_key_targets
+        ]
         if keyboard_layout == "qwerty" and qwerty_geometry is not None:
             literal_keys = [
                 item
@@ -6014,6 +6073,14 @@ def _apply_input_structure_audit(
                     input_evidence.append(
                         "输入状态切换后同一应用输入区域仍逐字可见："
                         f"{lineage_visible_cue_text}；本地同值连续性核对通过"
+                    )
+                same_frame_visible_cue_text = trusted_input.get(
+                    "same_frame_visible_cue_text"
+                )
+                if isinstance(same_frame_visible_cue_text, str):
+                    input_evidence.append(
+                        "同一帧粗场景与输入结构审计逐字一致："
+                        f"{same_frame_visible_cue_text}；非授权 IME 分类已隔离"
                     )
             elif trusted_input["placeholder"]:
                 input_evidence.insert(0, f"应用输入框为空，占位提示：{trusted_input['placeholder']}")

@@ -5412,6 +5412,7 @@ def _normalized_keyboard_layout_token(value: Any) -> Any:
     return {
         "symbols": "symbol",
         "symbol_grid": "symbol",
+        "qwerty_symbol": "symbol",
     }.get(normalized, normalized)
 
 

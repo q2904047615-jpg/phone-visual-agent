@@ -4328,7 +4328,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual({"q", "p", "a", "l", "z", "m", "backspace"}, set(geometry["anchors"]))
 
     def test_input_audit_normalizes_symbols_layout_without_relaxing_schema(self) -> None:
-        for observed_layout in (" Symbols ", "symbol_grid"):
+        for observed_layout in (" Symbols ", "symbol_grid", "qwerty_symbol"):
             with self.subTest(observed_layout=observed_layout):
                 empty = scene_payload()
                 empty["elements"] = []
@@ -4395,23 +4395,32 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("symbol", scene.elements[0].states["keyboard_layout"])
 
     def test_input_audit_keeps_unknown_layout_fail_closed(self) -> None:
-        empty = scene_payload()
-        empty["elements"] = []
-        audit = input_audit_payload(
-            keyboard={
-                "visible": True,
-                "bounds": [0, 360, 1000, 1000],
-                "layout": "symbols_custom",
-                "input_mode": "unknown",
-                "mode_switch": None,
-            }
-        )
+        for observed_layout in (
+            "symbols_custom",
+            "numeric_symbol_grid",
+            "qwerty_numeric",
+            "mixed",
+        ):
+            with self.subTest(observed_layout=observed_layout):
+                empty = scene_payload()
+                empty["elements"] = []
+                audit = input_audit_payload(
+                    keyboard={
+                        "visible": True,
+                        "bounds": [0, 360, 1000, 1000],
+                        "layout": observed_layout,
+                        "input_mode": "unknown",
+                        "mode_switch": None,
+                    }
+                )
 
-        with self.assertRaisesRegex(VisionAgentError, "keyboard.layout"):
-            GenericSceneObserver(SequenceProvider([empty, empty, audit])).observe(
-                frames=stable_frames(),
-                goal_context={"objective": "读取当前输入框和键盘"},
-            )
+                with self.assertRaisesRegex(VisionAgentError, "keyboard.layout"):
+                    GenericSceneObserver(
+                        SequenceProvider([empty, empty, audit])
+                    ).observe(
+                        frames=stable_frames(),
+                        goal_context={"objective": "读取当前输入框和键盘"},
+                    )
 
     def test_input_audit_enriches_known_focused_input_missing_keyboard_facts(self) -> None:
         preliminary = scene_payload()

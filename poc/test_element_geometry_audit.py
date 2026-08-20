@@ -177,6 +177,34 @@ class StrictGeometryAuditProtocolTests(unittest.TestCase):
             result.full_bounds,
         )
 
+    def test_one_to_four_safe_evidence_items_are_bounded_and_accepted(self):
+        facts = [
+            "绿色文件夹图标完整可见",
+            "文件传输助手标题逐字可见",
+            "副标题位于同一完整列表项内",
+            "列表项左右边缘均完整可见",
+        ]
+        for count in (1, 2, 3, 4):
+            with self.subTest(count=count):
+                result = self.select(
+                    self.render(audit_payload(match={"evidence": facts[:count]}))
+                )
+                self.assertEqual(tuple(facts[:count]), result.evidence)
+
+    def test_geometry_evidence_count_and_contents_remain_fail_closed(self):
+        cases = (
+            ([], "格式无效"),
+            (["安全可见事实"] * 5, "格式无效"),
+            (["安全可见事实", "点击该列表项"], "控制信息"),
+            ([123], "格式无效"),
+        )
+        for evidence, error in cases:
+            with self.subTest(evidence=evidence):
+                with self.assertRaisesRegex(ElementGeometryAuditError, error):
+                    self.select(
+                        self.render(audit_payload(match={"evidence": evidence}))
+                    )
+
     def test_duplicate_json_keys_are_rejected_at_top_and_nested_levels(self):
         top = self.render()[:-1] + ',"matches":[]}'
         with self.assertRaisesRegex(ElementGeometryAuditError, "重复JSON字段"):

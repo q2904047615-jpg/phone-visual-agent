@@ -313,6 +313,7 @@ class AuditedElementGeometry:
 _SOURCE_REF_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$")
 _MATCH_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 MAX_GEOMETRY_EVIDENCE_CHARS = 200
+MAX_GEOMETRY_EVIDENCE_ITEMS = 4
 _FORBIDDEN_EVIDENCE = re.compile(
     r"(?:coordinates?|coords?|bounds?\s*(?:[=:]|\[|\(|-?\d)|"
     r"\bx\s*[=:]|\by\s*[=:]|"
@@ -432,7 +433,7 @@ def parse_element_geometry_audit(
         raw_evidence = item["evidence"]
         if (
             not isinstance(raw_evidence, list)
-            or not 1 <= len(raw_evidence) <= 2
+            or not 1 <= len(raw_evidence) <= MAX_GEOMETRY_EVIDENCE_ITEMS
             or any(not isinstance(part, str) for part in raw_evidence)
         ):
             raise ElementGeometryAuditError("geometry audit evidence 格式无效。")
@@ -623,6 +624,7 @@ def element_geometry_audit_prompt(
         "not merely a broad row or neighboring control. If the crop is unclear, an "
         "occurrence is clipped, or enumeration cannot be completed, report those facts "
         "without guessing. The local controller will map accepted crop-local bounds.\n"
+        "Each match evidence array must contain 1 to 4 short visible facts.\n"
         f"source_ref={source_ref}\n"
         f"literal_label={json.dumps(label, ensure_ascii=False)}\n"
         f"visual_role={visual_role}\n"

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from PIL import Image, ImageDraw
 
+from canonical_action_protocol import compile_canonical_action_catalog
 from generic_scene_observer import _local_frame_fingerprint
 from generic_step_planner import GenericStepPlanningError
 from qwen_visual_decision import (
@@ -1792,7 +1793,12 @@ class QwenVisualDecisionTests(unittest.TestCase):
             label="",
             bounds=(0.08, 0.12, 0.92, 0.22),
             confidence=0.97,
-            states={"goal_relevant": True, "focused": False, "value": ""},
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "focused": False,
+                "value": "",
+            },
             evidence=("空输入框可见",),
         )
         observation = trusted_observation(self.frames, elements=(field,))
@@ -2039,6 +2045,32 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 }
             },
             mode_choice["expected_result"],
+        )
+        available = frozenset({"tap_semantic", "input_verified_text", "clear_verified_text"})
+        literal_choice = next(
+            item for item in choices if item["element_id"] == literal.element_id
+        )
+        decision = QwenVisualDecisionObserver(
+            FakeProvider(
+                minimal_selection_payload(
+                    status="action",
+                    choice_id=literal_choice["choice_id"],
+                )
+            )
+        ).decide(
+            frames=self.frames,
+            task_context=parsed,
+            trusted_observation=observation,
+            available_action_kinds=available,
+        )
+        rebuilt = compile_canonical_action_catalog(
+            observation.scene,
+            parsed.semantic_ir,
+            available,
+        )
+        self.assertEqual(
+            rebuilt.report_digest,
+            decision.proposal.action.params["formal_report_digest"],
         )
 
     def test_search_result_prohibition_keeps_unique_unfocused_input_focus_choice(self) -> None:
@@ -2618,12 +2650,6 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn("states.focused=true时禁止再用tap_semantic重复聚焦", prompt)
 
     def test_unfocused_input_hides_verified_input_until_fresh_focus(self) -> None:
-        from qwen_visual_decision import (
-            _decision_prompt,
-            _decision_retry_prompt,
-            _precondition_eligible_action_kinds,
-        )
-
         context_payload = copy.deepcopy(self.context)
         context_payload["goal"]["entities"] = {"input_text": "agent"}
         context = QwenTaskContext.from_dict(context_payload)
@@ -2634,32 +2660,22 @@ class QwenVisualDecisionTests(unittest.TestCase):
             label="",
             bounds=(0.1, 0.3, 0.9, 0.4),
             confidence=0.99,
-            states={"goal_relevant": True, "value": ""},
+            states={"goal_relevant": True, "fully_visible": True, "value": ""},
             evidence=("唯一空输入框",),
         )
         observation = trusted_observation(self.frames, elements=(field,))
-        eligible = _precondition_eligible_action_kinds(
+        typed_context = test_context_with_semantic_ir(
             context,
             observation,
             frozenset({"tap_semantic", "input_verified_text"}),
         )
-
-        self.assertEqual(frozenset({"tap_semantic"}), eligible)
-        prompt = _decision_prompt(
-            context,
+        choices = _selection_choices(
+            typed_context,
             observation,
-            decision_number=1,
-            available_action_kinds=eligible,
+            frozenset({"tap_semantic", "input_verified_text"}),
         )
-        retry = _decision_retry_prompt(
-            context,
-            observation,
-            error=VisionAgentError("输入框未聚焦"),
-            decision_number=1,
-            available_action_kinds=eligible,
-        )
-        self.assertIn("本轮应只绑定该唯一input候选并提出tap_semantic", prompt)
-        self.assertIn("本轮不得同时输入文字", retry)
+        self.assertEqual(["tap_semantic"], [item["action"] for item in choices])
+        self.assertEqual("target_field", choices[0]["element_id"])
 
     def test_forged_mars_element_and_self_authored_page_state_are_rejected(self) -> None:
         forged = action_payload(self.context, self.observation)

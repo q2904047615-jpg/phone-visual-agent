@@ -1312,11 +1312,6 @@ class QwenVisualDecisionObserver:
         available_actions = _normalize_available_action_kinds(
             available_action_kinds
         )
-        available_actions = _precondition_eligible_action_kinds(
-            context,
-            trusted_observation,
-            available_actions,
-        )
         privacy_minimized_system_home = (
             _task_requests_coordinate_free_system_home(context)
         )
@@ -1335,6 +1330,14 @@ class QwenVisualDecisionObserver:
         if context.device_id != trusted_observation.device_id:
             raise VisionAgentError("任务 device_id 与可信观察不一致。")
         self._metrics["decision_count"] += 1
+        canonical_choices = _selection_choices(
+            context,
+            trusted_observation,
+            available_actions,
+        )
+        canonical_action_kinds = sorted(
+            {str(item["action"]) for item in canonical_choices}
+        )
 
         model_identity = public_model_identity(self.provider.status())
         base_diagnostics = {
@@ -1352,7 +1355,8 @@ class QwenVisualDecisionObserver:
             "first_pass_success": False,
             "repair_retry_success": False,
             "hardware_actions_enabled": False,
-            "available_action_kinds": sorted(available_actions),
+            "available_action_kinds": canonical_action_kinds,
+            "device_action_kinds": sorted(available_actions),
             "model_call_elapsed_seconds": model_call_elapsed_seconds,
         }
         self.last_diagnostics = dict(base_diagnostics)
@@ -2462,154 +2466,9 @@ def _normalize_available_action_kinds(
     return normalized
 
 
-def _precondition_eligible_action_kinds(
-    context: QwenTaskContext,
-    observation: TrustedObservation,
-    available_action_kinds: frozenset[str],
-) -> frozenset[str]:
-    """Hide actions whose controller-owned visual preconditions are absent.
-
-    This does not add an action or infer focus. It only prevents Qwen from
-    proposing verified text input before the trusted scene proves that an
-    input is focused; a separate tap and fresh observation must establish that
-    state first.
-    """
-
-    eligible = set(available_action_kinds)
-    if "input_verified_text" in eligible:
-        eligible_inputs = []
-        if context.requested_input_text is not None:
-            for element in observation.scene.elements:
-                if element.role != "input" or element.states.get("focused") is not True:
-                    continue
-                try:
-                    step = plan_next_verified_input(
-                        context.requested_input_text,
-                        element.states.get("value"),
-                    )
-                except (ValueError, VerifiedTextTransactionError):
-                    continue
-                if (
-                    step is not None
-                    and step.kind != "literal_key"
-                    and element.states.get("keyboard_layout") == "qwerty"
-                    and element.states.get("keyboard_input_mode") == step.required_mode
-                    and (
-                        not step.required_case_mode
-                        or element.states.get("keyboard_case_mode")
-                        == step.required_case_mode
-                    )
-                    and not element.states.get("ime_preedit_text")
-                ):
-                    eligible_inputs.append(element)
-        if len(eligible_inputs) != 1:
-            eligible.remove("input_verified_text")
-    if "clear_verified_text" in eligible:
-        clearable_inputs = tuple(
-            element
-            for element in observation.scene.elements
-            if element.role == "input"
-            and element.states.get("focused") is True
-            and isinstance(element.states.get("value"), str)
-            and bool(element.states.get("value"))
-            and element.states.get("keyboard_layout") == "qwerty"
-            and (
-                context.semantic_ir is not None
-                or element.states.get("goal_relevant") is True
-            )
-        )
-        if len(clearable_inputs) != 1:
-            eligible.remove("clear_verified_text")
-        elif _current_subgoal_requests_verified_clear(context):
-            # Clearing a currently visible local draft is a certified atomic
-            # action.  Do not offer indirect long-press/selection flows or
-            # keyboard keys when the trusted scene already proves the exact
-            # preconditions for the one-shot clear contract.
-            eligible.intersection_update({"clear_verified_text"})
-    if _current_subgoal_requests_keyboard_dismissal(context) and (
-        _trusted_scene_proves_visible_keyboard(
-            observation.scene,
-            formal=context.semantic_ir is not None,
-        )
-    ):
-        # Android back is the certified device primitive for dismissing a
-        # currently visible soft keyboard.  Keep Qwen as the single-step
-        # selector, but do not offer element taps (especially keyboard keys),
-        # Home, or gestures for this exact structural state transition.
-        eligible.intersection_update({"back"})
-    return frozenset(eligible)
-
-
-_KEYBOARD_REFERENCE_PATTERN = re.compile(
-    r"(?:软键盘|键盘|输入法|\b(?:soft\s+)?keyboard\b|\bime\b)",
-    re.IGNORECASE,
-)
-_KEYBOARD_DISMISSAL_PATTERN = re.compile(
-    r"(?:收起|隐藏|关闭|不再显示|不可见|"
-    r"\b(?:hide|hidden|dismiss|close|closed|not\s+visible|no\s+longer\s+visible)\b)",
-    re.IGNORECASE,
-)
-
-_VERIFIED_CLEAR_PATTERN = re.compile(
-    r"(?:清空|清除|删(?:除|掉)|恢复(?:为|成)?(?:空白|空)|"
-    r"(?:内容|输入框|草稿|文本|文字|值)(?:恢复)?(?:为|成|是)?(?:空白|空)|"
-    r"\b(?:clear|empty|blank|remove|delete)\b)",
-    re.IGNORECASE,
-)
-
-
-def _current_subgoal_requests_verified_clear(
-    context: QwenTaskContext,
-) -> bool:
-    """Recognize only the active subgoal's explicit empty-value request."""
-
-    typed_actions = _typed_required_action_kinds(context)
-    if typed_actions:
-        return "clear_verified_text" in typed_actions
-    if context.requested_input_text is not None:
-        return False
-    visible = " ".join(
-        [
-            str(context.current_subgoal.get("objective") or ""),
-            *(
-                str(item)
-                for item in context.current_subgoal.get(
-                    "completion_conditions",
-                    [],
-                )
-            ),
-        ]
-    )
-    return bool(_VERIFIED_CLEAR_PATTERN.search(visible))
-
-
-def _current_subgoal_requests_keyboard_dismissal(
-    context: QwenTaskContext,
-) -> bool:
-    """Match only the active subgoal, never a keyboard mention in the goal."""
-
-    typed_actions = _typed_required_action_kinds(context)
-    if typed_actions:
-        return "back" in typed_actions
-    visible = " ".join(
-        [
-            str(context.current_subgoal.get("objective") or ""),
-            *(
-                str(item)
-                for item in context.current_subgoal.get(
-                    "completion_conditions",
-                    [],
-                )
-            ),
-        ]
-    )
-    return bool(
-        _KEYBOARD_REFERENCE_PATTERN.search(visible)
-        and _KEYBOARD_DISMISSAL_PATTERN.search(visible)
-    )
-
-
 def _typed_required_action_kinds(context: QwenTaskContext) -> frozenset[str]:
+    """Read typed action requirements for identity/evidence checks only."""
+
     semantic_ir = context.semantic_ir
     if semantic_ir is None:
         return frozenset()
@@ -2629,28 +2488,6 @@ def _typed_required_action_kinds(context: QwenTaskContext) -> frozenset[str]:
         if constraint_ref in constraints
         and constraints[constraint_ref].kind == "required_action"
     )
-
-
-def _trusted_scene_proves_visible_keyboard(
-    scene: UIScene,
-    *,
-    formal: bool = False,
-) -> bool:
-    """Require the independent input audit's complete visible-keyboard facts."""
-
-    candidates = tuple(
-        element
-        for element in scene.elements
-        if element.role == "input"
-        and float(element.confidence) >= MIN_TARGET_CONFIDENCE
-        and (formal or element.states.get("goal_relevant") is True)
-        and element.states.get("focused") is True
-        and element.states.get("keyboard_layout")
-        in {"qwerty", "numeric", "symbol", "unknown"}
-        and element.states.get("keyboard_input_mode")
-        in {"direct_latin", "chinese_pinyin", "unknown"}
-    )
-    return len(candidates) == 1
 
 
 def _parse_action(

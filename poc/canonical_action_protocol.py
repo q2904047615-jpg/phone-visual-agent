@@ -1557,6 +1557,35 @@ def compile_canonical_action_catalog(
         if candidate.effect_ref:
             return candidate.effect_ref in active_effect_refs
         action_kind = candidate.action_kind
+        if active_required_actions:
+            if "input_verified_text" in active_required_actions:
+                if action_kind == "input_verified_text":
+                    pass
+                elif action_kind == "tap_semantic":
+                    required_element = element_by_id.get(
+                        str(candidate.parameters.get("element_id") or "")
+                    )
+                    if required_element is None or not (
+                        required_element.role == "input"
+                        or required_element.meaning
+                        in {
+                            "ime_exact_candidate",
+                            "input_exact_literal_key",
+                            "switch_keyboard_layout",
+                            "switch_keyboard_case",
+                            "switch_keyboard_input_mode",
+                        }
+                    ):
+                        return False
+                elif (
+                    action_kind == "clear_verified_text"
+                    and "clear_verified_text" in active_required_actions
+                ):
+                    pass
+                else:
+                    return False
+            elif action_kind not in active_required_actions:
+                return False
         if action_kind in {"input_verified_text", "clear_verified_text"}:
             return bool(active_input_payload_refs)
         if action_kind == "tap_semantic":

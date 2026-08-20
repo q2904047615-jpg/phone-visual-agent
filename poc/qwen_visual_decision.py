@@ -3358,7 +3358,26 @@ def _matching_exact_text_candidates(
     for element in observation.scene.elements:
         if float(element.confidence) < MIN_TARGET_CONFIDENCE:
             continue
-        if required_text not in (element.label, *element.evidence):
+        literal_match = required_text in (element.label, *element.evidence)
+        audited_reload_alias = (
+            required_text.strip().casefold()
+            in {
+                "刷新",
+                "刷新图标",
+                "重新加载",
+                "重新加载图标",
+                "refresh",
+                "refresh icon",
+                "reload",
+                "reload icon",
+            }
+            and element.role in {"button", "icon"}
+            and element.meaning.strip().casefold() == "reload"
+            and element.states.get("reload_visual_audit") is True
+            and element.states.get("independent_geometry_verified") is True
+            and element.states.get("fully_visible") is True
+        )
+        if not literal_match and not audited_reload_alias:
             continue
         if roles and element.role not in roles:
             continue

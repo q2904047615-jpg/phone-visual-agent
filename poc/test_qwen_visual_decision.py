@@ -605,6 +605,71 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.context = task_context()
         self.observation = trusted_observation(self.frames)
 
+    def test_reload_literal_alias_requires_unique_local_visual_audit(self) -> None:
+        audited_reload = UIElement(
+            element_id="local_audited_reload_control_1",
+            role="icon",
+            meaning="reload",
+            label="",
+            bounds=(0.82, 0.01, 0.86, 0.04),
+            confidence=0.95,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "reload_visual_audit": True,
+                "independent_geometry_verified": True,
+            },
+            evidence=("圆弧与箭头组成的独立图标",),
+        )
+        observation = trusted_observation(
+            self.frames,
+            elements=(audited_reload,),
+        )
+        raw = task_context(task_id="task_reload_alias")
+        raw["goal"]["entities"] = {"target_ui_label": "刷新图标"}
+        raw["current_subgoal"].update(
+            objective="点击当前浏览器顶部可见的刷新图标",
+            completion_conditions=["刷新图标已被点击"],
+        )
+        context = test_context_with_semantic_ir(
+            raw,
+            observation,
+            frozenset({"tap_semantic"}),
+        )
+        self.assertIsNone(_exact_text_candidate_block(context, observation))
+        self.assertEqual(
+            {"local_audited_reload_control_1"},
+            _required_exact_candidate_ids(context, observation),
+        )
+
+        for states, required_text in (
+            ({"goal_relevant": True, "fully_visible": True}, "刷新图标"),
+            (audited_reload.states, "支付图标"),
+        ):
+            with self.subTest(states=states, required_text=required_text):
+                candidate = replace(audited_reload, states=states)
+                blocked_observation = trusted_observation(
+                    self.frames,
+                    elements=(candidate,),
+                    observation_id="obs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                blocked_raw = copy.deepcopy(raw)
+                blocked_raw["goal"]["entities"] = {
+                    "target_ui_label": required_text
+                }
+                blocked_context = test_context_with_semantic_ir(
+                    blocked_raw,
+                    blocked_observation,
+                    frozenset({"tap_semantic"}),
+                )
+                self.assertEqual(
+                    "exact_text_missing",
+                    _exact_text_candidate_block(
+                        blocked_context,
+                        blocked_observation,
+                    )[1],
+                )
+
     def test_cross_surface_app_entry_offers_home_before_app_controls(self) -> None:
         parsed = QwenTaskContext.from_dict(task_context())
         semantic_ir = TaskSemanticIR(

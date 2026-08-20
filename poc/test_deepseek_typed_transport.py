@@ -85,6 +85,24 @@ class TypedPlannerTransportTests(unittest.TestCase):
                     graph.subgoals[0].external_impact,
                 )
 
+        split_context = payload(
+            objective="点击当前浏览器顶部可见的刷新图标，重新加载当前页面"
+        )
+        split_context["subgoals"][0].update(
+            {
+                "subgoal_id": "click_refresh",
+                "objective": "点击当前浏览器顶部可见的刷新图标",
+                "completion_conditions": ["刷新图标已被点击"],
+                "execution_class": "effect",
+                "effect_ids": [],
+            }
+        )
+        split_graph = DeepSeekTaskGraphPlanner(FakeProvider(split_context)).plan(
+            split_context["goal"]["objective"],
+            device_id="phone-1",
+        )
+        self.assertEqual("navigation_only", split_graph.subgoals[0].external_impact)
+
         for objective in (
             "刷新当前页面后提交表单",
             "刷新当前页面并登录账号",
@@ -101,6 +119,24 @@ class TypedPlannerTransportTests(unittest.TestCase):
                     objective,
                     device_id="phone-1",
                 )
+
+        unrelated_effect = payload(
+            objective="刷新当前页面后提交表单"
+        )
+        unrelated_effect["subgoals"][0].update(
+            {
+                "subgoal_id": "submit_form",
+                "objective": "提交表单",
+                "completion_conditions": ["表单已提交"],
+                "execution_class": "effect",
+                "effect_ids": [],
+            }
+        )
+        with self.assertRaisesRegex(TaskGraphError, "effect 子目标必须引用"):
+            DeepSeekTaskGraphPlanner(FakeProvider(unrelated_effect)).plan(
+                unrelated_effect["goal"]["objective"],
+                device_id="phone-1",
+            )
 
     def test_functional_page_modifiers_are_not_treated_as_page_names(self):
         for text in (

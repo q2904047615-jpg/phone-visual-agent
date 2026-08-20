@@ -3256,6 +3256,12 @@ def _normalize_local_refresh_execution_class(
     subgoals = payload.get("subgoals")
     if effects != [] or not isinstance(subgoals, list):
         return payload
+    goal_payload = payload.get("goal")
+    goal_objective = (
+        str(goal_payload.get("objective") or "")
+        if isinstance(goal_payload, dict)
+        else ""
+    )
     refresh_pattern = re.compile(
         r"(?:刷新|重新加载|重新载入).{0,16}(?:当前)?(?:页面|网页|标签页)|"
         r"(?:当前)?(?:页面|网页|标签页).{0,16}(?:刷新|重新加载|重新载入)|"
@@ -3276,7 +3282,7 @@ def _normalize_local_refresh_execution_class(
         if not isinstance(item, dict):
             normalized_subgoals.append(item)
             continue
-        context = " ".join(
+        local_context = " ".join(
             [
                 str(item.get("objective") or ""),
                 *(
@@ -3286,10 +3292,12 @@ def _normalize_local_refresh_execution_class(
                 ),
             ]
         )
+        context = " ".join((goal_objective, local_context))
         if (
             item.get("execution_class") == "effect"
             and item.get("effect_ids") == []
             and refresh_pattern.search(context)
+            and re.search(r"刷新|重新加载|重新载入|\brefresh\b|\breload\b", local_context, re.IGNORECASE)
             and not external_effect_pattern.search(context)
         ):
             normalized = dict(item)

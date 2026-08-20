@@ -30,6 +30,7 @@ from vision_agent import _image_data_url
 from system_navigation_privacy import privacy_minimized_system_navigation_view
 from task_semantic_ir import (
     ConstraintIntent,
+    DesiredState,
     EffectIntent,
     InputFieldIntent,
     SemanticEntity,
@@ -123,7 +124,7 @@ def launcher_elements() -> tuple[UIElement, ...]:
             label="设置",
             bounds=(0.68, 0.20, 0.86, 0.35),
             confidence=0.96,
-            states={"goal_relevant": True},
+            states={"goal_relevant": True, "fully_visible": True},
             evidence=("设置",),
         ),
         UIElement(
@@ -133,7 +134,7 @@ def launcher_elements() -> tuple[UIElement, ...]:
             label="",
             bounds=(0.69, 0.82, 0.88, 0.95),
             confidence=0.92,
-            states={"goal_relevant": False},
+            states={"goal_relevant": False, "fully_visible": True},
             evidence=("相机图形",),
         ),
     )
@@ -323,6 +324,199 @@ def task_context(
             "effect_action_allowed": bool(external and confirmed),
         },
     }
+
+
+def test_context_with_semantic_ir(
+    value: dict | QwenTaskContext,
+    observation: TrustedObservation,
+    available_action_kinds: frozenset[str],
+) -> QwenTaskContext:
+    """Upgrade parser-era fixtures to the sole canonical action protocol."""
+
+    context = value if isinstance(value, QwenTaskContext) else QwenTaskContext.from_dict(value)
+    if context.semantic_ir is not None:
+        return context
+
+    raw_goal = " ".join(
+        (
+            str(context.goal.get("objective") or ""),
+            str(context.current_subgoal.get("objective") or ""),
+            *(str(item.label) for item in observation.scene.elements if item.label),
+        )
+    ) or "test task"
+    entities: list[SemanticEntity] = []
+    seen_values: set[str] = set()
+    for element in observation.scene.elements:
+        value_text = str(element.label or "").strip()
+        if not value_text or value_text.casefold() in seen_values:
+            continue
+        seen_values.add(value_text.casefold())
+        entities.append(
+            SemanticEntity(
+                entity_id=f"entity_visible_{len(entities) + 1}",
+                entity_type="ui_label",
+                role="target_ui_label",
+                value=value_text,
+                authority="planner_context",
+            )
+        )
+
+    goal_entities = context.goal.get("entities") or {}
+    payload_text = ""
+    if isinstance(goal_entities, dict):
+        for key in ("input_text", "text", "content", "message"):
+            candidate = goal_entities.get(key)
+            if isinstance(candidate, str):
+                payload_text = candidate
+                break
+    if not payload_text:
+        for element in observation.scene.elements:
+            expected = element.states.get("expected_input_value")
+            if isinstance(expected, str) and expected:
+                payload_text = expected
+                break
+    if not payload_text and "clear_verified_text" in available_action_kinds:
+        for element in observation.scene.elements:
+            current = element.states.get("value")
+            if element.role == "input" and isinstance(current, str) and current:
+                payload_text = current
+                break
+    payload_ref = ""
+    if payload_text:
+        payload_ref = "entity_input_text"
+        entities.append(
+            SemanticEntity(
+                entity_id=payload_ref,
+                entity_type="text",
+                role="input_text",
+                value=payload_text,
+                authority="planner_context",
+            )
+        )
+
+    active_text = " ".join(
+        (
+            str(context.current_subgoal.get("objective") or ""),
+            *(
+                str(item)
+                for item in context.current_subgoal.get(
+                    "completion_conditions",
+                    [],
+                )
+            ),
+        )
+    ).casefold()
+    required_actions: set[str] = set()
+    if "clear_verified_text" in available_action_kinds and any(
+        token in active_text for token in ("清空", "清除", "空白", "为空", "clear")
+    ):
+        required_actions.add("clear_verified_text")
+    if "back" in available_action_kinds and any(
+        token in active_text for token in ("收起", "隐藏", "不可见", "dismiss", "hide")
+    ):
+        required_actions.add("back")
+    if len(available_action_kinds) == 1:
+        required_actions.update(available_action_kinds)
+    constraints = tuple(
+        ConstraintIntent(
+            constraint_id=f"constraint_action_{index}",
+            kind="required_action",
+            value=action,
+            authoritative=True,
+        )
+        for index, action in enumerate(
+            sorted(
+                required_actions
+                & {
+                    "tap_semantic",
+                    "swipe",
+                    "long_press",
+                    "drag",
+                    "input_verified_text",
+                    "clear_verified_text",
+                    "home",
+                    "back",
+                    "dismiss_overlay",
+                    "reveal_system_navigation",
+                }
+            ),
+            start=1,
+        )
+    )
+    subgoal_id = str(context.current_subgoal["subgoal_id"])
+    input_fields = (
+        (
+            InputFieldIntent(
+                field_id="field_test_input",
+                payload_ref=payload_ref,
+                source_subgoal_ids=(subgoal_id,),
+            ),
+        )
+        if payload_ref
+        else ()
+    )
+
+    effect_refs: tuple[str, ...] = ()
+    effects: tuple[EffectIntent, ...] = ()
+    if context.current_execution_class == "effect":
+        effect_kind = "generic_effect"
+        visible_meanings = {item.meaning for item in observation.scene.elements}
+        for candidate_kind in (
+            "send_message",
+            "publish_content",
+            "relationship_change",
+            "membership_change",
+        ):
+            if candidate_kind in visible_meanings:
+                effect_kind = candidate_kind
+                break
+        effect_refs = ("effect_test",)
+        effects = (
+            EffectIntent(
+                effect_id="effect_test",
+                kind=effect_kind,
+                payload_refs=(payload_ref,) if payload_ref else (),
+                source_subgoal_ids=(subgoal_id,),
+            ),
+        )
+
+    semantic_ir = TaskSemanticIR(
+        task_id=context.task_id,
+        device_id=context.device_id,
+        revision=context.revision,
+        raw_goal=raw_goal,
+        surfaces=(SurfaceRef(surface_id="surface_current", kind="current_surface"),),
+        entities=tuple(entities),
+        effects=effects,
+        constraints=constraints,
+        desired_states=(
+            DesiredState(
+                state_id="state_active_goal",
+                subject_ref="surface_current",
+                predicate="surface.state_visible",
+                value=active_text or "current state visible",
+                source_subgoal_id=subgoal_id,
+            ),
+        ),
+        subgoals=(
+            SemanticSubgoal(
+                subgoal_id=subgoal_id,
+                surface_ref="surface_current",
+                status="active",
+                external_impact=(
+                    "external_state"
+                    if context.current_execution_class == "effect"
+                    else "navigation_only"
+                ),
+                constraint_refs=tuple(item.constraint_id for item in constraints),
+                entity_refs=tuple(item.entity_id for item in entities),
+                desired_state_refs=("state_active_goal",),
+                effect_refs=effect_refs,
+            ),
+        ),
+        input_fields=input_fields,
+    )
+    return replace(context, semantic_ir=semantic_ir)
 
 
 def action_payload(
@@ -579,6 +773,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
                     surface_ref="surface_wechat",
                     status="active",
                     external_impact="navigation_only",
+                    entity_refs=("entity_recipient",),
                 ),
             ),
         )
@@ -812,6 +1007,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
             ),
         )
 
+        parsed = test_context_with_semantic_ir(
+            context,
+            observation,
+            frozenset({"tap_semantic", "input_verified_text"}),
+        )
         self.assertIsNone(_exact_text_candidate_block(parsed, observation))
         self.assertIsNone(_identity_text_candidate_block(parsed, observation))
         choices = _selection_choices(
@@ -1112,11 +1312,33 @@ class QwenVisualDecisionTests(unittest.TestCase):
         available_action_kinds=None,
     ):
         observer = QwenVisualDecisionObserver(provider)
+        resolved_observation = observation or self.observation
+        resolved_actions = frozenset(
+            available_action_kinds
+            or {
+                "tap_semantic",
+                "dismiss_overlay",
+                "swipe",
+                "back",
+                "home",
+                "reveal_system_navigation",
+                "input_verified_text",
+                "clear_verified_text",
+                "long_press",
+                "drag",
+                "wait_for_change",
+            }
+        )
+        resolved_context = test_context_with_semantic_ir(
+            context or self.context,
+            resolved_observation,
+            resolved_actions,
+        )
         decision = observer.decide(
             frames=frames or self.frames,
-            task_context=context or self.context,
-            trusted_observation=observation or self.observation,
-            available_action_kinds=available_action_kinds,
+            task_context=resolved_context,
+            trusted_observation=resolved_observation,
+            available_action_kinds=resolved_actions,
         )
         return observer, decision
 
@@ -1128,7 +1350,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual(self.observation.scene.fingerprint, self.observation.fingerprint)
 
     def test_minimal_selection_hydrates_existing_formal_decision(self) -> None:
-        parsed = QwenTaskContext.from_dict(self.context)
+        parsed = test_context_with_semantic_ir(
+            self.context,
+            self.observation,
+            frozenset({"tap_semantic"}),
+        )
         choices = _selection_choices(
             parsed,
             self.observation,
@@ -1176,7 +1402,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertNotIn('"protocol_version":"逐字复制输入"', prompt)
 
     def test_minimal_terminal_selection_binds_only_the_completion_claim(self) -> None:
-        parsed = QwenTaskContext.from_dict(self.context)
+        parsed = test_context_with_semantic_ir(
+            self.context,
+            self.observation,
+            frozenset({"tap_semantic"}),
+        )
         choices = _selection_choices(
             parsed,
             self.observation,
@@ -1293,6 +1523,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             states={
                 "focused": True,
                 "value": "",
+                "fully_visible": True,
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "direct_latin",
                 "goal_relevant": True,
@@ -1339,6 +1570,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             states={
                 "focused": True,
                 "value": "lxs,",
+                "fully_visible": True,
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "direct_latin",
                 "goal_relevant": True,
@@ -1385,6 +1617,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             states={
                 "focused": True,
                 "value": "lxs,",
+                "fully_visible": True,
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "direct_latin",
                 "goal_relevant": True,
@@ -1455,6 +1688,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             states={
                 "focused": True,
                 "value": "",
+                "fully_visible": True,
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "direct_latin",
                 "goal_relevant": True,
@@ -1496,6 +1730,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             states={
                 "focused": True,
                 "value": "agent",
+                "fully_visible": True,
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "chinese_pinyin",
                 "goal_relevant": True,
@@ -1532,18 +1767,16 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual({"scene_changed": True}, decision.expected_result)
         self.assertNotIn("selection_context", decision.proposal.action.params)
         choices = _selection_choices(
-            QwenTaskContext.from_dict(context),
+            test_context_with_semantic_ir(
+                context,
+                observation,
+                frozenset({"back"}),
+            ),
             observation,
             frozenset({"back"}),
         )
         self.assertEqual(1, len(choices))
-        self.assertEqual(
-            {
-                "contextual_effect": "dismiss_visible_soft_keyboard",
-                "preserves_current_app_surface": True,
-            },
-            choices[0]["selection_context"],
-        )
+        self.assertNotIn("selection_context", choices[0])
         self.assertEqual(["back"], observer.last_diagnostics["available_action_kinds"])
         self.assertFalse(observer.last_diagnostics["protocol_retry_used"])
 
@@ -1579,7 +1812,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
             observer.last_diagnostics["available_action_kinds"],
         )
         choices = _selection_choices(
-            QwenTaskContext.from_dict(context),
+            test_context_with_semantic_ir(
+                context,
+                observation,
+                frozenset({"back", "tap_semantic"}),
+            ),
             observation,
             frozenset({"back", "tap_semantic"}),
         )
@@ -1625,6 +1862,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             states={
                 "focused": True,
                 "value": "",
+                "fully_visible": True,
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "chinese_pinyin",
                 "goal_relevant": True,
@@ -1673,6 +1911,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             states={
                 "focused": True,
                 "value": "",
+                "fully_visible": True,
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "chinese_pinyin",
                 "ime_preedit_text": "nihao",
@@ -1770,6 +2009,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
         observation = trusted_observation(
             self.frames,
             elements=(field, literal, mode_switch),
+        )
+        parsed = test_context_with_semantic_ir(
+            context,
+            observation,
+            frozenset({"tap_semantic", "input_verified_text"}),
         )
         choices = _selection_choices(
             parsed, observation, frozenset({"tap_semantic", "input_verified_text"})
@@ -1950,6 +2194,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             states={
                 "focused": True,
                 "value": "",
+                "fully_visible": True,
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "direct_latin",
                 "goal_relevant": True,
@@ -2443,7 +2688,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
         observer = QwenVisualDecisionObserver(provider)
         decision = observer.decide(
             frames=self.frames,
-            task_context=self.context,
+            task_context=test_context_with_semantic_ir(
+                self.context,
+                self.observation,
+                frozenset({"tap_semantic"}),
+            ),
             trusted_observation=self.observation,
         )
         self.assertEqual(provider.calls, 1)
@@ -2562,7 +2811,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
         observer = QwenVisualDecisionObserver(ambiguous_provider)
         decision = observer.decide(
             frames=self.frames,
-            task_context=ambiguous_context,
+            task_context=test_context_with_semantic_ir(
+                ambiguous_context,
+                duplicate_observation,
+                frozenset({"tap_semantic"}),
+            ),
             trusted_observation=duplicate_observation,
         )
         self.assertEqual(ambiguous_provider.calls, 0)
@@ -2634,7 +2887,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
         observer = QwenVisualDecisionObserver(FakeProvider(payload))
         decision = observer.decide(
             frames=self.frames,
-            task_context=context,
+            task_context=test_context_with_semantic_ir(
+                context,
+                observation,
+                frozenset({"tap_semantic"}),
+            ),
             trusted_observation=observation,
         )
         self.assertEqual(decision.proposal.status, "finished")
@@ -2707,7 +2964,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
         observer = QwenVisualDecisionObserver(FakeProvider(payload))
         decision = observer.decide(
             frames=self.frames,
-            task_context=context,
+            task_context=test_context_with_semantic_ir(
+                context,
+                observation,
+                frozenset({"tap_semantic"}),
+            ),
             trusted_observation=observation,
         )
         self.assertEqual(decision.proposal.status, "action")
@@ -2853,7 +3114,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
         decision = observer.decide(
             frames=self.frames,
-            task_context=self.context,
+            task_context=test_context_with_semantic_ir(
+                self.context,
+                self.observation,
+                frozenset({"wait_for_change"}),
+            ),
             trusted_observation=self.observation,
             available_action_kinds={"wait_for_change"},
         )
@@ -3745,7 +4010,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
         observer = QwenVisualDecisionObserver(FakeProvider(payload))
         decision = observer.decide(
             frames=frames,
-            task_context=context,
+            task_context=test_context_with_semantic_ir(
+                context,
+                observation,
+                frozenset({"swipe"}),
+            ),
             trusted_observation=observation,
         )
         self.assertEqual(decision.proposal.action.action, "swipe")
@@ -3777,7 +4046,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
         close_observer = QwenVisualDecisionObserver(FakeProvider(close_payload))
         close_decision = close_observer.decide(
             frames=frames,
-            task_context=close_context,
+            task_context=test_context_with_semantic_ir(
+                close_context,
+                observation,
+                frozenset({"dismiss_overlay"}),
+            ),
             trusted_observation=observation,
         )
         self.assertEqual(close_decision.proposal.action.action, "dismiss_overlay")
@@ -3796,7 +4069,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
         submit_observer = QwenVisualDecisionObserver(FakeProvider(submit_payload))
         submit_decision = submit_observer.decide(
             frames=frames,
-            task_context=submit_context,
+            task_context=test_context_with_semantic_ir(
+                submit_context,
+                observation,
+                frozenset({"tap_semantic"}),
+            ),
             trusted_observation=observation,
         )
         self.assertEqual(
@@ -3823,7 +4100,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
         finished_observer = QwenVisualDecisionObserver(FakeProvider(finished_payload))
         finished_decision = finished_observer.decide(
             frames=frames,
-            task_context=finished_context,
+            task_context=test_context_with_semantic_ir(
+                finished_context,
+                observation,
+                frozenset({"tap_semantic"}),
+            ),
             trusted_observation=observation,
         )
         self.assertEqual(finished_decision.proposal.status, "finished")

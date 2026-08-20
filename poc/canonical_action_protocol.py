@@ -3,17 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
 from task_semantic_ir import EffectIntent, SemanticEntity, TaskSemanticIR
 from ui_scene import UIElement, UIScene
 
 
-VISUAL_ACTION_SHADOW_PROTOCOL = "2026-08-18-visual-action-shadow-v1"
-VISUAL_ACTION_AUTHORITY_PROTOCOL = "2026-08-19-visual-action-authority-v1"
-VISUAL_CLAIM_PROTOCOL = "2026-08-18-visual-claim-v1-shadow"
-SHADOW_SELECTION_PROTOCOL = "2026-08-18-shadow-candidate-selection-v1"
+CANONICAL_ACTION_PROTOCOL = "2026-08-20-canonical-action-v1"
 
 _EFFECT_CONTROL_MEANINGS = {
     "send_message": frozenset({"send_message"}),
@@ -27,6 +24,11 @@ _EFFECT_CONTROL_MEANINGS = {
         {"join", "leave", "invite", "remove_member"}
     ),
 }
+_ALL_EFFECT_CONTROL_MEANINGS = frozenset(
+    meaning
+    for meanings in _EFFECT_CONTROL_MEANINGS.values()
+    for meaning in meanings
+)
 
 
 def _element_realizes_effect(element: UIElement, effect_kind: str) -> bool:
@@ -108,6 +110,9 @@ EXPECTATION_PREDICATES = frozenset(
         "scene.changed",
         "element.state.focused",
         "element.state.value",
+        "element.state.keyboard_layout",
+        "element.state.keyboard_input_mode",
+        "element.state.keyboard_case_mode",
         "element.state.interaction_result",
         "element.state.location_relation",
         "effect.applied",
@@ -132,7 +137,7 @@ _SAFE_STATE_KEYS = frozenset(
 )
 
 
-class VisualActionShadowError(ValueError):
+class CanonicalActionProtocolError(ValueError):
     pass
 
 
@@ -141,7 +146,7 @@ def _json_value(value: Any, field_name: str) -> Any:
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return json.loads(encoded)
     except (TypeError, ValueError) as exc:
-        raise VisualActionShadowError(f"{field_name} 必须是可序列化 JSON 值。") from exc
+        raise CanonicalActionProtocolError(f"{field_name} 必须是可序列化 JSON 值。") from exc
 
 
 def _digest(value: Any) -> str:
@@ -164,15 +169,15 @@ def _element_ref(element_id: str) -> str:
 
 def _validate_id(value: str, field_name: str) -> None:
     if not isinstance(value, str) or not _ID_PATTERN.fullmatch(value):
-        raise VisualActionShadowError(f"{field_name} 无效：{value!r}")
+        raise CanonicalActionProtocolError(f"{field_name} 无效：{value!r}")
 
 
 def _required_text(value: Any, field_name: str, *, max_length: int = 300) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise VisualActionShadowError(f"{field_name} 必须是非空字符串。")
+        raise CanonicalActionProtocolError(f"{field_name} 必须是非空字符串。")
     text = value.strip()
     if len(text) > max_length:
-        raise VisualActionShadowError(f"{field_name} 超过长度限制。")
+        raise CanonicalActionProtocolError(f"{field_name} 超过长度限制。")
     return text
 
 
@@ -225,11 +230,7 @@ class VisualClaim:
     value: Any
     confidence: float
     source_digest: str
-    protocol_version: str = VISUAL_CLAIM_PROTOCOL
-
     def validate(self) -> None:
-        if self.protocol_version != VISUAL_CLAIM_PROTOCOL:
-            raise VisualActionShadowError("VisualClaim protocol_version 无效。")
         _validate_id(self.claim_id, "claim.claim_id")
         _validate_id(self.subject_ref, "claim.subject_ref")
         _required_text(self.predicate, "claim.predicate", max_length=100)
@@ -237,21 +238,20 @@ class VisualClaim:
             self.predicate.startswith("element.state.")
             and self.predicate.removeprefix("element.state.") in _SAFE_STATE_KEYS
         ):
-            raise VisualActionShadowError(
+            raise CanonicalActionProtocolError(
                 f"claim.predicate 无效：{self.predicate}"
             )
         _json_value(self.value, "claim.value")
         if isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)):
-            raise VisualActionShadowError("claim.confidence 格式无效。")
+            raise CanonicalActionProtocolError("claim.confidence 格式无效。")
         if not 0.0 <= float(self.confidence) <= 1.0:
-            raise VisualActionShadowError("claim.confidence 超出范围。")
+            raise CanonicalActionProtocolError("claim.confidence 超出范围。")
         if not re.fullmatch(r"[0-9a-f]{64}", self.source_digest):
-            raise VisualActionShadowError("claim.source_digest 必须是 SHA-256。")
+            raise CanonicalActionProtocolError("claim.source_digest 必须是 SHA-256。")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
         return {
-            "protocol_version": self.protocol_version,
             "claim_id": self.claim_id,
             "subject_ref": self.subject_ref,
             "predicate": self.predicate,
@@ -274,11 +274,11 @@ class VisualRelation:
         _validate_id(self.subject_ref, "relation.subject_ref")
         _validate_id(self.object_ref, "relation.object_ref")
         if self.relation not in RELATION_KINDS:
-            raise VisualActionShadowError(f"relation.relation 无效：{self.relation}")
+            raise CanonicalActionProtocolError(f"relation.relation 无效：{self.relation}")
         if not self.support_claim_ids:
-            raise VisualActionShadowError("relation.support_claim_ids 不能为空。")
+            raise CanonicalActionProtocolError("relation.support_claim_ids 不能为空。")
         if len(set(self.support_claim_ids)) != len(self.support_claim_ids):
-            raise VisualActionShadowError("relation.support_claim_ids 重复。")
+            raise CanonicalActionProtocolError("relation.support_claim_ids 重复。")
         for value in self.support_claim_ids:
             _validate_id(value, "relation.support_claim_ids")
 
@@ -304,11 +304,11 @@ class Affordance:
         _validate_id(self.affordance_id, "affordance.affordance_id")
         _validate_id(self.subject_ref, "affordance.subject_ref")
         if self.action_kind not in SUPPORTED_ACTIONS:
-            raise VisualActionShadowError(
+            raise CanonicalActionProtocolError(
                 f"affordance.action_kind 无效：{self.action_kind}"
             )
         if not self.support_claim_ids:
-            raise VisualActionShadowError("affordance.support_claim_ids 不能为空。")
+            raise CanonicalActionProtocolError("affordance.support_claim_ids 不能为空。")
         for value in self.support_claim_ids:
             _validate_id(value, "affordance.support_claim_ids")
 
@@ -333,17 +333,17 @@ class StateExpectation:
         _validate_id(self.subject_ref, "expectation.subject_ref")
         _required_text(self.predicate, "expectation.predicate", max_length=100)
         if self.predicate not in EXPECTATION_PREDICATES:
-            raise VisualActionShadowError(
+            raise CanonicalActionProtocolError(
                 f"expectation.predicate 无效：{self.predicate}"
             )
         if self.operator not in EXPECTATION_OPERATORS:
-            raise VisualActionShadowError(
+            raise CanonicalActionProtocolError(
                 f"expectation.operator 无效：{self.operator}"
             )
         if self.operator in {"equals", "not_equals"}:
             _json_value(self.value, "expectation.value")
         elif self.value is not None:
-            raise VisualActionShadowError(
+            raise CanonicalActionProtocolError(
                 f"expectation.{self.operator} 不得携带 value。"
             )
 
@@ -369,22 +369,22 @@ class TypedStateTransition:
     def validate(self) -> None:
         _validate_id(self.transition_id, "transition.transition_id")
         if not self.precondition_claim_ids:
-            raise VisualActionShadowError("transition.precondition_claim_ids 不能为空。")
+            raise CanonicalActionProtocolError("transition.precondition_claim_ids 不能为空。")
         for value in self.precondition_claim_ids:
             _validate_id(value, "transition.precondition_claim_ids")
         if not self.expectations:
-            raise VisualActionShadowError("transition.expectations 不能为空。")
+            raise CanonicalActionProtocolError("transition.expectations 不能为空。")
         for expectation in self.expectations:
             expectation.validate()
             if (
                 expectation.predicate in {"scene.changed", "observation.changed"}
                 and not self.exploratory
             ):
-                raise VisualActionShadowError(
+                raise CanonicalActionProtocolError(
                     "scene/observation changed 只能用于 exploratory transition。"
                 )
         if not isinstance(self.exploratory, bool):
-            raise VisualActionShadowError("transition.exploratory 必须是布尔值。")
+            raise CanonicalActionProtocolError("transition.exploratory 必须是布尔值。")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -397,7 +397,7 @@ class TypedStateTransition:
 
 
 @dataclass(frozen=True)
-class ShadowActionCandidate:
+class CanonicalActionCandidate:
     candidate_id: str
     action_kind: str
     subject_refs: tuple[str, ...]
@@ -410,21 +410,21 @@ class ShadowActionCandidate:
     def validate(self) -> None:
         _validate_id(self.candidate_id, "candidate.candidate_id")
         if self.action_kind not in SUPPORTED_ACTIONS:
-            raise VisualActionShadowError(f"candidate.action_kind 无效：{self.action_kind}")
+            raise CanonicalActionProtocolError(f"candidate.action_kind 无效：{self.action_kind}")
         if not self.subject_refs or not self.affordance_ids:
-            raise VisualActionShadowError("candidate 缺少 subject/affordance 绑定。")
+            raise CanonicalActionProtocolError("candidate 缺少 subject/affordance 绑定。")
         for field_name, values in (
             ("subject_refs", self.subject_refs),
             ("affordance_ids", self.affordance_ids),
             ("relation_ids", self.relation_ids),
         ):
             if len(set(values)) != len(values):
-                raise VisualActionShadowError(f"candidate.{field_name} 重复。")
+                raise CanonicalActionProtocolError(f"candidate.{field_name} 重复。")
             for value in values:
                 _validate_id(value, f"candidate.{field_name}")
         _json_value(self.parameters, "candidate.parameters")
         if any(key in self.parameters for key in {"bounds", "point", "x", "y"}):
-            raise VisualActionShadowError("shadow candidate 不得携带坐标。")
+            raise CanonicalActionProtocolError("canonical candidate 不得携带坐标。")
         if self.effect_ref:
             _validate_id(self.effect_ref, "candidate.effect_ref")
         self.transition.validate()
@@ -444,7 +444,7 @@ class ShadowActionCandidate:
 
 
 @dataclass(frozen=True)
-class VisualActionShadowReport:
+class CanonicalActionCatalog:
     task_id: str
     device_id: str
     revision: int
@@ -453,42 +453,33 @@ class VisualActionShadowReport:
     claims: tuple[VisualClaim, ...]
     relations: tuple[VisualRelation, ...]
     affordances: tuple[Affordance, ...]
-    candidates: tuple[ShadowActionCandidate, ...]
+    candidates: tuple[CanonicalActionCandidate, ...]
     status: str
     warnings: tuple[str, ...] = ()
-    authoritative: bool = False
-    execution_allowed: bool = False
-    protocol_version: str = VISUAL_ACTION_SHADOW_PROTOCOL
+    protocol_version: str = CANONICAL_ACTION_PROTOCOL
 
     def validate(self) -> None:
-        expected_protocol = (
-            VISUAL_ACTION_AUTHORITY_PROTOCOL
-            if self.authoritative
-            else VISUAL_ACTION_SHADOW_PROTOCOL
-        )
-        if self.protocol_version != expected_protocol:
-            raise VisualActionShadowError("visual report protocol_version 无效。")
-        if self.execution_allowed:
-            raise VisualActionShadowError("视觉候选报告本身不得授予物理执行权限。")
+        if self.protocol_version != CANONICAL_ACTION_PROTOCOL:
+            raise CanonicalActionProtocolError("canonical action protocol_version 无效。")
         _required_text(self.task_id, "report.task_id", max_length=128)
         _required_text(self.device_id, "report.device_id", max_length=128)
         if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1:
-            raise VisualActionShadowError("report.revision 必须是正整数。")
+            raise CanonicalActionProtocolError("report.revision 必须是正整数。")
         for field_name, value in (
             ("scene_digest", self.scene_digest),
             ("semantic_digest", self.semantic_digest),
         ):
             if not re.fullmatch(r"[0-9a-f]{64}", value):
-                raise VisualActionShadowError(f"report.{field_name} 必须是 SHA-256。")
+                raise CanonicalActionProtocolError(f"report.{field_name} 必须是 SHA-256。")
         if self.status not in {"ready", "blocked"}:
-            raise VisualActionShadowError("report.status 无效。")
+            raise CanonicalActionProtocolError("report.status 无效。")
         if self.status == "ready" and not MIN_READY_CANDIDATES <= len(self.candidates) <= MAX_READY_CANDIDATES:
-            raise VisualActionShadowError(
+            raise CanonicalActionProtocolError(
                 f"ready report 必须包含{MIN_READY_CANDIDATES}至"
                 f"{MAX_READY_CANDIDATES}个候选。"
             )
         if self.status == "blocked" and len(self.candidates) >= MIN_READY_CANDIDATES:
-            raise VisualActionShadowError("候选已足够时不得标记 blocked。")
+            raise CanonicalActionProtocolError("候选已足够时不得标记 blocked。")
 
         collections = (
             ("claim", self.claims),
@@ -503,7 +494,7 @@ class VisualActionShadowReport:
                 item.validate()
                 item_id = str(getattr(item, key))
                 if item_id in seen:
-                    raise VisualActionShadowError(f"report.{field_name} ID 重复。")
+                    raise CanonicalActionProtocolError(f"report.{field_name} ID 重复。")
                 seen.add(item_id)
 
         claim_ids = {item.claim_id for item in self.claims}
@@ -513,21 +504,21 @@ class VisualActionShadowReport:
         affordance_by_id = {item.affordance_id: item for item in self.affordances}
         for relation in self.relations:
             if relation.subject_ref not in claimed_subjects:
-                raise VisualActionShadowError("relation.subject_ref 没有事实主体。")
+                raise CanonicalActionProtocolError("relation.subject_ref 没有事实主体。")
             if not set(relation.support_claim_ids).issubset(claim_ids):
-                raise VisualActionShadowError("relation 引用未知 claim。")
+                raise CanonicalActionProtocolError("relation 引用未知 claim。")
         for affordance in self.affordances:
             if affordance.subject_ref not in claimed_subjects:
-                raise VisualActionShadowError("affordance.subject_ref 没有事实主体。")
+                raise CanonicalActionProtocolError("affordance.subject_ref 没有事实主体。")
             if not set(affordance.support_claim_ids).issubset(claim_ids):
-                raise VisualActionShadowError("affordance 引用未知 claim。")
+                raise CanonicalActionProtocolError("affordance 引用未知 claim。")
         for candidate in self.candidates:
             if not set(candidate.subject_refs).issubset(claimed_subjects):
-                raise VisualActionShadowError("candidate.subject_refs 没有事实主体。")
+                raise CanonicalActionProtocolError("candidate.subject_refs 没有事实主体。")
             if not set(candidate.relation_ids).issubset(relation_ids):
-                raise VisualActionShadowError("candidate 引用未知 relation。")
+                raise CanonicalActionProtocolError("candidate 引用未知 relation。")
             if not set(candidate.affordance_ids).issubset(affordance_ids):
-                raise VisualActionShadowError("candidate 引用未知 affordance。")
+                raise CanonicalActionProtocolError("candidate 引用未知 affordance。")
             bound_affordances = [
                 affordance_by_id[value] for value in candidate.affordance_ids
             ]
@@ -536,22 +527,20 @@ class VisualActionShadowReport:
                 or item.subject_ref not in candidate.subject_refs
                 for item in bound_affordances
             ):
-                raise VisualActionShadowError("candidate 与 affordance 绑定不一致。")
+                raise CanonicalActionProtocolError("candidate 与 affordance 绑定不一致。")
             if not set(candidate.transition.precondition_claim_ids).issubset(claim_ids):
-                raise VisualActionShadowError("transition 引用未知 claim。")
+                raise CanonicalActionProtocolError("transition 引用未知 claim。")
             if any(
                 item.subject_ref not in claimed_subjects
                 and item.subject_ref != candidate.effect_ref
                 for item in candidate.transition.expectations
             ):
-                raise VisualActionShadowError("transition expectation 没有事实主体。")
+                raise CanonicalActionProtocolError("transition expectation 没有事实主体。")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
         return {
             "protocol_version": self.protocol_version,
-            "authoritative": self.authoritative,
-            "execution_allowed": self.execution_allowed,
             "task_id": self.task_id,
             "device_id": self.device_id,
             "revision": self.revision,
@@ -568,34 +557,6 @@ class VisualActionShadowReport:
     @property
     def report_digest(self) -> str:
         return _digest(self.to_dict())
-
-
-@dataclass(frozen=True)
-class ShadowCandidateSelection:
-    report_digest: str
-    candidate: ShadowActionCandidate
-    authoritative: bool = False
-    execution_allowed: bool = False
-    protocol_version: str = SHADOW_SELECTION_PROTOCOL
-
-    def validate(self) -> None:
-        if self.protocol_version != SHADOW_SELECTION_PROTOCOL:
-            raise VisualActionShadowError("shadow selection protocol_version 无效。")
-        if self.authoritative or self.execution_allowed:
-            raise VisualActionShadowError("shadow selection 不得取得执行权限。")
-        if not re.fullmatch(r"[0-9a-f]{64}", self.report_digest):
-            raise VisualActionShadowError("selection.report_digest 必须是 SHA-256。")
-        self.candidate.validate()
-
-    def to_dict(self) -> dict[str, Any]:
-        self.validate()
-        return {
-            "protocol_version": self.protocol_version,
-            "authoritative": self.authoritative,
-            "execution_allowed": self.execution_allowed,
-            "report_digest": self.report_digest,
-            "candidate": self.candidate.to_dict(),
-        }
 
 
 def _claim(subject_ref: str, predicate: str, value: Any, confidence: float, source: Any) -> VisualClaim:
@@ -691,6 +652,47 @@ def _element_proves_scrollable_viewport(element: UIElement) -> bool:
     )
 
 
+def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> bool:
+    """Bind a typed App surface to a package identity or exact App heading."""
+
+    foreground = str(scene.foreground_app_id or "").strip().casefold()
+    target_app_id = str(getattr(target_surface, "app_id", "") or "").strip().casefold()
+    if not foreground or foreground == "unknown" or not target_app_id:
+        return False
+    if foreground == target_app_id:
+        return True
+
+    foreground_parts = tuple(part for part in foreground.split(".") if part)
+    target_parts = tuple(part for part in target_app_id.split(".") if part)
+    # A package suffix such as ``app`` is not an App identity.  Leaf matching is
+    # only valid when one side is an intentionally unqualified identifier
+    # (for example ``settings`` versus ``com.android.settings``).
+    if foreground_parts and target_parts and (
+        (len(foreground_parts) == 1 and foreground_parts[0] == target_parts[-1])
+        or (len(target_parts) == 1 and target_parts[0] == foreground_parts[-1])
+    ):
+        return True
+
+    app_name = str(getattr(target_surface, "app_name", "") or "").strip().casefold()
+    if not app_name:
+        return False
+    if foreground == app_name:
+        return True
+    title_matches = tuple(
+        element
+        for element in scene.elements
+        if element.role in {"text", "container"}
+        and any(
+            marker in str(element.meaning or "").strip().casefold()
+            for marker in ("page_title", "title", "heading", "app_header")
+        )
+        and str(element.label or "").strip().casefold() == app_name
+        and float(element.confidence) >= MIN_ELEMENT_CONFIDENCE
+        and element.states.get("fully_visible") is True
+    )
+    return len(title_matches) == 1
+
+
 def _unique_exact_matches(
     elements: tuple[UIElement, ...],
     entity: SemanticEntity,
@@ -721,7 +723,7 @@ def _candidate(
     exploratory: bool = False,
     parameters: Mapping[str, Any] | None = None,
     effect_ref: str = "",
-) -> ShadowActionCandidate:
+) -> CanonicalActionCandidate:
     transition_payload = {
         "action_kind": action_kind,
         "subjects": subject_refs,
@@ -744,7 +746,7 @@ def _candidate(
         "effect_ref": effect_ref,
         "transition": transition.to_dict(),
     }
-    return ShadowActionCandidate(
+    return CanonicalActionCandidate(
         candidate_id=_stable_id("candidate", payload),
         action_kind=action_kind,
         subject_refs=subject_refs,
@@ -756,19 +758,76 @@ def _candidate(
     )
 
 
-def compile_visual_action_shadow(
+def compile_canonical_action_catalog(
     scene: UIScene,
     semantic_ir: TaskSemanticIR,
     available_action_kinds: Iterable[str],
-) -> VisualActionShadowReport:
-    """Compile a deterministic, non-authoritative visual/action shadow report."""
+) -> CanonicalActionCatalog:
+    """Compile the sole deterministic action catalog for the active subgoal."""
 
     scene.validate()
     semantic_ir.validate()
+    active_subgoals = tuple(
+        item for item in semantic_ir.subgoals if item.status == "active"
+    )
+    if len(active_subgoals) != 1:
+        raise CanonicalActionProtocolError(
+            "canonical action catalog 要求且只允许一个 active subgoal。"
+        )
+    active_subgoal = active_subgoals[0]
+    constraints_by_id = {
+        item.constraint_id: item for item in semantic_ir.constraints
+    }
+    active_required_actions = frozenset(
+        str(constraints_by_id[ref].value)
+        for ref in active_subgoal.constraint_refs
+        if ref in constraints_by_id
+        and constraints_by_id[ref].kind == "required_action"
+    )
+    active_input_fields = tuple(
+        item
+        for item in semantic_ir.input_fields
+        if active_subgoal.subgoal_id in item.source_subgoal_ids
+    )
+    active_input_payload_refs = frozenset(
+        item.payload_ref for item in active_input_fields
+    )
+    active_effect_refs = frozenset(active_subgoal.effect_refs)
+    effects_by_id = {item.effect_id: item for item in semantic_ir.effects}
+    active_entity_refs = set(active_subgoal.entity_refs)
+    for effect_ref in active_effect_refs:
+        effect = effects_by_id.get(effect_ref)
+        if effect is not None:
+            active_entity_refs.update(effect.target_refs)
+            active_entity_refs.update(effect.payload_refs)
+    active_entity_refs.update(active_input_payload_refs)
+    desired_by_id = {
+        item.state_id: item for item in semantic_ir.desired_states
+    }
+    active_desired_states = tuple(
+        desired_by_id[ref]
+        for ref in active_subgoal.desired_state_refs
+        if ref in desired_by_id
+    )
+    active_entity_refs.update(
+        item.subject_ref
+        for item in active_desired_states
+        if item.subject_ref in {entity.entity_id for entity in semantic_ir.entities}
+    )
+    active_text = " ".join(
+        str(item.value or "") for item in active_desired_states
+    ).casefold()
+    active_targets_input = bool(
+        active_input_fields
+        or any(
+            token in active_text
+            for token in ("input", "text field", "输入框", "文本框", "编辑框")
+        )
+    )
     available = frozenset(str(value) for value in available_action_kinds)
     unknown = available - SUPPORTED_ACTIONS
     if unknown:
-        raise VisualActionShadowError(
+        raise CanonicalActionProtocolError(
             "available_action_kinds 含未知动作：" + ", ".join(sorted(unknown))
         )
 
@@ -1020,17 +1079,12 @@ def compile_visual_action_shadow(
     }
     affordances = sorted(affordances, key=lambda item: item.affordance_id)
 
-    candidates: list[ShadowActionCandidate] = []
+    candidates: list[CanonicalActionCandidate] = []
     active_external_effect_refs = tuple(
-        dict.fromkeys(
-            effect_ref
-            for subgoal in semantic_ir.subgoals
-            if subgoal.status == "active"
-            and subgoal.external_impact == "external_state"
-            for effect_ref in subgoal.effect_refs
-        )
+        active_subgoal.effect_refs
+        if active_subgoal.external_impact == "external_state"
+        else ()
     )
-    effects_by_id = {effect.effect_id: effect for effect in semantic_ir.effects}
     unique_effect_control_by_ref: dict[str, str] = {}
     for effect_ref in active_external_effect_refs:
         effect = effects_by_id.get(effect_ref)
@@ -1102,6 +1156,7 @@ def compile_visual_action_shadow(
             # instead of choosing the bound input transaction.
             tap_affordance = None
         if tap_affordance is not None:
+            extra_expectations: tuple[StateExpectation, ...] = ()
             surface_binding = next(
                 (
                     relation_by_id[value]
@@ -1132,12 +1187,47 @@ def compile_visual_action_shadow(
                 )
                 if not isinstance(expected_input_value, str):
                     continue
+                expected_element_id = str(
+                    element.states.get("input_element_id") or element.element_id
+                ).strip()
+                expected_element = next(
+                    (
+                        item
+                        for item in sorted_elements
+                        if item.element_id == expected_element_id
+                    ),
+                    None,
+                )
+                expected_subject_ref = (
+                    _element_ref(expected_element.element_id)
+                    if expected_element is not None
+                    else element_ref
+                )
                 expectation = StateExpectation(
-                    element_ref,
+                    expected_subject_ref,
                     "element.state.value",
                     "equals",
                     expected_input_value,
                 )
+                switch_predicate = {
+                    "switch_keyboard_layout": "element.state.keyboard_layout",
+                    "switch_keyboard_case": "element.state.keyboard_case_mode",
+                    "switch_keyboard_input_mode": "element.state.keyboard_input_mode",
+                }.get(element.meaning)
+                switch_value = (
+                    element.states.get("target_layout")
+                    if element.meaning == "switch_keyboard_layout"
+                    else element.states.get("target_mode")
+                )
+                if switch_predicate and isinstance(switch_value, str) and switch_value:
+                    extra_expectations = (
+                        StateExpectation(
+                            expected_subject_ref,
+                            switch_predicate,
+                            "equals",
+                            switch_value,
+                        ),
+                    )
             elif element.role == "input":
                 expectation = StateExpectation(
                     element_ref,
@@ -1184,7 +1274,7 @@ def compile_visual_action_shadow(
                     affordance_ids=(tap_affordance.affordance_id,),
                     relation_ids=tuple(sorted(set(unique_relation_ids))),
                     precondition_claim_ids=tuple(element_claim_ids[element.element_id]),
-                    expectations=(expectation,),
+                    expectations=(expectation, *extra_expectations),
                     effect_ref=effect_ref,
                     parameters={"element_id": element.element_id},
                     exploratory=(
@@ -1461,6 +1551,101 @@ def compile_visual_action_shadow(
         "wait_for_change": 10,
     }
     unique_candidates = {item.candidate_id: item for item in candidates}
+    element_by_id = {item.element_id: item for item in sorted_elements}
+
+    def belongs_to_active_subgoal(candidate: CanonicalActionCandidate) -> bool:
+        if candidate.effect_ref:
+            return candidate.effect_ref in active_effect_refs
+        action_kind = candidate.action_kind
+        if action_kind in {"input_verified_text", "clear_verified_text"}:
+            return bool(active_input_payload_refs)
+        if action_kind == "tap_semantic":
+            element_id = str(candidate.parameters.get("element_id") or "")
+            element = element_by_id.get(element_id)
+            if element is None:
+                return False
+            surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
+            target_surface = surfaces.get(active_subgoal.surface_ref)
+            current_kind = _surface_kind(scene)
+            if (
+                target_surface is not None
+                and target_surface.kind == "app"
+                and current_kind != "launcher"
+                and not scene_matches_target_app_surface(scene, target_surface)
+            ):
+                return False
+            if element.meaning in {
+                "ime_exact_candidate",
+                "input_exact_literal_key",
+                "switch_keyboard_layout",
+                "switch_keyboard_case",
+                "switch_keyboard_input_mode",
+            }:
+                return bool(active_input_payload_refs)
+            if element.role == "input":
+                return active_targets_input
+            target_surface = surfaces.get(active_subgoal.surface_ref)
+            if target_surface is not None and target_surface.kind == "app":
+                if current_kind == "launcher":
+                    return any(
+                        relation_by_id[relation_id].relation == "binds_surface"
+                        and relation_by_id[relation_id].object_ref
+                        == active_subgoal.surface_ref
+                        for relation_id in candidate.relation_ids
+                    )
+                if not scene_matches_target_app_surface(scene, target_surface):
+                    return False
+            for relation_id in candidate.relation_ids:
+                relation = relation_by_id[relation_id]
+                if (
+                    relation.relation == "binds_surface"
+                    and relation.object_ref == active_subgoal.surface_ref
+                ):
+                    return True
+                if (
+                    relation.relation == "exact_literal_match"
+                    and relation.object_ref in active_entity_refs
+                ):
+                    return True
+            return bool(
+                active_subgoal.external_impact == "navigation_only"
+                and element.meaning not in _ALL_EFFECT_CONTROL_MEANINGS
+            )
+        if action_kind == "dismiss_overlay":
+            return active_subgoal.external_impact == "navigation_only"
+        if action_kind in {"long_press", "drag"}:
+            return action_kind in active_required_actions
+        if action_kind == "home":
+            surfaces = {
+                item.surface_id: item for item in semantic_ir.surfaces
+            }
+            target = surfaces.get(active_subgoal.surface_ref)
+            current_kind = _surface_kind(scene)
+            if target is None:
+                return False
+            if target.kind == "launcher":
+                return current_kind != "launcher"
+            if target.kind != "app" or current_kind == "launcher":
+                return False
+            return not scene_matches_target_app_surface(scene, target)
+        if action_kind == "wait_for_change":
+            if active_input_fields:
+                return action_kind in active_required_actions
+            return active_subgoal.external_impact in {
+                "read_only",
+                "navigation_only",
+            }
+        if action_kind in {"back", "swipe", "reveal_system_navigation"}:
+            if active_input_fields:
+                return action_kind in active_required_actions
+            return active_subgoal.external_impact == "navigation_only"
+        return False
+
+    unique_candidates = {
+        candidate_id: candidate
+        for candidate_id, candidate in unique_candidates.items()
+        if belongs_to_active_subgoal(candidate)
+    }
     candidates = sorted(
         unique_candidates.values(),
         key=lambda item: (
@@ -1476,7 +1661,7 @@ def compile_visual_action_shadow(
     if any(len(matches) > 1 for matches in exact_elements_by_entity.values()):
         warnings.append("duplicate_exact_literal_binding")
 
-    report = VisualActionShadowReport(
+    report = CanonicalActionCatalog(
         task_id=semantic_ir.task_id,
         device_id=semantic_ir.device_id,
         revision=semantic_ir.revision,
@@ -1493,70 +1678,65 @@ def compile_visual_action_shadow(
     return report
 
 
-def select_shadow_candidate(
-    report: VisualActionShadowReport,
+def canonical_candidate_expected_result(
+    candidate: CanonicalActionCandidate,
+    scene: UIScene,
+) -> dict[str, Any]:
+    """Project one canonical transition into the controller's visual result shape."""
+
+    candidate.validate()
+    if candidate.action_kind == "reveal_system_navigation":
+        return {"system_ui": {"navigation_bar_visible": True}}
+    if candidate.action_kind == "swipe":
+        return {"content_changed": True}
+
+    element_by_ref = {
+        _element_ref(element.element_id): element for element in scene.elements
+    }
+    state_expectations = [
+        item
+        for item in candidate.transition.expectations
+        if item.predicate.startswith("element.state.")
+        and item.operator == "equals"
+        and item.subject_ref in element_by_ref
+    ]
+    if state_expectations:
+        subjects = {item.subject_ref for item in state_expectations}
+        if len(subjects) != 1:
+            raise CanonicalActionProtocolError(
+                "canonical candidate 包含多个元素的状态结果，无法形成唯一验证目标。"
+            )
+        subject_ref = next(iter(subjects))
+        element = element_by_ref[subject_ref]
+        states = {
+            item.predicate.removeprefix("element.state."): item.value
+            for item in state_expectations
+        }
+        return {
+            "element_state": {
+                "meaning": element.meaning,
+                "states": states,
+            }
+        }
+    return {"scene_changed": True}
+
+
+def select_canonical_action_candidate(
+    report: CanonicalActionCatalog,
     *,
     report_digest: str,
     candidate_id: str,
-) -> ShadowCandidateSelection:
-    """Select exactly one existing candidate without allowing any mutation."""
+) -> CanonicalActionCandidate:
+    """Return exactly one immutable candidate from the current catalog."""
 
     report.validate()
     if report_digest != report.report_digest:
-        raise VisualActionShadowError("shadow report digest 已过期或不匹配。")
+        raise CanonicalActionProtocolError(
+            "canonical action catalog digest 已过期或不匹配。"
+        )
     matches = [item for item in report.candidates if item.candidate_id == candidate_id]
     if len(matches) != 1:
-        raise VisualActionShadowError("shadow candidate_id 不存在或不唯一。")
-    selection = ShadowCandidateSelection(
-        report_digest=report_digest,
-        candidate=matches[0],
-    )
-    selection.validate()
-    return selection
-
-
-def compile_visual_action_authority(
-    scene: UIScene,
-    semantic_ir: TaskSemanticIR,
-    available_action_kinds: Iterable[str],
-) -> VisualActionShadowReport:
-    """Promote the deterministic local candidate graph, never model prose.
-
-    Authority here means only candidate identity and typed transition authority.
-    It cannot execute hardware; the fresh-observation, policy, geometry and
-    one-shot confirmation gates remain mandatory downstream.
-    """
-
-    shadow = compile_visual_action_shadow(
-        scene,
-        semantic_ir,
-        available_action_kinds,
-    )
-    report = replace(
-        shadow,
-        protocol_version=VISUAL_ACTION_AUTHORITY_PROTOCOL,
-        authoritative=True,
-        execution_allowed=False,
-    )
-    report.validate()
-    return report
-
-
-def compile_visual_action_shadow_safe(
-    scene: UIScene,
-    semantic_ir: TaskSemanticIR,
-    available_action_kinds: Iterable[str],
-) -> tuple[VisualActionShadowReport | None, dict[str, Any] | None]:
-    """Fail-open for production behavior, fail-closed for shadow authority."""
-
-    try:
-        return compile_visual_action_shadow(scene, semantic_ir, available_action_kinds), None
-    except Exception as exc:  # diagnostic boundary: never changes the formal path
-        return None, {
-            "protocol_version": VISUAL_ACTION_SHADOW_PROTOCOL,
-            "authoritative": False,
-            "execution_allowed": False,
-            "status": "shadow_error",
-            "error_type": type(exc).__name__,
-            "error_message": str(exc)[:500],
-        }
+        raise CanonicalActionProtocolError(
+            "canonical candidate_id 不存在或不唯一。"
+        )
+    return matches[0]

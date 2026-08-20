@@ -4663,6 +4663,14 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertTrue(universal["automatic_loop_enabled"])
         self.assertEqual(universal["automatic_loop_max_physical_actions"], 12)
         self.assertEqual(universal["supported_app_scope"], "dynamic")
+        self.assertEqual(
+            universal["action_protocol"],
+            "2026-08-20-canonical-action-v1",
+        )
+        self.assertEqual(
+            universal["controller_protocol"],
+            web_app.UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
+        )
         semantic_authority = universal["typed_effect_authority"]
         self.assertEqual(
             semantic_authority["authority_scope"],
@@ -4672,10 +4680,9 @@ class ApiEndToEndTests(unittest.TestCase):
             semantic_authority["retired_remote_risk_diagnostics_enabled"]
         )
         self.assertEqual(
-            semantic_authority["visual_action_authority"],
-            "2026-08-19-visual-action-authority-v1",
+            semantic_authority["canonical_action_protocol"],
+            "2026-08-20-canonical-action-v1",
         )
-        self.assertTrue(semantic_authority["visual_action_shadow_enabled"])
         self.assertEqual(
             universal["hardware_capability_profile"]["protocol_version"],
             "2026-08-18-device-capability-profile-v1",

@@ -150,6 +150,10 @@ class TaskSemanticIRTests(unittest.TestCase):
 
         self.assertNotIn("input_verified_text", actions_by_subgoal["open_wechat"])
         self.assertIn("input_verified_text", actions_by_subgoal["send_message"])
+        self.assertEqual(
+            ("send_message",),
+            authority.semantic_ir.input_fields[0].source_subgoal_ids,
+        )
 
     def test_english_input_carrier_presence_does_not_mint_input_action(self):
         payload = current_send_failure_payload()
@@ -177,6 +181,10 @@ class TaskSemanticIRTests(unittest.TestCase):
 
         self.assertNotIn("input_verified_text", actions_by_subgoal["open_wechat"])
         self.assertIn("input_verified_text", actions_by_subgoal["send_message"])
+        self.assertEqual(
+            ("send_message",),
+            authority.semantic_ir.input_fields[0].source_subgoal_ids,
+        )
 
     def test_current_send_failure_projects_to_automatic_typed_effect(self):
         report = compile_runtime_graph_semantics(graph_from_payload())

@@ -8,6 +8,7 @@ import unittest
 
 from PIL import Image, ImageDraw
 
+from canonical_action_protocol import compile_canonical_action_catalog
 from deepseek_task_graph import TargetApp
 from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
 from generic_step_planner import GenericStepProposal
@@ -197,7 +198,15 @@ class ScriptedQwen:
         self.unsafe = unsafe
         self.calls = []
 
-    def decide(self, *, frames, task_context, trusted_observation, decision_number=1):
+    def decide(
+        self,
+        *,
+        frames,
+        task_context,
+        trusted_observation,
+        decision_number=1,
+        available_action_kinds=None,
+    ):
         self.calls.append((frames, task_context, trusted_observation, decision_number))
         if self.action_kind == "back":
             params = {"expected_effect": {"scene_changed": True}}
@@ -221,6 +230,45 @@ class ScriptedQwen:
             node_id=f"synthetic-{decision_number}",
             action=self.action_kind,
             params=params,
+        )
+        semantic_ir = getattr(task_context, "semantic_ir", None)
+        if semantic_ir is None:
+            raise AssertionError("ScriptedQwen 缺少 canonical TaskSemanticIR")
+        catalog = compile_canonical_action_catalog(
+            trusted_observation.scene,
+            semantic_ir,
+            available_action_kinds or (),
+        )
+        matches = [
+            item
+            for item in catalog.candidates
+            if item.action_kind == action.action
+            and (
+                action.action != "tap_semantic"
+                or str(item.parameters.get("element_id") or "")
+                == str(action.params.get("element_id") or "")
+            )
+            and (
+                action.action != "swipe"
+                or str(item.parameters.get("direction") or "")
+                == str(action.params.get("direction") or "")
+            )
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                "ScriptedQwen 的动作未唯一绑定 canonical candidate："
+                f"{self.action_kind}; 候选="
+                f"{[(item.action_kind, item.parameters) for item in catalog.candidates]}"
+            )
+        candidate = matches[0]
+        action = replace(
+            action,
+            params={
+                **action.params,
+                "formal_candidate_id": candidate.candidate_id,
+                "formal_report_digest": catalog.report_digest,
+                "formal_transition": candidate.transition.to_dict(),
+            },
         )
         proposal = GenericStepProposal(
             status="action",

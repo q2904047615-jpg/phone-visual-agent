@@ -1618,47 +1618,9 @@ def _decision_observation_prompt_dict(
 
 
 def _scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> bool:
-    """Bind a typed App surface to a real package or a strict page title."""
+    from canonical_action_protocol import scene_matches_target_app_surface
 
-    foreground = str(scene.foreground_app_id or "").strip().casefold()
-    target_app_id = str(getattr(target_surface, "app_id", "") or "").strip().casefold()
-    if not foreground or foreground == "unknown" or not target_app_id:
-        return False
-    if foreground == target_app_id:
-        return True
-
-    def package_leaf(value: str) -> str:
-        parts = tuple(part for part in value.split(".") if part)
-        return parts[-1] if parts else ""
-
-    foreground_leaf = package_leaf(foreground)
-    target_leaf = package_leaf(target_app_id)
-    if foreground_leaf and foreground_leaf == target_leaf:
-        return True
-
-    app_name = str(getattr(target_surface, "app_name", "") or "").strip().casefold()
-    if not app_name:
-        return False
-    # The observer contract permits foreground_app_id to be either a stable
-    # semantic/package identifier or the exact visible App display name.  The
-    # latter is still a dedicated top-level identity field, not arbitrary body
-    # text.  Exact equality therefore proves the same typed App surface while
-    # near names and Launcher entry labels remain rejected.
-    if foreground == app_name:
-        return True
-    title_matches = tuple(
-        element
-        for element in scene.elements
-        if element.role in {"text", "container"}
-        and any(
-            marker in str(element.meaning or "").strip().casefold()
-            for marker in ("page_title", "title", "heading", "app_header")
-        )
-        and str(element.label or "").strip().casefold() == app_name
-        and float(element.confidence) >= MIN_TARGET_CONFIDENCE
-        and element.states.get("fully_visible") is True
-    )
-    return len(title_matches) == 1
+    return scene_matches_target_app_surface(scene, target_surface)
 
 
 def _selection_choices(
@@ -1668,390 +1630,44 @@ def _selection_choices(
 ) -> tuple[dict[str, Any], ...]:
     """Build generic action choices from the trusted scene, never app steps."""
 
-    prompt_observation = _decision_observation_prompt_dict(context, observation)
-    candidates = tuple(
-        item
-        for item in prompt_observation.get("candidates", ())
-        if isinstance(item, Mapping)
-        and str(item.get("element_id") or "").strip()
-    )
     choices: list[dict[str, Any]] = []
-    keyboard_dismissal_context = bool(
-        _current_subgoal_requests_keyboard_dismissal(context)
-        and _trusted_scene_proves_visible_keyboard(
+    if context.semantic_ir is None:
+        raise VisionAgentError("typed v4 视觉选择缺少 canonical TaskSemanticIR。")
+    try:
+        from canonical_action_protocol import (
+            canonical_candidate_expected_result,
+            compile_canonical_action_catalog,
+        )
+
+        formal_report = compile_canonical_action_catalog(
             observation.scene,
-            formal=context.semantic_ir is not None,
+            context.semantic_ir,
+            available_action_kinds,
         )
-    )
-    launcher_entry_ids = _launcher_app_entry_candidate_ids(context, observation)
-    formal_report = None
-    if context.semantic_ir is not None:
-        try:
-            from visual_action_shadow import compile_visual_action_authority
+    except Exception as exc:
+        raise VisionAgentError(
+            f"canonical action catalog 构建失败：{exc}"
+        ) from exc
 
-            formal_report = compile_visual_action_authority(
-                observation.scene,
-                context.semantic_ir,
-                available_action_kinds,
-            )
-        except Exception as exc:
-            raise VisionAgentError(
-                f"正式视觉候选权威构建失败：{exc}"
-            ) from exc
-    force_launcher_entry = False
-    if context.semantic_ir is not None:
-        active_id = str(context.current_subgoal.get("subgoal_id") or "")
-        typed_subgoal = next(
-            (
-                item
-                for item in context.semantic_ir.subgoals
-                if item.subgoal_id == active_id
-            ),
-            None,
-        )
-        surfaces = {
-            item.surface_id: item for item in context.semantic_ir.surfaces
-        }
-        target_surface = (
-            surfaces.get(typed_subgoal.surface_ref)
-            if typed_subgoal is not None
-            else None
-        )
-        current_identity = (
-            f"{observation.scene.foreground_app_id} {observation.scene.screen_id}"
-            .casefold()
-        )
-        current_is_launcher = any(
-            token in current_identity
-            for token in ("launcher", "home_screen", "desktop")
-        )
-        force_launcher_entry = bool(
-            target_surface is not None
-            and target_surface.kind == "app"
-            and not current_is_launcher
-            and not _scene_matches_target_app_surface(
-                observation.scene,
-                target_surface,
-            )
-        )
-
-    def formal_candidate(
-        action: str,
-        *,
-        element_ids: tuple[str, ...] = (),
-        direction: str = "",
-    ) -> Any:
-        if formal_report is None:
-            return None
-        matches = [
-            item
-            for item in formal_report.candidates
-            if item.action_kind == action
-            and (
-                not element_ids
-                or (
-                    len(element_ids) == 1
-                    and str(item.parameters.get("element_id") or "")
-                    == element_ids[0]
-                )
-                or (
-                    len(element_ids) == 2
-                    and (
-                        str(item.parameters.get("source_element_id") or ""),
-                        str(item.parameters.get("destination_element_id") or ""),
-                    )
-                    == element_ids
-                )
-            )
-            and (
-                not direction
-                or str(item.parameters.get("direction") or "") == direction
-            )
-        ]
-        if len(matches) != 1:
-            return None
-        return matches[0]
-
-    def append_choice(
-        action: str,
-        *,
-        expected_result: Mapping[str, Any],
-        authority_candidate: Any = None,
-        **parts: Any,
-    ) -> None:
-        if formal_report is not None and authority_candidate is None:
-            return
-        formal_parts: dict[str, Any] = {}
-        if authority_candidate is not None:
-            formal_parts = {
-                "formal_candidate_id": authority_candidate.candidate_id,
-                "formal_report_digest": formal_report.report_digest,
-                "formal_transition": authority_candidate.transition.to_dict(),
-            }
+    # Qwen receives a presentation of the canonical catalog, not a separately
+    # rebuilt action list.  Every action parameter and postcondition below is a
+    # deterministic projection of the same immutable candidate that Policy
+    # later selects by digest and ID.
+    for candidate in formal_report.candidates:
         choices.append(
             {
                 "choice_id": f"choice_{len(choices) + 1}",
-                "action": action,
-                "expected_result": dict(expected_result),
-                **formal_parts,
-                **parts,
+                "action": candidate.action_kind,
+                **dict(candidate.parameters),
+                "expected_result": canonical_candidate_expected_result(
+                    candidate,
+                    observation.scene,
+                ),
+                "formal_candidate_id": candidate.candidate_id,
+                "formal_report_digest": formal_report.report_digest,
+                "formal_transition": candidate.transition.to_dict(),
             }
         )
-
-    for action in sorted(available_action_kinds):
-        if launcher_entry_ids and action != "tap_semantic":
-            continue
-        if force_launcher_entry and action != "home":
-            continue
-        if action in {"back", "home", "reveal_system_navigation", "wait_for_change"}:
-            expected_result = (
-                {"system_ui": {"navigation_bar_visible": True}}
-                if action == "reveal_system_navigation"
-                else {"scene_changed": True}
-            )
-            append_choice(
-                action,
-                expected_result=expected_result,
-                authority_candidate=formal_candidate(action),
-                **(
-                    {
-                        "selection_context": {
-                            "contextual_effect": "dismiss_visible_soft_keyboard",
-                            "preserves_current_app_surface": True,
-                        }
-                    }
-                    if action == "back" and keyboard_dismissal_context
-                    else {}
-                ),
-            )
-            continue
-        if action == "swipe":
-            for direction in ("up", "down", "left", "right"):
-                append_choice(
-                    action,
-                    direction=direction,
-                    expected_result={"content_changed": True},
-                    authority_candidate=formal_candidate(
-                        action,
-                        direction=direction,
-                    ),
-                )
-            continue
-        eligible = tuple(
-            item
-            for item in candidates
-            if (
-                not launcher_entry_ids
-                or str(item.get("element_id") or "") in launcher_entry_ids
-            )
-            if str(item.get("role") or "") not in {"keyboard_key", "dialog"}
-            and isinstance(item.get("states"), Mapping)
-            and (
-                formal_report is not None
-                and formal_candidate(
-                    action,
-                    element_ids=(str(item.get("element_id") or ""),),
-                )
-                is not None
-                or formal_report is None
-                and (
-                    item["states"].get("goal_relevant") is True
-                    or item["states"].get("ime_candidate") is True
-                    or item["states"].get("input_literal_key") is True
-                    or item["states"].get("keyboard_layout_switch") is True
-                    or item["states"].get("keyboard_case_switch") is True
-                    or item["states"].get("keyboard_input_mode_switch") is True
-                )
-            )
-        )
-        if action in {"input_verified_text", "clear_verified_text"}:
-            eligible = tuple(
-                item for item in eligible if str(item.get("role") or "") == "input"
-            )
-            if action == "input_verified_text":
-                eligible = tuple(
-                    item for item in eligible
-                    if isinstance(item.get("states"), Mapping)
-                    and item["states"].get("focused") is True
-                )
-            else:
-                eligible = tuple(
-                    item for item in eligible
-                    if isinstance(item.get("states"), Mapping)
-                    and item["states"].get("focused") is True
-                    and isinstance(item["states"].get("value"), str)
-                    and bool(item["states"].get("value"))
-                    and (
-                        formal_report is not None
-                        or item["states"].get("goal_relevant") is True
-                    )
-                )
-        if action in SINGLE_ELEMENT_ACTIONS:
-            for item in eligible:
-                if action == "input_verified_text":
-                    try:
-                        input_step = plan_next_verified_input(
-                            context.requested_input_text,
-                            item["states"].get("value"),
-                        )
-                    except (ValueError, VerifiedTextTransactionError):
-                        continue
-                    if (
-                        input_step is None
-                        or input_step.kind == "literal_key"
-                        or item["states"].get("keyboard_layout") != "qwerty"
-                        or item["states"].get("keyboard_input_mode")
-                        != input_step.required_mode
-                        or (
-                            bool(input_step.required_case_mode)
-                            and item["states"].get("keyboard_case_mode")
-                            != input_step.required_case_mode
-                        )
-                        or item["states"].get("ime_preedit_text")
-                    ):
-                        continue
-                    expected_states = (
-                        {
-                            "value": input_step.current_text,
-                            "ime_preedit_text": input_step.pinyin,
-                            "ime_exact_candidate_text": input_step.segment,
-                        }
-                        if input_step.kind == "chinese_pinyin"
-                        else {"value": input_step.expected_value}
-                    )
-                    expected_result = {
-                        "element_state": {
-                            "meaning": str(item.get("meaning") or "").strip(),
-                            "states": expected_states,
-                        }
-                    }
-                elif action == "clear_verified_text":
-                    expected_result = {
-                        "element_state": {
-                            "meaning": str(item.get("meaning") or "").strip(),
-                            "states": {"value": ""},
-                        }
-                    }
-                elif (
-                    action == "tap_semantic"
-                    and str(item.get("meaning") or "") == "ime_exact_candidate"
-                    and isinstance(item.get("states"), Mapping)
-                    and item["states"].get("ime_candidate") is True
-                ):
-                    expected_result = {
-                        "element_state": {
-                            "meaning": "application_text_input",
-                            "states": {
-                                "value": item["states"].get("expected_input_value"),
-                            },
-                        }
-                    }
-                elif (
-                    action == "tap_semantic"
-                    and str(item.get("meaning") or "") == "input_exact_literal_key"
-                    and isinstance(item.get("states"), Mapping)
-                    and item["states"].get("input_literal_key") is True
-                ):
-                    expected_result = {
-                        "element_state": {
-                            "meaning": "application_text_input",
-                            "states": {
-                                "value": item["states"].get("expected_input_value"),
-                            },
-                        }
-                    }
-                elif (
-                    action == "tap_semantic"
-                    and str(item.get("meaning") or "") == "switch_keyboard_layout"
-                    and isinstance(item.get("states"), Mapping)
-                    and item["states"].get("keyboard_layout_switch") is True
-                ):
-                    expected_result = {
-                        "element_state": {
-                            "meaning": "application_text_input",
-                            "states": {
-                                "value": item["states"].get("prior_input_value"),
-                                "keyboard_layout": item["states"].get("target_layout"),
-                            },
-                        }
-                    }
-                elif (
-                    action == "tap_semantic"
-                    and str(item.get("meaning") or "") == "switch_keyboard_case"
-                    and isinstance(item.get("states"), Mapping)
-                    and item["states"].get("keyboard_case_switch") is True
-                ):
-                    expected_result = {
-                        "element_state": {
-                            "meaning": "application_text_input",
-                            "states": {
-                                "value": item["states"].get("prior_input_value"),
-                                "keyboard_case_mode": item["states"].get("target_mode"),
-                            },
-                        }
-                    }
-                elif (
-                    action == "tap_semantic"
-                    and str(item.get("meaning") or "")
-                    == "switch_keyboard_input_mode"
-                    and isinstance(item.get("states"), Mapping)
-                    and item["states"].get("keyboard_input_mode_switch") is True
-                ):
-                    expected_result = {
-                        "element_state": {
-                            "meaning": "application_text_input",
-                            "states": {
-                                "value": item["states"].get("prior_input_value"),
-                                "keyboard_input_mode": item["states"].get(
-                                    "target_mode"
-                                ),
-                            },
-                        }
-                    }
-                elif (
-                    action == "tap_semantic"
-                    and str(item.get("role") or "") == "input"
-                    and not bool(
-                        isinstance(item.get("states"), Mapping)
-                        and item["states"].get("focused") is True
-                    )
-                ):
-                    expected_result = {
-                        "element_state": {
-                            "meaning": str(item.get("meaning") or "").strip(),
-                            "states": {"focused": True},
-                        }
-                    }
-                else:
-                    expected_result = {"scene_changed": True}
-                append_choice(
-                    action,
-                    element_id=str(item["element_id"]),
-                    expected_result=expected_result,
-                    authority_candidate=formal_candidate(
-                        action,
-                        element_ids=(str(item["element_id"]),),
-                    ),
-                )
-            continue
-        if action == "drag":
-            for source in eligible:
-                for destination in eligible:
-                    if source["element_id"] == destination["element_id"]:
-                        continue
-                    append_choice(
-                        action,
-                        source_element_id=str(source["element_id"]),
-                        destination_element_id=str(destination["element_id"]),
-                        expected_result={"scene_changed": True},
-                        authority_candidate=formal_candidate(
-                            action,
-                            element_ids=(
-                                str(source["element_id"]),
-                                str(destination["element_id"]),
-                            ),
-                        ),
-                    )
     return tuple(choices)
 
 

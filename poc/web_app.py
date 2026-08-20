@@ -59,7 +59,7 @@ from task_semantic_ir import (
     RISK_POLICY_PROTOCOL,
     TASK_SEMANTIC_IR_PROTOCOL,
 )
-from visual_action_shadow import VISUAL_ACTION_AUTHORITY_PROTOCOL
+from canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
 
 from operation_specs import (
     STRUCTURED_OPERATIONS,
@@ -1429,7 +1429,8 @@ def device() -> dict[str, Any]:
         "universal_agent": {
             "goal_protocol": "2026-08-10-generic-intent-v1",
             "scene_protocol": UI_SCENE_PROTOCOL_VERSION,
-            "action_protocol": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
+            "action_protocol": CANONICAL_ACTION_PROTOCOL,
+            "controller_protocol": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
             "goal_preview_enabled": True,
             "scene_preview_enabled": True,
             "hardware_execution_enabled": True,
@@ -1463,8 +1464,7 @@ def device() -> dict[str, Any]:
                 "effect_policy_protocol": RISK_POLICY_PROTOCOL,
                 "authority_scope": "typed_task_and_effect_policy",
                 "retired_remote_risk_diagnostics_enabled": False,
-                "visual_action_authority": VISUAL_ACTION_AUTHORITY_PROTOCOL,
-                "visual_action_shadow_enabled": True,
+                "canonical_action_protocol": CANONICAL_ACTION_PROTOCOL,
             },
             "observer": runtime.generic_scene_observer.status(),
         },

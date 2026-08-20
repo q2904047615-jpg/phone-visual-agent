@@ -6,7 +6,7 @@
 
 当前唯一正式高层协议为 `2026-08-20-deepseek-typed-task-graph-v4`。项目不再迁移、修补或执行 DeepSeek v2/v3，也不再让旧自由文本风险审计、旧风险字段或 App 固定流程参与正式会话。
 
-运行时公开的配套协议为 `2026-08-20-task-semantic-ir-v3`、`2026-08-20-typed-effect-authority-v1` 和 `2026-08-19-visual-action-authority-v1`。`/api/device` 只公开 `typed_effect_authority`，不再公开旧 `semantic_risk_authority` 或 `formal_qwen_v3` 名称。
+运行时公开的配套协议为 `2026-08-20-task-semantic-ir-v3`、`2026-08-20-typed-effect-authority-v1` 和唯一动作协议 `2026-08-20-canonical-action-v1`。`/api/device` 只公开当前 typed effect 与 canonical action 协议，不再公开旧 `semantic_risk_authority`、visual action authority/shadow/selection 或 `formal_qwen_v3` 名称。
 
 ## 1. 用户目标
 
@@ -46,11 +46,13 @@ DeepSeek 只输出：
 
 效果确认使用 `2026-08-20-typed-effect-confirmation-v1`，绑定 task、device、revision、subgoal、`effect_ids` 和 typed effect 摘要。公开接口为 `/approve-effect`；旧 `/approve-risk` 不存在。
 
-## 4. Qwen 与可信观察
+## 4. 唯一动作目录、Qwen 与可信观察
 
 Qwen 只接受 typed v4 的 `current_execution_class`、当前 `effect_intents` 和 `effect_gate`。`effect_gate` 由本地生成，模型不能伪造。
 
-Qwen 每轮只能从当前可信观察和本地正式候选中选择一个动作，或返回完成/阻塞。目标身份、逐字文本、元素状态和几何必须与观察绑定；确认前再次取得新帧并重做语义/几何绑定。画面或 scope 任一变化都会让旧确认失效。
+本地 `CanonicalActionCatalog` 是动作语义的唯一权威。它只读取当前 active subgoal、TaskSemanticIR、UIScene 和设备能力，并只生成属于当前子目标的动作候选与 typed transition。pending 子目标的输入、效果、App 入口和具名目标不得泄漏进当前目录。
+
+Qwen 每轮只能从该目录返回一个 `choice_id`，或返回完成/阻塞；不能创造候选、后置条件或权限。Policy 只能重建同一目录并核对 scope、digest、choice 和动作参数，不得再次解释输入事务、App 归属或 EffectIntent。目标身份、逐字文本、元素状态和几何必须与观察绑定；确认前再次取得新帧并重做几何/设备复核。画面或 scope 任一变化都会让旧确认失效。
 
 ## 5. 动作与执行闭环
 
@@ -61,7 +63,7 @@ Qwen 每轮只能从当前可信观察和本地正式候选中选择一个动作
 1. 取得多帧可信观察；
 2. DeepSeek 选定唯一活动子目标；
 3. Qwen 选择唯一视觉动作；
-4. 本地控制器验证 typed 语义、效果策略、设备能力、fresh scope 和几何；
+4. Policy 从同一 canonical catalog 复核 choice；控制器只验证设备能力、fresh scope、目标唯一性和几何；
 5. 最多执行一个物理动作；
 6. 重新观察并验证；
 7. 写 typed receipt；
@@ -83,5 +85,6 @@ Qwen 每轮只能从当前可信观察和本地正式候选中选择一个动作
 - `risk_confirmation_scope`、`risk_ids`、`/approve-risk`；
 - 旧远程自由文本风险审计模块；
 - 网页端旧协议兼容执行入口和旧协议夹具。
+- visual action shadow、visual action authority、shadow selection 及其旧候选编译入口。
 
 正式链内部为兼容现有 Python 数据结构而生成的确定性运行时对象不是模型协议，不能读取模型旧字段、改变 typed 分类或产生确认权限；后续清理内部命名不得改变这一权威边界。

@@ -474,6 +474,7 @@ class SemanticSubgoal:
     external_impact: str
     depends_on: tuple[str, ...] = ()
     constraint_refs: tuple[str, ...] = ()
+    entity_refs: tuple[str, ...] = ()
     desired_state_refs: tuple[str, ...] = ()
     effect_refs: tuple[str, ...] = ()
 
@@ -489,6 +490,7 @@ class SemanticSubgoal:
         for field_name, values in (
             ("depends_on", self.depends_on),
             ("constraint_refs", self.constraint_refs),
+            ("entity_refs", self.entity_refs),
             ("desired_state_refs", self.desired_state_refs),
             ("effect_refs", self.effect_refs),
         ):
@@ -508,6 +510,7 @@ class SemanticSubgoal:
             "external_impact": self.external_impact,
             "depends_on": list(self.depends_on),
             "constraint_refs": list(self.constraint_refs),
+            "entity_refs": list(self.entity_refs),
             "desired_state_refs": list(self.desired_state_refs),
             "effect_refs": list(self.effect_refs),
         }
@@ -658,6 +661,7 @@ class TaskSemanticIR:
             for field_name, refs, known in (
                 ("depends_on", subgoal.depends_on, subgoals),
                 ("constraint_refs", subgoal.constraint_refs, constraints),
+                ("entity_refs", subgoal.entity_refs, entities),
                 ("desired_state_refs", subgoal.desired_state_refs, states),
                 ("effect_refs", subgoal.effect_refs, effects),
             ):
@@ -1710,6 +1714,24 @@ def compile_runtime_graph_semantics(
     semantic_subgoals: list[SemanticSubgoal] = []
     for subgoal_id, subgoal in subgoals.items():
         surface_ref = surface_for_subgoal(subgoal)
+        subgoal_text = " ".join(
+            [
+                str(getattr(subgoal, "objective", "") or ""),
+                *(
+                    str(item)
+                    for item in tuple(
+                        getattr(subgoal, "completion_conditions", ()) or ()
+                    )
+                ),
+            ]
+        ).casefold()
+        entity_refs = tuple(
+            entity.entity_id
+            for entity in entities
+            if isinstance(entity.value, str)
+            and entity.value.strip()
+            and entity.value.strip().casefold() in subgoal_text
+        )
         for description in tuple(
             getattr(subgoal, "completion_conditions", ()) or ()
         ):
@@ -1741,6 +1763,7 @@ def compile_runtime_graph_semantics(
                         ]
                     )
                 ),
+                entity_refs=entity_refs,
                 desired_state_refs=tuple(desired_by_subgoal.get(subgoal_id, ())),
                 effect_refs=tuple(effect_refs_by_subgoal.get(subgoal_id, ())),
             )
@@ -1765,6 +1788,9 @@ def compile_runtime_graph_semantics(
     semantic_subgoal_by_id = {
         item.subgoal_id: item for item in semantic_subgoals
     }
+    desired_by_id = {
+        item.state_id: item for item in desired_states
+    }
     recipient_refs = tuple(
         item.entity_id for item in entity_by_role.get("recipient", ())
     )
@@ -1781,22 +1807,17 @@ def compile_runtime_graph_semantics(
     input_entities = tuple(entity_by_role.get("input_text", ()))
     input_fields: list[InputFieldIntent] = []
     for index, payload in enumerate(input_entities, 1):
-        literal_source_subgoal_ids = tuple(
-            subgoal_id
-            for subgoal_id, subgoal in subgoals.items()
-            if subgoal_id in input_action_subgoal_ids
-            if isinstance(payload.value, str)
-            and payload.value
-            and payload.value in " ".join(
-                [
-                    str(getattr(subgoal, "objective", "") or ""),
-                    *tuple(
-                        str(item)
-                        for item in tuple(
-                            getattr(subgoal, "completion_conditions", ()) or ()
-                        )
-                    ),
-                ]
+        typed_source_subgoal_ids = tuple(
+            semantic_subgoal.subgoal_id
+            for semantic_subgoal in semantic_subgoals
+            if (
+                payload.entity_id in semantic_subgoal.entity_refs
+                or semantic_subgoal.subgoal_id in input_action_subgoal_ids
+                or any(
+                    desired_by_id[desired_ref].subject_ref == payload.entity_id
+                    for desired_ref in semantic_subgoal.desired_state_refs
+                    if desired_ref in desired_by_id
+                )
             )
         )
         # With one canonical input field, the typed action itself is sufficient
@@ -1807,7 +1828,7 @@ def compile_runtime_graph_semantics(
         source_subgoal_ids = tuple(
             dict.fromkeys(
                 [
-                    *literal_source_subgoal_ids,
+                    *typed_source_subgoal_ids,
                     *(input_action_subgoal_ids if len(input_entities) == 1 else ()),
                 ]
             )

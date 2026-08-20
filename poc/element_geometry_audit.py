@@ -330,6 +330,10 @@ def _evidence_contains_control_info(text: str, *, literal_label: str) -> bool:
     label = str(literal_label or "").strip()
     if label:
         remainder = remainder.replace(label, "")
+    # ``可点击`` describes a visible affordance, just as English ``clickable``
+    # does; it is not an instruction to perform a click.  Preserve the strict
+    # rejection of imperative ``点击该项``/``click`` wording.
+    remainder = remainder.replace("可点击", "可交互")
     return _FORBIDDEN_EVIDENCE.search(remainder) is not None
 
 

@@ -205,6 +205,24 @@ class StrictGeometryAuditProtocolTests(unittest.TestCase):
                         self.render(audit_payload(match={"evidence": evidence}))
                     )
 
+    def test_clickable_is_visible_affordance_but_click_instruction_is_rejected(self):
+        prompt = element_geometry_audit_prompt(
+            source_ref=SOURCE_REF,
+            literal_label="返回验收模式选择",
+            visual_role="button",
+            visible_evidence="位于说明文字下方的白色可点击链接文本",
+            visible_literal_labels=("返回验收模式选择",),
+        )
+        self.assertIn("白色可点击链接文本", prompt)
+        with self.assertRaisesRegex(ElementGeometryAuditError, "visible_evidence"):
+            element_geometry_audit_prompt(
+                source_ref=SOURCE_REF,
+                literal_label="返回验收模式选择",
+                visual_role="button",
+                visible_evidence="点击该链接进入下一页",
+                visible_literal_labels=("返回验收模式选择",),
+            )
+
     def test_duplicate_json_keys_are_rejected_at_top_and_nested_levels(self):
         top = self.render()[:-1] + ',"matches":[]}'
         with self.assertRaisesRegex(ElementGeometryAuditError, "重复JSON字段"):

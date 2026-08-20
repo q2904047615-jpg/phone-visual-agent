@@ -3606,6 +3606,124 @@ class UniversalAgentStartTests(unittest.TestCase):
             trusted_observation_factory=_trusted_factory,
         )
 
+    def test_named_app_already_foreground_completes_open_node_without_action(self) -> None:
+        base = _graph()
+        open_app = replace(
+            base.subgoals[0],
+            subgoal_id="open_wechat",
+            objective="打开微信应用",
+            completion_conditions=("微信应用已打开",),
+            constraints=(),
+            external_impact="navigation_only",
+        )
+        next_step = Subgoal(
+            subgoal_id="continue_in_wechat",
+            objective="继续处理当前页面",
+            status="pending",
+            depends_on=(open_app.subgoal_id,),
+            constraints=(),
+            completion_conditions=("后续目标完成",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        initial = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="打开微信并继续处理当前页面",
+                target_apps=(TargetApp(app_id="wechat", app_name="微信"),),
+            ),
+            subgoals=(open_app, next_step),
+            active_subgoal_id=open_app.subgoal_id,
+            raw_user_goal="打开微信并继续处理当前页面",
+        )
+        initial.validate()
+        scene = UIScene(
+            app_id="wechat",
+            screen_id="chat_window",
+            summary="微信文件传输助手聊天界面。",
+            elements=(),
+            stable=True,
+            confidence=1.0,
+            fingerprint="wechat-already-foreground",
+        )
+        revised = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    open_app,
+                    status="completed",
+                    completion_evidence=(scene.summary,),
+                ),
+                replace(next_step, status="active"),
+            ),
+            active_subgoal_id=next_step.subgoal_id,
+        )
+        revised.validate()
+        planner = SequenceDeepSeekPlanner(initial, revised)
+        adapter = FakeAdapter(scene)
+        orchestrator = self._orchestrator(
+            planner,
+            FakeQwenObserver(),
+            adapter,
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = UniversalAgentSessionState(
+                session_id="session-open-app-idempotent",
+                raw_goal=initial.raw_user_goal,
+                device_id=initial.device_id,
+                run_dir=Path(temp),
+                adapter=adapter,
+                evidence_store=AgentEvidenceStore(Path(temp)),
+                task_graph=initial,
+            )
+            result = orchestrator._try_advance_visible_presence_subgoal(
+                session,
+                graph=initial,
+                trusted_observation=FakeTrustedObservation(
+                    device_id=initial.device_id,
+                    scene=scene,
+                ),
+            )
+            wrong_app = orchestrator._try_advance_visible_presence_subgoal(
+                session,
+                graph=initial,
+                trusted_observation=FakeTrustedObservation(
+                    device_id=initial.device_id,
+                    scene=replace(
+                        scene,
+                        app_id="browser",
+                        fingerprint="browser-foreground",
+                    ),
+                ),
+            )
+
+        self.assertEqual(revised, result)
+        self.assertIsNone(wrong_app)
+        self.assertEqual(1, len(planner.replan_calls))
+
+    def test_app_foreground_presence_phrase_is_narrow(self) -> None:
+        self.assertTrue(
+            UniversalAgentOrchestrator._is_idempotent_app_foreground_completion(
+                "浏览器应用已启动"
+            )
+        )
+        for value in (
+            "应用已重新加载",
+            "微信应用已打开并登录",
+            "付款应用已完成付款",
+            "应用图标可见",
+        ):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    UniversalAgentOrchestrator._is_idempotent_app_foreground_completion(
+                        value
+                    )
+                )
+
     def test_named_app_page_ignores_incomplete_control_sharing_app_name(self) -> None:
         base = _graph()
         open_settings = replace(

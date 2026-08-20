@@ -1702,6 +1702,26 @@ class UniversalAgentOrchestrator:
         return getattr(source, name, default)
 
     @staticmethod
+    def _is_idempotent_app_foreground_completion(value: Any) -> bool:
+        """Recognize one completed App-foreground state, never an action receipt."""
+
+        text = str(value or "").strip().casefold()
+        if not text or len(text) > 96:
+            return False
+        chinese = re.fullmatch(
+            r"[\w\u4e00-\u9fff·._ -]{1,64}(?:应用|程序)"
+            r"(?:已经|已)?(?:打开|启动|在前台|处于前台)(?:可见)?[。.]?",
+            text,
+        )
+        english = re.fullmatch(
+            r"[a-z0-9][a-z0-9 ._-]{0,63}\s+(?:app|application)\s+"
+            r"(?:is\s+)?(?:open|opened|launched|in the foreground|foreground)"
+            r"(?:\s+and\s+visible)?[.]?",
+            text,
+        )
+        return bool(chinese or english)
+
+    @staticmethod
     def _is_presence_only_read_only_subgoal(subgoal: Any) -> bool:
         """Allow zero-action completion only for locating one visible object.
 
@@ -1813,6 +1833,20 @@ class UniversalAgentOrchestrator:
             )
             if str(item or "").strip()
         ).casefold()
+        completion_conditions = tuple(
+            str(item or "").strip()
+            for item in tuple(
+                getattr(subgoal, "completion_conditions", ()) or ()
+            )
+            if str(item or "").strip()
+        )
+        if (
+            len(completion_conditions) == 1
+            and UniversalAgentOrchestrator._is_idempotent_app_foreground_completion(
+                completion_conditions[0]
+            )
+        ):
+            return True
         occurrence_or_absence_markers = (
             "刷新",
             "重新加载",
@@ -1986,8 +2020,8 @@ class UniversalAgentOrchestrator:
                 )
         return frozenset(term for term in terms if term not in generic)
 
-    @staticmethod
-    def _presence_surface_classes(*values: Any) -> frozenset[str]:
+    @classmethod
+    def _presence_surface_classes(cls, *values: Any) -> frozenset[str]:
         """Keep destination/container nouns from collapsing into ordinal overlap."""
 
         text = " ".join(
@@ -2037,6 +2071,8 @@ class UniversalAgentOrchestrator:
             }.items()
             if any(marker in text for marker in markers)
         }
+        if any(cls._is_idempotent_app_foreground_completion(value) for value in values):
+            classes.add("foreground_app")
         return frozenset(classes)
 
     @classmethod

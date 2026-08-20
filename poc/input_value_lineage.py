@@ -349,6 +349,31 @@ class TypedInputLineage:
     ) -> bool:
         """Bind an immediate state-only keyboard action to the same input."""
 
+        return bool(
+            isinstance(raw_value, str)
+            and raw_value == self.exact_value
+            and self.matches_pending_input_state_surface(
+                device_id=device_id,
+                app_id=app_id,
+                screen_id=screen_id,
+                input_bounds=input_bounds,
+                now_epoch=now_epoch,
+                ttl_seconds=ttl_seconds,
+            )
+        )
+
+    def matches_pending_input_state_surface(
+        self,
+        *,
+        device_id: str,
+        app_id: str,
+        screen_id: str,
+        input_bounds: tuple[float, float, float, float] | None,
+        now_epoch: float | None = None,
+        ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
+    ) -> bool:
+        """Authorize only a later exact visual-cue check on the same surface."""
+
         now = time.time() if now_epoch is None else float(now_epoch)
         current_screen = str(screen_id or "").strip().casefold()
         recorded_screen = self.screen_id.strip().casefold()
@@ -357,8 +382,6 @@ class TypedInputLineage:
             and device_id == self.device_id
             and now >= self.recorded_at_epoch
             and now - self.recorded_at_epoch <= ttl_seconds
-            and isinstance(raw_value, str)
-            and raw_value == self.exact_value
             and str(app_id or "").strip().casefold()
             == self.app_id.strip().casefold()
             and current_screen

@@ -1131,8 +1131,6 @@ class GenericSceneObserver:
                     element
                     for element in scene.elements
                     if element.role == "input"
-                    and element.meaning == "application_text_input"
-                    and element.states.get("focused") is True
                 )
                 preliminary_bounds = (
                     preliminary_inputs[0].bounds
@@ -1158,6 +1156,12 @@ class GenericSceneObserver:
                             app_id=scene.app_id,
                             screen_id=scene.screen_id,
                             raw_value=input_audit_current_value,
+                            input_bounds=preliminary_bounds,
+                        )
+                        or input_lineage_override.matches_pending_input_state_surface(
+                            device_id=device_id,
+                            app_id=scene.app_id,
+                            screen_id=scene.screen_id,
                             input_bounds=preliminary_bounds,
                         )
                     )
@@ -5411,6 +5415,42 @@ def _normalized_keyboard_layout_token(value: Any) -> Any:
     }.get(normalized, normalized)
 
 
+def _adjacent_exact_preedit_cue(
+    trusted_input: dict[str, Any],
+    trusted_preedits: list[dict[str, Any]],
+    exact_text: str,
+) -> bool:
+    """Accept one exact non-authoritative cue beside the same input surface."""
+
+    if (
+        not exact_text
+        or len(trusted_preedits) != 1
+        or trusted_preedits[0].get("text") != exact_text
+        or trusted_preedits[0].get("candidates")
+    ):
+        return False
+    input_box = tuple(float(value) for value in trusted_input["input_bounds"])
+    preedit_box = tuple(float(value) for value in trusted_preedits[0]["bounds"])
+    horizontal_overlap = max(
+        0.0,
+        min(input_box[2], preedit_box[2]) - max(input_box[0], preedit_box[0]),
+    )
+    smaller_width = min(
+        input_box[2] - input_box[0],
+        preedit_box[2] - preedit_box[0],
+    )
+    vertical_gap = max(
+        0.0,
+        preedit_box[1] - input_box[3],
+        input_box[1] - preedit_box[3],
+    )
+    return bool(
+        smaller_width > 0
+        and horizontal_overlap / smaller_width >= 0.60
+        and vertical_gap <= 100
+    )
+
+
 def _apply_input_structure_audit(
     scene: UIScene,
     raw: str,
@@ -5698,10 +5738,12 @@ def _apply_input_structure_audit(
             and coarse_input_value
             and _unique_scene_input_value(scene) == coarse_input_value
             and keyboard_input_mode == "direct_latin"
-            and len(trusted_preedits) == 1
-            and trusted_preedits[0]["text"] == coarse_input_value
-            and not trusted_preedits[0]["candidates"]
             and trusted_input["visible_editable_cues"]
+            and _adjacent_exact_preedit_cue(
+                trusted_input,
+                trusted_preedits,
+                coarse_input_value,
+            )
         ):
             focused_context = _active_subgoal_visual_context(goal_context)
             focused_entities = (
@@ -5714,28 +5756,9 @@ def _apply_input_structure_audit(
                 if isinstance(focused_entities, dict)
                 else None
             )
-            input_box = tuple(float(value) for value in trusted_input["input_bounds"])
-            preedit_box = tuple(float(value) for value in trusted_preedits[0]["bounds"])
-            horizontal_overlap = max(
-                0.0,
-                min(input_box[2], preedit_box[2])
-                - max(input_box[0], preedit_box[0]),
-            )
-            smaller_width = min(
-                input_box[2] - input_box[0],
-                preedit_box[2] - preedit_box[0],
-            )
-            vertical_gap = max(
-                0.0,
-                preedit_box[1] - input_box[3],
-                input_box[1] - preedit_box[3],
-            )
             if (
                 isinstance(focused_target_text, str)
                 and focused_target_text.startswith(coarse_input_value)
-                and smaller_width > 0
-                and horizontal_overlap / smaller_width >= 0.60
-                and vertical_gap <= 100
             ):
                 trusted_input = dict(trusted_input)
                 trusted_input["same_frame_visible_cue_text"] = coarse_input_value
@@ -5745,14 +5768,26 @@ def _apply_input_structure_audit(
             lineage_bounds = tuple(
                 float(part) / 1000.0 for part in trusted_input["input_bounds"]
             )
+            lineage_visible_cues = tuple(trusted_input["visible_editable_cues"])
+            if (
+                keyboard_input_mode == "direct_latin"
+                and verified_input_lineage.exact_value not in lineage_visible_cues
+                and _adjacent_exact_preedit_cue(
+                    trusted_input,
+                    trusted_preedits,
+                    verified_input_lineage.exact_value,
+                )
+            ):
+                lineage_visible_cues = (
+                    *lineage_visible_cues,
+                    verified_input_lineage.exact_value,
+                )
             if verified_input_lineage.matches_pending_input_state_cue(
                 device_id=str(device_id or ""),
                 app_id=scene.app_id,
                 screen_id=scene.screen_id,
                 raw_value=raw_lineage_text,
-                visible_editable_cues=tuple(
-                    trusted_input["visible_editable_cues"]
-                ),
+                visible_editable_cues=lineage_visible_cues,
                 input_bounds=lineage_bounds,
             ):
                 trusted_input = dict(trusted_input)

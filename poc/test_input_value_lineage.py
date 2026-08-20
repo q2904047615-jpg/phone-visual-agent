@@ -674,6 +674,15 @@ class TypedInputLineageTests(unittest.TestCase):
                 self.assertEqual("pending_verified_input_state_action", record.source)
                 self.assertEqual(PRIOR, record.exact_value)
                 self.assertTrue(
+                    record.matches_pending_input_state_surface(
+                        device_id=DEVICE,
+                        app_id="sample.app",
+                        screen_id="editor",
+                        input_bounds=(0.13, 0.54, 0.69, 0.61),
+                        now_epoch=1000.0,
+                    )
+                )
+                self.assertTrue(
                     record.matches_pending_input_state_value(
                         device_id=DEVICE,
                         app_id="sample.app",
@@ -705,6 +714,13 @@ class TypedInputLineageTests(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case):
                 self.assertFalse(record.matches_pending_input_state_value(**case))
+                surface_case = dict(case)
+                surface_case.pop("raw_value")
+                if case["raw_value"] != PRIOR:
+                    continue
+                self.assertFalse(
+                    record.matches_pending_input_state_surface(**surface_case)
+                )
 
     def test_pending_input_state_lineage_rejects_non_state_or_mutating_actions(self) -> None:
         before, action = state_switch_case()
@@ -772,6 +788,30 @@ class TypedInputLineageTests(unittest.TestCase):
         self.assertEqual(PRIOR, next_key.states["prior_input_value"])
         self.assertEqual(PRIOR + "2", next_key.states["expected_input_value"])
         self.assertTrue(any("输入状态切换后" in item for item in input_element.evidence))
+
+        preedit_only = json.loads(state_switch_audit_raw())
+        preedit_only["application_inputs"][0]["visible_editable_cues"] = [
+            "caret",
+            "underlined text",
+        ]
+        audited_preedit_only = _apply_input_structure_audit(
+            UIScene.from_dict(before),
+            json.dumps(preedit_only, ensure_ascii=False),
+            fingerprint="after-state-fp-preedit-only",
+            goal_context={
+                "objective": f"让输入框逐字显示 {PRIOR}2",
+                "entities": {"input_text": PRIOR + "2"},
+            },
+            verified_input_lineage=record,
+            device_id=DEVICE,
+            lineage_frame=surface_frame(),
+        )
+        self.assertEqual(
+            PRIOR,
+            audited_preedit_only.get_element(
+                "local_audited_input_1"
+            ).states["value"],
+        )
 
     def test_state_switch_live_audit_requires_bound_lineage_and_exact_visible_cue(self) -> None:
         before, action = state_switch_case()

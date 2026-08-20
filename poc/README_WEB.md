@@ -218,3 +218,18 @@ poc\.venv\Scripts\python.exe poc\analyze_state_graph_reliability.py `
 
 历史报告会计入“未带指标的旧运行”，但不会混入新版本成功率。只有包含
 `reliability_metrics` 的新报告才参与动作确认率、恢复确认率和失败阶段统计。
+
+## 本地 Agent API 网关
+
+命令行控制通用 Agent 时只能使用类型化网关，不能手写 URL 或控制令牌：
+
+```powershell
+python poc/agent_api_cli.py bootstrap
+python poc/agent_api_cli.py status
+python poc/agent_api_cli.py start --device-id device-local-01 --text "目标描述"
+python poc/agent_api_cli.py confirm-once --session-id SESSION_ID
+```
+
+`start` 默认 `auto_advance=false`，只建立 0 动作会话；只有显式加入
+`--auto-advance` 才启用连续循环。网关每次从当前服务取得内存令牌和 OpenAPI，
+先校验方法、路径与 JSON schema，再发送请求。令牌不会写入文件或输出。

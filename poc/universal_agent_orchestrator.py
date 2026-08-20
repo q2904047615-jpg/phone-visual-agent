@@ -77,6 +77,57 @@ _TRANSIENT_ACTION_KEYS = frozenset(
 )
 
 
+def _validate_visible_completion_condition_progress(
+    previous: DynamicTaskGraph,
+    revised: DynamicTaskGraph,
+    observed: ObservedState,
+) -> None:
+    """Allow evidence-backed condition state progress without semantic rewrites."""
+
+    old_conditions = tuple(previous.completion_conditions)
+    new_conditions = tuple(revised.completion_conditions)
+    old_ids = tuple(item.condition_id for item in old_conditions)
+    new_ids = tuple(item.condition_id for item in new_conditions)
+    if old_ids != new_ids:
+        raise UniversalAgentOrchestratorError(
+            "可见状态证据推进不得增加、删除或重排全局完成条件。"
+        )
+    typed_refs = {
+        item.ref_id for item in observed.visual_claim_evidence_refs
+    }
+    current_evidence = (
+        typed_refs
+        if typed_refs
+        else set(observed.visible_evidence).union(observed.grounded_visual_facts)
+    )
+    for old, new in zip(old_conditions, new_conditions):
+        if (
+            new.description != old.description
+            or new.evidence_required != old.evidence_required
+        ):
+            raise UniversalAgentOrchestratorError(
+                "可见状态证据推进不得改写全局完成条件定义："
+                f"{old.condition_id}。"
+            )
+        if old.satisfied and not new.satisfied:
+            raise UniversalAgentOrchestratorError(
+                "可见状态证据推进不得撤销已满足的全局完成条件："
+                f"{old.condition_id}。"
+            )
+        old_evidence = set(old.evidence)
+        new_evidence = set(new.evidence)
+        if not old_evidence.issubset(new_evidence):
+            raise UniversalAgentOrchestratorError(
+                "可见状态证据推进不得删除既有全局完成证据："
+                f"{old.condition_id}。"
+            )
+        if not (new_evidence - old_evidence).issubset(current_evidence):
+            raise UniversalAgentOrchestratorError(
+                "可见状态证据推进使用了当前观察之外的全局完成证据："
+                f"{old.condition_id}。"
+            )
+
+
 def _stable_action_payload(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
@@ -2628,12 +2679,12 @@ class UniversalAgentOrchestrator:
         if (
             revised.goal != graph.goal
             or revised.constraints != graph.constraints
-            or revised.completion_conditions != graph.completion_conditions
             or revised.risk_actions != graph.risk_actions
         ):
             raise UniversalAgentOrchestratorError(
-                "可见状态证据推进不得修改目标、约束、全局完成条件或风险定义。"
+                "可见状态证据推进不得修改目标、约束或效果定义。"
             )
+        _validate_visible_completion_condition_progress(graph, revised, observed)
         for subgoal_id in old_ids:
             old_item = old_by_id[subgoal_id]
             new_item = new_by_id[subgoal_id]

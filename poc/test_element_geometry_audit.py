@@ -590,7 +590,6 @@ class GenericSceneGeometryAuditIntegrationTests(unittest.TestCase):
             for expected_part, actual_part in zip(expected, actual):
                 self.assertAlmostEqual(expected_part, actual_part, places=8)
         self.assertEqual(current.elements[0].meaning, audited.elements[0].meaning)
-        self.assertEqual(current.elements[0].meaning, audited.elements[0].meaning)
         for element in audited.elements:
             self.assertTrue(element.states["fully_visible"])
             self.assertTrue(element.states["independent_geometry_verified"])

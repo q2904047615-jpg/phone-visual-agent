@@ -43,6 +43,7 @@ from universal_agent_orchestrator import (
     VerifiedAppSurfaceLineage,
     _action_digest,
     _action_equivalence_digest,
+    _validate_visible_completion_condition_progress,
 )
 
 
@@ -648,6 +649,142 @@ def _trusted_factory(*, frames, device_id, scene, observation_id=None):
         scene=scene,
         observation_id=observation_id or "obs-start",
     )
+
+
+class VisibleCompletionConditionProgressTests(unittest.TestCase):
+    @staticmethod
+    def _observed(*refs: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            visual_claim_evidence_refs=tuple(
+                SimpleNamespace(ref_id=value) for value in refs
+            ),
+            visible_evidence=(),
+            grounded_visual_facts=(),
+        )
+
+    def test_allows_only_current_typed_evidence_state_progress(self) -> None:
+        graph = _graph()
+        ref = "visual_claim:obs-current:claim-current"
+        revised = replace(
+            graph,
+            completion_conditions=(
+                replace(
+                    graph.completion_conditions[0],
+                    satisfied=True,
+                    evidence=(ref,),
+                ),
+            ),
+        )
+
+        _validate_visible_completion_condition_progress(
+            graph,
+            revised,
+            self._observed(ref),
+        )
+
+    def test_rejects_definition_rewrite_and_unknown_evidence(self) -> None:
+        graph = _graph()
+        ref = "visual_claim:obs-current:claim-current"
+        cases = (
+            (
+                replace(
+                    graph,
+                    completion_conditions=graph.completion_conditions
+                    + (
+                        CompletionCondition(
+                            condition_id="added-condition",
+                            description="新增状态可见",
+                            evidence_required=("新增状态可见",),
+                        ),
+                    ),
+                ),
+                "不得增加、删除或重排全局完成条件",
+            ),
+            (
+                replace(
+                    graph,
+                    completion_conditions=(
+                        replace(
+                            graph.completion_conditions[0],
+                            description="被改写的完成条件",
+                        ),
+                    ),
+                ),
+                "不得改写全局完成条件定义",
+            ),
+            (
+                replace(
+                    graph,
+                    completion_conditions=(
+                        replace(
+                            graph.completion_conditions[0],
+                            satisfied=True,
+                            evidence=("visual_claim:old:unknown",),
+                        ),
+                    ),
+                ),
+                "当前观察之外的全局完成证据",
+            ),
+        )
+        for revised, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(
+                    UniversalAgentOrchestratorError,
+                    message,
+                ):
+                    _validate_visible_completion_condition_progress(
+                        graph,
+                        revised,
+                        self._observed(ref),
+                    )
+
+    def test_rejects_satisfied_condition_rollback_or_evidence_deletion(self) -> None:
+        ref = "visual_claim:obs-old:claim-old"
+        graph = replace(
+            _graph(),
+            completion_conditions=(
+                replace(
+                    _graph().completion_conditions[0],
+                    satisfied=True,
+                    evidence=(ref,),
+                ),
+            ),
+        )
+        cases = (
+            (
+                replace(
+                    graph,
+                    completion_conditions=(
+                        replace(
+                            graph.completion_conditions[0],
+                            satisfied=False,
+                            evidence=(),
+                        ),
+                    ),
+                ),
+                "不得撤销已满足",
+            ),
+            (
+                replace(
+                    graph,
+                    completion_conditions=(
+                        replace(graph.completion_conditions[0], evidence=()),
+                    ),
+                ),
+                "不得删除既有全局完成证据",
+            ),
+        )
+        for revised, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(
+                    UniversalAgentOrchestratorError,
+                    message,
+                ):
+                    _validate_visible_completion_condition_progress(
+                        graph,
+                        revised,
+                        self._observed(),
+                    )
 
 
 class PhaseOneNavigationPolicyTests(unittest.TestCase):
@@ -3532,9 +3669,32 @@ class UniversalAgentStartTests(unittest.TestCase):
             confidence=1.0,
             fingerprint="settings-main-current",
         )
+        trusted = FakeTrustedObservation(
+            device_id=initial.device_id,
+            scene=scene,
+        )
+        observed = ObservationBridge().observed_state(
+            graph=initial,
+            trusted_observation=trusted,
+            action_outcome="not_applicable",
+            verification={"visible_evidence": [scene.summary]},
+        )
+        current_summary_ref = next(
+            item.ref_id
+            for item in observed.visual_claim_evidence_refs
+            if item.fact == scene.summary
+        )
         revised = replace(
             initial,
             revision=2,
+            completion_conditions=tuple(
+                replace(
+                    item,
+                    satisfied=True,
+                    evidence=(current_summary_ref,),
+                )
+                for item in initial.completion_conditions
+            ),
             subgoals=(
                 replace(
                     open_settings,
@@ -3567,10 +3727,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             result = orchestrator._try_advance_visible_presence_subgoal(
                 session,
                 graph=initial,
-                trusted_observation=FakeTrustedObservation(
-                    device_id=initial.device_id,
-                    scene=scene,
-                ),
+                trusted_observation=trusted,
             )
 
         self.assertEqual(revised, result)

@@ -1,6 +1,9 @@
 import copy
 import json
 import unittest
+from unittest.mock import patch
+
+import deepseek_task_graph as task_graph_module
 
 from deepseek_task_graph import (
     DeepSeekTaskGraphPlanner,
@@ -424,16 +427,30 @@ class TypedPlannerTransportTests(unittest.TestCase):
             device_id="phone-1",
             task_id="task-fixed",
         )
-        revised = planner.replan(
-            graph,
-            ObservedState(
-                scene_id="scene-2",
-                summary="页面发生变化",
-                visible_evidence=("目标仍未完成",),
-            ),
-            trigger="observation_changed",
-            reason="当前画面已变化",
-        )
+        with (
+            patch.object(
+                task_graph_module,
+                "_validate_execution_class_revision",
+                wraps=task_graph_module._validate_execution_class_revision,
+            ) as execution_check,
+            patch.object(
+                task_graph_module,
+                "_validate_preserved_effect_intents",
+                wraps=task_graph_module._validate_preserved_effect_intents,
+            ) as effect_check,
+        ):
+            revised = planner.replan(
+                graph,
+                ObservedState(
+                    scene_id="scene-2",
+                    summary="页面发生变化",
+                    visible_evidence=("目标仍未完成",),
+                ),
+                trigger="observation_changed",
+                reason="当前画面已变化",
+            )
+        self.assertEqual(1, execution_check.call_count)
+        self.assertEqual(1, effect_check.call_count)
         self.assertEqual("task-fixed", revised.task_id)
         self.assertEqual("phone-1", revised.device_id)
         self.assertEqual(2, revised.revision)

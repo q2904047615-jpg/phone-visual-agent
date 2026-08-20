@@ -1296,8 +1296,10 @@ class DeepSeekTaskGraphPlanner:
             trigger=trigger,
         )
         candidate = _normalize_unique_active_frontier(candidate)
-        _validate_execution_class_revision(graph, candidate)
-        _validate_preserved_effect_intents(graph, candidate)
+        # Validate the raw typed transport once before local projection.  The
+        # revision-specific execution-class and EffectIntent invariants are
+        # owned by _validate_replan_candidate below and must not be duplicated
+        # on the same candidate.
         candidate.validate()
         candidate = self._apply_formal_semantic_authority(candidate)
         self._validate_replan_candidate(

@@ -3406,7 +3406,6 @@ def confirm_task(
 ) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
     require_legacy_workflows_enabled()
-    require_legacy_workflows_enabled()
     device_id = runtime.device_controllers.default_device_id
     active_session = runtime.device_task_registry.active_session(device_id)
     if active_session is not None:

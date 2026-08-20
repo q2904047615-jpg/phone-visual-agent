@@ -18,6 +18,11 @@ SYSTEM_NAVIGATION_DOM_CENTER_X = 0.5
 SYSTEM_NAVIGATION_DOM_INWARD_DISTANCE = 0.25
 SYSTEM_NAVIGATION_MIN_BOTTOM_Y = 0.90
 SYSTEM_NAVIGATION_MAX_FRAME_TO_DOM_ERROR = 0.02
+LOCAL_TARGET_MIN_RELATIVE_INTERSECTION = 0.40
+LOCAL_TARGET_MIN_ABSOLUTE_INTERSECTION_WIDTH = 0.05
+LOCAL_TARGET_MIN_ABSOLUTE_INTERSECTION_HEIGHT = 0.04
+LOCAL_TARGET_MIN_ABSOLUTE_INTERSECTION_AREA = 0.002
+LOCAL_TARGET_MAX_ABSOLUTE_INTERSECTION_SHIFT_RATIO = 0.35
 
 
 class TapCalibrationError(RuntimeError):
@@ -352,11 +357,27 @@ def resolve_target_grid_point_within_calibration(
     axis_coverage_x = (max(xs) - min(xs)) / target_width
     axis_coverage_y = (max(ys) - min(ys)) / target_height
     area_coverage = area / (target_width * target_height)
-    if min(area_coverage, axis_coverage_x, axis_coverage_y) < 0.40:
+    relative_intersection_sufficient = (
+        min(area_coverage, axis_coverage_x, axis_coverage_y)
+        >= LOCAL_TARGET_MIN_RELATIVE_INTERSECTION
+    )
+    intersection_width = max(xs) - min(xs)
+    intersection_height = max(ys) - min(ys)
+    absolute_intersection_sufficient = (
+        intersection_width >= LOCAL_TARGET_MIN_ABSOLUTE_INTERSECTION_WIDTH
+        and intersection_height >= LOCAL_TARGET_MIN_ABSOLUTE_INTERSECTION_HEIGHT
+        and area >= LOCAL_TARGET_MIN_ABSOLUTE_INTERSECTION_AREA
+    )
+    if not (relative_intersection_sufficient or absolute_intersection_sufficient):
         raise TapCalibrationError("目标区域在实测标定凸包内的二维覆盖不足，已拒绝点击。")
+    shift_ratio = (
+        LOCAL_TARGET_MAX_ABSOLUTE_INTERSECTION_SHIFT_RATIO
+        if absolute_intersection_sufficient and not relative_intersection_sufficient
+        else 0.30
+    )
     if (
-        abs(centroid[0] - preferred[0]) > max(0.03, 0.30 * target_width)
-        or abs(centroid[1] - preferred[1]) > max(0.03, 0.30 * target_height)
+        abs(centroid[0] - preferred[0]) > max(0.03, shift_ratio * target_width)
+        or abs(centroid[1] - preferred[1]) > max(0.03, shift_ratio * target_height)
     ):
         raise TapCalibrationError("标定交集中心偏离视觉目标中心过远，已拒绝点击。")
     target_edge_distance = min(

@@ -2024,6 +2024,10 @@ class QwenVisualDecisionTests(unittest.TestCase):
         choices = _selection_choices(
             parsed, observation, frozenset({"tap_semantic", "input_verified_text"})
         )
+        self.assertFalse(
+            any(item["action"] == "input_verified_text" for item in choices),
+            "a visible literal-key step must not expose an invalid batch-input choice",
+        )
         choice = next(item for item in choices if item["element_id"] == literal.element_id)
         self.assertEqual("tap_semantic", choice["action"])
         self.assertEqual(

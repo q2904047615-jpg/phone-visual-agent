@@ -8,6 +8,10 @@ from typing import Any, Iterable, Mapping
 
 from task_semantic_ir import EffectIntent, SemanticEntity, TaskSemanticIR
 from ui_scene import UIElement, UIScene
+from verified_text_transaction import (
+    VerifiedTextTransactionError,
+    plan_from_input_states,
+)
 
 
 CANONICAL_ACTION_PROTOCOL = "2026-08-20-canonical-action-v1"
@@ -638,6 +642,31 @@ def _element_eligible(element: UIElement) -> bool:
     )
 
 
+def _verified_text_affordance_ready(
+    element: UIElement,
+    target_text: str,
+) -> bool:
+    """Expose batch text input only when the next typed segment is executable."""
+
+    if element.role != "input" or element.states.get("focused") is not True:
+        return False
+    try:
+        step = plan_from_input_states(target_text, element.states)
+    except (ValueError, VerifiedTextTransactionError):
+        return False
+    if step is None or step.kind == "literal_key":
+        return False
+    return bool(
+        element.states.get("keyboard_layout") == "qwerty"
+        and element.states.get("keyboard_input_mode") == step.required_mode
+        and (
+            not step.required_case_mode
+            or element.states.get("keyboard_case_mode") == step.required_case_mode
+        )
+        and not element.states.get("ime_preedit_text")
+    )
+
+
 def _element_proves_scrollable_viewport(element: UIElement) -> bool:
     """Grant swipe affordance only from a typed, evidenced viewport fact."""
 
@@ -913,6 +942,13 @@ def compile_canonical_action_catalog(
             )
 
     entity_by_id = {item.entity_id: item for item in semantic_ir.entities}
+    active_input_payload_entities = tuple(
+        entity_by_id[ref]
+        for ref in sorted(active_input_payload_refs)
+        if ref in entity_by_id
+        and entity_by_id[ref].role == "input_text"
+        and isinstance(entity_by_id[ref].value, str)
+    )
     effect_by_entity: dict[str, list[tuple[EffectIntent, str]]] = {}
     for effect in semantic_ir.effects:
         for entity_ref in effect.target_refs:
@@ -1060,7 +1096,14 @@ def compile_canonical_action_catalog(
         if "drag" in available:
             supported.add("drag")
         if element.role == "input" and element.states.get("focused") is True:
-            if "input_verified_text" in available:
+            if (
+                "input_verified_text" in available
+                and len(active_input_payload_entities) == 1
+                and _verified_text_affordance_ready(
+                    element,
+                    active_input_payload_entities[0].value,
+                )
+            ):
                 supported.add("input_verified_text")
             if "clear_verified_text" in available and bool(element.states.get("value")):
                 supported.add("clear_verified_text")
@@ -1301,17 +1344,14 @@ def compile_canonical_action_catalog(
                     element.element_id, ()
                 )
                 if relation_kind == "binds_effect_payload"
+                and entity_id in active_input_payload_refs
                 and entity_id in entity_by_id
                 and entity_by_id[entity_id].role == "input_text"
             ]
             # A focused empty input does not literally contain the future payload.
             # Bind the unique typed input_text payload directly to the input affordance.
             if not payload_entities:
-                payload_entities = [
-                    entity
-                    for entity in semantic_ir.entities
-                    if entity.role == "input_text" and isinstance(entity.value, str)
-                ]
+                payload_entities = list(active_input_payload_entities)
             if len(payload_entities) == 1:
                 payload = payload_entities[0]
                 payload_effects = sorted(

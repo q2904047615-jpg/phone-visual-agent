@@ -198,6 +198,105 @@ class CanonicalActionProtocolTests(unittest.TestCase):
             "longinputvalidation2026:12",
             matches[0].transition.expectations[0].value,
         )
+        self.assertFalse(
+            any(
+                candidate.action_kind == "input_verified_text"
+                for candidate in report.candidates
+            ),
+            "numeric literal-key steps must not advertise an impossible batch input",
+        )
+
+    def test_qwerty_direct_latin_continuation_keeps_batch_input(self) -> None:
+        semantic_ir = input_ir(active="type_last_char")
+        payload = next(
+            item for item in semantic_ir.entities if item.role == "input_text"
+        )
+        semantic_ir = replace(
+            semantic_ir,
+            entities=tuple(
+                replace(item, value="draftmore") if item is payload else item
+                for item in semantic_ir.entities
+            ),
+        )
+        direct_scene = scene(
+            element(
+                "input",
+                label="draft",
+                meaning="application_text_input",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "draft",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                    "keyboard_case_mode": "lower",
+                },
+            )
+        )
+        report = compile_canonical_action_catalog(
+            direct_scene,
+            semantic_ir,
+            {"tap_semantic", "input_verified_text"},
+        )
+        matches = [
+            candidate
+            for candidate in report.candidates
+            if candidate.action_kind == "input_verified_text"
+        ]
+        self.assertEqual(1, len(matches))
+        self.assertEqual(
+            "draftmore",
+            matches[0].transition.expectations[0].value,
+        )
+
+    def test_batch_input_is_absent_when_typed_step_is_not_executable(self) -> None:
+        cases = (
+            ("already complete", "draft", "draft", "qwerty", "direct_latin", "lower", ""),
+            ("wrong prefix", "draft", "other", "qwerty", "direct_latin", "lower", ""),
+            ("non qwerty", "draftmore", "draft", "numeric", "direct_latin", "unknown", ""),
+            ("wrong mode", "draftmore", "draft", "qwerty", "chinese_pinyin", "lower", ""),
+            ("pending preedit", "draftmore", "draft", "qwerty", "direct_latin", "lower", "draft"),
+            ("wrong case", "DRAFT", "", "qwerty", "direct_latin", "lower", ""),
+        )
+        for name, target, current, layout, mode, case_mode, preedit in cases:
+            with self.subTest(name=name):
+                semantic_ir = input_ir(active="type_last_char")
+                semantic_ir = replace(
+                    semantic_ir,
+                    entities=tuple(
+                        replace(item, value=target)
+                        if item.role == "input_text"
+                        else item
+                        for item in semantic_ir.entities
+                    ),
+                )
+                current_scene = scene(
+                    element(
+                        "input",
+                        label=current,
+                        meaning="application_text_input",
+                        role="input",
+                        states={
+                            "focused": True,
+                            "value": current,
+                            "keyboard_layout": layout,
+                            "keyboard_input_mode": mode,
+                            "keyboard_case_mode": case_mode,
+                            "ime_preedit_text": preedit,
+                        },
+                    )
+                )
+                report = compile_canonical_action_catalog(
+                    current_scene,
+                    semantic_ir,
+                    {"tap_semantic", "input_verified_text"},
+                )
+                self.assertFalse(
+                    any(
+                        candidate.action_kind == "input_verified_text"
+                        for candidate in report.candidates
+                    )
+                )
 
     def test_selection_only_returns_existing_candidate_from_same_digest(self) -> None:
         report = compile_canonical_action_catalog(

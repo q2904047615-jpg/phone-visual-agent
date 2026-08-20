@@ -81,6 +81,42 @@ NON_EFFECT_RESULT_PATTERN = re.compile(
     r"\b(?:send|submit|publish|follow|comment|pay|login|authorize|delete|modify|save|sync)\b",
     re.IGNORECASE,
 )
+_PROHIBITED_EFFECT_FAMILY_PATTERNS = {
+    "send": re.compile(r"发送|\bsend\b", re.IGNORECASE),
+    "search": re.compile(r"搜索|\bsearch\b", re.IGNORECASE),
+    "submit": re.compile(r"提交|\bsubmit\b", re.IGNORECASE),
+    "publish": re.compile(r"发布|\bpublish\b", re.IGNORECASE),
+    "follow": re.compile(r"关注|\bfollow\b", re.IGNORECASE),
+    "comment": re.compile(r"评论|\bcomment\b", re.IGNORECASE),
+    "financial": re.compile(
+        r"付款|支付|转账|\b(?:pay|payment|transfer)\b",
+        re.IGNORECASE,
+    ),
+    "authentication": re.compile(
+        r"登录|认证|\b(?:login|log\s+in|authenticate)\b",
+        re.IGNORECASE,
+    ),
+    "authorization": re.compile(
+        r"授权|权限|\b(?:authorize|permission)\b",
+        re.IGNORECASE,
+    ),
+    "deletion": re.compile(r"删除|清除|\b(?:delete|erase)\b", re.IGNORECASE),
+    "mutation": re.compile(
+        r"修改|保存|同步|\b(?:modify|save|sync)\b",
+        re.IGNORECASE,
+    ),
+}
+_NEGATIVE_EFFECT_CLAUSE_SPLIT_PATTERN = re.compile(
+    r"(?:，|,|。|；|;|且|并且|\band\b)",
+    re.IGNORECASE,
+)
+_VISIBLE_NEGATIVE_STATE_PATTERN = re.compile(
+    r"页面|界面|输入框|按钮|控件|气泡|列表|弹窗|结果|"
+    r"可见|显示|不存在|消失|为空|"
+    r"\b(?:page|screen|input|button|control|bubble|list|dialog|result|"
+    r"visible|shown|absent|missing|empty)\b",
+    re.IGNORECASE,
+)
 _EXECUTION_CLASS_BY_RUNTIME_IMPACT = {
     value: key for key, value in _RUNTIME_IMPACT_BY_EXECUTION_CLASS.items()
 }
@@ -1205,6 +1241,7 @@ class DeepSeekTaskGraphPlanner:
         # allowed.  A malformed or unsafe semantic answer is never repaired by
         # another remote sample.
         graph = _normalize_explicit_target_surface(graph, text)
+        graph = _normalize_redundant_prohibited_effect_conditions(graph)
         graph = _normalize_initial_premature_completed_status(graph)
         graph = _normalize_unique_active_frontier(graph)
         # Reject malformed planner transport before semantic cutover so the
@@ -1245,6 +1282,7 @@ class DeepSeekTaskGraphPlanner:
             raw_user_goal=graph.raw_user_goal or graph.goal.objective,
             validate=False,
         )
+        candidate = _normalize_redundant_prohibited_effect_conditions(candidate)
         candidate = _restore_completed_history_evidence(graph, candidate)
         candidate = _canonicalize_literal_visible_evidence_clauses(
             graph,
@@ -1477,7 +1515,9 @@ Shell、ADB、keycode、main.exe 指令或其他可直接驱动设备的控制�
 5. 每个子目标只用 execution_class 标为 observe、navigate、effect 或 unknown；模型不得输出风险等级、
    confirmation_required、external_impact 或 risk_actions。真正产生外部结果的子目标必须声明 typed
    effect_intents，并让 expected_results 逐字引用该子目标的正向完成条件。禁止、未发生、保持不变、
-   按钮可见但未触发等约束或状态不得声明为 effect。确认只由 EffectIntent.kind 与本地版本化策略决定。
+   按钮可见但未触发等约束或状态不得声明为 effect。纯粹的“不要发送、未提交、未保存、未登录”等
+   效果禁令只保留在 constraints，不得再重复建立 completion_conditions；completion_conditions 只写
+   最终需要由当前画面或正式效果回执证明的正向结果。确认只由 EffectIntent.kind 与本地版本化策略决定。
 6. observe 只能描述查看、读取、检查等纯观察结果；navigate 只能描述打开或进入页面等
    导航结果。仅改变本机临时界面层级、前后台页面或临时标签页也属于 navigation_only，不得为它
    虚构 effect_intents；但登录/退出账号、修改账号数据或云端同步状态仍属于 effect。
@@ -1551,6 +1591,98 @@ def _normalize_initial_premature_completed_status(
     ):
         return graph
     return replace(graph, status="running")
+
+
+def _pure_prohibited_effect_families(value: str) -> frozenset[str]:
+    """Classify a clause that contains only a prohibited-effect invariant.
+
+    This is intentionally narrower than general negation detection.  Visible
+    absence states remain visual completion conditions, while controller-side
+    statements such as "the send action did not occur" can be recognized as
+    redundant with an explicit global prohibition.
+    """
+
+    clauses = tuple(
+        clause.strip()
+        for clause in _NEGATIVE_EFFECT_CLAUSE_SPLIT_PATTERN.split(
+            str(value or "").strip()
+        )
+        if clause.strip()
+    )
+    if not clauses:
+        return frozenset()
+    families: set[str] = set()
+    for clause in clauses:
+        if (
+            not NON_EFFECT_RESULT_PATTERN.search(clause)
+            or _VISIBLE_NEGATIVE_STATE_PATTERN.search(clause)
+        ):
+            return frozenset()
+        clause_families = {
+            family
+            for family, pattern in _PROHIBITED_EFFECT_FAMILY_PATTERNS.items()
+            if pattern.search(clause)
+        }
+        if not clause_families:
+            return frozenset()
+        families.update(clause_families)
+    return frozenset(families)
+
+
+def _normalize_redundant_prohibited_effect_conditions(
+    graph: DynamicTaskGraph,
+) -> DynamicTaskGraph:
+    """Keep pure effect prohibitions as constraints, not visual outcomes.
+
+    Removal is a fail-safe reduction of model authority: the original global
+    constraint remains byte-for-byte present, no completion is minted, and a
+    dedicated read-only negative-state subgoal prevents normalization when the
+    user actually asked to inspect an absence.  Mixed positive/negative visual
+    conditions and evidence-bearing claims remain under the strict validator.
+    """
+
+    constraint_families = frozenset().union(
+        *(
+            _pure_prohibited_effect_families(item)
+            for item in graph.constraints
+        )
+    )
+    if not constraint_families or len(graph.completion_conditions) <= 1:
+        return graph
+
+    observed_negative_families: set[str] = set()
+    for subgoal in graph.subgoals:
+        if subgoal.external_impact != "read_only":
+            continue
+        for text in (subgoal.objective, *subgoal.completion_conditions):
+            observed_negative_families.update(
+                _pure_prohibited_effect_families(text)
+            )
+
+    retained: list[CompletionCondition] = []
+    for condition in graph.completion_conditions:
+        description_families = _pure_prohibited_effect_families(
+            condition.description
+        )
+        evidence_families = tuple(
+            _pure_prohibited_effect_families(item)
+            for item in condition.evidence_required
+        )
+        combined = description_families.union(*evidence_families)
+        redundant = bool(
+            not condition.evidence
+            and description_families
+            and evidence_families
+            and all(evidence_families)
+            and combined.issubset(constraint_families)
+            and combined.isdisjoint(observed_negative_families)
+        )
+        if not redundant:
+            retained.append(condition)
+
+    if not retained or len(retained) == len(graph.completion_conditions):
+        return graph
+    return replace(graph, completion_conditions=tuple(retained))
 
 
 def _normalize_explicit_target_surface(
@@ -1745,7 +1877,9 @@ def _replan_prompt(
 {_schema_prompt()}
 
 重规划规则：
-1. goal 必须逐字段保持不变；constraints 必须保留已有约束，可追加新发现的约束。
+1. goal 必须逐字段保持不变；constraints 必须保留已有约束，可追加新发现的约束。纯粹的禁止效果或
+   “某动作未发生”继续只作为 constraints，不得新增或满足同义 completion_conditions；正向最终状态
+   仍必须使用后述 typed evidence。
 2. 已 completed 的子目标必须原样保留且仍为 completed；已满足的全局条件不得撤销。
 3. 可修改、跳过或替换尚未完成的子目标，并新增子目标；不要坚持已失效的旧路径。
 4. 新宣称 completed/satisfied 时，如果 visual_claim_evidence_refs 非空，视觉证据必须逐字复制

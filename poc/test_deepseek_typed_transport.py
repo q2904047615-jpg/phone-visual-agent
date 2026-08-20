@@ -96,6 +96,128 @@ class TypedPlannerTransportTests(unittest.TestCase):
         self.assertEqual((), graph.risk_actions)
         self.assertEqual("navigation_only", graph.subgoals[0].external_impact)
 
+    def test_pure_prohibited_effect_condition_remains_only_a_constraint(self):
+        raw = payload(objective="在输入框保留草稿且不要发送")
+        raw["completion_conditions"].append(
+            {
+                "condition_id": "not_sent",
+                "description": "消息未被发送",
+                "evidence_required": ["没有发送消息的动作发生"],
+                "satisfied": False,
+                "evidence": [],
+            }
+        )
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+            raw["goal"]["objective"],
+            device_id="phone-1",
+        )
+
+        self.assertEqual(("done",), tuple(
+            item.condition_id for item in graph.completion_conditions
+        ))
+        self.assertIn("不得发送、删除或清空任何内容", graph.constraints)
+        self.assertEqual((), graph.risk_actions)
+
+    def test_replan_drops_unsupported_satisfied_prohibition_without_granting_completion(self):
+        initial = payload(objective="在输入框保留草稿且不要发送")
+        negative = {
+            "condition_id": "not_sent",
+            "description": "消息未被发送",
+            "evidence_required": ["没有发送消息的动作发生"],
+            "satisfied": False,
+            "evidence": [],
+        }
+        initial["completion_conditions"].append(copy.deepcopy(negative))
+        candidate = copy.deepcopy(initial)
+        candidate["status"] = "running"
+        candidate["completion_conditions"][-1]["satisfied"] = True
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(copy.deepcopy(initial), candidate)
+        )
+        graph = planner.plan(
+            initial["goal"]["objective"],
+            device_id="phone-1",
+        )
+
+        revised = planner.replan(
+            graph,
+            ObservedState(
+                scene_id="scene-still-editing",
+                summary="输入表面仍可见",
+                visible_evidence=("输入表面仍可见",),
+            ),
+            trigger="observation_changed",
+            reason="当前画面已更新",
+        )
+
+        self.assertEqual(("done",), tuple(
+            item.condition_id for item in revised.completion_conditions
+        ))
+        self.assertFalse(revised.completion_conditions[0].satisfied)
+        self.assertEqual("running", revised.status)
+
+    def test_prohibition_normalization_is_cross_effect_and_not_app_specific(self):
+        cases = (
+            ("不得搜索或提交", "未搜索、未提交", "没有搜索或提交动作发生"),
+            ("不得保存或发布", "未保存、未发布", "没有保存或发布动作发生"),
+            ("不得登录", "账号未登录", "没有登录动作发生"),
+        )
+        for constraint, description, evidence_required in cases:
+            with self.subTest(constraint=constraint):
+                raw = payload(objective="保持当前本机临时状态")
+                raw["constraints"] = [constraint]
+                raw["subgoals"][0]["constraints"] = [constraint]
+                raw["completion_conditions"].append(
+                    {
+                        "condition_id": "negative_effect",
+                        "description": description,
+                        "evidence_required": [evidence_required],
+                        "satisfied": False,
+                        "evidence": [],
+                    }
+                )
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                    raw["goal"]["objective"],
+                    device_id="phone-1",
+                )
+
+                self.assertEqual(("done",), tuple(
+                    item.condition_id for item in graph.completion_conditions
+                ))
+                self.assertEqual((constraint,), graph.constraints)
+
+    def test_visible_or_mixed_negative_state_is_not_removed(self):
+        cases = (
+            {
+                "condition_id": "mixed",
+                "description": "输入框最终值可见，且消息未被发送",
+                "evidence_required": ["输入框最终值可见", "没有发送消息的动作发生"],
+                "satisfied": False,
+                "evidence": [],
+            },
+            {
+                "condition_id": "visible_absence",
+                "description": "页面未显示发送结果",
+                "evidence_required": ["页面中不存在发送结果气泡"],
+                "satisfied": False,
+                "evidence": [],
+            },
+        )
+        for condition in cases:
+            with self.subTest(condition=condition["condition_id"]):
+                raw = payload(objective="核对当前可见状态并且不要发送")
+                raw["completion_conditions"].append(condition)
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                    raw["goal"]["objective"],
+                    device_id="phone-1",
+                )
+                self.assertIn(
+                    condition["condition_id"],
+                    tuple(item.condition_id for item in graph.completion_conditions),
+                )
+
     def test_retired_risk_fields_are_rejected_at_transport_boundary(self):
         raw = payload()
         raw["risk_actions"] = []
@@ -226,6 +348,8 @@ class TypedPlannerTransportTests(unittest.TestCase):
         self.assertNotIn('"risk_action_ids"', prompt)
         self.assertNotIn('"external_impact"', prompt)
         self.assertNotIn('"confirmation_required"', prompt)
+        self.assertIn("只保留在 constraints", prompt)
+        self.assertIn("不得再重复建立 completion_conditions", prompt)
 
     def test_natural_action_words_are_valid_but_direct_control_is_not(self):
         natural = payload(objective="点击设置入口后滑动列表并返回首页")

@@ -1789,6 +1789,32 @@ class UniversalAgentOrchestrator:
                 )
         return frozenset(term for term in terms if term not in generic)
 
+    @staticmethod
+    def _presence_title_prefixes(*values: Any) -> tuple[str, ...]:
+        """Extract explicit visible title-prefix selectors, never infer one."""
+
+        text = " ".join(str(value or "").strip() for value in values)
+        selectors: list[str] = []
+        patterns = (
+            re.compile(
+                r"标题(?:文字)?(?:开头|起始)(?:为|是|[:：])?\s*[“\"']?"
+                r"([A-Za-z0-9\u4e00-\u9fff·._-]{1,64}?)"
+                r"(?=的(?:唯一)?(?:卡片|列表项|条目|按钮|菜单项)|[”\"'，,。；;]|$)"
+            ),
+            re.compile(
+                r"title\s+(?:starts?|begins?)\s+with\s+[\"']?"
+                r"([A-Za-z0-9][A-Za-z0-9 ._\-]{0,63}?)"
+                r"(?=(?:\s+(?:card|item|button|entry))|[\"',.;]|$)",
+                re.IGNORECASE,
+            ),
+        )
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                value = match.group(1).strip().casefold()
+                if value and value not in selectors:
+                    selectors.append(value)
+        return tuple(selectors)
+
     @classmethod
     def _presence_surface_classes(cls, *values: Any) -> frozenset[str]:
         """Keep destination/container nouns from collapsing into ordinal overlap."""
@@ -2273,6 +2299,39 @@ class UniversalAgentOrchestrator:
                 target_apps=referenced_app_pages,
             )
         )
+        unique_goal_candidate = scene.unique_trusted_goal_element(
+            min_confidence=MIN_TARGET_CONFIDENCE,
+        )
+        presence_terms = self._presence_binding_terms(presence_text)
+        unique_candidate_terms = (
+            self._presence_binding_terms(
+                unique_goal_candidate.label,
+                unique_goal_candidate.meaning,
+                *unique_goal_candidate.evidence,
+            )
+            if unique_goal_candidate is not None
+            else frozenset()
+        )
+        title_prefixes = self._presence_title_prefixes(
+            current.objective,
+            *tuple(current.completion_conditions or ()),
+        )
+        candidate_label = str(
+            getattr(unique_goal_candidate, "label", "") or ""
+        ).strip().casefold()
+        title_prefix_grounded = bool(
+            unique_goal_candidate is not None
+            and title_prefixes
+            and all(candidate_label.startswith(prefix) for prefix in title_prefixes)
+        )
+        candidate_identity_grounded = bool(
+            unique_goal_candidate is not None
+            and (
+                title_prefix_grounded
+                if title_prefixes
+                else presence_terms.intersection(unique_candidate_terms)
+            )
+        )
         if not (
             foreground_matches_referenced_app
             or self._scene_named_presence_is_grounded(
@@ -2282,6 +2341,7 @@ class UniversalAgentOrchestrator:
                     *tuple(current.completion_conditions or ()),
                 ),
             )
+            or candidate_identity_grounded
         ):
             return None
         if referenced_app_pages and not foreground_matches_referenced_app:
@@ -2315,9 +2375,7 @@ class UniversalAgentOrchestrator:
             completion_terms = self._presence_binding_terms(
                 *tuple(current.completion_conditions or ())
             )
-            candidate = scene.unique_trusted_goal_element(
-                min_confidence=MIN_TARGET_CONFIDENCE,
-            )
+            candidate = unique_goal_candidate
             if candidate is not None:
                 candidate_terms = self._presence_binding_terms(
                     candidate.label,
@@ -2342,6 +2400,16 @@ class UniversalAgentOrchestrator:
                 required_element_surfaces = required_surfaces.difference(
                     scene_container_surfaces
                 )
+                # In "a card whose title starts with X", title is a visible
+                # selector carried by the list item's label, not a demand that
+                # the whole card itself have role=text/title.
+                if (
+                    "title" in required_element_surfaces
+                    and title_prefix_grounded
+                ):
+                    required_element_surfaces = required_element_surfaces.difference(
+                        {"title"}
+                    )
                 if (
                     not completion_terms
                     or not (

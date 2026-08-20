@@ -3360,6 +3360,145 @@ class UniversalAgentStartTests(unittest.TestCase):
         self.assertEqual(["subgoal_completed"], [call[2] for call in planner.replan_calls])
         self.assertEqual(0, session.physical_actions)
 
+    def test_start_advances_unique_list_item_selected_by_visible_title_prefix(self) -> None:
+        self.assertEqual(
+            ("通用动作真机验",),
+            UniversalAgentOrchestrator._presence_title_prefixes(
+                "定位标题开头为通用动作真机验的唯一卡片"
+            ),
+        )
+        self.assertEqual(
+            ("weekly report",),
+            UniversalAgentOrchestrator._presence_title_prefixes(
+                "locate the card whose title starts with Weekly Report card"
+            ),
+        )
+        base = _graph()
+        locate = replace(
+            base.subgoals[0],
+            subgoal_id="locate-card",
+            objective="定位标题开头为通用动作真机验的唯一卡片",
+            completion_conditions=(
+                "标题开头为通用动作真机验的卡片在列表中可见",
+            ),
+            external_impact="read_only",
+        )
+        click = Subgoal(
+            subgoal_id="click-card",
+            objective="点击已定位的唯一卡片",
+            status="pending",
+            depends_on=("locate-card",),
+            constraints=("只点击该卡片",),
+            completion_conditions=("目标页面已打开",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        initial = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="点击标题开头为通用动作真机验的唯一卡片",
+                target_apps=(),
+                entities={
+                    "target_ui_label": "通用动作真机验",
+                    "target_surface": "current_surface",
+                },
+            ),
+            subgoals=(locate, click),
+            active_subgoal_id="locate-card",
+            raw_user_goal="点击当前卡片列表中标题开头为通用动作真机验的唯一卡片",
+        )
+        initial.validate()
+        visible_fact = "标题开头为通用动作真机验的卡片在列表中可见"
+        revised = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    locate,
+                    status="completed",
+                    completion_evidence=(visible_fact,),
+                ),
+                replace(click, status="active"),
+            ),
+            active_subgoal_id="click-card",
+        )
+        revised.validate()
+        scene = _scene(
+            meaning="app_task_card",
+            label="通用动作真机验...",
+            role="list_item",
+            bounds=(0.53, 0.34, 0.94, 0.70),
+            evidence=(visible_fact,),
+            app_id="unknown",
+        )
+        planner = FakeDeepSeekPlanner(initial, replan_result=revised)
+        adapter = FakeAdapter(scene)
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = self._orchestrator(
+                planner,
+                FakeQwenObserver(),
+                adapter,
+            ).start(
+                session_id="session-title-prefix-card",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("needs_reobservation", session.status)
+        self.assertEqual(2, session.task_graph.revision)
+        self.assertEqual("click-card", session.task_graph.active_subgoal_id)
+        self.assertEqual(0, adapter.execute_calls)
+        self.assertEqual(0, session.physical_actions)
+
+        for unsafe_scene in (
+            replace(scene, elements=()),
+            replace(
+                scene,
+                elements=(
+                    scene.elements[0],
+                    replace(scene.elements[0], element_id="duplicate-card"),
+                ),
+            ),
+            replace(
+                scene,
+                elements=(
+                    replace(
+                        scene.elements[0],
+                        states={"goal_relevant": True, "fully_visible": False},
+                    ),
+                ),
+            ),
+            replace(
+                scene,
+                elements=(
+                    replace(
+                        scene.elements[0],
+                        label="其他卡片",
+                        evidence=("仅可见其他卡片",),
+                    ),
+                ),
+            ),
+        ):
+            unsafe_planner = FakeDeepSeekPlanner(initial, replan_result=revised)
+            with tempfile.TemporaryDirectory() as temp:
+                unsafe_session = self._orchestrator(
+                    unsafe_planner,
+                    FakeQwenObserver(),
+                    FakeAdapter(unsafe_scene),
+                ).start(
+                    session_id="session-unsafe-title-prefix-card",
+                    raw_goal=initial.raw_user_goal,
+                    device_id="device-1",
+                    run_dir=Path(temp),
+                )
+            self.assertEqual("blocked", unsafe_session.status)
+            self.assertEqual([], unsafe_planner.replan_calls)
+            self.assertEqual(0, unsafe_session.physical_actions)
+
     def test_exact_target_app_id_can_ground_deep_page_without_app_title(self) -> None:
         graph = self._named_app_page_graph(
             app_id="local_tool",

@@ -141,7 +141,7 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 "device_id": "device-a",
                 "revision": 1,
                 "subgoal_id": "subgoal-001",
-                "risk_ids": [],
+                "effect_ids": [],
                 "observation_id": "obs-before",
                 "fingerprint": "fingerprint-confirmed",
             },

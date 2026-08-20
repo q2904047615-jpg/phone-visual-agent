@@ -760,7 +760,7 @@ class VisualActionShadowTests(unittest.TestCase):
 
         observer = Observer()
         planner = SimpleNamespace(
-            last_semantic_shadow=SimpleNamespace(semantic_ir=ir)
+            last_semantic_authority=SimpleNamespace(semantic_ir=ir)
         )
         orchestrator = UniversalAgentOrchestrator(
             deepseek_planner=planner,
@@ -802,7 +802,7 @@ class VisualActionShadowTests(unittest.TestCase):
         observer = Observer()
         orchestrator = UniversalAgentOrchestrator(
             deepseek_planner=SimpleNamespace(
-                last_semantic_shadow=SimpleNamespace(semantic_ir=ir)
+                last_semantic_authority=SimpleNamespace(semantic_ir=ir)
             ),
             qwen_observer=observer,
             adapter_factory=lambda _device_id: None,
@@ -844,7 +844,7 @@ class VisualActionShadowTests(unittest.TestCase):
         observer = Observer()
         orchestrator = UniversalAgentOrchestrator(
             deepseek_planner=SimpleNamespace(
-                last_semantic_shadow=SimpleNamespace(semantic_ir=ir)
+                last_semantic_authority=SimpleNamespace(semantic_ir=ir)
             ),
             qwen_observer=observer,
             adapter_factory=lambda _device_id: None,

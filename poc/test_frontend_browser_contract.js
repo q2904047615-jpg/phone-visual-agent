@@ -6,10 +6,10 @@ const path = require("node:path");
 const { chromium } = require("playwright");
 
 const staticRoot = path.join(__dirname, "static");
-const deepSeekFixture = require("./frontend_contract_fixtures/deepseek_task_graph_v3.json");
-const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v2.json");
+const deepSeekFixture = require("./frontend_contract_fixtures/deepseek_typed_task_graph_v4.json");
+const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v4.json");
 const requests = {
-  start: [], approveRisk: [], confirm: [], next: [], auto: [], pause: [], cancel: [], stop: [],
+  start: [], approveEffect: [], confirm: [], next: [], auto: [], pause: [], cancel: [], stop: [],
   capabilityStart: [], capabilityConfirm: [], capabilityPromote: [], capabilityCancel: [],
   restore: [], previewDevices: [],
 };
@@ -21,24 +21,26 @@ function clone(value) {
 function externalSession() {
   return {
     session_id: "session-browser-external",
-    status: "awaiting_risk_confirmation",
+    status: "awaiting_effect_confirmation",
     task_graph: clone(deepSeekFixture.task_graph),
-    risk_confirmation_scope: {
+    effect_confirmation_scope: {
       session_id: "session-browser-external",
       task_id: "task-map-001",
       device_id: "phone-01",
       revision: 1,
-      subgoal_id: "save_target",
-      risk_ids: ["save_place"],
+      subgoal_id: "submit_payment",
+      effect_ids: ["payment_order"],
       intent_digest: "d".repeat(64),
     },
-    risk_confirmation_ready: true,
-    risk_confirmation_preview: {
-      kind: "message_or_communication",
-      target_apps: [{ app_id: "chat", app_name: "聊天应用" }],
-      recipient: "张三",
-      message_text: "今晚八点见。",
-    },
+    effect_confirmation_ready: true,
+    effect_previews: [{
+      effect_id: "payment_order",
+      effect_kind: "financial_transaction",
+      targets: [{entity_ref: "merchant-1", role: "merchant", value: "演示商户"}],
+      payloads: [{entity_ref: "amount-1", role: "amount", value: "20元"}],
+      policy: "confirmation_required",
+      preview_digest: "e".repeat(64),
+    }],
     physical_actions: 0,
     evidence: [],
     history: [],
@@ -48,8 +50,8 @@ function externalSession() {
 function externalActionSession() {
   const session = externalSession();
   session.status = "awaiting_confirmation";
-  session.risk_confirmation_ready = false;
-  session.confirmed_risk_ids = ["save_place"];
+  session.effect_confirmation_ready = false;
+  session.confirmed_effect_ids = ["payment_order"];
   session.qwen_decision = clone(qwenFixture.decision);
   session.controller_decision = {
     allowed: true,
@@ -58,7 +60,7 @@ function externalActionSession() {
     policy_version: "2026-08-13-universal-action-policy-v3",
   };
   session.confirmation_scope = {
-    ...session.risk_confirmation_scope,
+    ...session.effect_confirmation_scope,
     observation_id: "obs_0123456789abcdef0123456789abcdef",
     fingerprint: "51277d0d9e6f986b00dc",
     decision_node_id: "qwen_visual_revision_1",
@@ -121,7 +123,7 @@ function safeActionSession(decisionStatus = "action") {
       device_id: "phone-01",
       revision: 1,
       subgoal_id: "locate_target",
-      risk_ids: [],
+      effect_ids: [],
       observation_id: "obs_0123456789abcdef0123456789abcdef",
       fingerprint: "51277d0d9e6f986b00dc",
       decision_node_id: "qwen_visual_revision_1",
@@ -211,7 +213,7 @@ function capabilityTrial({ failed = false, completed = false, promoted = false }
       trial_id: "capability-trial-browser",
       action: "drag",
     },
-    risk_confirmation_scope: null,
+    effect_confirmation_scope: null,
     report,
     promotion_scope: completed && !failed ? {
       trial_id: "capability-trial-browser",
@@ -291,7 +293,7 @@ function createServer({ devices = null, activeSessions = [], restoredSessions = 
     if (request.method === "POST" && url.pathname === "/api/agent/generic-supervised/start") {
       const body = await readBody(request);
       requests.start.push(body);
-      const session = body.text.includes("外部状态")
+      const session = body.text.includes("本地确认")
         ? externalSession()
         : body.text.includes("blocked")
           ? safeActionSession("blocked")
@@ -366,8 +368,8 @@ function createServer({ devices = null, activeSessions = [], restoredSessions = 
       json(response, 200, { session: afterActionSession() });
       return;
     }
-    if (request.method === "POST" && url.pathname.endsWith("/approve-risk")) {
-      requests.approveRisk.push(await readBody(request));
+    if (request.method === "POST" && url.pathname.endsWith("/approve-effect")) {
+      requests.approveEffect.push(await readBody(request));
       json(response, 200, { physical_actions: 1, session: externalExecutedSession() });
       return;
     }
@@ -477,21 +479,21 @@ test("browser renders controller evidence and confirms one exact observation", {
     await page.locator("#goalSummary").getByText(/目标 · task-map-001/).waitFor({ timeout: 5000 });
 
     const goalText = await page.locator("#goalSummary").innerText();
-    assert.match(goalText, /在地图应用中找到图书馆并保存地点/);
+    assert.match(goalText, /在支付演示页核对订单并付款/);
     assert.doesNotMatch(goalText, /未命名目标/);
-    assert.match(goalText, /2026-08-11-deepseek-task-graph-v3/);
+    assert.match(goalText, /2026-08-20-deepseek-typed-task-graph-v4/);
     assert.match(goalText, /revision 1/);
     assert.match(goalText, /会话 · session-browser-action/);
     assert.match(goalText, /确认作用域 · active · 后端 scope 与当前权威任务、观察和动作字段一致/);
     assert.match(goalText, /phone-01/);
-    assert.match(goalText, /地图 \(maps\)/);
-    assert.match(goalText, /不要发起导航/);
-    assert.match(goalText, /目标地点已保存/);
+    assert.match(goalText, /支付演示 \(payment_demo\)/);
+    assert.match(goalText, /付款前使用本地效果确认/);
+    assert.match(goalText, /页面显示付款完成/);
     assert.match(goalText, /required=true/);
-    assert.match(goalText, /external_allowed=false/);
+    assert.match(goalText, /effect_allowed=false/);
 
     assert.equal(await page.locator("#planList .plan-step.current").count(), 1);
-    assert.match(await page.locator("#planList .plan-step.current").innerText(), /目标地点详情可见/);
+    assert.match(await page.locator("#planList .plan-step.current").innerText(), /确认付款入口可见/);
 
     const actionText = await page.locator("#actionContent").innerText();
     assert.match(actionText, /点击语义控件/);
@@ -503,7 +505,7 @@ test("browser renders controller evidence and confirms one exact observation", {
     assert.match(actionText, /scene_changed=true/);
     assert.match(actionText, /92%/);
     assert.match(actionText, /可信候选唯一且清晰/);
-    assert.match(actionText, /2026-08-12-qwen-visual-decision-v3/);
+    assert.match(actionText, /2026-08-14-qwen-visual-decision-v5/);
     assert.match(actionText, /status action/);
     assert.match(actionText, /session session-browser-action/);
     assert.match(actionText, /task task-map-001/);
@@ -538,7 +540,7 @@ test("browser renders controller evidence and confirms one exact observation", {
         device_id: "phone-01",
         revision: 1,
         subgoal_id: "locate_target",
-        risk_ids: [],
+        effect_ids: [],
         observation_id: "obs_0123456789abcdef0123456789abcdef",
         fingerprint: "51277d0d9e6f986b00dc",
         decision_node_id: "qwen_visual_revision_1",
@@ -590,46 +592,47 @@ test("browser renders controller evidence and confirms one exact observation", {
   }
 });
 
-test("external-state graph executes at most one bound action after one risk approval", { timeout: 30000 }, async () => {
+test("typed effect graph executes at most one bound action after one effect approval", { timeout: 30000 }, async () => {
   Object.values(requests).forEach(items => { items.length = 0; });
   const server = createServer();
   const { browser, page } = await launchFixturePage(server);
 
   try {
-    await page.locator("#agentText").fill("外部状态风险任务");
+    await page.locator("#agentText").fill("需要本地确认的付款演示任务");
     await page.locator("#startSupervisedAgent").click();
-    await page.locator("#sessionBadge").getByText("等待风险范围确认").waitFor();
+    await page.locator("#sessionBadge").getByText("等待效果确认").waitFor();
     assert.equal(await page.locator("#autoSupervisedAgent").count(), 0);
     assert.equal(await page.locator("#reviewAction").count(), 1);
-    assert.equal(await page.locator("#reviewAction").innerText(), "查看风险范围并确认");
+    assert.equal(await page.locator("#reviewAction").innerText(), "查看效果并确认");
     assert.equal(requests.auto.length, 0);
     const goalText = await page.locator("#goalSummary").innerText();
-    assert.match(goalText, /确认门 · awaiting_risk_confirmation/);
+    assert.match(goalText, /确认门 · awaiting_effect_confirmation/);
     assert.match(goalText, /required=true/);
-    assert.match(goalText, /风险 save_place · 保存目标地点/);
+    assert.match(goalText, /效果 payment_order · financial_transaction/);
     assert.match(goalText, /确认作用域 · active · 后端 scope 与当前权威任务、观察和动作字段一致/);
     assert.match(await page.locator("#actionContent").innerText(), /Qwen 唯一动作尚未产生/);
     await page.locator("#reviewAction").click();
-    assert.match(await page.locator("#riskWarning").innerText(), /后端风险 scope 与当前权威任务、收件人\/文字草稿一致/);
-    assert.match(await page.locator("#riskReason").innerText(), /收件人：张三/);
-    assert.match(await page.locator("#riskReason").innerText(), /消息原文：今晚八点见。/);
+    assert.match(await page.locator("#riskWarning").innerText(), /typed EffectIntent 一致/);
+    assert.match(await page.locator("#riskReason").innerText(), /financial_transaction/);
+    assert.match(await page.locator("#riskReason").innerText(), /演示商户/);
+    assert.match(await page.locator("#riskReason").innerText(), /20元/);
     assert.match(await page.locator("#riskWarning").innerText(), /最多执行一个/);
     const approvalResponse = page.waitForResponse(
-      response => response.url().endsWith("/approve-risk"),
+      response => response.url().endsWith("/approve-effect"),
       { timeout: 5000 },
     );
     await page.locator("#confirmRiskAction").click();
     await approvalResponse;
     await page.locator("#sessionBadge").getByText("目标完成").waitFor({ timeout: 5000 });
-    assert.deepEqual(requests.approveRisk[0], {
+    assert.deepEqual(requests.approveEffect[0], {
       confirmed: true,
       confirmation: {
         session_id: "session-browser-external",
         task_id: "task-map-001",
         device_id: "phone-01",
         revision: 1,
-        subgoal_id: "save_target",
-        risk_ids: ["save_place"],
+        subgoal_id: "submit_payment",
+        effect_ids: ["payment_order"],
         intent_digest: "d".repeat(64),
       },
     });

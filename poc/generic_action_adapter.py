@@ -123,7 +123,7 @@ def _post_action_observation_context(
     expected = resolved.expected_effect
     if (
         not isinstance(focus, dict)
-        or str(focus.get("external_impact") or "").strip() != "navigation_only"
+        or str(focus.get("execution_class") or "").strip() != "navigate"
         or resolved.kind not in _POST_NAVIGATION_RESULT_KINDS
         or not isinstance(expected, dict)
         or expected.get("scene_changed") is not True

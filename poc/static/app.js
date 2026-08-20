@@ -35,7 +35,7 @@ const statusNames = {
   idle: "等待目标",
   ready: "准备执行",
   awaiting_confirmation: "等待当前动作确认",
-  awaiting_risk_confirmation: "等待风险范围确认",
+  awaiting_effect_confirmation: "等待效果确认",
   needs_effect_verification: "等待只读效果结果复核",
   paused_after_action: "已完成一步",
   running: "执行中",
@@ -181,17 +181,17 @@ function renderStatus() {
   document.querySelector("#agentTextStatus").textContent = state.paused
     ? "人工暂停"
     : (state.busy ? currentVisionStageLabel() : (view ? (statusNames[view.status] || view.status) : "等待目标"));
-  const riskPhase = view?.status === "awaiting_risk_confirmation";
+  const effectPhase = view?.status === "awaiting_effect_confirmation";
   const actionPhase = view?.status === "awaiting_confirmation";
-  const highAttention = Boolean(view?.risk.hasCurrentRisk || view?.risk.accountEffectPossible);
-  document.querySelector("#safetyText").textContent = riskPhase
-    ? "等待风险范围确认"
+  const highAttention = Boolean(view?.effectPolicy.requiresConfirmation);
+  document.querySelector("#safetyText").textContent = effectPhase
+    ? "等待效果确认"
     : actionPhase
       ? "等待当前动作确认"
       : highAttention
-        ? "风险动作已暂停"
+        ? "受限效果已暂停"
         : "一次一动作";
-  setDot("#safetyDot", riskPhase || actionPhase || highAttention ? "warn" : "online");
+  setDot("#safetyDot", effectPhase || actionPhase || highAttention ? "warn" : "online");
 }
 
 function renderGoalAndPlan() {
@@ -222,11 +222,11 @@ function renderGoalAndPlan() {
       ${!view.targetApps.length && view.appName ? `<span>目标应用 · ${escapeHtml(view.appName)}</span>` : ""}
       ${view.constraints.map(item => `<span>限制 · ${escapeHtml(item)}</span>`).join("")}
       ${view.completionConditions.map(item => `<span>完成 · ${escapeHtml(item)}</span>`).join("")}
-      <span>确认门 · ${escapeHtml(view.risk.confirmationGate.state)} · required=${view.risk.confirmationGate.required ? "true" : "false"} · external_allowed=${view.risk.confirmationGate.externalStateActionAllowed ? "true" : "false"}</span>
-      <span>影响等级 · ${escapeHtml(view.risk.currentExternalImpact)}</span>
+      <span>确认门 · ${escapeHtml(view.effectPolicy.confirmationGate.state)} · required=${view.effectPolicy.confirmationGate.required ? "true" : "false"} · effect_allowed=${view.effectPolicy.confirmationGate.effectActionAllowed ? "true" : "false"}</span>
+      <span>执行类型 · ${escapeHtml(view.effectPolicy.currentExecutionClass)}</span>
       <span>本地策略 · ${escapeHtml(controllerGateLabel(view.controllerGate))}</span>
       <span>确认作用域 · ${escapeHtml(view.scopeState.state)} · ${escapeHtml(view.scopeState.reason || "—")}</span>
-      ${view.risk.actions.map(item => `<span>风险 ${escapeHtml(item.id)} · ${escapeHtml(item.description)}</span>`).join("")}
+      ${view.effectPolicy.actions.map(item => `<span>效果 ${escapeHtml(item.id)} · ${escapeHtml(item.kind)}</span>`).join("")}
     </div>`;
 
   const steps = view.subgoals.map(item => planStepHtml({
@@ -271,7 +271,7 @@ function renderTrace() {
     blocked: "阻止",
     stopped: "停止",
     awaiting_confirmation: "等待动作确认",
-    awaiting_risk_confirmation: "等待风险确认",
+    awaiting_effect_confirmation: "等待效果确认",
     needs_effect_verification: "等待只读效果结果复核",
     observing: "观察中",
     unknown: "旧记录未提供",
@@ -374,12 +374,12 @@ function renderAction() {
   }
 
   const action = view.visualAction;
-  const riskPhase = view.status === "awaiting_risk_confirmation"
-    || view.risk.confirmationGate.phase === "risk";
-  const staleScope = ["awaiting_confirmation", "awaiting_risk_confirmation"].includes(view.status)
+  const effectPhase = view.status === "awaiting_effect_confirmation"
+    || view.effectPolicy.confirmationGate.phase === "effect";
+  const staleScope = ["awaiting_confirmation", "awaiting_effect_confirmation"].includes(view.status)
     && view.scopeState.state !== "active";
-  const highAttention = view.risk.hasCurrentRisk || view.risk.accountEffectPossible;
-  const riskSummary = view.risk.currentActions.map(item => `${item.id}：${item.description}`).join("；");
+  const highAttention = view.effectPolicy.requiresConfirmation;
+  const riskSummary = view.effectPolicy.currentActions.map(item => `${item.id}：${item.kind}`).join("；");
   const actionMetadata = String(action.protocol || "").startsWith("qwen-visual-decision-v")
     ? `<div class="action-metadata">
          <span>${escapeHtml(action.protocolVersion || "qwen-v2")}</span>
@@ -406,7 +406,7 @@ function renderAction() {
            <p>${escapeHtml(action.reason)}</p>${actionMetadata}`
         : view.status === "paused_after_action"
       ? `<h3>上一步已完成并重新观察</h3><p>网页将依据新画面决定是否发起下一次单动作请求。</p>`
-      : `<div class="next-action-title"><span>${escapeHtml(action.actionType ? actionLabel(action) : decisionStatusNames[action.status] || "等待唯一动作")}</span>${staleScope ? '<b class="risk-tag">旧确认已失效</b>' : riskPhase ? '<b class="risk-tag">需要风险范围确认</b>' : view.status === "awaiting_confirmation" ? `<b class="${highAttention ? "risk-tag" : "safe-tag"}">需要当前动作确认</b>` : '<b class="safe-tag">受限单步</b>'}</div>
+      : `<div class="next-action-title"><span>${escapeHtml(action.actionType ? actionLabel(action) : decisionStatusNames[action.status] || "等待唯一动作")}</span>${staleScope ? '<b class="risk-tag">旧确认已失效</b>' : effectPhase ? '<b class="risk-tag">需要效果确认</b>' : view.status === "awaiting_confirmation" ? `<b class="${highAttention ? "risk-tag" : "safe-tag"}">需要当前动作确认</b>` : '<b class="safe-tag">受限单步</b>'}</div>
          <h3>${escapeHtml(view.currentSubgoal.label)}</h3>
          <div class="action-target">语义目标 · ${escapeHtml(action.semanticTarget)}${action.elementId ? ` · element_id ${escapeHtml(action.elementId)}` : ""}</div>
          <div class="action-facts">
@@ -416,7 +416,7 @@ function renderAction() {
            <span><b>本地策略</b>${escapeHtml(controllerGateLabel(view.controllerGate))}</span>
          </div>
          <p>${escapeHtml(action.reason || riskSummary || "等待 Qwen 生成唯一下一视觉动作。")}</p>
-         ${riskSummary ? `<small>当前风险：${escapeHtml(riskSummary)}</small>` : ""}
+         ${riskSummary ? `<small>当前效果：${escapeHtml(riskSummary)}</small>` : ""}
          ${actionMetadata}
           <small>${staleScope ? `当前作用域不可执行：${escapeHtml(view.scopeState.reason || "任务或画面已变化")}；必须重新观察。` : "后端 scope 与当前权威任务、观察和动作字段一致；本次只允许一个动作，之后必须重新观察。"}</small>`);
 
@@ -427,9 +427,9 @@ function renderAction() {
     controls.innerHTML = `
       <button id="nextSupervisedAgent" class="primary-button" ${disabled}>旧确认已失效 · 重新观察</button>
       <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
-  } else if (view.risk.requiresConfirmation || view.status === "awaiting_confirmation") {
+  } else if (view.effectPolicy.requiresConfirmation || view.status === "awaiting_confirmation") {
     controls.innerHTML = `
-      <button id="reviewAction" class="${riskPhase || highAttention ? "risk-button" : "primary-button"}" ${disabled}>${riskPhase ? "查看风险范围并确认" : "确认当前动作"}</button>
+      <button id="reviewAction" class="${effectPhase || highAttention ? "risk-button" : "primary-button"}" ${disabled}>${effectPhase ? "查看效果并确认" : "确认当前动作"}</button>
       <button id="nextSupervisedAgent" class="secondary-button" ${disabled}>放弃旧确认并重新观察</button>
       <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
   } else {
@@ -437,7 +437,7 @@ function renderAction() {
       <button id="nextSupervisedAgent" class="primary-button" ${disabled}>观察并生成下一步</button>
       <button id="cancelSupervisedAgent" class="text-button" ${state.busy ? "disabled" : ""}>取消会话</button>`;
   }
-  badge.className = `pill ${view.isTerminal ? (view.status === "succeeded" || view.status === "completed" ? "success" : "danger") : (riskPhase || highAttention ? "risk" : "active")}`;
+  badge.className = `pill ${view.isTerminal ? (view.status === "succeeded" || view.status === "completed" ? "success" : "danger") : (effectPhase || highAttention ? "risk" : "active")}`;
   badge.textContent = view.isTerminal
     ? (statusNames[view.status] || view.status)
     : (statusNames[view.status] || view.status);
@@ -528,9 +528,9 @@ function renderCapabilityAcceptance() {
         <button id="resetCapabilityTrial" class="secondary-button">保留报告并关闭</button>`;
     } else if (report?.status === "failed") {
       controls.innerHTML = `<button id="resetCapabilityTrial" class="secondary-button">开始新的验收</button>`;
-    } else if (["awaiting_confirmation", "awaiting_risk_confirmation"].includes(view.status)) {
+    } else if (["awaiting_confirmation", "awaiting_effect_confirmation"].includes(view.status)) {
       controls.innerHTML = `
-        <button id="reviewCapabilityAction" class="risk-button" ${disabled}>${view.status === "awaiting_risk_confirmation" ? "确认风险范围（0 动作）" : "确认执行本次验收动作"}</button>
+        <button id="reviewCapabilityAction" class="risk-button" ${disabled}>${view.status === "awaiting_effect_confirmation" ? "确认效果（0 动作）" : "确认执行本次验收动作"}</button>
         <button id="cancelCapabilityTrial" class="text-button" ${state.busy ? "disabled" : ""}>取消验收</button>`;
     } else {
       controls.innerHTML = `<button id="cancelCapabilityTrial" class="text-button" ${state.busy ? "disabled" : ""}>取消验收</button>`;
@@ -694,26 +694,26 @@ function openCapabilityDialog() {
     state.pendingConfirmationGrant = null;
     return toast(error.message, true);
   }
-  const riskPhase = state.pendingConfirmationGrant.phase === "risk";
+  const effectPhase = state.pendingConfirmationGrant.phase === "effect";
   const session = view.session;
-  document.querySelector("#riskTitle").textContent = riskPhase
-    ? "确认验收子目标的风险范围"
+  document.querySelector("#riskTitle").textContent = effectPhase
+    ? "确认验收子目标的效果范围"
     : "确认执行本次真机验收动作";
   const level = document.querySelector("#riskLevel");
   level.className = "risk-level high";
-  level.textContent = riskPhase ? "此确认只允许观察 · 物理动作 0" : "真机动作 · 最多执行一次";
+  level.textContent = effectPhase ? "此确认只允许观察 · 物理动作 0" : "真机动作 · 最多执行一次";
   document.querySelector("#riskGoal").textContent = view.text || session?.objective || "—";
   document.querySelector("#riskAction").textContent = `${semanticActionNames[view.action] || view.action} · trial=${view.trialId}`;
   document.querySelector("#riskReason").textContent = session?.visualAction?.reason || "依据当前真实画面提出唯一候选动作。";
-  document.querySelector("#riskExpected").textContent = riskPhase
+  document.querySelector("#riskExpected").textContent = effectPhase
     ? "生成一个与候选动作完全一致的视觉动作，不触发机械臂"
     : Protocol.displayValue(session?.visualAction?.expectedChange);
   document.querySelector("#riskDevice").textContent = view.deviceId;
   const scope = state.pendingConfirmationGrant.scope;
-  document.querySelector("#riskWarning").textContent = riskPhase
-    ? `仅确认 trial=${view.trialId}、action=${view.action}、session=${scope.session_id}、task=${scope.task_id}、revision=${scope.revision}、subgoal=${scope.subgoal_id}、risk_ids=${scope.risk_ids.join(",") || "—"} 的观察权限；本次物理动作数必须保持 0。`
+  document.querySelector("#riskWarning").textContent = effectPhase
+    ? `仅确认 trial=${view.trialId}、action=${view.action}、session=${scope.session_id}、task=${scope.task_id}、revision=${scope.revision}、subgoal=${scope.subgoal_id}、effect_ids=${scope.effect_ids.join(",") || "—"} 的观察权限；本次物理动作数必须保持 0。`
     : `只授权 trial=${view.trialId}、action=${view.action}、session=${scope.session_id}、task=${scope.task_id}、revision=${scope.revision}、subgoal=${scope.subgoal_id}、observation_id=${scope.observation_id}、fingerprint=${scope.fingerprint} 对应的一个动作；失败不自动重试。`;
-  document.querySelector("#confirmRiskAction").className = riskPhase ? "primary-button" : "danger-confirm";
+  document.querySelector("#confirmRiskAction").className = effectPhase ? "primary-button" : "danger-confirm";
   document.querySelector("#riskDialog").showModal();
 }
 
@@ -722,18 +722,18 @@ async function advanceCapabilityTrial(grant) {
   if (!view || state.paused || state.busy) return;
   try {
     const payload = Protocol.consumeCapabilityConfirmationGrant(grant, state.capabilityTrial);
-    const riskPhase = grant.phase === "risk";
+    const effectPhase = grant.phase === "effect";
     const response = await withVisionProgress(
-      riskPhase ? "确认验收风险范围并观察（0 动作）" : "执行唯一验收动作并采集八帧证据",
-      () => api(`/api/capability-acceptance/${view.trialId}/${riskPhase ? "approve-risk" : "confirm"}`, {
+      effectPhase ? "确认验收效果范围并观察（0 动作）" : "执行唯一验收动作并采集八帧证据",
+      () => api(`/api/capability-acceptance/${view.trialId}/${effectPhase ? "approve-effect" : "confirm"}`, {
         method: "POST",
         body: JSON.stringify(payload),
       })
     );
     state.capabilityTrial = response.trial;
-    if (!riskPhase) await loadCapabilityEvidence();
-    toast(riskPhase
-      ? "风险范围已确认，机械臂尚未动作；请再次核对具体动作。"
+    if (!effectPhase) await loadCapabilityEvidence();
+    toast(effectPhase
+      ? "效果范围已确认，机械臂尚未动作；请再次核对具体动作。"
       : "本次单动作已终结，已生成验收报告；不会自动重试。")
     render();
   } catch (error) {
@@ -861,18 +861,18 @@ function resetCapabilityTrial() {
 
 function openRiskDialog() {
   const view = sessionView();
-  if (!view || state.paused || state.busy || !view.risk.requiresConfirmation) return;
-  const riskPhase = view.status === "awaiting_risk_confirmation"
-    || view.risk.confirmationGate.phase === "risk";
-  const highAttention = view.risk.hasCurrentRisk || view.risk.accountEffectPossible;
+  if (!view || state.paused || state.busy || !view.effectPolicy.requiresConfirmation) return;
+  const effectPhase = view.status === "awaiting_effect_confirmation"
+    || view.effectPolicy.confirmationGate.phase === "effect";
+  const highAttention = view.effectPolicy.requiresConfirmation;
   try {
     state.pendingConfirmationGrant = Protocol.createConfirmationGrant(view, lockedSessionDeviceId());
   } catch (error) {
     state.pendingConfirmationGrant = null;
     return toast(error.message, true);
   }
-  document.querySelector("#riskTitle").textContent = riskPhase
-    ? "确认当前子目标的风险范围"
+  document.querySelector("#riskTitle").textContent = effectPhase
+    ? "确认当前子目标的效果范围"
     : (highAttention ? "确认外部状态动作" : "确认当前单步动作");
   const level = document.querySelector("#riskLevel");
   level.className = `risk-level ${highAttention ? "high" : "guarded"}`;
@@ -881,10 +881,9 @@ function openRiskDialog() {
   document.querySelector("#riskAction").textContent = view.visualAction.actionType
     ? `${actionLabel(view.visualAction)} · ${view.visualAction.semanticTarget}`
     : `${view.currentSubgoal.label} · 等待 Qwen 唯一动作`;
-  document.querySelector("#riskReason").textContent = view.risk.currentActions.map(item => `${item.id} [${item.level}]：${item.description}；${item.externalEffect}`).join("\n") || view.visualAction.reason;
-  const intentPreview = view.risk.intentPreview || {};
-  const effectPreviews = Array.isArray(view.risk.effectPreviews)
-    ? view.risk.effectPreviews
+  document.querySelector("#riskReason").textContent = view.effectPolicy.currentActions.map(item => `${item.id} [${item.policyLevel}]：${item.kind}；${item.expectedResults.join("、")}`).join("\n") || view.visualAction.reason;
+  const effectPreviews = Array.isArray(view.effectPolicy.effectPreviews)
+    ? view.effectPolicy.effectPreviews
     : [];
   if (effectPreviews.length) {
     const previewLines = effectPreviews.map((preview) => {
@@ -904,25 +903,10 @@ function openRiskDialog() {
     });
     document.querySelector("#riskReason").textContent = previewLines.join("\n");
   }
-  if (
-    riskPhase
-    && intentPreview.kind === "message_or_communication"
-    && effectPreviews.length === 0
-  ) {
-    const apps = Array.isArray(intentPreview.target_apps)
-      ? intentPreview.target_apps.map(item => item.app_name || item.app_id).filter(Boolean).join("、")
-      : "";
-    document.querySelector("#riskReason").textContent = [
-      apps ? `目标应用：${apps}` : "",
-      `收件人：${intentPreview.recipient || "未提供"}`,
-      `消息原文：${intentPreview.message_text || "未提供"}`,
-      view.risk.currentActions.map(item => `${item.id} [${item.level}]：${item.description}；${item.externalEffect}`).join("\n"),
-    ].filter(Boolean).join("\n");
-  }
   document.querySelector("#riskExpected").textContent = Protocol.displayValue(view.visualAction.expectedChange);
   document.querySelector("#riskDevice").textContent = lockedSessionDeviceId();
-  document.querySelector("#riskWarning").textContent = riskPhase
-    ? "后端风险 scope 与当前权威任务、收件人/文字草稿一致；确认后最多执行一个由新观察严格绑定的外部影响动作，不再二次弹窗。"
+  document.querySelector("#riskWarning").textContent = effectPhase
+    ? "后端效果 scope 与当前权威任务及 typed EffectIntent 一致；确认后最多执行一个由新观察严格绑定的动作。"
     : highAttention
     ? "后端动作 scope 与当前权威任务、观察和动作字段一致；本次只授权当前一个动作，任何字段变化都必须重新确认。"
     : "后端动作 scope 与当前权威任务、观察和动作字段一致；本次只授权一个动作，执行后必须重新观察。";
@@ -941,20 +925,20 @@ async function advanceSupervisedAgent(grant) {
   if (!view || state.paused || state.busy) return;
   try {
     const payload = Protocol.consumeConfirmationGrant(grant, view, lockedSessionDeviceId());
-    const riskPhase = grant?.phase === "risk";
+    const effectPhase = grant?.phase === "effect";
     const response = await withVisionProgress(
-      riskPhase ? "确认风险范围并生成唯一动作" : "执行当前一步并重新观察",
-      () => api(`/api/agent/generic-supervised/${view.sessionId}/${riskPhase ? "approve-risk" : "confirm"}`, {
+      effectPhase ? "确认效果并生成唯一动作" : "执行当前一步并重新观察",
+      () => api(`/api/agent/generic-supervised/${view.sessionId}/${effectPhase ? "approve-effect" : "confirm"}`, {
         method: "POST",
         body: JSON.stringify(payload),
       })
     );
     state.supervisedSession = response.session;
     await finalizeStopIfRequested();
-    toast(riskPhase
+    toast(effectPhase
       ? (Number(response.physical_actions || 0)
-        ? "风险草稿已确认，唯一外部影响动作已执行并重新观察。"
-        : "风险草稿已确认，但当前画面没有形成可安全执行的唯一动作。")
+        ? "效果策略已确认，唯一外部影响动作已执行并重新观察。"
+        : "效果策略已确认，但当前画面没有形成可安全执行的唯一动作。")
       : "当前一步已处理，并已重新观察画面。");
     render();
   } catch (error) {

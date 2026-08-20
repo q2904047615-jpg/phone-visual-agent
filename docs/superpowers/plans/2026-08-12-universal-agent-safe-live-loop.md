@@ -1,5 +1,7 @@
 # Universal Agent Safe Live Loop Implementation Plan
 
+> **ARCHIVED — DO NOT EXECUTE.** References to the deleted legacy runtime and DeepSeek v3 are historical only and must not be restored.
+
 > **For Codex:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** 把 DeepSeek v3 动态任务图、Qwen v2 单步视觉决策、通用动作控制器和机械臂适配器接成首页默认运行链路，并以两个不同 App 的低风险导航任务验证“一次只执行一个动作、动作后重新观察与重规划”的通用闭环。

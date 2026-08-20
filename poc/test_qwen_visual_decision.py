@@ -255,10 +255,10 @@ def task_context(
     external: bool = False,
     confirmed: bool = False,
 ) -> dict:
-    risk_ids = ["risk_send"] if external else []
-    impact = "external_state" if external else "navigation_only"
+    effect_ids = ["effect_send"] if external else []
+    execution_class = "effect" if external else "navigate"
     return {
-        "protocol_version": "2026-08-11-deepseek-task-graph-v3",
+        "protocol_version": "2026-08-20-deepseek-typed-task-graph-v4",
         "task_id": task_id,
         "device_id": "offline_phone_01",
         "revision": revision,
@@ -286,36 +286,40 @@ def task_context(
             "constraints": ["只使用当前画面中的可信控件"],
             "completion_conditions": ["目标页面可见"],
             "completion_evidence": [],
-            "risk_action_ids": risk_ids,
-            "external_impact": impact,
+            "effect_ids": effect_ids,
+            "execution_class": execution_class,
         },
-        "current_external_impact": impact,
-        "risk_actions": (
+        "current_execution_class": execution_class,
+        "effect_intents": (
             [
                 {
-                    "risk_id": "risk_send",
-                    "description": "提交将改变外部状态",
-                    "external_effect": "内容会被提交",
-                    "risk_type": "data_mutation",
-                    "risk_level": "high",
-                    "subgoal_ids": ["current_target"],
-                    "confirmation_required": True,
+                    "effect_id": "effect_send",
+                    "kind": "data_mutation",
+                    "target_entity_roles": [],
+                    "payload_entity_roles": [],
+                    "source_subgoal_ids": ["current_target"],
+                    "expected_results": ["内容会被提交"],
+                    "local_policy": {
+                        "effect_id": "effect_send",
+                        "confirmation_required": True,
+                        "policy_level": "high",
+                    },
                 }
             ]
             if external
             else []
         ),
-        "confirmation_gate": {
+        "effect_gate": {
             "required": external,
             "state": "confirmed" if confirmed else "awaiting_confirmation" if external else "not_required",
-            "risk_ids": risk_ids,
+            "effect_ids": effect_ids,
             "scope": {
                 "task_id": task_id,
                 "device_id": "offline_phone_01",
                 "revision": revision,
                 "subgoal_id": "current_target",
             },
-            "external_state_action_allowed": bool(external and confirmed),
+            "effect_action_allowed": bool(external and confirmed),
         },
     }
 
@@ -1100,8 +1104,8 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
     def test_minimal_finished_cannot_claim_future_action_completion(self) -> None:
         context = task_context()
-        context["current_external_impact"] = "read_only"
-        context["current_subgoal"]["external_impact"] = "read_only"
+        context["current_execution_class"] = "observe"
+        context["current_subgoal"]["execution_class"] = "observe"
         provider = FakeProvider(
             minimal_selection_payload(
                 status="finished",
@@ -1148,8 +1152,8 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
     def test_minimal_finished_uses_current_trusted_scene(self) -> None:
         context = task_context()
-        context["current_external_impact"] = "read_only"
-        context["current_subgoal"]["external_impact"] = "read_only"
+        context["current_execution_class"] = "observe"
+        context["current_subgoal"]["execution_class"] = "observe"
         provider = FakeProvider(
             minimal_selection_payload(
                 status="finished",
@@ -1752,7 +1756,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 "completion_conditions": ["输入框中显示 'wifi'"],
             }
         )
-        context["confirmation_gate"]["scope"]["subgoal_id"] = "input_wifi"
+        context["effect_gate"]["scope"]["subgoal_id"] = "input_wifi"
         parsed = replace(QwenTaskContext.from_dict(context), semantic_ir=semantic_ir)
         field = UIElement(
             element_id="local_audited_input_1",
@@ -1882,7 +1886,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             parsed = QwenTaskContext.from_dict(case["task_context"])
             self.assertEqual(
                 parsed.protocol_version,
-                "2026-08-11-deepseek-task-graph-v3",
+                "2026-08-20-deepseek-typed-task-graph-v4",
             )
             self.assertEqual(parsed.device_id, "offline_phone_01")
             for field in (
@@ -1892,12 +1896,12 @@ class QwenVisualDecisionTests(unittest.TestCase):
                 "revision",
                 "current_subgoal",
                 "global_constraints",
-                "current_external_impact",
-                "risk_actions",
-                "confirmation_gate",
+                "current_execution_class",
+                "effect_intents",
+                "effect_gate",
             ):
                 self.assertIn(field, case["task_context"])
-            scope = case["task_context"]["confirmation_gate"]["scope"]
+            scope = case["task_context"]["effect_gate"]["scope"]
             self.assertEqual(
                 set(scope),
                 {"task_id", "device_id", "revision", "subgoal_id"},
@@ -2007,9 +2011,9 @@ class QwenVisualDecisionTests(unittest.TestCase):
             "revision",
             "current_subgoal",
             "global_constraints",
-            "current_external_impact",
-            "risk_actions",
-            "confirmation_gate",
+            "current_execution_class",
+            "effect_intents",
+            "effect_gate",
         ):
             self.assertIn(field, parsed.to_dict())
 
@@ -2386,7 +2390,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         with self.assertRaisesRegex(GenericStepPlanningError, "已过期或不匹配"):
             decision.validate_fresh(self.context, new_observation)
 
-    def test_confirmation_gate_blocks_before_qwen_call(self) -> None:
+    def test_effect_gate_blocks_before_qwen_call(self) -> None:
         context = task_context(external=True, confirmed=False)
         provider = FakeProvider(action_payload(task_context(), self.observation))
         observer, decision = self.decide(provider, context=context)
@@ -2394,7 +2398,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertEqual(decision.proposal.status, "blocked")
         self.assertIn("确认门未满足", decision.reason)
         self.assertEqual(
-            observer.last_diagnostics["local_safety_block"], "confirmation_gate"
+            observer.last_diagnostics["local_safety_block"], "effect_gate"
         )
         self.assertEqual(observer.status()["final_blocked_rate"], 1.0)
 
@@ -2501,8 +2505,8 @@ class QwenVisualDecisionTests(unittest.TestCase):
             observation_id="obs_44444444444444444444444444444444",
         )
         context = task_context(task_id="task_verify_input", revision=15)
-        context["current_external_impact"] = "read_only"
-        context["current_subgoal"]["external_impact"] = "read_only"
+        context["current_execution_class"] = "observe"
+        context["current_subgoal"]["execution_class"] = "observe"
         context["goal"]["entities"] = {
             "expected_text": ".com",
             "expected_role": "input",
@@ -2528,8 +2532,8 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
     def test_read_only_physical_action_is_blocked_without_remote_repair(self) -> None:
         context = task_context()
-        context["current_external_impact"] = "read_only"
-        context["current_subgoal"]["external_impact"] = "read_only"
+        context["current_execution_class"] = "observe"
+        context["current_subgoal"]["execution_class"] = "observe"
         invalid = action_payload(context, self.observation)
         finished = copy.deepcopy(invalid)
         finished.update(
@@ -3729,9 +3733,9 @@ class QwenVisualDecisionTests(unittest.TestCase):
             "revision",
             "current_subgoal",
             "global_constraints",
-            "current_external_impact",
-            "risk_actions",
-            "confirmation_gate",
+            "current_execution_class",
+            "effect_intents",
+            "effect_gate",
         ):
             self.assertIn(field, prompt)
 

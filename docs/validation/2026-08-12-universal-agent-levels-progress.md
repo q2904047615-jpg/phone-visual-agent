@@ -1,5 +1,7 @@
 # 通用手机视觉 Agent 后续交付层级验证记录
 
+> **已归档，不可执行。** 本文中的旧风险范围和状态名仅为历史记录；当前唯一正式协议为 `2026-08-20-deepseek-typed-task-graph-v4`。
+
 日期：2026-08-12
 分支：`codex/complete-universal-agent`
 最高依据：根目录 `项目最终目标.md`

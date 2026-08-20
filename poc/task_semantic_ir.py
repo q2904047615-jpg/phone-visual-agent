@@ -10,9 +10,9 @@ from typing import Any, Mapping
 
 TASK_SEMANTIC_IR_PROTOCOL = "2026-08-19-task-semantic-ir-v2"
 RISK_POLICY_PROTOCOL = "2026-08-18-local-risk-policy-v1"
-SHADOW_REPORT_PROTOCOL = "2026-08-18-semantic-shadow-report-v1"
+COMPILATION_REPORT_PROTOCOL = "2026-08-20-semantic-compilation-v1"
 AUTHORITY_REPORT_PROTOCOL = "2026-08-19-semantic-risk-authority-v2"
-CUTOVER_DIFF_PROTOCOL = "2026-08-18-semantic-risk-cutover-diff-v1"
+POLICY_TRACE_PROTOCOL = "2026-08-20-semantic-policy-trace-v1"
 EFFECT_PREVIEW_PROTOCOL = "2026-08-19-effect-preview-v1"
 
 AUTOMATIC = "automatic"
@@ -49,7 +49,7 @@ CONSTRAINT_KINDS = frozenset(
         "forbidden_effect",
         "required_state",
         "required_action",
-        "legacy_context",
+        "planner_context",
     }
 )
 REQUIRED_ACTION_KINDS = frozenset(
@@ -88,7 +88,7 @@ SUBGOAL_IMPACTS = frozenset(
 _ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,95}$")
 _EXTERNAL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
-_LEGACY_RISK_EFFECT_KIND = {
+_RUNTIME_RISK_EFFECT_KIND = {
     "message_or_communication": "send_message",
     "content_publication": "publish_content",
     "account_relationship_change": "relationship_change",
@@ -382,9 +382,9 @@ class ConstraintIntent:
             )
         if not isinstance(self.authoritative, bool):
             raise TaskSemanticIRError("constraint.authoritative 必须是布尔值。")
-        if self.kind == "legacy_context" and self.authoritative:
-            raise TaskSemanticIRError("legacy_context 约束不得取得 authority。")
-        if self.kind != "legacy_context" and not self.authoritative:
+        if self.kind == "planner_context" and self.authoritative:
+            raise TaskSemanticIRError("planner_context 约束不得取得 authority。")
+        if self.kind != "planner_context" and not self.authoritative:
             raise TaskSemanticIRError("typed constraint 必须明确取得 authority。")
         if self.kind == "required_action" and self.value not in REQUIRED_ACTION_KINDS:
             raise TaskSemanticIRError("required_action 约束的动作类型无效。")
@@ -974,18 +974,18 @@ def load_local_risk_policy(path: str | Path) -> LocalRiskPolicyConfig:
 
 
 @dataclass(frozen=True)
-class SemanticShadowReport:
+class SemanticCompilationReport:
     semantic_ir: TaskSemanticIR
     risk_policy: LocalRiskPolicyConfig
     risk_decisions: tuple[RiskDecision, ...]
     warnings: tuple[str, ...] = ()
     authoritative: bool = False
     execution_allowed: bool = False
-    protocol_version: str = SHADOW_REPORT_PROTOCOL
+    protocol_version: str = COMPILATION_REPORT_PROTOCOL
 
     def validate(self) -> None:
-        if self.protocol_version != SHADOW_REPORT_PROTOCOL:
-            raise TaskSemanticIRError("影子报告协议版本无效。")
+        if self.protocol_version != COMPILATION_REPORT_PROTOCOL:
+            raise TaskSemanticIRError("语义编译报告协议版本无效。")
         if self.authoritative is not False or self.execution_allowed is not False:
             raise TaskSemanticIRError("影子报告不得携带执行权限。")
         self.semantic_ir.validate()
@@ -1002,7 +1002,7 @@ class SemanticShadowReport:
         if set(decisions) != expected:
             raise TaskSemanticIRError("影子风险决定必须逐项覆盖全部 EffectIntent。")
         for warning in self.warnings:
-            _required_text(warning, "semantic_shadow.warning", max_length=500)
+            _required_text(warning, "semantic_compilation.warning", max_length=500)
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -1019,33 +1019,27 @@ class SemanticShadowReport:
 
 
 @dataclass(frozen=True)
-class RiskCutoverDiff:
+class RiskPolicyTrace:
     effect_id: str
     effect_kind: str
-    legacy_confirmation_required: bool
     formal_policy: str
     allowed: bool
     reason: str
 
     def validate(self) -> None:
-        _validate_id(self.effect_id, "risk_cutover.effect_id")
-        _validate_id(self.effect_kind, "risk_cutover.effect_kind")
-        if not isinstance(self.legacy_confirmation_required, bool):
-            raise TaskSemanticIRError(
-                "risk_cutover.legacy_confirmation_required 必须是布尔值。"
-            )
+        _validate_id(self.effect_id, "risk_policy_trace.effect_id")
+        _validate_id(self.effect_kind, "risk_policy_trace.effect_kind")
         if self.formal_policy not in RISK_POLICIES:
-            raise TaskSemanticIRError("risk_cutover.formal_policy 无效。")
+            raise TaskSemanticIRError("risk_policy_trace.formal_policy 无效。")
         if not isinstance(self.allowed, bool):
-            raise TaskSemanticIRError("risk_cutover.allowed 必须是布尔值。")
-        _required_text(self.reason, "risk_cutover.reason", max_length=300)
+            raise TaskSemanticIRError("risk_policy_trace.allowed 必须是布尔值。")
+        _required_text(self.reason, "risk_policy_trace.reason", max_length=300)
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
         return {
             "effect_id": self.effect_id,
             "effect_kind": self.effect_kind,
-            "legacy_confirmation_required": self.legacy_confirmation_required,
             "formal_policy": self.formal_policy,
             "allowed": self.allowed,
             "reason": self.reason,
@@ -1063,7 +1057,7 @@ class SemanticRiskAuthorityReport:
     semantic_ir: TaskSemanticIR
     risk_policy: LocalRiskPolicyConfig
     risk_decisions: tuple[RiskDecision, ...]
-    cutover_diffs: tuple[RiskCutoverDiff, ...]
+    policy_traces: tuple[RiskPolicyTrace, ...]
     effect_previews: tuple[EffectPreview, ...]
     source_graph_digest: str
     authoritative_scope: str = "semantic_task_and_risk"
@@ -1115,14 +1109,14 @@ class SemanticRiskAuthorityReport:
             raise TaskSemanticIRError(
                 "未知外部效果没有可执行语义类型：" + ", ".join(unsupported)
             )
-        diffs = {item.effect_id: item for item in self.cutover_diffs}
-        if len(diffs) != len(self.cutover_diffs) or set(diffs) != expected:
-            raise TaskSemanticIRError("新旧风险差异必须逐项覆盖全部 EffectIntent。")
-        for item in self.cutover_diffs:
+        traces = {item.effect_id: item for item in self.policy_traces}
+        if len(traces) != len(self.policy_traces) or set(traces) != expected:
+            raise TaskSemanticIRError("正式策略轨迹必须逐项覆盖全部 EffectIntent。")
+        for item in self.policy_traces:
             item.validate()
             if not item.allowed:
                 raise TaskSemanticIRError(
-                    f"存在未经允许的语义风险切换差异：{item.effect_id}"
+                    f"正式策略存在未允许效果：{item.effect_id}"
                 )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1140,8 +1134,8 @@ class SemanticRiskAuthorityReport:
                 {**item.to_dict(), "preview_digest": item.preview_digest}
                 for item in self.effect_previews
             ],
-            "cutover_diff_protocol": CUTOVER_DIFF_PROTOCOL,
-            "cutover_diffs": [item.to_dict() for item in self.cutover_diffs],
+            "policy_trace_protocol": POLICY_TRACE_PROTOCOL,
+            "policy_traces": [item.to_dict() for item in self.policy_traces],
         }
 
 
@@ -1166,7 +1160,7 @@ def _entity_refs_for_roles(
     )
 
 
-def _legacy_graph_digest(graph: Any) -> str:
+def _runtime_graph_digest(graph: Any) -> str:
     goal = getattr(graph, "goal", None)
     payload = {
         "task_id": str(getattr(graph, "task_id", "")),
@@ -1184,19 +1178,30 @@ def _legacy_graph_digest(graph: Any) -> str:
             ],
             "entities": dict(getattr(goal, "entities", {}) or {}),
         },
-        "risk_actions": [
+        "effect_intents": [
             {
-                "risk_id": str(getattr(item, "risk_id", "")),
-                "risk_type": str(getattr(item, "risk_type", "")),
-                "subgoal_ids": list(getattr(item, "subgoal_ids", ()) or ()),
+                "effect_id": str(getattr(item, "risk_id", "")),
+                "kind": str(getattr(item, "effect_kind", "")),
+                "target_entity_roles": list(
+                    getattr(item, "target_roles", ()) or ()
+                ),
+                "payload_entity_roles": list(
+                    getattr(item, "payload_roles", ()) or ()
+                ),
+                "source_subgoal_ids": list(
+                    getattr(item, "subgoal_ids", ()) or ()
+                ),
+                "expected_results": list(
+                    getattr(item, "expected_result_texts", ()) or ()
+                ),
             }
             for item in tuple(getattr(graph, "risk_actions", ()) or ())
         ],
         "subgoals": [
             {
                 "subgoal_id": str(getattr(item, "subgoal_id", "")),
-                "external_impact": str(getattr(item, "external_impact", "")),
-                "risk_action_ids": list(getattr(item, "risk_action_ids", ()) or ()),
+                "execution_class": str(getattr(item, "external_impact", "")),
+                "effect_ids": list(getattr(item, "risk_action_ids", ()) or ()),
             }
             for item in tuple(getattr(graph, "subgoals", ()) or ())
         ],
@@ -1204,17 +1209,12 @@ def _legacy_graph_digest(graph: Any) -> str:
     return _canonical_digest(payload)
 
 
-def compile_legacy_graph_shadow(
+def compile_runtime_graph_semantics(
     graph: Any,
     *,
     risk_policy: LocalRiskPolicyConfig | None = None,
-) -> SemanticShadowReport:
-    """Project one legacy DeepSeek graph into a non-authoritative semantic IR.
-
-    The projector deliberately ignores every free-text constraint for risk
-    classification. It does not validate or mutate the legacy graph and cannot
-    grant execution authority.
-    """
+) -> SemanticCompilationReport:
+    """Project the locally generated runtime graph into semantic IR."""
 
     task_id = str(getattr(graph, "task_id", "")).strip()
     device_id = str(getattr(graph, "device_id", "")).strip()
@@ -1269,7 +1269,7 @@ def compile_legacy_graph_shadow(
 
     raw_entities = getattr(goal, "entities", {}) or {}
     if not isinstance(raw_entities, Mapping):
-        raise TaskSemanticIRError("legacy goal.entities 必须是映射。")
+        raise TaskSemanticIRError("goal.entities 必须是映射。")
     entities: list[SemanticEntity] = []
     input_field_id_by_entity: dict[str, str] = {}
     raw_recipients = raw_entities.get("recipients")
@@ -1281,7 +1281,7 @@ def compile_legacy_graph_shadow(
                     entity_id=entity_id,
                     entity_type="party",
                     role="recipient",
-                    value=_json_value(value, f"legacy.entities.recipients[{index - 1}]"),
+                    value=_json_value(value, f"entities.recipients[{index - 1}]"),
                     source_span=_source_span(raw_goal, value),
                     authority=(
                         "user_literal"
@@ -1305,7 +1305,7 @@ def compile_legacy_graph_shadow(
                     role="input_text",
                     value=_json_value(
                         value,
-                        f"legacy.entities.input_fields[{index - 1}].text",
+                        f"entities.input_fields[{index - 1}].text",
                     ),
                     source_span=_source_span(raw_goal, value),
                     authority=(
@@ -1327,7 +1327,7 @@ def compile_legacy_graph_shadow(
                 entity_id=f"entity_{role}_{index + 1}",
                 entity_type=_ENTITY_TYPE_BY_ROLE.get(role, "opaque"),
                 role=role,
-                value=_json_value(value, f"legacy.entities.{role}"),
+                value=_json_value(value, f"entities.{role}"),
                 source_span=span,
                 authority="user_literal" if span is not None else "planner_context",
             )
@@ -1357,33 +1357,54 @@ def compile_legacy_graph_shadow(
     represented_subgoals: set[str] = set()
     warnings: list[str] = []
     for index, risk in enumerate(tuple(getattr(graph, "risk_actions", ()) or ())):
-        legacy_type = str(getattr(risk, "risk_type", "") or "")
-        effect_kind = _LEGACY_RISK_EFFECT_KIND.get(legacy_type, "generic_effect")
+        runtime_type = str(getattr(risk, "risk_type", "") or "")
+        declared_kind = str(getattr(risk, "effect_kind", "") or "")
+        effect_kind = declared_kind or _RUNTIME_RISK_EFFECT_KIND.get(
+            runtime_type,
+            "generic_effect",
+        )
         risk_id = _slug(getattr(risk, "risk_id", ""), fallback=f"effect_{index + 1}")
         source_subgoal_ids = tuple(
             _slug(value, fallback="subgoal")
             for value in tuple(getattr(risk, "subgoal_ids", ()) or ())
         )
         represented_subgoals.update(source_subgoal_ids)
-        expected_results: list[str] = []
-        for subgoal_id in source_subgoal_ids:
-            subgoal = subgoals.get(subgoal_id)
-            if subgoal is None:
-                continue
-            expected_results.extend(
-                str(value).strip()
-                for value in tuple(
-                    getattr(subgoal, "completion_conditions", ()) or ()
-                )
-                if str(value).strip()
+        expected_results = [
+            str(value).strip()
+            for value in tuple(
+                getattr(risk, "expected_result_texts", ()) or ()
             )
+            if str(value).strip()
+        ]
+        if not expected_results:
+            for subgoal_id in source_subgoal_ids:
+                subgoal = subgoals.get(subgoal_id)
+                if subgoal is None:
+                    continue
+                expected_results.extend(
+                    str(value).strip()
+                    for value in tuple(
+                        getattr(subgoal, "completion_conditions", ()) or ()
+                    )
+                    if str(value).strip()
+                )
+        declared_target_roles = tuple(
+            str(value)
+            for value in tuple(getattr(risk, "target_roles", ()) or ())
+        )
+        declared_payload_roles = tuple(
+            str(value)
+            for value in tuple(getattr(risk, "payload_roles", ()) or ())
+        )
         target_refs = _entity_refs_for_roles(
             tuple(entities),
-            _TARGET_ROLES_BY_EFFECT.get(effect_kind, ("target",)),
+            declared_target_roles
+            or _TARGET_ROLES_BY_EFFECT.get(effect_kind, ("target",)),
         )
         payload_refs = _entity_refs_for_roles(
             tuple(entities),
-            _PAYLOAD_ROLES_BY_EFFECT.get(effect_kind, ("input_text", "value")),
+            declared_payload_roles
+            or _PAYLOAD_ROLES_BY_EFFECT.get(effect_kind, ("input_text", "value")),
         )
         if not target_refs:
             warnings.append(f"effect_{risk_id}:missing_typed_target")
@@ -1398,48 +1419,9 @@ def compile_legacy_graph_shadow(
                 source_subgoal_ids=source_subgoal_ids,
                 expected_result_texts=tuple(dict.fromkeys(expected_results)),
                 attributes={
-                    "legacy_risk_id": str(getattr(risk, "risk_id", "") or ""),
-                    "legacy_risk_type": legacy_type,
-                    "legacy_risk_level": str(getattr(risk, "risk_level", "") or ""),
-                    "legacy_confirmation_required": bool(
-                        getattr(risk, "confirmation_required", False)
-                    ),
+                    "runtime_effect_id": str(getattr(risk, "risk_id", "") or ""),
+                    "planner_declared_typed_effect": bool(declared_kind),
                 },
-            )
-        )
-
-    for index, (subgoal_id, subgoal) in enumerate(subgoals.items()):
-        if subgoal_id in represented_subgoals:
-            continue
-        impact = str(getattr(subgoal, "external_impact", "") or "")
-        if impact not in {"external_state", "unknown"}:
-            continue
-        expected_results = tuple(
-            str(value).strip()
-            for value in tuple(getattr(subgoal, "completion_conditions", ()) or ())
-            if str(value).strip()
-        )
-        effect_id = f"effect_generic_{index + 1}"
-        target_refs = _entity_refs_for_roles(
-            tuple(entities),
-            _TARGET_ROLES_BY_EFFECT["generic_effect"],
-        )
-        if not target_refs:
-            warnings.append(f"{effect_id}:missing_typed_target")
-        if not expected_results:
-            warnings.append(f"{effect_id}:missing_expected_result")
-        effects.append(
-            EffectIntent(
-                effect_id=effect_id,
-                kind="generic_effect",
-                target_refs=target_refs,
-                payload_refs=_entity_refs_for_roles(
-                    tuple(entities),
-                    _PAYLOAD_ROLES_BY_EFFECT["generic_effect"],
-                ),
-                source_subgoal_ids=(subgoal_id,),
-                expected_result_texts=expected_results,
-                attributes={"legacy_external_impact": impact},
             )
         )
 
@@ -1492,31 +1474,31 @@ def compile_legacy_graph_shadow(
             )
         )
 
-    legacy_constraint_ids_by_subgoal: dict[str, list[str]] = {}
+    planner_constraint_ids_by_subgoal: dict[str, list[str]] = {}
     action_constraint_ids_by_subgoal: dict[str, list[str]] = {}
-    all_legacy_constraints: list[tuple[str, str]] = [
+    all_planner_constraints: list[tuple[str, str]] = [
         ("", str(item).strip())
         for item in tuple(getattr(graph, "constraints", ()) or ())
         if str(item).strip()
     ]
     for subgoal_id, subgoal in subgoals.items():
-        all_legacy_constraints.extend(
+        all_planner_constraints.extend(
             (subgoal_id, str(item).strip())
             for item in tuple(getattr(subgoal, "constraints", ()) or ())
             if str(item).strip()
         )
-    for index, (subgoal_id, text) in enumerate(all_legacy_constraints, 1):
+    for index, (subgoal_id, text) in enumerate(all_planner_constraints, 1):
         constraint_id = f"constraint_context_{index}"
         typed_constraints.append(
             ConstraintIntent(
                 constraint_id=constraint_id,
-                kind="legacy_context",
+                kind="planner_context",
                 value=text,
                 source_text=text,
                 authoritative=False,
             )
         )
-        legacy_constraint_ids_by_subgoal.setdefault(subgoal_id, []).append(
+        planner_constraint_ids_by_subgoal.setdefault(subgoal_id, []).append(
             constraint_id
         )
 
@@ -1756,8 +1738,8 @@ def compile_legacy_graph_shadow(
                     dict.fromkeys(
                         [
                             *entity_constraint_ids,
-                            *legacy_constraint_ids_by_subgoal.get("", ()),
-                            *legacy_constraint_ids_by_subgoal.get(subgoal_id, ()),
+                            *planner_constraint_ids_by_subgoal.get("", ()),
+                            *planner_constraint_ids_by_subgoal.get(subgoal_id, ()),
                             *action_constraint_ids_by_subgoal.get(subgoal_id, ()),
                         ]
                     )
@@ -1908,8 +1890,8 @@ def compile_legacy_graph_shadow(
     semantic_ir.validate()
     policy = risk_policy or LocalRiskPolicyConfig()
     decisions = tuple(policy.decide(effect) for effect in semantic_ir.effects)
-    warnings.insert(0, f"legacy_graph_digest:{_legacy_graph_digest(graph)}")
-    report = SemanticShadowReport(
+    warnings.insert(0, f"runtime_graph_digest:{_runtime_graph_digest(graph)}")
+    report = SemanticCompilationReport(
         semantic_ir=semantic_ir,
         risk_policy=policy,
         risk_decisions=decisions,
@@ -1926,35 +1908,33 @@ def compile_formal_semantic_authority(
 ) -> SemanticRiskAuthorityReport:
     """Compile the sole formal field-role and confirmation authority.
 
-    The legacy graph remains the planner transport during migration, but its
-    free-text constraints and its model-supplied confirmation booleans are not
-    authoritative.  Only typed ``EffectIntent.kind`` and the local policy are.
+    The runtime graph is already a deterministic projection of the strict
+    typed planner transport.  Only ``EffectIntent.kind`` and the local policy
+    decide confirmation; model-supplied legacy risk fields are not accepted.
     """
 
-    shadow = compile_legacy_graph_shadow(graph, risk_policy=risk_policy)
-    decisions = {item.effect_id: item for item in shadow.risk_decisions}
-    entity_by_id = {item.entity_id: item for item in shadow.semantic_ir.entities}
-    diffs: list[RiskCutoverDiff] = []
-    for effect in shadow.semantic_ir.effects:
+    if any(
+        not str(getattr(item, "effect_kind", "") or "")
+        for item in tuple(getattr(graph, "risk_actions", ()) or ())
+    ):
+        raise TaskSemanticIRError(
+            "正式语义权威拒绝旧风险投影；必须由 typed effect_intents 创建新任务图。"
+        )
+    compilation = compile_runtime_graph_semantics(graph, risk_policy=risk_policy)
+    decisions = {item.effect_id: item for item in compilation.risk_decisions}
+    entity_by_id = {
+        item.entity_id: item for item in compilation.semantic_ir.entities
+    }
+    traces: list[RiskPolicyTrace] = []
+    for effect in compilation.semantic_ir.effects:
         decision = decisions[effect.effect_id]
-        legacy_required = bool(
-            effect.attributes.get("legacy_confirmation_required", False)
-        )
         formal_required = decision.policy == CONFIRMATION_REQUIRED
-        changed = legacy_required != formal_required
         allowed = effect.kind != "generic_effect"
-        reason = (
-            "typed_effect_local_policy"
-            if not changed
-            else "remove_legacy_blanket_confirmation"
-            if legacy_required and not formal_required
-            else "local_policy_safety_escalation"
-        )
-        diffs.append(
-            RiskCutoverDiff(
+        reason = "typed_effect_local_policy"
+        traces.append(
+            RiskPolicyTrace(
                 effect_id=effect.effect_id,
                 effect_kind=effect.kind,
-                legacy_confirmation_required=legacy_required,
                 formal_policy=decision.policy,
                 allowed=allowed,
                 reason=reason,
@@ -1962,9 +1942,9 @@ def compile_formal_semantic_authority(
         )
     previews = tuple(
         EffectPreview(
-            task_id=shadow.semantic_ir.task_id,
-            device_id=shadow.semantic_ir.device_id,
-            revision=shadow.semantic_ir.revision,
+            task_id=compilation.semantic_ir.task_id,
+            device_id=compilation.semantic_ir.device_id,
+            revision=compilation.semantic_ir.revision,
             effect_id=effect.effect_id,
             effect_kind=effect.kind,
             targets=tuple(
@@ -1990,15 +1970,15 @@ def compile_formal_semantic_authority(
             policy_version=decisions[effect.effect_id].policy_version,
             expected_result_texts=effect.expected_result_texts,
         )
-        for effect in shadow.semantic_ir.effects
+        for effect in compilation.semantic_ir.effects
     )
     report = SemanticRiskAuthorityReport(
-        semantic_ir=shadow.semantic_ir,
-        risk_policy=shadow.risk_policy,
-        risk_decisions=shadow.risk_decisions,
-        cutover_diffs=tuple(diffs),
+        semantic_ir=compilation.semantic_ir,
+        risk_policy=compilation.risk_policy,
+        risk_decisions=compilation.risk_decisions,
+        policy_traces=tuple(traces),
         effect_previews=previews,
-        source_graph_digest=_legacy_graph_digest(graph),
+        source_graph_digest=_runtime_graph_digest(graph),
     )
     report.validate()
     return report
@@ -2011,31 +1991,36 @@ def apply_formal_semantic_risk_policy(
     """Project formal confirmation decisions back onto the transport graph."""
 
     authority.validate()
-    if authority.source_graph_digest != _legacy_graph_digest(graph):
+    if authority.source_graph_digest != _runtime_graph_digest(graph):
         raise TaskSemanticIRError("正式语义风险权威未绑定当前任务图。")
     decisions = {item.effect_id: item for item in authority.risk_decisions}
-    decision_by_legacy_risk_id: dict[str, RiskDecision] = {}
+    decision_by_runtime_effect_id: dict[str, RiskDecision] = {}
     for effect in authority.semantic_ir.effects:
-        risk_id = str(effect.attributes.get("legacy_risk_id") or "").strip()
+        risk_id = str(effect.attributes.get("runtime_effect_id") or "").strip()
         if not risk_id:
             raise TaskSemanticIRError(
-                f"EffectIntent 缺少 legacy risk 绑定：{effect.effect_id}"
+                f"EffectIntent 缺少 runtime effect 绑定：{effect.effect_id}"
             )
-        if risk_id in decision_by_legacy_risk_id:
-            raise TaskSemanticIRError(f"legacy risk 重复映射：{risk_id}")
-        decision_by_legacy_risk_id[risk_id] = decisions[effect.effect_id]
+        if risk_id in decision_by_runtime_effect_id:
+            raise TaskSemanticIRError(f"runtime effect 重复映射：{risk_id}")
+        decision_by_runtime_effect_id[risk_id] = decisions[effect.effect_id]
 
     projected_risks = []
     for risk in tuple(getattr(graph, "risk_actions", ()) or ()):
         risk_id = str(getattr(risk, "risk_id", "") or "")
-        decision = decision_by_legacy_risk_id.get(risk_id)
+        decision = decision_by_runtime_effect_id.get(risk_id)
         if decision is None:
-            raise TaskSemanticIRError(f"正式风险权威遗漏 risk_action：{risk_id}")
+            raise TaskSemanticIRError(f"正式风险权威遗漏 runtime effect：{risk_id}")
         projected_risks.append(
             replace(
                 risk,
                 confirmation_required=(
                     decision.policy == CONFIRMATION_REQUIRED
+                ),
+                risk_level=(
+                    "high"
+                    if decision.policy == CONFIRMATION_REQUIRED
+                    else "low"
                 ),
             )
         )

@@ -357,7 +357,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
                 {
                     "task_graph_revision_1.json",
                     "task_graph_revision_2.json",
-                    "risk_audit_revision_1.json",
+                    "effect_policy_revision_1.json",
                     "trusted_observation_step_1.json",
                     "trusted_observation_step_2.json",
                     "qwen_decision_step_1.json",
@@ -442,7 +442,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
             self.assertTrue(
                 {
                     "task_graph_revision_1.json",
-                    "risk_audit_revision_1.json",
+                    "effect_policy_revision_1.json",
                     "trusted_observation_step_1.json",
                     "qwen_decision_step_1.json",
                     "controller_decision_step_1.json",

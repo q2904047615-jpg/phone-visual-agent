@@ -3298,7 +3298,7 @@ def _active_subgoal_visual_context(context: dict[str, Any]) -> dict[str, Any]:
         "objective",
         "constraints",
         "completion_conditions",
-        "external_impact",
+        "execution_class",
         "goal_entities",
     }
     if set(focus) != required:
@@ -3332,7 +3332,7 @@ def _observation_goal_context(context: dict[str, Any]) -> dict[str, Any]:
         "objective": focused["objective"],
         "constraints": list(focused["constraints"]),
         "completion_conditions": list(focused["completion_conditions"]),
-        "external_impact": focused["external_impact"],
+        "execution_class": focused["execution_class"],
         "goal_entities": dict(focused["goal_entities"]),
     }
 
@@ -7088,7 +7088,7 @@ def _goal_requests_coordinate_free_system_home(
     """
 
     focused = _observation_goal_context(context)
-    if str(focused.get("external_impact") or "").strip() != "navigation_only":
+    if str(focused.get("execution_class") or "").strip() != "navigate":
         return False
     objective = re.sub(
         r"\s+",
@@ -7131,7 +7131,7 @@ def _is_verified_navigation_result_observation(
     """
 
     focused = _observation_goal_context(context)
-    if str(focused.get("external_impact") or "").strip() != "navigation_only":
+    if str(focused.get("execution_class") or "").strip() != "navigate":
         return False
     entities = focused.get("goal_entities")
     if not isinstance(entities, dict):

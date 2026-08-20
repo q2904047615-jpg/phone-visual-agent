@@ -711,7 +711,7 @@ class BaseActionConfirmationScopeRequest(StrictAgentRequest):
     device_id: StrictStr = Field(min_length=1, max_length=128)
     revision: StrictInt = Field(ge=1)
     subgoal_id: StrictStr = Field(min_length=1, max_length=128)
-    risk_ids: list[StrictStr] = Field(default_factory=list)
+    effect_ids: list[StrictStr] = Field(default_factory=list)
     observation_id: StrictStr = Field(min_length=1, max_length=128)
     fingerprint: StrictStr = Field(min_length=1, max_length=256)
 
@@ -721,19 +721,19 @@ class GenericConfirmationScopeRequest(BaseActionConfirmationScopeRequest):
     action_digest: StrictStr = Field(min_length=64, max_length=64)
 
 
-class GenericRiskConfirmationScopeRequest(StrictAgentRequest):
+class GenericEffectConfirmationScopeRequest(StrictAgentRequest):
     session_id: StrictStr = Field(min_length=1, max_length=128)
     task_id: StrictStr = Field(min_length=1, max_length=128)
     device_id: StrictStr = Field(min_length=1, max_length=128)
     revision: StrictInt = Field(ge=1)
     subgoal_id: StrictStr = Field(min_length=1, max_length=128)
-    risk_ids: list[StrictStr] = Field(min_length=1)
+    effect_ids: list[StrictStr] = Field(min_length=1)
     intent_digest: StrictStr = Field(min_length=64, max_length=64)
 
 
-class GenericRiskApprovalRequest(StrictAgentRequest):
+class GenericEffectApprovalRequest(StrictAgentRequest):
     confirmed: StrictBool = False
-    confirmation: GenericRiskConfirmationScopeRequest | None = None
+    confirmation: GenericEffectConfirmationScopeRequest | None = None
 
 
 class GenericSupervisedStepRequest(StrictAgentRequest):
@@ -760,7 +760,7 @@ class CapabilityActionConfirmationScopeRequest(BaseActionConfirmationScopeReques
     action: StrictStr = Field(min_length=1, max_length=64)
 
 
-class CapabilityRiskConfirmationScopeRequest(GenericRiskConfirmationScopeRequest):
+class CapabilityEffectConfirmationScopeRequest(GenericEffectConfirmationScopeRequest):
     trial_id: StrictStr = Field(min_length=1, max_length=128)
     action: StrictStr = Field(min_length=1, max_length=64)
 
@@ -770,9 +770,9 @@ class CapabilityActionConfirmationRequest(StrictAgentRequest):
     confirmation: CapabilityActionConfirmationScopeRequest | None = None
 
 
-class CapabilityRiskApprovalRequest(StrictAgentRequest):
+class CapabilityEffectApprovalRequest(StrictAgentRequest):
     confirmed: StrictBool = False
-    confirmation: CapabilityRiskConfirmationScopeRequest | None = None
+    confirmation: CapabilityEffectConfirmationScopeRequest | None = None
 
 
 class CapabilityPromotionRequest(StrictAgentRequest):
@@ -1513,7 +1513,7 @@ def device() -> dict[str, Any]:
             item.snapshot()
             for item in runtime.generic_supervised_sessions.values()
             if item.status in {
-                "awaiting_risk_confirmation",
+                "awaiting_effect_confirmation",
                 "awaiting_confirmation",
                 "paused_after_action",
                 "needs_reobservation",
@@ -1799,7 +1799,7 @@ def _capability_trial_payload(trial: Any) -> dict[str, Any]:
     if not isinstance(session, dict):
         session = {}
     action_scope = session.get("confirmation_scope")
-    risk_scope = session.get("risk_confirmation_scope")
+    effect_scope = session.get("effect_confirmation_scope")
     snapshot["action_confirmation_scope"] = (
         {
             **dict(action_scope),
@@ -1809,13 +1809,13 @@ def _capability_trial_payload(trial: Any) -> dict[str, Any]:
         if isinstance(action_scope, dict)
         else None
     )
-    snapshot["risk_confirmation_scope"] = (
+    snapshot["effect_confirmation_scope"] = (
         {
-            **dict(risk_scope),
+            **dict(effect_scope),
             "trial_id": trial.trial_id,
             "action": trial.candidate_action,
         }
-        if isinstance(risk_scope, dict)
+        if isinstance(effect_scope, dict)
         else None
     )
     return snapshot
@@ -1992,10 +1992,10 @@ def get_capability_acceptance_evidence(
     return FileResponse(evidence_path, media_type="image/jpeg")
 
 
-@app.post("/api/capability-acceptance/{trial_id}/approve-risk")
-def approve_capability_acceptance_risk(
+@app.post("/api/capability-acceptance/{trial_id}/approve-effect")
+def approve_capability_acceptance_effect(
     trial_id: str,
-    body: CapabilityRiskApprovalRequest,
+    body: CapabilityEffectApprovalRequest,
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
@@ -2004,7 +2004,7 @@ def approve_capability_acceptance_risk(
     try:
         trial = runtime.capability_acceptance_manager.get(trial_id)
         if body.confirmed is not True or body.confirmation is None:
-            raise CapabilityAcceptanceError("验收风险确认必须提交完整精确作用域。")
+            raise CapabilityAcceptanceError("验收效果确认必须提交完整精确作用域。")
         try:
             _require_capability_trial_binding(
                 trial,
@@ -2018,13 +2018,13 @@ def approve_capability_acceptance_risk(
         _require_supervised_device_ready(trial.device_id)
         before_actions = int(getattr(trial.session, "physical_actions", 0))
         with _supervised_hardware_lock(trial.device_id):
-            runtime.capability_acceptance_manager.approve_risks(
+            runtime.capability_acceptance_manager.approve_effects(
                 trial_id,
                 body.confirmation.model_dump(exclude={"trial_id", "action"}),
             )
         request_actions = int(getattr(trial.session, "physical_actions", 0)) - before_actions
         if request_actions != 0:
-            raise CapabilityAcceptanceError("验收风险确认错误地产生了物理动作。")
+            raise CapabilityAcceptanceError("验收效果确认错误地产生了物理动作。")
         return {
             "mode": "capability_acceptance_single_action",
             "physical_actions": 0,
@@ -2276,14 +2276,14 @@ def get_generic_supervised_session(session_id: str) -> dict[str, Any]:
     }
 
 
-@app.post("/api/agent/generic-supervised/{session_id}/approve-risk")
-def approve_generic_supervised_risk(
+@app.post("/api/agent/generic-supervised/{session_id}/approve-effect")
+def approve_generic_supervised_effect(
     session_id: str,
-    body: GenericRiskApprovalRequest,
+    body: GenericEffectApprovalRequest,
     request: Request,
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
-    """Approve one canonical risk draft and execute at most its one bound action."""
+    """Approve one canonical local-effect policy scope and execute at most one action."""
 
     verify_local_request(request, x_control_token)
     with runtime.generic_supervised_session_lock:
@@ -2295,18 +2295,18 @@ def approve_generic_supervised_risk(
     try:
         if body.confirmed is not True or body.confirmation is None:
             raise UniversalAgentOrchestratorError(
-                "调用 Qwen 观察外部状态子目标前必须确认完整风险作用域。"
+                "调用 Qwen 处理受限效果前必须确认完整效果作用域。"
             )
         _require_generic_session_device(session, body.confirmation.device_id)
         with _supervised_hardware_lock(session.device_id):
-            result = runtime.universal_agent_orchestrator.approve_risks(
+            result = runtime.universal_agent_orchestrator.approve_effects(
                 session,
                 body.confirmation.model_dump(),
             )
         request_actions = session.physical_actions - before_actions
         if request_actions not in {0, 1}:
             raise UniversalAgentOrchestratorError(
-                "一次风险确认产生了超过一个物理动作。"
+                "一次效果确认产生了超过一个物理动作。"
             )
         report = _write_generic_supervised_report(session)
         response = {

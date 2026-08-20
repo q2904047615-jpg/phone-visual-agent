@@ -66,7 +66,7 @@ def _classify_deepseek_error(error: Exception) -> str:
     if "低层动作表达" in message:
         return "low_level_instruction"
     if "外部状态变化但未声明" in message:
-        return "external_impact_mismatch"
+        return "execution_class_mismatch"
     if "active 子目标" in message or "活动子目标" in message:
         return "active_frontier"
     if "JSON" in message or "json" in message:
@@ -106,26 +106,6 @@ def persist_deepseek_failure_diagnostic(
         "redacted_response_truncated": len(redacted) > len(bounded),
         "redacted_raw_response": bounded,
     }
-    shadow = getattr(planner, "last_semantic_shadow", None)
-    if shadow is not None:
-        try:
-            shadow_json = json.dumps(
-                shadow.to_dict(),
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            payload["semantic_shadow"] = json.loads(
-                _redact_deepseek_failure_response(shadow_json)
-            )
-        except (AttributeError, TypeError, ValueError):
-            payload["semantic_shadow_error"] = "影子报告无法安全序列化。"
-    shadow_error = str(
-        getattr(planner, "last_semantic_shadow_error", "") or ""
-    ).strip()
-    if shadow_error:
-        payload["semantic_shadow_error"] = _redact_deepseek_failure_response(
-            shadow_error
-        )[:1000]
     authority = getattr(planner, "last_semantic_authority", None)
     if authority is not None:
         try:

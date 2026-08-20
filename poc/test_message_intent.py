@@ -1,65 +1,12 @@
 import unittest
 
 from message_intent import (
-    CanonicalMessageIntent,
-    MessageIntentError,
     subgoal_binds_recipient,
+    subgoal_targets_recipient_control,
 )
 
 
-class CanonicalMessageIntentTests(unittest.TestCase):
-    def intent(self, recipient="张三", text="今晚八点见。"):
-        return CanonicalMessageIntent.from_goal(
-            target_apps=[{"app_id": "chat", "app_name": "聊天应用"}],
-            entities={"recipient": recipient, "input_text": text},
-        )
-
-    def test_preserves_recipient_and_message_verbatim(self):
-        intent = self.intent()
-        self.assertEqual("张三", intent.recipient)
-        self.assertEqual("今晚八点见。", intent.message_text)
-        self.assertEqual("聊天应用", intent.preview()["target_apps"][0]["app_name"])
-
-    def test_digest_binds_message_recipient_and_revision(self):
-        scope = {
-            "task_id": "task-1",
-            "device_id": "device-1",
-            "revision": 3,
-            "subgoal_id": "send",
-            "risk_ids": ["risk-send"],
-        }
-        first = self.intent().digest(**scope)
-        self.assertEqual(64, len(first))
-        self.assertNotEqual(first, self.intent(recipient="李四").digest(**scope))
-        self.assertNotEqual(first, self.intent(text="内容变化").digest(**scope))
-        self.assertNotEqual(first, self.intent().digest(**{**scope, "revision": 4}))
-
-    def test_rejects_missing_or_ambiguous_values(self):
-        cases = [
-            {"recipient": "", "input_text": "你好"},
-            {"recipient": " 张三", "input_text": "你好"},
-            {"recipient": "张三", "input_text": ""},
-        ]
-        for entities in cases:
-            with self.subTest(entities=entities):
-                with self.assertRaises(MessageIntentError):
-                    CanonicalMessageIntent.from_goal(
-                        target_apps=[{"app_id": "chat", "app_name": "聊天应用"}],
-                        entities=entities,
-                    )
-
-    def test_multiline_and_multiple_recipients_are_preserved(self):
-        intent = CanonicalMessageIntent.from_goal(
-            target_apps=[{"app_id": "chat", "app_name": "聊天应用"}],
-            entities={
-                "recipients": ["张三", "李四"],
-                "input_text": "第一行\n第二行",
-            },
-        )
-        self.assertEqual(("张三", "李四"), intent.recipients)
-        self.assertEqual("第一行\n第二行", intent.message_text)
-        self.assertEqual("", intent.recipient)
-
+class RecipientBindingTests(unittest.TestCase):
     def test_recipient_becomes_exact_only_for_bound_subgoal(self):
         self.assertFalse(subgoal_binds_recipient("张三", "聊天应用在前台可见"))
         self.assertTrue(subgoal_binds_recipient("张三", "张三的聊天页面可见"))
@@ -67,6 +14,15 @@ class CanonicalMessageIntentTests(unittest.TestCase):
             subgoal_binds_recipient(
                 "Alice",
                 {"completion_conditions": ["当前聊天标题逐字显示 Alice"]},
+            )
+        )
+
+    def test_recipient_selection_and_page_identity_are_distinct(self):
+        self.assertTrue(subgoal_targets_recipient_control("张三", "选择张三"))
+        self.assertFalse(
+            subgoal_targets_recipient_control(
+                "张三",
+                "张三的页面已打开，在输入框中编辑正文",
             )
         )
 

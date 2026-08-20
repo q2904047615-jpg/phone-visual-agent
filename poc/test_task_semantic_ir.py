@@ -18,11 +18,10 @@ from task_semantic_ir import (
     LocalRiskPolicyConfig,
     SemanticEntity,
     SemanticRiskAuthorityReport,
-    SemanticShadowReport,
     SourceSpan,
     TaskSemanticIR,
     TaskSemanticIRError,
-    compile_legacy_graph_shadow,
+    compile_runtime_graph_semantics,
     compile_formal_semantic_authority,
     apply_formal_semantic_risk_policy,
     load_local_risk_policy,
@@ -51,15 +50,14 @@ def current_send_failure_payload(constraint="确认发送对象为文件传输�
                 "evidence": [],
             }
         ],
-        "risk_actions": [
+        "effect_intents": [
             {
-                "risk_id": "send_message",
-                "description": "向文件传输助手发送消息“你好”",
-                "external_effect": "向指定收件人发送一条消息",
-                "risk_type": "message_or_communication",
-                "risk_level": "medium",
-                "subgoal_ids": ["send_message"],
-                "confirmation_required": True,
+                "effect_id": "send_message",
+                "kind": "send_message",
+                "target_entity_roles": ["recipient"],
+                "payload_entity_roles": ["input_text"],
+                "source_subgoal_ids": ["send_message"],
+                "expected_results": ["消息“你好”已发送"],
             }
         ],
         "subgoals": [
@@ -71,8 +69,8 @@ def current_send_failure_payload(constraint="确认发送对象为文件传输�
                 "constraints": ["仅导航"],
                 "completion_conditions": ["微信主界面可见"],
                 "completion_evidence": [],
-                "risk_action_ids": [],
-                "external_impact": "navigation_only",
+                "effect_ids": [],
+                "execution_class": "navigate",
             },
             {
                 "subgoal_id": "send_message",
@@ -82,8 +80,8 @@ def current_send_failure_payload(constraint="确认发送对象为文件传输�
                 "constraints": [constraint],
                 "completion_conditions": ["消息“你好”已发送"],
                 "completion_evidence": [],
-                "risk_action_ids": ["send_message"],
-                "external_impact": "external_state",
+                "effect_ids": ["send_message"],
+                "execution_class": "effect",
             },
         ],
         "active_subgoal_id": "open_wechat",
@@ -181,7 +179,7 @@ class TaskSemanticIRTests(unittest.TestCase):
         self.assertIn("input_verified_text", actions_by_subgoal["send_message"])
 
     def test_current_send_failure_projects_to_automatic_typed_effect(self):
-        report = compile_legacy_graph_shadow(graph_from_payload())
+        report = compile_runtime_graph_semantics(graph_from_payload())
 
         self.assertFalse(report.authoritative)
         self.assertFalse(report.execution_allowed)
@@ -210,7 +208,7 @@ class TaskSemanticIRTests(unittest.TestCase):
             "仅向文件传输助手发送指定文字",
         )
         reports = [
-            compile_legacy_graph_shadow(
+            compile_runtime_graph_semantics(
                 graph_from_payload(current_send_failure_payload(value))
             )
             for value in variants
@@ -232,8 +230,8 @@ class TaskSemanticIRTests(unittest.TestCase):
         at_graph["constraints"].append(moved)
 
         reports = (
-            compile_legacy_graph_shadow(graph_from_payload(in_subgoal)),
-            compile_legacy_graph_shadow(graph_from_payload(at_graph)),
+            compile_runtime_graph_semantics(graph_from_payload(in_subgoal)),
+            compile_runtime_graph_semantics(graph_from_payload(at_graph)),
         )
         self.assertEqual(
             [report.risk_decisions[0].policy for report in reports],
@@ -302,7 +300,7 @@ class TaskSemanticIRTests(unittest.TestCase):
             policy.validate()
 
     def test_shadow_report_can_never_grant_execution(self):
-        report = compile_legacy_graph_shadow(graph_from_payload())
+        report = compile_runtime_graph_semantics(graph_from_payload())
 
         with self.assertRaisesRegex(TaskSemanticIRError, "不得携带执行权限"):
             replace(report, authoritative=True).validate()
@@ -382,14 +380,7 @@ class TaskSemanticIRTests(unittest.TestCase):
             planner.last_semantic_authority,
             SemanticRiskAuthorityReport,
         )
-        self.assertIsNotNone(planner.last_semantic_shadow)
-        self.assertEqual(planner.last_semantic_shadow_error, "")
-        assert planner.last_semantic_shadow is not None
-        self.assertEqual(
-            planner.last_semantic_shadow.risk_decisions[0].policy,
-            AUTOMATIC,
-        )
-        self.assertFalse(planner.last_semantic_shadow.execution_allowed)
+        self.assertFalse(hasattr(planner, "last_semantic_shadow"))
 
     def test_formal_planner_no_longer_accepts_legacy_risk_audit_controls(self):
         provider = OneResponseProvider(current_send_failure_payload())
@@ -405,9 +396,9 @@ class TaskSemanticIRTests(unittest.TestCase):
                 risk_audit_provider=provider,
             )
 
-    def test_unknown_effect_failure_artifact_records_formal_authority_error(self):
+    def test_unknown_effect_is_rejected_by_new_transport(self):
         payload = current_send_failure_payload()
-        payload["risk_actions"][0]["risk_type"] = "unknown_external_effect"
+        payload["effect_intents"][0]["kind"] = "unknown_external_effect"
         payload["subgoals"][1]["objective"] = "处理当前对象"
         payload["subgoals"][1]["completion_conditions"] = ["处理结果可见"]
         planner = DeepSeekTaskGraphPlanner(
@@ -426,43 +417,30 @@ class TaskSemanticIRTests(unittest.TestCase):
             )
             artifact = json.loads(Path(paths[0]).read_text(encoding="utf-8"))
 
-        self.assertIn("semantic_risk_authority_error", artifact)
-        self.assertIn("未知外部效果", artifact["semantic_risk_authority_error"])
+        self.assertNotIn("semantic_risk_authority", artifact)
+        self.assertIn("正式效果类型无效", artifact["error_message"])
 
-    def test_shadow_compiler_error_cannot_replace_formal_success(self):
+    def test_retired_shadow_compiler_is_absent_from_planner(self):
         provider = OneResponseProvider(current_send_failure_payload())
         planner = DeepSeekTaskGraphPlanner(
             provider,
         )
-        original_compiler = __import__("deepseek_task_graph").compile_legacy_graph_shadow
-
-        def broken_compiler(graph):
-            raise RuntimeError("shadow-only failure")
-
-        module = __import__("deepseek_task_graph")
-        module.compile_legacy_graph_shadow = broken_compiler
-        try:
-            graph = planner.plan(
-                RAW_GOAL,
-                device_id="device-local-01",
-                task_id="9abc",
-            )
-        finally:
-            module.compile_legacy_graph_shadow = original_compiler
-
+        graph = planner.plan(
+            RAW_GOAL,
+            device_id="device-local-01",
+            task_id="9abc",
+        )
         self.assertEqual(graph.status, "ready")
-        self.assertIsNone(planner.last_semantic_shadow)
-        self.assertEqual(planner.last_semantic_shadow_error, "shadow-only failure")
+        self.assertFalse(hasattr(planner, "last_semantic_shadow"))
 
     def test_formal_cutover_diff_is_complete_and_bound_to_graph(self):
         graph = graph_from_payload()
         authority = compile_formal_semantic_authority(graph)
 
-        self.assertEqual(len(authority.cutover_diffs), 1)
-        diff = authority.cutover_diffs[0]
-        self.assertTrue(diff.allowed)
-        self.assertTrue(diff.legacy_confirmation_required)
-        self.assertEqual(diff.formal_policy, AUTOMATIC)
+        self.assertEqual(len(authority.policy_traces), 1)
+        trace = authority.policy_traces[0]
+        self.assertTrue(trace.allowed)
+        self.assertEqual(trace.formal_policy, AUTOMATIC)
         projected = apply_formal_semantic_risk_policy(graph, authority)
         self.assertFalse(projected.risk_actions[0].confirmation_required)
 
@@ -504,6 +482,7 @@ class TaskSemanticIRTests(unittest.TestCase):
         next(
             item for item in payload["subgoals"] if item["subgoal_id"] == "send_message"
         )["completion_conditions"] = ["发送动作已执行"]
+        payload["effect_intents"][0]["expected_results"] = ["发送动作已执行"]
         receipt_only = compile_formal_semantic_authority(
             graph_from_payload(payload)
         )
@@ -531,6 +510,9 @@ class TaskSemanticIRTests(unittest.TestCase):
         }
         payload["subgoals"][1]["objective"] = "为张三和李四填写主题与正文"
         payload["subgoals"][1]["completion_conditions"] = [
+            "主题为“主题”且正文为“第一行\n第二行”"
+        ]
+        payload["effect_intents"][0]["expected_results"] = [
             "主题为“主题”且正文为“第一行\n第二行”"
         ]
         graph = _graph_from_payload(
@@ -564,22 +546,24 @@ class TaskSemanticIRTests(unittest.TestCase):
 
     def test_unknown_effect_cannot_cross_formal_cutover(self):
         payload = current_send_failure_payload()
-        payload["risk_actions"][0]["risk_type"] = "unknown_external_effect"
-        with self.assertRaisesRegex(TaskSemanticIRError, "未知外部效果"):
-            compile_formal_semantic_authority(graph_from_payload(payload))
+        payload["effect_intents"][0]["kind"] = "unknown_external_effect"
+        with self.assertRaisesRegex(TaskGraphError, "正式效果类型无效"):
+            graph_from_payload(payload)
 
-    def test_new_request_clears_stale_shadow_before_json_parse(self):
+    def test_new_request_clears_stale_authority_before_json_parse(self):
         planner = DeepSeekTaskGraphPlanner(
             RawResponseProvider("{"),
         )
-        planner.last_semantic_shadow = compile_legacy_graph_shadow(graph_from_payload())
-        planner.last_semantic_shadow_error = "stale"
+        planner.last_semantic_authority = compile_formal_semantic_authority(
+            graph_from_payload()
+        )
+        planner.last_semantic_authority_error = "stale"
 
         with self.assertRaises(TaskGraphError):
             planner.plan("新的目标", device_id="device-local-01", task_id="9abc")
 
-        self.assertIsNone(planner.last_semantic_shadow)
-        self.assertEqual(planner.last_semantic_shadow_error, "")
+        self.assertIsNone(planner.last_semantic_authority)
+        self.assertEqual(planner.last_semantic_authority_error, "")
 
 
 if __name__ == "__main__":

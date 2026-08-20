@@ -5,9 +5,9 @@ const { pathToFileURL } = require("node:url");
 const { chromium } = require("playwright");
 
 const staticRoot = path.join(__dirname, "static");
-const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v2.json");
-const deepSeekFixture = require("./frontend_contract_fixtures/deepseek_task_graph_v3.json");
-const redacted2bd3Fixture = require("./frontend_contract_fixtures/generic_supervised_2bd3_redacted.json");
+const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v4.json");
+const deepSeekFixture = require("./frontend_contract_fixtures/deepseek_typed_task_graph_v4.json");
+const redacted2bd3Fixture = require("./frontend_contract_fixtures/generic_supervised_v4_redacted.json");
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -54,7 +54,7 @@ function traceSession() {
       device_id: "phone-01",
       revision: 1,
       subgoal_id: "locate_target",
-      risk_ids: [],
+      effect_ids: [],
       observation_id: "obs_0123456789abcdef0123456789abcdef",
       fingerprint: "51277d0d9e6f986b00dc",
       decision_node_id: "qwen_visual_revision_1",
@@ -175,7 +175,7 @@ test("offline console renders the full phase-two trace and disables a stale scop
 
     const goalText = await page.locator("#goalSummary").innerText();
     assert.match(goalText, /revision 2/);
-    assert.match(await page.locator("#planList").innerText(), /目标地点详情可见/);
+    assert.match(await page.locator("#planList").innerText(), /确认付款入口可见/);
 
     const traceText = await page.locator("#traceList").innerText();
     assert.match(traceText, /步骤 1 · revision 1/);
@@ -187,7 +187,7 @@ test("offline console renders the full phase-two trace and disables a stale scop
     assert.match(traceText, /obs-after-001 \/ fingerprint-after-001/);
     assert.match(traceText, /重规划/);
     assert.match(traceText, /action_result_mismatch/);
-    assert.match(traceText, /旧记录没有可验证的确认消费回执/);
+    assert.match(traceText, /记录没有可验证的确认消费回执/);
     assert.match(traceText, /步骤 2 · revision 2/);
     assert.match(traceText, /作用域字段已变化/);
 
@@ -234,7 +234,7 @@ test("offline confirmation is single-shot even when the dialog button is clicked
       device_id: "phone-01",
       revision: 2,
       subgoal_id: "locate_target",
-      risk_ids: [],
+      effect_ids: [],
       observation_id: "obs-after-001",
       fingerprint: "fingerprint-after-001",
       decision_node_id: "qwen_visual_revision_1",

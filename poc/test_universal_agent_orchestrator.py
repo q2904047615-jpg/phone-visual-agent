@@ -208,12 +208,18 @@ def _context(
     risk_actions: tuple[dict, ...] = (),
     risk_action_ids: tuple[str, ...] = (),
 ) -> SimpleNamespace:
+    execution_class = {
+        "read_only": "observe",
+        "navigation_only": "navigate",
+        "external_state": "effect",
+        "unknown": "unknown",
+    }.get(impact, impact)
     return SimpleNamespace(
         task_id="task-1",
         device_id="device-1",
         revision=1,
-        current_external_impact=impact,
-        external_action_allowed=external_action_allowed,
+        current_execution_class=execution_class,
+        effect_action_allowed=external_action_allowed,
         goal={
             "target_apps": list(target_apps),
             "entities": dict(entities if entities is not None else {"target": "目标详情"}),
@@ -224,10 +230,10 @@ def _context(
             "status": "active",
             "constraints": list(subgoal_constraints),
             "completion_conditions": list(subgoal_completion_conditions),
-            "risk_action_ids": list(risk_action_ids),
-            "external_impact": impact,
+            "effect_ids": list(risk_action_ids),
+            "execution_class": execution_class,
         },
-        risk_actions=tuple(risk_actions),
+        effect_intents=tuple(risk_actions),
     )
 
 
@@ -273,7 +279,7 @@ def _graph(*, device_id: str = "device-1") -> DynamicTaskGraph:
 
 def _external_graph(*, impact: str = "external_state") -> DynamicTaskGraph:
     risk_type = (
-        "message_or_communication"
+        "transaction_or_payment"
         if impact == "external_state"
         else "unknown_external_effect"
     )
@@ -284,22 +290,22 @@ def _external_graph(*, impact: str = "external_state") -> DynamicTaskGraph:
         status="awaiting_confirmation",
         goal=GraphGoal(
             objective=(
-                "向目标联系人发送需求询问"
+                "向商户付款20元"
                 if impact == "external_state"
                 else "处理影响尚不明确的目标状态"
             ),
             target_apps=(TargetApp(app_id="gallery", app_name="示例工具"),),
             entities={
-                "contact": "目标联系人",
-                "recipient": "目标联系人",
-                "input_text": "需求询问",
+                "merchant": "商户",
+                "amount": "20",
+                "currency": "CNY",
             },
         ),
         constraints=("任何外部影响都必须失败关闭",),
         completion_conditions=(
             CompletionCondition(
                 condition_id="condition-1",
-                description="目标外部状态已经产生",
+                description="已向商户付款20元",
                 evidence_required=("页面显示结果",),
             ),
         ),
@@ -307,37 +313,57 @@ def _external_graph(*, impact: str = "external_state") -> DynamicTaskGraph:
             RiskAction(
                 risk_id="risk-1",
                 description=(
-                    "发送需求询问" if impact == "external_state" else "影响不明确"
+                    "向商户付款20元" if impact == "external_state" else "影响不明确"
                 ),
                 external_effect=(
-                    "向外部对象发送消息"
+                    "已向商户付款20元"
                     if impact == "external_state"
                     else "可能改变外部状态"
                 ),
                 risk_type=risk_type,
                 risk_level="high",
                 subgoal_ids=("subgoal-1",),
+                effect_kind=(
+                    "financial_transaction"
+                    if impact == "external_state"
+                    else ""
+                ),
+                target_roles=(("merchant",) if impact == "external_state" else ()),
+                payload_roles=(
+                    ("amount", "currency") if impact == "external_state" else ()
+                ),
+                expected_result_texts=(
+                    ("已向商户付款20元",) if impact == "external_state" else ()
+                ),
             ),
         ),
         subgoals=(
             Subgoal(
                 subgoal_id="subgoal-1",
                 objective=(
-                    "目标联系人收到需求询问"
+                    "已向商户付款20元"
                     if impact == "external_state"
                     else "目标状态达到但影响仍不明确"
                 ),
                 status="active",
                 depends_on=(),
                 constraints=("必须等待明确确认",),
-                completion_conditions=("页面显示结果",),
+                completion_conditions=(
+                    ("已向商户付款20元",)
+                    if impact == "external_state"
+                    else ("页面显示结果",)
+                ),
                 completion_evidence=(),
                 risk_action_ids=("risk-1",),
                 external_impact=impact,
             ),
         ),
         active_subgoal_id="subgoal-1",
-        raw_user_goal="测试风险目标",
+        raw_user_goal=(
+            "向商户付款20元"
+            if impact == "external_state"
+            else "测试未知效果目标"
+        ),
     )
     graph.validate()
     return graph
@@ -647,7 +673,6 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
             },
         )
         context = SimpleNamespace(
-            current_external_impact="navigation_only",
             current_subgoal={"subgoal_id": "input-value"},
             semantic_ir=SimpleNamespace(
                 subgoals=(
@@ -775,8 +800,8 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         )
         decision = _decision(scene, action_kind="reveal_system_navigation")
         for context, message in (
-            (_context(impact="read_only"), "read_only"),
-            (_context(risk_action_ids=("risk-1",)), "风险动作"),
+            (_context(impact="read_only"), "observe"),
+            (_context(risk_action_ids=("risk-1",)), "效果"),
         ):
             with self.subTest(message=message):
                 result = self.policy.evaluate(
@@ -1204,7 +1229,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         )
 
         self.assertFalse(result.allowed)
-        self.assertIn("风险动作", result.reason)
+        self.assertIn("效果", result.reason)
 
     def test_actual_input_role_stays_on_separate_focus_path(self) -> None:
         scene = _scene(
@@ -2149,7 +2174,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         )
 
         self.assertFalse(result.allowed)
-        self.assertIn("read_only", result.reason)
+        self.assertIn("observe", result.reason)
 
     def test_rejects_external_state_even_when_confirmed(self) -> None:
         scene = _scene()
@@ -2162,7 +2187,7 @@ class PhaseOneNavigationPolicyTests(unittest.TestCase):
         )
 
         self.assertFalse(result.allowed)
-        self.assertIn("external_state", result.reason)
+        self.assertIn("effect", result.reason)
 
     def test_rejects_unknown_impact_before_qwen_or_robot(self) -> None:
         scene = _scene()
@@ -3273,7 +3298,7 @@ class AgentEvidenceStoreTests(unittest.TestCase):
 
             store.write_session({"session_id": "session-1", "status": "observing"})
             store.write_task_graph(graph)
-            store.write_risk_audit(graph)
+            store.write_effect_policy_snapshot(graph)
             store.write_trusted_observation(1, {"observation_id": "obs-1"})
             store.write_qwen_decision(1, {"status": "action"})
             store.write_controller_decision(1, {"allowed": True})
@@ -3283,7 +3308,7 @@ class AgentEvidenceStoreTests(unittest.TestCase):
             expected = {
                 "session.json",
                 "task_graph_revision_1.json",
-                "risk_audit_revision_1.json",
+                "effect_policy_revision_1.json",
                 "trusted_observation_step_1.json",
                 "qwen_decision_step_1.json",
                 "controller_decision_step_1.json",
@@ -4140,7 +4165,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             session.snapshot()["confirmation_scope"]["observation_id"],
         )
 
-    def test_external_state_waits_for_risk_confirmation_before_qwen_and_robot(self) -> None:
+    def test_payment_waits_for_local_effect_confirmation_before_qwen_and_robot(self) -> None:
         adapter = FakeAdapter(_scene())
         qwen = FakeQwenObserver()
         with tempfile.TemporaryDirectory() as temp:
@@ -4148,34 +4173,28 @@ class UniversalAgentStartTests(unittest.TestCase):
                 FakeDeepSeekPlanner(_external_graph()), qwen, adapter
             ).start(
                 session_id="session-risk",
-                raw_goal="向目标联系人发送需求询问",
+                raw_goal="向商户付款20元",
                 device_id="device-1",
                 run_dir=Path(temp),
             )
 
-        self.assertEqual("awaiting_risk_confirmation", session.status)
-        self.assertTrue(session.snapshot()["risk_confirmation_ready"])
-        self.assertEqual(["risk-1"], session.snapshot()["risk_confirmation_scope"]["risk_ids"])
+        self.assertEqual("awaiting_effect_confirmation", session.status)
+        self.assertTrue(session.snapshot()["effect_confirmation_ready"])
+        self.assertEqual(["risk-1"], session.snapshot()["effect_confirmation_scope"]["effect_ids"])
         self.assertRegex(
-            session.snapshot()["risk_confirmation_scope"]["intent_digest"],
+            session.snapshot()["effect_confirmation_scope"]["intent_digest"],
             r"^[0-9a-f]{64}$",
         )
-        self.assertEqual(
-            {
-                "kind": "message_or_communication",
-                    "target_apps": [{"app_id": "gallery", "app_name": "示例工具"}],
-                "recipient": "目标联系人",
-                "recipients": ["目标联系人"],
-                "message_text": "需求询问",
-            },
-            session.snapshot()["risk_confirmation_preview"],
-        )
+        preview = session.snapshot()["effect_confirmation_preview"]
+        self.assertEqual("typed_effects", preview["kind"])
+        self.assertEqual(["risk-1"], preview["effect_ids"])
+        self.assertEqual("financial_transaction", preview["effects"][0]["kind"])
         self.assertEqual(0, len(qwen.calls))
         self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, adapter.execute_calls)
         self.assertEqual(0, session.physical_actions)
 
-    def test_unknown_impact_waits_for_risk_confirmation_before_qwen_and_robot(self) -> None:
+    def test_unknown_impact_waits_for_effect_confirmation_before_qwen_and_robot(self) -> None:
         adapter = FakeAdapter(_scene())
         qwen = FakeQwenObserver()
         unknown_graph = _external_graph(impact="unknown")
@@ -4194,7 +4213,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
 
-        self.assertEqual("awaiting_risk_confirmation", session.status)
+        self.assertEqual("awaiting_effect_confirmation", session.status)
         self.assertEqual([], qwen.calls)
         self.assertEqual(1, adapter.capture_calls)
         self.assertEqual(0, session.physical_actions)
@@ -5345,8 +5364,8 @@ def _confirmation(session) -> dict:
     return dict(session.snapshot()["confirmation_scope"])
 
 
-def _risk_confirmation(session) -> dict:
-    return dict(session.snapshot()["risk_confirmation_scope"])
+def _effect_confirmation(session) -> dict:
+    return dict(session.snapshot()["effect_confirmation_scope"])
 
 
 def _failure_artifacts(temp: str, *, step_number: int = 1):
@@ -6790,293 +6809,6 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         self.assertEqual(0, session.physical_actions)
 
 
-class UniversalAgentRiskConfirmationTests(unittest.TestCase):
-    def _started(self, temp: str, *, impact: str = "external_state"):
-        initial = _external_graph(impact=impact)
-        planner = FakeDeepSeekPlanner(
-            initial,
-            replan_result=replace(initial, revision=2),
-        )
-        qwen = FakeQwenObserver()
-        adapter = FakeExecutingAdapter(
-            _scene(meaning="send_message", label="发送"),
-            _scene(fingerprint="frame-b", meaning="open_more", label="查看更多"),
-        )
-        orchestrator = UniversalAgentOrchestrator(
-            deepseek_planner=planner,
-            qwen_observer=qwen,
-            adapter_factory=lambda _device_id: adapter,
-            trusted_observation_factory=_trusted_factory,
-        )
-        session = orchestrator.start(
-            session_id="session-risk-confirm",
-            raw_goal="向目标联系人发送需求询问",
-            device_id="device-1",
-            run_dir=Path(temp),
-        )
-        return orchestrator, session, qwen, adapter
-
-    def test_risk_approval_observes_and_executes_exactly_one_bound_action(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            orchestrator, session, qwen, adapter = self._started(temp)
-
-            result = orchestrator.approve_risks(
-                session,
-                _risk_confirmation(session),
-            )
-
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual("needs_effect_verification", session.status)
-        self.assertEqual((), session.confirmed_risk_ids)
-        self.assertEqual(1, len(qwen.calls))
-        self.assertEqual(2, adapter.capture_calls)
-        self.assertEqual(1, adapter.execute_calls)
-        self.assertEqual(1, session.physical_actions)
-        self.assertIsNone(session.snapshot()["confirmation_scope"])
-        self.assertEqual(
-            "pending",
-            session.snapshot()["effect_verification"]["status"],
-        )
-
-    def test_matched_external_effect_uses_one_read_only_refresh_to_finish(self) -> None:
-        initial = _external_graph()
-
-        class EffectPlanner(FakeDeepSeekPlanner):
-            def replan(self, graph, observation, *, trigger, reason):
-                self.replan_calls.append((graph, observation, trigger, reason))
-                if len(self.replan_calls) == 1:
-                    return replace(
-                        graph,
-                        revision=graph.revision + 1,
-                        status="blocked",
-                        subgoals=tuple(
-                            replace(item, status="blocked")
-                            for item in graph.subgoals
-                        ),
-                        active_subgoal_id=None,
-                    )
-                visual_ref = next(
-                    ref.ref_id
-                    for ref in observation.visual_claim_evidence_refs
-                    if "需求询问" in ref.fact
-                )
-                return replace(
-                    graph,
-                    revision=graph.revision + 1,
-                    status="completed",
-                    completion_conditions=tuple(
-                        replace(item, satisfied=True, evidence=(visual_ref,))
-                        for item in graph.completion_conditions
-                    ),
-                    subgoals=tuple(
-                        replace(
-                            item,
-                            status="completed",
-                            completion_evidence=(visual_ref,),
-                        )
-                        for item in graph.subgoals
-                    ),
-                    active_subgoal_id=None,
-                )
-
-        planner = EffectPlanner(initial)
-        qwen = FakeQwenObserver()
-        adapter = FakeExecutingAdapter(
-            _scene(meaning="send_message", label="发送"),
-            _scene(fingerprint="frame-b", meaning="message_input", label=""),
-        )
-        with tempfile.TemporaryDirectory() as temp:
-            orchestrator = UniversalAgentOrchestrator(
-                deepseek_planner=planner,
-                qwen_observer=qwen,
-                adapter_factory=lambda _device_id: adapter,
-                trusted_observation_factory=_trusted_factory,
-            )
-            session = orchestrator.start(
-                session_id="session-effect-result-refresh",
-                raw_goal="向目标联系人发送需求询问",
-                device_id="device-1",
-                run_dir=Path(temp),
-            )
-            orchestrator.approve_risks(session, _risk_confirmation(session))
-            self.assertEqual("needs_effect_verification", session.status)
-            adapter.scene = _scene(
-                fingerprint="frame-c",
-                meaning="sent_message_result",
-                label="需求询问",
-            )
-
-            decision = orchestrator.refresh_decision(session)
-
-        self.assertEqual("finished", decision.proposal.status)
-        self.assertEqual("succeeded", session.status)
-        self.assertEqual("verified", session.effect_verification["status"])
-        self.assertEqual(1, session.effect_verification["verification_attempts"])
-        self.assertEqual(1, adapter.execute_calls)
-        self.assertEqual(1, session.physical_actions)
-        self.assertEqual(1, len(qwen.calls))
-        self.assertEqual(
-            ["action_result_matched", "observation_changed"],
-            [call[2] for call in planner.replan_calls],
-        )
-        self.assertIsNone(session.snapshot()["confirmation_scope"])
-
-    def test_external_effect_refresh_without_visual_result_blocks_without_retry(self) -> None:
-        initial = _external_graph()
-
-        class IncompleteEffectPlanner(FakeDeepSeekPlanner):
-            def replan(self, graph, observation, *, trigger, reason):
-                self.replan_calls.append((graph, observation, trigger, reason))
-                return replace(
-                    graph,
-                    revision=graph.revision + 1,
-                    status="blocked",
-                    subgoals=tuple(
-                        replace(item, status="blocked")
-                        for item in graph.subgoals
-                    ),
-                    active_subgoal_id=None,
-                )
-
-        planner = IncompleteEffectPlanner(initial)
-        qwen = FakeQwenObserver()
-        adapter = FakeExecutingAdapter(
-            _scene(meaning="send_message", label="发送"),
-            _scene(fingerprint="frame-b", meaning="message_input", label=""),
-        )
-        with tempfile.TemporaryDirectory() as temp:
-            orchestrator = UniversalAgentOrchestrator(
-                deepseek_planner=planner,
-                qwen_observer=qwen,
-                adapter_factory=lambda _device_id: adapter,
-                trusted_observation_factory=_trusted_factory,
-            )
-            session = orchestrator.start(
-                session_id="session-effect-result-missing",
-                raw_goal="向目标联系人发送需求询问",
-                device_id="device-1",
-                run_dir=Path(temp),
-            )
-            orchestrator.approve_risks(session, _risk_confirmation(session))
-            adapter.scene = _scene(
-                fingerprint="frame-c",
-                meaning="message_input",
-                label="",
-            )
-
-            decision = orchestrator.refresh_decision(session)
-
-        self.assertEqual("blocked", decision.proposal.status)
-        self.assertEqual("blocked", session.status)
-        self.assertEqual("failed", session.effect_verification["status"])
-        self.assertIn("不会重试", session.failed_reason)
-        self.assertEqual(1, adapter.execute_calls)
-        self.assertEqual(1, session.physical_actions)
-        self.assertEqual(1, len(qwen.calls))
-        self.assertIsNone(session.snapshot()["confirmation_scope"])
-
-    def test_tampered_effect_preview_binding_blocks_before_refresh_capture(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            orchestrator, session, qwen, adapter = self._started(temp)
-            orchestrator.approve_risks(session, _risk_confirmation(session))
-            capture_calls = adapter.capture_calls
-            session.effect_verification["effect_preview_digest"] = "0" * 64
-
-            with self.assertRaisesRegex(
-                UniversalAgentOrchestratorError,
-                "receipt/preview 不一致",
-            ):
-                orchestrator.refresh_decision(session)
-
-        self.assertEqual(capture_calls, adapter.capture_calls)
-        self.assertEqual(1, adapter.execute_calls)
-        self.assertEqual(1, session.physical_actions)
-        self.assertEqual(1, len(qwen.calls))
-
-    def test_risk_scope_mismatch_is_consumed_without_observation(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            orchestrator, session, qwen, adapter = self._started(temp)
-            scope = _risk_confirmation(session)
-            scope["revision"] = 99
-
-            with self.assertRaisesRegex(UniversalAgentOrchestratorError, "不一致"):
-                orchestrator.approve_risks(session, scope)
-
-        self.assertEqual([], qwen.calls)
-        self.assertEqual(1, adapter.capture_calls)
-        self.assertEqual(0, adapter.execute_calls)
-        self.assertTrue(session.risk_confirmation_authority.consumed)
-
-    def test_message_intent_digest_drift_is_consumed_without_observation(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            orchestrator, session, qwen, adapter = self._started(temp)
-            scope = _risk_confirmation(session)
-            scope["intent_digest"] = "0" * 64
-
-            with self.assertRaisesRegex(UniversalAgentOrchestratorError, "不一致"):
-                orchestrator.approve_risks(session, scope)
-
-        self.assertEqual([], qwen.calls)
-        self.assertEqual(1, adapter.capture_calls)
-        self.assertEqual(0, adapter.execute_calls)
-        self.assertTrue(session.risk_confirmation_authority.consumed)
-
-    def test_unsupported_explicit_double_tap_returns_typed_capability_gap(self) -> None:
-        base = _graph()
-        graph = replace(
-            base,
-            goal=replace(base.goal, objective="双击当前唯一目标"),
-            subgoals=(
-                replace(base.subgoals[0], objective="双击当前唯一目标"),
-            ),
-            raw_user_goal="双击当前唯一目标",
-        )
-        graph.validate()
-        qwen = FakeQwenObserver()
-        adapter = FakeAdapter(_scene())
-        with tempfile.TemporaryDirectory() as temp:
-            session = UniversalAgentOrchestrator(
-                deepseek_planner=FakeDeepSeekPlanner(graph),
-                qwen_observer=qwen,
-                adapter_factory=lambda _device_id: adapter,
-                trusted_observation_factory=_trusted_factory,
-            ).start(
-                session_id="session-double-gap",
-                raw_goal=graph.raw_user_goal,
-                device_id="device-1",
-                run_dir=Path(temp),
-            )
-        self.assertEqual("blocked", session.status)
-        self.assertEqual("double_tap", session.capability_gap["requested_action"])
-        self.assertEqual(
-            "vendor_multi_click_not_safely_integrated",
-            session.capability_gap["reason_code"],
-        )
-        self.assertEqual([], qwen.calls)
-        self.assertEqual(0, adapter.execute_calls)
-        self.assertEqual(0, session.physical_actions)
-
-    def test_single_external_effect_cannot_mint_a_second_risk_scope(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            orchestrator, session, qwen, adapter = self._started(temp)
-            old_risk_scope = _risk_confirmation(session)
-            result = orchestrator.approve_risks(session, old_risk_scope)
-            self.assertIsNone(session.snapshot()["risk_confirmation_scope"])
-            with self.assertRaises(UniversalAgentOrchestratorError):
-                orchestrator.approve_risks(session, old_risk_scope)
-
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual(1, adapter.execute_calls)
-        self.assertEqual(1, session.physical_actions)
-        self.assertEqual(2, session.task_graph.revision)
-        self.assertEqual("needs_effect_verification", session.status)
-        self.assertEqual((), session.confirmed_risk_ids)
-        self.assertEqual(1, len(qwen.calls))
-        self.assertIsNone(session.snapshot()["confirmation_scope"])
-        self.assertFalse(session.snapshot()["risk_confirmation_ready"])
-        self.assertIsNone(session.snapshot()["risk_confirmation_scope"])
-
-
 class UniversalAgentConfirmTests(unittest.TestCase):
     @staticmethod
     def _input_graph() -> DynamicTaskGraph:
@@ -8319,11 +8051,11 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 UniversalAgentOrchestratorError,
-                "awaiting_risk_confirmation",
+                "awaiting_effect_confirmation",
             ):
                 orchestrator.run_safe_loop(
                     session,
-                    _risk_confirmation(session),
+                    _effect_confirmation(session),
                 )
 
         self.assertEqual(0, session.physical_actions)
@@ -8349,7 +8081,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             "device_id": "device-other",
             "revision": 99,
             "subgoal_id": "other-subgoal",
-            "risk_ids": ["other-risk"],
+            "effect_ids": ["other-risk"],
             "observation_id": "obs-other",
             "fingerprint": "frame-other",
         }

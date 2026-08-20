@@ -1,5 +1,7 @@
 # Qwen DeepSeek v3 Contract Implementation Plan
 
+> **ARCHIVED — DO NOT EXECUTE.** DeepSeek v3 and every migration step in this plan are retired. The only formal protocol is `2026-08-20-deepseek-typed-task-graph-v4`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make DeepSeek task-graph v3 the formal Qwen input protocol with exact confirmation scope validation and a safe read-only/navigation-only v2 migration path.

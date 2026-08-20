@@ -1,5 +1,7 @@
 # DeepSeek v3 Console and Scoped Confirmation Implementation Plan
 
+> **ARCHIVED — DO NOT EXECUTE.** v3 confirmation and migration behavior are retired; current confirmation is typed effect confirmation under v4.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the universal console treat DeepSeek v3 as the formal shared protocol and enforce one-time confirmation scope on the FastAPI server immediately before one physical action.

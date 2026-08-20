@@ -31,7 +31,6 @@ from generic_step_planner import (
     GenericStepPlanningError,
     GenericStepProposal,
 )
-from generic_supervised_runtime import GenericSupervisedSession
 from semantic_executor import SemanticAction
 from ui_scene import CameraAlignmentFacts, SystemUIFacts, UIElement, UIScene
 from universal_action_controller import (
@@ -340,7 +339,7 @@ def goal():
     )
 
 
-def navigation_goal(*, external_impact="navigation_only"):
+def navigation_goal(*, execution_class="navigate"):
     return GenericIntentDraft(
         understood=True,
         app_id="browser",
@@ -352,7 +351,7 @@ def navigation_goal(*, external_impact="navigation_only"):
                 "objective": "打开浏览器",
                 "constraints": ["仅使用当前可见入口"],
                 "completion_conditions": ["浏览器结果页面已显示"],
-                "external_impact": external_impact,
+                "execution_class": execution_class,
                 "goal_entities": {
                     "target_ui_label": "浏览器",
                     "target_surface": "device",
@@ -1094,7 +1093,7 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         unsafe_cases = (
             (
-                navigation_goal(external_impact="external_state"),
+                navigation_goal(execution_class="effect"),
                 safe,
             ),
             (
@@ -1134,8 +1133,8 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
         for case_goal, resolved in unsafe_cases:
             with self.subTest(
-                impact=case_goal.entities["active_subgoal_visual_context"][
-                    "external_impact"
+                execution_class=case_goal.entities["active_subgoal_visual_context"][
+                    "execution_class"
                 ],
                 kind=resolved.kind,
                 expected=resolved.expected_effect,
@@ -1145,7 +1144,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                     _post_action_observation_context(case_goal, resolved),
                 )
 
-        spoofed = navigation_goal(external_impact="external_state")
+        spoofed = navigation_goal(execution_class="effect")
         spoofed_focus = spoofed.entities["active_subgoal_visual_context"]
         spoofed_focus["objective"] = "观察本次导航后的当前稳定画面"
         spoofed_focus["completion_conditions"] = [
@@ -5291,353 +5290,6 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(ctx.exception.physical_actions, 1)
         self.assertEqual(observer.calls, 1)
         self.assertEqual(robot.actions, [("tap", 300, 400)])
-
-
-class GenericSupervisedSessionTests(unittest.TestCase):
-    def _proposal(self):
-        return GenericStepProposal(
-            status="action",
-            action=SemanticAction(
-                node_id="generic_step_1",
-                action="tap_semantic",
-                params={"element_id": "e1", "target": "app_icon"},
-            ),
-            reason="设置图标清晰可见",
-        )
-
-    def test_legacy_boolean_confirmation_is_disabled_without_execution(self):
-        initial = scene("initial")
-        before = scene("before", element_id="fresh")
-        after = scene("after", screen_id="app_home", element_id="after")
-        observer = FakeSceneObserver([before, after])
-        robot = FakeRobot()
-        adapter = GenericSingleActionAdapter(
-            capture=lambda: Image.new("RGB", (540, 960), "gray"),
-            observer=observer,
-            robot=robot,
-            frame_interval=0,
-            post_action_settle=0,
-        )
-        planner = GenericStepPlanner(
-            FakeTextProvider(
-                {
-                    "status": "finished",
-                    "action": None,
-                    "reason": "已完成",
-                    "completion_evidence": ["蓝牙设置标题可见"],
-                }
-            )
-        )
-        with tempfile.TemporaryDirectory() as temp:
-            session = GenericSupervisedSession.start(
-                session_id="s1",
-                goal=goal(),
-                scene=initial,
-                proposal=self._proposal(),
-                planner=planner,
-                adapter=adapter,
-                run_dir=Path(temp),
-            )
-            self.assertEqual(session.status, "awaiting_confirmation")
-            with self.assertRaisesRegex(GenericActionAdapterError, "完整确认作用域"):
-                session.confirm(confirmed=False)
-            with self.assertRaisesRegex(GenericActionAdapterError, "完整确认作用域"):
-                session.confirm(confirmed=True)
-            self.assertEqual(robot.actions, [])
-            self.assertEqual(session.status, "awaiting_confirmation")
-
-    def test_legacy_boolean_confirmation_cannot_execute_terminal_scene_change(self):
-        initial = scene("initial", screen_id="video_detail", app_id="douyin")
-        before = scene("video-a", screen_id="video_detail", app_id="douyin")
-        after = UIScene(
-            app_id="douyin",
-            screen_id="video_detail",
-            summary="下一条公开视频可见",
-            elements=(
-                UIElement(
-                    element_id="next-video",
-                    role="image",
-                    meaning="next_public_video",
-                    label="下一条视频",
-                    bounds=(0.05, 0.05, 0.95, 0.90),
-                    confidence=0.96,
-                ),
-            ),
-            stable=True,
-            confidence=0.95,
-            fingerprint="video-b",
-        )
-        observer = FakeSceneObserver([before, after])
-        robot = FakeRobot()
-        adapter = GenericSingleActionAdapter(
-            capture=lambda: Image.new("RGB", (540, 960), "gray"),
-            observer=observer,
-            robot=robot,
-            frame_interval=0,
-            post_action_settle=0,
-        )
-        proposal = GenericStepProposal(
-            status="action",
-            action=SemanticAction(
-                node_id="generic_step_1",
-                action="swipe",
-                params={
-                    "direction": "up",
-                    "expected_effect": {
-                        "scene_changed": True,
-                        "goal_complete_on_success": True,
-                    },
-                },
-            ),
-            reason="上划后目标内容应改变",
-        )
-        provider = FakeTextProvider({})
-        with tempfile.TemporaryDirectory() as temp:
-            session = GenericSupervisedSession.start(
-                session_id="terminal-change",
-                goal=goal(),
-                scene=initial,
-                proposal=proposal,
-                planner=GenericStepPlanner(provider),
-                adapter=adapter,
-                run_dir=Path(temp),
-            )
-            with self.assertRaisesRegex(GenericActionAdapterError, "完整确认作用域"):
-                session.confirm(confirmed=True)
-
-        self.assertEqual(session.status, "awaiting_confirmation")
-        self.assertEqual(provider.calls, 0)
-        self.assertEqual(robot.actions, [])
-
-    def test_legacy_boolean_confirmation_cannot_submit_unproven_terminal_claim(self):
-        initial = scene("initial")
-        before = scene("before", element_id="fresh")
-        after = scene("after", screen_id="app_home", element_id="after")
-        adapter = GenericSingleActionAdapter(
-            capture=lambda: Image.new("RGB", (540, 960), "gray"),
-            observer=FakeSceneObserver([before, after]),
-            robot=FakeRobot(),
-            frame_interval=0,
-            post_action_settle=0,
-        )
-        proposal = GenericStepProposal(
-            status="action",
-            action=SemanticAction(
-                node_id="generic_step_1",
-                action="tap_semantic",
-                params={
-                    "element_id": "e1",
-                    "target": "app_icon",
-                    "expected_effect": {
-                        "description": "应该完成",
-                        "goal_complete_on_success": True,
-                    },
-                },
-            ),
-            reason="模型声称完成但没有机器证据",
-        )
-        with tempfile.TemporaryDirectory() as temp:
-            session = GenericSupervisedSession.start(
-                session_id="unproven-terminal",
-                goal=goal(),
-                scene=initial,
-                proposal=proposal,
-                planner=GenericStepPlanner(FakeTextProvider({})),
-                adapter=adapter,
-                run_dir=Path(temp),
-            )
-            with self.assertRaisesRegex(GenericActionAdapterError, "完整确认作用域"):
-                session.confirm(confirmed=True)
-
-        self.assertEqual(session.status, "awaiting_confirmation")
-        self.assertEqual(adapter.robot.actions, [])
-
-    def test_next_only_plans_and_does_not_touch_robot(self):
-        initial = scene("initial")
-        robot = FakeRobot()
-        planner = GenericStepPlanner(
-            FakeTextProvider(
-                {
-                    "status": "finished",
-                    "action": None,
-                    "reason": "已完成",
-                    "completion_evidence": ["蓝牙设置标题可见"],
-                }
-            )
-        )
-        adapter = GenericSingleActionAdapter(
-            capture=lambda: Image.new("RGB", (540, 960), "gray"),
-            observer=FakeSceneObserver([]),
-            robot=robot,
-            frame_interval=0,
-            post_action_settle=0,
-        )
-        with tempfile.TemporaryDirectory() as temp:
-            session = GenericSupervisedSession.start(
-                session_id="s2",
-                goal=goal(),
-                scene=initial,
-                proposal=self._proposal(),
-                planner=planner,
-                adapter=adapter,
-                run_dir=Path(temp),
-            )
-            session.status = "paused_after_action"
-            session.proposal = None
-            proposal = session.plan_next(
-                scene("done", screen_id="bluetooth_settings")
-            )
-        self.assertEqual(proposal.status, "finished")
-        self.assertEqual(session.status, "succeeded")
-        self.assertEqual(robot.actions, [])
-
-    def test_legacy_safe_loop_requires_exact_scope_and_never_executes(self):
-        initial = scene("initial")
-        before = scene("before", element_id="fresh")
-        after = scene(
-            "after",
-            screen_id="app_home",
-            element_id="after",
-            app_id="settings",
-        )
-        observer = FakeSceneObserver([before, after])
-        robot = FakeRobot()
-        adapter = GenericSingleActionAdapter(
-            capture=lambda: Image.new("RGB", (540, 960), "gray"),
-            observer=observer,
-            robot=robot,
-            frame_interval=0,
-            post_action_settle=0,
-        )
-        planner = GenericStepPlanner(
-            FakeTextProvider(
-                {
-                    "status": "finished",
-                    "action": None,
-                    "reason": "设置已经打开",
-                    "completion_evidence": ["设置页面标题可见"],
-                }
-            )
-        )
-        with tempfile.TemporaryDirectory() as temp:
-            session = GenericSupervisedSession.start(
-                session_id="auto1",
-                goal=goal(),
-                scene=initial,
-                proposal=self._proposal(),
-                planner=planner,
-                adapter=adapter,
-                run_dir=Path(temp),
-            )
-            with self.assertRaisesRegex(
-                GenericActionAdapterError,
-                "完整确认作用域",
-            ):
-                session.run_safe_loop(confirmed=True)
-        self.assertEqual(session.status, "awaiting_confirmation")
-        self.assertEqual(robot.actions, [])
-
-    def test_safe_loop_rejects_more_than_one_iteration_before_execution(self):
-        robot = FakeRobot()
-        adapter = GenericSingleActionAdapter(
-            capture=lambda: Image.new("RGB", (540, 960), "gray"),
-            observer=FakeSceneObserver([]),
-            robot=robot,
-            frame_interval=0,
-            post_action_settle=0,
-        )
-        with tempfile.TemporaryDirectory() as temp:
-            session = GenericSupervisedSession.start(
-                session_id="auto-bounded",
-                goal=goal(),
-                scene=scene("initial"),
-                proposal=self._proposal(),
-                planner=GenericStepPlanner(FakeTextProvider({})),
-                adapter=adapter,
-                run_dir=Path(temp),
-            )
-            with self.assertRaisesRegex(
-                GenericActionAdapterError,
-                "每次确认只允许一个动作轮次",
-            ):
-                session.run_safe_loop(
-                    confirmed=True,
-                    confirmation={},
-                    max_iterations=2,
-                )
-
-        self.assertEqual(robot.actions, [])
-
-    def test_safe_loop_pauses_before_account_effect(self):
-        proposal = GenericStepProposal(
-            status="action",
-            action=SemanticAction(
-                node_id="generic_step_1",
-                action="tap_semantic",
-                params={"element_id": "e1", "target": "like"},
-            ),
-            reason="点赞按钮可见",
-        )
-        robot = FakeRobot()
-        adapter = GenericSingleActionAdapter(
-            capture=lambda: Image.new("RGB", (540, 960), "gray"),
-            observer=FakeSceneObserver([]),
-            robot=robot,
-            frame_interval=0,
-            post_action_settle=0,
-        )
-        with tempfile.TemporaryDirectory() as temp:
-            session = GenericSupervisedSession.start(
-                session_id="auto2",
-                goal=goal(),
-                scene=scene("video"),
-                proposal=proposal,
-                planner=GenericStepPlanner(FakeTextProvider({})),
-                adapter=adapter,
-                run_dir=Path(temp),
-            )
-            with self.assertRaisesRegex(GenericActionAdapterError, "完整确认作用域"):
-                session.run_safe_loop(confirmed=True)
-        self.assertEqual(session.status, "awaiting_confirmation")
-        self.assertEqual(robot.actions, [])
-
-    def test_natural_language_like_button_is_reported_as_account_effect(self):
-        proposal = GenericStepProposal(
-            status="action",
-            action=SemanticAction(
-                node_id="generic_step_1",
-                action="tap_semantic",
-                params={
-                    "element_id": "e1",
-                    "target": "点赞按钮",
-                    "expected_effect": {
-                        "element_state": {
-                            "meaning": "点赞按钮",
-                            "states": {"is_liked": True},
-                        }
-                    },
-                },
-            ),
-            reason="白色爱心按钮可见",
-        )
-        with tempfile.TemporaryDirectory() as temp:
-            session = GenericSupervisedSession.start(
-                session_id="account-effect-cn",
-                goal=goal(),
-                scene=scene("video"),
-                proposal=proposal,
-                planner=GenericStepPlanner(FakeTextProvider({})),
-                adapter=GenericSingleActionAdapter(
-                    capture=lambda: Image.new("RGB", (540, 960), "gray"),
-                    observer=FakeSceneObserver([]),
-                    robot=FakeRobot(),
-                    frame_interval=0,
-                    post_action_settle=0,
-                ),
-                run_dir=Path(temp),
-            )
-            snapshot = session.snapshot()
-        self.assertTrue(snapshot["current_action"]["account_effect_possible"])
 
 
 if __name__ == "__main__":

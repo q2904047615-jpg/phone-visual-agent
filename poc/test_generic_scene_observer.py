@@ -440,7 +440,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "completion_conditions": list(
                         POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS
                     ),
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {
                         "target_surface": "device",
                         "observation_phase": (
@@ -760,7 +760,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             self.assertIn("role=button", prompt)
             self.assertNotIn("普通键仍必须role=keyboard_key", prompt)
 
-    def test_observation_prompts_preserve_only_read_only_clipped_list_cue(self) -> None:
+    def test_observation_prompts_preserve_only_observe_clipped_list_cue(self) -> None:
         compact = _compact_prompt({"objective": "查看目标结果"})
         targeted = _targeted_prompt(
             {"objective": "查看目标结果"},
@@ -1310,7 +1310,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "目标入口对应页面可见",
                     "constraints": [],
                     "completion_conditions": ["目标页面可见"],
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {"target_ui_label": "语义点击"},
                 },
             }
@@ -1338,7 +1338,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "打开浏览器",
                     "constraints": ["仅导航"],
                     "completion_conditions": ["浏览器主界面可见"],
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {"target_surface": "device"},
                 },
             },
@@ -1383,7 +1383,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "打开浏览器",
                     "constraints": [],
                     "completion_conditions": ["浏览器主界面可见"],
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {},
                 },
             },
@@ -1396,7 +1396,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "subgoal_id": "read_page_title",
                 "objective": "读取当前页面标题",
                 "completion_conditions": ["已读取页面主标题"],
-                "external_impact": "read_only",
+                "execution_class": "observe",
             }
         )
         self.assertTrue(_needs_targeted_refinement(scene, context))
@@ -1446,7 +1446,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                                 "objective": objective,
                                 "constraints": ["仅导航"],
                                 "completion_conditions": [condition],
-                                "external_impact": "navigation_only",
+                                "execution_class": "navigate",
                                 "goal_entities": {},
                             }
                         },
@@ -1491,7 +1491,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                         "objective": "打开应用主页",
                         "constraints": [],
                         "completion_conditions": ["应用主页可见"],
-                        "external_impact": "navigation_only",
+                        "execution_class": "navigate",
                         "goal_entities": {},
                     }
                 },
@@ -1506,7 +1506,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                         "objective": "打开浏览器",
                         "constraints": [],
                         "completion_conditions": ["浏览器主界面可见"],
-                        "external_impact": "navigation_only",
+                        "execution_class": "navigate",
                         "goal_entities": {},
                     }
                 },
@@ -1557,7 +1557,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                             "objective": f"打开{app_name}",
                             "constraints": [],
                             "completion_conditions": [f"{app_name}主界面可见"],
-                            "external_impact": "navigation_only",
+                            "execution_class": "navigate",
                             "goal_entities": {},
                         }
                     },
@@ -1576,7 +1576,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "目标入口对应页面可见",
                     "constraints": [],
                     "completion_conditions": ["目标页面可见"],
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {"target_ui_label": "语义点击"},
                 },
             }
@@ -2863,7 +2863,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 goal_context={"objective": "点击目标"},
             )
 
-    def test_low_scene_confidence_accepts_read_only_completion_evidence(self) -> None:
+    def test_low_scene_confidence_accepts_observe_completion_evidence(self) -> None:
         payload = scene_payload()
         payload["confidence"] = 0.6
         payload["elements"][0].update(
@@ -2891,7 +2891,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             GenericSceneObserver(provider).observe(frames=frames)
         self.assertEqual(provider.calls, 0)
 
-    def test_read_only_observation_accepts_one_stale_leading_frame_after_convergence(self) -> None:
+    def test_observe_observation_accepts_one_stale_leading_frame_after_convergence(self) -> None:
         provider = FakeProvider(scene_payload())
         settled = Image.new("RGB", (540, 960), (30, 40, 50))
         stale = Image.new("RGB", settled.size, (255, 255, 255))
@@ -2904,7 +2904,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(1, provider.calls)
         self.assertTrue(observer.last_diagnostics["local_stability"]["stable"])
 
-    def test_read_only_observation_never_reselects_ignored_sharp_leading_frame(self) -> None:
+    def test_observe_observation_never_reselects_ignored_sharp_leading_frame(self) -> None:
         observer = GenericSceneObserver(FakeProvider(scene_payload()))
 
         observer.observe(frames=converged_frames_with_sharp_stale_leader())
@@ -3415,7 +3415,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "文件传输助手页面在前台可见",
                     "constraints": ["不得选择其他联系人"],
                     "completion_conditions": ["文件传输助手页面在前台可见"],
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {
                         "target_ui_label": "文件传输助手",
                         "input_text": "codex",
@@ -5085,7 +5085,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "重新加载当前页面",
                     "constraints": ["软键盘必须保持不可见"],
                     "completion_conditions": ["页面内容已重新加载"],
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {"input_text": "agent"},
                 },
             },
@@ -5109,7 +5109,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "让当前软键盘保持不可见",
                     "constraints": [],
                     "completion_conditions": ["软键盘未显示"],
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {"input_text": "agent"},
                 }
             },
@@ -5129,7 +5129,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                         "草稿区域显示为空白",
                         "键盘仍然可见",
                     ],
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {
                         "target_ui_label": "唯一临时草稿区域"
                     },
@@ -5195,7 +5195,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "使软键盘最终不在画面中",
                     "constraints": ["保持输入框内容不变"],
                     "completion_conditions": ["软键盘不可见"],
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {"input_text": "agent"},
                 }
             },
@@ -5271,7 +5271,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "软键盘已收起",
                     "constraints": ["保持输入框内容不变"],
                     "completion_conditions": ["软键盘不可见"],
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {"input_text": "codex"},
                 }
             },
@@ -6068,7 +6068,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "软键盘已收起",
                     "constraints": [],
                     "completion_conditions": ["软键盘不可见"],
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {"input_text": "codex"},
                 }
             },
@@ -6114,7 +6114,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "确认唯一输入框为空",
                     "constraints": [],
                     "completion_conditions": ["输入框可见且文字为空"],
-                    "external_impact": "read_only",
+                    "execution_class": "observe",
                     "goal_entities": {},
                 },
             },
@@ -6217,7 +6217,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "选择唯一逐字候选‘你好’",
                     "constraints": ["不要发送或提交"],
                     "completion_conditions": ["候选‘你好’被选中"],
-                    "external_impact": "navigation_only",
+                    "execution_class": "navigate",
                     "goal_entities": {
                         "input_text": "你好",
                         "target_ui_label": "你好",
@@ -6266,7 +6266,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "发送已准备的正文",
                     "constraints": [],
                     "completion_conditions": ["正文已发送"],
-                    "external_impact": "external_state",
+                    "execution_class": "effect",
                     "goal_entities": {
                         "input_text": "你好",
                         "target_ui_label": "发送",

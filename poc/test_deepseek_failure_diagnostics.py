@@ -71,7 +71,7 @@ class DeepSeekFailureDiagnosticTests(unittest.TestCase):
             self.assertEqual((), paths)
             self.assertEqual([], list(Path(temp).iterdir()))
 
-    def test_includes_non_authoritative_semantic_shadow_diagnostic(self) -> None:
+    def test_retired_semantic_shadow_is_not_serialized(self) -> None:
         shadow = SimpleNamespace(
             to_dict=lambda: {
                 "authoritative": False,
@@ -96,9 +96,7 @@ class DeepSeekFailureDiagnosticTests(unittest.TestCase):
             )
             artifact = json.loads(Path(paths[0]).read_text(encoding="utf-8"))
 
-        self.assertFalse(artifact["semantic_shadow"]["authoritative"])
-        self.assertFalse(artifact["semantic_shadow"]["execution_allowed"])
-        self.assertEqual("abc123", artifact["semantic_shadow"]["semantic_digest"])
+        self.assertNotIn("semantic_shadow", artifact)
         self.assertNotIn("must-not-leak", json.dumps(artifact, ensure_ascii=False))
 
 

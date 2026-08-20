@@ -3,11 +3,11 @@
     "branch": "agent/qwen-next-action",
     "commit": "af9b6e7e6c4525980430e01dd82b59ce47d9fb81",
     "serializer": "QwenVisualDecisionObserver.decide() / QwenVisualDecision.to_dict()",
-    "input_task_context_protocol": "2026-08-11-deepseek-task-graph-v3",
+    "input_task_context_protocol": "2026-08-20-deepseek-typed-task-graph-v4",
     "generated_from": "test_qwen_visual_decision.task_context() / launcher_stable"
   },
   "decision": {
-    "protocol_version": "2026-08-12-qwen-visual-decision-v3",
+    "protocol_version": "2026-08-14-qwen-visual-decision-v5",
     "task_id": "task-map-001",
     "device_id": "phone-01",
     "revision": 1,

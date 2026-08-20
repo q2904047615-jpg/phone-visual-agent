@@ -44,11 +44,8 @@ from vision_model_config import public_model_identity
 
 QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-14-qwen-visual-decision-v5"
 QWEN_VISUAL_SELECTION_PROTOCOL_VERSION = "2026-08-16-qwen-visual-selection-v2"
-SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v3"
-MIGRATION_TASK_CONTEXT_PROTOCOL = "2026-08-11-deepseek-task-graph-v2"
-SUPPORTED_TASK_CONTEXT_PROTOCOLS = frozenset(
-    {SUPPORTED_TASK_CONTEXT_PROTOCOL, MIGRATION_TASK_CONTEXT_PROTOCOL}
-)
+SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-20-deepseek-typed-task-graph-v4"
+SUPPORTED_TASK_CONTEXT_PROTOCOLS = frozenset({SUPPORTED_TASK_CONTEXT_PROTOCOL})
 QWEN_VISUAL_DECISION_MODEL_ROLE = "trusted_observation_single_step_selector"
 DECISION_TIMEOUT_SECONDS = 60.0
 DECISION_OUTPUT_TOKENS = 1800
@@ -78,7 +75,7 @@ ALLOWED_TASK_STATUSES = {
 def _task_requests_coordinate_free_system_home(
     context: "QwenTaskContext",
 ) -> bool:
-    if context.current_external_impact != "navigation_only":
+    if context.current_execution_class != "navigate":
         return False
     objective = re.sub(
         r"\s+",
@@ -105,10 +102,10 @@ def _task_requests_coordinate_free_system_home(
         )
         for item in conditions
     )
-ALLOWED_EXTERNAL_IMPACTS = {
-    "read_only",
-    "navigation_only",
-    "external_state",
+ALLOWED_EXECUTION_CLASSES = {
+    "observe",
+    "navigate",
+    "effect",
     "unknown",
 }
 ACTIONABLE_EXACT_TEXT_ROLES = frozenset(
@@ -231,9 +228,9 @@ class QwenTaskContext(Mapping[str, Any]):
     global_constraints: tuple[str, ...]
     goal_completion_conditions: tuple[dict[str, Any], ...]
     current_subgoal: dict[str, Any]
-    current_external_impact: str
-    risk_actions: tuple[dict[str, Any], ...]
-    confirmation_gate: dict[str, Any]
+    current_execution_class: str
+    effect_intents: tuple[dict[str, Any], ...]
+    effect_gate: dict[str, Any]
     semantic_ir: TaskSemanticIR | None = field(
         default=None,
         repr=False,
@@ -254,9 +251,9 @@ class QwenTaskContext(Mapping[str, Any]):
             "global_constraints",
             "goal_completion_conditions",
             "current_subgoal",
-            "current_external_impact",
-            "risk_actions",
-            "confirmation_gate",
+            "current_execution_class",
+            "effect_intents",
+            "effect_gate",
         }
         missing = required - set(value)
         unexpected = set(value) - required
@@ -287,12 +284,12 @@ class QwenTaskContext(Mapping[str, Any]):
             current_subgoal=_require_dict(
                 value["current_subgoal"], "current_subgoal"
             ),
-            current_external_impact=str(
-                value["current_external_impact"] or ""
+            current_execution_class=str(
+                value["current_execution_class"] or ""
             ).strip(),
-            risk_actions=_dict_tuple(value["risk_actions"], "risk_actions"),
-            confirmation_gate=_require_dict(
-                value["confirmation_gate"], "confirmation_gate"
+            effect_intents=_dict_tuple(value["effect_intents"], "effect_intents"),
+            effect_gate=_require_dict(
+                value["effect_gate"], "effect_gate"
             ),
         )
         context.validate()
@@ -315,9 +312,9 @@ class QwenTaskContext(Mapping[str, Any]):
             raise VisionAgentError("revision 必须是正整数。")
         if self.task_status not in ALLOWED_TASK_STATUSES:
             raise VisionAgentError(f"task_status 无效：{self.task_status}")
-        if self.current_external_impact not in ALLOWED_EXTERNAL_IMPACTS:
+        if self.current_execution_class not in ALLOWED_EXECUTION_CLASSES:
             raise VisionAgentError(
-                f"current_external_impact 无效：{self.current_external_impact}"
+                f"current_execution_class 无效：{self.current_execution_class}"
             )
         if self.semantic_ir is not None:
             self.semantic_ir.validate()
@@ -338,8 +335,8 @@ class QwenTaskContext(Mapping[str, Any]):
             "constraints",
             "completion_conditions",
             "completion_evidence",
-            "risk_action_ids",
-            "external_impact",
+            "effect_ids",
+            "execution_class",
         }
         unexpected_subgoal = set(self.current_subgoal) - subgoal_allowed
         if unexpected_subgoal:
@@ -354,68 +351,114 @@ class QwenTaskContext(Mapping[str, Any]):
         if str(self.current_subgoal.get("status") or "") != "active":
             raise VisionAgentError("Qwen入口只接受 status=active 的 current_subgoal。")
         if (
-            str(self.current_subgoal.get("external_impact") or "")
-            != self.current_external_impact
+            str(self.current_subgoal.get("execution_class") or "")
+            != self.current_execution_class
         ):
             raise VisionAgentError(
-                "current_subgoal.external_impact 与顶层上下文不一致。"
+                "current_subgoal.execution_class 与顶层上下文不一致。"
             )
         _safe_goal_context(self.to_dict())
 
-        risk_ids = [str(item.get("risk_id") or "").strip() for item in self.risk_actions]
-        if any(not item for item in risk_ids) or len(risk_ids) != len(set(risk_ids)):
-            raise VisionAgentError("risk_actions 含空ID或重复ID。")
-        subgoal_risk_ids = _text_tuple(
-            self.current_subgoal.get("risk_action_ids") or [],
-            "current_subgoal.risk_action_ids",
+        effect_allowed = {
+            "effect_id",
+            "kind",
+            "target_entity_roles",
+            "payload_entity_roles",
+            "source_subgoal_ids",
+            "expected_results",
+            "local_policy",
+        }
+        policy_allowed = {"effect_id", "confirmation_required", "policy_level"}
+        for index, item in enumerate(self.effect_intents):
+            if set(item) != effect_allowed:
+                raise VisionAgentError(
+                    f"effect_intents[{index}] 字段不完整或包含协议外字段。"
+                )
+            for field in (
+                "target_entity_roles",
+                "payload_entity_roles",
+                "source_subgoal_ids",
+                "expected_results",
+            ):
+                _text_tuple(item[field], f"effect_intents[{index}].{field}")
+            if not str(item.get("kind") or "").strip():
+                raise VisionAgentError(f"effect_intents[{index}].kind 不能为空。")
+            policy = _require_dict(
+                item.get("local_policy"),
+                f"effect_intents[{index}].local_policy",
+            )
+            if set(policy) != policy_allowed:
+                raise VisionAgentError(
+                    f"effect_intents[{index}].local_policy 字段不完整或包含协议外字段。"
+                )
+            if policy.get("effect_id") != item.get("effect_id"):
+                raise VisionAgentError(
+                    f"effect_intents[{index}].local_policy.effect_id 不一致。"
+                )
+            if not isinstance(policy.get("confirmation_required"), bool):
+                raise VisionAgentError(
+                    f"effect_intents[{index}].local_policy.confirmation_required 必须是布尔值。"
+                )
+            if not str(policy.get("policy_level") or "").strip():
+                raise VisionAgentError(
+                    f"effect_intents[{index}].local_policy.policy_level 不能为空。"
+                )
+
+        effect_ids = [str(item.get("effect_id") or "").strip() for item in self.effect_intents]
+        if any(not item for item in effect_ids) or len(effect_ids) != len(set(effect_ids)):
+            raise VisionAgentError("effect_intents 含空ID或重复ID。")
+        subgoal_effect_ids = _text_tuple(
+            self.current_subgoal.get("effect_ids") or [],
+            "current_subgoal.effect_ids",
         )
-        if len(subgoal_risk_ids) != len(set(subgoal_risk_ids)):
-            raise VisionAgentError("current_subgoal.risk_action_ids 含重复风险ID。")
+        if len(subgoal_effect_ids) != len(set(subgoal_effect_ids)):
+            raise VisionAgentError("current_subgoal.effect_ids 含重复效果ID。")
         gate_allowed = {
             "required",
             "state",
-            "risk_ids",
-            "external_state_action_allowed",
+            "effect_ids",
+            "effect_action_allowed",
         }
         if self.protocol_version == SUPPORTED_TASK_CONTEXT_PROTOCOL:
             gate_allowed.add("scope")
-        if set(self.confirmation_gate) != gate_allowed:
-            raise VisionAgentError("confirmation_gate 字段不完整或包含协议外字段。")
-        required = self.confirmation_gate.get("required")
-        allowed = self.confirmation_gate.get("external_state_action_allowed")
+        if set(self.effect_gate) != gate_allowed:
+            raise VisionAgentError("effect_gate 字段不完整或包含协议外字段。")
+        required = self.effect_gate.get("required")
+        allowed = self.effect_gate.get("effect_action_allowed")
         if not isinstance(required, bool) or not isinstance(allowed, bool):
-            raise VisionAgentError("confirmation_gate 布尔字段格式无效。")
-        state = str(self.confirmation_gate.get("state") or "").strip()
+            raise VisionAgentError("effect_gate 布尔字段格式无效。")
+        state = str(self.effect_gate.get("state") or "").strip()
         if state not in {"not_required", "awaiting_confirmation", "confirmed"}:
-            raise VisionAgentError(f"confirmation_gate.state 无效：{state}")
-        gate_risk_ids = _text_tuple(
-            self.confirmation_gate.get("risk_ids") or [],
-            "confirmation_gate.risk_ids",
+            raise VisionAgentError(f"effect_gate.state 无效：{state}")
+        gate_effect_ids = _text_tuple(
+            self.effect_gate.get("effect_ids") or [],
+            "effect_gate.effect_ids",
         )
-        if len(gate_risk_ids) != len(set(gate_risk_ids)):
-            raise VisionAgentError("confirmation_gate.risk_ids 含重复风险ID。")
-        confirmation_risk_ids = {
-            str(item.get("risk_id") or "").strip()
-            for item in self.risk_actions
-            if item.get("confirmation_required") is True
+        if len(gate_effect_ids) != len(set(gate_effect_ids)):
+            raise VisionAgentError("effect_gate.effect_ids 含重复效果ID。")
+        confirmation_effect_ids = {
+            str(item.get("effect_id") or "").strip()
+            for item in self.effect_intents
+            if isinstance(item.get("local_policy"), dict)
+            and item["local_policy"].get("confirmation_required") is True
         }
         if (
-            set(gate_risk_ids) != confirmation_risk_ids
-            or set(risk_ids) != set(subgoal_risk_ids)
+            set(gate_effect_ids) != confirmation_effect_ids
+            or set(effect_ids) != set(subgoal_effect_ids)
         ):
             raise VisionAgentError(
-                "risk_actions、current_subgoal 与 confirmation_gate 风险ID不一致。"
+                "effect_intents、current_subgoal 与 effect_gate 效果ID不一致。"
             )
 
         if self.protocol_version == SUPPORTED_TASK_CONTEXT_PROTOCOL:
             scope = _require_dict(
-                self.confirmation_gate.get("scope"),
-                "confirmation_gate.scope",
+                self.effect_gate.get("scope"),
+                "effect_gate.scope",
             )
             scope_allowed = {"task_id", "device_id", "revision", "subgoal_id"}
             if set(scope) != scope_allowed:
                 raise VisionAgentError(
-                    "confirmation_gate.scope 字段缺失或包含协议外字段。"
+                    "effect_gate.scope 字段缺失或包含协议外字段。"
                 )
             expected_scope = {
                 "task_id": self.task_id,
@@ -426,45 +469,43 @@ class QwenTaskContext(Mapping[str, Any]):
             for field, expected in expected_scope.items():
                 if type(scope[field]) is not type(expected) or scope[field] != expected:
                     raise VisionAgentError(
-                        f"confirmation_gate.scope.{field} 与当前上下文不一致。"
+                        f"effect_gate.scope.{field} 与当前上下文不一致。"
                     )
 
-        external = self.current_external_impact in {"external_state", "unknown"}
-        if self.current_external_impact == "unknown":
+        external = self.current_execution_class in {"effect", "unknown"}
+        if self.current_execution_class == "unknown":
             raise VisionAgentError("unknown 子目标禁止进入视觉动作协议。")
-        if external and confirmation_risk_ids:
-            if not required or not gate_risk_ids:
-                raise VisionAgentError("需确认的外部状态子目标必须关闭风险确认门。")
+        if external and confirmation_effect_ids:
+            if not required or not gate_effect_ids:
+                raise VisionAgentError("需确认的效果子目标必须关闭效果确认门。")
             if state not in {"awaiting_confirmation", "confirmed"}:
                 raise VisionAgentError("外部状态子目标的确认门状态无效。")
             if state == "confirmed" and not allowed:
-                raise VisionAgentError("确认门状态与 external_state_action_allowed 冲突。")
+                raise VisionAgentError("确认门状态与 effect_action_allowed 冲突。")
             if state != "confirmed" and allowed:
-                raise VisionAgentError("未确认风险不能允许外部状态动作。")
+                raise VisionAgentError("未确认效果不能允许受限效果动作。")
         elif external:
-            if required or gate_risk_ids or state != "not_required" or not allowed:
+            if required or gate_effect_ids or state != "not_required" or not allowed:
                 raise VisionAgentError("自动外部效果的本地策略授权状态无效。")
-        elif required or gate_risk_ids or allowed or state != "not_required":
-            raise VisionAgentError("只读/导航子目标不得伪造风险确认状态。")
+        elif required or gate_effect_ids or allowed or state != "not_required":
+            raise VisionAgentError("只读/导航子目标不得伪造效果确认状态。")
 
     @property
-    def external_action_allowed(self) -> bool:
+    def effect_action_allowed(self) -> bool:
         return bool(
             self.protocol_version == SUPPORTED_TASK_CONTEXT_PROTOCOL
-            and self.confirmation_gate["external_state_action_allowed"]
+            and self.effect_gate["effect_action_allowed"]
         )
 
     @property
     def pre_observation_block_reason(self) -> str | None:
         """Return the local gate that must run before either Qwen call."""
 
-        if self.current_external_impact == "unknown":
+        if self.current_execution_class == "unknown":
             return "unknown 子目标禁止调用观察或决策模型。"
-        if self.current_external_impact == "external_state":
-            if self.protocol_version == MIGRATION_TASK_CONTEXT_PROTOCOL:
-                return "v2迁移上下文缺少确认作用域，禁止调用观察或决策模型。"
-            if not self.external_action_allowed:
-                return "风险确认门未满足，本轮禁止调用观察或决策模型。"
+        if self.current_execution_class == "effect":
+            if not self.effect_action_allowed:
+                return "本地效果确认门未满足，本轮禁止调用观察或决策模型。"
         return None
 
     @property
@@ -588,9 +629,9 @@ class QwenTaskContext(Mapping[str, Any]):
                 dict(item) for item in self.goal_completion_conditions
             ],
             "current_subgoal": dict(self.current_subgoal),
-            "current_external_impact": self.current_external_impact,
-            "risk_actions": [dict(item) for item in self.risk_actions],
-            "confirmation_gate": dict(self.confirmation_gate),
+            "current_execution_class": self.current_execution_class,
+            "effect_intents": [dict(item) for item in self.effect_intents],
+            "effect_gate": dict(self.effect_gate),
         }
 
     def __getitem__(self, key: str) -> Any:
@@ -625,7 +666,7 @@ class QwenTaskContext(Mapping[str, Any]):
             "completion_conditions": list(
                 self.current_subgoal.get("completion_conditions") or []
             ),
-            "external_impact": self.current_external_impact,
+            "execution_class": self.current_execution_class,
         }
 
 
@@ -1007,8 +1048,8 @@ class QwenVisualDecision:
             if not self.expected_result:
                 raise GenericStepPlanningError("唯一下一动作缺少可验证预期结果。")
             if (
-                context.current_external_impact in {"external_state", "unknown"}
-                and not context.external_action_allowed
+                context.current_execution_class in {"effect", "unknown"}
+                and not context.effect_action_allowed
             ):
                 raise GenericStepPlanningError("风险确认门未满足，禁止产生外部状态动作。")
             self.target_region.validate(self.trusted_observation, action)
@@ -1326,8 +1367,8 @@ class QwenVisualDecisionObserver:
                 self.last_diagnostics = dict(base_diagnostics)
 
         if (
-            context.current_external_impact in {"external_state", "unknown"}
-            and not context.external_action_allowed
+            context.current_execution_class in {"effect", "unknown"}
+            and not context.effect_action_allowed
         ):
             decision = _local_blocked_decision(
                 context,
@@ -1337,7 +1378,7 @@ class QwenVisualDecisionObserver:
             self._metrics["final_blocked_count"] += 1
             self.last_diagnostics.update(
                 {
-                    "local_safety_block": "confirmation_gate",
+                    "local_safety_block": "effect_gate",
                     "decision_status": "blocked",
                     "elapsed_seconds": round(time.perf_counter() - started, 3),
                 }
@@ -2047,7 +2088,7 @@ def _selection_decision_prompt(
 3. status=blocked时choice_id必须为null、完成证据必须为空，
    completes_current_subgoal_on_success必须为false。
 4. global_constraints和current_subgoal.constraints是选择前硬过滤；无法安全满足时blocked。
-5. current_external_impact=read_only时只能finished/blocked，除非目标明确要求等待异步变化且choices含wait_for_change。
+5. current_execution_class=observe时只能finished/blocked，除非目标明确要求等待异步变化且choices含wait_for_change。
 6. choices中的action、element_id、direction和expected_result都由本地控制器绑定；禁止复制、改写或另行输出。
    selection_context只用于解释上下文相关原语：当back的contextual_effect为
    dismiss_visible_soft_keyboard且preserves_current_app_surface=true时，该动作表示收起当前已证明可见的
@@ -2115,7 +2156,7 @@ back/home/reveal_system_navigation是无元素、无坐标的系统动作，不�
 1. 每轮最多一个next_action，禁止actions、steps、plan、后续动作或裸坐标。
    global_constraints与current_subgoal.constraints是候选选择前的硬过滤条件。若某条否定约束明确排除
    某个可见元素、区域、角色或语义，即使它看起来是最短路径，也绝不能选择该element_id。不得以目标
-   objective是肯定表达为由覆盖否定约束。若navigation_only子目标要求沿访问层级离开当前页面，所有
+   objective是肯定表达为由覆盖否定约束。若navigate子目标要求沿访问层级离开当前页面，所有
    页面内导航候选又被明确排除，且可信scene证明system_ui.navigation_bar_visible=true、设备能力包含
    back，则应使用无element_id、无坐标的back；绝不能把back伪装成页面元素tap_semantic。
 2. page_state只是语义描述，禁止elements、bounds或任何可执行候选字段。
@@ -2159,7 +2200,7 @@ back/home/reveal_system_navigation是无元素、无坐标的系统动作，不�
    单张当前画面的静态元素或目标结果外观不能单独证明该事件。只有上下文已有前后变化或动作回执，
    或被引用候选逐字显示“刷新成功/加载完成/刚刚更新”等明确动态证据时才可finished；否则选择
    一个当前可信动作，找不到就blocked。禁止用刷新图标、页面标题或目标内容的静态存在冒充事件证据。
-9. confirmation_gate没有允许外部状态动作时必须blocked；你不能自行改写或批准确认门。
+9. effect_gate没有允许外部状态动作时必须blocked；你不能自行改写或批准确认门。
 10. task_id/device_id/revision/observation_id/fingerprint必须逐字复制；任何旧值都会被拒绝。
 11. expected_result只描述一个动作后可由新画面验证的变化，且只能按需使用：
     scene_changed、content_changed、current_video_changed、app_id、screen_id、system_ui、
@@ -2169,10 +2210,10 @@ back/home/reveal_system_navigation是无元素、无坐标的系统动作，不�
 14. status是互斥判别字段：只要返回非null next_action，就必须是status=action并同时给出target_region和
     非空expected_result；status=blocked或finished时next_action和target_region必须为null、
     expected_result必须为空对象。不得把动作字段与终止状态混合。
-15. current_external_impact=read_only 时禁止点击、滑动、返回、输入、长按和拖动；当前可信画面已
+15. current_execution_class=observe 时禁止点击、滑动、返回、输入、长按和拖动；当前可信画面已
     证明子目标时必须 finished，并可用 completion_evidence_element_ids=["scene"] 引用可信场景摘要；
     尚未证明时必须 blocked。只有目标明确要求等待异步变化时才可使用 wait_for_change。
-16. current_external_impact=navigation_only 且目标字面标签或目标区域尚未出现在可信候选中时，
+16. current_execution_class=navigate 且目标字面标签或目标区域尚未出现在可信候选中时，
     只有原图明确显示当前就是与目标相关、仍可继续浏览的列表/信息流/结构化分步流程，并且边缘存在
     被裁切的后续内容，或属于页面内容的连续引导轨/连接线明确接触该边缘、同时没有遮挡层时，才允许
     返回一次整屏 swipe 去显示更多内容。根据原图内容延伸方向选择
@@ -2209,12 +2250,12 @@ def _decision_retry_prompt(
   source_element_id。可信container也可作为drag的destination_element_id；其他情况只能作为finished证据。
 - action只能选择可信候选已有element_id并复制原始字段与bounds；不能新建元素。
 - global_constraints和current_subgoal.constraints中的否定约束必须先过滤候选；被明确排除的元素即使是
-  最短路径也不得选择。navigation_only要求沿访问层级离开当前页面、页面内候选均被排除、导航栏可见
+  最短路径也不得选择。navigate要求沿访问层级离开当前页面、页面内候选均被排除、导航栏可见
   且back能力可用时，使用无element_id、无坐标的back，不得返回页面元素tap_semantic。
 - 找不到逐字匹配且唯一的可信候选就blocked；finished只引用可信证据ID或scene。
 - “已刷新/已重新加载/已导航/已重新获取/已同步”等发生型完成条件必须有前后变化、动作回执或被引用
   候选中的明确动态成功文字；单帧静态页面内容、标题或图标不能证明事件已经发生。
-- confirmation_gate未允许外部动作时blocked；每轮只允许一个动作，不要计划后续步骤。
+- effect_gate未允许外部动作时blocked；每轮只允许一个动作，不要计划后续步骤。
 - 顶层只允许下方JSON中的字段；绝对不要action、actions、reasoning、analysis、plan或额外字段。
 - expected_result只能按需使用scene_changed、content_changed、current_video_changed、app_id、screen_id、
   element_state、system_ui；reveal_system_navigation 的 system_ui 必须精确证明导航栏可见。
@@ -2227,10 +2268,10 @@ def _decision_retry_prompt(
   重新观察，本轮不得同时输入文字。
 - 这是第{decision_number}轮。不要Markdown，不要解释，不要把JSON转义成字符串。
 - 当前设备只允许动作：{available_actions}；不得返回集合外动作，无法继续就blocked。
-- current_external_impact=read_only 时禁止点击、滑动、返回、输入、长按和拖动；画面已证明结果就
+- current_execution_class=observe 时禁止点击、滑动、返回、输入、长按和拖动；画面已证明结果就
   finished，并可用 completion_evidence_element_ids=["scene"]，否则blocked；只有明确等待异步变化
   才可 wait_for_change。
-- navigation_only 的目标候选尚未出现时，只有原图明确显示相关列表/信息流/结构化分步流程可继续浏览，
+- navigate 的目标候选尚未出现时，只有原图明确显示相关列表/信息流/结构化分步流程可继续浏览，
   且边缘有被裁切内容或属于页面内容的连续引导轨/连接线明确接触该边缘、没有遮挡层，才可返回一次
   整屏swipe；expected_result必须是{{"content_changed":true}}，
   不得点击无关候选或连续滑动。
@@ -2528,12 +2569,12 @@ def _parse_decision(
             revision=context.revision,
         )
         if (
-            context.current_external_impact == "read_only"
+            context.current_execution_class == "observe"
             and action is not None
             and action.action != "wait_for_change"
         ):
             raise GenericStepPlanningError(
-                "read_only 子目标禁止点击、滑动、系统导航、返回、输入、长按或拖动；"
+                "observe 子目标禁止点击、滑动、系统导航、返回、输入、长按或拖动；"
                 "当前画面已证明结果时必须 finished，否则 blocked。"
             )
         if (
@@ -3854,7 +3895,7 @@ def _matching_exact_text_candidates(
             continue
         if meanings and element.meaning.strip().casefold() not in meanings:
             continue
-        if context.current_external_impact != "read_only" and not roles:
+        if context.current_execution_class != "observe" and not roles:
             if element.role not in ACTIONABLE_EXACT_TEXT_ROLES:
                 continue
         matches.append(element.element_id)

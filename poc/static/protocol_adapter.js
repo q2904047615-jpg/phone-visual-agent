@@ -5,9 +5,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function createProtocolAdapter() {
   const terminalStatuses = new Set(["succeeded", "completed", "blocked", "failed", "cancelled"]);
   const activeSubgoalStatuses = new Set(["current", "running", "active", "in_progress"]);
-  const externalImpacts = new Set(["external_state", "unknown"]);
-  const formalDeepSeekProtocol = "2026-08-11-deepseek-task-graph-v3";
-  const legacyDeepSeekV2Protocol = "2026-08-11-deepseek-task-graph-v2";
+  const formalDeepSeekProtocol = "2026-08-20-deepseek-typed-task-graph-v4";
 
   function asObject(value) {
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -54,10 +52,10 @@
       index: Number(firstDefined(item.index, item.step_number, index + 1)),
       label: String(firstDefined(item.objective, item.label, item.title, item.description, `动态子目标 ${index + 1}`)),
       status: String(firstDefined(item.status, "pending")).toLowerCase(),
-      reason: String(firstDefined(item.reason, item.checkpoint, item.expected_result, item.external_impact, "等待当前画面更新")),
+      reason: String(firstDefined(item.reason, item.checkpoint, item.expected_result, item.execution_class, "等待当前画面更新")),
       completionConditions: normalizeStringList(firstDefined(item.completion_conditions, item.success_criteria, item.checkpoint)),
-      riskIds: normalizeStringList(item.risk_action_ids),
-      externalImpact: String(firstDefined(item.external_impact, "unknown")),
+      effectIds: normalizeStringList(item.effect_ids),
+      executionClass: String(firstDefined(item.execution_class, "unknown")),
       raw: item,
     };
   }
@@ -84,27 +82,61 @@
       status: "current",
       reason: "由当前目标和画面动态确定",
       completionConditions: [],
-      riskIds: [],
-      externalImpact: "unknown",
+      effectIds: [],
+      executionClass: "unknown",
       raw: {},
     };
   }
 
-  function normalizeRiskActions(value) {
+  function normalizeEffectIntents(value) {
     if (!Array.isArray(value)) return [];
     return value.map(raw => {
       const item = asObject(raw);
+      const policy = asObject(item.local_policy);
       return {
-        id: String(firstDefined(item.risk_id, item.id, "")),
-        description: String(firstDefined(item.description, "未说明风险")),
-        externalEffect: String(firstDefined(item.external_effect, "影响未知")),
-        type: String(firstDefined(item.risk_type, "unknown_external_effect")),
-        level: String(firstDefined(item.risk_level, "unknown")),
-        subgoalIds: normalizeStringList(item.subgoal_ids),
-        confirmationRequired: item.confirmation_required !== false,
+        id: String(firstDefined(item.effect_id, "")),
+        kind: String(firstDefined(item.kind, "unknown")),
+        targetEntityRoles: normalizeStringList(item.target_entity_roles),
+        payloadEntityRoles: normalizeStringList(item.payload_entity_roles),
+        subgoalIds: normalizeStringList(item.source_subgoal_ids),
+        expectedResults: normalizeStringList(item.expected_results),
+        confirmationRequired: policy.confirmation_required === true,
+        policyLevel: String(firstDefined(policy.policy_level, "unknown")),
         raw: item,
       };
     });
+  }
+
+  function isStrictTypedV4Graph(graph) {
+    const value = asObject(graph);
+    const required = [
+      "protocol_version", "task_id", "device_id", "revision", "status", "goal",
+      "constraints", "completion_conditions", "effect_intents", "subgoals",
+      "active_subgoal_id", "clarification_questions", "replan_history",
+    ];
+    if (required.some(key => !Object.prototype.hasOwnProperty.call(value, key))) return false;
+    const retired = ["risk_actions", "confirmation_gate", "current_external_impact"];
+    if (retired.some(key => Object.prototype.hasOwnProperty.call(value, key))) return false;
+    if (!Array.isArray(value.effect_intents) || !Array.isArray(value.subgoals)) return false;
+    const effectKeys = [
+      "effect_id", "kind", "target_entity_roles", "payload_entity_roles",
+      "source_subgoal_ids", "expected_results", "local_policy",
+    ].sort();
+    const policyKeys = ["effect_id", "confirmation_required", "policy_level"].sort();
+    const subgoalKeys = [
+      "subgoal_id", "objective", "status", "depends_on", "constraints",
+      "completion_conditions", "completion_evidence", "effect_ids", "execution_class",
+    ].sort();
+    if (value.effect_intents.some(item => {
+      const intent = asObject(item);
+      const policy = asObject(intent.local_policy);
+      return JSON.stringify(Object.keys(intent).sort()) !== JSON.stringify(effectKeys)
+        || JSON.stringify(Object.keys(policy).sort()) !== JSON.stringify(policyKeys);
+    })) return false;
+    if (value.subgoals.some(item => (
+      JSON.stringify(Object.keys(asObject(item)).sort()) !== JSON.stringify(subgoalKeys)
+    ))) return false;
+    return true;
   }
 
   function normalizeConfirmationGateScope(rawScope) {
@@ -115,7 +147,7 @@
       deviceId: String(firstDefined(scope.device_id, "")),
       revision: firstDefined(scope.revision, null),
       subgoalId: String(firstDefined(scope.subgoal_id, "")),
-      riskIds: normalizeStringList(scope.risk_ids),
+      effectIds: normalizeStringList(scope.effect_ids),
       observationId: String(firstDefined(scope.observation_id, "")),
       fingerprint: String(firstDefined(scope.fingerprint, "")),
       decisionNodeId: String(firstDefined(scope.decision_node_id, "")),
@@ -124,7 +156,7 @@
     };
   }
 
-  function isQwenV2Decision(value) {
+  function isQwenDecision(value) {
     const decision = asObject(value);
     return /qwen-visual-decision-v\d+/.test(String(decision.protocol_version || ""))
       || (Object.prototype.hasOwnProperty.call(decision, "next_action")
@@ -133,7 +165,7 @@
         && decision.status !== undefined);
   }
 
-  function normalizeQwenV2Decision(rawDecision) {
+  function normalizeQwenDecision(rawDecision) {
     const decision = asObject(rawDecision);
     const status = String(firstDefined(decision.status, "blocked")).toLowerCase();
     const nextAction = asObject(decision.next_action);
@@ -152,7 +184,7 @@
     const protocolVersion = String(firstDefined(decision.protocol_version, ""));
     const protocolMatch = protocolVersion.match(/qwen-visual-decision-v\d+/);
     return {
-      protocol: protocolMatch ? protocolMatch[0] : "qwen-visual-decision-v2",
+      protocol: protocolMatch ? protocolMatch[0] : "qwen-visual-decision",
       protocolVersion,
       status,
       decisionNodeId: String(firstDefined(nextAction.node_id, "")),
@@ -174,60 +206,6 @@
       identityMatchesTask: true,
       raw: decision,
     };
-  }
-
-  function normalizeLegacyVisualAction(rawAction, proposal, scene) {
-    const raw = asObject(rawAction);
-    const params = asObject(raw.params);
-    const fallbackProposal = asObject(proposal);
-    const actionType = String(firstDefined(raw.action_type, raw.action, ""));
-    return {
-      protocol: "legacy-visual-action",
-      protocolVersion: String(firstDefined(raw.protocol_version, "")),
-      status: actionType ? "action" : "unknown",
-      decisionNodeId: String(firstDefined(raw.node_id, params.node_id, "")),
-      actionType,
-      semanticTarget: String(firstDefined(raw.semantic_target, params.semantic_target, params.target, params.label, params.element_id, "当前语义目标")),
-      elementId: String(firstDefined(params.element_id, "")),
-      targetRegion: firstDefined(raw.target_region, params.target_region, params.bounds, null),
-      expectedChange: firstDefined(raw.expected_change, params.expected_change, params.expected_result, "动作后重新观察并验证可见变化"),
-      confidence: firstDefined(raw.confidence, fallbackProposal.confidence, null),
-      reason: String(firstDefined(raw.reason, fallbackProposal.reason, "依据当前画面动态生成")),
-      taskId: "",
-      deviceId: "",
-      revision: null,
-      observationId: "",
-      fingerprint: "",
-      accountEffectPossible: Boolean(firstDefined(raw.account_effect_possible, false)),
-      physicalActionPossible: Boolean(firstDefined(raw.physical_action_possible, actionType)),
-      isExecutable: Boolean(actionType),
-      identityMatchesTask: true,
-      sceneConfidence: firstDefined(asObject(scene).confidence, null),
-      raw,
-    };
-  }
-
-  function legacySubgoals(session, proposal) {
-    const history = Array.isArray(session.history) ? session.history : [];
-    const completed = history.map((item, index) => normalizeSubgoal({
-      subgoal_id: `history-${item.step_number ?? index + 1}`,
-      step_number: item.step_number ?? index + 1,
-      objective: firstDefined(asObject(item.proposal).current_subgoal, asObject(asObject(item.proposal).action).action, "已完成动态步骤"),
-      status: "completed",
-      reason: firstDefined(item.completion_evidence, asObject(item.proposal).reason, "动作后已重新观察"),
-      external_impact: "unknown",
-    }, index));
-    if (Object.keys(asObject(proposal)).length && !terminalStatuses.has(String(session.status || "").toLowerCase())) {
-      completed.push(normalizeSubgoal({
-        subgoal_id: `current-${session.step_number || completed.length + 1}`,
-        step_number: session.step_number || completed.length + 1,
-        objective: firstDefined(proposal.current_subgoal, asObject(proposal.action).action, asObject(session.goal).objective),
-        status: "current",
-        reason: proposal.reason,
-        external_impact: "unknown",
-      }, completed.length));
-    }
-    return completed;
   }
 
   function normalizeControllerGate(value) {
@@ -331,8 +309,8 @@
     ));
     const scope = normalizeConfirmationGateScope(receipt.scope);
     const expectedSubgoalId = String(firstDefined(entry.subgoal_id, asObject(entry.scope).subgoal_id, ""));
-    const expectedRiskIds = Array.isArray(entry.risk_ids)
-      ? normalizeStringList(entry.risk_ids).map(String).sort()
+    const expectedEffectIds = Array.isArray(entry.effect_ids)
+      ? normalizeStringList(entry.effect_ids).map(String).sort()
       : null;
     const authoritative = receipt.authoritative === true && receipt.consumed === true;
     const exact = authoritative
@@ -343,8 +321,8 @@
       && scope.revision === action.revision
       && Boolean(expectedSubgoalId)
       && scope.subgoalId === expectedSubgoalId
-      && expectedRiskIds !== null
-      && JSON.stringify([...scope.riskIds].map(String).sort()) === JSON.stringify(expectedRiskIds)
+      && expectedEffectIds !== null
+      && JSON.stringify([...scope.effectIds].map(String).sort()) === JSON.stringify(expectedEffectIds)
       && scope.observationId === action.observationId
       && scope.fingerprint === action.fingerprint
       && scope.decisionNodeId === action.decisionNodeId
@@ -358,7 +336,7 @@
       }
       : {
         state: "unknown",
-        reason: "旧记录没有可验证的确认消费回执",
+        reason: "该记录没有可验证的确认消费回执",
         mismatches: [],
         scope: {},
       };
@@ -368,11 +346,10 @@
     if (!Array.isArray(rawHistory)) return [];
     return rawHistory.map((item, index) => {
       const entry = asObject(item);
-      const proposal = asObject(entry.proposal);
-      const candidate = firstDefined(entry.qwen_decision, entry.visual_decision, entry.visual_action, proposal.visual_action, proposal.action);
-      const action = isQwenV2Decision(candidate)
-        ? normalizeQwenV2Decision(candidate)
-        : normalizeLegacyVisualAction(candidate, proposal, firstDefined(entry.after_scene, entry.scene));
+      const candidate = firstDefined(entry.qwen_decision, entry.visual_decision);
+      const action = isQwenDecision(candidate)
+        ? normalizeQwenDecision(candidate)
+        : normalizeQwenDecision({ status: "blocked", reason: "该 v4 历史轮次没有 Qwen 决策。" });
       const verification = normalizeVerification(entry, action);
       const controllerGate = normalizeControllerGate(firstDefined(
         entry.controller_decision,
@@ -382,7 +359,7 @@
       return {
         stepNumber: Number(firstDefined(entry.step_number, index + 1)),
         graphRevision: firstDefined(entry.task_revision, entry.revision, action.revision, null),
-        subgoal: String(firstDefined(entry.current_subgoal, proposal.current_subgoal, "旧记录未提供")),
+        subgoal: String(firstDefined(entry.current_subgoal, "记录未提供")),
         subgoalId: String(firstDefined(entry.subgoal_id, asObject(entry.scope).subgoal_id, "")),
         observation: {
           id: String(firstDefined(entry.observation_id, action.observationId, "")),
@@ -390,7 +367,7 @@
         },
         action,
         controllerGate,
-        reason: String(firstDefined(entry.reason, proposal.reason, "已执行并重新观察")),
+        reason: String(firstDefined(entry.reason, "已执行并重新观察")),
         physicalActions: Number(firstDefined(asObject(entry.execution).physical_actions, 0)),
         verification,
         transition: normalizeTransition(
@@ -414,7 +391,7 @@
     const hasScope = Boolean(
       scope.sessionId || scope.taskId || scope.deviceId || scope.subgoalId
       || scope.observationId || scope.fingerprint || scope.decisionNodeId
-      || scope.actionDigest || scope.intentDigest || scope.riskIds.length
+      || scope.actionDigest || scope.intentDigest || scope.effectIds.length
     );
     const explicitReason = String(firstDefined(
       session.confirmation_invalid_reason,
@@ -424,15 +401,15 @@
     ));
     const mismatches = [];
     const actionPhase = context.status === "awaiting_confirmation";
-    const riskPhase = context.status === "awaiting_risk_confirmation";
-    const expectedRiskIds = [...context.riskIds].map(String).sort();
-    const actualRiskIds = [...scope.riskIds].map(String).sort();
+    const effectPhase = context.status === "awaiting_effect_confirmation";
+    const expectedEffectIds = [...context.effectIds].map(String).sort();
+    const actualEffectIds = [...scope.effectIds].map(String).sort();
     const requiredScopeMissing = actionPhase
       ? !scope.sessionId || !scope.taskId || !scope.deviceId
         || !Number.isInteger(scope.revision) || !scope.subgoalId
         || !scope.observationId || !scope.fingerprint
         || !scope.decisionNodeId || !scope.actionDigest
-      : riskPhase
+      : effectPhase
         ? !scope.sessionId || !scope.taskId || !scope.deviceId
           || !Number.isInteger(scope.revision) || !scope.subgoalId
           || !scope.intentDigest
@@ -443,28 +420,28 @@
       if (scope.deviceId !== context.deviceId) mismatches.push("device_id");
       if (scope.revision !== context.revision) mismatches.push("revision");
       if (scope.subgoalId !== context.subgoalId) mismatches.push("subgoal_id");
-      if (JSON.stringify(actualRiskIds) !== JSON.stringify(expectedRiskIds)) mismatches.push("risk_ids");
+      if (JSON.stringify(actualEffectIds) !== JSON.stringify(expectedEffectIds)) mismatches.push("effect_ids");
       if (actionPhase) {
         if (scope.observationId !== context.observationId) mismatches.push("observation_id");
         if (scope.fingerprint !== context.fingerprint) mismatches.push("fingerprint");
         if (scope.decisionNodeId !== context.decisionNodeId) mismatches.push("decision_node_id");
       }
-      if (riskPhase && (
+      if (effectPhase && (
         scope.observationId || scope.fingerprint || scope.decisionNodeId || scope.actionDigest
-      )) mismatches.push("risk_scope_extra_action_fields");
+      )) mismatches.push("effect_scope_extra_action_fields");
     }
     let state = "none";
     let reason = explicitReason;
     if (context.isTerminal) {
       state = "invalidated";
       reason ||= `会话已停止于 ${context.status}`;
-    } else if ((actionPhase || riskPhase) && requiredScopeMissing) {
+    } else if ((actionPhase || effectPhase) && requiredScopeMissing) {
       state = "missing";
       reason = "等待确认但缺少完整作用域";
     } else if (explicitReason || mismatches.length) {
       state = "stale";
       reason ||= `作用域字段已变化：${mismatches.join("、")}`;
-    } else if ((actionPhase || riskPhase) && hasScope) {
+    } else if ((actionPhase || effectPhase) && hasScope) {
       state = "active";
       reason = "后端 scope 与当前权威任务、观察和动作字段一致";
     } else if (context.physicalActions > 0 && !hasScope) {
@@ -489,26 +466,25 @@
 
   function adaptSession(rawSession, options = {}) {
     const session = asObject(rawSession);
-    const graph = asObject(firstDefined(session.task_graph, asObject(session.goal).task_graph));
+    const graph = asObject(session.task_graph);
     const graphGoal = asObject(graph.goal);
-    const legacyGoal = asObject(session.goal);
-    const proposal = asObject(session.proposal);
     const qwenContext = asObject(firstDefined(session.qwen_context, session.task_context));
+    const protocolVersion = String(firstDefined(graph.protocol_version, qwenContext.protocol_version, ""));
+    const formalV4 = protocolVersion === formalDeepSeekProtocol && isStrictTypedV4Graph(graph);
     const qwenDecisionRaw = [
       session.qwen_decision,
       session.visual_decision,
       session.decision,
       session.current_visual_decision,
       session.current_action,
-    ].find(isQwenV2Decision);
-    const currentActionMeta = asObject(session.current_action);
-    const rawSubgoals = firstDefined(graph.subgoals, graph.nodes);
+    ].find(isQwenDecision);
+    const rawSubgoals = graph.subgoals;
     const subgoals = Array.isArray(rawSubgoals)
       ? rawSubgoals.map(normalizeSubgoal)
-      : legacySubgoals(session, proposal);
-    const objective = String(firstDefined(graphGoal.objective, graph.objective, legacyGoal.objective, session.objective, "未命名目标"));
+      : [];
+    const objective = String(firstDefined(graphGoal.objective, "未命名目标"));
     const currentSubgoal = resolveCurrentSubgoal(
-      firstDefined(graph.current_subgoal, qwenContext.current_subgoal, session.current_subgoal, proposal.current_subgoal),
+      firstDefined(graph.current_subgoal, qwenContext.current_subgoal, session.current_subgoal),
       subgoals,
       objective,
     );
@@ -519,24 +495,10 @@
     const taskId = String(firstDefined(graph.task_id, qwenContext.task_id, session.task_id, session.session_id, ""));
     const deviceId = String(firstDefined(graph.device_id, qwenContext.device_id, session.device_id, options.fallbackDeviceId, ""));
     const revision = firstDefined(graph.revision, qwenContext.revision, session.revision, null);
-    const scene = asObject(firstDefined(session.current_scene, session.scene, asObject(qwenDecisionRaw).page_state));
+    const scene = asObject(firstDefined(session.current_scene, asObject(qwenDecisionRaw).page_state));
     const visualAction = qwenDecisionRaw
-      ? normalizeQwenV2Decision(qwenDecisionRaw)
-      : normalizeLegacyVisualAction(
-        firstDefined(
-          session.visual_action,
-          proposal.visual_action,
-          currentActionMeta.action_type ? currentActionMeta : undefined,
-          proposal.action,
-        ),
-        proposal,
-        scene,
-      );
-    visualAction.accountEffectPossible = Boolean(firstDefined(
-      visualAction.raw.account_effect_possible,
-      currentActionMeta.account_effect_possible,
-      false,
-    ));
+      ? normalizeQwenDecision(qwenDecisionRaw)
+      : normalizeQwenDecision({ status: "unknown", reason: "当前 v4 会话尚无 Qwen 决策。" });
     const identityChecks = [
       !visualAction.taskId || !taskId || visualAction.taskId === taskId,
       visualAction.revision === null || revision === null || Number(visualAction.revision) === Number(revision),
@@ -548,66 +510,51 @@
       visualAction.isExecutable = false;
     }
 
-    const riskActions = normalizeRiskActions(firstDefined(graph.risk_actions, qwenContext.risk_actions));
-    const rawGate = asObject(firstDefined(graph.confirmation_gate, qwenContext.confirmation_gate, session.confirmation_gate));
-    const confirmationPhase = status === "awaiting_risk_confirmation" ? "risk" : "action";
+    const effectIntents = normalizeEffectIntents(firstDefined(graph.effect_intents, qwenContext.effect_intents));
+    const rawGate = asObject(firstDefined(qwenContext.effect_gate, session.effect_gate));
+    const confirmationPhase = status === "awaiting_effect_confirmation" ? "effect" : "action";
     const authorityScope = normalizeConfirmationGateScope(firstDefined(
-      confirmationPhase === "risk" ? session.risk_confirmation_scope : session.confirmation_scope,
+      confirmationPhase === "effect" ? session.effect_confirmation_scope : session.confirmation_scope,
       rawGate.scope,
     ));
-    const currentExternalImpact = String(firstDefined(
-      graph.current_external_impact,
-      qwenContext.current_external_impact,
-      currentSubgoal.externalImpact,
+    const currentExecutionClass = String(firstDefined(
+      qwenContext.current_execution_class,
+      currentSubgoal.executionClass,
       "unknown",
     ));
-    const gateRiskIds = normalizeStringList(firstDefined(
-      asObject(session.risk_confirmation_scope).risk_ids,
-      asObject(session.confirmation_scope).risk_ids,
-      rawGate.risk_ids,
-      currentSubgoal.riskIds,
+    const gateEffectIds = normalizeStringList(firstDefined(
+      asObject(session.effect_confirmation_scope).effect_ids,
+      asObject(session.confirmation_scope).effect_ids,
+      rawGate.effect_ids,
+      currentSubgoal.effectIds,
     ));
-    const currentRiskActions = riskActions.filter(item => (
-      gateRiskIds.includes(item.id) || item.subgoalIds.includes(currentSubgoal.id)
+    const currentEffectIntents = effectIntents.filter(item => (
+      gateEffectIds.includes(item.id) || item.subgoalIds.includes(currentSubgoal.id)
     ));
     const gateRequired = Boolean(
       session.confirmation_ready === true
-      || session.risk_confirmation_ready === true
-      || status === "awaiting_risk_confirmation"
+      || session.effect_confirmation_ready === true
+      || status === "awaiting_effect_confirmation"
       || status === "awaiting_confirmation"
       || rawGate.required === true
-      || externalImpacts.has(currentExternalImpact)
     );
     const gateState = String(firstDefined(
       rawGate.state,
       gateRequired
-        ? (["awaiting_risk_confirmation", "awaiting_confirmation"].includes(status) ? status : "unconfirmed")
+        ? (["awaiting_effect_confirmation", "awaiting_confirmation"].includes(status) ? status : "unconfirmed")
         : "not_required",
     ));
     const requiresConfirmation = Boolean(
       gateRequired
-      || currentActionMeta.requires_confirmation
-      || status === "awaiting_risk_confirmation"
+      || status === "awaiting_effect_confirmation"
       || status === "awaiting_confirmation"
     );
-    const hasCurrentRisk = gateRiskIds.length > 0 || currentRiskActions.length > 0;
-    const accountEffectPossible = Boolean(
-      visualAction.accountEffectPossible
-      || externalImpacts.has(currentExternalImpact)
-    );
+    const hasCurrentEffect = gateEffectIds.length > 0 || currentEffectIntents.length > 0;
     const blocksAutomatic = Boolean(
       requiresConfirmation
-      || hasCurrentRisk
-      || accountEffectPossible
-      || externalImpacts.has(currentExternalImpact)
       || gateState === "awaiting_confirmation"
       || gateState === "unconfirmed"
     );
-    visualAction.accountEffectPossible = accountEffectPossible;
-
-    const protocolVersion = String(firstDefined(graph.protocol_version, qwenContext.protocol_version, ""));
-    const formalV3 = protocolVersion === formalDeepSeekProtocol;
-    const compatibilityV2 = protocolVersion === legacyDeepSeekV2Protocol;
     const targetApps = normalizeTargetApps(firstDefined(graphGoal.target_apps, asObject(qwenContext.goal).target_apps));
     const controllerGate = normalizeControllerGate(session.controller_decision);
     const physicalActions = Number(firstDefined(session.physical_actions, 0));
@@ -647,7 +594,7 @@
       observationId: currentObservation.id,
       fingerprint: currentObservation.fingerprint,
       decisionNodeId: visualAction.decisionNodeId,
-      riskIds: gateRiskIds,
+      effectIds: gateEffectIds,
       status,
       isTerminal: stopState.stopped,
       physicalActions,
@@ -660,8 +607,8 @@
           ? "replan"
           : status === "awaiting_confirmation"
             ? "awaiting_confirmation"
-            : status === "awaiting_risk_confirmation"
-              ? "awaiting_risk_confirmation"
+            : status === "awaiting_effect_confirmation"
+              ? "awaiting_effect_confirmation"
               : "observing";
     const currentTrace = {
       phase: stopState.stopped ? "terminal" : "current",
@@ -703,13 +650,9 @@
       status,
     };
     return {
-      protocol: formalV3
-        ? "deepseek-task-graph-v3"
-        : compatibilityV2
-          ? "deepseek-task-graph-v2-compatibility"
-        : (graph.subgoals ? "deepseek-task-graph" : (graph.nodes ? "legacy-task-graph" : "legacy-session")),
+      protocol: formalV4 ? "deepseek-typed-task-graph-v4" : "unsupported-protocol",
       protocolVersion,
-      compatibilityFallback: !formalV3,
+      compatibilityFallback: !formalV4,
       sessionId: String(firstDefined(session.session_id, session.id, "")),
       taskId,
       deviceId,
@@ -719,9 +662,9 @@
       stepNumber: Number(firstDefined(session.step_number, currentSubgoal.index, 1)),
       objective,
       targetApps,
-      appName: String(firstDefined(legacyGoal.app_name, "")),
-      constraints: normalizeStringList(firstDefined(graph.constraints, graph.global_constraints, qwenContext.global_constraints, legacyGoal.constraints)),
-      completionConditions: normalizeStringList(firstDefined(graph.completion_conditions, graph.goal_completion_conditions, qwenContext.goal_completion_conditions, legacyGoal.success_criteria)),
+      appName: "",
+      constraints: normalizeStringList(firstDefined(graph.constraints, qwenContext.global_constraints)),
+      completionConditions: normalizeStringList(firstDefined(graph.completion_conditions, qwenContext.goal_completion_conditions)),
       subgoals,
       currentSubgoal,
       visualAction,
@@ -749,24 +692,22 @@
       ],
       scopeState,
       stopState,
-      risk: {
-        accountEffectPossible,
+      effectPolicy: {
         requiresConfirmation,
-        hasCurrentRisk,
+        hasCurrentEffect,
         blocksAutomatic,
-        currentExternalImpact,
-        riskIds: gateRiskIds,
-        actions: riskActions,
-        currentActions: currentRiskActions,
-        intentPreview: asObject(session.risk_confirmation_preview),
+        currentExecutionClass,
+        effectIds: gateEffectIds,
+        actions: effectIntents,
+        currentActions: currentEffectIntents,
         effectPreviews: Array.isArray(session.effect_previews)
           ? session.effect_previews.map(item => ({ ...asObject(item) }))
           : [],
         confirmationGate: {
           required: gateRequired,
           state: gateState,
-          riskIds: gateRiskIds,
-          externalStateActionAllowed: rawGate.external_state_action_allowed === true,
+          effectIds: gateEffectIds,
+          effectActionAllowed: rawGate.effect_action_allowed === true,
           scope: authorityScope,
           phase: confirmationPhase,
           raw: rawGate,
@@ -802,7 +743,7 @@
     if (session.scopeState?.state !== "active") {
       throw new Error("当前确认作用域缺失、已消费或已经变化失效，请重新观察。");
     }
-    const gateScope = session.risk?.confirmationGate?.scope || {};
+    const gateScope = session.effectPolicy?.confirmationGate?.scope || {};
     if (String(sessionDeviceId || "") !== String(session.deviceId || "")) {
       throw new Error("确认设备已经变化，请重新确认。");
     }
@@ -812,7 +753,7 @@
       device_id: gateScope.deviceId,
       revision: gateScope.revision,
       subgoal_id: gateScope.subgoalId,
-      risk_ids: [...gateScope.riskIds].map(String).sort(),
+      effect_ids: [...gateScope.effectIds].map(String).sort(),
       observation_id: gateScope.observationId,
       fingerprint: gateScope.fingerprint,
       decision_node_id: gateScope.decisionNodeId,
@@ -828,7 +769,7 @@
       device_id: scope.device_id,
       revision: scope.revision,
       subgoal_id: scope.subgoal_id,
-      risk_ids: [...scope.risk_ids].sort(),
+      effect_ids: [...scope.effect_ids].sort(),
       observation_id: scope.observation_id,
       fingerprint: scope.fingerprint,
       decision_node_id: scope.decision_node_id,
@@ -838,12 +779,12 @@
   }
 
   function createConfirmationGrant(session, sessionDeviceId) {
-    if (!session?.risk?.requiresConfirmation) throw new Error("当前步骤不需要风险确认。");
-    if (session.protocol !== "deepseek-task-graph-v3" || session.compatibilityFallback) {
-      throw new Error("当前会话没有正式DeepSeek v3确认作用域，拒绝确认。");
+    if (!session?.effectPolicy?.requiresConfirmation) throw new Error("当前步骤不需要效果确认。");
+    if (session.protocol !== "deepseek-typed-task-graph-v4" || session.compatibilityFallback) {
+      throw new Error("当前会话没有正式 DeepSeek typed v4 确认作用域，拒绝确认。");
     }
     const scope = confirmationScope(session, sessionDeviceId);
-    const phase = session.risk?.confirmationGate?.phase === "risk" ? "risk" : "action";
+    const phase = session.effectPolicy?.confirmationGate?.phase === "effect" ? "effect" : "action";
     if (
       !scope.session_id
       || !scope.task_id
@@ -852,13 +793,10 @@
       || !Number.isInteger(scope.revision)
       || scope.device_id !== String(sessionDeviceId || "")
     ) {
-      throw new Error("当前DeepSeek v3确认作用域不完整或设备不一致。");
+      throw new Error("当前 DeepSeek typed v4 确认作用域不完整或设备不一致。");
     }
-    if (externalImpacts.has(session.risk.currentExternalImpact) && !scope.risk_ids.length) {
-      throw new Error("外部状态或未知影响步骤缺少 risk_ids，拒绝确认。");
-    }
-    if (phase === "risk" && !scope.intent_digest) {
-      throw new Error("当前风险确认缺少绑定目标内容的 intent_digest。");
+    if (phase === "effect" && (!scope.effect_ids.length || !scope.intent_digest)) {
+      throw new Error("当前效果确认缺少 effect_ids 或绑定目标内容的 intent_digest。");
     }
     if (phase === "action" && (
       !scope.observation_id || !scope.fingerprint
@@ -870,10 +808,10 @@
   }
 
   function consumeConfirmationGrant(grant, session, sessionDeviceId) {
-    if (!grant || grant.consumed) throw new Error("本次风险确认已使用或不存在。");
+    if (!grant || grant.consumed) throw new Error("本次确认已使用或不存在。");
     const currentScope = confirmationScope(session, sessionDeviceId);
     if (scopeFingerprint(grant.scope) !== scopeFingerprint(currentScope)) {
-      throw new Error("任务、revision、子目标、风险或设备已经变化，请重新确认。");
+      throw new Error("任务、revision、子目标、效果或设备已经变化，请重新确认。");
     }
     grant.consumed = true;
     const confirmation = {
@@ -882,9 +820,9 @@
       device_id: grant.scope.device_id,
       revision: grant.scope.revision,
       subgoal_id: grant.scope.subgoal_id,
-      risk_ids: [...grant.scope.risk_ids],
+      effect_ids: [...grant.scope.effect_ids],
     };
-    if (grant.phase === "risk") {
+    if (grant.phase === "effect") {
       confirmation.intent_digest = grant.scope.intent_digest;
     } else {
       confirmation.observation_id = grant.scope.observation_id;
@@ -904,8 +842,7 @@
     if (session.status !== "awaiting_confirmation") return false;
     if (session.scopeState?.state !== "active") return false;
     if (!session.visualAction?.isExecutable) return false;
-    if (session.risk?.requiresConfirmation || session.risk?.hasCurrentRisk) return false;
-    return !externalImpacts.has(session.risk?.currentExternalImpact);
+    return !session.effectPolicy?.requiresConfirmation;
   }
 
   async function runAutoAdvanceLoop(options) {
@@ -929,7 +866,7 @@
     const report = asObject(raw.report);
     const promotionScope = asObject(raw.promotion_scope);
     const actionScope = asObject(raw.action_confirmation_scope);
-    const riskScope = asObject(raw.risk_confirmation_scope);
+    const effectScope = asObject(raw.effect_confirmation_scope);
     const trialId = String(firstDefined(raw.trial_id, ""));
     const deviceId = String(firstDefined(raw.device_id, ""));
     const action = String(firstDefined(raw.candidate_action, ""));
@@ -946,7 +883,7 @@
       status: String(firstDefined(sessionRaw.status, report.status, "unknown")),
       physicalActions: Number(firstDefined(sessionRaw.physical_actions, report.physical_actions, 0)),
       actionConfirmationScope: actionScope,
-      riskConfirmationScope: riskScope,
+      effectConfirmationScope: effectScope,
       report: Object.keys(report).length ? report : null,
       passed: report.status === "passed",
       promotionScope: Object.keys(promotionScope).length ? promotionScope : null,
@@ -967,9 +904,9 @@
 
   function currentCapabilityConfirmationScope(trial) {
     const view = adaptCapabilityTrial(trial);
-    const riskPhase = view.status === "awaiting_risk_confirmation";
-    const scope = asObject(riskPhase
-      ? view.riskConfirmationScope
+    const effectPhase = view.status === "awaiting_effect_confirmation";
+    const scope = asObject(effectPhase
+      ? view.effectConfirmationScope
       : view.actionConfirmationScope);
     if (
       !view.trialId
@@ -982,13 +919,13 @@
       || !scope.task_id
       || !Number.isInteger(scope.revision)
       || !scope.subgoal_id
-      || !Array.isArray(scope.risk_ids)
-      || (!riskPhase && (!scope.observation_id || !scope.fingerprint))
-      || (!riskPhase && view.session?.visualAction?.actionType !== view.action)
+      || !Array.isArray(scope.effect_ids)
+      || (!effectPhase && (!scope.observation_id || !scope.fingerprint))
+      || (!effectPhase && view.session?.visualAction?.actionType !== view.action)
     ) {
       throw new Error("真机验收确认缺少 trial、action 或精确画面作用域。");
     }
-    return { view, phase: riskPhase ? "risk" : "action", scope: { ...scope } };
+    return { view, phase: effectPhase ? "effect" : "action", scope: { ...scope } };
   }
 
   function createCapabilityConfirmationGrant(trial) {

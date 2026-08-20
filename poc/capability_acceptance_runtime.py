@@ -423,13 +423,13 @@ class CapabilityAcceptanceManager:
                 requested.append(trial.trial_id)
         return requested
 
-    def approve_risks(
+    def approve_effects(
         self,
         trial_id: str,
         confirmation: Mapping[str, Any],
     ) -> Any:
         trial = self._require_live_trial(self.get(trial_id))
-        result = trial.orchestrator.approve_risks(trial.session, confirmation)
+        result = trial.orchestrator.approve_effects(trial.session, confirmation)
         if int(getattr(trial.session, "physical_actions", 0)) != 0:
             raise CapabilityAcceptanceError("验收风险确认错误地产生了物理动作。")
         self._ensure_candidate(trial)

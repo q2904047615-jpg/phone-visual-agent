@@ -1,55 +1,52 @@
-# DeepSeek 通用动态任务图 v1
+# DeepSeek 类型化动态任务图 v4
 
-协议版本：`2026-08-11-deepseek-task-graph-v3`
+正式协议：`2026-08-20-deepseek-typed-task-graph-v4`
 
 ## 职责
 
-`deepseek_task_graph.py` 只负责把自然语言目标组织为可修订的高层任务图，并在收到新的只读场景摘要后调整剩余子目标。模型图随后投影为 `TaskSemanticIR`，再由本地版本化风险策略生成正式语义/风险权威。任务图模块不导入机械臂、摄像头、坐标转换、Qwen 或网页运行时代码，也没有任何执行入口。
+`deepseek_task_graph.py` 只把自然语言目标组织为可修订的高层任务图。它不输出坐标、不调用机械臂，也不能决定是否需要确认。用户可以直接使用“点击、滑动、输入、长按、拖动、返回、Home、发送、关注、评论”等自然动作词；只有坐标、ADB、Shell、keycode、卖家控制命令和绕过闭环的自由动作脚本会被拒绝。
 
-任务图包含：
+## 模型输出
 
-- 用户最终目标、目标 App 和目标实体；
-- 不可在重规划时删除的全局约束；
-- 必须由可见证据满足的全局完成条件；
-- 每次只激活一个的高层子目标及其依赖；
-- 会改变账号、数据、交易或外部状态的风险事项；
-- 每轮重规划的触发原因、观察证据和子目标变化记录；
-- 从第一版开始携带的 `task_id` 和 `device_id`，用于隔离任务与设备状态。
+DeepSeek 的正式响应只能包含：
 
-## 提供给 Qwen 的当前子目标
+- `goal`、`constraints`、`completion_conditions`；
+- `effect_intents`；
+- `subgoals[].effect_ids`；
+- `subgoals[].execution_class`，值为 `observe | navigate | effect | unknown`；
+- `active_subgoal_id`、`status`、`clarification_questions`。
 
-`DynamicTaskGraph.to_qwen_context()` 生成只读上下文，明确包含 `task_id`、`device_id`、最终目标、全局约束、全局完成条件和唯一的 `current_subgoal`。其中风险列表只保留与当前子目标关联的风险。Qwen据此结合真实画面提出一个下一视觉动作，但不能修改任务图，也不能直接执行设备动作。
+每个 effect 必须明确 `effect_id`、`kind`、目标实体角色、载荷实体角色、来源子目标和预期结果。模型不得输出风险等级、确认布尔值、机械权限或退役字段。额外字段、缺失字段、重复键、旧 v2/v3 版本，以及伪装成 v4 的旧字段都会在进入 Qwen 前失败关闭。
 
-上下文同时包含 `current_external_impact` 和 `confirmation_gate`。是否需要确认不由任务图中的关键词或模型布尔值决定，而由 `TaskSemanticIR` 中的 `EffectIntent` 和 `poc/config/local_risk_policy.v1.json` 决定。普通发送、关注、评论、发布、收藏和一般数据变更默认自动；登录/身份认证、资金交易、敏感权限变更、不可逆账号删除和不可逆数据删除仍要求一次绑定作用域的确认。`unknown` 不能靠确认获得执行权限。
+## 本地唯一策略权威
+
+类型化响应先形成 `TaskSemanticIR`，再由版本化本地策略为每个 effect 生成 `local_policy`。模型不能自行升降风险。
+
+- 普通发送、关注、评论、发布、收藏、订阅和一般数据修改默认自动；
+- 登录/身份认证、资金交易、敏感权限、不可逆账号删除和不可逆数据删除需要一次效果确认；
+- `unknown` 不能靠确认取得执行权限。
+
+效果确认使用 `effect_ids` 和 `/approve-effect`，绑定 session、task、device、revision、subgoal、当前观察、decision 和 action digest。旧确认、其他效果或其他 revision 不能复用。
+
+## 提供给 Qwen 的上下文
+
+`DynamicTaskGraph.to_qwen_context()` 只公开 typed v4 上下文：当前 `execution_class`、与活动子目标绑定的 `effect_intents`、本地 `effect_gate`、目标、约束、完成条件和实体。Qwen只能基于当前可信场景选择一个正式候选；它不能修改任务图、效果策略或确认状态。
 
 ## 重规划不变量
 
-DeepSeek 每轮返回完整的新图快照，本地校验器再决定是否接受。校验器强制保证：
+每次重规划返回完整的新 typed v4 快照，本地校验器强制：
 
-1. 原目标、目标 App 和目标实体不能被改写；
-2. 已有全局约束不能删除；
-3. 已完成子目标必须保留，不能复活或改写；
-4. 已满足完成条件不能撤销；新完成声明只能引用本轮观察提供的原文证据；
-5. 已绑定的 typed effect、实体和证据来源不能被删除或改写；确认策略只由本地版本化策略裁决；
-6. 依赖必须存在且不能形成环，活动子目标的依赖必须全部完成；
-7. 可推进状态必须且只能有一个活动子目标；
-8. 低层动作、裸坐标、系统命令和 `main.exe` 控制字段不能进入任务图。
+1. task、device、目标和既有约束不能被改写或删除；
+2. revision 必须精确增加一；
+3. 已完成子目标和已消费 receipt 不能复活或重放；
+4. visual claim 只证明当前画面，controller receipt 只证明已绑定动作执行；
+5. effect、实体角色、来源子目标和预期结果不能漂移；
+6. 依赖必须存在且无环，可推进状态只能有一个活动子目标；
+7. 低层控制字段和退役协议字段不能进入任务图；
+8. 结果缺证据时可以 0 动作重新观察，但不能重复 effect 动作。
 
-## 两项强制校验
+## 已退役
 
-1. **自然动作词合法，直接控制字段非法**：用户和高层任务图可以包含“点击、滑动、输入、长按、拖动、发送”等自然意图；协议只拒绝坐标、ADB、Shell、keycode、`main.exe` 命令、连续自由动作脚本以及模型试图直接授予机械臂权限的字段。
-2. **效果必须类型化**：每个可执行子目标必须投影为明确的 `EffectIntent`、实体绑定、目标状态和证据要求。`read_only`、`navigation_only`、`external_state` 与 `unknown` 是影响描述，不直接等于确认策略；只有本地策略列出的少量效果要求确认。
+DeepSeek v2/v3 schema、旧 transport 迁移器、旧远程自由文本风险审计、`risk_actions`、`risk_action_ids`、模型 `external_impact`、模型 `confirmation_required`、`confirmation_gate`、`risk_confirmation_scope` 和 `/approve-risk` 均不是兼容入口。历史文档和报告只作只读证据，不能进入正式 session、Qwen 或机械臂。
 
-风险和效果类型使用跨 App 通用语义，不描述任何 App 页面路径或固定业务步骤。
-
-## 正式语义与风险权威
-
-正式生产路径只有一套权威：DeepSeek 任务图投影得到 `2026-08-19-task-semantic-ir-v2`，再由本地 `poc/config/local_risk_policy.v1.json` 生成 `2026-08-19-semantic-risk-authority-v2`。约束、完成条件、收件人和正文不会再被自由文本正则当成风险，也不会发生第二次远程文本审计覆盖正式类型化结果。
-
-模型图里的旧 `confirmation_required`、旧风险文案和旧实体列表只作为迁移输入或诊断，不拥有执行权。新旧语义之间必须生成结构化 diff；无法类型化的效果在进入 Qwen 前停止。旧 `deepseek_semantic_risk_audit.py` 只保留为离线历史回归工具，正式规划器不导入、不实例化也不调用它，并且不再接受打开旧审计的构造参数。
-
-需要确认时，作用域绑定 `session_id`、`task_id`、`device_id`、`revision`、`current_subgoal`、风险 ID、观察 ID、fingerprint、decision node 和 action digest。旧 revision、其他子目标或无关效果的确认均不能复用。
-
-## 与后续模块的接口
-
-后续 Qwen 层读取 `to_qwen_context()` 中的 `current_subgoal`，结合真实画面提出一个视觉动作。动作结果重新观察后，调用 `replan()` 传入 `ObservedState`。本模块自身不会执行动作，也不会把 App 名称转换成固定步骤。
+代码内部仍可能以历史 Python 属性名承载由 typed v4 **确定性生成**的运行时投影；这些对象不是模型输入协议，不能读取旧 payload、改变 effect 分类或产生确认权限。

@@ -1,5 +1,7 @@
 # Qwen 与 DeepSeek v3 交叉契约设计
 
+> **已归档，不可执行。** v2/v3 均已退役，当前 Qwen 只接受 `2026-08-20-deepseek-typed-task-graph-v4`。
+
 ## 目标
 
 让当前 Qwen 单动作视觉决策入口正式接受 DeepSeek 提交 `438cd2258cdca681abe42da11b70c399df58063e` 的 `2026-08-11-deepseek-task-graph-v3` 上下文，同时保留已有可信候选、单动作、新鲜度、失败关闭和硬件禁用规则。

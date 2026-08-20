@@ -11,17 +11,15 @@ from typing import Any, Protocol
 from generic_intent import GenericIntentError, _parse_json_object
 from task_semantic_ir import (
     SemanticRiskAuthorityReport,
-    SemanticShadowReport,
     TaskSemanticIRError,
     LocalRiskPolicyConfig,
     apply_formal_semantic_risk_policy,
     compile_formal_semantic_authority,
-    compile_legacy_graph_shadow,
     load_local_risk_policy,
 )
 
 
-DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-11-deepseek-task-graph-v3"
+DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-20-deepseek-typed-task-graph-v4"
 SUBGOAL_EXTERNAL_IMPACTS = frozenset(
     {"read_only", "navigation_only", "external_state", "unknown"}
 )
@@ -39,6 +37,53 @@ RISK_TYPES = frozenset(
         "unknown_external_effect",
     }
 )
+PLANNER_EXECUTION_CLASSES = frozenset(
+    {"observe", "navigate", "effect", "unknown"}
+)
+PLANNER_EFFECT_KINDS = frozenset(
+    {
+        "send_message",
+        "publish_content",
+        "relationship_change",
+        "membership_change",
+        "data_mutation",
+        "authentication",
+        "financial_transaction",
+        "sensitive_permission_change",
+        "irreversible_account_deletion",
+        "irreversible_data_deletion",
+    }
+)
+_RUNTIME_RISK_TYPE_BY_EFFECT_KIND = {
+    "send_message": "message_or_communication",
+    "publish_content": "content_publication",
+    "relationship_change": "account_relationship_change",
+    "membership_change": "membership_change",
+    "data_mutation": "data_mutation",
+    "authentication": "account_or_permission_change",
+    "financial_transaction": "transaction_or_payment",
+    "sensitive_permission_change": "permission_role_change",
+    "irreversible_account_deletion": "account_or_permission_change",
+    "irreversible_data_deletion": "data_deletion",
+}
+_RUNTIME_IMPACT_BY_EXECUTION_CLASS = {
+    "observe": "read_only",
+    "navigate": "navigation_only",
+    "effect": "external_state",
+    "unknown": "unknown",
+}
+NON_EFFECT_RESULT_PATTERN = re.compile(
+    r"(?:保持|维持|仍然|仍旧).{0,24}(?:不变|原样|未发生|未触发|未执行)|"
+    r"(?:未|没有|尚未|不得|不要|禁止|不能).{0,20}"
+    r"(?:发送|提交|发布|关注|评论|付款|支付|转账|登录|授权|删除|修改|保存|同步)|"
+    r"\b(?:remain|keep|stay)\b.{0,24}\b(?:unchanged|not\s+sent)\b|"
+    r"\b(?:not|never|without)\b.{0,20}"
+    r"\b(?:send|submit|publish|follow|comment|pay|login|authorize|delete|modify|save|sync)\b",
+    re.IGNORECASE,
+)
+_EXECUTION_CLASS_BY_RUNTIME_IMPACT = {
+    value: key for key, value in _RUNTIME_IMPACT_BY_EXECUTION_CLASS.items()
+}
 GRAPH_STATUSES = frozenset(
     {"ready", "running", "awaiting_confirmation", "completed", "blocked"}
 )
@@ -117,187 +162,12 @@ GENERIC_UI_ROLE_ONLY_LABEL_PATTERN = re.compile(
     r"按钮|入口|选项|控件|元素|列表项|标签页|页签)$",
     re.IGNORECASE,
 )
-EXTERNAL_STATE_CHANGE_PATTERN = re.compile(
-    r"(?:"
-    r"发送|发布|点赞|"
-    r"(?<!已)关注(?:该|这个|目标|账号|用户|作者)|进入已关注|"
-    r"(?<!已)收藏(?:该|这个|目标|地点|内容|记录|项目)|进入已收藏|"
-    r"(?<!已)(?:执行|进行|完成)?保存(?:到|该|这个|目标|地点|内容|记录|文件)|进入已保存|"
-    r"发表评论|发布评论|进行评论|添加评论|"
-    r"删除|移除|购买|下单|付款|支付|"
-    r"转账|授权|授予|修改|创建|新增|上传|分享|加入|"
-    r"退出(?:当前|该|这个|目标)?(?:账号|账户|登录|群|群组|团队|组织)|"
-    r"订阅|举报|预约|提交|注册|登录|登出|"
-    r"\b(?:send|publish|post|comment|like|follow|favorite|save|delete|remove|"
-    r"purchase|pay|transfer|grant|modify|create|upload|share|join|leave|"
-    r"subscribe|report|book|submit|register|login|logout)\b"
-    r")",
-    re.IGNORECASE,
-)
-COMMUNICATION_EFFECT_PATTERN = re.compile(
-    r"(?:"
-    r"(?:发送|发给|发(?:一条)?|回复|询问|通知|联系|沟通).{0,12}"
-    r"(?:消息|私信|留言|需求|用户|联系人|对方)|"
-    r"发送内容(?:必须|应当|应|需要)(?:为|是|等于)|"
-    r"(?:消息|私信|留言).{0,20}(?:已发送|已经发送|发送成功|已回复|已通知)|"
-    r"(?:消息|私信|留言).{0,16}(?:并|然后|后再|再)发送"
-    r"(?!按钮|图标|控件|入口|按键)|"
-    r"(?:给|向).{0,12}(?:留言|发送|发私信|发消息)|"
-    r"(?:私信|留言).{0,8}(?:询问|回复|通知)|"
-    r"\b(?:send|reply|message|notify|contact)\b.{0,24}"
-    r"\b(?:message|user|contact|recipient)\b"
-    r")",
-    re.IGNORECASE,
-)
-ACCOUNT_RELATIONSHIP_EFFECT_PATTERN = re.compile(
-    r"(?:"
-    r"(?:加|添加|列为|成为|删除|移除|解除).{0,8}(?:好友|联系人)|"
-    r"(?<!已)(?:取消|解除)?关注(?:该|这个|目标|用户|账号|作者|对方)|"
-    r"(?:拉黑|屏蔽).{0,8}(?:用户|账号|联系人|对方)|"
-    r"\b(?:add|remove|block|unblock|follow|unfollow)\b.{0,20}"
-    r"\b(?:friend|contact|user|account)\b"
-    r")",
-    re.IGNORECASE,
-)
-MEMBERSHIP_EFFECT_PATTERN = re.compile(
-    r"(?:"
-    r"(?:拉|邀请|添加|加入|移入|移出|踢出|删除|移除|创建|建立|建|修改)"
-    r".{0,12}(?:群|群组|成员|团队|组织)|"
-    r"(?:群|群组|团队|组织).{0,8}(?:加人|添加成员|移除成员|修改成员)|"
-    r"\b(?:invite|add|remove|join|leave|create|modify)\b.{0,20}"
-    r"\b(?:group|member|team|organization)\b"
-    r")",
-    re.IGNORECASE,
-)
-PERMISSION_ROLE_EFFECT_PATTERN = re.compile(
-    r"(?:"
-    r"(?:设为|设置为|任命|授予|撤销|修改|提升|降为).{0,12}"
-    r"(?:管理员|权限|角色|所有者|版主)|"
-    r"\b(?:assign|grant|revoke|promote|demote|change)\b.{0,20}"
-    r"\b(?:admin|administrator|permission|role|owner|moderator)\b"
-    r")",
-    re.IGNORECASE,
-)
-CONTENT_PUBLICATION_EFFECT_PATTERN = re.compile(
-    r"(?:发布|发表评论|发布评论|上传内容|分享内容|公开内容|"
-    r"\b(?:publish|post|comment|upload|share)\b.{0,16}"
-    r"\b(?:content|post|comment|media)\b)",
-    re.IGNORECASE,
-)
-DATA_DELETION_EFFECT_PATTERN = re.compile(
-    r"(?:(?:删除|清除|移除).{0,10}(?:数据|文件|记录|内容|项目|照片|文档)|"
-    r"\b(?:delete|erase|remove)\b.{0,16}\b(?:data|file|record|content|item)\b)",
-    re.IGNORECASE,
-)
-DATA_MUTATION_EFFECT_PATTERN = re.compile(
-    r"(?:(?:保存|创建|新增|修改|编辑|提交|上传).{0,10}"
-    r"(?:数据|文件|记录|内容|项目|地点|文档|表单|草稿)|进入已保存|"
-    r"(?:数据|文件|记录|内容|项目|地点|文档|表单|草稿).{0,4}"
-    r"(?:已保存|已创建|已新增|已修改|已编辑|已提交|已上传)|"
-    r"\b(?:save|create|modify|edit|submit|upload)\b.{0,16}"
-    r"\b(?:data|file|record|content|item|form)\b)",
-    re.IGNORECASE,
-)
-TRANSACTION_EFFECT_PATTERN = re.compile(
-    r"(?:购买|下单|付款|支付|转账|退款|充值|提现|"
-    r"\b(?:purchase|order|pay|transfer|refund|deposit|withdraw)\b)",
-    re.IGNORECASE,
-)
-ACCOUNT_PERMISSION_EFFECT_PATTERN = re.compile(
-    r"(?:授权|授予权限|撤销权限|注册|登录|登出|修改账号|修改账户|"
-    r"\b(?:authorize|grant permission|revoke permission|register|login|logout)\b)",
-    re.IGNORECASE,
-)
-DIRECT_EFFECT_NEGATION_PATTERN = re.compile(
-    r"(?:不|未|没有|未曾|勿|不要|不得|禁止|不能|避免|无需|无须|"
-    r"do\s+not|don't|never|without)\s*"
-    r"(?:(?:进行|执行|发生|出现)\s*)?"
-    r"(?:(?:任何|任意|一切|all|any)\s*)?$",
-    re.IGNORECASE,
-)
-COORDINATED_EFFECT_NEGATION_PATTERN = re.compile(
-    r"(?:不|未|没有|未曾|勿|不要|不得|禁止|不能|避免|无需|无须|"
-    r"do\s+not|don't|never|without)\s*"
-    r"(?:(?:进行|执行|发生|出现)\s*)?"
-    r"(?:(?:任何|任意|一切|all|any)\s*)?"
-    r"[^，。；;]{1,24}(?:或|和|及|以及|、|or|and)\s*$",
-    re.IGNORECASE,
-)
-SAFE_NAVIGATION_SEMANTIC_PATTERN = re.compile(
-    r"(?:打开|进入|启动|切换|返回|后退|关闭|取消|查看.{0,12}(?:页|界面|详情)|"
-    r"\b(?:open|enter|launch|navigate|switch|back|close|view)\b)",
-    re.IGNORECASE,
-)
 NEGATED_LOW_LEVEL_INSTRUCTION_PREFIX_PATTERN = re.compile(
     r"(?:不|未|没有|未曾|勿|不要|不得|禁止|不能|避免|无需|无须|"
     r"do\s+not|don't|never|without)\s*"
     r"(?:(?:进行|执行)\s*)?"
     r"(?:(?:任何|任意|一切|all|any)\s*)?"
     r"(?!(?:忘记|漏掉|只|仅|forget\b|fail\b))",
-    re.IGNORECASE,
-)
-REPAIRABLE_INITIAL_GRAPH_ERRORS = (
-    "任务图至少需要一个全局完成条件。",
-    "可推进任务图必须且只能有一个活动子目标。",
-    "可推进的任务图至少需要一个目标 App。",
-)
-LOCAL_TRANSIENT_NAVIGATION_PATTERN = re.compile(
-    r"(?:(?:新建|打开|进入|关闭|切换|显示).{0,10}(?:空白)?(?:标签页|页签|窗口|弹层|浮层)|"
-    r"(?:前台|后台|上一级|下一页|当前页面|空白页面))",
-    re.IGNORECASE,
-)
-REVERSIBLE_NAVIGATION_EFFECT_PATTERN = re.compile(
-    r"(?:刷新|重新加载|重载|重新获取|重新读取|重新导航|返回|后退|"
-    r"(?:收起|隐藏|关闭).{0,8}(?:软键盘|键盘|输入法)|"
-    r"(?:软键盘|键盘|输入法).{0,8}(?:已收起|已隐藏|已关闭|不再可见)|"
-    r"切换.{0,10}(?:页面|页签|视图|窗口)|打开.{0,10}(?:页面|视图|详情)|"
-    r"(?:页面|界面|主界面).{0,16}(?:无遮挡|不再被遮挡)|"
-    r"(?:无遮挡|不再被遮挡).{0,16}(?:页面|界面|主界面)|"
-    r"(?:遮挡层|弹层|浮层).{0,12}(?:不再可见|已消失|不存在)|"
-    r"\b(?:refresh|reload|re\s*load|re\s*fetch|re\s*retrieve|reacquire|"
-    r"navigate|return|back|(?:hide|dismiss|close)\s+(?:soft\s+)?keyboard|"
-    r"(?:soft\s+)?keyboard\s+(?:is\s+)?(?:hidden|dismissed|closed)|"
-    r"switch\s+(?:page|tab|view|window)|"
-    r"open\s+(?:page|view|details?))\b)",
-    re.IGNORECASE,
-)
-LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN = re.compile(
-    r"(?:(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)"
-    r"[^，。；;]{0,24}(?:为|是|变为|改为|修改为|替换为|显示)|"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域).{0,28}"
-    r"(?:文字|文本|内容|值|字符).{0,20}"
-    r"(?:为|是|变为|改为|修改为|替换为|显示|保持)|"
-    r"(?:填写|输入|替换|改为|修改).{0,28}"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)|"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域).{0,20}"
-    r"(?:填写|输入|替换|改为|修改).{0,28}"
-    r"(?:未提交|草稿|文字|文本|内容|值|字符)|"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域).{0,20}"
-    r"(?:保留|留下).{0,20}(?:未发送|未提交|草稿|文字|文本|内容)|"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域).{0,20}"
-    r"(?:包含|含有|显示).{0,28}(?:未发送|未提交|草稿)|"
-    r"\b(?:input|text|query)\s*(?:field|box).{0,28}(?:contains?|shows?|value|text)\b|"
-    r"\b(?:input|text|query|message)\s*(?:field|box|area)\b"
-    r"[^\r\n]{0,60}\b(?:type|enter|write|fill|replace)\b)",
-    re.IGNORECASE,
-)
-LOCAL_EDITABLE_CARRIER_ADJECTIVE_PATTERN = re.compile(
-    r"(?:可编辑(?:的)?|editable\s+)"
-    r"(?=[^，。；;]{0,12}(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域|"
-    r"\b(?:input|text|query)\s*(?:field|box)\b))",
-    re.IGNORECASE,
-)
-LOCAL_INPUT_PREPARATION_STATE_PATTERN = re.compile(
-    r"(?:"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)"
-    r"[^，。；;]{0,24}(?:可见|显示|存在|可编辑|已聚焦|获得焦点|保持焦点)|"
-    r"(?:可见|显示|存在|可编辑|已聚焦|获得焦点|保持焦点)"
-    r"[^，。；;]{0,24}(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域)|"
-    r"\b(?:input|text|query|message)\s*(?:field|box|area)\b"
-    r"[^,.;\r\n]{0,24}\b(?:visible|shown|present|editable|focused)\b|"
-    r"\b(?:visible|shown|present|editable|focused)\b"
-    r"[^,.;\r\n]{0,24}\b(?:input|text|query|message)\s*(?:field|box|area)\b"
-    r")",
     re.IGNORECASE,
 )
 LOW_LEVEL_NEGATION_SCOPE_RESET_PATTERN = re.compile(
@@ -310,68 +180,6 @@ INPUT_CONTENT_STATE_CONSTRAINT_PATTERN = re.compile(
     r"^\s*(?:当前)?输入内容"
     r"(?:(?:必须|应当|应|需要)(?:为|是|等于)|保持为)\s*"
     r"(?:“[^”\r\n]{1,100}”|\"[^\"\r\n]{1,100}\")\s*$",
-    re.IGNORECASE,
-)
-POST_EFFECT_VERIFICATION_PATTERN = re.compile(
-    r"(?:可见|显示|确认|核对|存在|已出现|记录|"
-    r"\b(?:visible|shown|confirm|verify|observe|recorded)\b)",
-    re.IGNORECASE,
-)
-LOCAL_TEMPORARY_DRAFT_CLEAR_STATE_PATTERN = re.compile(
-    r"(?:(?:当前页面|当前前台|当前应用|本机|本地).{0,28}"
-    r"(?:唯一)?(?:未发送|未提交|临时|草稿).{0,24}"
-    r"(?:为空|空白|无内容|内容为空)|"
-    r"(?:唯一)?(?:未发送|未提交|临时|草稿).{0,24}"
-    r"(?:为空|空白|无内容|内容为空).{0,28}"
-    r"(?:当前页面|当前前台|当前应用|本机|本地)|"
-    r"\b(?:current|local)\b.{0,32}\b(?:temporary|unsubmitted|unsent|draft)\b"
-    r".{0,24}\b(?:empty|blank|cleared)\b)",
-    re.IGNORECASE,
-)
-CONDITIONAL_LOCAL_INPUT_CLEAR_PATTERN = re.compile(
-    r"(?:(?:如果|若|如).{0,48}"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域|草稿)"
-    r".{0,32}(?:已有|有内容|非空|不为空).{0,24}(?:清空|清除|置空)|"
-    r"(?:如果|若|如).{0,48}(?:已有|有内容|非空|不为空).{0,32}"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域|草稿)"
-    r".{0,24}(?:清空|清除|置空)|"
-    r"\bif\b.{0,48}\b(?:input|text|draft)\b.{0,32}"
-    r"\b(?:nonempty|not\s+empty|has\s+(?:text|content))\b.{0,24}"
-    r"\b(?:clear|empty)\b)",
-    re.IGNORECASE,
-)
-CONCRETE_LOCAL_INPUT_CLEAR_PATTERN = re.compile(
-    r"(?:(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域|草稿)"
-    r".{0,32}(?:清空|清除|置空|为空|空白|无内容|内容为空)|"
-    r"(?:清空|清除|置空).{0,32}"
-    r"(?:输入框|文本框|搜索框|文本区域|输入区域|编辑区域|草稿)|"
-    r"\b(?:clear|empty)\b.{0,32}\b(?:input|text|draft)\b|"
-    r"\b(?:input|text|draft)\b.{0,32}\b(?:clear|empty|blank)\b)",
-    re.IGNORECASE,
-)
-PERSISTENT_DRAFT_STATE_PATTERN = re.compile(
-    r"(?:已保存|云端|云同步|服务器|账号草稿|历史记录|文件|数据库|"
-    r"\b(?:saved|cloud|synced|server|account|history|file|database)\b)",
-    re.IGNORECASE,
-)
-PERSISTENT_INPUT_CLEAR_PATTERN = re.compile(
-    r"(?:已保存|云端|云同步|服务器|账号草稿|历史记录|数据库|"
-    r"\b(?:saved|cloud|synced|server|account|history|database)\b)",
-    re.IGNORECASE,
-)
-LOCAL_UNSUBMITTED_WORKFLOW_RISK_PATTERN = re.compile(
-    r"(?:(?:未提交|本机临时|本地临时|临时).{0,12}"
-    r"(?:文本|文字|输入|草稿|内容)|"
-    r"(?:文本|文字|输入|草稿|内容).{0,12}"
-    r"(?:未提交|本机临时|本地临时|临时))",
-    re.IGNORECASE,
-)
-RISK_EFFECT_ACTION_PATTERN = re.compile(
-    r"(?:取消关注|发送|提交|删除|清除|移除|转发|发布|选择|保存|分享|回复|"
-    r"联系(?!人)|关注|评论|上传|创建|修改|授权|登录|登出|购买|下单|付款|支付|转账|"
-    r"\b(?:send|submit|delete|erase|remove|forward|publish|post|select|save|"
-    r"share|reply|contact|follow|comment|upload|create|modify|authorize|login|"
-    r"logout|purchase|order|pay|transfer)\b)",
     re.IGNORECASE,
 )
 READ_ONLY_RISK_CONTROL_STATE_PATTERN = re.compile(
@@ -393,60 +201,6 @@ DIRECT_PROHIBITION_CLAUSE_PATTERN = re.compile(
     r"不(?!要|得|能|应|可|只|仅|忘记)|do\s+not|don't|never)\s*"
     r"(?!(?:忘记|漏掉|只|仅|forget\b|fail\b))",
     re.IGNORECASE,
-)
-CONTACT_SELECTION_ACTION_PATTERN = re.compile(
-    r"(?:(?:选择|切换(?:到|至)?|改变当前).{0,8}(?:其他)?(?:联系人|聊天对象)|"
-    r"\b(?:select|switch|change)\b.{0,16}\b(?:contact|recipient)\b)",
-    re.IGNORECASE,
-)
-CONTACT_SELECTION_ANCHOR = "__contact_selection__"
-LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN = re.compile(
-    r"(?:不|未|勿|不要|不得|禁止|不能|避免|无需|无须|"
-    r"do\s+not|don't|never|without)"
-    r"[^，。；;]{0,28}"
-    r"(?:搜索|提交|发送|保存|发布|上传|分享|评论|回复|"
-    r"search|submit|send|save|publish|post|upload|share|comment|reply)",
-    re.IGNORECASE,
-)
-LOCAL_KEYBOARD_MODE_PATTERN = re.compile(
-    r"(?:(?:输入法|软键盘|键盘).{0,24}"
-    r"(?:输入模式|直输模式|英文直输|中文拼音|"
-    r"direct[_ -]?latin|chinese[_ -]?pinyin)|"
-    r"(?:direct[_ -]?latin|chinese[_ -]?pinyin).{0,24}"
-    r"(?:input\s*method|keyboard|ime|输入法|键盘))",
-    re.IGNORECASE,
-)
-PERSISTENT_KEYBOARD_SETTING_PATTERN = re.compile(
-    r"(?:默认|全局|系统设置|账号|账户|同步|云端|词库|安装|启用|停用|"
-    r"卸载|持久|default|global|system\s+settings?|account|sync|cloud|"
-    r"dictionary|install|enable|disable|uninstall|persistent)",
-    re.IGNORECASE,
-)
-REPAIRABLE_INITIAL_GRAPH_ERROR_FRAGMENTS = (
-    "文本模型没有返回有效 JSON",
-    "文本模型返回内容不是 JSON 对象",
-    "缺少字段",
-    "必须是对象",
-    "必须是数组",
-    "包含低层动作表达",
-    "关联风险的子目标影响分类必须为",
-)
-REPAIRABLE_REPLAN_ERROR_FRAGMENTS = (
-    "文本模型没有返回有效 JSON",
-    "文本模型返回内容不是 JSON 对象",
-    "协议外字段",
-    "包含低层动作表达",
-    "任务图至少需要一个全局完成条件",
-    "可推进任务图必须且只能有一个活动子目标",
-    "active_subgoal_id",
-    "read_only 完成复核",
-    "命名页面完成声明缺少结构化画面身份锚点",
-    "子目标使用了当前观察之外的完成证据",
-    "matched controller_transition 未完成其绑定的 navigation_only 子目标",
-)
-MISMATCH_BLOCKED_CLARIFICATION = (
-    "动作后的新画面未证明预期结果，且当前没有可验证的安全替代路径；"
-    "请说明希望继续原目标还是停止任务。"
 )
 class JsonTaskGraphProvider(Protocol):
     configured: bool
@@ -605,15 +359,19 @@ class RiskAction:
     risk_level: str
     subgoal_ids: tuple[str, ...]
     confirmation_required: bool = True
+    effect_kind: str = ""
+    target_roles: tuple[str, ...] = ()
+    payload_roles: tuple[str, ...] = ()
+    expected_result_texts: tuple[str, ...] = ()
 
     def validate(self) -> None:
         _validate_id(self.risk_id, "风险 ID")
-        _require_text(self.description, "risk_actions.description")
-        _require_text(self.external_effect, "risk_actions.external_effect")
-        _reject_low_level_instruction(self.description, "risk_actions.description")
+        _require_text(self.description, "effect_intents.description")
+        _require_text(self.external_effect, "effect_intents.expected_results")
+        _reject_low_level_instruction(self.description, "effect_intents.description")
         _reject_low_level_instruction(
             self.external_effect,
-            "risk_actions.external_effect",
+            "effect_intents.expected_results",
         )
         if self.risk_type not in RISK_TYPES:
             raise TaskGraphError(f"通用风险类型无效：{self.risk_type}")
@@ -621,9 +379,29 @@ class RiskAction:
             raise TaskGraphError(f"风险等级无效：{self.risk_level}")
         if not isinstance(self.confirmation_required, bool):
             raise TaskGraphError(
-                f"risk_actions.confirmation_required 必须是布尔值：{self.risk_id}"
+                f"effect_intents.local_policy.confirmation_required 必须是布尔值：{self.risk_id}"
             )
-        _validate_id_list(self.subgoal_ids, "risk_actions.subgoal_ids", required=True)
+        _validate_id_list(self.subgoal_ids, "effect_intents.source_subgoal_ids", required=True)
+        if self.effect_kind:
+            if self.effect_kind not in PLANNER_EFFECT_KINDS:
+                raise TaskGraphError(
+                    f"正式效果类型无效：{self.effect_kind}"
+                )
+            _validate_id_list(
+                self.target_roles,
+                "effect_intents.target_entity_roles",
+                required=False,
+            )
+            _validate_id_list(
+                self.payload_roles,
+                "effect_intents.payload_entity_roles",
+                required=False,
+            )
+            _validate_text_list(
+                self.expected_result_texts,
+                "effect_intents.expected_results",
+                required=True,
+            )
 
 
 @dataclass(frozen=True)
@@ -669,29 +447,18 @@ class Subgoal:
         )
         _validate_id_list(
             self.risk_action_ids,
-            "subgoals.risk_action_ids",
+            "subgoals.effect_ids",
             required=False,
         )
         if self.external_impact not in SUBGOAL_EXTERNAL_IMPACTS:
             raise TaskGraphError(
-                f"子目标外部影响分类无效：{self.external_impact}"
+                f"子目标执行类别无效：{self.external_impact}"
             )
         # Free-form legacy prose is not an input-value authority.  Canonical
         # payload ownership is validated later by TaskSemanticIR's typed
         # InputFieldIntent + required_action binding.  In particular, visible,
         # focused, editable and empty preparation states must never be forced to
         # repeat the future input payload merely because they mention a field.
-        if self.external_impact in {"external_state", "unknown"} and not self.risk_action_ids:
-            raise TaskGraphError(
-                f"外部状态或未知影响子目标必须关联风险并失败关闭：{self.subgoal_id}"
-            )
-        if self.risk_action_ids and self.external_impact not in {
-            "external_state",
-            "unknown",
-        }:
-            raise TaskGraphError(
-                f"关联风险的子目标影响分类必须为 external_state 或 unknown：{self.subgoal_id}"
-            )
         if self.status == "completed" and not self.completion_evidence:
             raise TaskGraphError(f"已完成子目标缺少完成证据：{self.subgoal_id}")
         if self.status != "completed" and self.completion_evidence:
@@ -1119,7 +886,7 @@ class DynamicTaskGraph:
                 if risks[risk_id].confirmation_required
             }
             if self.status == "awaiting_confirmation" and not confirmation_risk_ids:
-                raise TaskGraphError("等待确认状态必须关联当前子目标的风险动作。")
+                raise TaskGraphError("等待确认状态必须关联当前子目标的效果意图。")
             if (
                 confirmation_risk_ids
                 and self.status != "awaiting_confirmation"
@@ -1148,35 +915,68 @@ class DynamicTaskGraph:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        value = asdict(self)
-        value.pop("raw_user_goal", None)
-        value["goal"]["target_apps"] = [asdict(app) for app in self.goal.target_apps]
-        value["constraints"] = list(self.constraints)
-        value["completion_conditions"] = [
+        effect_policy = {
+            item.risk_id: {
+                "effect_id": item.risk_id,
+                "confirmation_required": item.confirmation_required,
+                "policy_level": item.risk_level,
+            }
+            for item in self.risk_actions
+        }
+        subgoals = [
+            {
+                "subgoal_id": item.subgoal_id,
+                "objective": item.objective,
+                "status": item.status,
+                "depends_on": list(item.depends_on),
+                "constraints": list(item.constraints),
+                "completion_conditions": list(item.completion_conditions),
+                "completion_evidence": list(item.completion_evidence),
+                "effect_ids": list(item.risk_action_ids),
+                "execution_class": _EXECUTION_CLASS_BY_RUNTIME_IMPACT[
+                    item.external_impact
+                ],
+            }
+            for item in self.subgoals
+        ]
+        value = {
+            "protocol_version": self.protocol_version,
+            "task_id": self.task_id,
+            "device_id": self.device_id,
+            "revision": self.revision,
+            "status": self.status,
+            "goal": {
+                "objective": self.goal.objective,
+                "target_apps": [
+                    asdict(app) for app in self.goal.target_apps
+                ],
+                "entities": dict(self.goal.entities),
+            },
+            "constraints": list(self.constraints),
+            "completion_conditions": [
             {
                 **asdict(item),
                 "evidence_required": list(item.evidence_required),
                 "evidence": list(item.evidence),
             }
             for item in self.completion_conditions
-        ]
-        value["risk_actions"] = [
-            {**asdict(item), "subgoal_ids": list(item.subgoal_ids)}
-            for item in self.risk_actions
-        ]
-        value["subgoals"] = [
-            {
-                **asdict(item),
-                "depends_on": list(item.depends_on),
-                "constraints": list(item.constraints),
-                "completion_conditions": list(item.completion_conditions),
-                "completion_evidence": list(item.completion_evidence),
-                "risk_action_ids": list(item.risk_action_ids),
-            }
-            for item in self.subgoals
-        ]
-        value["clarification_questions"] = list(self.clarification_questions)
-        value["replan_history"] = [
+            ],
+            "effect_intents": [
+                {
+                    "effect_id": item.risk_id,
+                    "kind": item.effect_kind,
+                    "target_entity_roles": list(item.target_roles),
+                    "payload_entity_roles": list(item.payload_roles),
+                    "source_subgoal_ids": list(item.subgoal_ids),
+                    "expected_results": list(item.expected_result_texts),
+                    "local_policy": effect_policy[item.risk_id],
+                }
+                for item in self.risk_actions
+            ],
+            "subgoals": subgoals,
+            "active_subgoal_id": self.active_subgoal_id,
+            "clarification_questions": list(self.clarification_questions),
+            "replan_history": [
             {
                 **asdict(item),
                 "evidence": list(item.evidence),
@@ -1187,11 +987,12 @@ class DynamicTaskGraph:
                 "skipped_subgoal_ids": list(item.skipped_subgoal_ids),
             }
             for item in self.replan_history
-        ]
+            ],
+        }
         current = next(
             (
                 item
-                for item in value["subgoals"]
+                for item in subgoals
                 if item["subgoal_id"] == self.active_subgoal_id
             ),
             None,
@@ -1208,7 +1009,7 @@ class DynamicTaskGraph:
     def to_qwen_context(
         self,
         *,
-        confirmed_risk_ids: tuple[str, ...] = (),
+        confirmed_effect_ids: tuple[str, ...] = (),
         confirmed_task_id: str | None = None,
         confirmed_device_id: str | None = None,
         confirmed_subgoal_id: str | None = None,
@@ -1218,17 +1019,17 @@ class DynamicTaskGraph:
 
         value = self.to_dict()
         current = value["current_subgoal"]
-        current_risk_ids = set(current["risk_action_ids"] if current else [])
-        risk_by_id = {
-            item["risk_id"]: item
-            for item in value["risk_actions"]
+        current_effect_ids = set(current["effect_ids"] if current else [])
+        effect_by_id = {
+            item["effect_id"]: item
+            for item in value["effect_intents"]
         }
-        confirmation_risk_ids = {
-            risk_id
-            for risk_id in current_risk_ids
-            if bool(risk_by_id[risk_id]["confirmation_required"])
+        confirmation_effect_ids = {
+            effect_id
+            for effect_id in current_effect_ids
+            if bool(effect_by_id[effect_id]["local_policy"]["confirmation_required"])
         }
-        confirmed = set(confirmed_risk_ids)
+        confirmed = set(confirmed_effect_ids)
         if confirmed and confirmed_task_id != self.task_id:
             raise TaskGraphError("确认记录 task_id 不匹配，禁止跨 task 复用。")
         if confirmed and confirmed_device_id != self.device_id:
@@ -1243,21 +1044,21 @@ class DynamicTaskGraph:
             or confirmed_subgoal_id is not None
             or confirmed_revision is not None
         ):
-            raise TaskGraphError("确认作用域不能脱离 confirmed_risk_ids 单独提供。")
-        unknown_confirmations = confirmed - confirmation_risk_ids
+            raise TaskGraphError("确认作用域不能脱离 confirmed_effect_ids 单独提供。")
+        unknown_confirmations = confirmed - confirmation_effect_ids
         if unknown_confirmations:
             raise TaskGraphError(
                 "确认记录不属于 current_subgoal："
                 + ", ".join(sorted(unknown_confirmations))
             )
-        confirmation_required = bool(confirmation_risk_ids)
+        confirmation_required = bool(confirmation_effect_ids)
         confirmation_granted = bool(
             confirmation_required
-            and confirmation_risk_ids.issubset(confirmed)
+            and confirmation_effect_ids.issubset(confirmed)
         )
         automatic_external_allowed = bool(
             current
-            and current["external_impact"] == "external_state"
+            and current["execution_class"] == "effect"
             and not confirmation_required
         )
         goal_context = dict(value["goal"])
@@ -1326,15 +1127,15 @@ class DynamicTaskGraph:
             "global_constraints": value["constraints"],
             "goal_completion_conditions": value["completion_conditions"],
             "current_subgoal": current,
-            "current_external_impact": (
-                current["external_impact"] if current else None
+            "current_execution_class": (
+                current["execution_class"] if current else None
             ),
-            "risk_actions": [
+            "effect_intents": [
                 item
-                for item in value["risk_actions"]
-                if item["risk_id"] in current_risk_ids
+                for item in value["effect_intents"]
+                if item["effect_id"] in current_effect_ids
             ],
-            "confirmation_gate": {
+            "effect_gate": {
                 "required": confirmation_required,
                 "state": (
                     "confirmed"
@@ -1343,14 +1144,14 @@ class DynamicTaskGraph:
                     if confirmation_required
                     else "not_required"
                 ),
-                "risk_ids": sorted(confirmation_risk_ids),
+                "effect_ids": sorted(confirmation_effect_ids),
                 "scope": {
                     "task_id": self.task_id,
                     "device_id": self.device_id,
                     "revision": self.revision,
                     "subgoal_id": self.active_subgoal_id,
                 },
-                "external_state_action_allowed": (
+                "effect_action_allowed": (
                     confirmation_granted or automatic_external_allowed
                 ),
             },
@@ -1375,8 +1176,6 @@ class DeepSeekTaskGraphPlanner:
         self.last_raw_response = ""
         self.last_semantic_authority: SemanticRiskAuthorityReport | None = None
         self.last_semantic_authority_error = ""
-        self.last_semantic_shadow: SemanticShadowReport | None = None
-        self.last_semantic_shadow_error = ""
 
     def plan(
         self,
@@ -1391,7 +1190,7 @@ class DeepSeekTaskGraphPlanner:
         _validate_device_id(device_id)
         resolved_task_id = task_id or uuid.uuid4().hex
         _validate_task_id(resolved_task_id)
-        self._reset_semantic_shadow()
+        self._reset_semantic_authority()
         self._require_provider()
         prompt = _initial_prompt(text)
         graph = self._request_graph(
@@ -1405,23 +1204,14 @@ class DeepSeekTaskGraphPlanner:
         # Only deterministic, semantics-preserving local normalization is
         # allowed.  A malformed or unsafe semantic answer is never repaired by
         # another remote sample.
-        graph = _normalize_initial_input_goal_objective(graph)
-        graph = _normalize_redundant_conditional_input_clear(graph)
         graph = _normalize_explicit_target_surface(graph, text)
-        # Migration-only transport cleanup: this can delete a model-invented
-        # legacy risk that contradicts an explicitly local/reversible typed
-        # state, but it cannot reject a task, request confirmation, or grant an
-        # action.  TaskSemanticIR + local policy below are the sole authority.
-        graph = _normalize_legacy_transport_for_typed_projection(graph)
         graph = _normalize_initial_premature_completed_status(graph)
         graph = _normalize_unique_active_frontier(graph)
-        graph = _normalize_initial_confirmation_status(graph)
         # Reject malformed planner transport before semantic cutover so the
         # formal projector never masks missing IDs, invalid enums or broken
         # graph structure with a later migration error.
         graph.validate()
         graph = self._apply_formal_semantic_authority(graph)
-        self._capture_semantic_shadow(graph)
         graph.validate()
         if (
             graph.status == "completed"
@@ -1444,7 +1234,7 @@ class DeepSeekTaskGraphPlanner:
         if trigger not in REPLAN_TRIGGERS:
             raise TaskGraphError(f"不支持的重规划触发原因：{trigger}")
         _require_text(reason, "replan.reason")
-        self._reset_semantic_shadow()
+        self._reset_semantic_authority()
         self._require_provider()
         prompt = _replan_prompt(graph, observation, trigger=trigger, reason=reason)
         candidate = self._request_graph(
@@ -1467,20 +1257,11 @@ class DeepSeekTaskGraphPlanner:
             observation,
             trigger=trigger,
         )
-        candidate = _normalize_redundant_conditional_input_clear(candidate)
-        candidate = _normalize_observed_concrete_input_clear(candidate, observation)
         candidate = _normalize_unique_active_frontier(candidate)
-        # Replanning can preserve a legacy model confirmation flag while the
-        # formal typed policy classifies the same ordinary external effect as
-        # automatic.  Make that transport internally self-consistent before
-        # validation; the formal projector below remains the sole authority
-        # that can grant automatic execution or require confirmation.
-        candidate = _normalize_initial_confirmation_status(candidate)
-        _validate_external_impact_revision(graph, candidate)
-        _validate_preserved_risk_ids(graph, candidate)
+        _validate_execution_class_revision(graph, candidate)
+        _validate_preserved_effect_intents(graph, candidate)
         candidate.validate()
         candidate = self._apply_formal_semantic_authority(candidate)
-        self._capture_semantic_shadow(candidate)
         self._validate_replan_candidate(
             graph,
             candidate,
@@ -1527,16 +1308,6 @@ class DeepSeekTaskGraphPlanner:
         revised.validate()
         return revised
 
-    def _capture_semantic_shadow(self, graph: DynamicTaskGraph) -> None:
-        """Compile diagnostics only; never influence the formal v3 graph."""
-
-        self.last_semantic_shadow = None
-        self.last_semantic_shadow_error = ""
-        try:
-            self.last_semantic_shadow = compile_legacy_graph_shadow(graph)
-        except Exception as exc:  # Shadow migration must remain non-authoritative.
-            self.last_semantic_shadow_error = str(exc)[:1000]
-
     def _apply_formal_semantic_authority(
         self,
         graph: DynamicTaskGraph,
@@ -1557,11 +1328,9 @@ class DeepSeekTaskGraphPlanner:
         self.last_semantic_authority = authority
         return projected
 
-    def _reset_semantic_shadow(self) -> None:
+    def _reset_semantic_authority(self) -> None:
         self.last_semantic_authority = None
         self.last_semantic_authority_error = ""
-        self.last_semantic_shadow = None
-        self.last_semantic_shadow_error = ""
 
     def _validate_replan_candidate(
         self,
@@ -1606,8 +1375,8 @@ class DeepSeekTaskGraphPlanner:
         elif trigger == "observation_changed" and transition is not None:
             raise TaskGraphError("纯观察变化不得携带动作执行回执。")
 
-        _validate_external_impact_revision(graph, candidate)
-        _validate_preserved_risk_ids(graph, candidate)
+        _validate_execution_class_revision(graph, candidate)
+        _validate_preserved_effect_intents(graph, candidate)
         candidate.validate()
         previous_current = graph.active_subgoal()
         candidate_current = candidate.active_subgoal()
@@ -1705,15 +1474,13 @@ Shell、ADB、keycode、main.exe 指令或其他可直接驱动设备的控制�
    App 目标仍应使用 target_apps。
 3. 只能有一个 active 子目标；其依赖必须已经 completed（初始图通常无依赖）。
 4. 初始规划没有画面证据，所有完成条件 satisfied=false，任何子目标都不能 completed。
-5. 每个子目标必须用 external_impact 标为 read_only、navigation_only、external_state 或 unknown。
-   会改变账号、数据、交易、发布、发送或其他外部状态的事项必须标为 external_state 并列入
-   risk_actions；无法确定影响时标为 unknown。两者都必须关联类型化效果。兼容字段
-   confirmation_required 仍输出 true，但它不是确认权威；本地版本化策略会按 EffectIntent.kind
-   重新计算。发送、关注、评论等普通效果不会仅因 external_state 自动要求用户确认；登录、付款、
-   敏感权限与不可逆删除等策略内效果才进入确认门。unknown 不得进入视觉或执行。
-6. read_only 只能描述查看、读取、检查等纯观察结果；navigation_only 只能描述打开或进入页面等
+5. 每个子目标只用 execution_class 标为 observe、navigate、effect 或 unknown；模型不得输出风险等级、
+   confirmation_required、external_impact 或 risk_actions。真正产生外部结果的子目标必须声明 typed
+   effect_intents，并让 expected_results 逐字引用该子目标的正向完成条件。禁止、未发生、保持不变、
+   按钮可见但未触发等约束或状态不得声明为 effect。确认只由 EffectIntent.kind 与本地版本化策略决定。
+6. observe 只能描述查看、读取、检查等纯观察结果；navigate 只能描述打开或进入页面等
    导航结果。仅改变本机临时界面层级、前后台页面或临时标签页也属于 navigation_only，不得为它
-   虚构 risk_actions；但登录/退出账号、修改账号数据或云端同步状态仍属于 external_state。
+   虚构 effect_intents；但登录/退出账号、修改账号数据或云端同步状态仍属于 effect。
    当用户要查看、读取或核对某个目标页面的结果，但没有明确说明该结果已经在当前画面中时，
    必须先建立一个 navigation_only 子目标描述“目标页面或目标区域可见”，再建立 read_only 子目标
    描述要核对的结果；不得把潜在导航需求隐藏在单个 read_only 子目标中。
@@ -1724,576 +1491,19 @@ Shell、ADB、keycode、main.exe 指令或其他可直接驱动设备的控制�
    明确非空；将当前唯一未发送/未提交临时草稿恢复为空白时，必须把空白状态写成明确结果而不能
    虚构空字符串 input_text。两者都要求用户直接禁止该上下文中的搜索、提交、发送、保存或发布等
    效果，且句中没有任何未被否定的外部效果。输入并搜索/发送/保存、清除云端或已保存数据、未明确
-   禁止提交效果、或含义不清时仍必须标为 external_state 或 unknown。
+   禁止提交效果、或含义不清时仍必须标为 effect 或 unknown。
    不能证明属于这些安全类别时必须标为 unknown，不能为了免确认而猜成安全类别。
-7. 风险类型只用通信、内容发布、账号关系、成员关系、权限角色、数据修改/删除、交易支付、
-   账号权限或未知外部影响等跨 App 语义，不得描述 App 页面路径。
+7. effect_intents.kind 只用 schema 中的跨 App typed effect，不得描述 App 页面路径；target/payload role
+   必须引用 goal.entities 中实际存在的用户字面实体。
    用户指定已有收件人和文字消息时，必须把收件人逐字写入 goal.entities.recipient，把消息原文
    逐字写入 goal.entities.input_text；不得翻译、纠错、补标点或改写。打开目标 App、查找并进入
-   已有收件人的聊天页面属于 navigation_only，但相关子目标和完成条件必须逐字包含 canonical
+   已有收件人的聊天页面属于 navigate，但相关子目标和完成条件必须逐字包含 canonical
    recipient，供本地唯一身份核对。只在输入框保留未发送草稿也属于 navigation_only；真正发送
-   才是 external_state，send_message 风险只能关联发送子目标，不能提前污染 App 导航、收件人定位
+   才是 effect，send_message 只能关联发送子目标，不能提前污染 App 导航、收件人定位
    或未提交草稿准备。联系人重名、身份不唯一或缺少消息原文时必须 blocked 并提出澄清问题。
 8. 信息不足时 status=blocked、active_subgoal_id=null，并填写 clarification_questions。
 9. 一次给出完整、严格 JSON。不要 Markdown，也不要要求通过第二次远程采样修复格式。
 """
-
-
-def _repair_initial_prompt(
-    raw_goal: str,
-    *,
-    invalid_response: str,
-    validation_error: str,
-) -> str:
-    return f"""
-你是通用手机视觉操作 Agent 的 DeepSeek 高层任务图规划器。上一次 JSON 未通过本地协议校验。
-请根据校验错误重新生成完整任务图，不要解释、不要局部补丁。自然点击、滑动、输入、长按、
-拖动意图可以保留，但不能输出坐标、Shell、ADB、keycode、main.exe 或 App 专用固定流程。
-
-用户原始目标：{json.dumps(raw_goal, ensure_ascii=False)}
-本地校验错误：{json.dumps(validation_error, ensure_ascii=False)}
-上一次无效 JSON：
-{invalid_response}
-
-{_schema_prompt()}
-
-修复规则：
-1. status 为 ready、running 或 awaiting_confirmation 时，必须恰好一个子目标 status=active，
-   且 active_subgoal_id 必须等于该子目标 ID。
-2. blocked 或 completed 时 active_subgoal_id=null，且不能有 active 子目标。
-3. 至少返回一个全局 completion_conditions；初始规划不得宣称任何条件或子目标已完成。
-4. external_state 或 unknown 必须声明并关联风险；成为 active 时必须等待本地用户确认。
-   read_only 或 navigation_only 不得关联 risk_actions。仅改变本机临时界面层级、前后台页面或
-   临时标签页属于 navigation_only；登录/退出账号、账号数据或云端同步状态不属于此例外。
-   只改变当前可见输入框中的未提交临时文字仅在目标文字非空、用户直接禁止相关提交效果、且没有
-   任何未否定外部效果时属于 navigation_only；否则仍按 external_state 或 unknown 失败关闭。
-5. goal、subgoals、constraints 和 completion_conditions 可以保留用户原始的点击、滑动、输入、
-   长按、拖动、返回等自然动作意图、方向和次数限制；不得为了规避协议而改写成另一项任务。
-   每个动作意图必须同时给出可验证的后置状态，但不得附带控件索引、坐标、按键码、Shell、ADB、
-   main.exe 或其他可执行控制细节。具体下一控件和单步动作仍由 Qwen 基于真实画面选择，本地控制器
-   独立授权。用户明确写出的否定约束必须原意保留。
-6. 如果用户明确指“当前页面”“当前应用”或“当前前台”但未说 App 名称，target_apps 必须使用
-   [{{"app_id":"current_foreground","app_name":"当前前台应用"}}]，不得只因缺少 App 名称而阻塞。
-7. 字面 UI 标签若包含点击、滑动、输入、长按、拖动等词，应逐字放在
-   goal.entities.target_ui_label；同一字面词也可以出现在 objective 或完成条件中，但不得因此
-   被解释为坐标或直接机械权限。
-8. 用户指定已有收件人和文字消息时，goal.entities.recipient 与 input_text 必须分别逐字复制
-   收件人和消息原文。App 导航、已有收件人页面定位和未发送草稿准备使用 navigation_only；
-   只有真正发送子目标使用 external_state 并关联 send_message 风险。收件人定位子目标及其完成
-   条件必须逐字包含 canonical recipient；重名或身份不唯一时 blocked，不得猜测。
-9. 只返回符合结构的完整 JSON 对象，不要 Markdown。
-"""
-
-
-def _retry_safe_initial_audit_prompt(raw_goal: str) -> str:
-    return f"""
-你是通用手机视觉操作 Agent 的 DeepSeek 高层任务图规划器。上一次独立语义风险审计与任务图
-分类发生冲突，但本地逐词校验没有发现任何未被否定的外部状态效果。请根据用户原始目标进行
-一次独立重新规划；不要沿用上一次任务图或审计结论，不要解释。可以保留自然点击、滑动、输入、
-长按或拖动意图，但不得输出坐标、Shell、系统命令或任何 App 专用固定流程。
-
-用户原始目标：{json.dumps(raw_goal, ensure_ascii=False)}
-
-{_schema_prompt()}
-
-重新规划规则：
-1. 明确否定或禁止的效果词是约束，不是正向目标；例如“不登录”“不要发送”本身不构成外部
-   状态动作，但“不要忘记登录”“不能只查看而要发送”仍包含正向外部效果。
-2. read_only、navigation_only、external_state、unknown 必须按完整句子语义重新判断。
-3. external_state 或 unknown 必须声明并关联类型化效果；是否确认只由本地策略决定，unknown 阻塞。
-4. 初始规划没有画面证据，不能宣称任何目标或子目标已经完成。
-5. 只返回符合结构的完整 JSON 对象，不要 Markdown。
-"""
-
-
-def _retryable_safe_initial_audit_conflict(
-    raw_goal: str,
-    error: TaskGraphError,
-) -> bool:
-    return (
-        "语义风险审计与任务图分类冲突" in str(error)
-        and not _describes_external_state_change(raw_goal)
-        and bool(_infer_directly_negated_risk_types(raw_goal))
-    )
-
-
-def _retryable_initial_output_error(error: TaskGraphError) -> bool:
-    text = str(error)
-    if "协议外字段" in text:
-        return False
-    return text in REPAIRABLE_INITIAL_GRAPH_ERRORS or any(
-        fragment in text for fragment in REPAIRABLE_INITIAL_GRAPH_ERROR_FRAGMENTS
-    )
-
-
-def _initial_repair_error_category(error: TaskGraphError) -> str:
-    text = str(error)
-    if "包含低层动作表达" in text:
-        return "low_level_instruction"
-    if "关联风险的子目标影响分类必须为" in text:
-        return "safe_impact_with_risk"
-    if text in REPAIRABLE_INITIAL_GRAPH_ERRORS:
-        return "graph_structure"
-    return text
-
-
-def _dependency_ancestor_map(
-    subgoals: dict[str, Subgoal],
-) -> dict[str, frozenset[str]]:
-    """Return transitive dependency ancestors without assuming a valid DAG."""
-
-    result: dict[str, frozenset[str]] = {}
-    for subgoal_id, subgoal in subgoals.items():
-        found: set[str] = set()
-        pending = list(subgoal.depends_on)
-        while pending:
-            current = pending.pop()
-            if current in found:
-                continue
-            found.add(current)
-            parent = subgoals.get(current)
-            if parent is not None:
-                pending.extend(parent.depends_on)
-        result[subgoal_id] = frozenset(found)
-    return result
-
-
-def _local_input_preparation_subgoal_ids(
-    graph: DynamicTaskGraph,
-    subgoals: dict[str, Subgoal],
-    local_unsubmitted_input_ids: set[str],
-    ancestor_map: dict[str, frozenset[str]],
-) -> set[str]:
-    """Prove reversible input-carrier preparation on the canonical input chain.
-
-    This is a local structural attestation, not a model-declared permission.  A
-    preparation node may only describe a formal input carrier being visible,
-    editable, or focused.  It must be dependency-related to an independently
-    proven canonical unsubmitted-input node, and its positive result must not
-    contain any external effect.  The attestation never authorizes text entry;
-    that remains the separate ``input_verified_text`` action.
-    """
-
-    input_text = graph.goal.entities.get("input_text")
-    if (
-        not isinstance(input_text, str)
-        or not input_text.strip()
-        or not local_unsubmitted_input_ids
-    ):
-        return set()
-
-    def dependency_related(left_id: str, right_id: str) -> bool:
-        return (
-            left_id == right_id
-            or left_id in ancestor_map.get(right_id, frozenset())
-            or right_id in ancestor_map.get(left_id, frozenset())
-        )
-
-    result: set[str] = set()
-    for subgoal in subgoals.values():
-        if subgoal.subgoal_id in local_unsubmitted_input_ids:
-            continue
-        if not _is_local_input_preparation_state(
-            subgoal.objective,
-            *subgoal.completion_conditions,
-            input_text=input_text,
-        ):
-            continue
-        if not any(
-            dependency_related(subgoal.subgoal_id, input_id)
-            for input_id in local_unsubmitted_input_ids
-        ):
-            continue
-        result.add(subgoal.subgoal_id)
-    return result
-
-
-def _risk_is_required_by_positive_result(
-    graph: DynamicTaskGraph,
-    risk: RiskAction,
-) -> bool:
-    sources = [graph.goal.objective]
-    for condition in graph.completion_conditions:
-        sources.extend((condition.description, *condition.evidence_required))
-    for subgoal in graph.subgoals:
-        sources.extend((subgoal.objective, *subgoal.completion_conditions))
-    type_pattern = _external_risk_patterns().get(risk.risk_type)
-    if type_pattern is None and risk.risk_type == "unknown_external_effect":
-        type_pattern = EXTERNAL_STATE_CHANGE_PATTERN
-    phrases = tuple(
-        value.strip()
-        for value in (risk.description, risk.external_effect)
-        if len("".join(value.split())) >= 4
-    )
-    for source in sources:
-        for clause in _positive_effect_clauses(source):
-            if type_pattern is not None and _has_unnegated_effect_match(
-                type_pattern,
-                clause,
-            ):
-                return True
-            for phrase in phrases:
-                if _has_unnegated_effect_match(
-                    re.compile(re.escape(phrase), re.IGNORECASE),
-                    clause,
-                ):
-                    return True
-    return False
-
-
-def _subgoal_is_safe_without_forbidden_risk(
-    graph: DynamicTaskGraph,
-    subgoal: Subgoal,
-    local_unsubmitted_input_ids: set[str],
-    local_input_preparation_ids: set[str],
-) -> bool:
-    if subgoal.subgoal_id in (
-        local_unsubmitted_input_ids | local_input_preparation_ids
-    ):
-        return True
-    if subgoal.external_impact == "read_only":
-        return _is_read_only_risk_control_state(
-            subgoal.objective,
-            subgoal.constraints,
-            subgoal.completion_conditions,
-        ) or not _infer_external_risk_types(
-            subgoal.objective,
-            *subgoal.completion_conditions,
-        )
-    # This migration check only decides whether a model-invented risk that is
-    # explicitly prohibited everywhere can be removed before typed projection.
-    # Requiring particular page-state words here made ordinary safe states such
-    # as a focused empty field depend on a growing UI vocabulary.  A legacy
-    # transport may also have derived ``external_state`` solely from that same
-    # invented risk, so its enum is not independently authoritative here.  The
-    # generic boundary is instead the absence of any positive external effect
-    # in the subgoal's requested result. Direct prohibition of every risk
-    # action, whole-graph positive-result checks and formal TaskSemanticIR
-    # policy remain separate mandatory gates in the caller and projection.
-    positive_text = "；".join((subgoal.objective, *subgoal.completion_conditions))
-    return not any(
-        _has_unnegated_effect_match(pattern, positive_text)
-        for pattern in _external_risk_patterns().values()
-    )
-
-
-def _purely_forbidden_initial_risks(
-    graph: DynamicTaskGraph,
-    subgoals: dict[str, Subgoal],
-    local_unsubmitted_input_ids: set[str],
-    local_input_preparation_ids: set[str],
-) -> tuple[set[str], set[str]]:
-    def linked_subgoals_share_dependency_component(
-        linked_ids: tuple[str, ...],
-    ) -> bool:
-        if len(linked_ids) <= 1:
-            return True
-        adjacency: dict[str, set[str]] = {
-            subgoal_id: set() for subgoal_id in subgoals
-        }
-        for item in subgoals.values():
-            for dependency_id in item.depends_on:
-                if dependency_id not in adjacency:
-                    continue
-                adjacency[item.subgoal_id].add(dependency_id)
-                adjacency[dependency_id].add(item.subgoal_id)
-        pending = [linked_ids[0]]
-        reached: set[str] = set()
-        while pending:
-            current = pending.pop()
-            if current in reached:
-                continue
-            reached.add(current)
-            pending.extend(adjacency.get(current, ()))
-        return set(linked_ids) <= reached
-
-    removable_ids: set[str] = set()
-    safe_subgoal_ids: set[str] = set()
-    for risk in graph.risk_actions:
-        linked = tuple(subgoals.get(item) for item in risk.subgoal_ids)
-        if (
-            not linked
-            or any(item is None for item in linked)
-            or not linked_subgoals_share_dependency_component(risk.subgoal_ids)
-        ):
-            continue
-        anchors = _risk_effect_action_anchors(
-            risk.description,
-            risk.external_effect,
-        )
-        constraints = tuple(graph.constraints) + tuple(
-            constraint
-            for item in linked
-            if item is not None
-            for constraint in item.constraints
-        )
-        if not anchors or not all(
-            any(
-                _text_directly_negates_action_anchor(constraint, anchor)
-                for constraint in constraints
-            )
-            for anchor in anchors
-        ):
-            continue
-        risk_declaration_is_purely_negated = all(
-            _text_directly_negates_action_anchor(risk.description, anchor)
-            or _text_directly_negates_action_anchor(risk.external_effect, anchor)
-            for anchor in anchors
-        )
-        if (
-            _risk_is_required_by_positive_result(graph, risk)
-            and not risk_declaration_is_purely_negated
-        ):
-            continue
-        if not all(
-            item is not None
-            and _subgoal_is_safe_without_forbidden_risk(
-                graph,
-                item,
-                local_unsubmitted_input_ids,
-                local_input_preparation_ids,
-            )
-            for item in linked
-        ):
-            continue
-        removable_ids.add(risk.risk_id)
-        safe_subgoal_ids.update(
-            item.subgoal_id for item in linked if item is not None
-        )
-    return removable_ids, safe_subgoal_ids
-
-
-def _normalize_legacy_transport_for_typed_projection(
-    graph: DynamicTaskGraph,
-) -> DynamicTaskGraph:
-    """Remove self-contradictory legacy markers before typed projection.
-
-    This compatibility conversion has no denial, confirmation, Qwen, or
-    physical-action authority.  The returned graph is immediately compiled
-    into TaskSemanticIR and adjudicated by the local versioned policy.
-    """
-
-    if graph.status not in {"ready", "running", "awaiting_confirmation"}:
-        return graph
-    subgoals = {item.subgoal_id: item for item in graph.subgoals}
-    local_unsubmitted_input_ids = {
-        item.subgoal_id
-        for item in graph.subgoals
-        if LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(
-            "；".join(
-                (
-                    item.objective,
-                    *item.constraints,
-                    *item.completion_conditions,
-                )
-            )
-        )
-        and _is_explicitly_unsubmitted_local_input(
-            graph.raw_user_goal or graph.goal.objective,
-            graph.goal.objective,
-            item.objective,
-            *graph.constraints,
-            *item.constraints,
-            *item.completion_conditions,
-            input_text=graph.goal.entities.get("input_text"),
-        )
-    }
-    local_temporary_clear_ids = {
-        item.subgoal_id
-        for item in graph.subgoals
-        if _is_explicit_local_temporary_draft_clear(graph, item)
-    }
-    ancestor_map = _dependency_ancestor_map(subgoals)
-    local_input_preparation_ids = _local_input_preparation_subgoal_ids(
-        graph,
-        subgoals,
-        local_unsubmitted_input_ids,
-        ancestor_map,
-    )
-    removable_ids, safe_workflow_ids = _purely_forbidden_initial_risks(
-        graph,
-        subgoals,
-        local_unsubmitted_input_ids,
-        local_input_preparation_ids,
-    )
-
-    def dependency_related(left_id: str, right_id: str) -> bool:
-        return (
-            left_id == right_id
-            or left_id in ancestor_map.get(right_id, frozenset())
-            or right_id in ancestor_map.get(left_id, frozenset())
-        )
-
-    for risk in graph.risk_actions:
-        linked = tuple(subgoals.get(item) for item in risk.subgoal_ids)
-        if (
-            risk.risk_type
-            in {
-                "unknown_external_effect",
-                "message_or_communication",
-                "content_publication",
-                "data_mutation",
-                "data_deletion",
-            }
-            and risk.subgoal_ids
-            and set(risk.subgoal_ids) <= local_temporary_clear_ids
-        ):
-            removable_ids.add(risk.risk_id)
-            safe_workflow_ids.update(risk.subgoal_ids)
-            continue
-        if (
-            risk.risk_type not in {
-                "unknown_external_effect",
-                "data_mutation",
-                "message_or_communication",
-                "content_publication",
-            }
-            or not linked
-            or any(item is None for item in linked)
-        ):
-            continue
-        local_input_only = all(
-            item is not None
-            and item.subgoal_id
-            in (local_unsubmitted_input_ids | local_input_preparation_ids)
-            for item in linked
-        )
-        local_input_workflow = bool(
-            local_unsubmitted_input_ids
-            and risk.risk_level == "low"
-            and _explicitly_denies_external_effect(risk.external_effect)
-            and LOCAL_UNSUBMITTED_WORKFLOW_RISK_PATTERN.search(risk.description)
-            and _infer_external_risk_types(risk.description)
-            <= {"unknown_external_effect"}
-            and all(
-                item is not None
-                and any(
-                    dependency_related(item.subgoal_id, input_id)
-                    for input_id in local_unsubmitted_input_ids
-                )
-                and (
-                    item.subgoal_id in local_input_preparation_ids
-                    or not _infer_external_risk_types(
-                        item.objective,
-                        *item.constraints,
-                        *item.completion_conditions,
-                    )
-                )
-                for item in linked
-            )
-        )
-        if local_input_only:
-            pass
-        elif not local_input_workflow and (
-            risk.risk_level != "low"
-            or not _explicitly_denies_external_effect(risk.external_effect)
-        ):
-            continue
-        if all(
-            item.external_impact in {
-                "read_only",
-                "navigation_only",
-                "external_state",
-                "unknown",
-            }
-            and (
-                LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
-                or item.subgoal_id in local_unsubmitted_input_ids
-                or item.subgoal_id in local_input_preparation_ids
-                or local_input_workflow
-            )
-            and (
-                item.subgoal_id in local_input_preparation_ids
-                or not _infer_external_risk_types(
-                    item.objective,
-                    *item.constraints,
-                    *item.completion_conditions,
-                )
-            )
-            for item in linked
-            if item is not None
-        ):
-            removable_ids.add(risk.risk_id)
-            if local_input_workflow:
-                safe_workflow_ids.update(
-                    item.subgoal_id for item in linked if item is not None
-                )
-    normalized_subgoals = tuple(
-        replace(
-            item,
-            external_impact=(
-                "navigation_only"
-                if item.risk_action_ids
-                and set(item.risk_action_ids) <= removable_ids
-                and (
-                    LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.objective)
-                    or item.subgoal_id in local_unsubmitted_input_ids
-                    or item.subgoal_id in local_input_preparation_ids
-                    or item.subgoal_id in local_temporary_clear_ids
-                    or item.subgoal_id in safe_workflow_ids
-                )
-                and item.external_impact != "read_only"
-                else item.external_impact
-            ),
-            risk_action_ids=tuple(
-                risk_id
-                for risk_id in item.risk_action_ids
-                if risk_id not in removable_ids
-            ),
-        )
-        for item in graph.subgoals
-    )
-    active_ids = [item.subgoal_id for item in normalized_subgoals if item.status == "active"]
-    active_subgoal_id = graph.active_subgoal_id
-    if not active_ids and active_subgoal_id is not None:
-        selected = next(
-            (item for item in normalized_subgoals if item.subgoal_id == active_subgoal_id),
-            None,
-        )
-        if (
-            selected is not None
-            and selected.status == "pending"
-            and not selected.depends_on
-            and selected.external_impact in {"read_only", "navigation_only"}
-            and not selected.risk_action_ids
-        ):
-            normalized_subgoals = tuple(
-                replace(item, status="active")
-                if item.subgoal_id == active_subgoal_id
-                else item
-                for item in normalized_subgoals
-            )
-            active_ids = [active_subgoal_id]
-    if not active_ids and active_subgoal_id is None:
-        candidates = [
-            item
-            for item in normalized_subgoals
-            if item.status == "pending"
-            and not item.depends_on
-            and item.external_impact in {"read_only", "navigation_only"}
-            and not item.risk_action_ids
-        ]
-        if len(candidates) == 1:
-            selected_id = candidates[0].subgoal_id
-            normalized_subgoals = tuple(
-                replace(item, status="active") if item.subgoal_id == selected_id else item
-                for item in normalized_subgoals
-            )
-            active_subgoal_id = selected_id
-    normalized_status = graph.status
-    if graph.status == "awaiting_confirmation" and not any(
-        item.risk_action_ids for item in normalized_subgoals if item.status == "active"
-    ):
-        normalized_status = "ready"
-    return replace(
-        graph,
-        status=normalized_status,
-        risk_actions=tuple(
-            risk for risk in graph.risk_actions if risk.risk_id not in removable_ids
-        ),
-        subgoals=normalized_subgoals,
-        active_subgoal_id=active_subgoal_id,
-    )
 
 
 def _normalize_initial_premature_completed_status(
@@ -2341,305 +1551,6 @@ def _normalize_initial_premature_completed_status(
     ):
         return graph
     return replace(graph, status="running")
-
-
-def _normalize_initial_input_goal_objective(
-    graph: DynamicTaskGraph,
-) -> DynamicTaskGraph:
-    """Replace only a redundant low-level input objective with result states.
-
-    DeepSeek sometimes copies the user's natural-language input verb into the
-    top-level objective even though the same initial graph already contains
-    strict, unsatisfied input-state completion conditions.  Those conditions
-    are the graph's canonical result contract; using them avoids a second model
-    sample without weakening the low-level-instruction validator anywhere else.
-    """
-
-    try:
-        _reject_low_level_instruction(graph.goal.objective, "goal.objective")
-        return graph
-    except TaskGraphError:
-        pass
-    if not graph.completion_conditions or any(
-        condition.satisfied or condition.evidence
-        for condition in graph.completion_conditions
-    ):
-        return graph
-    input_text = graph.goal.entities.get("input_text")
-    if not isinstance(input_text, str) or not input_text.strip():
-        return graph
-    descriptions = tuple(
-        condition.description.strip()
-        for condition in graph.completion_conditions
-        if condition.description.strip()
-    )
-    if len(descriptions) != len(graph.completion_conditions):
-        return graph
-    for description in descriptions:
-        try:
-            _reject_low_level_instruction(
-                description,
-                "completion_conditions.description",
-            )
-        except TaskGraphError:
-            return graph
-    normalized = "；".join(descriptions)
-    if (
-        not LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(normalized)
-        or _compact_identity_text(input_text) not in _compact_identity_text(normalized)
-        or len(normalized) > 1000
-    ):
-        return graph
-    return replace(
-        graph,
-        goal=replace(graph.goal, objective=normalized),
-    )
-
-
-def _normalize_redundant_conditional_input_clear(
-    graph: DynamicTaskGraph,
-) -> DynamicTaskGraph:
-    """Fold a user-authorized conditional clear into the final input state.
-
-    ``verified_text_transaction`` already decides from the fresh observed value
-    whether clearing is needed.  This normalization removes only one redundant
-    high-level implementation node when the raw user request and its sole
-    canonical input successor prove the same deterministic transaction.
-    """
-
-    input_text = graph.goal.entities.get("input_text")
-    raw_goal = str(graph.raw_user_goal or "").strip()
-    if (
-        not isinstance(input_text, str)
-        or not input_text.strip()
-        or not raw_goal
-        or not CONDITIONAL_LOCAL_INPUT_CLEAR_PATTERN.search(raw_goal)
-        or PERSISTENT_INPUT_CLEAR_PATTERN.search(raw_goal)
-        or graph.risk_actions
-        or not LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN.search(raw_goal)
-    ):
-        return graph
-
-    candidates: list[tuple[Subgoal, Subgoal]] = []
-    for clear in graph.subgoals:
-        clear_text = "；".join((clear.objective, *clear.completion_conditions))
-        if (
-            clear.status not in {"pending", "active"}
-            or clear.completion_evidence
-            or clear.risk_action_ids
-            or clear.external_impact != "navigation_only"
-            or PERSISTENT_INPUT_CLEAR_PATTERN.search(clear_text)
-            or not CONDITIONAL_LOCAL_INPUT_CLEAR_PATTERN.search(clear_text)
-        ):
-            continue
-        successors = tuple(
-            item for item in graph.subgoals if clear.subgoal_id in item.depends_on
-        )
-        if len(successors) != 1:
-            continue
-        successor = successors[0]
-        successor_texts = (
-            successor.objective,
-            *successor.constraints,
-            *successor.completion_conditions,
-        )
-        if (
-            successor.status not in {"pending", "active"}
-            or successor.completion_evidence
-            or successor.risk_action_ids
-            or successor.external_impact != "navigation_only"
-            or not _state_description_binds_canonical_input_text(
-                successor_texts,
-                input_text,
-            )
-        ):
-            continue
-        candidates.append((clear, successor))
-    if len(candidates) != 1:
-        return graph
-
-    clear, successor = candidates[0]
-    active_ids = {
-        item.subgoal_id for item in graph.subgoals if item.status == "active"
-    }
-    if clear.subgoal_id in active_ids and active_ids != {clear.subgoal_id}:
-        return graph
-
-    replacement_dependencies: list[str] = []
-    for dependency_id in successor.depends_on:
-        values = (
-            clear.depends_on
-            if dependency_id == clear.subgoal_id
-            else (dependency_id,)
-        )
-        for value in values:
-            if value not in replacement_dependencies:
-                replacement_dependencies.append(value)
-    replacement = replace(
-        successor,
-        status=(
-            "active"
-            if graph.active_subgoal_id == clear.subgoal_id
-            else successor.status
-        ),
-        depends_on=tuple(replacement_dependencies),
-        constraints=tuple(dict.fromkeys((*clear.constraints, *successor.constraints))),
-    )
-    return replace(
-        graph,
-        subgoals=tuple(
-            replacement if item.subgoal_id == successor.subgoal_id else item
-            for item in graph.subgoals
-            if item.subgoal_id != clear.subgoal_id
-        ),
-        active_subgoal_id=(
-            successor.subgoal_id
-            if graph.active_subgoal_id == clear.subgoal_id
-            else graph.active_subgoal_id
-        ),
-    )
-
-
-def _observed_unique_nonempty_input(observation: ObservedState) -> bool:
-    """Prove one visible scene input makes a conditional clear true.
-
-    This fact only normalizes the high-level graph.  It never authorizes an
-    input action; the later input-targeted observation must still prove focus,
-    full visibility, keyboard mode, and exact canonical value independently.
-    """
-
-    matches: list[str] = []
-    for raw_fact in observation.grounded_visual_facts:
-        try:
-            fact = json.loads(raw_fact)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(fact, dict) or fact.get("role") != "input":
-            continue
-        states = fact.get("states")
-        if not isinstance(states, dict):
-            continue
-        value = states.get("value")
-        if (
-            isinstance(value, str)
-            and value != ""
-        ):
-            matches.append(str(fact.get("element_id") or ""))
-    return len(matches) == 1 and bool(matches[0])
-
-
-def _normalize_observed_concrete_input_clear(
-    graph: DynamicTaskGraph,
-    observation: ObservedState,
-) -> DynamicTaskGraph:
-    """Fold a concrete clear produced after a trusted nonempty input observation.
-
-    A replan may resolve the user's conditional wording into a concrete clear
-    once the trusted scene proves that the condition is true.  The action layer
-    already owns the atomic clear-to-canonical-value transaction, so retaining
-    a separate high-level clear node would duplicate that transaction.
-    """
-
-    input_text = graph.goal.entities.get("input_text")
-    raw_goal = str(graph.raw_user_goal or "").strip()
-    if (
-        not isinstance(input_text, str)
-        or not input_text.strip()
-        or not raw_goal
-        or not CONDITIONAL_LOCAL_INPUT_CLEAR_PATTERN.search(raw_goal)
-        or PERSISTENT_INPUT_CLEAR_PATTERN.search(raw_goal)
-        or graph.risk_actions
-        or not LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN.search(raw_goal)
-        or not _observed_unique_nonempty_input(observation)
-    ):
-        return graph
-
-    canonical_targets = tuple(
-        item
-        for item in graph.subgoals
-        if item.status in {"pending", "active"}
-        and not item.completion_evidence
-        and not item.risk_action_ids
-        and item.external_impact == "navigation_only"
-        and _state_description_binds_canonical_input_text(
-            (item.objective, *item.constraints, *item.completion_conditions),
-            input_text,
-        )
-    )
-    if len(canonical_targets) != 1:
-        return graph
-    target = canonical_targets[0]
-
-    clear_candidates = tuple(
-        item
-        for item in graph.subgoals
-        if item.subgoal_id != target.subgoal_id
-        and item.status in {"pending", "active"}
-        and not item.completion_evidence
-        and not item.risk_action_ids
-        and item.external_impact == "navigation_only"
-        and CONCRETE_LOCAL_INPUT_CLEAR_PATTERN.search(
-            "；".join((item.objective, *item.completion_conditions))
-        )
-        and not PERSISTENT_INPUT_CLEAR_PATTERN.search(
-            "；".join((item.objective, *item.constraints, *item.completion_conditions))
-        )
-    )
-    if len(clear_candidates) != 1:
-        return graph
-    clear = clear_candidates[0]
-
-    direct_predecessor = clear.subgoal_id in target.depends_on
-    same_frontier = (
-        clear.status == "active"
-        and target.status == "pending"
-        and graph.active_subgoal_id == clear.subgoal_id
-        and target.depends_on == clear.depends_on
-    )
-    dependents = tuple(
-        item.subgoal_id
-        for item in graph.subgoals
-        if clear.subgoal_id in item.depends_on
-    )
-    if (
-        not (direct_predecessor or same_frontier)
-        or any(item != target.subgoal_id for item in dependents)
-    ):
-        return graph
-
-    replacement_dependencies: list[str] = []
-    for dependency_id in target.depends_on:
-        values = (
-            clear.depends_on
-            if dependency_id == clear.subgoal_id
-            else (dependency_id,)
-        )
-        for value in values:
-            if value not in replacement_dependencies:
-                replacement_dependencies.append(value)
-    replacement = replace(
-        target,
-        status=(
-            "active"
-            if graph.active_subgoal_id == clear.subgoal_id
-            else target.status
-        ),
-        depends_on=tuple(replacement_dependencies),
-        constraints=tuple(dict.fromkeys((*clear.constraints, *target.constraints))),
-    )
-    return replace(
-        graph,
-        subgoals=tuple(
-            replacement if item.subgoal_id == target.subgoal_id else item
-            for item in graph.subgoals
-            if item.subgoal_id != clear.subgoal_id
-        ),
-        active_subgoal_id=(
-            target.subgoal_id
-            if graph.active_subgoal_id == clear.subgoal_id
-            else graph.active_subgoal_id
-        ),
-    )
 
 
 def _normalize_explicit_target_surface(
@@ -2742,261 +1653,73 @@ def _normalize_unique_active_frontier(graph: DynamicTaskGraph) -> DynamicTaskGra
     )
 
 
-def _normalize_initial_confirmation_status(
-    graph: DynamicTaskGraph,
-) -> DynamicTaskGraph:
-    """Promote a fully risk-bound active node to the mandatory confirmation gate."""
+def _planner_transport_snapshot(graph: DynamicTaskGraph) -> dict[str, Any]:
+    """Serialize only the new typed planner transport.
 
-    if graph.status not in {"ready", "running"}:
-        return graph
-    active = tuple(item for item in graph.subgoals if item.status == "active")
-    if len(active) != 1 or graph.active_subgoal_id != active[0].subgoal_id:
-        return graph
-    current = active[0]
-    declared_risk_ids = {risk.risk_id for risk in graph.risk_actions}
-    model_confirmation_ids = {
-        risk.risk_id
-        for risk in graph.risk_actions
-        if risk.confirmation_required
+    Runtime risk projections exist for current controller/Qwen compatibility,
+    but they are intentionally absent here and can never flow back into a
+    DeepSeek plan or replan.
+    """
+
+    graph.validate()
+    effect_intents = []
+    for effect in graph.risk_actions:
+        if not effect.effect_kind:
+            raise TaskGraphError(
+                "旧风险任务图不能进入正式重规划；请从用户原始目标创建新会话。"
+            )
+        effect_intents.append(
+            {
+                "effect_id": effect.risk_id,
+                "kind": effect.effect_kind,
+                "target_entity_roles": list(effect.target_roles),
+                "payload_entity_roles": list(effect.payload_roles),
+                "source_subgoal_ids": list(effect.subgoal_ids),
+                "expected_results": list(effect.expected_result_texts),
+            }
+        )
+    return {
+        "status": (
+            "running"
+            if graph.status == "awaiting_confirmation"
+            else graph.status
+        ),
+        "goal": {
+            "objective": graph.goal.objective,
+            "target_apps": [asdict(item) for item in graph.goal.target_apps],
+            "entities": dict(graph.goal.entities),
+        },
+        "constraints": list(graph.constraints),
+        "completion_conditions": [
+            {
+                "condition_id": item.condition_id,
+                "description": item.description,
+                "evidence_required": list(item.evidence_required),
+                "satisfied": item.satisfied,
+                "evidence": list(item.evidence),
+            }
+            for item in graph.completion_conditions
+        ],
+        "effect_intents": effect_intents,
+        "subgoals": [
+            {
+                "subgoal_id": item.subgoal_id,
+                "objective": item.objective,
+                "status": item.status,
+                "depends_on": list(item.depends_on),
+                "constraints": list(item.constraints),
+                "completion_conditions": list(item.completion_conditions),
+                "completion_evidence": list(item.completion_evidence),
+                "effect_ids": list(item.risk_action_ids),
+                "execution_class": _EXECUTION_CLASS_BY_RUNTIME_IMPACT[
+                    item.external_impact
+                ],
+            }
+            for item in graph.subgoals
+        ],
+        "active_subgoal_id": graph.active_subgoal_id,
+        "clarification_questions": list(graph.clarification_questions),
     }
-    if (
-        current.external_impact not in {"external_state", "unknown"}
-        or not current.risk_action_ids
-        or not set(current.risk_action_ids) <= declared_risk_ids
-        or not set(current.risk_action_ids).intersection(model_confirmation_ids)
-    ):
-        return graph
-    return replace(graph, status="awaiting_confirmation")
-
-
-def _explicitly_denies_external_effect(value: str) -> bool:
-    normalized = "".join(str(value or "").strip().lower().split())
-    return bool(
-        re.search(
-            r"(?:(?:无|没有|不涉及|不会产生|不得产生|禁止产生|不改变)(?:任何)?"
-            r"(?:账号或)?(?:外部)?(?:状态)?"
-            r"(?:影响|变更|变化)|不影响(?:账号数据|外部系统|外部状态))",
-            normalized,
-        )
-    )
-
-
-def _risk_effect_action_anchors(*values: str) -> frozenset[str]:
-    anchors = {
-        match.group(0).casefold()
-        for value in values
-        for match in RISK_EFFECT_ACTION_PATTERN.finditer(str(value or ""))
-    }
-    if any(
-        CONTACT_SELECTION_ACTION_PATTERN.search(str(value or ""))
-        for value in values
-    ):
-        anchors.add(CONTACT_SELECTION_ANCHOR)
-    return frozenset(anchors)
-
-
-def _positive_effect_clauses(value: str) -> tuple[str, ...]:
-    return tuple(
-        clause.strip()
-        for clause in re.split(r"[，,。；;\r\n]+", str(value or ""))
-        if clause.strip()
-        and not DIRECT_PROHIBITION_CLAUSE_PATTERN.search(clause)
-    )
-
-
-def _text_directly_negates_action_anchor(value: str, anchor: str) -> bool:
-    pattern = (
-        CONTACT_SELECTION_ACTION_PATTERN
-        if anchor == CONTACT_SELECTION_ANCHOR
-        else re.compile(re.escape(anchor), re.IGNORECASE)
-    )
-    for match in pattern.finditer(str(value or "")):
-        prefix = str(value or "")[: match.start()].rstrip().lower()
-        if (
-            DIRECT_EFFECT_NEGATION_PATTERN.search(prefix)
-            or COORDINATED_EFFECT_NEGATION_PATTERN.search(prefix)
-            or NEGATED_LOW_LEVEL_INSTRUCTION_PREFIX_PATTERN.search(prefix)
-        ):
-            return True
-    return False
-
-
-def _is_read_only_risk_control_state(
-    objective: str,
-    constraints: tuple[str, ...],
-    completion_conditions: tuple[str, ...],
-) -> bool:
-    positive_text = "；".join((objective, *completion_conditions))
-    anchors = _risk_effect_action_anchors(positive_text)
-    if not anchors or not READ_ONLY_RISK_CONTROL_STATE_PATTERN.search(positive_text):
-        return False
-    residual_positive_effects = READ_ONLY_RISK_CONTROL_STATE_PATTERN.sub(
-        "",
-        positive_text,
-    )
-    if _infer_external_risk_types(residual_positive_effects):
-        return False
-    return all(
-        any(_text_directly_negates_action_anchor(item, anchor) for item in constraints)
-        for anchor in anchors
-    )
-
-
-def _state_description_binds_canonical_input_text(
-    values: tuple[str, ...],
-    input_text: str,
-) -> bool:
-    """Prove an exact canonical literal belongs to a formal input-state clause.
-
-    Descriptive words between a state relation and the literal are prose, not
-    alternate candidate values.  The task graph's canonical ``input_text`` is
-    therefore the only value authority.  We only check that this exact literal
-    occurs in the same punctuation-delimited clause as an existing formal input
-    carrier state; we never extract or infer a replacement value from prose.
-    """
-
-    literal = str(input_text or "").strip()
-    if not literal:
-        return False
-    escaped = re.escape(literal)
-    continuation = r"[A-Za-z0-9_.-]"
-    prefix = rf"(?<!{continuation})" if re.match(continuation, literal[0]) else ""
-    suffix = rf"(?!{continuation})" if re.match(continuation, literal[-1]) else ""
-    literal_pattern = re.compile(prefix + escaped + suffix)
-    clause_boundary = re.compile(r"[。；;\r\n]+")
-    for value in values:
-        text = str(value or "")
-        for literal_match in literal_pattern.finditer(text):
-            # The canonical literal may itself contain punctuation.  Locate the
-            # enclosing clause around the complete literal match instead of
-            # splitting through the literal and losing exact-value authority.
-            before = tuple(clause_boundary.finditer(text, 0, literal_match.start()))
-            clause_start = before[-1].end() if before else 0
-            after = clause_boundary.search(text, literal_match.end())
-            clause_end = after.start() if after else len(text)
-            if LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(
-                text[clause_start:clause_end]
-            ):
-                return True
-    return False
-
-
-def _is_local_input_preparation_state(
-    *values: str,
-    input_text: Any,
-) -> bool:
-    """Recognize only reversible state of a formal local input carrier.
-
-    The canonical literal proves that the graph contains a concrete input task;
-    it is deliberately not treated as permission to type.  Positive clauses may
-    describe only visibility, editability, or focus.  Any concrete external
-    effect (send/save/delete/account/transaction and so on) rejects the proof.
-    """
-
-    if not isinstance(input_text, str) or not input_text.strip():
-        return False
-    texts = tuple(str(value or "") for value in values if str(value or "").strip())
-    if not texts or not LOCAL_INPUT_PREPARATION_STATE_PATTERN.search("；".join(texts)):
-        return False
-    inferred = frozenset().union(
-        *(
-            _infer_external_risk_types(clause)
-            for value in texts
-            for clause in _positive_effect_clauses(value)
-        )
-    )
-    return inferred <= {"unknown_external_effect"}
-
-
-def _is_explicitly_unsubmitted_local_input(
-    *values: str,
-    input_text: Any,
-) -> bool:
-    target_text = input_text if isinstance(input_text, str) else ""
-    if not target_text or not target_text.strip():
-        return False
-    texts = tuple(str(value or "") for value in values if str(value or "").strip())
-    combined = "；".join(texts)
-    risk_texts = tuple(
-        LOCAL_EDITABLE_CARRIER_ADJECTIVE_PATTERN.sub("", value)
-        for value in texts
-    )
-    inferred = frozenset().union(
-        *(
-            _infer_external_risk_types(clause)
-            for value in risk_texts
-            for clause in _positive_effect_clauses(value)
-        )
-    )
-    return bool(
-        _state_description_binds_canonical_input_text(texts, target_text)
-        and LOCAL_INPUT_EFFECT_BOUNDARY_PATTERN.search(combined)
-        # Generic wording such as "修改输入框文字" currently produces only
-        # unknown_external_effect.  The explicit unsubmitted-input boundary is
-        # enough to resolve that ambiguity, but never suppress a concrete
-        # communication, publication, account, data, or transaction effect.
-        and inferred <= {"unknown_external_effect"}
-    )
-
-
-def _is_reversible_local_keyboard_mode(*values: str) -> bool:
-    """Recognize only an unsubmitted, device-local IME mode state.
-
-    The exception is deliberately narrower than general settings changes. Any
-    concrete account, communication, publication, data, permission, or
-    transaction effect keeps the scope external and fail-closed.
-    """
-
-    texts = tuple(str(value or "") for value in values if str(value or "").strip())
-    if not texts:
-        return False
-    combined = "；".join(texts)
-    inferred = frozenset().union(
-        *(_infer_external_risk_types(value) for value in texts)
-    )
-    return bool(
-        LOCAL_KEYBOARD_MODE_PATTERN.search(combined)
-        and not PERSISTENT_KEYBOARD_SETTING_PATTERN.search(combined)
-        and inferred <= {"unknown_external_effect"}
-    )
-
-
-def _retryable_replan_output_error(error: TaskGraphError) -> bool:
-    text = str(error)
-    return any(fragment in text for fragment in REPAIRABLE_REPLAN_ERROR_FRAGMENTS)
-
-
-def _normalize_blocked_mismatch_clarification(
-    candidate: DynamicTaskGraph,
-    *,
-    trigger: str,
-    error: TaskGraphError,
-) -> DynamicTaskGraph | None:
-    """Replace only a blocked model request for another low-level action.
-
-    The result remains blocked and asks for a high-level user choice.  It never
-    grants confirmation, creates a visual action, or makes an invalid active
-    graph executable.
-    """
-
-    if trigger not in {"action_mismatch", "action_result_mismatch"}:
-        return None
-    if candidate.status != "blocked" or candidate.active_subgoal_id is not None:
-        return None
-    if "clarification_questions" not in str(error):
-        return None
-    if not candidate.clarification_questions:
-        return None
-    for question in candidate.clarification_questions:
-        try:
-            _reject_low_level_instruction(question, "clarification_questions")
-        except TaskGraphError:
-            continue
-        return None
-    return replace(
-        candidate,
-        clarification_questions=(MISMATCH_BLOCKED_CLARIFICATION,),
-    )
 
 
 def _replan_prompt(
@@ -3011,8 +1734,8 @@ def _replan_prompt(
 完整高层任务图快照。可以保留用户的自然点击、滑动、输入、长按和拖动意图，但不能输出
 具体控件选择、坐标、按键码、Shell、ADB、main.exe 或其他可直接驱动设备的细节。
 
-当前任务图：
-{json.dumps(graph.to_dict(), ensure_ascii=False)}
+ 当前正式任务计划（仅新 typed transport，不含运行时风险投影视图）：
+ {json.dumps(_planner_transport_snapshot(graph), ensure_ascii=False)}
 
 重规划触发：{json.dumps(trigger, ensure_ascii=False)}
 重规划原因：{json.dumps(reason, ensure_ascii=False)}
@@ -3028,11 +1751,12 @@ def _replan_prompt(
 4. 新宣称 completed/satisfied 时，如果 visual_claim_evidence_refs 非空，视觉证据必须逐字复制
    其中的 ref_id；只有旧观察没有 typed visual refs 时才允许逐字复制 visible_evidence。
    历史完成节点继续保留自己的历史证据。
-5. 既有 risk_actions 必须保留，不能降低风险等级或取消 confirmation_required。
-6. external_state 和 unknown 子目标都必须关联风险；成为 active 时必须返回
-   awaiting_confirmation。每轮只选择一个 active 高层子目标；不要提出下一视觉动作。
-7. 既有 external_state 不能降级，unknown 没有新的可靠证据时不能改成 read_only 或
-   navigation_only；read_only/navigation_only 必须分别有纯观察或纯导航依据。
+5. 既有 effect_intents 必须原样保留，除非其 source subgoal 已由可信视觉结果完成；不得输出风险等级、
+   confirmation_required、risk_actions、risk_action_ids 或 external_impact。
+6. effect 子目标必须引用 typed effect_intents；unknown 不得成为 active。确认状态由本地策略生成，模型
+   不得返回 awaiting_confirmation。每轮只选择一个 active 高层子目标；不要提出下一视觉动作。
+7. 既有 effect 不能降级，unknown 没有新的可靠证据时不能改成 observe 或 navigate；observe/navigate
+   必须分别有纯观察或纯导航依据。
    trigger=observation_changed 且当前 read_only 结果无法由新画面直接证明时，如果目标页面或区域
    尚未出现，应把未完成路径改写为先达到 navigation_only 的目标页面可见状态，再保留后续
    read_only 结果核对；可以保留用户原始导航动作意图，但不得写入具体控件或坐标，也不得凭空
@@ -3045,14 +1769,14 @@ def _replan_prompt(
 10. visual_claim_evidence_refs[].fact 仅用于理解当前事实，输出证据必须选择对应 ref_id，不能复制 fact。
     completion_conditions[].evidence 只能选择 visual_claim_evidence_refs[].ref_id；旧观察没有该数组时
     才兼容 visible_evidence 完整短字符串。subgoals[].completion_evidence 也遵守同一规则；唯一例外是当前严格绑定的
-    navigation_only 旧子目标可选择 controller_transition_evidence_refs[].ref_id。每个数组最多3项，
+     navigate 旧子目标可选择 controller_transition_evidence_refs[].ref_id。每个数组最多3项，
     不得拼接多项、不得复制整个观察对象或 JSON。没有匹配证据时保持未完成或阻塞。
 11. verified_action_transition 是本地控制器生成、严格绑定上一 revision/子目标/决策/动作和
     前后观察的动作回执；它与 visible_evidence 分离，不能当作页面可见事实或全局完成证据。
     outcome=matched 只证明该受控动作已执行并获得匹配验证，不代表任意子目标自动完成。
 12. trigger=action_result_matched 时，可以结合回执和当前 visual claim 完成其严格绑定的
-    navigation_only 旧子目标，或推进到不同的剩余状态目标；若证据不足，应明确重写剩余目标
-    或阻塞。不得让同一活动子目标原样存活后再次请求等价动作。external_state/unknown 不能
+     navigate 旧子目标，或推进到不同的剩余状态目标；若证据不足，应明确重写剩余目标
+     或阻塞。不得让同一活动子目标原样存活后再次请求等价动作。effect/unknown 不能
     仅凭回执完成，仍必须由当前 visual claim 证明真实外部结果。
     如果旧子目标要求目标页面/结果区域可见，而新画面只出现了具名入口或分类项，绝不能完成旧
     子目标；应把未完成路径修订为先达到“具名入口可见”的 navigation_only 状态，再保留目标页面
@@ -3068,78 +1792,10 @@ def _replan_prompt(
 """
 
 
-def _repair_replan_prompt(
-    graph: DynamicTaskGraph,
-    observation: ObservedState,
-    *,
-    trigger: str,
-    reason: str,
-    invalid_response: str,
-    validation_error: str,
-) -> str:
-    return f"""
-你是通用手机视觉操作 Agent 的 DeepSeek 高层任务图重规划器。上一次修订 JSON 未通过
-本地协议、安全或证据校验。请根据原任务图、新观察和校验错误重新生成一份完整修订图。
-这只是唯一一次格式与高层协议修复机会；不要解释、不要局部补丁。可以保留自然点击、滑动、
-输入、长按和拖动意图，但不得输出具体控件选择、坐标、Shell、系统命令或任何 App 专用固定流程。
-
-当前任务图：
-{json.dumps(graph.to_dict(), ensure_ascii=False)}
-
-重规划触发：{json.dumps(trigger, ensure_ascii=False)}
-重规划原因：{json.dumps(reason, ensure_ascii=False)}
-新的只读观察：
-{json.dumps(observation.to_dict(), ensure_ascii=False)}
-
-本地校验错误：{json.dumps(validation_error, ensure_ascii=False)}
-上一次无效 JSON：
-{invalid_response}
-
-{_schema_prompt()}
-
-修复规则：
-1. goal 必须逐字段保持不变；constraints 必须保留已有约束，可追加新发现的约束。
-2. 已 completed 的子目标和已满足的全局条件不得撤销；既有风险不得删除、降级或取消确认。
-3. visual_claim_evidence_refs 非空时只能逐字依据其 ref_id 新增视觉完成证据；fact 与
-   grounded_visual_facts 只用于理解和身份复核，不能复制成完成 evidence。旧观察没有 typed refs 时
-   才兼容逐字 visible_evidence 或 grounded_visual_facts；
-   动作结果不匹配时不得假称预期结果已完成。
-4. 可替换、跳过或新增尚未完成的高层子目标，也可保留自然动作意图；但不能描述具体按钮索引、
-   坐标、按键码或其他可直接驱动设备的执行细节。
-5. external_state 或 unknown 必须关联风险；成为 active 时必须等待本地确认。
-6. 仍需通过全部本地校验；不要试图改写任务身份、设备、revision 或协议字段。
-7. 只返回符合结构的完整 JSON 对象，不要 Markdown。
-8. 当 trigger=subgoal_completed 且原活动子目标是 read_only 时，不得继续返回 read_only 活动
-   子目标；只能依据 visual_claim_evidence_refs[].ref_id 完成、阻塞，或推进到后续非只读子目标。
-9. 全局完成条件和子目标视觉证据只能逐字选择 visual_claim_evidence_refs[].ref_id；旧观察没有
-   typed refs 时才兼容 visible_evidence 或 grounded_visual_facts；
-   严格绑定的 navigation_only 旧子目标可选择 controller_transition_evidence_refs[].ref_id。
-   每个数组最多3项；禁止拼接多项或复制整个观察对象/JSON。
-10. verified_action_transition 是本地控制器回执而不是视觉证据；只能与当前
-    visible_evidence 共同解释其严格绑定的上一 navigation_only 子目标。不能用它伪造
-    external_state/unknown 完成，也不能在 matched 后原样保留旧子目标再提出等价动作。
-11. action_result_mismatch 不得完成回执绑定的旧子目标；revision 必须严格增加 1。
-12. 若校验错误指出“命名页面完成声明缺少结构化画面身份锚点”，不得重复该声明，
-   也不得将 summary/visible_evidence 的自由文本当作身份。只能使用 grounded_visual_facts
-   里的 screen_id、overlay 或元素 label/meaning。唯一例外是严格绑定上一 active
-   navigation_only 子目标的 controller_transition_evidence_refs：它只可完成该导航转换，
-   不能证明后续页面内容、全局视觉条件或外部结果。如仍无支持，应跳过或替换尚未完成的
-   具名页面节点，改为基于当前结构化可见元素的高层状态。不得改写用户最终目标。
-13. 若校验错误指出子目标使用了当前观察之外的完成证据，必须删除该伪证据；不得把
-    subgoal_id、condition_id、目标名称或自行概括的句子当作证据。只能逐字选择
-    visual_claim_evidence_refs[].ref_id，或为严格绑定的上一 navigation_only 子目标选择
-    controller_transition_evidence_refs[].ref_id；没有合格证据就保持未完成、替换路径或阻塞。
-14. 若校验错误指出“matched controller_transition 未完成其绑定的 navigation_only 子目标”，
-    必须把该严格绑定的上一活动子目标标为 completed，并逐字使用对应
-    controller_transition_evidence_refs[].ref_id；不得让该旧子目标继续 active，不得把回执用于
-    其他子目标、全局条件或 external_state/unknown，也不得自行生成第二动作。
-"""
-
-
 def _schema_prompt() -> str:
     return """JSON 只允许以下结构：
 {
-  "status":"ready|running|awaiting_confirmation|completed|blocked",
+  "status":"ready|running|completed|blocked",
   "goal":{
     "objective":"用户目标，可保留点击、滑动、输入、长按、拖动等自然动作意图，但不得含坐标或系统命令",
     "target_apps":[{"app_id":"稳定小写英文ID","app_name":"App名称；设备或当前表面任务可为空数组"}],
@@ -3153,14 +1809,13 @@ def _schema_prompt() -> str:
     "satisfied":false,
     "evidence":[]
   }],
-  "risk_actions":[{
-    "risk_id":"小写稳定ID",
-    "description":"可能改变外部状态的事项",
-    "external_effect":"对账号、数据、交易或他人的影响",
-    "risk_type":"message_or_communication|content_publication|account_relationship_change|membership_change|permission_role_change|data_mutation|data_deletion|transaction_or_payment|account_or_permission_change|unknown_external_effect",
-    "risk_level":"low|medium|high|critical",
-    "subgoal_ids":["关联子目标ID"],
-    "confirmation_required":true
+  "effect_intents":[{
+    "effect_id":"小写稳定ID",
+    "kind":"send_message|publish_content|relationship_change|membership_change|data_mutation|authentication|financial_transaction|sensitive_permission_change|irreversible_account_deletion|irreversible_data_deletion",
+    "target_entity_roles":["goal.entities 中作为效果对象的键"],
+    "payload_entity_roles":["goal.entities 中作为效果正文或值的键"],
+    "source_subgoal_ids":["实际产生该效果的子目标ID"],
+    "expected_results":["逐字复制绑定子目标中的正向完成条件"]
   }],
   "subgoals":[{
     "subgoal_id":"小写稳定ID",
@@ -3170,8 +1825,8 @@ def _schema_prompt() -> str:
     "constraints":["本子目标约束"],
     "completion_conditions":["本子目标完成条件"],
     "completion_evidence":[],
-    "risk_action_ids":["关联风险ID"],
-    "external_impact":"read_only|navigation_only|external_state|unknown"
+    "effect_ids":["本子目标实际产生的 effect_id；纯观察或导航为空"],
+    "execution_class":"observe|navigate|effect|unknown"
   }],
   "active_subgoal_id":"活动子目标ID或null",
   "clarification_questions":["阻塞时需要用户补充的信息"]
@@ -3193,7 +1848,7 @@ def _graph_from_payload(
             "goal",
             "constraints",
             "completion_conditions",
-            "risk_actions",
+            "effect_intents",
             "subgoals",
             "active_subgoal_id",
             "clarification_questions",
@@ -3220,6 +1875,39 @@ def _graph_from_payload(
     )
     active_value = payload.get("active_subgoal_id")
     active_subgoal_id = None if active_value is None else str(active_value).strip()
+    raw_subgoals = tuple(
+        _subgoal_from_payload(item)
+        for item in _expect_list(payload.get("subgoals"), "subgoals")
+    )
+    subgoals_by_id = {
+        item.subgoal_id: item for item in raw_subgoals
+    }
+    if len(subgoals_by_id) != len(raw_subgoals):
+        raise TaskGraphError("子目标 ID 重复。")
+    effects = tuple(
+        _effect_from_payload(item, subgoals=subgoals_by_id, entities=entities)
+        for item in _expect_list(payload.get("effect_intents"), "effect_intents")
+    )
+    effects_by_id = {item.risk_id: item for item in effects}
+    if len(effects_by_id) != len(effects):
+        raise TaskGraphError("effect_intents.effect_id 重复。")
+    for subgoal in raw_subgoals:
+        missing = set(subgoal.risk_action_ids) - set(effects_by_id)
+        if missing:
+            raise TaskGraphError(
+                f"子目标 {subgoal.subgoal_id} 引用不存在 effect："
+                + ", ".join(sorted(missing))
+            )
+        if subgoal.external_impact == "external_state" and not subgoal.risk_action_ids:
+            raise TaskGraphError(
+                f"effect 子目标必须引用至少一个 effect_intent：{subgoal.subgoal_id}"
+            )
+        if subgoal.external_impact != "external_state" and subgoal.risk_action_ids:
+            raise TaskGraphError(
+                f"非 effect 子目标不能引用 effect_intent：{subgoal.subgoal_id}"
+            )
+    if str(payload.get("status") or "").strip().lower() == "awaiting_confirmation":
+        raise TaskGraphError("模型不得决定 awaiting_confirmation；确认状态只由本地策略生成。")
     return DynamicTaskGraph(
         task_id=task_id,
         device_id=device_id,
@@ -3233,14 +1921,8 @@ def _graph_from_payload(
                 payload.get("completion_conditions"), "completion_conditions"
             )
         ),
-        risk_actions=tuple(
-            _risk_from_payload(item)
-            for item in _expect_list(payload.get("risk_actions"), "risk_actions")
-        ),
-        subgoals=tuple(
-            _subgoal_from_payload(item)
-            for item in _expect_list(payload.get("subgoals"), "subgoals")
-        ),
+        risk_actions=effects,
+        subgoals=raw_subgoals,
         active_subgoal_id=active_subgoal_id,
         clarification_questions=_text_tuple(
             payload.get("clarification_questions"), "clarification_questions"
@@ -3276,31 +1958,93 @@ def _condition_from_payload(value: Any) -> CompletionCondition:
     )
 
 
-def _risk_from_payload(value: Any) -> RiskAction:
-    item = _expect_dict(value, "risk_actions[]")
+def _effect_from_payload(
+    value: Any,
+    *,
+    subgoals: dict[str, Subgoal],
+    entities: dict[str, Any],
+) -> RiskAction:
+    item = _expect_dict(value, "effect_intents[]")
     _expect_keys(
         item,
         {
-            "risk_id",
-            "description",
-            "external_effect",
-            "risk_type",
-            "risk_level",
-            "subgoal_ids",
-            "confirmation_required",
+            "effect_id",
+            "kind",
+            "target_entity_roles",
+            "payload_entity_roles",
+            "source_subgoal_ids",
+            "expected_results",
         },
-        "risk_actions[]",
+        "effect_intents[]",
     )
+    effect_id = str(item.get("effect_id") or "").strip().lower()
+    _validate_id(effect_id, "effect_intents.effect_id")
+    kind = str(item.get("kind") or "").strip().lower()
+    if kind not in PLANNER_EFFECT_KINDS:
+        raise TaskGraphError(f"正式效果类型无效：{kind}")
+    source_subgoal_ids = _id_tuple(
+        item.get("source_subgoal_ids"),
+        "effect_intents.source_subgoal_ids",
+    )
+    missing_subgoals = set(source_subgoal_ids) - set(subgoals)
+    if missing_subgoals:
+        raise TaskGraphError(
+            "effect_intents 引用不存在子目标："
+            + ", ".join(sorted(missing_subgoals))
+        )
+    target_roles = _id_tuple(
+        item.get("target_entity_roles"),
+        "effect_intents.target_entity_roles",
+    )
+    payload_roles = _id_tuple(
+        item.get("payload_entity_roles"),
+        "effect_intents.payload_entity_roles",
+    )
+    available_roles = set(entities)
+    if isinstance(entities.get("recipients"), list):
+        available_roles.add("recipient")
+    if isinstance(entities.get("input_fields"), list):
+        available_roles.add("input_text")
+    missing_roles = (set(target_roles) | set(payload_roles)) - available_roles
+    if missing_roles:
+        raise TaskGraphError(
+            "effect_intents 引用不存在的 goal.entities 角色："
+            + ", ".join(sorted(missing_roles))
+        )
+    expected_results = _text_tuple(
+        item.get("expected_results"),
+        "effect_intents.expected_results",
+    )
+    allowed_results = {
+        condition
+        for subgoal_id in source_subgoal_ids
+        for condition in subgoals[subgoal_id].completion_conditions
+    }
+    if not expected_results or any(
+        result not in allowed_results for result in expected_results
+    ):
+        raise TaskGraphError(
+            "effect_intents.expected_results 必须逐字来自绑定子目标的正向完成条件。"
+        )
+    required_type = _RUNTIME_RISK_TYPE_BY_EFFECT_KIND[kind]
+    if any(
+        DIRECT_PROHIBITION_CLAUSE_PATTERN.search(result)
+        or NON_EFFECT_RESULT_PATTERN.search(result)
+        for result in expected_results
+    ):
+        raise TaskGraphError("禁止或未发生状态不能声明为 effect_intent。")
     return RiskAction(
-        risk_id=str(item.get("risk_id") or "").strip().lower(),
-        description=_require_text(item.get("description"), "risk_actions.description"),
-        external_effect=_require_text(
-            item.get("external_effect"), "risk_actions.external_effect"
-        ),
-        risk_type=str(item.get("risk_type") or "").strip().lower(),
-        risk_level=str(item.get("risk_level") or "").strip().lower(),
-        subgoal_ids=_id_tuple(item.get("subgoal_ids"), "risk_actions.subgoal_ids"),
-        confirmation_required=item.get("confirmation_required") is True,
+        risk_id=effect_id,
+        description=expected_results[0],
+        external_effect=expected_results[0],
+        risk_type=required_type,
+        risk_level="low",
+        subgoal_ids=source_subgoal_ids,
+        confirmation_required=False,
+        effect_kind=kind,
+        target_roles=target_roles,
+        payload_roles=payload_roles,
+        expected_result_texts=expected_results,
     )
 
 
@@ -3316,11 +2060,16 @@ def _subgoal_from_payload(value: Any) -> Subgoal:
             "constraints",
             "completion_conditions",
             "completion_evidence",
-            "risk_action_ids",
-            "external_impact",
+            "effect_ids",
+            "execution_class",
         },
         "subgoals[]",
     )
+    execution_class = str(item.get("execution_class") or "").strip().lower()
+    if execution_class not in PLANNER_EXECUTION_CLASSES:
+        raise TaskGraphError(
+            f"subgoals.execution_class 无效：{execution_class}"
+        )
     return Subgoal(
         subgoal_id=str(item.get("subgoal_id") or "").strip().lower(),
         objective=_require_text(item.get("objective"), "subgoals.objective"),
@@ -3333,10 +2082,8 @@ def _subgoal_from_payload(value: Any) -> Subgoal:
         completion_evidence=_text_tuple(
             item.get("completion_evidence"), "subgoals.completion_evidence"
         ),
-        risk_action_ids=_id_tuple(
-            item.get("risk_action_ids"), "subgoals.risk_action_ids"
-        ),
-        external_impact=str(item.get("external_impact") or "").strip().lower(),
+        risk_action_ids=_id_tuple(item.get("effect_ids"), "subgoals.effect_ids"),
+        external_impact=_RUNTIME_IMPACT_BY_EXECUTION_CLASS[execution_class],
     )
 
 
@@ -3758,120 +2505,6 @@ def _apply_verified_navigation_completion(
     )
 
 
-def _is_explicit_local_temporary_draft_clear(
-    graph: DynamicTaskGraph,
-    subgoal: Subgoal,
-) -> bool:
-    """Recognize only an explicitly local, reversible empty-draft result."""
-
-    if (
-        len(graph.goal.target_apps) != 1
-        or graph.goal.target_apps[0].app_id != "current_foreground"
-        or str(graph.goal.entities.get("input_text") or "").strip()
-    ):
-        return False
-    state_texts = (subgoal.objective, *subgoal.completion_conditions)
-    combined_state = "；".join(state_texts)
-    if (
-        not LOCAL_TEMPORARY_DRAFT_CLEAR_STATE_PATTERN.search(combined_state)
-        or PERSISTENT_DRAFT_STATE_PATTERN.search(combined_state)
-    ):
-        return False
-    boundary_texts = (
-        graph.raw_user_goal or graph.goal.objective,
-        graph.goal.objective,
-        *graph.constraints,
-        *subgoal.constraints,
-    )
-    if not any(_explicitly_denies_external_effect(item) for item in boundary_texts):
-        return False
-    positive = tuple(
-        clause
-        for value in (*boundary_texts, *state_texts)
-        for clause in _positive_effect_clauses(value)
-    )
-    return not any(_infer_external_risk_types(item) for item in positive)
-
-
-def _explicit_local_temporary_clear_audit_scopes(
-    graph: DynamicTaskGraph,
-) -> frozenset[str | None]:
-    ids = {
-        item.subgoal_id
-        for item in graph.subgoals
-        if _is_explicit_local_temporary_draft_clear(graph, item)
-    }
-    return frozenset({*ids, None} if ids else ())
-
-
-def _explicit_local_input_audit_scopes(
-    graph: DynamicTaskGraph,
-    source_groups: dict[str | None, list[AuditSource]],
-) -> set[str | None]:
-    """Bind canonical input text and global safety constraints to each subgoal."""
-
-    input_text = graph.goal.entities.get("input_text")
-    global_context = (
-        graph.raw_user_goal or graph.goal.objective,
-        graph.goal.objective,
-        *graph.constraints,
-    )
-    scopes: set[str | None] = set()
-    for subgoal in graph.subgoals:
-        group = source_groups.get(subgoal.subgoal_id, ())
-        group_texts = tuple(item.text for item in group)
-        if LOCAL_UNSUBMITTED_INPUT_STATE_PATTERN.search(
-            "；".join(group_texts)
-        ) and _is_explicitly_unsubmitted_local_input(
-            *global_context,
-            *group_texts,
-            input_text=input_text,
-        ):
-            scopes.add(subgoal.subgoal_id)
-    if scopes:
-        scopes.add(None)
-    return scopes
-
-
-def _structured_local_input_workflow_scopes(
-    graph: DynamicTaskGraph,
-    source_groups: dict[str | None, list[AuditSource]],
-) -> frozenset[str | None]:
-    """Extend a proven local input scope only along its dependency chain."""
-
-    if graph.risk_actions:
-        return frozenset()
-    direct_scopes = _explicit_local_input_audit_scopes(graph, source_groups)
-    direct_ids = {item for item in direct_scopes if item is not None}
-    if not direct_ids:
-        return frozenset()
-    subgoals = {item.subgoal_id: item for item in graph.subgoals}
-    ancestor_map = _dependency_ancestor_map(subgoals)
-    scopes: set[str | None] = set()
-    for subgoal in graph.subgoals:
-        group = source_groups.get(subgoal.subgoal_id, [])
-        if (
-            subgoal.external_impact not in {"read_only", "navigation_only"}
-            or subgoal.risk_action_ids
-            or not group
-            or any(_infer_external_risk_types(item.text) for item in group)
-        ):
-            continue
-        if any(
-            subgoal.subgoal_id == input_id
-            or input_id in ancestor_map[subgoal.subgoal_id]
-            or subgoal.subgoal_id in ancestor_map[input_id]
-            for input_id in direct_ids
-        ):
-            scopes.add(subgoal.subgoal_id)
-    if scopes == set(subgoals) and not any(
-        _infer_external_risk_types(item.text)
-        for item in source_groups.get(None, [])
-    ):
-        scopes.add(None)
-    return frozenset(scopes)
-
-
 def _canonicalize_literal_visible_evidence_clauses(
     previous: DynamicTaskGraph,
     candidate: DynamicTaskGraph,
@@ -4138,7 +2771,7 @@ def _validate_revision(
             )
 
 
-def _validate_external_impact_revision(
+def _validate_execution_class_revision(
     previous: DynamicTaskGraph,
     candidate: DynamicTaskGraph,
 ) -> None:
@@ -4150,7 +2783,7 @@ def _validate_external_impact_revision(
             continue
         if old.external_impact == "external_state" and new.external_impact != "external_state":
             raise TaskGraphError(
-                f"重规划不能降低既有 external_state 影响分类：{subgoal_id}"
+                f"重规划不能把既有 effect 子目标降级：{subgoal_id}"
             )
         if old.external_impact == "unknown" and new.external_impact in {
             "read_only",
@@ -4161,24 +2794,30 @@ def _validate_external_impact_revision(
             )
 
 
-def _validate_preserved_risk_ids(
+def _validate_preserved_effect_intents(
     previous: DynamicTaskGraph,
     candidate: DynamicTaskGraph,
 ) -> None:
-    previous_risks = {item.risk_id: item for item in previous.risk_actions}
-    candidate_risks = {item.risk_id: item for item in candidate.risk_actions}
-    missing = set(previous_risks) - set(candidate_risks)
+    previous_effects = {item.risk_id: item for item in previous.risk_actions}
+    candidate_effects = {item.risk_id: item for item in candidate.risk_actions}
+    missing = set(previous_effects) - set(candidate_effects)
     if missing:
         raise TaskGraphError(
-            "重规划不能删除既有风险：" + ", ".join(sorted(missing))
+            "重规划不能删除既有 EffectIntent：" + ", ".join(sorted(missing))
         )
-    for risk_id, previous_risk in previous_risks.items():
-        candidate_risk = candidate_risks[risk_id]
-        if candidate_risk.risk_type != previous_risk.risk_type:
-            raise TaskGraphError(f"重规划不能改换既有风险类别：{risk_id}")
-        # The model-supplied confirmation flag is transport-only.  The formal
-        # TaskSemanticIR policy is applied immediately after this structural
-        # preservation check and is compared in the full revision validator.
+    for effect_id, previous_effect in previous_effects.items():
+        candidate_effect = candidate_effects[effect_id]
+        if (
+            candidate_effect.effect_kind != previous_effect.effect_kind
+            or candidate_effect.target_roles != previous_effect.target_roles
+            or candidate_effect.payload_roles != previous_effect.payload_roles
+            or candidate_effect.subgoal_ids != previous_effect.subgoal_ids
+            or candidate_effect.expected_result_texts
+            != previous_effect.expected_result_texts
+        ):
+            raise TaskGraphError(
+                f"重规划不能改写既有 EffectIntent：{effect_id}"
+            )
 
 
 def _reject_dependency_cycles(subgoals: dict[str, Subgoal]) -> None:
@@ -4321,486 +2960,6 @@ def _reject_low_level_completion_evidence(value: str, path: str) -> None:
         _reject_low_level_instruction(value, path, allow_negated=True)
 
 
-def _describes_external_state_change(*values: str) -> bool:
-    return bool(_infer_external_risk_types(*values))
-
-
-def _infer_external_risk_types(*values: str) -> frozenset[str]:
-    inferred: set[str] = set()
-    patterns = _external_risk_patterns()
-    for value in values:
-        field_inferred: set[str] = set()
-        for risk_type, pattern in patterns.items():
-            if _has_unnegated_effect_match(pattern, value):
-                field_inferred.add(risk_type)
-        if (
-            _has_unnegated_effect_match(EXTERNAL_STATE_CHANGE_PATTERN, value)
-            and not field_inferred
-        ):
-            field_inferred.add("unknown_external_effect")
-        inferred.update(field_inferred)
-    return frozenset(inferred)
-
-
-def _is_bound_post_effect_verification(
-    subgoal: Subgoal,
-    *,
-    subgoals: dict[str, Subgoal],
-    risks: dict[str, RiskAction],
-) -> bool:
-    if (
-        subgoal.external_impact != "read_only"
-        or subgoal.risk_action_ids
-        or len(subgoal.depends_on) != 1
-    ):
-        return False
-    predecessor = subgoals.get(subgoal.depends_on[0])
-    if (
-        predecessor is None
-        or predecessor.external_impact not in {"external_state", "unknown"}
-        or not predecessor.risk_action_ids
-    ):
-        return False
-    predecessor_risk_types = {
-        risks[risk_id].risk_type
-        for risk_id in predecessor.risk_action_ids
-        if risk_id in risks
-    }
-    if not predecessor_risk_types:
-        return False
-    effect_texts = tuple(
-        value
-        for value in (
-            subgoal.objective,
-            *subgoal.constraints,
-            *subgoal.completion_conditions,
-        )
-        if _infer_external_risk_types(value)
-    )
-    if not effect_texts or any(
-        not POST_EFFECT_VERIFICATION_PATTERN.search(value)
-        for value in effect_texts
-    ):
-        return False
-    inferred_types = set(_infer_external_risk_types(*effect_texts))
-    concrete_types = inferred_types - {"unknown_external_effect"}
-    return concrete_types <= predecessor_risk_types
-
-
-def _external_risk_patterns() -> dict[str, re.Pattern[str]]:
-    return {
-        "message_or_communication": COMMUNICATION_EFFECT_PATTERN,
-        "account_relationship_change": ACCOUNT_RELATIONSHIP_EFFECT_PATTERN,
-        "membership_change": MEMBERSHIP_EFFECT_PATTERN,
-        "permission_role_change": PERMISSION_ROLE_EFFECT_PATTERN,
-        "content_publication": CONTENT_PUBLICATION_EFFECT_PATTERN,
-        "data_deletion": DATA_DELETION_EFFECT_PATTERN,
-        "data_mutation": DATA_MUTATION_EFFECT_PATTERN,
-        "transaction_or_payment": TRANSACTION_EFFECT_PATTERN,
-        "account_or_permission_change": ACCOUNT_PERMISSION_EFFECT_PATTERN,
-    }
-
-
-def _infer_directly_negated_risk_types(value: str) -> frozenset[str]:
-    negated: set[str] = set()
-    for risk_type, pattern in _external_risk_patterns().items():
-        for match in pattern.finditer(value):
-            prefix = value[: match.start()].rstrip().lower()
-            if (
-                DIRECT_EFFECT_NEGATION_PATTERN.search(prefix)
-                or COORDINATED_EFFECT_NEGATION_PATTERN.search(prefix)
-            ):
-                negated.add(risk_type)
-    return frozenset(negated)
-
-
-def _has_unnegated_effect_match(pattern: re.Pattern[str], value: str) -> bool:
-    for match in pattern.finditer(value):
-        prefix = value[: match.start()].rstrip().lower()
-        if (
-            DIRECT_EFFECT_NEGATION_PATTERN.search(prefix)
-            or COORDINATED_EFFECT_NEGATION_PATTERN.search(prefix)
-        ):
-            continue
-        return True
-    return False
-
-
-def _risk_audit_sources(graph: DynamicTaskGraph) -> tuple[AuditSource, ...]:
-    # Historical regression helper only.  The formal planner no longer imports or
-    # invokes the legacy free-text risk auditor; keep its dependency lazy so the
-    # production authority path cannot acquire that auditor by module import.
-    from deepseek_semantic_risk_audit import AuditSource
-
-    sources = [
-        AuditSource(
-            source_id="raw_goal",
-            source_kind="raw_goal",
-            text=graph.raw_user_goal or graph.goal.objective,
-        ),
-        AuditSource(
-            source_id="goal.objective",
-            source_kind="goal_objective",
-            text=graph.goal.objective,
-        ),
-    ]
-    sources.extend(
-        AuditSource(
-            source_id=f"constraints.{index}",
-            source_kind="goal_constraint",
-            text=text,
-        )
-        for index, text in enumerate(graph.constraints)
-    )
-    for condition in graph.completion_conditions:
-        sources.append(
-            AuditSource(
-                source_id=(
-                    f"completion_conditions.{condition.condition_id}.description"
-                ),
-                source_kind="goal_completion_condition",
-                text=condition.description,
-            )
-        )
-        sources.extend(
-            AuditSource(
-                source_id=(
-                    f"completion_conditions.{condition.condition_id}."
-                    f"evidence_required.{index}"
-                ),
-                source_kind="goal_completion_condition",
-                text=text,
-            )
-            for index, text in enumerate(condition.evidence_required)
-        )
-    for subgoal in graph.subgoals:
-        sources.append(
-            AuditSource(
-                source_id=f"subgoals.{subgoal.subgoal_id}.objective",
-                source_kind="subgoal_objective",
-                subgoal_id=subgoal.subgoal_id,
-                text=subgoal.objective,
-            )
-        )
-        sources.extend(
-            AuditSource(
-                source_id=f"subgoals.{subgoal.subgoal_id}.constraints.{index}",
-                source_kind="subgoal_constraint",
-                subgoal_id=subgoal.subgoal_id,
-                text=text,
-            )
-            for index, text in enumerate(subgoal.constraints)
-        )
-        sources.extend(
-            AuditSource(
-                source_id=(
-                    f"subgoals.{subgoal.subgoal_id}.completion_conditions.{index}"
-                ),
-                source_kind="subgoal_completion_condition",
-                subgoal_id=subgoal.subgoal_id,
-                text=text,
-            )
-            for index, text in enumerate(subgoal.completion_conditions)
-        )
-    return tuple(sources)
-
-
-def _apply_local_risk_supplements(
-    report: SemanticRiskAuditReport,
-    sources: tuple[AuditSource, ...],
-    *,
-    graph: DynamicTaskGraph | None = None,
-) -> SemanticRiskAuditReport:
-    source_map = {item.source_id: item for item in sources}
-    source_groups: dict[str | None, list[AuditSource]] = {}
-    for source in sources:
-        source_groups.setdefault(source.subgoal_id, []).append(source)
-    transient_navigation_scopes = {
-        scope_id
-        for scope_id, group in source_groups.items()
-        if any(LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(item.text) for item in group)
-        and not any(_infer_external_risk_types(item.text) for item in group)
-    }
-    structured_navigation_scopes = (
-        _structured_reversible_navigation_scopes(graph, source_groups)
-        if graph is not None
-        else frozenset()
-    )
-    local_literal_action_scopes = (
-        _structured_local_literal_action_scopes(graph, source_groups)
-        if graph is not None
-        else frozenset()
-    )
-    local_input_scopes = (
-        _explicit_local_input_audit_scopes(graph, source_groups)
-        if graph is not None
-        else set()
-    )
-    local_input_workflow_scopes = (
-        _structured_local_input_workflow_scopes(graph, source_groups)
-        if graph is not None
-        else frozenset()
-    )
-    local_temporary_clear_scopes = (
-        _explicit_local_temporary_clear_audit_scopes(graph)
-        if graph is not None
-        else frozenset()
-    )
-    read_only_risk_control_scopes = (
-        {
-            subgoal.subgoal_id
-            for subgoal in graph.subgoals
-            if subgoal.external_impact == "read_only"
-            and not subgoal.risk_action_ids
-            and _is_read_only_risk_control_state(
-                subgoal.objective,
-                subgoal.constraints,
-                subgoal.completion_conditions,
-            )
-        }
-        if graph is not None
-        else set()
-    )
-    local_input_graph_is_risk_free = graph is None or not graph.risk_actions
-    current_foreground_keyboard_scope = bool(
-        graph is not None
-        and len(graph.goal.target_apps) == 1
-        and graph.goal.target_apps[0].app_id == "current_foreground"
-        and not graph.risk_actions
-    )
-    local_keyboard_mode_scopes = (
-        {
-            scope_id
-            for scope_id, group in source_groups.items()
-            if _is_reversible_local_keyboard_mode(*(item.text for item in group))
-            and (
-                scope_id is None
-                or any(
-                    subgoal.subgoal_id == scope_id
-                    and subgoal.external_impact == "navigation_only"
-                    and not subgoal.risk_action_ids
-                    for subgoal in graph.subgoals
-                )
-            )
-        }
-        if current_foreground_keyboard_scope
-        else set()
-    )
-    declared_graph_risk_types = (
-        {item.risk_type for item in graph.risk_actions}
-        if graph is not None
-        else set()
-    )
-    assessments = []
-    for assessment in report.assessments:
-        source = source_map[assessment.source_id]
-        scope_is_local_input = assessment.subgoal_id in local_input_scopes
-        if assessment.subgoal_id is None and None in local_input_scopes:
-            scope_is_local_input = True
-        scope_is_local_keyboard_mode = (
-            assessment.subgoal_id in local_keyboard_mode_scopes
-        )
-        if assessment.subgoal_id is None and None in local_keyboard_mode_scopes:
-            scope_is_local_keyboard_mode = True
-        is_negated_constraint = source.source_kind in {
-            "goal_constraint",
-            "subgoal_constraint",
-        } and source.text.strip().lower().startswith(
-            ("不要", "不得", "禁止", "不能", "避免", "do not", "never")
-        )
-        inferred = (
-            frozenset()
-            if is_negated_constraint
-            else _infer_external_risk_types(source.text)
-        )
-        if (
-            assessment.subgoal_id is None
-            and source.source_kind == "goal_completion_condition"
-            and inferred == {"unknown_external_effect"}
-            and POST_EFFECT_VERIFICATION_PATTERN.search(source.text)
-            and len(declared_graph_risk_types) == 1
-        ):
-            bound_risk_types = tuple(sorted(declared_graph_risk_types))
-            assessment = replace(
-                assessment,
-                external_impact="external_state",
-                risk_types=bound_risk_types,
-                reason=(
-                    assessment.reason
-                    + "；本地校验将纯观察型后验完成证据绑定到全图唯一已声明风险"
-                ),
-            )
-            inferred = frozenset(bound_risk_types)
-        negated_types = _infer_directly_negated_risk_types(source.text)
-        model_types = frozenset(assessment.risk_types)
-        if assessment.subgoal_id in read_only_risk_control_scopes:
-            assessment = replace(
-                assessment,
-                external_impact="read_only",
-                risk_types=(),
-                reason=(
-                    assessment.reason
-                    + "；本地校验确认这里只核对被明确禁止触发的风险控件可见状态"
-                ),
-            )
-            model_types = frozenset()
-        if (
-            assessment.external_impact == "external_state"
-            and model_types
-            and model_types <= negated_types
-            and not inferred
-        ):
-            corrected_impact = (
-                "navigation_only"
-                if SAFE_NAVIGATION_SEMANTIC_PATTERN.search(source.text)
-                else "read_only"
-            )
-            assessment = replace(
-                assessment,
-                external_impact=corrected_impact,
-                risk_types=(),
-                reason=(
-                    assessment.reason
-                    + "；本地逐匹配否定校验确认该风险类型仅以直接否定形式出现"
-                ),
-            )
-        if (
-            assessment.external_impact in {"external_state", "unknown"}
-            and scope_is_local_input
-            and local_input_graph_is_risk_free
-        ):
-            assessment = replace(
-                assessment,
-                external_impact="navigation_only",
-                risk_types=(),
-                reason=(
-                    assessment.reason
-                    + "；本地校验确认只改变未提交输入框临时文字且相关提交效果被直接禁止"
-                ),
-            )
-        if (
-            assessment.external_impact in {"external_state", "unknown"}
-            and assessment.subgoal_id in local_temporary_clear_scopes
-            and not inferred
-        ):
-            assessment = replace(
-                assessment,
-                external_impact="navigation_only",
-                risk_types=(),
-                reason=(
-                    assessment.reason
-                    + "；本地校验确认仅把当前唯一未提交临时草稿恢复为空白且禁止任何外部效果"
-                ),
-            )
-        if (
-            assessment.external_impact in {"external_state", "unknown"}
-            and model_types <= {"unknown_external_effect", "data_mutation"}
-            and inferred <= {"unknown_external_effect"}
-            and assessment.subgoal_id in local_input_workflow_scopes
-        ):
-            expected_impact = next(
-                item.external_impact
-                for item in graph.subgoals
-                if item.subgoal_id == assessment.subgoal_id
-            )
-            assessment = replace(
-                assessment,
-                external_impact=expected_impact,
-                risk_types=(),
-                reason=(
-                    assessment.reason
-                    + "；本地一致性校验确认该节点只属于已证明未提交输入的同一依赖链"
-                ),
-            )
-        if (
-            assessment.external_impact in {"external_state", "unknown"}
-            and model_types <= {"unknown_external_effect", "data_mutation"}
-            and inferred <= {"unknown_external_effect"}
-            and scope_is_local_keyboard_mode
-        ):
-            assessment = replace(
-                assessment,
-                external_impact="navigation_only",
-                risk_types=(),
-                reason=(
-                    assessment.reason
-                    + "；本地校验确认只改变未提交的设备输入法临时模式"
-                ),
-            )
-        if (
-            assessment.external_impact in {"external_state", "unknown"}
-            and model_types <= {"unknown_external_effect", "data_mutation"}
-            and inferred <= {"unknown_external_effect"}
-            and assessment.subgoal_id in local_literal_action_scopes
-        ):
-            expected_impact = "navigation_only"
-            if assessment.subgoal_id is not None:
-                expected_impact = next(
-                    item.external_impact
-                    for item in graph.subgoals
-                    if item.subgoal_id == assessment.subgoal_id
-                )
-            assessment = replace(
-                assessment,
-                external_impact=expected_impact,
-                risk_types=(),
-                reason=(
-                    assessment.reason
-                    + "；本地一致性校验确认精确字面动作标签仅对应当前页面的本机临时状态"
-                ),
-            )
-        if (
-            assessment.external_impact == "external_state"
-            and model_types
-            and model_types <= {"unknown_external_effect", "data_mutation"}
-            and not inferred
-            and (
-                assessment.subgoal_id in transient_navigation_scopes
-                or assessment.subgoal_id in structured_navigation_scopes
-            )
-        ):
-            structured_reconciliation = (
-                assessment.subgoal_id in structured_navigation_scopes
-            )
-            assessment = replace(
-                assessment,
-                external_impact="navigation_only",
-                risk_types=(),
-                reason=(
-                    assessment.reason
-                    + (
-                        "；本地一致性校验确认结构化影响为无风险的可逆导航，"
-                        "实体和整组语义均不含外部效果"
-                        if structured_reconciliation
-                        else "；本地校验确认只涉及临时界面层级或标签页导航"
-                    )
-                ),
-            )
-        if (
-            inferred
-            and assessment.subgoal_id not in read_only_risk_control_scopes
-            and not (
-                scope_is_local_input and local_input_graph_is_risk_free
-            )
-            and not (
-                scope_is_local_keyboard_mode
-                and inferred <= {"unknown_external_effect"}
-            )
-            and assessment.external_impact != "unknown"
-        ):
-            assessment = replace(
-                assessment,
-                external_impact="external_state",
-                risk_types=tuple(sorted(set(assessment.risk_types) | set(inferred))),
-                reason=(
-                    assessment.reason
-                    + "；本地单字段防御规则提供了额外外部状态证据"
-                ),
-            )
-        assessments.append(assessment)
-    return replace(report, assessments=tuple(assessments))
-
-
 def _normalize_explicit_ui_label_payload(
     payload: dict[str, Any],
     raw_user_goal: str,
@@ -4902,308 +3061,6 @@ def _normalize_explicit_ui_label_payload(
                     replace_label(item) for item in completion
                 ]
     return value
-
-
-def _structured_reversible_navigation_scopes(
-    graph: DynamicTaskGraph,
-    source_groups: dict[str | None, list[AuditSource]],
-) -> frozenset[str | None]:
-    """Reconcile only navigation scopes whose structure and semantics agree."""
-
-    entity_text = json.dumps(
-        graph.goal.entities,
-        ensure_ascii=False,
-        sort_keys=True,
-        default=str,
-    )
-    if _infer_external_risk_types(entity_text):
-        return frozenset()
-    subgoals = {item.subgoal_id: item for item in graph.subgoals}
-    safe_scopes: set[str | None] = set()
-    for scope_id, group in source_groups.items():
-        scoped_subgoals = (
-            tuple(graph.subgoals)
-            if scope_id is None
-            else ((subgoals[scope_id],) if scope_id in subgoals else ())
-        )
-        if not scoped_subgoals:
-            continue
-        if any(
-            item.external_impact != "navigation_only" or item.risk_action_ids
-            for item in scoped_subgoals
-        ):
-            continue
-        if scope_id is None and graph.risk_actions:
-            continue
-        texts = tuple(item.text for item in group)
-        if any(_infer_external_risk_types(text) for text in texts):
-            continue
-        if not any(
-            _has_reversible_navigation_semantics(text)
-            for text in (*texts, entity_text)
-        ):
-            continue
-        safe_scopes.add(scope_id)
-    return frozenset(safe_scopes)
-
-
-def _structured_local_literal_action_scopes(
-    graph: DynamicTaskGraph,
-    source_groups: dict[str | None, list[AuditSource]],
-) -> frozenset[str | None]:
-    """Reconcile only a fully structured, explicitly local gesture-label task."""
-
-    if (
-        len(graph.goal.target_apps) != 1
-        or graph.goal.target_apps[0].app_id != "current_foreground"
-        or graph.risk_actions
-        or _infer_external_risk_types(graph.raw_user_goal)
-        or not _infer_directly_negated_risk_types(graph.raw_user_goal)
-    ):
-        return frozenset()
-    label = str(graph.goal.entities.get("target_ui_label") or "").strip()
-    marker_groups = (
-        ("长按", "long_press", "longpress"),
-        ("拖动", "drag"),
-    )
-    matched = tuple(
-        group
-        for group in marker_groups
-        if any(marker in label.casefold() for marker in group)
-    )
-    if len(matched) != 1 or _infer_external_risk_types(label):
-        return frozenset()
-
-    subgoals = {item.subgoal_id: item for item in graph.subgoals}
-    safe_navigation_ids: set[str] = set()
-    safe_read_only_ids: set[str] = set()
-    for subgoal in graph.subgoals:
-        group = source_groups.get(subgoal.subgoal_id, [])
-        texts = tuple(item.text for item in group)
-        if (
-            subgoal.external_impact not in {"navigation_only", "read_only"}
-            or subgoal.risk_action_ids
-            or not texts
-            or any(_infer_external_risk_types(text) for text in texts)
-        ):
-            continue
-        combined = " ".join(texts)
-        if subgoal.external_impact == "navigation_only" and (
-            "本机临时" in combined and "当前页面" in combined
-        ):
-            safe_navigation_ids.add(subgoal.subgoal_id)
-        elif subgoal.external_impact == "read_only" and re.search(
-            r"(?:显示|可见|观察|状态区域)", combined
-        ):
-            safe_read_only_ids.add(subgoal.subgoal_id)
-    if not safe_navigation_ids:
-        return frozenset()
-
-    scopes: set[str | None] = set(safe_navigation_ids | safe_read_only_ids)
-    global_group = source_groups.get(None, [])
-    if (
-        global_group
-        and not any(_infer_external_risk_types(item.text) for item in global_group)
-        and all(
-            item.subgoal_id in scopes
-            for item in graph.subgoals
-        )
-    ):
-        scopes.add(None)
-    return frozenset(scopes)
-
-
-def _has_reversible_navigation_semantics(value: str) -> bool:
-    normalized = re.sub(r"[_-]+", " ", value)
-    return bool(
-        LOCAL_TRANSIENT_NAVIGATION_PATTERN.search(normalized)
-        or REVERSIBLE_NAVIGATION_EFFECT_PATTERN.search(normalized)
-    )
-
-
-def _validate_graph_against_risk_audit(
-    graph: DynamicTaskGraph,
-    report: SemanticRiskAuditReport,
-) -> None:
-    if graph.status == "blocked":
-        return
-    risks = {item.risk_id: item for item in graph.risk_actions}
-    subgoals = {item.subgoal_id: item for item in graph.subgoals}
-    for subgoal_id, subgoal in subgoals.items():
-        assessments = tuple(
-            item for item in report.assessments if item.subgoal_id == subgoal_id
-        )
-        if not assessments:
-            raise TaskGraphError(
-                f"语义风险审计遗漏子目标，失败关闭为 unknown：{subgoal_id}"
-            )
-        impact, risk_types = _aggregate_audit_assessments(assessments)
-        post_effect_verification = _is_bound_post_effect_verification(
-            subgoal,
-            subgoals=subgoals,
-            risks=risks,
-        )
-        safe_classification_disagreement = {
-            impact,
-            subgoal.external_impact,
-        } <= {"read_only", "navigation_only"}
-        if (
-            post_effect_verification
-            and subgoal.external_impact == "read_only"
-            and impact in {"external_state", "unknown"}
-        ):
-            safe_classification_disagreement = True
-        if impact != subgoal.external_impact and not safe_classification_disagreement:
-            if impact == "unknown":
-                raise TaskGraphError(
-                    f"语义风险审计为 unknown 且任务图未声明匹配风险：{subgoal_id}"
-                )
-            raise TaskGraphError(
-                f"语义风险审计与任务图分类冲突：{subgoal_id} "
-                f"audit={impact} graph={subgoal.external_impact}"
-            )
-        linked_types = {
-            risks[risk_id].risk_type
-            for risk_id in subgoal.risk_action_ids
-            if risk_id in risks
-        }
-        audited_types = set(risk_types)
-        if post_effect_verification:
-            predecessor = subgoals[subgoal.depends_on[0]]
-            linked_types = {
-                risks[risk_id].risk_type
-                for risk_id in predecessor.risk_action_ids
-                if risk_id in risks
-            }
-            audited_types.discard("unknown_external_effect")
-        missing = audited_types - linked_types
-        if missing:
-            raise TaskGraphError(
-                f"语义风险审计要求子目标关联匹配风险：{subgoal_id} / "
-                + ", ".join(sorted(missing))
-            )
-
-    global_assessments = tuple(
-        item for item in report.assessments if item.subgoal_id is None
-    )
-    if not global_assessments:
-        raise TaskGraphError("语义风险审计遗漏用户目标，失败关闭为 unknown。")
-    global_impact, global_risk_types = _aggregate_audit_assessments(
-        global_assessments
-    )
-    graph_impacts = {item.external_impact for item in graph.subgoals}
-    graph_risk_types = {item.risk_type for item in graph.risk_actions}
-    if global_impact == "external_state" and "external_state" not in graph_impacts:
-        raise TaskGraphError("语义风险审计与任务图分类冲突：全局目标包含外部状态。")
-    if global_impact == "unknown" and "unknown" not in graph_impacts:
-        raise TaskGraphError("语义风险审计为 unknown 且任务图未声明匹配风险：全局目标。")
-    missing_global = set(global_risk_types) - graph_risk_types
-    if (
-        missing_global == {"unknown_external_effect"}
-        and _concrete_message_risk_covers_global_unknown(
-            graph,
-            global_risk_types=set(global_risk_types),
-        )
-    ):
-        missing_global.clear()
-    if missing_global:
-        raise TaskGraphError(
-            "语义风险审计要求任务图关联匹配风险："
-            + ", ".join(sorted(missing_global))
-        )
-
-
-def _concrete_message_risk_covers_global_unknown(
-    graph: DynamicTaskGraph,
-    *,
-    global_risk_types: set[str],
-) -> bool:
-    """Allow one concrete communication risk to cover only audit uncertainty.
-
-    Composite natural-language message goals can make the independent auditor
-    classify the raw sentence as ``unknown_external_effect`` while its other
-    global sources identify the concrete communication effect.  This exception
-    remains fail-closed: the graph must carry the exact recipient and body, all
-    external subgoals must bind only the communication risk, and deterministic
-    local semantics must independently identify the same concrete effect.
-    """
-
-    if global_risk_types != {
-        "message_or_communication",
-        "unknown_external_effect",
-    }:
-        return False
-    recipient = graph.goal.entities.get("recipient")
-    input_text = graph.goal.entities.get("input_text")
-    if not isinstance(recipient, str) or not recipient.strip():
-        return False
-    if not isinstance(input_text, str) or not input_text.strip():
-        return False
-
-    risks = {item.risk_id: item for item in graph.risk_actions}
-    if not risks or {item.risk_type for item in risks.values()} != {
-        "message_or_communication"
-    }:
-        return False
-    external_subgoals = tuple(
-        item for item in graph.subgoals if item.external_impact == "external_state"
-    )
-    if not external_subgoals or any(
-        item.external_impact == "unknown" for item in graph.subgoals
-    ):
-        return False
-    external_ids = {item.subgoal_id for item in external_subgoals}
-    for subgoal in external_subgoals:
-        if not subgoal.risk_action_ids:
-            return False
-        if any(
-            risk_id not in risks
-            or risks[risk_id].risk_type != "message_or_communication"
-            for risk_id in subgoal.risk_action_ids
-        ):
-            return False
-    if any(set(risk.subgoal_ids) != external_ids for risk in risks.values()):
-        return False
-
-    semantic_sources = [
-        condition.description for condition in graph.completion_conditions
-    ]
-    semantic_sources.extend(
-        evidence
-        for condition in graph.completion_conditions
-        for evidence in condition.evidence_required
-    )
-    for risk in risks.values():
-        semantic_sources.extend((risk.description, risk.external_effect))
-    for subgoal in external_subgoals:
-        semantic_sources.append(subgoal.objective)
-        semantic_sources.extend(subgoal.completion_conditions)
-    inferred = set(_infer_external_risk_types(*semantic_sources))
-    return inferred == {"message_or_communication"}
-
-
-def _aggregate_audit_assessments(
-    assessments: tuple[RiskAuditAssessment, ...],
-) -> tuple[str, tuple[str, ...]]:
-    impacts = {item.external_impact for item in assessments}
-    if "external_state" in impacts:
-        impact = "external_state"
-        risk_types = {
-            risk_type
-            for item in assessments
-            if item.external_impact == "external_state"
-            for risk_type in item.risk_types
-        }
-    elif "unknown" in impacts:
-        impact = "unknown"
-        risk_types = {"unknown_external_effect"}
-    elif "navigation_only" in impacts:
-        impact = "navigation_only"
-        risk_types = set()
-    else:
-        impact = "read_only"
-        risk_types = set()
-    return impact, tuple(sorted(risk_types))
 
 
 def _reject_control_fields(value: Any, path: str) -> None:

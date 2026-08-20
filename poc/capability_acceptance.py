@@ -634,7 +634,7 @@ def _confirmation_scope(
         "device_id",
         "revision",
         "subgoal_id",
-        "risk_ids",
+        "effect_ids",
         "observation_id",
         "fingerprint",
     }
@@ -662,14 +662,14 @@ def _confirmation_scope(
         normalized.get("fingerprint"),
         field="confirmation_scope.fingerprint",
     )
-    risk_ids = normalized.get("risk_ids")
-    if not isinstance(risk_ids, list) or any(
-        not isinstance(item, str) or not item.strip() for item in risk_ids
+    effect_ids = normalized.get("effect_ids")
+    if not isinstance(effect_ids, list) or any(
+        not isinstance(item, str) or not item.strip() for item in effect_ids
     ):
-        raise CapabilityAcceptanceError("验收报告 confirmation_scope.risk_ids 无效。")
-    if risk_ids != sorted(set(risk_ids)):
+        raise CapabilityAcceptanceError("验收报告 confirmation_scope.effect_ids 无效。")
+    if effect_ids != sorted(set(effect_ids)):
         raise CapabilityAcceptanceError(
-            "验收报告 confirmation_scope.risk_ids 必须去重并排序。"
+            "验收报告 confirmation_scope.effect_ids 必须去重并排序。"
         )
     return normalized
 

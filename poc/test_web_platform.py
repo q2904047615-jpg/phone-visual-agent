@@ -4556,7 +4556,7 @@ class ApiEndToEndTests(unittest.TestCase):
                         "device_id": device_id,
                         "revision": 1,
                         "subgoal_id": "subgoal-001",
-                        "risk_ids": [],
+                        "effect_ids": [],
                         "observation_id": "obs-001",
                         "fingerprint": "frame-001",
                     },
@@ -5559,52 +5559,6 @@ class ApiEndToEndTests(unittest.TestCase):
             len(web_app.runtime.controller.executions),
             before_executions,
         )
-
-    def test_external_state_requires_risk_approval_before_qwen_or_robot(self) -> None:
-        from test_universal_agent_orchestrator import _external_graph
-
-        orchestrator, _planner, qwen, adapter = self._universal_api_orchestrator(
-            device_id="device-1",
-            graph=_external_graph(),
-        )
-        with (
-            patch.object(web_app, "_require_supervised_device_ready"),
-            patch.object(
-                web_app.runtime,
-                "universal_agent_orchestrator",
-                orchestrator,
-            ),
-        ):
-            response = self.client.post(
-                "/api/agent/generic-supervised/start",
-                headers=self.headers,
-                json={
-                    "text": "向联系人发送一条消息",
-                    "device_id": "device-1",
-                },
-            )
-            self.assertEqual(response.status_code, 200, response.text)
-            session = response.json()["session"]
-            self.assertEqual(session["status"], "awaiting_risk_confirmation")
-            self.assertEqual(response.json()["physical_actions"], 0)
-            self.assertEqual(len(qwen.calls), 0)
-            self.assertEqual(adapter.capture_calls, 1)
-            self.assertEqual(adapter.execute_calls, 0)
-
-            approved = self.client.post(
-                f"/api/agent/generic-supervised/{session['session_id']}/approve-risk",
-                headers=self.headers,
-                json={
-                    "confirmed": True,
-                    "confirmation": session["risk_confirmation_scope"],
-                },
-            )
-
-        self.assertEqual(approved.status_code, 200, approved.text)
-        self.assertEqual(approved.json()["physical_actions"], 1)
-        self.assertEqual(len(qwen.calls), 1)
-        self.assertGreaterEqual(adapter.capture_calls, 2)
-        self.assertEqual(adapter.execute_calls, 1)
 
     def test_same_device_second_generic_session_returns_409(self) -> None:
         orchestrator, planner, qwen, adapter = self._universal_api_orchestrator()

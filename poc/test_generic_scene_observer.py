@@ -3962,6 +3962,128 @@ class GenericSceneObserverTests(unittest.TestCase):
                     fingerprint="local-fingerprint",
                 )
 
+    def test_targeted_delta_reattaches_unknown_xywh_canvas_only_to_unique_base_identity(self) -> None:
+        base_payload = scene_payload()
+        base_payload["elements"] = [
+            {
+                "element_id": "bottom_nav_window_btn",
+                "role": "button",
+                "meaning": "window_button",
+                "label": "窗口",
+                "bounds": [390, 880, 510, 980],
+                "confidence": 1.0,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["底部窗口按钮完整可见"],
+            }
+        ]
+        base = _parse_scene(
+            json.dumps(base_payload, ensure_ascii=False),
+            fingerprint="local-fingerprint",
+        )
+        live_element = {
+            "element_id": "window_button_01",
+            "role": "button",
+            "meaning": "window_button",
+            "label": "窗口",
+            "bounds": {"x": 390, "y": 1750, "w": 120, "h": 140},
+            "confidence": 1.0,
+            "states": {"goal_relevant": True, "fully_visible": True},
+            "evidence": "底部导航栏可见窗口按钮",
+        }
+
+        parsed = _parse_targeted_scene_delta(
+            json.dumps(
+                targeted_delta_payload(elements=[live_element], confidence=1.0),
+                ensure_ascii=False,
+            ),
+            base_scene=base,
+            fingerprint="local-fingerprint",
+        )
+
+        self.assertEqual("bottom_nav_window_btn", parsed.elements[0].element_id)
+        self.assertEqual((0.39, 0.88, 0.51, 0.98), parsed.elements[0].bounds)
+
+        rejection_variants = []
+        no_match_payload = scene_payload()
+        no_match_payload["elements"] = []
+        rejection_variants.append(
+            _parse_scene(
+                json.dumps(no_match_payload, ensure_ascii=False),
+                fingerprint="local-fingerprint",
+            )
+        )
+        duplicate_payload = dict(base_payload)
+        duplicate_payload["elements"] = [
+            base_payload["elements"][0],
+            {**base_payload["elements"][0], "element_id": "other_window"},
+        ]
+        rejection_variants.append(
+            _parse_scene(
+                json.dumps(duplicate_payload, ensure_ascii=False),
+                fingerprint="local-fingerprint",
+            )
+        )
+        clipped_payload = dict(base_payload)
+        clipped_payload["elements"] = [
+            {
+                **base_payload["elements"][0],
+                "states": {"goal_relevant": True, "fully_visible": False},
+            }
+        ]
+        rejection_variants.append(
+            _parse_scene(
+                json.dumps(clipped_payload, ensure_ascii=False),
+                fingerprint="local-fingerprint",
+            )
+        )
+        low_confidence_payload = dict(base_payload)
+        low_confidence_payload["elements"] = [
+            {**base_payload["elements"][0], "confidence": 0.89}
+        ]
+        rejection_variants.append(
+            _parse_scene(
+                json.dumps(low_confidence_payload, ensure_ascii=False),
+                fingerprint="local-fingerprint",
+            )
+        )
+        for unsafe_base in rejection_variants:
+            with self.subTest(base=unsafe_base), self.assertRaisesRegex(
+                VisionAgentError,
+                "最小增量协议",
+            ):
+                _parse_targeted_scene_delta(
+                    json.dumps(
+                        targeted_delta_payload(elements=[live_element]),
+                        ensure_ascii=False,
+                    ),
+                    base_scene=unsafe_base,
+                    fingerprint="local-fingerprint",
+                )
+
+        unrelated_live_element = {
+            **live_element,
+            "element_id": "container_feed_001",
+            "role": "container",
+            "meaning": "content_list",
+            "label": "新闻信息流列表",
+            "bounds": {"x": 50, "y": 130, "w": 900, "h": 1400},
+            "states": {
+                "goal_relevant": True,
+                "fully_visible": False,
+                "scrollable": True,
+                "scroll_axis": "vertical",
+            },
+        }
+        with self.assertRaisesRegex(VisionAgentError, "最小增量协议"):
+            _parse_targeted_scene_delta(
+                json.dumps(
+                    targeted_delta_payload(elements=[unrelated_live_element]),
+                    ensure_ascii=False,
+                ),
+                base_scene=base,
+                fingerprint="local-fingerprint",
+            )
+
     def test_targeted_delta_discards_only_explicit_non_goal_out_of_range_peripheral(self) -> None:
         base = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),

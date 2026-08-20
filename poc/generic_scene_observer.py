@@ -3163,6 +3163,88 @@ def _normalize_targeted_delta_xywh_bounds_shorthand(payload: Any) -> None:
         element["bounds"] = [x, y, x + width, y + height]
 
 
+def _reattach_invalid_targeted_xywh_to_unique_base_element(
+    payload: Any,
+    base_scene: UIScene,
+) -> None:
+    """Discard an unknown coordinate canvas only when identity is already exact.
+
+    Some vision responses preserve the strict delta shape but emit ``x/y/w/h``
+    on an undocumented portrait canvas whose y values exceed 1000.  Guessing a
+    scale would turn model geometry into authority.  A unique element already
+    observed on the same frame can instead keep its own rough bounds; the
+    action adapter still requires independent crop geometry audits before any
+    physical action.
+    """
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
+        return
+    for element in payload["elements"]:
+        if not isinstance(element, dict):
+            continue
+        bounds = element.get("bounds")
+        if not isinstance(bounds, dict) or set(bounds) not in (
+            {"x", "y", "w", "h"},
+            {"x", "y", "width", "height"},
+        ):
+            continue
+        keys = (
+            ("x", "y", "w", "h")
+            if "w" in bounds
+            else ("x", "y", "width", "height")
+        )
+        values = tuple(bounds[key] for key in keys)
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in values
+        ):
+            continue
+        x, y, width, height = (float(value) for value in values)
+        if x < 0 or y < 0 or width <= 0 or height <= 0:
+            continue
+        # Valid normalized shorthand was already handled by the normalizer
+        # above.  This path never interprets or rescales an unknown canvas.
+        if x + width <= 1000 and y + height <= 1000:
+            continue
+        label = element.get("label")
+        role = element.get("role")
+        meaning = element.get("meaning")
+        states = element.get("states")
+        confidence = element.get("confidence")
+        if (
+            not isinstance(label, str)
+            or not label.strip()
+            or not isinstance(role, str)
+            or not role.strip()
+            or not isinstance(meaning, str)
+            or not meaning.strip()
+            or not isinstance(states, dict)
+            or states.get("goal_relevant") is not True
+            or states.get("fully_visible") is not True
+            or isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or float(confidence) < 0.9
+        ):
+            continue
+        matches = tuple(
+            candidate
+            for candidate in base_scene.elements
+            if candidate.label == label
+            and candidate.role == role
+            and candidate.meaning == meaning
+            and candidate.confidence >= 0.9
+            and candidate.states.get("goal_relevant") is True
+            and candidate.states.get("fully_visible") is True
+        )
+        if len(matches) != 1:
+            continue
+        match = matches[0]
+        element["element_id"] = match.element_id
+        element["bounds"] = [part * 1000.0 for part in match.bounds]
+
+
 def _extract_targeted_delta_json_object(raw: str) -> dict[str, Any]:
     text = str(raw or "").strip()
     if text.startswith("```"):
@@ -3200,6 +3282,7 @@ def _parse_targeted_scene_delta(
     payload = _extract_targeted_delta_json_object(raw)
     _normalize_targeted_delta_evidence_shorthand(payload)
     _normalize_targeted_delta_xywh_bounds_shorthand(payload)
+    _reattach_invalid_targeted_xywh_to_unique_base_element(payload, base_scene)
     _drop_out_of_range_non_goal_elements(payload, goal_context or {})
     if not _matches_targeted_delta_schema(payload):
         raise VisionAgentError(

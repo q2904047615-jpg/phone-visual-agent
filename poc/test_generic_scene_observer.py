@@ -1654,15 +1654,44 @@ class GenericSceneObserverTests(unittest.TestCase):
             scene.camera_alignment.evidence,
         )
 
-    def test_camera_alignment_with_only_forbidden_evidence_remains_fail_closed(self) -> None:
-        payload = scene_payload()
-        payload["camera_alignment"]["evidence"] = ["顶部PX/MM坐标水平排列"]
+    def test_camera_alignment_with_only_forbidden_evidence_downgrades_rotation(self) -> None:
+        for evidence in (
+            ["PX: (264, 151)", "MM: (44.8, 44.4)"],
+            ["顶部PX/MM坐标水平排列"],
+        ):
+            with self.subTest(evidence=evidence):
+                payload = scene_payload()
+                payload["camera_alignment"]["evidence"] = evidence
 
-        with self.assertRaisesRegex(VisionAgentError, "坐标或控制指令"):
+                scene = _parse_scene(
+                    json.dumps(payload, ensure_ascii=False),
+                    fingerprint="local-fingerprint",
+                    goal_context={"objective": "读取当前页面"},
+                    camera_layout_orientation="portrait",
+                )
+
+                self.assertEqual(
+                    "portrait", scene.camera_alignment.camera_layout_orientation
+                )
+                self.assertEqual(
+                    "unknown", scene.camera_alignment.phone_content_rotation
+                )
+                self.assertEqual(0.0, scene.camera_alignment.confidence)
+                self.assertEqual((), scene.camera_alignment.evidence)
+
+    def test_camera_alignment_hud_downgrade_does_not_hide_invalid_scalar(self) -> None:
+        payload = scene_payload()
+        payload["camera_alignment"].update(
+            {
+                "phone_content_rotation": "unknownish",
+                "evidence": ["PX: (264, 151)"],
+            }
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "phone_content_rotation"):
             _parse_scene(
                 json.dumps(payload, ensure_ascii=False),
-                fingerprint="local-fingerprint",
-                goal_context={"objective": "读取当前页面"},
+                fingerprint="bad-alignment",
                 camera_layout_orientation="portrait",
             )
 
@@ -2167,8 +2196,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         for mutation, error in (
             ({"phone_content_rotation": "unknownish"}, "phone_content_rotation"),
             ({"confidence": "high"}, "confidence"),
-            ({"evidence": ["点击坐标(500,900)"]}, "坐标或控制指令"),
-            ({"evidence": ["PX/MM 控制端读数方向正常"]}, "坐标或控制指令"),
+            ({"evidence": [123]}, "短字符串"),
         ):
             with self.subTest(mutation=mutation):
                 payload = scene_payload()

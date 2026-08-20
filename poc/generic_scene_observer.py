@@ -41,8 +41,10 @@ from ocr_runtime import find_text as find_ocr_text, recognize as recognize_ocr
 from robot_core import WorkflowNotReady, qwerty_keyboard_config_from_anchors
 from ui_scene import (
     ALLOWED_ROLES,
+    CAMERA_LAYOUT_ORIENTATIONS,
     CameraAlignmentFacts,
     MIN_TARGET_CONFIDENCE,
+    PHONE_CONTENT_ROTATIONS,
     SystemUIFacts,
     UI_SCENE_PROTOCOL_VERSION,
     UIScene,
@@ -3198,7 +3200,7 @@ def _camera_layout_orientation(frame: Image.Image) -> str:
 
 
 def _drop_forbidden_camera_alignment_evidence(payload: dict[str, Any]) -> None:
-    """Remove unsafe peripheral evidence only when safe phone evidence remains."""
+    """Remove peripheral HUD text without minting alignment authority from it."""
 
     alignment = payload.get("camera_alignment")
     if not isinstance(alignment, dict):
@@ -3213,6 +3215,35 @@ def _drop_forbidden_camera_alignment_evidence(payload: dict[str, Any]) -> None:
     ]
     if retained and len(retained) != len(evidence):
         alignment["evidence"] = retained
+        return
+    if not evidence or retained:
+        return
+    required = {
+        "camera_layout_orientation",
+        "phone_content_rotation",
+        "confidence",
+        "evidence",
+    }
+    confidence = alignment.get("confidence")
+    if (
+        set(alignment) != required
+        or alignment.get("camera_layout_orientation")
+        not in CAMERA_LAYOUT_ORIENTATIONS
+        or alignment.get("phone_content_rotation") not in PHONE_CONTENT_ROTATIONS
+        or isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0.0 <= float(confidence) <= 1.0
+    ):
+        # Do not let the repair hide malformed scalar fields.  The strict scene
+        # parser below remains responsible for rejecting those payloads.
+        return
+    # Every evidence item came from coordinates or controller HUD text.  Such
+    # text cannot prove phone rotation, but it also says nothing about the rest
+    # of the page.  Downgrade only the unproved fact; later physical actions
+    # still require their independent orientation credential.
+    alignment["phone_content_rotation"] = "unknown"
+    alignment["confidence"] = 0.0
+    alignment["evidence"] = []
 
 
 def _fail_closed_invalid_system_ui(payload: dict[str, Any]) -> None:

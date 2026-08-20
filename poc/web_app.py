@@ -700,6 +700,7 @@ class StrictAgentRequest(BaseModel):
 class GenericSupervisedStartRequest(StrictAgentRequest):
     text: StrictStr = Field(min_length=1, max_length=500)
     device_id: StrictStr = Field(min_length=1, max_length=128)
+    auto_advance: StrictBool = True
 
 
 class GenericSupervisedDeviceRequest(StrictAgentRequest):
@@ -2230,7 +2231,10 @@ def start_generic_supervised_session(
             "status": session.status,
             "pause_reason": "当前没有可自动推进的安全动作。",
         }
-        if session.status in {"awaiting_confirmation", "needs_reobservation"}:
+        if (
+            body.auto_advance is True
+            and session.status in {"awaiting_confirmation", "needs_reobservation"}
+        ):
             with _supervised_hardware_lock(body.device_id):
                 auto_result = (
                     runtime.universal_agent_orchestrator.run_autonomous_safe_loop(
@@ -2241,10 +2245,14 @@ def start_generic_supervised_session(
                 )
         report = _write_generic_supervised_report(session)
         return {
-            "mode": "generic_supervised_autonomous_safe_loop",
+            "mode": (
+                "generic_supervised_autonomous_safe_loop"
+                if body.auto_advance is True
+                else "generic_supervised_single_step"
+            ),
             "physical_actions": auto_result["physical_actions"],
             "automatic_loop_supported": True,
-            "automatic_loop_enabled": True,
+            "automatic_loop_enabled": body.auto_advance,
             "automatic_progress": auto_result,
             "session": session.snapshot(),
             "report": report,

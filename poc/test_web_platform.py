@@ -5564,6 +5564,57 @@ class ApiEndToEndTests(unittest.TestCase):
             before_executions,
         )
 
+    def test_generic_supervised_api_can_start_in_explicit_single_step_mode(self) -> None:
+        orchestrator, planner, qwen, adapter = self._universal_api_orchestrator()
+        before_executions = len(web_app.runtime.controller.executions)
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+            patch.object(
+                orchestrator,
+                "run_autonomous_safe_loop",
+                side_effect=AssertionError("single-step start must not run safe loop"),
+            ) as auto_loop,
+        ):
+            started = self.client.post(
+                "/api/agent/generic-supervised/start",
+                headers=self.headers,
+                json={
+                    "text": "查看当前页面的详情",
+                    "device_id": "phone-01",
+                    "auto_advance": False,
+                },
+            )
+            self.assertEqual(started.status_code, 200, started.text)
+            payload = started.json()
+            session_id = payload["session"]["session_id"]
+            self.assertEqual("generic_supervised_single_step", payload["mode"])
+            self.assertEqual(0, payload["physical_actions"])
+            self.assertFalse(payload["automatic_loop_enabled"])
+            self.assertEqual("awaiting_confirmation", payload["session"]["status"])
+            self.assertEqual(1, len(planner.plan_calls))
+            self.assertEqual(1, len(qwen.calls))
+            self.assertEqual(1, adapter.capture_calls)
+            self.assertEqual(0, adapter.execute_calls)
+            auto_loop.assert_not_called()
+
+            cancelled = self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/cancel",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+
+        self.assertEqual(200, cancelled.status_code, cancelled.text)
+        self.assertEqual("cancelled", cancelled.json()["session"]["status"])
+        self.assertEqual(
+            before_executions,
+            len(web_app.runtime.controller.executions),
+        )
+
     def test_same_device_second_generic_session_returns_409(self) -> None:
         orchestrator, planner, qwen, adapter = self._universal_api_orchestrator()
         with tempfile.TemporaryDirectory() as temp:

@@ -264,6 +264,34 @@ class TaskSemanticIRTests(unittest.TestCase):
                     case["expected_policy"],
                 )
 
+    def test_default_policy_requires_confirmation_only_for_login_and_payment(self):
+        policy = LocalRiskPolicyConfig()
+        confirmation_kinds = {"authentication", "financial_transaction"}
+        automatic_kinds = {
+            "send_message",
+            "publish_content",
+            "relationship_change",
+            "membership_change",
+            "sensitive_permission_change",
+            "irreversible_account_deletion",
+            "irreversible_data_deletion",
+            "data_mutation",
+            "generic_effect",
+        }
+
+        for index, kind in enumerate(sorted(confirmation_kinds), start=1):
+            with self.subTest(kind=kind):
+                decision = policy.decide(
+                    EffectIntent(effect_id=f"effect_confirm_{index}", kind=kind)
+                )
+                self.assertEqual(CONFIRMATION_REQUIRED, decision.policy)
+        for index, kind in enumerate(sorted(automatic_kinds), start=1):
+            with self.subTest(kind=kind):
+                decision = policy.decide(
+                    EffectIntent(effect_id=f"effect_auto_{index}", kind=kind)
+                )
+                self.assertEqual(AUTOMATIC, decision.policy)
+
     def test_policy_override_is_typed_and_versioned(self):
         policy = LocalRiskPolicyConfig(
             policy_id="team_policy",

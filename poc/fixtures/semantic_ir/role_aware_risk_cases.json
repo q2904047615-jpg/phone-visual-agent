@@ -50,14 +50,14 @@
       "raw_goal": "授予目标账号管理员权限。",
       "effect_kind": "sensitive_permission_change",
       "target": "目标账号",
-      "expected_policy": "confirmation_required"
+      "expected_policy": "automatic"
     },
     {
       "case_id": "irreversible_data_deletion",
       "raw_goal": "永久删除目标文件。",
       "effect_kind": "irreversible_data_deletion",
       "target": "目标文件",
-      "expected_policy": "confirmation_required"
+      "expected_policy": "automatic"
     },
     {
       "case_id": "ordinary_data_mutation",

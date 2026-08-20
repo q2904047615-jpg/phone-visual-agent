@@ -23,9 +23,6 @@ DEFAULT_CONFIRMATION_EFFECT_KINDS = frozenset(
     {
         "authentication",
         "financial_transaction",
-        "sensitive_permission_change",
-        "irreversible_account_deletion",
-        "irreversible_data_deletion",
     }
 )
 
@@ -786,7 +783,7 @@ class RiskDecision:
 @dataclass(frozen=True)
 class LocalRiskPolicyConfig:
     policy_id: str = "default_low_friction"
-    version: int = 1
+    version: int = 2
     confirmation_effect_kinds: frozenset[str] = DEFAULT_CONFIRMATION_EFFECT_KINDS
     overrides: tuple[tuple[str, str], ...] = ()
     protocol_version: str = RISK_POLICY_PROTOCOL

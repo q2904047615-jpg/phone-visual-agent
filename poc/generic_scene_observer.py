@@ -1127,17 +1127,39 @@ class GenericSceneObserver:
                 input_audit_current_value = _unique_scene_input_value(scene)
                 if input_audit_current_value is None:
                     input_audit_current_value = preliminary_input_value_hint
+                preliminary_inputs = tuple(
+                    element
+                    for element in scene.elements
+                    if element.role == "input"
+                    and element.meaning == "application_text_input"
+                    and element.states.get("focused") is True
+                )
+                preliminary_bounds = (
+                    preliminary_inputs[0].bounds
+                    if len(preliminary_inputs) == 1
+                    else None
+                )
                 verified_input_lineage: TypedInputLineage | None = None
                 if (
                     input_lineage_override is not None
                     and isinstance(device_id, str)
                     and isinstance(input_audit_current_value, str)
-                    and input_lineage_override.matches_visual(
-                        device_id=device_id,
-                        app_id=scene.app_id,
-                        screen_id=scene.screen_id,
-                        raw_value=input_audit_current_value,
-                        current_frame=frame,
+                    and (
+                        input_lineage_override.matches_visual(
+                            device_id=device_id,
+                            app_id=scene.app_id,
+                            screen_id=scene.screen_id,
+                            raw_value=input_audit_current_value,
+                            input_bounds=preliminary_bounds,
+                            current_frame=frame,
+                        )
+                        or input_lineage_override.matches_pending_input_state_value(
+                            device_id=device_id,
+                            app_id=scene.app_id,
+                            screen_id=scene.screen_id,
+                            raw_value=input_audit_current_value,
+                            input_bounds=preliminary_bounds,
+                        )
                     )
                 ):
                     verified_input_lineage = input_lineage_override
@@ -1147,18 +1169,6 @@ class GenericSceneObserver:
                     and isinstance(device_id, str)
                     and device_id.strip()
                 ):
-                    preliminary_inputs = tuple(
-                        element
-                        for element in scene.elements
-                        if element.role == "input"
-                        and element.meaning == "application_text_input"
-                        and element.states.get("focused") is True
-                    )
-                    preliminary_bounds = (
-                        preliminary_inputs[0].bounds
-                        if len(preliminary_inputs) == 1
-                        else None
-                    )
                     verified_input_lineage = self.input_lineage_store.match_visual(
                         device_id=device_id,
                         app_id=scene.app_id,
@@ -5678,7 +5688,22 @@ def _apply_input_structure_audit(
             lineage_bounds = tuple(
                 float(part) / 1000.0 for part in trusted_input["input_bounds"]
             )
-            if verified_input_lineage.matches_visual(
+            if verified_input_lineage.matches_pending_input_state_cue(
+                device_id=str(device_id or ""),
+                app_id=scene.app_id,
+                screen_id=scene.screen_id,
+                raw_value=raw_lineage_text,
+                visible_editable_cues=tuple(
+                    trusted_input["visible_editable_cues"]
+                ),
+                input_bounds=lineage_bounds,
+            ):
+                trusted_input = dict(trusted_input)
+                trusted_input["lineage_visible_cue_text"] = (
+                    verified_input_lineage.exact_value
+                )
+                trusted_input["text"] = verified_input_lineage.exact_value
+            elif verified_input_lineage.matches_visual(
                 device_id=str(device_id or ""),
                 app_id=scene.app_id,
                 screen_id=scene.screen_id,
@@ -5981,6 +6006,14 @@ def _apply_input_structure_audit(
                 if isinstance(lineage_visual_text, str):
                     input_evidence.append(
                         f"视觉折行转写：{lineage_visual_text}；本地逐键连续性逐字核对通过"
+                    )
+                lineage_visible_cue_text = trusted_input.get(
+                    "lineage_visible_cue_text"
+                )
+                if isinstance(lineage_visible_cue_text, str):
+                    input_evidence.append(
+                        "输入状态切换后同一应用输入区域仍逐字可见："
+                        f"{lineage_visible_cue_text}；本地同值连续性核对通过"
                     )
             elif trusted_input["placeholder"]:
                 input_evidence.insert(0, f"应用输入框为空，占位提示：{trusted_input['placeholder']}")

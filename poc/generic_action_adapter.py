@@ -24,6 +24,7 @@ from input_value_lineage import (
     InputValueLineageError,
     TypedInputLineage,
     TypedInputLineageStore,
+    build_pending_input_state_lineage,
     build_pending_literal_lineage,
     build_pending_text_lineage,
 )
@@ -1831,7 +1832,15 @@ class GenericSingleActionAdapter:
                     hardware_receipt=hardware_receipt,
                 )
             except (InputValueLineageError, TypeError, ValueError):
-                pending_input_lineage = None
+                try:
+                    pending_input_lineage = build_pending_input_state_lineage(
+                        device_id=self.device_id,
+                        resolved_action=resolved.to_dict(),
+                        before_scene=before.to_dict(),
+                        hardware_receipt=hardware_receipt,
+                    )
+                except (InputValueLineageError, TypeError, ValueError):
+                    pending_input_lineage = None
         elif resolved.kind == "input_verified_text":
             try:
                 pending_input_lineage = build_pending_text_lineage(

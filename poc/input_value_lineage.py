@@ -232,6 +232,7 @@ class TypedInputLineage:
         pending_sources = {
             "pending_verified_literal_action",
             "pending_verified_text_action",
+            "pending_verified_input_state_action",
         }
         if self.source not in pending_sources and len(self.surface_descriptors) != 4:
             raise InputValueLineageError("持久输入值连续性必须绑定动作后四帧。")
@@ -333,6 +334,69 @@ class TypedInputLineage:
             self.surface_descriptors,
             frame=current_frame,
             bounds=self.input_bounds,
+        )
+
+    def matches_pending_input_state_value(
+        self,
+        *,
+        device_id: str,
+        app_id: str,
+        screen_id: str,
+        raw_value: str,
+        input_bounds: tuple[float, float, float, float] | None,
+        now_epoch: float | None = None,
+        ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
+    ) -> bool:
+        """Bind an immediate state-only keyboard action to the same input."""
+
+        now = time.time() if now_epoch is None else float(now_epoch)
+        current_screen = str(screen_id or "").strip().casefold()
+        recorded_screen = self.screen_id.strip().casefold()
+        return bool(
+            self.source == "pending_verified_input_state_action"
+            and device_id == self.device_id
+            and now >= self.recorded_at_epoch
+            and now - self.recorded_at_epoch <= ttl_seconds
+            and isinstance(raw_value, str)
+            and raw_value == self.exact_value
+            and str(app_id or "").strip().casefold()
+            == self.app_id.strip().casefold()
+            and current_screen
+            and (
+                current_screen == recorded_screen
+                or current_screen.startswith(recorded_screen + "_")
+                or recorded_screen.startswith(current_screen + "_")
+            )
+            and input_bounds is not None
+            and _bounds_compatible(self.input_bounds, input_bounds)
+        )
+
+    def matches_pending_input_state_cue(
+        self,
+        *,
+        device_id: str,
+        app_id: str,
+        screen_id: str,
+        raw_value: str,
+        visible_editable_cues: tuple[str, ...],
+        input_bounds: tuple[float, float, float, float] | None,
+        now_epoch: float | None = None,
+        ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
+    ) -> bool:
+        """Recover only an exact value still visible inside the same input."""
+
+        return bool(
+            raw_value == ""
+            and tuple(visible_editable_cues).count(self.exact_value) == 1
+            and self.matches_pending_input_state_value(
+                device_id=device_id,
+                app_id=app_id,
+                screen_id=screen_id,
+                raw_value=self.exact_value,
+                input_bounds=input_bounds,
+                now_epoch=now_epoch,
+                ttl_seconds=ttl_seconds,
+            )
         )
 
 
@@ -592,6 +656,124 @@ def build_pending_text_lineage(
             time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
         ),
         source="pending_verified_text_action",
+    )
+    record.validate()
+    return record
+
+
+def build_pending_input_state_lineage(
+    *,
+    device_id: str,
+    resolved_action: dict[str, Any],
+    before_scene: dict[str, Any],
+    hardware_receipt: dict[str, Any],
+    recorded_at_epoch: float | None = None,
+) -> TypedInputLineage:
+    """Bind a verified keyboard-state switch that must preserve exact text."""
+
+    if (
+        not isinstance(resolved_action, dict)
+        or resolved_action.get("kind") != "tap_semantic"
+        or not isinstance(hardware_receipt, dict)
+        or hardware_receipt.get("seller_event_barrier_confirmed") is not True
+        or hardware_receipt.get("round_trip_position_confirmed") is not True
+        or hardware_receipt.get("mechanical_contact_ack") is not False
+    ):
+        raise InputValueLineageError(
+            "临时输入状态连续性缺少有效单击事件栅栏。"
+        )
+    prior = resolved_action.get("prior_input_value")
+    expected = resolved_action.get("expected_input_value")
+    expected_effect = resolved_action.get("expected_effect")
+    expected_state = (
+        expected_effect.get("element_state")
+        if isinstance(expected_effect, dict)
+        else None
+    )
+    expected_states = (
+        expected_state.get("states")
+        if isinstance(expected_state, dict)
+        else None
+    )
+    if (
+        not isinstance(prior, str)
+        or not prior
+        or prior != expected
+        or "\r" in prior
+        or "\n" in prior
+        or not isinstance(expected_state, dict)
+        or expected_state.get("meaning") != "application_text_input"
+        or not isinstance(expected_states, dict)
+        or expected_states.get("value") != prior
+        or len(expected_states) != 2
+    ):
+        raise InputValueLineageError(
+            "临时输入状态连续性的同值 expected 合同无效。"
+        )
+    before_input = _single_input(before_scene, expected_value=prior)
+    elements = before_scene.get("elements") if isinstance(before_scene, dict) else None
+    targets = [
+        item
+        for item in elements or []
+        if isinstance(item, dict)
+        and item.get("element_id") == resolved_action.get("target_element_id")
+    ]
+    if len(targets) != 1:
+        raise InputValueLineageError(
+            "临时输入状态连续性缺少唯一输入辅助键。"
+        )
+    target = targets[0]
+    states = target.get("states")
+    meaning = target.get("meaning")
+    if (
+        not isinstance(states, dict)
+        or states.get("prior_input_value") != prior
+        or states.get("input_element_id") != before_input.get("element_id")
+    ):
+        raise InputValueLineageError(
+            "临时输入状态连续性没有绑定原输入框和值。"
+        )
+    expected_state_key = {
+        "switch_keyboard_layout": ("keyboard_layout", "target_layout"),
+        "switch_keyboard_case": ("keyboard_case_mode", "target_mode"),
+        "switch_keyboard_input_mode": ("keyboard_input_mode", "target_mode"),
+    }.get(str(meaning or ""))
+    if expected_state_key is None:
+        raise InputValueLineageError(
+            "临时输入状态连续性只接受键盘布局、大小写或输入模式切换。"
+        )
+    state_key, target_key = expected_state_key
+    if expected_states.get(state_key) != states.get(target_key):
+        raise InputValueLineageError(
+            "临时输入状态连续性的切换方向与 expected 不一致。"
+        )
+    app_id = before_scene.get("app_id")
+    screen_id = before_scene.get("screen_id")
+    before_fingerprint = before_scene.get("fingerprint")
+    if any(
+        not isinstance(value, str) or not value.strip() or value == "unknown"
+        for value in (app_id, screen_id, before_fingerprint)
+    ):
+        raise InputValueLineageError(
+            "临时输入状态连续性缺少明确输入表面。"
+        )
+    record = TypedInputLineage(
+        version=TYPED_INPUT_LINEAGE_VERSION,
+        device_id=device_id,
+        exact_value=prior,
+        app_id=app_id,
+        screen_id=screen_id,
+        input_meaning="application_text_input",
+        input_bounds=_valid_bounds(before_input["bounds"]),
+        before_fingerprint=before_fingerprint,
+        after_fingerprint="pending-visual-verification",
+        action_digest=_canonical_digest(resolved_action),
+        receipt_digest=_canonical_digest(hardware_receipt),
+        surface_descriptors=(),
+        recorded_at_epoch=(
+            time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
+        ),
+        source="pending_verified_input_state_action",
     )
     record.validate()
     return record

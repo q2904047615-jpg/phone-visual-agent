@@ -15,10 +15,12 @@ from input_value_lineage import (
     TypedInputLineage,
     TypedInputLineageStore,
     _surface_descriptor,
+    build_pending_input_state_lineage,
     build_pending_literal_lineage,
     build_pending_text_lineage,
 )
 from ui_scene import UIScene
+from vision_agent import VisionAgentError
 
 
 DEVICE = "device-test-01"
@@ -164,6 +166,76 @@ def receipt() -> dict:
     }
 
 
+def state_switch_case(
+    meaning: str = "switch_keyboard_layout",
+) -> tuple[dict, dict]:
+    state_key, current_key, target_key, current, target = {
+        "switch_keyboard_layout": (
+            "keyboard_layout",
+            "current_layout",
+            "target_layout",
+            "qwerty",
+            "numeric",
+        ),
+        "switch_keyboard_case": (
+            "keyboard_case_mode",
+            "current_mode",
+            "target_mode",
+            "lower",
+            "upper",
+        ),
+        "switch_keyboard_input_mode": (
+            "keyboard_input_mode",
+            "current_mode",
+            "target_mode",
+            "direct_latin",
+            "chinese_pinyin",
+        ),
+    }[meaning]
+    before = scene(PRIOR, "before-state-fp")
+    before["elements"][0]["states"].update(
+        {
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "keyboard_case_mode": "lower",
+        }
+    )
+    before["elements"].append(
+        {
+            "element_id": "state-switch-1",
+            "role": "button",
+            "meaning": meaning,
+            "bounds": [0.1, 0.86, 0.25, 0.94],
+            "confidence": 1.0,
+            "label": target,
+            "states": {
+                "goal_relevant": True,
+                "fully_visible": True,
+                current_key: current,
+                target_key: target,
+                "prior_input_value": PRIOR,
+                "input_element_id": "input-1",
+            },
+            "evidence": ["唯一完整可见输入状态切换键"],
+        }
+    )
+    resolved_state = {
+        **resolved(),
+        "node_id": "state-switch-node",
+        "prior_input_value": PRIOR,
+        "expected_input_value": PRIOR,
+        "target_element_id": "state-switch-1",
+        "before_fingerprint": "before-state-fp",
+        "expected_effect": {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": PRIOR, state_key: target},
+            }
+        },
+    }
+    return before, resolved_state
+
+
 def resolved_text(*, prior: str = "", fragment: str = "longinput") -> dict:
     expected = prior + fragment
     return {
@@ -228,6 +300,76 @@ def input_audit_raw(value: str, literal: str | None = "x") -> str:
                         "key_kind": "character",
                     }
                 ]),
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def state_switch_audit_raw(*, cue: str = PRIOR, literal: str = "2") -> str:
+    """Replay the generic shape returned after a keyboard layout switch."""
+
+    return json.dumps(
+        {
+            "protocol_version": "2026-08-18-input-structure-audit-v7",
+            "application_inputs": [
+                {
+                    "structure_id": "app-input-1",
+                    "bounds": [130, 540, 690, 600],
+                    "fully_visible": True,
+                    "text": "",
+                    "placeholder": "",
+                    "visible_editable_cues": ([] if not cue else [cue]),
+                    "confidence": 1.0,
+                    "right_button": {
+                        "label": "发送",
+                        "bounds": [780, 540, 920, 600],
+                    },
+                }
+            ],
+            "ime_preedit_regions": [
+                {
+                    "region_id": "ime-preedit-1",
+                    "bounds": [100, 600, 900, 660],
+                    "text": cue,
+                    "confidence": 1.0,
+                    "candidates": [],
+                }
+            ],
+            "keyboard": {
+                "visible": True,
+                "bounds": [0, 660, 1000, 1000],
+                "layout": "numeric",
+                "input_mode": "direct_latin",
+                "case_mode": "unknown",
+                "qwerty_anchors": None,
+                "mode_switch": None,
+                "backspace_key": {
+                    "label": "",
+                    "bounds": [820, 670, 980, 730],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                },
+                "case_switch": None,
+                "literal_keys": [
+                    {
+                        "value": literal,
+                        "label": literal,
+                        "key_kind": "character",
+                        "bounds": [420, 670, 580, 730],
+                        "confidence": 1.0,
+                        "fully_visible": True,
+                    }
+                ],
+                "layout_switches": [
+                    {
+                        "label": "!?#",
+                        "bounds": [20, 890, 180, 950],
+                        "confidence": 1.0,
+                        "current_layout": "numeric",
+                        "target_layout": "symbol",
+                    }
+                ],
             },
         },
         ensure_ascii=False,
@@ -511,6 +653,164 @@ class TypedInputLineageTests(unittest.TestCase):
                 screen_id="editor",
                 raw_value=RAW_AFTER,
                 input_bounds=(0.13, 0.54, 0.69, 0.61),
+            )
+        )
+
+    def test_pending_input_state_lineage_accepts_only_three_typed_switches(self) -> None:
+        for meaning in (
+            "switch_keyboard_layout",
+            "switch_keyboard_case",
+            "switch_keyboard_input_mode",
+        ):
+            with self.subTest(meaning=meaning):
+                before, action = state_switch_case(meaning)
+                record = build_pending_input_state_lineage(
+                    device_id=DEVICE,
+                    resolved_action=action,
+                    before_scene=before,
+                    hardware_receipt=receipt(),
+                    recorded_at_epoch=1000.0,
+                )
+                self.assertEqual("pending_verified_input_state_action", record.source)
+                self.assertEqual(PRIOR, record.exact_value)
+                self.assertTrue(
+                    record.matches_pending_input_state_value(
+                        device_id=DEVICE,
+                        app_id="sample.app",
+                        screen_id="editor",
+                        raw_value=PRIOR,
+                        input_bounds=(0.13, 0.54, 0.69, 0.61),
+                        now_epoch=1000.0,
+                    )
+                )
+
+    def test_pending_input_state_lineage_rejects_wrong_surface_value_and_expiry(self) -> None:
+        before, action = state_switch_case()
+        record = build_pending_input_state_lineage(
+            device_id=DEVICE,
+            resolved_action=action,
+            before_scene=before,
+            hardware_receipt=receipt(),
+            recorded_at_epoch=1000.0,
+        )
+        cases = (
+            {"device_id": "other", "app_id": "sample.app", "screen_id": "editor", "raw_value": PRIOR, "input_bounds": (0.13, 0.54, 0.69, 0.61), "now_epoch": 1000.0},
+            {"device_id": DEVICE, "app_id": "other.app", "screen_id": "editor", "raw_value": PRIOR, "input_bounds": (0.13, 0.54, 0.69, 0.61), "now_epoch": 1000.0},
+            {"device_id": DEVICE, "app_id": "unknown", "screen_id": "editor", "raw_value": PRIOR, "input_bounds": (0.13, 0.54, 0.69, 0.61), "now_epoch": 1000.0},
+            {"device_id": DEVICE, "app_id": "sample.app", "screen_id": "other", "raw_value": PRIOR, "input_bounds": (0.13, 0.54, 0.69, 0.61), "now_epoch": 1000.0},
+            {"device_id": DEVICE, "app_id": "sample.app", "screen_id": "editor", "raw_value": PRIOR + "x", "input_bounds": (0.13, 0.54, 0.69, 0.61), "now_epoch": 1000.0},
+            {"device_id": DEVICE, "app_id": "sample.app", "screen_id": "editor", "raw_value": PRIOR, "input_bounds": (0.75, 0.1, 0.95, 0.2), "now_epoch": 1000.0},
+            {"device_id": DEVICE, "app_id": "sample.app", "screen_id": "editor", "raw_value": PRIOR, "input_bounds": (0.13, 0.54, 0.69, 0.61), "now_epoch": 22601.0},
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertFalse(record.matches_pending_input_state_value(**case))
+
+    def test_pending_input_state_lineage_rejects_non_state_or_mutating_actions(self) -> None:
+        before, action = state_switch_case()
+        invalid_actions = []
+        ordinary = dict(action)
+        ordinary["target_element_id"] = "input-1"
+        invalid_actions.append(ordinary)
+        literal = dict(action)
+        literal["target_element_id"] = "state-switch-1"
+        before_literal = json.loads(json.dumps(before))
+        before_literal["elements"][1]["meaning"] = "input_exact_literal_key"
+        invalid_actions.append((before_literal, literal))
+        mutating = json.loads(json.dumps(action))
+        mutating["expected_input_value"] = PRIOR + "2"
+        mutating["expected_effect"]["element_state"]["states"]["value"] = PRIOR + "2"
+        invalid_actions.append(mutating)
+        extra_state = json.loads(json.dumps(action))
+        extra_state["expected_effect"]["element_state"]["states"]["extra"] = True
+        invalid_actions.append(extra_state)
+        for candidate in invalid_actions:
+            candidate_before, candidate_action = (
+                candidate if isinstance(candidate, tuple) else (before, candidate)
+            )
+            with self.subTest(action=candidate_action):
+                with self.assertRaises(InputValueLineageError):
+                    build_pending_input_state_lineage(
+                        device_id=DEVICE,
+                        resolved_action=candidate_action,
+                        before_scene=candidate_before,
+                        hardware_receipt=receipt(),
+                    )
+        bad_receipt = receipt()
+        bad_receipt["seller_event_barrier_confirmed"] = False
+        with self.assertRaises(InputValueLineageError):
+            build_pending_input_state_lineage(
+                device_id=DEVICE,
+                resolved_action=action,
+                before_scene=before,
+                hardware_receipt=bad_receipt,
+            )
+
+    def test_state_switch_live_audit_replay_preserves_exact_value_and_next_key(self) -> None:
+        before, action = state_switch_case()
+        record = build_pending_input_state_lineage(
+            device_id=DEVICE,
+            resolved_action=action,
+            before_scene=before,
+            hardware_receipt=receipt(),
+        )
+        audited = _apply_input_structure_audit(
+            UIScene.from_dict(before),
+            state_switch_audit_raw(),
+            fingerprint="after-state-fp",
+            goal_context={
+                "objective": f"让输入框逐字显示 {PRIOR}2",
+                "entities": {"input_text": PRIOR + "2"},
+            },
+            verified_input_lineage=record,
+            device_id=DEVICE,
+            lineage_frame=surface_frame(),
+        )
+        input_element = audited.get_element("local_audited_input_1")
+        next_key = audited.get_element("local_audited_literal_key_1")
+        self.assertEqual(PRIOR, input_element.states["value"])
+        self.assertEqual(PRIOR, next_key.states["prior_input_value"])
+        self.assertEqual(PRIOR + "2", next_key.states["expected_input_value"])
+        self.assertTrue(any("输入状态切换后" in item for item in input_element.evidence))
+
+    def test_state_switch_live_audit_requires_bound_lineage_and_exact_visible_cue(self) -> None:
+        before, action = state_switch_case()
+        record = build_pending_input_state_lineage(
+            device_id=DEVICE,
+            resolved_action=action,
+            before_scene=before,
+            hardware_receipt=receipt(),
+        )
+        goal = {
+            "objective": f"让输入框逐字显示 {PRIOR}2",
+            "entities": {"input_text": PRIOR + "2"},
+        }
+        for lineage, cue in ((None, PRIOR), (record, PRIOR + "x")):
+            with self.subTest(lineage=lineage is not None, cue=cue):
+                with self.assertRaisesRegex(VisionAgentError, "白名单外"):
+                    _apply_input_structure_audit(
+                        UIScene.from_dict(before),
+                        state_switch_audit_raw(cue=cue),
+                        fingerprint="after-state-fp",
+                        goal_context=goal,
+                        verified_input_lineage=lineage,
+                        device_id=DEVICE,
+                        lineage_frame=surface_frame(),
+                    )
+        without_cue = _apply_input_structure_audit(
+            UIScene.from_dict(before),
+            state_switch_audit_raw(cue=""),
+            fingerprint="after-state-fp",
+            goal_context=goal,
+            verified_input_lineage=record,
+            device_id=DEVICE,
+            lineage_frame=surface_frame(),
+        )
+        self.assertFalse(
+            any(
+                element.meaning == "input_exact_literal_key"
+                and element.states.get("goal_relevant") is True
+                for element in without_cue.elements
             )
         )
 

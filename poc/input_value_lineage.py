@@ -17,6 +17,13 @@ DEFAULT_LINEAGE_TTL_SECONDS = 6 * 60 * 60
 SURFACE_DESCRIPTOR_WIDTH = 32
 SURFACE_DESCRIPTOR_HEIGHT = 16
 SURFACE_DESCRIPTOR_MAX_MEAN_DISTANCE = 18.0
+PENDING_INPUT_LINEAGE_SOURCES = frozenset(
+    {
+        "pending_verified_literal_action",
+        "pending_verified_text_action",
+        "pending_verified_input_state_action",
+    }
+)
 
 
 class InputValueLineageError(ValueError):
@@ -229,14 +236,12 @@ class TypedInputLineage:
             not _valid_surface_descriptor(item) for item in self.surface_descriptors
         ):
             raise InputValueLineageError("输入值连续性的局部画面描述无效。")
-        pending_sources = {
-            "pending_verified_literal_action",
-            "pending_verified_text_action",
-            "pending_verified_input_state_action",
-        }
-        if self.source not in pending_sources and len(self.surface_descriptors) != 4:
+        if (
+            self.source not in PENDING_INPUT_LINEAGE_SOURCES
+            and len(self.surface_descriptors) != 4
+        ):
             raise InputValueLineageError("持久输入值连续性必须绑定动作后四帧。")
-        if self.source in pending_sources and self.surface_descriptors:
+        if self.source in PENDING_INPUT_LINEAGE_SOURCES and self.surface_descriptors:
             raise InputValueLineageError("临时输入值连续性不能伪造持久画面描述。")
         if isinstance(self.recorded_at_epoch, bool) or not isinstance(
             self.recorded_at_epoch, (int, float)
@@ -334,6 +339,76 @@ class TypedInputLineage:
             self.surface_descriptors,
             frame=current_frame,
             bounds=self.input_bounds,
+        )
+
+    def matches_persisted_surface(
+        self,
+        *,
+        device_id: str,
+        app_id: str,
+        screen_id: str,
+        input_bounds: tuple[float, float, float, float] | None,
+        current_frame: Image.Image | None,
+        now_epoch: float | None = None,
+        ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
+    ) -> bool:
+        """Rebind an immutable persisted value to the same live input surface.
+
+        This method deliberately does not inspect or return a model-transcribed
+        value.  It only proves that a prior four-frame action receipt still
+        describes the current App/screen/input crop.  A caller must separately
+        require an exact visible cue before using ``exact_value``.
+        """
+
+        now = time.time() if now_epoch is None else float(now_epoch)
+        return bool(
+            self.source not in PENDING_INPUT_LINEAGE_SOURCES
+            and device_id == self.device_id
+            and now >= self.recorded_at_epoch
+            and now - self.recorded_at_epoch <= ttl_seconds
+            and input_bounds is not None
+            and _bounds_compatible(self.input_bounds, input_bounds)
+            and _surface_identity_compatible(
+                recorded_app_id=self.app_id,
+                recorded_screen_id=self.screen_id,
+                current_app_id=app_id,
+                current_screen_id=screen_id,
+                exact_value=self.exact_value,
+            )
+            and _surface_descriptor_matches(
+                self.surface_descriptors,
+                frame=current_frame,
+                bounds=input_bounds,
+            )
+        )
+
+    def matches_persisted_surface_cue(
+        self,
+        *,
+        device_id: str,
+        app_id: str,
+        screen_id: str,
+        raw_value: str,
+        visible_editable_cues: tuple[str, ...],
+        input_bounds: tuple[float, float, float, float] | None,
+        current_frame: Image.Image | None,
+        now_epoch: float | None = None,
+        ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
+    ) -> bool:
+        """Recover only one exact cue on a revalidated persisted surface."""
+
+        return bool(
+            raw_value == ""
+            and tuple(visible_editable_cues).count(self.exact_value) == 1
+            and self.matches_persisted_surface(
+                device_id=device_id,
+                app_id=app_id,
+                screen_id=screen_id,
+                input_bounds=input_bounds,
+                current_frame=current_frame,
+                now_epoch=now_epoch,
+                ttl_seconds=ttl_seconds,
+            )
         )
 
     def matches_pending_input_state_value(
@@ -511,6 +586,28 @@ class TypedInputLineageStore:
             now_epoch=float(self.clock()),
             ttl_seconds=self.ttl_seconds,
             current_frame=current_frame,
+        ):
+            return None
+        return record
+
+    def match_surface(
+        self,
+        *,
+        device_id: str,
+        app_id: str,
+        screen_id: str,
+        input_bounds: tuple[float, float, float, float] | None,
+        current_frame: Image.Image | None,
+    ) -> TypedInputLineage | None:
+        record = self.load(device_id)
+        if record is None or not record.matches_persisted_surface(
+            device_id=device_id,
+            app_id=app_id,
+            screen_id=screen_id,
+            input_bounds=input_bounds,
+            current_frame=current_frame,
+            now_epoch=float(self.clock()),
+            ttl_seconds=self.ttl_seconds,
         ):
             return None
         return record

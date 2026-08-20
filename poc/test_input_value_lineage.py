@@ -546,6 +546,95 @@ class TypedInputLineageTests(unittest.TestCase):
                 )
             )
 
+    def test_persisted_surface_rebind_requires_identity_geometry_frame_and_ttl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            now = [1000.0]
+            store = TypedInputLineageStore(
+                Path(temp), ttl_seconds=10, clock=lambda: now[0]
+            )
+            record = store.record_verified_literal_action(
+                device_id=DEVICE,
+                resolved_action=resolved(),
+                before_scene=before_scene(),
+                after_scene=scene(RAW_AFTER, "after-fp"),
+                hardware_receipt=receipt(),
+                after_frames=surface_frames(),
+            )
+            matching = {
+                "device_id": DEVICE,
+                "app_id": "sample.app",
+                "screen_id": "editor_composing",
+                "input_bounds": (0.13, 0.54, 0.69, 0.61),
+                "current_frame": surface_frame(variation=1),
+            }
+            self.assertTrue(
+                record.matches_persisted_surface(now_epoch=1000.0, **matching)
+            )
+            self.assertEqual(record, store.match_surface(**matching))
+            negatives = (
+                {**matching, "device_id": "other"},
+                {**matching, "app_id": "other.app"},
+                {**matching, "screen_id": "unrelated"},
+                {**matching, "input_bounds": (0.75, 0.1, 0.95, 0.2)},
+                {**matching, "current_frame": surface_frame(unrelated=True)},
+                {**matching, "current_frame": None},
+            )
+            for candidate in negatives:
+                with self.subTest(candidate=candidate):
+                    self.assertIsNone(store.match_surface(**candidate))
+            now[0] = 1011.0
+            self.assertIsNone(store.match_surface(**matching))
+
+    def test_pending_lineage_cannot_rebind_as_persisted_surface(self) -> None:
+        pending = build_pending_literal_lineage(
+            device_id=DEVICE,
+            resolved_action=resolved(),
+            before_scene=before_scene(),
+            hardware_receipt=receipt(),
+            recorded_at_epoch=1000.0,
+        )
+        self.assertFalse(
+            pending.matches_persisted_surface(
+                device_id=DEVICE,
+                app_id="sample.app",
+                screen_id="editor",
+                input_bounds=(0.13, 0.54, 0.69, 0.61),
+                current_frame=surface_frame(),
+                now_epoch=1000.0,
+            )
+        )
+
+    def test_persisted_surface_exact_adjacent_cue_recovers_value(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = TypedInputLineageStore(Path(temp))
+            record = store.record_verified_literal_action(
+                device_id=DEVICE,
+                resolved_action=resolved(),
+                before_scene=before_scene(),
+                after_scene=scene(RAW_AFTER, "after-fp"),
+                hardware_receipt=receipt(),
+                after_frames=surface_frames(),
+            )
+            base = UIScene.from_dict(scene("", "current-fp"))
+            audited = _apply_input_structure_audit(
+                base,
+                state_switch_audit_raw(cue=EXPECTED, literal="2"),
+                fingerprint="current-fp",
+                goal_context={
+                    "objective": f"让输入框逐字显示 {EXPECTED}2",
+                    "entities": {"input_text": EXPECTED + "2"},
+                },
+                coarse_input_value=EXPECTED,
+                verified_input_lineage=record,
+                device_id=DEVICE,
+                lineage_frame=surface_frame(variation=1),
+            )
+            input_element = audited.get_element("local_audited_input_1")
+            self.assertEqual(EXPECTED, input_element.states["value"])
+            self.assertTrue(
+                any("持久回执连续性" in item for item in input_element.evidence)
+            )
+
     def test_next_verified_key_inherits_prior_known_surface_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = self.make_store(temp)

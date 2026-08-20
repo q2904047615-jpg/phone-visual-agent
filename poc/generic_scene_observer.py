@@ -1181,6 +1181,14 @@ class GenericSceneObserver:
                         input_bounds=preliminary_bounds,
                         current_frame=frame,
                     )
+                    if verified_input_lineage is None:
+                        verified_input_lineage = self.input_lineage_store.match_surface(
+                            device_id=device_id,
+                            app_id=scene.app_id,
+                            screen_id=scene.screen_id,
+                            input_bounds=preliminary_bounds,
+                            current_frame=frame,
+                        )
                     if verified_input_lineage is not None:
                         input_audit_current_value = verified_input_lineage.exact_value
                         input_lineage_used = True
@@ -5416,6 +5424,66 @@ def _normalized_keyboard_layout_token(value: Any) -> Any:
     }.get(normalized, normalized)
 
 
+def _evidenced_composite_symbol_layout(
+    value: Any,
+    *,
+    keyboard: dict[str, Any],
+    keyboard_bounds: tuple[float, float, float, float] | None,
+    goal_context: dict[str, Any],
+    current_input_text: str | None,
+) -> str | None:
+    """Normalize a composite symbol label only from the next visible key.
+
+    Composite names are descriptive model output, not a new layout enum.  A
+    token is accepted only when every component is known, it explicitly names
+    the symbol layer, and the current typed transaction independently derives
+    one symbol whose exact whole key is uniquely visible on this keyboard.
+    """
+
+    if not isinstance(value, str) or keyboard_bounds is None:
+        return None
+    components = tuple(
+        part
+        for part in re.split(r"[_+\-/\s]+", value.strip().casefold())
+        if part
+    )
+    known_components = {
+        "qwerty",
+        "numeric",
+        "number",
+        "numbers",
+        "symbol",
+        "symbols",
+        "grid",
+        "layer",
+    }
+    if (
+        len(components) < 2
+        or not set(components).issubset(known_components)
+        or not {"symbol", "symbols"}.intersection(components)
+    ):
+        return None
+    literal_targets = set(
+        _input_audit_literal_key_targets(
+            _observation_goal_context(goal_context),
+            current_input_text=current_input_text,
+        )
+    )
+    if (
+        len(literal_targets) != 1
+        or _preferred_keyboard_layout(next(iter(literal_targets))) != "symbol"
+    ):
+        return None
+    literal_keys = _validated_keyboard_literal_keys(
+        keyboard.get("literal_keys", []),
+        keyboard_bounds=keyboard_bounds,
+    )
+    target = next(iter(literal_targets))
+    if sum(item["value"] == target for item in literal_keys) != 1:
+        return None
+    return "symbol"
+
+
 def _adjacent_exact_preedit_cue(
     trusted_input: dict[str, Any],
     trusted_preedits: list[dict[str, Any]],
@@ -5516,8 +5584,6 @@ def _apply_input_structure_audit(
         keyboard_case_mode = keyboard.get("case_mode", "unknown")
         if not isinstance(keyboard_visible, bool):
             raise UISceneError("输入结构审计 keyboard.visible 必须是布尔值。")
-        if keyboard_layout not in {"qwerty", "numeric", "symbol", "unknown"}:
-            raise UISceneError("输入结构审计 keyboard.layout 无效。")
         if keyboard_input_mode not in {
             "direct_latin",
             "chinese_pinyin",
@@ -5567,6 +5633,17 @@ def _apply_input_structure_audit(
             or keyboard.get("layout_switches") not in (None, [])
         ):
             raise UISceneError("不可见键盘不能包含键位或切换控件。")
+        if keyboard_layout not in {"qwerty", "numeric", "symbol", "unknown"}:
+            keyboard_layout = _evidenced_composite_symbol_layout(
+                keyboard_layout,
+                keyboard=keyboard,
+                keyboard_bounds=keyboard_bounds,
+                goal_context=goal_context,
+                current_input_text=coarse_input_value,
+            )
+            if keyboard_layout is None:
+                raise UISceneError("输入结构审计 keyboard.layout 无效。")
+            keyboard["layout"] = keyboard_layout
 
         preedit_bounds: list[tuple[float, float, float, float]] = []
         trusted_preedits: list[dict[str, Any]] = []
@@ -5793,6 +5870,20 @@ def _apply_input_structure_audit(
             ):
                 trusted_input = dict(trusted_input)
                 trusted_input["lineage_visible_cue_text"] = (
+                    verified_input_lineage.exact_value
+                )
+                trusted_input["text"] = verified_input_lineage.exact_value
+            elif verified_input_lineage.matches_persisted_surface_cue(
+                device_id=str(device_id or ""),
+                app_id=scene.app_id,
+                screen_id=scene.screen_id,
+                raw_value=raw_lineage_text,
+                visible_editable_cues=lineage_visible_cues,
+                input_bounds=lineage_bounds,
+                current_frame=lineage_frame,
+            ):
+                trusted_input = dict(trusted_input)
+                trusted_input["lineage_persisted_visible_cue_text"] = (
                     verified_input_lineage.exact_value
                 )
                 trusted_input["text"] = verified_input_lineage.exact_value
@@ -6109,6 +6200,14 @@ def _apply_input_structure_audit(
                     input_evidence.append(
                         "输入状态切换后同一应用输入区域仍逐字可见："
                         f"{lineage_visible_cue_text}；本地同值连续性核对通过"
+                    )
+                lineage_persisted_visible_cue_text = trusted_input.get(
+                    "lineage_persisted_visible_cue_text"
+                )
+                if isinstance(lineage_persisted_visible_cue_text, str):
+                    input_evidence.append(
+                        "跨会话同一应用输入区域仍逐字可见："
+                        f"{lineage_persisted_visible_cue_text}；持久回执连续性核对通过"
                     )
                 same_frame_visible_cue_text = trusted_input.get(
                     "same_frame_visible_cue_text"

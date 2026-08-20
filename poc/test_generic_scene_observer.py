@@ -4364,6 +4364,122 @@ class GenericSceneObserverTests(unittest.TestCase):
                 self.assertIsNotNone(candidate)
                 self.assertEqual("symbol", candidate.states["keyboard_layout"])
 
+    def test_input_audit_infers_composite_symbol_only_from_unique_next_key(self) -> None:
+        current_value = "longinputvalidation2026"
+        target_value = current_value + ":"
+        base_scene = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="frame-composite-symbol",
+        )
+
+        def payload(layout: str, literal_keys: list[dict]) -> dict:
+            return input_audit_payload(
+                application_inputs=[
+                    audited_application_input(
+                        structure_id="message-field",
+                        bounds=[130, 540, 700, 600],
+                        text=current_value,
+                    )
+                ],
+                keyboard={
+                    "visible": True,
+                    "bounds": [0, 660, 1000, 1000],
+                    "layout": layout,
+                    "input_mode": "direct_latin",
+                    "case_mode": "unknown",
+                    "qwerty_anchors": None,
+                    "mode_switch": None,
+                    "backspace_key": None,
+                    "case_switch": None,
+                    "literal_keys": literal_keys,
+                    "layout_switches": [],
+                },
+            )
+
+        exact_key = {
+            "value": ":",
+            "label": ":",
+            "key_kind": "character",
+            "bounds": [440, 750, 560, 810],
+            "confidence": 1.0,
+            "fully_visible": True,
+        }
+        for layout in ("numeric_symbol", "numeric_symbol_grid"):
+            with self.subTest(layout=layout):
+                scene = _apply_input_structure_audit(
+                    base_scene,
+                    json.dumps(payload(layout, [exact_key]), ensure_ascii=False),
+                    fingerprint="frame-composite-symbol",
+                    goal_context={
+                        "objective": "输入框逐字等于目标且不发送",
+                        "entities": {"input_text": target_value},
+                    },
+                    coarse_input_value=current_value,
+                )
+                key = scene.unique_trusted_goal_element()
+                self.assertEqual("local_audited_literal_key_1", key.element_id)
+                self.assertEqual(":", key.states["key_value"])
+                self.assertEqual(
+                    "symbol",
+                    scene.get_element("local_audited_input_1").states[
+                        "keyboard_layout"
+                    ],
+                )
+
+        negative_cases = {
+            "unknown_component": payload("symbols_custom", [exact_key]),
+            "not_symbol_composite": payload("qwerty_numeric", [exact_key]),
+            "mixed": payload("mixed", [exact_key]),
+            "missing_key": payload("numeric_symbol", []),
+            "wrong_key": payload(
+                "numeric_symbol", [{**exact_key, "value": "+", "label": "+"}]
+            ),
+            "duplicate_key": payload(
+                "numeric_symbol",
+                [exact_key, {**exact_key, "bounds": [600, 750, 720, 810]}],
+            ),
+            "low_confidence": payload(
+                "numeric_symbol", [{**exact_key, "confidence": 0.5}]
+            ),
+            "not_whole": payload(
+                "numeric_symbol", [{**exact_key, "fully_visible": False}]
+            ),
+            "outside_keyboard": payload(
+                "numeric_symbol", [{**exact_key, "bounds": [440, 500, 560, 560]}]
+            ),
+        }
+        for name, candidate in negative_cases.items():
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(VisionAgentError, "keyboard.layout"):
+                    _apply_input_structure_audit(
+                        base_scene,
+                        json.dumps(candidate, ensure_ascii=False),
+                        fingerprint="frame-composite-symbol-negative",
+                        goal_context={
+                            "objective": "输入框逐字等于目标且不发送",
+                            "entities": {"input_text": target_value},
+                        },
+                        coarse_input_value=current_value,
+                    )
+
+        with self.assertRaisesRegex(VisionAgentError, "keyboard.layout"):
+            _apply_input_structure_audit(
+                base_scene,
+                json.dumps(
+                    payload(
+                        "numeric_symbol",
+                        [{**exact_key, "value": "2", "label": "2"}],
+                    ),
+                    ensure_ascii=False,
+                ),
+                fingerprint="frame-composite-symbol-number-target",
+                goal_context={
+                    "objective": "输入框逐字等于目标且不发送",
+                    "entities": {"input_text": current_value + "2"},
+                },
+                coarse_input_value=current_value,
+            )
+
     def test_scene_normalizes_exact_symbol_grid_layout_alias(self) -> None:
         payload = scene_payload()
         payload["elements"] = [

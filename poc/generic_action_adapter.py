@@ -28,7 +28,7 @@ from input_value_lineage import (
     build_pending_text_lineage,
 )
 from ocr_runtime import recognize as recognize_ocr
-from observation_images import measure_local_stability
+from observation_images import measure_frame_sharpness, measure_local_stability
 from orientation_safety import (
     OrientationCredential,
     OrientationFrameMismatchError,
@@ -688,6 +688,8 @@ class GenericSingleActionAdapter:
         post_action_settle: float = 1.5,
         post_action_timeout: float = 10.0,
         post_action_max_observations: int = 2,
+        post_action_min_relative_sharpness: float = 0.80,
+        post_action_min_reference_sharpness: float = 2.0,
         confirmation_frame_delta_max: float = 6.0,
         qwerty_row_snapper: Callable[
             [tuple[Image.Image, ...] | list[Image.Image], dict[str, Any]],
@@ -708,6 +710,14 @@ class GenericSingleActionAdapter:
         self.post_action_max_observations = min(
             2,
             max(1, int(post_action_max_observations)),
+        )
+        self.post_action_min_relative_sharpness = max(
+            0.0,
+            min(1.0, float(post_action_min_relative_sharpness)),
+        )
+        self.post_action_min_reference_sharpness = max(
+            0.0,
+            float(post_action_min_reference_sharpness),
         )
         self.confirmation_frame_delta_max = max(
             0.0,
@@ -856,22 +866,54 @@ class GenericSingleActionAdapter:
             )
         )
 
+    @staticmethod
+    def _requires_post_action_relative_clarity(
+        resolved: ResolvedSemanticAction,
+    ) -> bool:
+        """Return whether the action must preserve a readable input surface."""
+
+        if resolved.kind in {"input_verified_text", "clear_verified_text"}:
+            return True
+        element_state = resolved.expected_effect.get("element_state")
+        return bool(
+            isinstance(element_state, dict)
+            and element_state.get("meaning") == "application_text_input"
+        )
+
     def _capture_stable_post_action_frames(
         self,
         *,
         deadline: float,
         evidence_dir: Path | None,
         prefix: str,
+        clarity_reference_frames: tuple[Image.Image, ...] = (),
+        require_relative_clarity: bool = False,
     ) -> tuple[list[Image.Image], tuple[str, ...]]:
-        """Wait for four consecutive locally stable frames within the deadline.
+        """Wait for four stable, and when required relatively clear, frames.
 
         This gate is deliberately local and cheap.  Qwen is called only after
-        the camera's outer/static UI bands have settled, and no physical action
-        is ever repeated while waiting.
+        the camera's outer/static UI bands have settled.  Input-surface
+        continuity actions additionally reject a stable-but-blurred window by
+        comparing its median sharpness with the fresh pre-action frames.  No
+        physical action is ever repeated while waiting.
         """
 
         frames: list[Image.Image] = []
         last_stability = None
+        reference_sharpness = (
+            statistics.median(
+                measure_frame_sharpness(frame)
+                for frame in clarity_reference_frames
+            )
+            if require_relative_clarity and clarity_reference_frames
+            else None
+        )
+        clarity_is_comparable = bool(
+            reference_sharpness is not None
+            and reference_sharpness >= self.post_action_min_reference_sharpness
+        )
+        last_candidate_sharpness: float | None = None
+        last_relative_sharpness: float | None = None
         while True:
             frames.append(self._capture_frame())
             if len(frames) > 4:
@@ -879,14 +921,40 @@ class GenericSingleActionAdapter:
             if len(frames) == 4:
                 last_stability = measure_local_stability(frames)
                 if last_stability.stable:
-                    paths = self._save_frames(frames, evidence_dir, prefix)
-                    return list(frames), paths
+                    clarity_accepted = True
+                    if clarity_is_comparable:
+                        last_candidate_sharpness = statistics.median(
+                            measure_frame_sharpness(frame) for frame in frames
+                        )
+                        last_relative_sharpness = (
+                            last_candidate_sharpness / reference_sharpness
+                        )
+                        clarity_accepted = (
+                            last_relative_sharpness
+                            >= self.post_action_min_relative_sharpness
+                        )
+                    if clarity_accepted:
+                        paths = self._save_frames(frames, evidence_dir, prefix)
+                        return list(frames), paths
                 if time.monotonic() >= deadline:
                     paths = self._save_frames(
                         frames,
                         evidence_dir,
                         f"{prefix}_timeout",
                     )
+                    if (
+                        last_stability.stable
+                        and last_relative_sharpness is not None
+                    ):
+                        raise GenericActionAdapterError(
+                            "动作后画面在限定时间内虽已稳定但仍不够清晰："
+                            f"参考清晰度{reference_sharpness:.3f}，"
+                            f"候选清晰度{last_candidate_sharpness:.3f}，"
+                            f"相对值{last_relative_sharpness:.3f}，"
+                            "要求至少"
+                            f"{self.post_action_min_relative_sharpness:.3f}",
+                            evidence=paths,
+                        )
                     raise GenericActionAdapterError(
                         "动作后画面在限定时间内没有稳定："
                         f"{last_stability.reason}",
@@ -920,6 +988,7 @@ class GenericSingleActionAdapter:
         goal: GenericIntentDraft,
         *,
         before: UIScene,
+        before_frames: tuple[Image.Image, ...],
         resolved: ResolvedSemanticAction,
         input_lineage_override: TypedInputLineage | None,
         evidence_dir: Path | None,
@@ -947,6 +1016,10 @@ class GenericSingleActionAdapter:
                     deadline=attempt_deadline,
                     evidence_dir=evidence_dir,
                     prefix=f"{evidence_prefix}_after_attempt_{attempt}",
+                    clarity_reference_frames=before_frames,
+                    require_relative_clarity=(
+                        self._requires_post_action_relative_clarity(resolved)
+                    ),
                 )
             except GenericActionAdapterError as exc:
                 capture_evidence = all_paths + tuple(exc.evidence)
@@ -1780,6 +1853,7 @@ class GenericSingleActionAdapter:
             ) = self._observe_stable_post_action_scene(
                 goal,
                 before=before,
+                before_frames=tuple(before_frames),
                 resolved=resolved,
                 input_lineage_override=pending_input_lineage,
                 evidence_dir=evidence_dir,

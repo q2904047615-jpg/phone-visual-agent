@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 
 from capability_acceptance import _validate_live_promotion_source
 from generic_action_adapter import (
@@ -21,6 +21,7 @@ from generic_action_adapter import (
 from generic_intent import GenericIntentDraft
 from generic_scene_observer import GenericSceneObserver, _local_frame_fingerprint
 from input_value_lineage import TypedInputLineageStore
+from observation_images import measure_frame_sharpness
 from orientation_safety import (
     OrientationFrameMismatchError,
     _claim_audit_seal,
@@ -304,14 +305,32 @@ class GenericSingleActionAdapter(_GenericSingleActionAdapter):
 
 
 class SequenceCapture:
-    def __init__(self, colors):
-        self.colors = list(colors)
+    def __init__(self, frames):
+        self.frames = list(frames)
         self.calls = 0
 
     def __call__(self):
-        index = min(self.calls, len(self.colors) - 1)
+        index = min(self.calls, len(self.frames) - 1)
         self.calls += 1
-        return Image.new("RGB", (540, 960), self.colors[index])
+        value = self.frames[index]
+        if isinstance(value, Image.Image):
+            return value.copy()
+        return Image.new("RGB", (540, 960), value)
+
+
+def textured_phone_frame() -> Image.Image:
+    """Return a deterministic high-frequency frame for clarity-gate tests."""
+
+    frame = Image.new("RGB", (540, 960), "white")
+    draw = ImageDraw.Draw(frame)
+    for y in range(0, 960, 24):
+        color = "black" if (y // 24) % 2 == 0 else "navy"
+        draw.line((0, y, 539, y), fill=color, width=3)
+    for x in range(0, 540, 30):
+        draw.line((x, 0, x, 959), fill="gray", width=2)
+    draw.rectangle((80, 240, 460, 350), outline="black", width=5)
+    draw.text((100, 280), "generic input surface 2026", fill="black")
+    return frame
 
 
 class SecondPostCaptureFailureAdapter(GenericSingleActionAdapter):
@@ -4236,6 +4255,8 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, observer.calls)
 
     def test_stable_frames_allow_input_field_bounds_drift_with_fresh_keyboard_geometry(self):
+        sharp_frame = textured_phone_frame()
+        blurred_frame = sharp_frame.filter(ImageFilter.GaussianBlur(2))
         states = {
             "goal_relevant": True,
             "fully_visible": True,
@@ -4288,7 +4309,9 @@ class GenericActionAdapterTests(unittest.TestCase):
             for key, value in TEST_QWERTY_GEOMETRY["anchors"].items()
         }
         adapter = GenericSingleActionAdapter(
-            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            capture=SequenceCapture(
+                [sharp_frame] * 4 + [blurred_frame] * 4 + [sharp_frame] * 4
+            ),
             observer=observer,
             robot=robot,
             frame_interval=0,
@@ -4318,7 +4341,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             ),
             planned_scene=planned,
             planned_frames=tuple(
-                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+                sharp_frame.copy() for _ in range(4)
             ),
             goal=goal(),
             confirmed=True,
@@ -4327,6 +4350,8 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual([("input", first_segment)], robot.actions)
         self.assertEqual(1, result.physical_actions)
         self.assertEqual("matched", result.action_outcome)
+        self.assertGreater(adapter.capture.calls, 8)
+        self.assertEqual(2, observer.calls)
         self.assertEqual("fresh", result.before_scene.fingerprint)
         self.assertEqual(
             "stable_local_ocr",
@@ -4950,6 +4975,166 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(robot.actions, [("tap", 300, 400)])
         self.assertEqual(capture.calls, 9)
         self.assertEqual(observer.calls, 2)
+
+    def test_input_post_action_waits_past_stable_blur_until_clarity_recovers(self):
+        sharp = textured_phone_frame()
+        blurred = sharp.filter(ImageFilter.GaussianBlur(2))
+        capture = SequenceCapture([blurred] * 4 + [sharp] * 4)
+        adapter = GenericSingleActionAdapter(
+            capture=capture,
+            observer=FakeSceneObserver([]),
+            robot=FakeRobot(),
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=1,
+        )
+
+        frames, _paths = adapter._capture_stable_post_action_frames(
+            deadline=10**9,
+            evidence_dir=None,
+            prefix="clarity_recovers",
+            clarity_reference_frames=tuple(sharp.copy() for _ in range(4)),
+            require_relative_clarity=True,
+        )
+
+        reference = measure_frame_sharpness(sharp)
+        candidate = sorted(measure_frame_sharpness(frame) for frame in frames)
+        self.assertGreater(capture.calls, 4)
+        self.assertGreaterEqual(
+            (candidate[1] + candidate[2]) / 2 / reference,
+            0.80,
+        )
+
+    def test_relative_clarity_threshold_separates_observed_input_samples(self):
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"]),
+            observer=FakeSceneObserver([]),
+            robot=FakeRobot(),
+        )
+        observed_success_ratios = (
+            0.934,
+            1.007,
+            0.985,
+            0.945,
+            1.005,
+            1.018,
+            1.276,
+        )
+
+        self.assertLess(0.568, adapter.post_action_min_relative_sharpness)
+        self.assertTrue(
+            all(
+                ratio >= adapter.post_action_min_relative_sharpness
+                for ratio in observed_success_ratios
+            )
+        )
+
+    def test_relative_clarity_is_scoped_to_input_surface_continuity(self):
+        input_focus = ResolvedSemanticAction(
+            node_id="focus-input",
+            kind="tap_semantic",
+            expected_effect={
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {"focused": True},
+                }
+            },
+        )
+        navigation = ResolvedSemanticAction(
+            node_id="open-page",
+            kind="tap_semantic",
+            expected_effect={"scene_changed": True},
+        )
+
+        self.assertTrue(
+            GenericSingleActionAdapter._requires_post_action_relative_clarity(
+                input_focus
+            )
+        )
+        self.assertFalse(
+            GenericSingleActionAdapter._requires_post_action_relative_clarity(
+                navigation
+            )
+        )
+
+    def test_input_post_action_stable_blur_times_out_before_model_call(self):
+        sharp = textured_phone_frame()
+        blurred = sharp.filter(ImageFilter.GaussianBlur(2))
+        observer = FakeSceneObserver([])
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture([blurred] * 4),
+            observer=observer,
+            robot=FakeRobot(),
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=1,
+        )
+
+        with patch(
+            "generic_action_adapter.time.monotonic",
+            side_effect=[0.0, 0.0, 0.0, 1.0],
+        ):
+            with self.assertRaisesRegex(
+                GenericActionAdapterError,
+                "虽已稳定但仍不够清晰.*相对值.*要求至少0.800",
+            ):
+                adapter._capture_stable_post_action_frames(
+                    deadline=0.5,
+                    evidence_dir=None,
+                    prefix="clarity_timeout",
+                    clarity_reference_frames=tuple(
+                        sharp.copy() for _ in range(4)
+                    ),
+                    require_relative_clarity=True,
+                )
+
+        self.assertEqual(observer.calls, 0)
+
+    def test_navigation_post_action_does_not_compare_changed_page_sharpness(self):
+        sharp = textured_phone_frame()
+        blurred = sharp.filter(ImageFilter.GaussianBlur(2))
+        capture = SequenceCapture([blurred] * 4)
+        adapter = GenericSingleActionAdapter(
+            capture=capture,
+            observer=FakeSceneObserver([]),
+            robot=FakeRobot(),
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=1,
+        )
+
+        frames, _paths = adapter._capture_stable_post_action_frames(
+            deadline=10**9,
+            evidence_dir=None,
+            prefix="navigation_changed_page",
+            clarity_reference_frames=tuple(sharp.copy() for _ in range(4)),
+            require_relative_clarity=False,
+        )
+
+        self.assertEqual(capture.calls, 4)
+        self.assertEqual(len(frames), 4)
+
+    def test_low_texture_input_reference_keeps_existing_stability_contract(self):
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["white"] * 4),
+            observer=FakeSceneObserver([]),
+            robot=FakeRobot(),
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=1,
+        )
+
+        frames, _paths = adapter._capture_stable_post_action_frames(
+            deadline=10**9,
+            evidence_dir=None,
+            prefix="low_texture_reference",
+            clarity_reference_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+            require_relative_clarity=True,
+        )
+
+        self.assertEqual(len(frames), 4)
 
     def test_post_action_allows_second_observation_without_repeating_action(self):
         planned = scene("planned")

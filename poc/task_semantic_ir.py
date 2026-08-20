@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-TASK_SEMANTIC_IR_PROTOCOL = "2026-08-19-task-semantic-ir-v2"
+TASK_SEMANTIC_IR_PROTOCOL = "2026-08-20-task-semantic-ir-v3"
 RISK_POLICY_PROTOCOL = "2026-08-18-local-risk-policy-v1"
 COMPILATION_REPORT_PROTOCOL = "2026-08-20-semantic-compilation-v1"
-AUTHORITY_REPORT_PROTOCOL = "2026-08-19-semantic-risk-authority-v2"
+AUTHORITY_REPORT_PROTOCOL = "2026-08-20-typed-effect-authority-v1"
 POLICY_TRACE_PROTOCOL = "2026-08-20-semantic-policy-trace-v1"
 EFFECT_PREVIEW_PROTOCOL = "2026-08-19-effect-preview-v1"
 

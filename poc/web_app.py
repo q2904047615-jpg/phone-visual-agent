@@ -59,6 +59,7 @@ from task_semantic_ir import (
     RISK_POLICY_PROTOCOL,
     TASK_SEMANTIC_IR_PROTOCOL,
 )
+from visual_action_shadow import VISUAL_ACTION_AUTHORITY_PROTOCOL
 
 from operation_specs import (
     STRUCTURED_OPERATIONS,
@@ -1455,13 +1456,13 @@ def device() -> dict[str, Any]:
             "hardware_capabilities": hardware_capabilities,
             "hardware_capability_profile": hardware_capability_profile,
             "supported_app_scope": "dynamic",
-            "semantic_risk_authority": {
+            "typed_effect_authority": {
                 "semantic_ir_protocol": TASK_SEMANTIC_IR_PROTOCOL,
                 "authority_protocol": AUTHORITY_REPORT_PROTOCOL,
-                "risk_policy_protocol": RISK_POLICY_PROTOCOL,
-                "authority_scope": "semantic_task_and_risk",
-                "legacy_remote_risk_diagnostics_enabled": False,
-                "visual_action_authority": "formal_qwen_v3",
+                "effect_policy_protocol": RISK_POLICY_PROTOCOL,
+                "authority_scope": "typed_task_and_effect_policy",
+                "retired_remote_risk_diagnostics_enabled": False,
+                "visual_action_authority": VISUAL_ACTION_AUTHORITY_PROTOCOL,
                 "visual_action_shadow_enabled": True,
             },
             "observer": runtime.generic_scene_observer.status(),

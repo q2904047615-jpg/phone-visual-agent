@@ -4663,13 +4663,17 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertTrue(universal["automatic_loop_enabled"])
         self.assertEqual(universal["automatic_loop_max_physical_actions"], 12)
         self.assertEqual(universal["supported_app_scope"], "dynamic")
-        semantic_authority = universal["semantic_risk_authority"]
+        semantic_authority = universal["typed_effect_authority"]
         self.assertEqual(
             semantic_authority["authority_scope"],
-            "semantic_task_and_risk",
+            "typed_task_and_effect_policy",
         )
         self.assertFalse(
-            semantic_authority["legacy_remote_risk_diagnostics_enabled"]
+            semantic_authority["retired_remote_risk_diagnostics_enabled"]
+        )
+        self.assertEqual(
+            semantic_authority["visual_action_authority"],
+            "2026-08-19-visual-action-authority-v1",
         )
         self.assertTrue(semantic_authority["visual_action_shadow_enabled"])
         self.assertEqual(

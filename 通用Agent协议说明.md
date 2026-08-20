@@ -4,6 +4,8 @@
 
 当前唯一正式高层协议为 `2026-08-20-deepseek-typed-task-graph-v4`。项目不再迁移、修补或执行 DeepSeek v2/v3，也不再让旧自由文本风险审计、旧风险字段或 App 固定流程参与正式会话。
 
+运行时公开的配套协议为 `2026-08-20-task-semantic-ir-v3`、`2026-08-20-typed-effect-authority-v1` 和 `2026-08-19-visual-action-authority-v1`。`/api/device` 只公开 `typed_effect_authority`，不再公开旧 `semantic_risk_authority` 或 `formal_qwen_v3` 名称。
+
 ## 1. 用户目标
 
 用户可以直接说“点击、滑动、输入、长按、拖动、返回、Home、发送、关注、评论”等自然动作。自然动作词不会被当成非法低层指令。协议只拒绝直接驱动设备的坐标、ADB、Shell、keycode、卖家控制命令和跳过观察闭环的自由动作脚本。

@@ -417,7 +417,7 @@ class TaskSemanticIRTests(unittest.TestCase):
             )
             artifact = json.loads(Path(paths[0]).read_text(encoding="utf-8"))
 
-        self.assertNotIn("semantic_risk_authority", artifact)
+        self.assertNotIn("typed_effect_authority", artifact)
         self.assertIn("正式效果类型无效", artifact["error_message"])
 
     def test_retired_shadow_compiler_is_absent_from_planner(self):

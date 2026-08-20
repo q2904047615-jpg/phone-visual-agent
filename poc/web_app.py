@@ -1402,6 +1402,16 @@ def device() -> dict[str, Any]:
         if callable(capability_profile_provider)
         else None
     )
+    profile_actions = (
+        hardware_capability_profile.get("actions", {})
+        if isinstance(hardware_capability_profile, dict)
+        else {}
+    )
+    effective_hardware_capabilities = {
+        str(action): bool(spec.get("enabled"))
+        for action, spec in profile_actions.items()
+        if isinstance(action, str) and isinstance(spec, dict)
+    }
     status["default_device_id"] = runtime.device_controllers.default_device_id
     status["devices"] = [
         {
@@ -1440,7 +1450,9 @@ def device() -> dict[str, Any]:
             "supervised_single_step_enabled": False,
             "enabled_physical_actions": sorted(
                 action
-                for action, enabled in hardware_capabilities.items()
+                for action, enabled in (
+                    effective_hardware_capabilities or hardware_capabilities
+                ).items()
                 if enabled and action != "wait_for_change"
             ),
             "protocol_physical_actions": [
@@ -1451,6 +1463,7 @@ def device() -> dict[str, Any]:
                 "home",
                 "reveal_system_navigation",
                 "input_verified_text",
+                "press_enter",
                 "clear_verified_text",
                 "long_press",
                 "drag",

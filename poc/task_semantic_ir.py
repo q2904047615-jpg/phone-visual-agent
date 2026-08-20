@@ -1819,7 +1819,54 @@ def compile_runtime_graph_semantics(
             if constraint_ref in constraints_by_id
         )
     )
+    clear_action_subgoal_ids = tuple(
+        subgoal.subgoal_id
+        for subgoal in semantic_subgoals
+        if any(
+            constraints_by_id[constraint_ref].kind == "required_action"
+            and constraints_by_id[constraint_ref].value == "clear_verified_text"
+            for constraint_ref in subgoal.constraint_refs
+            if constraint_ref in constraints_by_id
+        )
+    )
     input_entities = tuple(entity_by_role.get("input_text", ()))
+
+    def clear_subgoals_for_input(entity_id: str) -> tuple[str, ...]:
+        if len(input_entities) == 1:
+            return clear_action_subgoal_ids
+        field_labels = {
+            item.entity_id: input_field_label_by_entity.get(item.entity_id, "").strip()
+            for item in input_entities
+        }
+        selected: list[str] = []
+        for subgoal_id in clear_action_subgoal_ids:
+            source = subgoals.get(subgoal_id)
+            if source is None:
+                continue
+            context = " ".join(
+                [
+                    str(getattr(source, "objective", "") or ""),
+                    *tuple(
+                        str(item)
+                        for item in tuple(getattr(source, "constraints", ()) or ())
+                    ),
+                    *tuple(
+                        str(item)
+                        for item in tuple(
+                            getattr(source, "completion_conditions", ()) or ()
+                        )
+                    ),
+                ]
+            ).casefold()
+            matches = tuple(
+                item_id
+                for item_id, label in field_labels.items()
+                if label and label.casefold() in context
+            )
+            if matches == (entity_id,):
+                selected.append(subgoal_id)
+        return tuple(selected)
+
     input_fields: list[InputFieldIntent] = []
     for index, payload in enumerate(input_entities, 1):
         typed_source_subgoal_ids = tuple(
@@ -1845,6 +1892,7 @@ def compile_runtime_graph_semantics(
                 [
                     *typed_source_subgoal_ids,
                     *(input_action_subgoal_ids if len(input_entities) == 1 else ()),
+                    *clear_subgoals_for_input(payload.entity_id),
                 ]
             )
         )

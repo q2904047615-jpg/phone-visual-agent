@@ -157,6 +157,65 @@ def input_scene() -> UIScene:
 
 
 class CanonicalActionProtocolTests(unittest.TestCase):
+    def test_active_clear_step_exposes_only_owned_clear_candidate(self) -> None:
+        semantic_ir = input_ir(active="type_last_char")
+        semantic_ir = replace(
+            semantic_ir,
+            constraints=(
+                ConstraintIntent(
+                    constraint_id="constraint.clear",
+                    kind="required_action",
+                    value="clear_verified_text",
+                    source_text="clear current input draft",
+                    authoritative=True,
+                ),
+            ),
+            subgoals=tuple(
+                replace(item, constraint_refs=("constraint.clear",))
+                if item.subgoal_id == "type_last_char"
+                else item
+                for item in semantic_ir.subgoals
+            ),
+        )
+        current_scene = scene(
+            element(
+                "input",
+                label="draft",
+                meaning="application_text_input",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "draft",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                    "keyboard_case_mode": "lower",
+                },
+            ),
+            element(
+                "key-x",
+                label="x",
+                meaning="input_exact_literal_key",
+                states={
+                    "input_literal_key": True,
+                    "key_value": "x",
+                    "prior_input_value": "draft",
+                    "expected_input_value": "draftx",
+                    "input_element_id": "input",
+                },
+            ),
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            semantic_ir,
+            {"tap_semantic", "input_verified_text", "clear_verified_text"},
+        )
+
+        self.assertEqual(
+            ["clear_verified_text"],
+            [item.action_kind for item in report.candidates],
+        )
+
     def test_catalog_is_the_only_action_protocol(self) -> None:
         report = compile_canonical_action_catalog(
             input_scene(),

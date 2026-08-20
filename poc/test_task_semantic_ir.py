@@ -122,6 +122,117 @@ class RawResponseProvider:
 
 
 class TaskSemanticIRTests(unittest.TestCase):
+    def test_single_input_clear_and_type_share_typed_field_ownership(self):
+        payload = current_send_failure_payload()
+        payload["goal"]["entities"] = {
+            "input_text": "longinputvalidation2026:1234567890ABC",
+            "target_ui_label": "输入框",
+        }
+        payload["effect_intents"] = []
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "clear_input",
+                "objective": "清空当前输入框中的现有草稿，使输入框变为空白",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["不得发送"],
+                "completion_conditions": ["输入框显示为空"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            },
+            {
+                "subgoal_id": "enter_text",
+                "objective": (
+                    "在输入框中输入 longinputvalidation2026:1234567890ABC"
+                ),
+                "status": "pending",
+                "depends_on": ["clear_input"],
+                "constraints": ["不得发送"],
+                "completion_conditions": [
+                    "输入框逐字等于 longinputvalidation2026:1234567890ABC"
+                ],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            },
+        ]
+        payload["active_subgoal_id"] = "clear_input"
+        graph = _graph_from_payload(
+            payload,
+            task_id="clear-then-input-task",
+            device_id="device-local-01",
+            revision=1,
+            raw_user_goal=(
+                "先清空当前草稿，再输入 longinputvalidation2026:1234567890ABC"
+            ),
+        )
+
+        semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+        constraints = {item.constraint_id: item for item in semantic_ir.constraints}
+        clear_subgoal = next(
+            item for item in semantic_ir.subgoals if item.subgoal_id == "clear_input"
+        )
+
+        self.assertIn("clear_input", semantic_ir.input_fields[0].source_subgoal_ids)
+        self.assertIn("enter_text", semantic_ir.input_fields[0].source_subgoal_ids)
+        self.assertIn(
+            "clear_verified_text",
+            {
+                constraints[ref].value
+                for ref in clear_subgoal.constraint_refs
+                if constraints[ref].kind == "required_action"
+            },
+        )
+
+    def test_multi_field_clear_binds_only_unique_visible_field_label(self):
+        payload = current_send_failure_payload()
+        payload["goal"]["entities"] = {
+            "input_fields": [
+                {"field_id": "subject", "field_label": "主题", "text": "周报"},
+                {"field_id": "body", "field_label": "正文", "text": "本周完成"},
+            ]
+        }
+        payload["effect_intents"] = []
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "clear_body",
+                "objective": "清空正文输入框中的现有草稿",
+                "status": "active",
+                "depends_on": [],
+                "constraints": [],
+                "completion_conditions": ["正文输入框为空"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            },
+            {
+                "subgoal_id": "enter_fields",
+                "objective": "填写主题与正文",
+                "status": "pending",
+                "depends_on": ["clear_body"],
+                "constraints": [],
+                "completion_conditions": ["主题和正文逐字正确"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            },
+        ]
+        payload["active_subgoal_id"] = "clear_body"
+        semantic_ir = compile_formal_semantic_authority(
+            _graph_from_payload(
+                payload,
+                task_id="multi-clear-task",
+                device_id="device-local-01",
+                revision=1,
+                raw_user_goal="清空正文后填写主题周报和正文本周完成",
+            )
+        ).semantic_ir
+        fields = {item.field_id: item for item in semantic_ir.input_fields}
+
+        self.assertNotIn("clear_body", fields["subject"].source_subgoal_ids)
+        self.assertIn("clear_body", fields["body"].source_subgoal_ids)
+
     def test_input_carrier_presence_does_not_mint_input_action(self):
         payload = current_send_failure_payload()
         payload["subgoals"][0]["objective"] = (

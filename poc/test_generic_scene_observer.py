@@ -7819,6 +7819,65 @@ class GenericSceneObserverTests(unittest.TestCase):
             observer.last_diagnostics["foreground_app_identity_audit_used"]
         )
 
+    def test_generic_foreground_category_with_named_screen_gets_brand_identity_audit(self) -> None:
+        cases = (
+            ("messaging", "wechat_main_chat_list", "wechat", "微信"),
+            ("system_utility", "settings_main", "settings", "设置"),
+        )
+        for foreground, screen_id, target_app, app_name in cases:
+            with self.subTest(target_app=target_app):
+                compact = scene_payload()
+                compact["foreground_app_id"] = foreground
+                compact["screen_id"] = screen_id
+                provider = SequenceProvider(
+                    [
+                        compact,
+                        targeted_delta_payload(elements=compact["elements"]),
+                        app_identity_audit_payload(target_app),
+                    ]
+                )
+                observer = GenericSceneObserver(provider)
+
+                scene = observer.observe(
+                    frames=stable_frames(),
+                    goal_context={
+                        "app_id": target_app,
+                        "app_name": app_name,
+                        "objective": "确认当前命名应用主界面可见",
+                    },
+                )
+
+                self.assertEqual(target_app, scene.foreground_app_id)
+                self.assertEqual(3, provider.calls)
+                audit_text = provider.messages_seen[2][1]["content"][0]["text"]
+                self.assertNotIn(target_app, audit_text)
+                self.assertNotIn(app_name, audit_text)
+                self.assertTrue(
+                    observer.last_diagnostics[
+                        "foreground_app_identity_audit_used"
+                    ]
+                )
+
+    def test_generic_foreground_category_without_named_page_stays_unrebound(self) -> None:
+        compact = scene_payload()
+        compact["foreground_app_id"] = "calculator"
+        compact["screen_id"] = "main"
+        provider = SequenceProvider(
+            [compact, targeted_delta_payload(elements=compact["elements"])]
+        )
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={"app_id": "settings", "app_name": "设置"},
+        )
+
+        self.assertEqual("calculator", scene.foreground_app_id)
+        self.assertEqual(2, provider.calls)
+        self.assertFalse(
+            observer.last_diagnostics["foreground_app_identity_audit_used"]
+        )
+
     def test_runtime_package_foreground_gets_goal_independent_semantic_identity_audit(self) -> None:
         cases = (
             ("com.tencent.mm", "wechat"),

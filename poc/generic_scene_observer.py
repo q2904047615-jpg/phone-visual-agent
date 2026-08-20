@@ -1997,7 +1997,7 @@ def _needs_foreground_app_identity_audit(
     scene: UIScene,
     context: dict[str, Any],
 ) -> bool:
-    """Audit unknown identity only when a real named App is task-bound."""
+    """Audit unresolved identity only when structured page facts support it."""
 
     foreground = str(scene.foreground_app_id or "").strip().casefold()
     if _is_foreground_app_identity_placeholder(foreground):
@@ -2012,7 +2012,64 @@ def _needs_foreground_app_identity_audit(
         return named_target
     if not named_target or foreground == target_app:
         return False
-    return _is_runtime_package_app_identity(foreground)
+    if _is_runtime_package_app_identity(foreground):
+        return True
+    return _scene_structurally_names_target_app(
+        scene,
+        target_app_id=target_app,
+        target_app_name=str(context.get("app_name") or "").strip(),
+    )
+
+
+def _structured_identity_contains(value: str, target: str) -> bool:
+    source = str(value or "").strip().casefold()
+    needle = str(target or "").strip().casefold()
+    if len(needle) < 2:
+        return False
+    if re.fullmatch(r"[a-z0-9_.-]+", needle):
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])",
+                source,
+            )
+        )
+    return needle in source
+
+
+def _scene_structurally_names_target_app(
+    scene: UIScene,
+    *,
+    target_app_id: str,
+    target_app_name: str,
+) -> bool:
+    """Require a page-identity field, never summary/business text, to name it."""
+
+    targets = tuple(
+        dict.fromkeys(
+            value
+            for value in (target_app_id, target_app_name)
+            if isinstance(value, str) and len(value.strip()) >= 2
+        )
+    )
+    if not targets:
+        return False
+    structured_values = [str(scene.screen_id or "")]
+    for element in scene.elements:
+        role = str(element.role or "").casefold()
+        meaning = str(element.meaning or "").casefold()
+        if role not in {"text", "container"}:
+            continue
+        if role != "container" and not any(
+            marker in meaning
+            for marker in ("page", "screen", "view", "home", "title", "heading")
+        ):
+            continue
+        structured_values.extend((str(element.label or ""), meaning))
+    return any(
+        _structured_identity_contains(value, target)
+        for value in structured_values
+        for target in targets
+    )
 
 
 def _foreground_app_identity_audit_prompt() -> str:
@@ -2021,9 +2078,11 @@ You are an app-independent, read-only foreground application identity auditor.
 Inspect only the physical phone display in this one stable image. No user goal,
 target App, planned action, or previous model answer is provided or authoritative.
 
-Return a short lower_snake_case semantic category for the App that is visibly in
-the foreground. Use "unknown" when the visible chrome and content do not establish
-one category with high confidence. Never return a referential placeholder such as
+Return a short lower_snake_case identity for the App that is visibly in the
+foreground. Prefer an unmistakable visible product or App brand identity over a
+generic category; use a generic category only when no product identity is visibly
+established. Use "unknown" when the visible chrome and content do not establish
+one identity with high confidence. Never return a referential placeholder such as
 current_foreground, current_app, foreground_app, target_app, or active_app.
 
 Evidence must contain one to three short visible identity cues from the phone screen.

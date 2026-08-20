@@ -1238,7 +1238,15 @@ def compile_runtime_graph_semantics(
     target_apps = tuple(getattr(goal, "target_apps", ()) or ())
     surfaces: list[SurfaceRef] = []
     raw_goal_folded = raw_goal.casefold()
-    launcher_terms = ("主桌面", "桌面", "主页", "home screen", "launcher")
+    launcher_terms = (
+        "主桌面",
+        "桌面",
+        "主页",
+        "手机主屏幕",
+        "系统主屏幕",
+        "home screen",
+        "launcher",
+    )
     current_surface_terms = (
         "当前",
         "当前页面",
@@ -1550,7 +1558,13 @@ def compile_runtime_graph_semantics(
                 re.I,
             ),
         ),
-        ("home", re.compile(r"home\s*键|回到主页|回到主桌面", re.I)),
+        (
+            "home",
+            re.compile(
+                r"home\s*键|回到主页|回到主桌面|回到(?:手机|系统)主屏幕",
+                re.I,
+            ),
+        ),
         (
             "back",
             re.compile(

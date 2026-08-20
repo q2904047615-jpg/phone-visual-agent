@@ -122,6 +122,96 @@ class RawResponseProvider:
 
 
 class TaskSemanticIRTests(unittest.TestCase):
+    def test_phone_home_screen_phrase_compiles_launcher_and_home_action(self):
+        payload = current_send_failure_payload()
+        payload["goal"] = {
+            "objective": "回到手机主屏幕",
+            "target_apps": [
+                {"app_id": "current_foreground", "app_name": "当前前台应用"}
+            ],
+            "entities": {},
+        }
+        payload["effect_intents"] = []
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "go_home",
+                "objective": "回到手机主屏幕",
+                "status": "active",
+                "depends_on": [],
+                "constraints": [],
+                "completion_conditions": ["手机主屏幕可见"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            }
+        ]
+        payload["active_subgoal_id"] = "go_home"
+        semantic_ir = compile_formal_semantic_authority(
+            _graph_from_payload(
+                payload,
+                task_id="phone-home-task",
+                device_id="device-local-01",
+                revision=1,
+                raw_user_goal="回到手机主屏幕",
+            )
+        ).semantic_ir
+        subgoal = semantic_ir.subgoals[0]
+        constraints = {item.constraint_id: item for item in semantic_ir.constraints}
+        surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
+
+        self.assertEqual("launcher", surfaces[subgoal.surface_ref].kind)
+        self.assertIn(
+            "home",
+            {
+                constraints[ref].value
+                for ref in subgoal.constraint_refs
+                if constraints[ref].kind == "required_action"
+            },
+        )
+
+    def test_app_main_screen_phrase_does_not_mint_system_home(self):
+        payload = current_send_failure_payload()
+        payload["goal"] = {
+            "objective": "返回浏览器主屏幕",
+            "target_apps": [{"app_id": "browser", "app_name": "浏览器"}],
+            "entities": {},
+        }
+        payload["effect_intents"] = []
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "browser_main",
+                "objective": "返回浏览器主屏幕",
+                "status": "active",
+                "depends_on": [],
+                "constraints": [],
+                "completion_conditions": ["浏览器主屏幕可见"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            }
+        ]
+        payload["active_subgoal_id"] = "browser_main"
+        semantic_ir = compile_formal_semantic_authority(
+            _graph_from_payload(
+                payload,
+                task_id="app-main-screen-task",
+                device_id="device-local-01",
+                revision=1,
+                raw_user_goal="返回浏览器主屏幕",
+            )
+        ).semantic_ir
+        constraints = {item.constraint_id: item for item in semantic_ir.constraints}
+
+        self.assertNotIn("launcher", {item.kind for item in semantic_ir.surfaces})
+        self.assertNotIn(
+            "home",
+            {
+                constraints[ref].value
+                for ref in semantic_ir.subgoals[0].constraint_refs
+                if constraints[ref].kind == "required_action"
+            },
+        )
+
     def test_single_input_clear_and_type_share_typed_field_ownership(self):
         payload = current_send_failure_payload()
         payload["goal"]["entities"] = {

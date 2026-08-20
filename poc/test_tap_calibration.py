@@ -493,6 +493,77 @@ class TapCalibrationMathTests(unittest.TestCase):
                 self.assertGreater(point[1] / 1000.0, bounds[1] + 0.01)
                 self.assertLess(point[1] / 1000.0, bounds[3] - 0.01)
 
+    def test_dual_audited_narrow_literal_key_uses_safe_intersection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tap.json"
+            hull = [
+                [0.11742892459826947, 0.48922863099374564],
+                [0.12855377008652658, 0.020152883947185545],
+                [0.5018541409147095, 0.017373175816539264],
+                [0.8825710754017305, 0.014593467685892982],
+                [0.8825710754017305, 0.9652536483669215],
+                [0.5006180469715699, 0.9645587213342599],
+                [0.1211372064276885, 0.9631688672689368],
+            ]
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "enabled": True,
+                        "validated": True,
+                        "frame_size": [810, 1440],
+                        "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                        "coverage": {
+                            "sufficient": True,
+                            "normalized_hull": hull,
+                            "normalized_bounds": [
+                                0.11742892459826947,
+                                0.014593467685892982,
+                                0.8825710754017305,
+                                0.9652536483669215,
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            left_bounds = (
+                0.0828,
+                0.6812916666666666,
+                0.1668,
+                0.742111111111111,
+            )
+            right_bounds = (
+                0.8332,
+                0.6812916666666666,
+                0.9172,
+                0.742111111111111,
+            )
+
+            left_point = resolve_target_grid_point_within_calibration(
+                115,
+                712,
+                left_bounds,
+                (810, 1440),
+                path,
+            )
+            right_point = resolve_target_grid_point_within_calibration(
+                885,
+                712,
+                right_bounds,
+                (810, 1440),
+                path,
+            )
+
+            for point, bounds in (
+                (left_point, left_bounds),
+                (right_point, right_bounds),
+            ):
+                self.assertGreater(point[0] / 1000.0, bounds[0] + 0.01)
+                self.assertLess(point[0] / 1000.0, bounds[2] - 0.01)
+                self.assertGreater(point[1] / 1000.0, bounds[1] + 0.01)
+                self.assertLess(point[1] / 1000.0, bounds[3] - 0.01)
+
     def test_dual_audited_edge_target_rejects_large_but_too_narrow_fragment(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "tap.json"

@@ -1419,40 +1419,55 @@ class UniversalActionController:
             and before_input.states.get("goal_relevant") is not True
         ):
             raise UniversalActionError("输入前目标与当前目标缺少可信关联。")
-        exact_id = tuple(
-            element
-            for element in after.elements
-            if element.element_id == target_id
-            and element.role == "input"
-            and float(element.confidence) >= self.min_confidence
-            and element.states.get("visible") is not False
-        )
-        if exact_id:
-            candidates = exact_id
-        else:
-            semantic_candidates = tuple(
+        typed_field_id = str(
+            before_input.states.get("input_field_id") or ""
+        ).strip()
+        if typed_field_id and typed_field_id != "unknown":
+            candidates = tuple(
                 element
                 for element in after.elements
                 if element.role == "input"
                 and float(element.confidence) >= self.min_confidence
                 and element.states.get("visible") is not False
-                and element.meaning.casefold() == before_input.meaning.casefold()
-                and element.label.casefold() == before_input.label.casefold()
+                and element.meaning == before_input.meaning == "application_text_input"
+                and str(element.states.get("input_field_id") or "").strip()
+                == typed_field_id
             )
-            if len(semantic_candidates) == 1:
-                candidates = semantic_candidates
+        else:
+            exact_id = tuple(
+                element
+                for element in after.elements
+                if element.element_id == target_id
+                and element.role == "input"
+                and float(element.confidence) >= self.min_confidence
+                and element.states.get("visible") is not False
+            )
+            if exact_id:
+                candidates = exact_id
             else:
-                candidates = tuple(
+                semantic_candidates = tuple(
                     element
                     for element in after.elements
                     if element.role == "input"
                     and float(element.confidence) >= self.min_confidence
                     and element.states.get("visible") is not False
-                    and self._input_regions_stably_overlap(
-                        before_input.bounds,
-                        element.bounds,
-                    )
+                    and element.meaning.casefold() == before_input.meaning.casefold()
+                    and element.label.casefold() == before_input.label.casefold()
                 )
+                if len(semantic_candidates) == 1:
+                    candidates = semantic_candidates
+                else:
+                    candidates = tuple(
+                        element
+                        for element in after.elements
+                        if element.role == "input"
+                        and float(element.confidence) >= self.min_confidence
+                        and element.states.get("visible") is not False
+                        and self._input_regions_stably_overlap(
+                            before_input.bounds,
+                            element.bounds,
+                        )
+                    )
         if len(candidates) != 1:
             raise UniversalActionError("动作后无法唯一绑定原目标输入框。")
         states = candidates[0].states
@@ -1521,23 +1536,35 @@ class UniversalActionController:
         before_states = before_input.states
         after_states = after_input.states
         typed_field_id = str(before_states.get("input_field_id") or "").strip()
-        typed_horizontal_suffix_identity = bool(
+        before_field_label = str(
+            before_states.get("input_field_label") or ""
+        ).strip()
+        after_field_label = str(
+            after_states.get("input_field_label") or ""
+        ).strip()
+        typed_field_identity = bool(
             typed_field_id
             and typed_field_id != "unknown"
             and str(after_states.get("input_field_id") or "").strip()
             == typed_field_id
             and before_input.meaning == after_input.meaning == "application_text_input"
-            and before_states.get("input_multiline") is False
-            and after_states.get("input_multiline") is False
-            and after_states.get("value_visibility") == "horizontal_suffix"
-            and isinstance(after_states.get("visible_value_suffix"), str)
+            and before_states.get("fully_visible") is not False
+            and after_states.get("fully_visible") is not False
+            and isinstance(before_states.get("input_multiline"), bool)
+            and after_states.get("input_multiline")
+            == before_states.get("input_multiline")
+            and not (
+                before_field_label
+                and after_field_label
+                and before_field_label != after_field_label
+            )
         )
         if not (
             cls._input_regions_stably_overlap(
                 before_input.bounds,
                 after_input.bounds,
             )
-            or typed_horizontal_suffix_identity
+            or typed_field_identity
         ):
             return False
         if before_states.get("focused") is not True or after_states.get("focused") is not True:

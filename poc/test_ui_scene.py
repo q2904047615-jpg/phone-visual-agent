@@ -1058,6 +1058,99 @@ class UISceneTests(unittest.TestCase):
         )
         self.assertEqual("a" * 20, long_text.input_fragment)
 
+    def test_verified_input_uses_unique_typed_field_identity_after_layout_shift(self) -> None:
+        before_states = {
+            "focused": True,
+            "value": "",
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "goal_relevant": True,
+            "fully_visible": True,
+            "input_field_id": "body_field",
+            "input_field_label": "正文",
+            "input_multiline": False,
+        }
+        before_input = element(
+            "local_audited_input_1",
+            "application_text_input",
+            role="input",
+            states=before_states,
+        )
+        before = scene(
+            before_input,
+            app_id="browser",
+            screen_id="input_form",
+            fingerprint="before-typed-shift",
+        )
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="type-body",
+                action="input_verified_text",
+                params={
+                    "element_id": before_input.element_id,
+                    "target": "application_text_input",
+                    "text": "agent",
+                },
+            ),
+            before,
+        )
+        after_input = replace(
+            before_input,
+            element_id="fresh_local_input_id",
+            label="agent",
+            bounds=(0.55, 0.65, 0.85, 0.78),
+            states={**before_states, "value": "agent"},
+        )
+        after = scene(
+            after_input,
+            app_id="browser",
+            screen_id="input_form_result",
+            fingerprint="after-typed-shift",
+        )
+
+        UniversalActionController().verify_after_action(resolved, before, after)
+
+        wrong_field = replace(
+            after_input,
+            element_id=before_input.element_id,
+            states={**after_input.states, "input_field_id": "other_field"},
+        )
+        with self.assertRaisesRegex(
+            UniversalActionError,
+            "无法唯一绑定原目标输入框",
+        ):
+            UniversalActionController().verify_after_action(
+                resolved,
+                before,
+                replace(after, elements=(wrong_field,)),
+            )
+
+        duplicate_field = replace(
+            after_input,
+            element_id="duplicate_field",
+            bounds=(0.1, 0.15, 0.4, 0.25),
+        )
+        with self.assertRaisesRegex(
+            UniversalActionError,
+            "无法唯一绑定原目标输入框",
+        ):
+            UniversalActionController().verify_after_action(
+                resolved,
+                before,
+                replace(after, elements=(after_input, duplicate_field)),
+            )
+
+        conflicting_label = replace(
+            after_input,
+            states={**after_input.states, "input_field_label": "标题"},
+        )
+        with self.assertRaisesRegex(UniversalActionError, "App 或页面身份"):
+            UniversalActionController().verify_after_action(
+                resolved,
+                before,
+                replace(after, elements=(conflicting_label,)),
+            )
+
     def test_generic_keyboard_geometry_is_strictly_backspace_only(self) -> None:
         parsed = UIElement.from_dict(
             {

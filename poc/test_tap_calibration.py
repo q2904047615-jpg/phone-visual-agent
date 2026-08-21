@@ -337,7 +337,7 @@ class TapCalibrationMathTests(unittest.TestCase):
         self.assertFalse(payload["coverage"]["sufficient"])
         self.assertFalse(payload["accepted_fit"])
 
-    def test_active_correction_rejects_target_outside_measured_hull(self):
+    def test_active_correction_allows_visible_target_outside_measured_hull(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "tap.json"
             path.write_text(
@@ -357,8 +357,10 @@ class TapCalibrationMathTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(TapCalibrationError, "实测标定区域之外"):
-                corrected_grid_point(735, 910, (540, 960), path)
+            self.assertEqual(
+                (735, 910),
+                corrected_grid_point(735, 910, (540, 960), path),
+            )
 
     def test_dual_audited_edge_target_resolves_inside_measured_hull(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -402,7 +404,7 @@ class TapCalibrationMathTests(unittest.TestCase):
                 path,
             )
 
-            self.assertEqual((842, 829), point)
+            self.assertEqual((895, 829), point)
             self.assertEqual(point, corrected_grid_point(*point, (810, 1440), path))
 
     def test_calibrated_target_center_already_inside_is_unchanged(self):
@@ -482,8 +484,8 @@ class TapCalibrationMathTests(unittest.TestCase):
                 path,
             )
 
-            self.assertEqual((155, 938), left_point)
-            self.assertEqual((847, 939), right_point)
+            self.assertEqual((99, 941), left_point)
+            self.assertEqual((901, 941), right_point)
             for point, bounds in (
                 (left_point, (0.009, 0.9131388888888889, 0.189, 0.9691388888888889)),
                 (right_point, (0.811, 0.9131388888888889, 0.991, 0.9691388888888889)),
@@ -555,6 +557,9 @@ class TapCalibrationMathTests(unittest.TestCase):
                 path,
             )
 
+            self.assertEqual((115, 712), left_point)
+            self.assertEqual((885, 712), right_point)
+
             for point, bounds in (
                 (left_point, left_bounds),
                 (right_point, right_bounds),
@@ -564,7 +569,7 @@ class TapCalibrationMathTests(unittest.TestCase):
                 self.assertGreater(point[1] / 1000.0, bounds[1] + 0.01)
                 self.assertLess(point[1] / 1000.0, bounds[3] - 0.01)
 
-    def test_dual_audited_edge_target_rejects_large_but_too_narrow_fragment(self):
+    def test_dual_audited_edge_target_keeps_visible_center(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "tap.json"
             path.write_text(
@@ -585,16 +590,18 @@ class TapCalibrationMathTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(TapCalibrationError, "二维覆盖不足"):
+            self.assertEqual(
+                (930, 500),
                 resolve_target_grid_point_within_calibration(
                     930,
                     500,
                     (0.87, 0.30, 0.98, 0.70),
                     (540, 960),
                     path,
-                )
+                ),
+            )
 
-    def test_calibrated_target_rejects_insufficient_overlap_and_large_shift(self):
+    def test_calibrated_target_keeps_visible_centers_without_hull_shifting(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "tap.json"
             path.write_text(
@@ -614,14 +621,34 @@ class TapCalibrationMathTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(TapCalibrationError, "二维覆盖不足"):
+            self.assertEqual(
+                (950, 500),
                 resolve_target_grid_point_within_calibration(
                     950, 500, (0.88, 0.45, 0.99, 0.55), (540, 960), path
-                )
-            with self.assertRaisesRegex(TapCalibrationError, "偏离视觉目标中心过远"):
+                ),
+            )
+            self.assertEqual(
+                (990, 500),
                 resolve_target_grid_point_within_calibration(
                     990, 500, (0.70, 0.45, 1.00, 0.55), (540, 960), path
-                )
+                ),
+            )
+
+    def test_target_outside_visible_frame_still_fails_closed(self):
+        with self.assertRaisesRegex(TapCalibrationError, "0～1000"):
+            resolve_target_grid_point_within_calibration(
+                1001,
+                500,
+                (0.90, 0.45, 1.00, 0.55),
+                (540, 960),
+            )
+        with self.assertRaisesRegex(TapCalibrationError, "区域边界无效"):
+            resolve_target_grid_point_within_calibration(
+                990,
+                500,
+                (0.90, 0.45, 1.01, 0.55),
+                (540, 960),
+            )
 
     def test_legacy_active_calibration_without_coverage_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -18,11 +18,6 @@ SYSTEM_NAVIGATION_DOM_CENTER_X = 0.5
 SYSTEM_NAVIGATION_DOM_INWARD_DISTANCE = 0.25
 SYSTEM_NAVIGATION_MIN_BOTTOM_Y = 0.90
 SYSTEM_NAVIGATION_MAX_FRAME_TO_DOM_ERROR = 0.02
-LOCAL_TARGET_MIN_RELATIVE_INTERSECTION = 0.40
-LOCAL_TARGET_MIN_ABSOLUTE_INTERSECTION_WIDTH = 0.04
-LOCAL_TARGET_MIN_ABSOLUTE_INTERSECTION_HEIGHT = 0.04
-LOCAL_TARGET_MIN_ABSOLUTE_INTERSECTION_AREA = 0.002
-LOCAL_TARGET_MAX_ABSOLUTE_INTERSECTION_SHIFT_RATIO = 0.35
 
 
 class TapCalibrationError(RuntimeError):
@@ -182,123 +177,6 @@ def _point_in_convex_hull(
     return True
 
 
-def _clip_polygon_to_bounds(
-    polygon: Sequence[tuple[float, float]],
-    bounds: tuple[float, float, float, float],
-) -> list[tuple[float, float]]:
-    """Clip one polygon to an axis-aligned rectangle."""
-
-    left, top, right, bottom = bounds
-
-    def clip(
-        points: list[tuple[float, float]],
-        *,
-        inside,
-        intersect,
-    ) -> list[tuple[float, float]]:
-        if not points:
-            return []
-        result: list[tuple[float, float]] = []
-        previous = points[-1]
-        previous_inside = inside(previous)
-        for current in points:
-            current_inside = inside(current)
-            if current_inside:
-                if not previous_inside:
-                    result.append(intersect(previous, current))
-                result.append(current)
-            elif previous_inside:
-                result.append(intersect(previous, current))
-            previous = current
-            previous_inside = current_inside
-        return result
-
-    def vertical_intersection(
-        first: tuple[float, float],
-        second: tuple[float, float],
-        x: float,
-    ) -> tuple[float, float]:
-        delta = second[0] - first[0]
-        if abs(delta) <= 1e-12:
-            return x, first[1]
-        ratio = (x - first[0]) / delta
-        return x, first[1] + ratio * (second[1] - first[1])
-
-    def horizontal_intersection(
-        first: tuple[float, float],
-        second: tuple[float, float],
-        y: float,
-    ) -> tuple[float, float]:
-        delta = second[1] - first[1]
-        if abs(delta) <= 1e-12:
-            return first[0], y
-        ratio = (y - first[1]) / delta
-        return first[0] + ratio * (second[0] - first[0]), y
-
-    result = list(polygon)
-    result = clip(
-        result,
-        inside=lambda point: point[0] >= left,
-        intersect=lambda first, second: vertical_intersection(first, second, left),
-    )
-    result = clip(
-        result,
-        inside=lambda point: point[0] <= right,
-        intersect=lambda first, second: vertical_intersection(first, second, right),
-    )
-    result = clip(
-        result,
-        inside=lambda point: point[1] >= top,
-        intersect=lambda first, second: horizontal_intersection(first, second, top),
-    )
-    return clip(
-        result,
-        inside=lambda point: point[1] <= bottom,
-        intersect=lambda first, second: horizontal_intersection(first, second, bottom),
-    )
-
-
-def _polygon_area_and_centroid(
-    polygon: Sequence[tuple[float, float]],
-) -> tuple[float, tuple[float, float]]:
-    if len(polygon) < 3:
-        raise TapCalibrationError("目标区域与标定凸包没有二维交集。")
-    double_area = 0.0
-    centroid_x = 0.0
-    centroid_y = 0.0
-    for index, first in enumerate(polygon):
-        second = polygon[(index + 1) % len(polygon)]
-        cross = first[0] * second[1] - second[0] * first[1]
-        double_area += cross
-        centroid_x += (first[0] + second[0]) * cross
-        centroid_y += (first[1] + second[1]) * cross
-    if abs(double_area) <= 1e-12:
-        raise TapCalibrationError("目标区域与标定凸包没有有效面积交集。")
-    return abs(double_area) / 2.0, (
-        centroid_x / (3.0 * double_area),
-        centroid_y / (3.0 * double_area),
-    )
-
-
-def _point_segment_distance(
-    point: tuple[float, float],
-    first: tuple[float, float],
-    second: tuple[float, float],
-) -> float:
-    delta_x = second[0] - first[0]
-    delta_y = second[1] - first[1]
-    length_squared = delta_x * delta_x + delta_y * delta_y
-    if length_squared <= 1e-15:
-        return math.dist(point, first)
-    ratio = (
-        (point[0] - first[0]) * delta_x
-        + (point[1] - first[1]) * delta_y
-    ) / length_squared
-    ratio = min(1.0, max(0.0, ratio))
-    projection = (first[0] + ratio * delta_x, first[1] + ratio * delta_y)
-    return math.dist(point, projection)
-
-
 def resolve_target_grid_point_within_calibration(
     x: int,
     y: int,
@@ -306,13 +184,7 @@ def resolve_target_grid_point_within_calibration(
     frame_size: tuple[int, int],
     path: Path = CALIBRATION_PATH,
 ) -> tuple[int, int]:
-    """Resolve a dual-audited local target inside measured calibration coverage.
-
-    This does not clamp an arbitrary point.  When the preferred center is
-    outside the measured hull, a replacement is allowed only if a substantial
-    two-dimensional portion of the already-audited target remains inside that
-    hull and its centroid stays close to the original center.
-    """
+    """Keep a dual-audited target center anywhere in the visible phone frame."""
 
     if not (0 <= x <= 1000 and 0 <= y <= 1000):
         raise TapCalibrationError("目标中心必须位于0～1000视觉坐标内。")
@@ -336,65 +208,13 @@ def resolve_target_grid_point_within_calibration(
         payload = json.loads(path.read_text(encoding="utf-8"))
         if int(payload.get("version", 0)) < CALIBRATION_VERSION:
             raise TapCalibrationError("当前触控标定缺少屏幕覆盖边界，必须重新标定。")
-        hull = _convex_hull(
-            _validated_hull(payload.get("coverage"), label="当前触控标定")
-        )
+        _validated_hull(payload.get("coverage"), label="当前触控标定")
     except TapCalibrationError:
         raise
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise TapCalibrationError("无法验证触控标定覆盖边界，已拒绝点击。") from exc
 
-    preferred = (x / 1000.0, y / 1000.0)
-    if _point_in_convex_hull(preferred, hull, tolerance=0.0):
-        return x, y
-
-    target_width = right - left
-    target_height = bottom - top
-    intersection = _clip_polygon_to_bounds(hull, (left, top, right, bottom))
-    area, centroid = _polygon_area_and_centroid(intersection)
-    xs = [point[0] for point in intersection]
-    ys = [point[1] for point in intersection]
-    axis_coverage_x = (max(xs) - min(xs)) / target_width
-    axis_coverage_y = (max(ys) - min(ys)) / target_height
-    area_coverage = area / (target_width * target_height)
-    relative_intersection_sufficient = (
-        min(area_coverage, axis_coverage_x, axis_coverage_y)
-        >= LOCAL_TARGET_MIN_RELATIVE_INTERSECTION
-    )
-    intersection_width = max(xs) - min(xs)
-    intersection_height = max(ys) - min(ys)
-    absolute_intersection_sufficient = (
-        intersection_width >= LOCAL_TARGET_MIN_ABSOLUTE_INTERSECTION_WIDTH
-        and intersection_height >= LOCAL_TARGET_MIN_ABSOLUTE_INTERSECTION_HEIGHT
-        and area >= LOCAL_TARGET_MIN_ABSOLUTE_INTERSECTION_AREA
-    )
-    if not (relative_intersection_sufficient or absolute_intersection_sufficient):
-        raise TapCalibrationError("目标区域在实测标定凸包内的二维覆盖不足，已拒绝点击。")
-    shift_ratio = (
-        LOCAL_TARGET_MAX_ABSOLUTE_INTERSECTION_SHIFT_RATIO
-        if absolute_intersection_sufficient and not relative_intersection_sufficient
-        else 0.30
-    )
-    if (
-        abs(centroid[0] - preferred[0]) > max(0.03, shift_ratio * target_width)
-        or abs(centroid[1] - preferred[1]) > max(0.03, shift_ratio * target_height)
-    ):
-        raise TapCalibrationError("标定交集中心偏离视觉目标中心过远，已拒绝点击。")
-    target_edge_distance = min(
-        centroid[0] - left,
-        right - centroid[0],
-        centroid[1] - top,
-        bottom - centroid[1],
-    )
-    hull_edge_distance = min(
-        _point_segment_distance(centroid, first, hull[(index + 1) % len(hull)])
-        for index, first in enumerate(hull)
-    )
-    if min(target_edge_distance, hull_edge_distance) < 0.01:
-        raise TapCalibrationError("标定交集中心过于接近目标或标定边缘，已拒绝点击。")
-    if not _point_in_convex_hull(centroid, hull, tolerance=0.0):
-        raise TapCalibrationError("标定交集中心不在实测凸包内，已拒绝点击。")
-    return int(round(centroid[0] * 1000)), int(round(centroid[1] * 1000))
+    return x, y
 
 
 def build_calibration(
@@ -528,17 +348,7 @@ def corrected_grid_point(
         payload = json.loads(path.read_text(encoding="utf-8"))
         if int(payload.get("version", 0)) < CALIBRATION_VERSION:
             raise TapCalibrationError("当前触控标定缺少屏幕覆盖边界，必须重新标定。")
-        coverage = payload.get("coverage")
-        if not isinstance(coverage, dict) or not coverage.get("sufficient"):
-            raise TapCalibrationError("当前触控标定未覆盖足够屏幕区域，已拒绝点击。")
-        hull = coverage.get("normalized_hull")
-        if not isinstance(hull, list) or not _point_in_convex_hull(
-            (x / 1000.0, y / 1000.0), hull
-        ):
-            bounds = coverage.get("normalized_bounds", [])
-            raise TapCalibrationError(
-                f"目标点({x}, {y})位于实测标定区域之外{bounds}，已拒绝外推点击。"
-            )
+        _validated_hull(payload.get("coverage"), label="当前触控标定")
     except TapCalibrationError:
         raise
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:

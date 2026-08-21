@@ -1243,7 +1243,10 @@ class DeepSeekTaskGraphPlanner:
         device_id: str,
         task_id: str | None = None,
     ) -> DynamicTaskGraph:
-        text = " ".join(str(raw_goal or "").strip().split())
+        # Internal whitespace can be literal user payload.  In particular, a
+        # line feed is an authorized input character that must survive into
+        # the typed graph and semantic source spans unchanged.
+        text = str(raw_goal or "").strip()
         if not text:
             raise TaskGraphError("用户目标不能为空。")
         _validate_device_id(device_id)
@@ -2024,6 +2027,10 @@ def _graph_from_payload(
         for item in _expect_list(raw_goal.get("target_apps"), "goal.target_apps")
     )
     entities = dict(_expect_dict(raw_goal.get("entities"), "goal.entities"))
+    entities = _normalize_unique_input_newline_escapes(
+        entities,
+        raw_user_goal=raw_user_goal,
+    )
     # Some JSON providers materialize an optional example field as null or an
     # empty string.  Treat only those two representations as absence.  Any
     # non-empty value still goes through the strict exact-input validation.
@@ -2091,6 +2098,47 @@ def _graph_from_payload(
         ),
         raw_user_goal=raw_user_goal,
     )
+
+
+def _normalize_unique_input_newline_escapes(
+    entities: dict[str, Any],
+    *,
+    raw_user_goal: str,
+) -> dict[str, Any]:
+    """Repair only one semantics-preserving JSON over-escape in input payloads.
+
+    Some providers emit the two literal characters ``\\n`` inside an already
+    parsed JSON string even though the user authority contains a real LF.  The
+    repair is allowed only when replacing every exact ``\\n`` token produces a
+    literal substring of the untouched user goal.  All other model text stays
+    unchanged and therefore cannot gain user-literal authority.
+    """
+
+    def normalized(value: Any) -> Any:
+        if (
+            not isinstance(value, str)
+            or "\\n" not in value
+            or value in raw_user_goal
+        ):
+            return value
+        candidate = value.replace("\\n", "\n")
+        return candidate if candidate in raw_user_goal else value
+
+    result = dict(entities)
+    if "input_text" in result:
+        result["input_text"] = normalized(result["input_text"])
+    raw_fields = result.get("input_fields")
+    if isinstance(raw_fields, list):
+        normalized_fields: list[Any] = []
+        for item in raw_fields:
+            if isinstance(item, dict) and "text" in item:
+                normalized_fields.append(
+                    {**item, "text": normalized(item.get("text"))}
+                )
+            else:
+                normalized_fields.append(item)
+        result["input_fields"] = normalized_fields
+    return result
 
 
 def _target_app_from_payload(value: Any) -> TargetApp:

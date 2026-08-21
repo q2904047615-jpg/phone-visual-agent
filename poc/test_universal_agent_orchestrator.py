@@ -1332,6 +1332,29 @@ class UniversalAgentStartTests(unittest.TestCase):
             trusted_observation_factory=_trusted_factory,
         )
 
+    def test_start_preserves_literal_newline_in_raw_goal(self) -> None:
+        graph = _graph()
+        planner = FakeDeepSeekPlanner(graph)
+        orchestrator = self._orchestrator(
+            planner,
+            FakeQwenObserver(),
+            FakeAdapter(_scene()),
+        )
+        raw_goal = (
+            "在当前多行输入框逐字输入且不要发送：first line\nsecond line"
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-newline-authority",
+                raw_goal=f"  {raw_goal}  ",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual(raw_goal, session.raw_goal)
+        self.assertEqual(raw_goal, planner.plan_calls[0][0])
+
     def test_named_app_already_foreground_completes_open_node_without_action(self) -> None:
         base = _graph()
         open_app = replace(

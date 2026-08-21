@@ -5847,7 +5847,10 @@ class UniversalAgentOrchestrator:
         store = self.evidence_store_factory(Path(run_dir))
         session = UniversalAgentSessionState(
             session_id=str(session_id or "").strip(),
-            raw_goal=" ".join(str(raw_goal or "").split()),
+            # Preserve literal payload whitespace (especially a real LF).
+            # The typed planner is responsible for validating any input_text
+            # entity derived from this original user authority.
+            raw_goal=str(raw_goal or "").strip(),
             device_id=str(device_id or "").strip(),
             run_dir=Path(run_dir),
             adapter=adapter,

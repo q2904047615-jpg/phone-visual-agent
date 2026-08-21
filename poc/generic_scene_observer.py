@@ -2510,8 +2510,11 @@ def _input_structure_audit_prompt(
             "All bounds and qwerty anchor points MUST use Image 1 crop-local "
             "normalized coordinates 0..1000. Here 0 and 1000 are the four "
             "edges of this crop. Never copy source-pixel or full-frame "
-            "coordinates. If a structure cannot be bounded in this crop-local "
-            "coordinate system, omit it instead of clipping or converting it."
+            "coordinates. Any complete structure next to an internal crop "
+            "edge MUST keep at least 15 units of crop-local margin from that "
+            "edge. If a structure cannot be bounded with that margin in this "
+            "crop-local coordinate system, omit it instead of clipping or "
+            "converting it."
         )
     else:
         image_contract = (
@@ -2536,6 +2539,7 @@ Distinguish three different visual structures; never merge them:
 2. ime_preedit_regions: the input method's composition/candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Enumerate only complete visible candidate words inside each region; candidates are read-only facts and never application inputs.
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
+   When keyboard.visible=true, keyboard.bounds MUST enclose the complete visible keyboard in the same coordinate system, have width at least 300 and height at least 180, and contain every reported keyboard key and anchor. Measure from the four edges of Image 1; do not shift the keyboard toward the bottom or describe only its letter rows. If those requirements cannot all be met, do not invent actionable keyboard geometry.
 5. keyboard.backspace_key: for any complete visible keyboard layout, report the one complete backspace/delete key as label, bounds, confidence and fully_visible. Use null when absent, clipped, ambiguous, or confused with an App delete control. This is read-only geometry and never authorizes clearing by itself.
 6. keyboard.literal_keys: the local, goal-derived whitelist is {json.dumps(literal_key_targets, ensure_ascii=False, separators=(',', ':'))}. Report only complete visible keys whose inserted value occurs in that exact whitelist, at most once per distinct value and at most eight total. Every literal-key object MUST contain exactly these six fields and never omit any of them: value, label, key_kind, bounds, confidence, fully_visible. When the whitelist is empty, literal_keys MUST be []. QWERTY alphabet letters and Chinese characters MUST NEVER be enumerated here, even when they occur in input_text, because qwerty_anchors and the verified pinyin transaction already represent them. Never enumerate a keyboard row. For a whitelisted space use value=" " and key_kind="space". For every other whitelisted key use key_kind="character" and require label to equal value literally. The large central PRIMARY glyph of the whole directly tappable key MUST equal value. A small corner glyph, superscript digit, alternate symbol, swipe hint or long-press hint printed on an alphabet key is NOT a literal key and MUST NEVER be reported here. If the whitelisted value exists only as such a secondary hint, leave literal_keys empty and report a separately visible direction-explicit numeric/symbol layout switch instead. Bounds must enclose the whole direct key, never only the secondary glyph. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
 7. keyboard.enter_key: report at most one complete visible keyboard action key using exactly label, bounds, confidence, fully_visible and key_action. key_action must be one of newline, send, search, done, next, unknown and must describe the key's current visible behavior, never the requested goal. A plain multiline Return/Enter key may be newline. A key visibly labelled or iconographically acting as Send/Search/Done/Next must use that action and can never authorize a newline. The current transaction needs a newline={str(enter_required).lower()} and multiline={str(active_multiline).lower()}, but those facts do not change the visual classification.
@@ -4001,7 +4005,17 @@ def _input_audit_retry_roi(
         or preliminary_input_bounds_hint is None
     ):
         return None
-    top_candidates = [preliminary_input_bounds_hint[1] - 120]
+    field_height = max(
+        1,
+        preliminary_input_bounds_hint[3] - preliminary_input_bounds_hint[1],
+    )
+    # A coarse box can lag behind a keyboard-induced pan and can cover only
+    # the editable interior of a tall multiline field. Keep proportional
+    # context above it so the independent retry can prove all four field edges.
+    field_upward_context = max(240, min(360, field_height * 2))
+    top_candidates = [
+        preliminary_input_bounds_hint[1] - field_upward_context
+    ]
     # Focusing an input can pan the App content upward while a compact scene
     # still reports the pre-focus field box.  When the first dedicated audit
     # independently proves a complete keyboard, use only that broad keyboard

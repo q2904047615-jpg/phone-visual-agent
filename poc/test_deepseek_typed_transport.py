@@ -247,6 +247,70 @@ class TypedPlannerTransportTests(unittest.TestCase):
             newline_graph.subgoals[0].external_impact,
         )
 
+        literal_goal = (
+            "在当前多行正文框逐字输入以下内容且不要发送：first line\n"
+            "second line"
+        )
+        literal = payload(objective=literal_goal)
+        literal["goal"]["entities"]["input_text"] = "first line\nsecond line"
+        literal["subgoals"][0].update(
+            {
+                "objective": literal_goal,
+                "completion_conditions": ["正文框逐字显示指定两行文字"],
+                "execution_class": "navigate",
+                "effect_ids": [],
+            }
+        )
+        provider = FakeProvider(literal)
+        literal_graph = DeepSeekTaskGraphPlanner(provider).plan(
+            f"  {literal_goal}  ",
+            device_id="phone-1",
+        )
+        self.assertEqual(literal_goal, literal_graph.raw_user_goal)
+        self.assertIn(
+            json.dumps(literal_goal, ensure_ascii=False),
+            provider.messages[0][0]["content"],
+        )
+
+        overescaped = payload(objective=literal_goal)
+        overescaped["goal"]["entities"]["input_text"] = (
+            "first line\\nsecond line"
+        )
+        overescaped["subgoals"][0].update(
+            {
+                "objective": literal_goal,
+                "completion_conditions": ["正文框逐字显示指定两行文字"],
+                "execution_class": "navigate",
+                "effect_ids": [],
+            }
+        )
+        repaired_graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(overescaped)
+        ).plan(literal_goal, device_id="phone-1")
+        self.assertEqual(
+            "first line\nsecond line",
+            repaired_graph.goal.entities["input_text"],
+        )
+
+        unrelated_goal = "在当前输入框逐字输入 literal backslash n"
+        unrelated = payload(objective=unrelated_goal)
+        unrelated["goal"]["entities"]["input_text"] = "other\\nvalue"
+        unrelated["subgoals"][0].update(
+            {
+                "objective": unrelated_goal,
+                "completion_conditions": ["输入框显示指定文字"],
+                "execution_class": "navigate",
+                "effect_ids": [],
+            }
+        )
+        unrelated_graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(unrelated)
+        ).plan(unrelated_goal, device_id="phone-1")
+        self.assertEqual(
+            "other\\nvalue",
+            unrelated_graph.goal.entities["input_text"],
+        )
+
         multifield = payload(objective="分别填写主题和正文")
         multifield["goal"]["entities"]["input_fields"] = [
             {

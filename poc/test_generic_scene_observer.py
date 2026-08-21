@@ -503,6 +503,17 @@ class GenericSceneObserverTests(unittest.TestCase):
             "conventional display height",
             prompt,
         )
+        self.assertIn("have width at least 300 and height at least 180", prompt)
+        self.assertIn("contain every reported keyboard key and anchor", prompt)
+        crop_prompt = _input_structure_audit_prompt(
+            {"objective": "在正文输入框输入两行文字"},
+            roi_bounds=(0, 130, 1000, 1000),
+            crop_local=True,
+        )
+        self.assertIn(
+            "at least 15 units of crop-local margin from that edge",
+            crop_prompt,
+        )
         self.assertEqual(
             (" ", "."),
             _input_audit_literal_key_targets(
@@ -3703,7 +3714,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             scene.unique_trusted_goal_element().element_id,
         )
         self.assertEqual(
-            (0.14, 0.365, 0.86, 0.455),
+            (0.14, 0.255, 0.86, 0.36),
             scene.unique_trusted_goal_element().bounds,
         )
         self.assertTrue(observer.last_diagnostics["input_structure_audit_retry_used"])
@@ -3849,7 +3860,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         }
         self.assertEqual(
-            (0, 600, 1000, 1000),
+            (0, 480, 1000, 1000),
             _input_audit_retry_roi(
                 context,
                 preliminary_input_bounds_hint=(120, 720, 880, 810),
@@ -3857,10 +3868,18 @@ class GenericSceneObserverTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            (0, 600, 1000, 1000),
+            (0, 480, 1000, 1000),
             _input_audit_retry_roi(
                 context,
                 preliminary_input_bounds_hint=(120, 720, 880, 810),
+                first_audit_raw="not-json",
+            ),
+        )
+        self.assertEqual(
+            (0, 130, 1000, 1000),
+            _input_audit_retry_roi(
+                context,
+                preliminary_input_bounds_hint=(135, 490, 865, 730),
                 first_audit_raw="not-json",
             ),
         )

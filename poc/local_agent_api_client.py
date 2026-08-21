@@ -142,17 +142,21 @@ class LocalAgentApiClient:
         self,
         *,
         text: str,
+        exact_input_text: str | None = None,
         device_id: str,
         auto_advance: bool = False,
     ) -> JsonObject:
+        payload: JsonObject = {
+            "text": text,
+            "device_id": device_id,
+            "auto_advance": auto_advance,
+        }
+        if exact_input_text is not None:
+            payload["exact_input_text"] = exact_input_text
         return self._request(
             "POST",
             self.START_ROUTE,
-            payload={
-                "text": text,
-                "device_id": device_id,
-                "auto_advance": auto_advance,
-            },
+            payload=payload,
             read_only=False,
         )
 
@@ -497,4 +501,3 @@ class LocalAgentApiClient:
                 detail=detail,
             )
         )
-

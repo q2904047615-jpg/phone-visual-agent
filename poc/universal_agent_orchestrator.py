@@ -21,6 +21,7 @@ from deepseek_task_graph import (
     ObservedState,
     VerifiedActionTransition,
     VisualClaimEvidenceRef,
+    build_exact_input_task_graph,
     named_visual_identity_is_grounded,
 )
 from deepseek_failure_diagnostics import persist_deepseek_failure_diagnostic
@@ -5890,6 +5891,7 @@ class UniversalAgentOrchestrator:
         *,
         session_id: str,
         raw_goal: str,
+        exact_input_text: str | None = None,
         device_id: str,
         run_dir: Path,
     ) -> UniversalAgentSessionState:
@@ -5901,6 +5903,7 @@ class UniversalAgentOrchestrator:
                 session = self._start_reserved(
                     session_id=resolved_session,
                     raw_goal=raw_goal,
+                    exact_input_text=exact_input_text,
                     device_id=resolved_device,
                     run_dir=run_dir,
                 )
@@ -5915,6 +5918,7 @@ class UniversalAgentOrchestrator:
         *,
         session_id: str,
         raw_goal: str,
+        exact_input_text: str | None,
         device_id: str,
         run_dir: Path,
     ) -> UniversalAgentSessionState:
@@ -5937,9 +5941,17 @@ class UniversalAgentOrchestrator:
             )
         try:
             session.status = "planning"
-            graph = self.deepseek_planner.plan(
-                session.raw_goal,
-                device_id=session.device_id,
+            graph = (
+                build_exact_input_task_graph(
+                    session.raw_goal,
+                    exact_input_text=exact_input_text,
+                    device_id=session.device_id,
+                )
+                if exact_input_text is not None
+                else self.deepseek_planner.plan(
+                    session.raw_goal,
+                    device_id=session.device_id,
+                )
             )
             self._validate_graph_identity(graph, device_id=session.device_id)
             session.task_graph = graph

@@ -59,6 +59,7 @@ def _parser() -> argparse.ArgumentParser:
     start = subparsers.add_parser("start")
     start.add_argument("--device-id", default="device-local-01")
     start.add_argument("--text", required=True)
+    start.add_argument("--exact-input-text")
     start.add_argument("--auto-advance", action="store_true")
     for name in ("get", "confirm-once", "next", "cancel", "pause"):
         command = subparsers.add_parser(name)
@@ -81,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "start":
                 raw = client.start_session(
                     text=args.text,
+                    exact_input_text=args.exact_input_text,
                     device_id=args.device_id,
                     auto_advance=args.auto_advance,
                 )

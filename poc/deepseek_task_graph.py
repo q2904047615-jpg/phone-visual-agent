@@ -1596,6 +1596,8 @@ def _normalize_initial_premature_completed_status(
 
     if graph.status != "completed":
         return graph
+
+
     if graph.clarification_questions or graph.risk_actions:
         return graph
     if any(
@@ -1627,6 +1629,82 @@ def _normalize_initial_premature_completed_status(
     ):
         return graph
     return replace(graph, status="running")
+
+
+def build_exact_input_task_graph(
+    raw_goal: str,
+    *,
+    exact_input_text: str,
+    device_id: str,
+    task_id: str | None = None,
+) -> DynamicTaskGraph:
+    """Build the typed graph for an explicitly authorized exact input value.
+
+    The caller supplies the canonical text as a structured field, so no model
+    is needed to recover it from prose or to split its deterministic keyboard
+    transaction. Visual selection, policy, controller checks and fresh
+    post-action verification remain unchanged.
+    """
+
+    goal_text = str(raw_goal or "").strip()
+    canonical = str(exact_input_text or "")
+    if not goal_text:
+        raise TaskGraphError("用户目标不能为空。")
+    if (
+        not canonical
+        or len(canonical) > MAX_CANONICAL_INPUT_CHARS
+        or "\r" in canonical
+    ):
+        raise TaskGraphError(
+            "exact_input_text 必须为1～4000个逐字输入字符；允许换行但不允许回车控制符。"
+        )
+    _validate_device_id(device_id)
+    resolved_task_id = task_id or uuid.uuid4().hex
+    _validate_task_id(resolved_task_id)
+    graph = DynamicTaskGraph(
+        task_id=resolved_task_id,
+        device_id=device_id,
+        revision=1,
+        status="ready",
+        goal=GraphGoal(
+            objective="使当前唯一输入框内容精确等于授权文字",
+            target_apps=(),
+            entities={
+                "target_surface": "current_surface",
+                "target_ui_label": "当前唯一输入框",
+                "input_text": canonical,
+            },
+        ),
+        constraints=("不要发送或提交",),
+        completion_conditions=(
+            CompletionCondition(
+                condition_id="exact_input_value",
+                description="当前唯一输入框内容与授权文字逐字一致",
+                evidence_required=("输入框中可见的完整文字",),
+            ),
+        ),
+        risk_actions=(),
+        subgoals=(
+            Subgoal(
+                subgoal_id="input_exact_text",
+                objective="在当前唯一输入框中逐字输入授权文字",
+                status="active",
+                depends_on=(),
+                constraints=("不要发送或提交",),
+                completion_conditions=(
+                    "当前唯一输入框内容与授权文字逐字一致",
+                ),
+                completion_evidence=(),
+                risk_action_ids=(),
+                external_impact="navigation_only",
+            ),
+        ),
+        active_subgoal_id="input_exact_text",
+        raw_user_goal=goal_text,
+    )
+    graph.validate()
+    compile_formal_semantic_authority(graph)
+    return graph
 
 
 def _pure_prohibited_effect_families(value: str) -> frozenset[str]:

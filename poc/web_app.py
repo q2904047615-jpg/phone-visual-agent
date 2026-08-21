@@ -129,6 +129,11 @@ class StrictAgentRequest(BaseModel):
 
 class GenericSupervisedStartRequest(StrictAgentRequest):
     text: StrictStr = Field(min_length=1, max_length=500)
+    exact_input_text: StrictStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4000,
+    )
     device_id: StrictStr = Field(min_length=1, max_length=128)
     auto_advance: StrictBool = True
 
@@ -1271,6 +1276,7 @@ def start_generic_supervised_session(
             session = runtime.universal_agent_orchestrator.start(
                 session_id=session_id,
                 raw_goal=body.text,
+                exact_input_text=body.exact_input_text,
                 device_id=body.device_id,
                 run_dir=run_dir,
             )

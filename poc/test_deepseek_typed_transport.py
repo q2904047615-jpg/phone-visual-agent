@@ -11,8 +11,10 @@ from deepseek_task_graph import (
     TaskGraphError,
     VisualClaimEvidenceRef,
     _named_visual_identity_anchor,
+    build_exact_input_task_graph,
     named_visual_identity_is_grounded,
 )
+from task_semantic_ir import compile_formal_semantic_authority
 
 
 class FakeProvider:
@@ -67,6 +69,28 @@ def payload(*, objective="进入普通会话并聚焦空输入框", effects=()):
 
 
 class TypedPlannerTransportTests(unittest.TestCase):
+    def test_structured_exact_input_builds_one_local_typed_subgoal(self):
+        graph = build_exact_input_task_graph(
+            "将当前唯一输入框精确填写为授权文字",
+            exact_input_text="first\nsecond",
+            device_id="device-local-01",
+        )
+        semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+
+        self.assertEqual("input_exact_text", graph.active_subgoal_id)
+        self.assertEqual(1, len(graph.subgoals))
+        self.assertEqual("first\nsecond", graph.goal.entities["input_text"])
+        self.assertEqual(1, len(semantic_ir.input_fields))
+        self.assertTrue(semantic_ir.input_fields[0].multiline)
+        self.assertEqual(
+            {"input_verified_text", "press_enter"},
+            {
+                constraint.value
+                for constraint in semantic_ir.constraints
+                if constraint.kind == "required_action"
+            },
+        )
+
     def test_unique_internal_transport_aliases_normalize_to_formal_schema(self):
         raw = payload(objective="清空当前输入框中的临时文字")
         raw["goal"]["target_apps"] = []

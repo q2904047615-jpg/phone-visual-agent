@@ -51,6 +51,12 @@ def _openapi(*, version="0.2.0", include_start=True):
         "Start": _schema_object(
             {
                 "text": {"type": "string", "minLength": 1, "maxLength": 500},
+                "exact_input_text": {
+                    "anyOf": [
+                        {"type": "string", "minLength": 1, "maxLength": 4000},
+                        {"type": "null"},
+                    ]
+                },
                 "device_id": string,
                 "auto_advance": {"type": "boolean"},
             },
@@ -193,6 +199,7 @@ class LocalAgentApiClientTests(unittest.TestCase):
         with self._client(handler) as client:
             result = client.start_session(
                 text="输入两个字符",
+                exact_input_text="first\nsecond",
                 device_id="device-local-01",
                 auto_advance=False,
             )
@@ -200,6 +207,7 @@ class LocalAgentApiClientTests(unittest.TestCase):
         self.assertEqual(len(posts), 1)
         self.assertEqual(posts[0][0], "secret")
         self.assertIn('"auto_advance":false', posts[0][1])
+        self.assertIn('"exact_input_text":"first\\nsecond"', posts[0][1])
 
     def test_confirm_fetches_latest_scope_and_posts_it_once(self):
         confirms = []

@@ -260,6 +260,23 @@ class UIElement:
                 raise UISceneError("只有 input 元素的 states.value 可以保存可见字符串。")
             if len(value) > 200:
                 raise UISceneError("input 元素的 states.value 最多200个字符。")
+        if "value_visibility" in self.states:
+            visible_suffix = self.states.get("visible_value_suffix")
+            full_value = self.states.get("value")
+            if (
+                self.role != "input"
+                or self.states["value_visibility"] != "horizontal_suffix"
+                or not isinstance(visible_suffix, str)
+                or not visible_suffix
+                or not isinstance(full_value, str)
+                or visible_suffix == full_value
+                or not full_value.endswith(visible_suffix)
+                or self.states.get("focused") is not True
+                or self.states.get("input_multiline") is not False
+            ):
+                raise UISceneError(
+                    "horizontal_suffix 只允许标记聚焦单行输入框的非空可见尾段。"
+                )
         if "keyboard_layout" in self.states:
             layout = self.states["keyboard_layout"]
             if self.role != "input" or layout not in {

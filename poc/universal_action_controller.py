@@ -1518,13 +1518,28 @@ class UniversalActionController:
             after_family = cls._input_screen_identity_family(after.screen_id)
             if not before_family or before_family != after_family:
                 return False
-        if not cls._input_regions_stably_overlap(
-            before_input.bounds,
-            after_input.bounds,
-        ):
-            return False
         before_states = before_input.states
         after_states = after_input.states
+        typed_field_id = str(before_states.get("input_field_id") or "").strip()
+        typed_horizontal_suffix_identity = bool(
+            typed_field_id
+            and typed_field_id != "unknown"
+            and str(after_states.get("input_field_id") or "").strip()
+            == typed_field_id
+            and before_input.meaning == after_input.meaning == "application_text_input"
+            and before_states.get("input_multiline") is False
+            and after_states.get("input_multiline") is False
+            and after_states.get("value_visibility") == "horizontal_suffix"
+            and isinstance(after_states.get("visible_value_suffix"), str)
+        )
+        if not (
+            cls._input_regions_stably_overlap(
+                before_input.bounds,
+                after_input.bounds,
+            )
+            or typed_horizontal_suffix_identity
+        ):
+            return False
         if before_states.get("focused") is not True or after_states.get("focused") is not True:
             return False
         for key in ("keyboard_layout", "keyboard_input_mode"):

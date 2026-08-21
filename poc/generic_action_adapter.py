@@ -1164,6 +1164,11 @@ class GenericSingleActionAdapter:
                 before,
                 after,
             )
+            after = self._reconcile_verified_text_horizontal_suffix(
+                resolved,
+                before,
+                after,
+            )
 
             try:
                 self.controller.verify_after_action(resolved, before, after)
@@ -1278,6 +1283,137 @@ class GenericSingleActionAdapter:
             after,
             elements=tuple(
                 replacement if element.element_id == input_id else element
+                for element in after.elements
+            ),
+        )
+        reconciled.validate()
+        return reconciled
+
+    @staticmethod
+    def _reconcile_verified_text_horizontal_suffix(
+        resolved: ResolvedSemanticAction,
+        before: UIScene,
+        after: UIScene,
+    ) -> UIScene:
+        """Recover one clipped single-line value from an exact typed transaction.
+
+        A focused single-line field may scroll horizontally to its caret after
+        an append.  The visual observer can then transcribe only a suffix.  The
+        suffix is sufficient only when it contains both a non-trivial suffix of
+        the previously verified value and the complete authorized fragment on
+        the same typed field.  All other partial-value observations remain
+        mismatches.
+        """
+
+        if (
+            resolved.kind != "input_verified_text"
+            or resolved.input_method != "direct_latin"
+            or not resolved.formal_candidate_id
+            or not resolved.target_element_id
+        ):
+            return after
+        prior = resolved.prior_input_value
+        fragment = resolved.input_fragment
+        expected = resolved.expected_input_value
+        expected_state = resolved.expected_effect.get("element_state")
+        expected_states = (
+            expected_state.get("states")
+            if isinstance(expected_state, dict)
+            else None
+        )
+        if (
+            not isinstance(prior, str)
+            or not prior
+            or not isinstance(fragment, str)
+            or not fragment
+            or not isinstance(expected, str)
+            or expected != prior + fragment
+            or any(marker in expected for marker in ("\r", "\n"))
+            or expected_states != {"value": expected}
+        ):
+            return after
+        try:
+            before_input = before.get_element(resolved.target_element_id)
+        except UISceneError:
+            return after
+        before_states = before_input.states
+        typed_field_id = str(before_states.get("input_field_id") or "").strip()
+        if (
+            before_input.role != "input"
+            or before_input.meaning != "application_text_input"
+            or before_states.get("focused") is not True
+            or before_states.get("input_multiline") is not False
+            or before_states.get("value") != prior
+            or before_states.get("keyboard_layout") != "qwerty"
+            or before_states.get("keyboard_input_mode") != "direct_latin"
+            or not typed_field_id
+            or typed_field_id == "unknown"
+        ):
+            return after
+        candidates = tuple(
+            element
+            for element in after.elements
+            if element.element_id == resolved.target_element_id
+            and element.role == "input"
+            and element.meaning == "application_text_input"
+            and float(element.confidence) >= 0.9
+            and element.states.get("fully_visible") is True
+            and element.states.get("focused") is True
+            and element.states.get("input_multiline") is False
+            and str(element.states.get("input_field_id") or "").strip()
+            == typed_field_id
+            and element.states.get("keyboard_layout") == "qwerty"
+            and element.states.get("keyboard_input_mode") == "direct_latin"
+        )
+        if len(candidates) != 1:
+            return after
+        candidate = candidates[0]
+        observed = candidate.states.get("value")
+        visible_prior_suffix = (
+            observed[: -len(fragment)]
+            if isinstance(observed, str) and len(observed) > len(fragment)
+            else ""
+        )
+        required_overlap = min(4, len(prior))
+        if (
+            not isinstance(observed, str)
+            or not observed
+            or observed == expected
+            or not expected.endswith(observed)
+            or not observed.endswith(fragment)
+            or len(visible_prior_suffix) < required_overlap
+            or not prior.endswith(visible_prior_suffix)
+            or not any(observed in str(item) for item in candidate.evidence)
+            or not UniversalActionController._input_app_identity_is_compatible(
+                before.foreground_app_id,
+                after.foreground_app_id,
+            )
+            or not UniversalActionController._input_screen_identity_is_compatible(
+                before.screen_id,
+                after.screen_id,
+            )
+        ):
+            return after
+        replacement = replace(
+            candidate,
+            states={
+                **candidate.states,
+                "visible_value_suffix": observed,
+                "value_visibility": "horizontal_suffix",
+                "value": expected,
+            },
+            evidence=candidate.evidence
+            + (
+                "本地精确分段交易确认完整值：" + expected,
+                "画面仅显示横向滚动尾段：" + observed,
+            ),
+        )
+        reconciled = replace(
+            after,
+            elements=tuple(
+                replacement
+                if element.element_id == resolved.target_element_id
+                else element
                 for element in after.elements
             ),
         )

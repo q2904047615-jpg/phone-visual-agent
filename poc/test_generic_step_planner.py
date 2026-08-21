@@ -1245,6 +1245,171 @@ class GenericActionAdapterTests(unittest.TestCase):
             ),
         )
 
+    def test_verified_text_reconciles_only_cross_boundary_horizontal_suffix(self):
+        cases = (
+            (
+                "abcdefghijklmnopqrst",
+                "uvwxyzabcdefghijk",
+                "nopqrstuvwxyzabcdefghijk",
+                "input_field_1",
+            ),
+            (
+                "releasecandidate",
+                "continuation",
+                "didatecontinuation",
+                "notes_field",
+            ),
+        )
+        for prior, fragment, observed, field_id in cases:
+            with self.subTest(field_id=field_id):
+                expected = prior + fragment
+                before = self._literal_input_scene(
+                    "before-" + field_id,
+                    value=prior,
+                    include_key=False,
+                )
+                before_input = before.get_element("local_audited_input_1")
+                before = replace(
+                    before,
+                    elements=(
+                        replace(
+                            before_input,
+                            states={
+                                **before_input.states,
+                                "input_field_id": field_id,
+                                "input_multiline": False,
+                            },
+                        ),
+                    ),
+                )
+                after = self._literal_input_scene(
+                    "after-" + field_id,
+                    value=observed,
+                    include_key=False,
+                )
+                after_input = after.get_element("local_audited_input_1")
+                after = replace(
+                    after,
+                    screen_id="unknown",
+                    elements=(
+                        replace(
+                            after_input,
+                            bounds=(0.13, 0.68, 0.87, 0.77),
+                            states={
+                                **after_input.states,
+                                "input_field_id": field_id,
+                                "input_multiline": False,
+                            },
+                        ),
+                    ),
+                )
+                resolved = ResolvedSemanticAction(
+                    node_id="verified-text-" + field_id,
+                    kind="input_verified_text",
+                    text=expected,
+                    input_fragment=fragment,
+                    input_method="direct_latin",
+                    prior_input_value=prior,
+                    expected_input_value=expected,
+                    target_element_id="local_audited_input_1",
+                    before_fingerprint=before.fingerprint,
+                    expected_effect={
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {"value": expected},
+                        }
+                    },
+                    formal_candidate_id="candidate-" + field_id,
+                    formal_transition={
+                        "transition_id": "transition-" + field_id,
+                        "precondition_claim_ids": ["claim-" + field_id],
+                        "expectations": [
+                            {
+                                "subject_ref": "element." + field_id,
+                                "predicate": "element.state.value",
+                                "operator": "equals",
+                                "value": expected,
+                            }
+                        ],
+                        "exploratory": False,
+                    },
+                )
+
+                reconciled = (
+                    GenericSingleActionAdapter._reconcile_verified_text_horizontal_suffix(
+                        resolved,
+                        before,
+                        after,
+                    )
+                )
+
+                reconciled_input = reconciled.get_element("local_audited_input_1")
+                self.assertEqual(expected, reconciled_input.states["value"])
+                self.assertEqual(
+                    observed,
+                    reconciled_input.states["visible_value_suffix"],
+                )
+                self.assertEqual(
+                    "horizontal_suffix",
+                    reconciled_input.states["value_visibility"],
+                )
+                UniversalActionController().verify_after_action(
+                    resolved,
+                    before,
+                    reconciled,
+                )
+
+                wrong_field_input = replace(
+                    after_input,
+                    states={
+                        **after_input.states,
+                        "input_field_id": field_id + "-other",
+                        "input_multiline": False,
+                    },
+                )
+                no_overlap_input = replace(
+                    after_input,
+                    label=fragment,
+                    states={
+                        **after_input.states,
+                        "value": fragment,
+                        "input_field_id": field_id,
+                        "input_multiline": False,
+                    },
+                    evidence=(f"应用输入框当前文字：{fragment}", "caret"),
+                )
+                wrong_prefix = "x" + observed[1:]
+                wrong_prefix_input = replace(
+                    after_input,
+                    label=wrong_prefix,
+                    states={
+                        **after_input.states,
+                        "value": wrong_prefix,
+                        "input_field_id": field_id,
+                        "input_multiline": False,
+                    },
+                    evidence=(f"应用输入框当前文字：{wrong_prefix}", "caret"),
+                )
+                missing_evidence_input = replace(
+                    after.get_element("local_audited_input_1"),
+                    evidence=("可见输入框", "caret"),
+                )
+                for unsafe_input in (
+                    wrong_field_input,
+                    no_overlap_input,
+                    wrong_prefix_input,
+                    missing_evidence_input,
+                ):
+                    unsafe_after = replace(after, elements=(unsafe_input,))
+                    self.assertIs(
+                        unsafe_after,
+                        GenericSingleActionAdapter._reconcile_verified_text_horizontal_suffix(
+                            resolved,
+                            before,
+                            unsafe_after,
+                        ),
+                    )
+
     def test_missing_ordinary_button_cannot_use_input_auxiliary_recovery(self):
         planned = scene("ordinary-planned")
         requested = SemanticAction(

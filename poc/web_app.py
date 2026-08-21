@@ -1465,13 +1465,6 @@ def _require_supervised_device_ready(device_id: str | None = None) -> None:
         raise HTTPException(status_code=409, detail="控制端或摄像头离线。")
     if status.get("busy"):
         raise HTTPException(status_code=409, detail="机械臂正在执行其他任务。")
-    active = [
-        item
-        for item in runtime.store.list(20)
-        if item["status"] in {"queued", "running"}
-    ]
-    if active:
-        raise HTTPException(status_code=409, detail="旧执行队列非空，拒绝并发。")
     if not runtime.vision_provider.status().get("configured"):
         raise HTTPException(status_code=409, detail="千问视觉尚未配置。")
 

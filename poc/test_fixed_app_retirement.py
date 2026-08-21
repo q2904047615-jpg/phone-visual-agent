@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import unittest
+from unittest.mock import Mock, patch
 
 
 RETIRED_RUNTIME_MODULES = {
@@ -93,6 +94,27 @@ class FixedAppRetirementTests(unittest.TestCase):
             "2026-08-20-deepseek-typed-task-graph-v4",
             architecture["universal_agent"]["goal_protocol"],
         )
+
+    def test_supervised_readiness_has_no_retired_queue_dependency(self) -> None:
+        controller = Mock()
+        controller.device_status.return_value = {
+            "controller_online": True,
+            "camera_online": True,
+            "busy": False,
+        }
+        with (
+            patch.object(
+                self.web_app.runtime,
+                "controller_for_device",
+                return_value=controller,
+            ),
+            patch.object(
+                self.web_app.runtime.vision_provider,
+                "status",
+                return_value={"configured": True},
+            ),
+        ):
+            self.web_app._require_supervised_device_ready("device-local-01")
 
 
 if __name__ == "__main__":

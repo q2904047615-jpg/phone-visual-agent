@@ -3645,6 +3645,113 @@ class GenericSceneObserverTests(unittest.TestCase):
             retry_content,
         )
 
+    def test_empty_input_audit_uses_unique_compact_field_only_as_crop_hint(
+        self,
+    ) -> None:
+        first = scene_payload()
+        first["elements"][0]["role"] = "input"
+        first["elements"][0]["meaning"] = "message_input"
+        first["elements"][0]["label"] = "消息"
+        first["elements"][0]["bounds"] = [120, 430, 880, 520]
+        first["elements"][0]["states"] = {
+            "goal_relevant": True,
+            "fully_visible": True,
+            "focused": True,
+            "value": "",
+        }
+        empty_audit = input_audit_payload(application_inputs=[])
+        recovered_audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="message-field",
+                    bounds=[140, 80, 860, 210],
+                    text="",
+                    placeholder="消息",
+                )
+            ]
+        )
+        provider = SequenceProvider([first, empty_audit, recovered_audit])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "在唯一消息输入框输入 cross app text",
+                "entities": {
+                    "input_text": "cross app text",
+                    "active_subgoal_visual_context": {
+                        "subgoal_id": "input_text",
+                        "objective": "在唯一消息输入框输入 cross app text",
+                        "constraints": [],
+                        "completion_conditions": [
+                            "输入框逐字等于 cross app text"
+                        ],
+                        "execution_class": "navigate",
+                        "goal_entities": {
+                            "input_text": "cross app text",
+                            "active_input_transaction_text": "cross app text",
+                        },
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(3, provider.calls)
+        self.assertEqual(
+            "local_audited_input_1",
+            scene.unique_trusted_goal_element().element_id,
+        )
+        self.assertEqual(
+            (0.14, 0.365, 0.86, 0.455),
+            scene.unique_trusted_goal_element().bounds,
+        )
+        self.assertTrue(observer.last_diagnostics["input_structure_audit_retry_used"])
+
+    def test_active_input_transaction_fails_as_observation_when_two_audits_are_empty(
+        self,
+    ) -> None:
+        first = scene_payload()
+        first["elements"][0]["role"] = "input"
+        first["elements"][0]["meaning"] = "message_input"
+        first["elements"][0]["bounds"] = [120, 430, 880, 520]
+        first["elements"][0]["states"] = {
+            "goal_relevant": True,
+            "fully_visible": True,
+            "focused": True,
+            "value": "",
+        }
+        context = {
+            "objective": "在唯一输入框输入 alpha",
+            "entities": {
+                "input_text": "alpha",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_text",
+                    "objective": "在唯一输入框输入 alpha",
+                    "constraints": [],
+                    "completion_conditions": ["输入框逐字等于 alpha"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "input_text": "alpha",
+                        "active_input_transaction_text": "alpha",
+                    },
+                },
+            },
+        }
+
+        with self.assertRaisesRegex(
+            VisionAgentError,
+            "专用输入结构审计没有建立当前输入事务的唯一本地目标",
+        ):
+            GenericSceneObserver(
+                SequenceProvider(
+                    [
+                        first,
+                        input_audit_payload(application_inputs=[]),
+                        input_audit_payload(application_inputs=[]),
+                    ]
+                )
+            ).observe(frames=stable_frames(), goal_context=context)
+
     def test_system_home_direction_audit_uses_privacy_minimized_views(self):
         provider = FakeProvider(
             {

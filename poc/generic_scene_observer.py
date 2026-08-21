@@ -656,6 +656,7 @@ class GenericSceneObserver:
         compact_geometry_discarded = False
         compact_input_geometry_isolated = False
         preliminary_input_value_hint: str | None = None
+        preliminary_input_bounds_hint: tuple[int, int, int, int] | None = None
         icon_cluster_audit_used = False
         icon_cluster_audit_candidate_count = 0
         icon_cluster_audit_reload_attested = False
@@ -755,9 +756,12 @@ class GenericSceneObserver:
 
             def parse_compact_response(value: str) -> UIScene:
                 nonlocal compact_geometry_discarded, compact_input_geometry_isolated
-                nonlocal preliminary_input_value_hint
+                nonlocal preliminary_input_value_hint, preliminary_input_bounds_hint
                 payload = _extract_compact_json_object(value)
                 preliminary_input_value_hint = _unique_payload_input_value(
+                    payload
+                )
+                preliminary_input_bounds_hint = _unique_payload_input_bounds(
                     payload
                 )
                 compact_input_geometry_isolated = (
@@ -1231,19 +1235,23 @@ class GenericSceneObserver:
                         visual_obstructions,
                         fingerprint=fingerprint,
                     )
-                    input_retry_roi = _goal_directed_roi_bounds(context)
+                    input_retry_roi = _input_audit_retry_roi(
+                        context,
+                        preliminary_input_bounds_hint=preliminary_input_bounds_hint,
+                    )
                     if (
                         _goal_has_explicit_input_text(context)
                         and input_retry_roi is not None
                         and not _input_audit_established_local_target(scene)
                     ):
                         # A valid empty audit grants no geometry authority. One
-                        # independent single-crop retry is allowed only when the
-                        # active goal itself supplies a coarse spatial region.
-                        # The crop owns a local 0..1000 coordinate system and is
-                        # mapped back locally; the first empty result contributes
-                        # no fields, bounds or states. Two empty results still
-                        # leave the scene fail-closed.
+                        # independent single-crop retry is allowed from either
+                        # a goal-authored coarse region or one uniquely isolated
+                        # compact input box. The hint grants crop selection only;
+                        # the crop owns a local 0..1000 coordinate system and is
+                        # mapped back locally. The first empty result contributes
+                        # no fields, bounds or states. Two empty results fail as
+                        # an observation fault below.
                         input_structure_audit_retry_used = True
                         self._set_stage("waiting_input_structure_audit")
                         retry_content = [
@@ -1291,6 +1299,13 @@ class GenericSceneObserver:
                             ),
                             visual_obstructions,
                             fingerprint=fingerprint,
+                        )
+                    if (
+                        _goal_active_input_transaction_text(context)
+                        and not _input_audit_established_local_target(scene)
+                    ):
+                        raise VisionAgentError(
+                            "专用输入结构审计没有建立当前输入事务的唯一本地目标。"
                         )
                 except VisionAgentError as audit_error:
                     try:
@@ -3949,6 +3964,50 @@ def _goal_directed_roi_bounds(
     return horizontal[0], vertical[0], horizontal[1], vertical[1]
 
 
+def _unique_payload_input_bounds(
+    payload: dict[str, Any],
+) -> tuple[int, int, int, int] | None:
+    """Keep one compact input box only as non-authoritative crop evidence."""
+
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return None
+    inputs = [
+        item
+        for item in elements
+        if isinstance(item, dict)
+        and str(item.get("role") or "").strip() == "input"
+        and _valid_1000_bounds(item.get("bounds"))
+    ]
+    if len(inputs) != 1:
+        return None
+    return tuple(round(float(part)) for part in inputs[0]["bounds"])
+
+
+def _input_audit_retry_roi(
+    context: dict[str, Any],
+    *,
+    preliminary_input_bounds_hint: tuple[int, int, int, int] | None,
+) -> tuple[int, int, int, int] | None:
+    """Choose one detail crop without granting compact geometry authority."""
+
+    goal_roi = _goal_directed_roi_bounds(context)
+    if goal_roi is not None:
+        return goal_roi
+    if (
+        not _goal_active_input_transaction_text(context)
+        or preliminary_input_bounds_hint is None
+    ):
+        return None
+    top = max(0, preliminary_input_bounds_hint[1] - 120)
+    # A crop must materially improve resolution and must include the complete
+    # keyboard below the coarse field.  The dedicated audit independently
+    # re-establishes all actionable bounds inside the crop.
+    if top < 100:
+        return None
+    return (0, top, 1000, 1000)
+
+
 def _crop_normalized(
     image: Image.Image,
     bounds: tuple[int, int, int, int],
@@ -5436,16 +5495,20 @@ def _should_audit_prefilled_input(scene: UIScene, context: dict[str, Any]) -> bo
 def _input_audit_established_local_target(scene: UIScene) -> bool:
     """Return true only for authority minted by the dedicated input audit."""
 
-    candidate = scene.unique_trusted_goal_element()
-    return bool(
-        candidate is not None
-        and candidate.element_id
-        in {
+    local_ids = {
             "local_audited_input_1",
             "local_audited_keyboard_mode_switch_1",
             "local_audited_ime_candidate_1",
-        }
+    }
+    candidates = tuple(
+        element
+        for element in scene.elements
+        if element.element_id in local_ids
+        and element.states.get("goal_relevant") is True
+        and element.states.get("fully_visible") is True
+        and float(element.confidence) >= MIN_TARGET_CONFIDENCE
     )
+    return len(candidates) == 1
 
 
 def _goal_explicit_input_text(context: dict[str, Any]) -> str:

@@ -1283,7 +1283,8 @@ def apps() -> dict[str, Any]:
 
 @app.get("/api/device")
 def device() -> dict[str, Any]:
-    status = runtime.controller.device_status()
+    status = dict(runtime.controller.device_status())
+    status.pop("readiness", None)
     capability_provider = getattr(runtime.controller, "hardware_capabilities", None)
     hardware_capabilities = (
         capability_provider() if callable(capability_provider) else {}
@@ -1309,18 +1310,19 @@ def device() -> dict[str, Any]:
         if isinstance(action, str) and isinstance(spec, dict)
     }
     status["default_device_id"] = runtime.device_controllers.default_device_id
-    status["devices"] = [
-        {
-            **descriptor,
-            **runtime.controller_for_device(descriptor["device_id"]).device_status(),
-        }
-        for descriptor in runtime.device_controllers.descriptors()
-    ]
+    devices = []
+    for descriptor in runtime.device_controllers.descriptors():
+        public_status = dict(
+            runtime.controller_for_device(descriptor["device_id"]).device_status()
+        )
+        public_status.pop("readiness", None)
+        devices.append({**descriptor, **public_status})
+    status["devices"] = devices
     status["vision_agent"] = runtime.vision_provider.status()
     status["intent_agent"] = runtime.intent_provider.status()
     status["execution_architecture"] = {
         "model_role": "observation_only",
-        "controller": "single_state_controller",
+        "controller": "universal_action_controller",
         "fixed_app_workflows_retired": True,
         "active_orchestrator": "universal_agent",
         "universal_agent": {

@@ -81,9 +81,12 @@ class FixedAppRetirementTests(unittest.TestCase):
 
     def test_device_contract_reports_single_current_authority(self) -> None:
         payload = self.web_app.device()
+        self.assertNotIn("readiness", payload)
+        self.assertTrue(all("readiness" not in item for item in payload["devices"]))
         architecture = payload["execution_architecture"]
         self.assertTrue(architecture["fixed_app_workflows_retired"])
         self.assertEqual("universal_agent", architecture["active_orchestrator"])
+        self.assertEqual("universal_action_controller", architecture["controller"])
         self.assertNotIn("background_compatibility_worker", architecture)
         self.assertNotIn("generic_orchestrator", architecture)
         self.assertEqual(

@@ -1450,6 +1450,7 @@ class QwenVisualDecisionObserver:
         deterministic_selection = _deterministic_exact_selection_payload(
             context,
             canonical_choices,
+            observation=trusted_observation,
         )
         if deterministic_selection is not None:
             raw = json.dumps(
@@ -1766,22 +1767,46 @@ def _selection_decision_prompt(
 def _deterministic_exact_selection_payload(
     context: QwenTaskContext,
     choices: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+    *,
+    observation: TrustedObservation | None = None,
 ) -> dict[str, Any] | None:
     """Select the sole matching candidate for a structured exact action."""
 
     active_id = str(context.current_subgoal.get("subgoal_id") or "").strip()
-    expected_action = {
-        "exact_back": "back",
-        "exact_home": "home",
-        "exact_tap_semantic": "tap_semantic",
-    }.get(active_id)
-    if expected_action is None:
-        return None
-    matching_choices = tuple(
-        choice
-        for choice in choices
-        if str(choice.get("action") or "").strip() == expected_action
-    )
+    if active_id == "input_exact_text":
+        local_target = (
+            observation.target_local_candidate()
+            if observation is not None
+            else None
+        )
+        if local_target is None:
+            return None
+        matching_choices = tuple(
+            choice
+            for choice in choices
+            if str(choice.get("element_id") or "").strip()
+            == local_target.element_id
+            and str(choice.get("action") or "").strip()
+            in {
+                "tap_semantic",
+                "input_verified_text",
+                "press_enter",
+                "clear_verified_text",
+            }
+        )
+    else:
+        expected_action = {
+            "exact_back": "back",
+            "exact_home": "home",
+            "exact_tap_semantic": "tap_semantic",
+        }.get(active_id)
+        if expected_action is None:
+            return None
+        matching_choices = tuple(
+            choice
+            for choice in choices
+            if str(choice.get("action") or "").strip() == expected_action
+        )
     if len(matching_choices) != 1:
         return None
     choice_id = str(matching_choices[0].get("choice_id") or "").strip()

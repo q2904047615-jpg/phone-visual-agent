@@ -3356,6 +3356,13 @@ def _matching_exact_text_candidates(
     observation: TrustedObservation,
     required_text: str,
 ) -> list[str]:
+    active_input_matches = _active_input_transaction_exact_candidate_ids(
+        context,
+        observation,
+        required_text,
+    )
+    if active_input_matches is not None:
+        return active_input_matches
     roles = set(context.exact_text_target_roles)
     meanings = set(context.exact_text_target_meanings)
     matches: list[str] = []
@@ -3392,6 +3399,76 @@ def _matching_exact_text_candidates(
                 continue
         matches.append(element.element_id)
     return matches
+
+
+def _active_input_transaction_exact_candidate_ids(
+    context: QwenTaskContext,
+    observation: TrustedObservation,
+    required_text: str,
+) -> list[str] | None:
+    """Keep one typed input field bound after its placeholder disappears.
+
+    The field label is task authority, while the current value, geometry and
+    uniqueness remain fresh local observation facts.  This bridge applies only
+    to the active typed input field and only when its current value is an exact
+    prefix of the authorized payload.  It therefore cannot turn another input
+    or an arbitrary similarly labelled element into the action target.
+    """
+
+    semantic_ir = context.semantic_ir
+    if semantic_ir is None:
+        return None
+    active_id = str(context.current_subgoal.get("subgoal_id") or "")
+    fields = tuple(
+        field
+        for field in semantic_ir.input_fields
+        if active_id in field.source_subgoal_ids
+        and field.field_label in {"", required_text}
+    )
+    if len(fields) != 1:
+        return None
+    field = fields[0]
+    entities = {item.entity_id: item for item in semantic_ir.entities}
+    payload = entities.get(field.payload_ref)
+    if (
+        payload is None
+        or payload.role != "input_text"
+        or not isinstance(payload.value, str)
+        or not payload.value
+    ):
+        return None
+
+    matches: list[str] = []
+    active_field_nonempty_seen = False
+    for element in observation.scene.elements:
+        current_value = element.states.get("value")
+        if (
+            element.states.get("input_field_id") == field.field_id
+            and isinstance(current_value, str)
+            and current_value
+        ):
+            active_field_nonempty_seen = True
+        if (
+            element.role != "input"
+            or element.meaning != "application_text_input"
+            or float(element.confidence) < MIN_TARGET_CONFIDENCE
+            or element.states.get("goal_relevant") is not True
+            or element.states.get("fully_visible") is not True
+            or element.states.get("input_field_id") != field.field_id
+            or (
+                bool(field.field_label)
+                and element.states.get("input_field_label") != field.field_label
+            )
+            or not isinstance(current_value, str)
+            or not current_value
+            or not payload.value.startswith(current_value)
+            or element.label != current_value
+        ):
+            continue
+        matches.append(element.element_id)
+    # An empty field still visibly carries its placeholder/label, so the
+    # ordinary literal matcher remains authoritative until text replaces it.
+    return matches if active_field_nonempty_seen else None
 
 
 def _local_blocked_decision(

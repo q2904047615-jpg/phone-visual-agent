@@ -1651,6 +1651,187 @@ class QwenVisualDecisionTests(unittest.TestCase):
             "query_field", exact_decision.proposal.action.params["element_id"]
         )
 
+    def test_typed_input_field_remains_exact_target_after_placeholder_disappears(self) -> None:
+        target_text = "abcdefghijklmnopqrstuvwxyzabcdefghijk"
+        prefix = "abcdefghijklmnopqrst"
+        raw = task_context(task_id="task_input_continuity", revision=8)
+        raw["goal"]["entities"] = {
+            "input_text": target_text,
+            "target_ui_label": "长文本",
+        }
+        raw["current_subgoal"]["objective"] = "继续在长文本输入框输入剩余文字"
+        field = UIElement(
+            element_id="local_audited_input_1",
+            role="input",
+            meaning="application_text_input",
+            label=prefix,
+            bounds=(0.135, 0.49, 0.865, 0.615),
+            confidence=0.99,
+            states={
+                "focused": True,
+                "value": prefix,
+                "fully_visible": True,
+                "goal_relevant": True,
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+                "input_field_id": "field_test_input",
+            },
+            evidence=(f"应用输入框当前文字：{prefix}",),
+        )
+        observation = trusted_observation(
+            self.frames,
+            elements=(field,),
+            observation_id="obs_12121212121212121212121212121212",
+        )
+        context = test_context_with_semantic_ir(
+            raw,
+            observation,
+            frozenset({"input_verified_text"}),
+        )
+        context = replace(
+            context,
+            semantic_ir=replace(
+                context.semantic_ir,
+                input_fields=(
+                    replace(
+                        context.semantic_ir.input_fields[0],
+                        field_id="input_field_1",
+                    ),
+                ),
+            ),
+        )
+        field = replace(
+            field,
+            states={**field.states, "input_field_id": "input_field_1"},
+        )
+        observation = trusted_observation(
+            self.frames,
+            elements=(field,),
+            observation_id="obs_12121212121212121212121212121212",
+        )
+        self.assertIsNone(_exact_text_candidate_block(context, observation))
+        self.assertEqual(
+            {"local_audited_input_1"},
+            _required_exact_candidate_ids(context, observation),
+        )
+        _observer, decision = self.decide(
+            FakeProvider(
+                minimal_selection_payload(status="action", choice_id="choice_1")
+            ),
+            context=context,
+            observation=observation,
+            available_action_kinds={"input_verified_text"},
+        )
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual(target_text, decision.proposal.action.params["text"])
+
+        for changed_states in (
+            {"input_field_id": "field_other"},
+            {"value": "wrong-prefix"},
+        ):
+            wrong_field = replace(
+                field,
+                label=str(changed_states.get("value", prefix)),
+                states={**field.states, **changed_states},
+            )
+            wrong_observation = trusted_observation(
+                self.frames,
+                elements=(wrong_field,),
+                observation_id=(
+                    "obs_34343434343434343434343434343434"
+                    if "value" not in changed_states
+                    else "obs_56565656565656565656565656565656"
+                ),
+            )
+            self.assertEqual(
+                "exact_text_missing",
+                _exact_text_candidate_block(context, wrong_observation)[1],
+            )
+
+    def test_typed_input_prefix_identity_varies_by_field_label_and_payload(self) -> None:
+        target_text = "releasecandidatecontinuation"
+        prefix = "releasecandidate"
+        raw = task_context(task_id="task_input_continuity_variation", revision=5)
+        raw["goal"]["entities"] = {
+            "input_text": target_text,
+            "target_ui_label": "备注",
+        }
+        raw["current_subgoal"]["objective"] = "继续填写备注字段"
+        field = UIElement(
+            element_id="local_audited_notes_input",
+            role="input",
+            meaning="application_text_input",
+            label=prefix,
+            bounds=(0.12, 0.31, 0.88, 0.46),
+            confidence=0.98,
+            states={
+                "focused": True,
+                "value": prefix,
+                "fully_visible": True,
+                "goal_relevant": True,
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+                "input_field_id": "notes_field",
+                "input_field_label": "备注",
+            },
+            evidence=(f"备注字段当前文字：{prefix}",),
+        )
+        observation = trusted_observation(
+            self.frames,
+            elements=(field,),
+            observation_id="obs_78787878787878787878787878787878",
+        )
+        context = test_context_with_semantic_ir(
+            raw,
+            observation,
+            frozenset({"input_verified_text"}),
+        )
+        context = replace(
+            context,
+            semantic_ir=replace(
+                context.semantic_ir,
+                input_fields=(
+                    replace(
+                        context.semantic_ir.input_fields[0],
+                        field_id="notes_field",
+                        field_label="备注",
+                    ),
+                ),
+            ),
+        )
+        self.assertIsNone(_exact_text_candidate_block(context, observation))
+        self.assertEqual(
+            {"local_audited_notes_input"},
+            _required_exact_candidate_ids(context, observation),
+        )
+
+        unrelated_nonempty = replace(
+            field,
+            element_id="other_input",
+            label="draft",
+            states={
+                **field.states,
+                "value": "draft",
+                "input_field_id": "other_field",
+                "input_field_label": "标题",
+            },
+        )
+        empty_active = replace(
+            field,
+            label="备注",
+            states={**field.states, "value": ""},
+        )
+        empty_observation = trusted_observation(
+            self.frames,
+            elements=(empty_active, unrelated_nonempty),
+            observation_id="obs_89898989898989898989898989898989",
+        )
+        self.assertIsNone(_exact_text_candidate_block(context, empty_observation))
+        self.assertEqual(
+            {"local_audited_notes_input"},
+            _required_exact_candidate_ids(context, empty_observation),
+        )
+
     def test_minimal_clear_choice_uses_local_empty_postcondition_without_text(self) -> None:
         context = task_context(task_id="task_minimal_clear", revision=4)
         context["current_subgoal"]["objective"] = "恢复唯一错误草稿输入框为空"

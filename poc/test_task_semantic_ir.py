@@ -827,6 +827,89 @@ class TaskSemanticIRTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskSemanticIRError, "未绑定当前任务图"):
             apply_formal_semantic_risk_policy(changed, authority)
 
+    def test_newline_key_wording_compiles_to_press_enter(self):
+        for wording in (
+            "点击手机键盘右下角换行键",
+            "press the new line key",
+        ):
+            with self.subTest(wording=wording):
+                payload = {
+                    "status": "ready",
+                    "goal": {
+                        "objective": "第一行输入 first，换行后第二行输入 second",
+                        "target_apps": [
+                            {
+                                "app_id": "current_foreground",
+                                "app_name": "当前前台应用",
+                            }
+                        ],
+                        "entities": {"input_text": "first\nsecond"},
+                    },
+                    "constraints": ["不得发送或提交"],
+                    "completion_conditions": [
+                        {
+                            "condition_id": "input_complete",
+                            "description": "输入框内容为 first 换行 second",
+                            "evidence_required": ["输入框显示两行目标文字"],
+                            "satisfied": False,
+                            "evidence": [],
+                        }
+                    ],
+                    "effect_intents": [],
+                    "subgoals": [
+                        {
+                            "subgoal_id": "input_first_line",
+                            "objective": "在输入框中输入 first",
+                            "status": "active",
+                            "depends_on": [],
+                            "constraints": ["不得发送或提交"],
+                            "completion_conditions": ["输入框内容为 first"],
+                            "completion_evidence": [],
+                            "effect_ids": [],
+                            "execution_class": "navigate",
+                        },
+                        {
+                            "subgoal_id": "press_enter",
+                            "objective": wording,
+                            "status": "pending",
+                            "depends_on": ["input_first_line"],
+                            "constraints": ["不得发送或提交"],
+                            "completion_conditions": [
+                                "输入框内容为 first 加换行"
+                            ],
+                            "completion_evidence": [],
+                            "effect_ids": [],
+                            "execution_class": "navigate",
+                        },
+                    ],
+                    "active_subgoal_id": "input_first_line",
+                    "clarification_questions": [],
+                }
+                graph = _graph_from_payload(
+                    payload,
+                    task_id="newline-wording-task",
+                    device_id="device-local-01",
+                    revision=1,
+                    raw_user_goal=(
+                        "第一行输入 first，点击换行键，第二行输入 second"
+                    ),
+                )
+                semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+                constraints = {
+                    item.constraint_id: item for item in semantic_ir.constraints
+                }
+                newline = next(
+                    item
+                    for item in semantic_ir.subgoals
+                    if item.subgoal_id == "press_enter"
+                )
+                required_actions = {
+                    constraints[ref].value
+                    for ref in newline.constraint_refs
+                    if constraints[ref].kind == "required_action"
+                }
+                self.assertIn("press_enter", required_actions)
+
     def test_unknown_effect_cannot_cross_formal_cutover(self):
         payload = current_send_failure_payload()
         payload["effect_intents"][0]["kind"] = "unknown_external_effect"

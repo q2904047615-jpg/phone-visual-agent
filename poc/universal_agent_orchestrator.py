@@ -3828,7 +3828,82 @@ class UniversalAgentOrchestrator:
         # typed receipt / DeepSeek completion path instead of asking Qwen to
         # enumerate the same text again (for example, input value and a stale
         # IME candidate carrying an identical literal).
-        return len(after_inputs) == 1 and expected_value != canonical
+        if len(after_inputs) != 1 or expected_value == canonical:
+            return False
+        if UniversalAgentOrchestrator._input_step_reaches_formal_successor(
+            graph=graph,
+            current_subgoal_id=current.subgoal_id,
+            canonical=canonical,
+            expected_value=expected_value,
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _input_step_reaches_formal_successor(
+        *,
+        graph: DynamicTaskGraph,
+        current_subgoal_id: str,
+        canonical: str,
+        expected_value: str,
+    ) -> bool:
+        """Detect one typed input boundary already split by the formal graph.
+
+        A deterministic text transaction normally remains inside one high-level
+        input subgoal.  When the graph instead has one direct successor whose
+        required action exactly matches the next deterministic input step, the
+        matched current step must use the normal receipt/replan path so that
+        the successor becomes active.  This is structural: no App, screenshot,
+        coordinate or free-form completion phrase decides the transition.
+        """
+
+        try:
+            semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+            next_step = plan_next_verified_input(canonical, expected_value)
+        except (TaskSemanticIRError, ValueError, VerifiedTextTransactionError):
+            return False
+        if next_step is None:
+            return False
+        next_required_action = (
+            "press_enter"
+            if next_step.kind == "literal_key" and next_step.segment == "\n"
+            else "input_verified_text"
+        )
+        constraints = {
+            item.constraint_id: item for item in semantic_ir.constraints
+        }
+
+        def required_actions(subgoal: Any) -> frozenset[str]:
+            return frozenset(
+                str(constraints[ref].value)
+                for ref in subgoal.constraint_refs
+                if ref in constraints
+                and constraints[ref].kind == "required_action"
+            )
+
+        current = next(
+            (
+                item
+                for item in semantic_ir.subgoals
+                if item.subgoal_id == current_subgoal_id
+            ),
+            None,
+        )
+        successors = tuple(
+            item
+            for item in semantic_ir.subgoals
+            if item.status == "pending"
+            and current_subgoal_id in item.depends_on
+        )
+        if current is None or len(successors) != 1:
+            return False
+        current_actions = required_actions(current)
+        successor_actions = required_actions(successors[0])
+        return bool(
+            "input_verified_text" in current_actions
+            and next_required_action not in current_actions
+            and next_required_action in successor_actions
+        )
 
     @staticmethod
     def _build_effect_verification(

@@ -1529,7 +1529,13 @@ def compile_runtime_graph_semantics(
     action_patterns = (
         ("double_tap", re.compile(r"双击|double[ _-]?(?:tap|click)", re.I)),
         ("pinch", re.compile(r"捏合|双指|pinch|zoom", re.I)),
-        ("press_enter", re.compile(r"回车|enter(?:\s+key)?", re.I)),
+        (
+            "press_enter",
+            re.compile(
+                r"回车|换行(?:键)?|enter(?:\s+key)?|new[ _-]?line(?:\s+key)?",
+                re.I,
+            ),
+        ),
         (
             "clear_verified_text",
             re.compile(

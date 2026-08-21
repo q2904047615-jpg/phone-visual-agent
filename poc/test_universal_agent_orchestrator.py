@@ -5270,6 +5270,114 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             )
         )
 
+    def test_verified_first_line_exits_microstep_for_formal_newline_successor(
+        self,
+    ) -> None:
+        base = self._input_graph()
+        first = replace(
+            base.subgoals[0],
+            subgoal_id="input_first_line",
+            objective="在输入框中输入 first",
+            completion_conditions=("输入框内容为 first",),
+        )
+        newline = replace(
+            base.subgoals[0],
+            subgoal_id="press_enter",
+            objective="点击手机键盘右下角换行键",
+            status="pending",
+            depends_on=("input_first_line",),
+            completion_conditions=("输入框内容为 first 加换行",),
+        )
+        second = replace(
+            base.subgoals[0],
+            subgoal_id="input_second_line",
+            objective="在输入框第二行输入 second",
+            status="pending",
+            depends_on=("press_enter",),
+            completion_conditions=("输入框内容为 first 换行 second",),
+        )
+        graph = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="第一行输入 first，换行后第二行输入 second",
+                entities={"input_text": "first\nsecond"},
+            ),
+            subgoals=(first, newline, second),
+            active_subgoal_id="input_first_line",
+            raw_user_goal="第一行输入 first，换行后第二行输入 second",
+        )
+        graph.validate()
+        before = self._input_scene("", fingerprint="first-line-before")
+        after = self._input_scene("first", fingerprint="first-line-after")
+        expected_effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": "first"},
+            }
+        }
+        action = SemanticAction(
+            node_id="first-line-step",
+            action="input_verified_text",
+            params={"text": "first\nsecond"},
+        )
+        result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=before,
+            after_scene=after,
+            resolved_action=ResolvedSemanticAction(
+                node_id="first-line-step",
+                kind="input_verified_text",
+                text="first\nsecond",
+                input_fragment="first",
+                input_method="direct_latin",
+                prior_input_value="",
+                expected_input_value="first",
+                target_element_id="input-1",
+                before_fingerprint=before.fingerprint,
+                expected_effect=expected_effect,
+            ),
+        )
+
+        self.assertFalse(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=SimpleNamespace(
+                    proposal=GenericStepProposal(status="action", action=action)
+                ),
+                result=result,
+                before_observation=SimpleNamespace(
+                    fingerprint=before.fingerprint
+                ),
+                new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+            )
+        )
+
+        unrelated = replace(
+            graph,
+            subgoals=(
+                first,
+                replace(newline, objective="打开下一页"),
+                second,
+            ),
+        )
+        unrelated.validate()
+        self.assertTrue(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=unrelated,
+                previous_decision=SimpleNamespace(
+                    proposal=GenericStepProposal(status="action", action=action)
+                ),
+                result=result,
+                before_observation=SimpleNamespace(
+                    fingerprint=before.fingerprint
+                ),
+                new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+            )
+        )
+
     def test_verified_direct_input_canonical_value_exits_microstep(self) -> None:
         graph = self._input_graph()
         graph = replace(

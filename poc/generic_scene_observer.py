@@ -2558,7 +2558,7 @@ Distinguish three different visual structures; never merge them:
 2. ime_preedit_regions: the input method's composition/candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Enumerate only complete visible candidate words inside each region; candidates are read-only facts and never application inputs.
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
-   When keyboard.visible=true, keyboard.bounds MUST enclose the complete visible keyboard in the same coordinate system, have width at least 300 and height at least 180, and contain every reported keyboard key and anchor. Measure from the four edges of Image 1; do not shift the keyboard toward the bottom or describe only its letter rows. If those requirements cannot all be met, do not invent actionable keyboard geometry.
+   When keyboard.visible=true, report keyboard.bounds only when it confidently encloses the complete visible keyboard in the same coordinate system, has width at least 300 and height at least 180, and contains every reported keyboard key and anchor. Measure from the four edges of Image 1; do not shift the keyboard toward the bottom or describe only its letter rows. For QWERTY, qwerty_anchors remain mandatory; when the outer bounds cannot be measured confidently, set bounds=null instead of inventing it. Local code may reconstruct an execution envelope only after independent multi-frame row evidence validates all seven anchors. Non-QWERTY actionable geometry still requires complete keyboard.bounds.
 5. keyboard.backspace_key: for any complete visible keyboard layout, report the one complete backspace/delete key as label, bounds, confidence and fully_visible. Use null when absent, clipped, ambiguous, or confused with an App delete control. This is read-only geometry and never authorizes clearing by itself.
 6. keyboard.literal_keys: the local, goal-derived whitelist is {json.dumps(literal_key_targets, ensure_ascii=False, separators=(',', ':'))}. Report only complete visible keys whose inserted value occurs in that exact whitelist, at most once per distinct value and at most eight total. Every literal-key object MUST contain exactly these six fields and never omit any of them: value, label, key_kind, bounds, confidence, fully_visible. When the whitelist is empty, literal_keys MUST be []. QWERTY alphabet letters and Chinese characters MUST NEVER be enumerated here, even when they occur in input_text, because qwerty_anchors and the verified pinyin transaction already represent them. Never enumerate a keyboard row. For a whitelisted space use value=" " and key_kind="space". For every other whitelisted key use key_kind="character" and require label to equal value literally. The large central PRIMARY glyph of the whole directly tappable key MUST equal value. A small corner glyph, superscript digit, alternate symbol, swipe hint or long-press hint printed on an alphabet key is NOT a literal key and MUST NEVER be reported here. If the whitelisted value exists only as such a secondary hint, leave literal_keys empty and report a separately visible direction-explicit numeric/symbol layout switch instead. Bounds must enclose the whole direct key, never only the secondary glyph. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
 7. keyboard.enter_key: report at most one complete visible keyboard action key using exactly label, bounds, confidence, fully_visible and key_action. key_action must be one of newline, send, search, done, next, unknown and must describe the key's current visible behavior, never the requested goal. A plain multiline Return/Enter key may be newline. A key visibly labelled or iconographically acting as Send/Search/Done/Next must use that action and can never authorize a newline. The current transaction needs a newline={str(enter_required).lower()} and multiline={str(active_multiline).lower()}, but those facts do not change the visual classification.
@@ -6020,6 +6020,14 @@ def _apply_input_structure_audit(
                     valid_keyboard_bounds = bool(
                         keyboard_bounds[3] - keyboard_bounds[1] >= 180
                     )
+            if (
+                not valid_keyboard_bounds
+                and locally_snapped_qwerty_anchors is not None
+            ):
+                keyboard_bounds = _keyboard_bounds_from_locally_snapped_qwerty_anchors(
+                    locally_snapped_qwerty_anchors
+                )
+                valid_keyboard_bounds = keyboard_bounds is not None
             if not valid_keyboard_bounds:
                 if _typed_prefix_input_survives_invalid_keyboard_geometry(
                     application_inputs,
@@ -7119,6 +7127,80 @@ def _audit_confidence(value: Any, field_name: str) -> float:
     if not 0.0 <= confidence <= 1.0:
         raise UISceneError(f"{field_name} confidence 超出0..1。")
     return confidence
+
+
+def _keyboard_bounds_from_locally_snapped_qwerty_anchors(
+    value: Any,
+) -> tuple[float, float, float, float] | None:
+    """Rebuild one keyboard envelope from independently stabilized QWERTY rows.
+
+    The model's outer rectangle is not a second authority once all seven
+    anchors have been stabilized across frames. Individual Enter, literal,
+    switch and backspace controls still require their own audited geometry.
+    """
+
+    expected = {"q", "p", "a", "l", "z", "m", "backspace"}
+    if not isinstance(value, dict) or set(value) != expected:
+        return None
+    try:
+        anchors = {
+            key: [float(value[key][0]), float(value[key][1])]
+            for key in expected
+            if isinstance(value.get(key), (list, tuple))
+            and len(value[key]) == 2
+            and all(
+                not isinstance(part, bool) and isinstance(part, (int, float))
+                for part in value[key]
+            )
+        }
+        if set(anchors) != expected or any(
+            not 0 <= coordinate <= 1000
+            for point in anchors.values()
+            for coordinate in point
+        ):
+            return None
+        normalized = {
+            key: [round(point[0]), round(point[1])]
+            for key, point in anchors.items()
+        }
+        qwerty_keyboard_config_from_anchors(normalized)
+        horizontal_pitch = min(
+            (anchors["p"][0] - anchors["q"][0]) / 9.0,
+            (anchors["l"][0] - anchors["a"][0]) / 8.0,
+            (anchors["m"][0] - anchors["z"][0]) / 6.0,
+        )
+        top_y = (anchors["q"][1] + anchors["p"][1]) / 2.0
+        middle_y = (anchors["a"][1] + anchors["l"][1]) / 2.0
+        bottom_y = (
+            anchors["z"][1]
+            + anchors["m"][1]
+            + anchors["backspace"][1]
+        ) / 3.0
+        vertical_pitch = min(middle_y - top_y, bottom_y - middle_y)
+        if horizontal_pitch <= 0 or vertical_pitch <= 0:
+            return None
+        bounds = (
+            max(
+                0.0,
+                min(anchors[key][0] for key in ("q", "a", "z"))
+                - 0.75 * horizontal_pitch,
+            ),
+            max(0.0, top_y - 0.75 * vertical_pitch),
+            min(
+                1000.0,
+                max(
+                    anchors[key][0]
+                    for key in ("p", "l", "m", "backspace")
+                )
+                + 0.75 * horizontal_pitch,
+            ),
+            min(1000.0, bottom_y + 2.0 * vertical_pitch),
+        )
+        if bounds[2] - bounds[0] < 300 or bounds[3] - bounds[1] < 180:
+            return None
+        return bounds
+    except (KeyError, TypeError, ValueError, WorkflowNotReady):
+        return None
 
 
 def _validated_qwerty_keyboard_geometry(

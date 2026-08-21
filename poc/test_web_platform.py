@@ -1114,6 +1114,36 @@ class LowLevelInputTests(unittest.TestCase):
         )
         self.assertEqual(keyboard["source"], "vision_anchors_normalized")
 
+    def test_dynamic_qwerty_accepts_audited_bottom_row_near_frame_edge(self) -> None:
+        keyboard = qwerty_keyboard_config_from_anchors(
+            {
+                "q": [110, 840],
+                "p": [890, 840],
+                "a": [160, 900],
+                "l": [840, 900],
+                "z": [260, 960],
+                "m": [740, 960],
+                "backspace": [890, 960],
+            }
+        )
+
+        self.assertAlmostEqual(keyboard["rows"][2]["y"], 0.96)
+        self.assertAlmostEqual(keyboard["backspace_y_ratio"], 0.96)
+
+    def test_dynamic_qwerty_rejects_bottom_row_without_safe_center_margin(self) -> None:
+        with self.assertRaisesRegex(Exception, "行位置或上下顺序异常"):
+            qwerty_keyboard_config_from_anchors(
+                {
+                    "q": [110, 870],
+                    "p": [890, 870],
+                    "a": [160, 930],
+                    "l": [840, 930],
+                    "z": [260, 990],
+                    "m": [740, 990],
+                    "backspace": [890, 990],
+                }
+            )
+
     def test_dynamic_qwerty_rejects_non_qwerty_geometry(self) -> None:
         invalid = {
             **TEST_QWERTY_LAYOUT["anchors"],

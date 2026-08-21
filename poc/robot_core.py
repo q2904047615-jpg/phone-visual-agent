@@ -278,7 +278,10 @@ def qwerty_keyboard_config_from_anchors(
     q_x, top_step, top_y = row("q", "p", 10)
     observed_a_x, _observed_middle_step, middle_y = row("a", "l", 9)
     observed_z_x, _observed_bottom_step, bottom_y = row("z", "m", 7)
-    if not (450.0 <= top_y < middle_y < bottom_y <= 950.0):
+    # A complete audited keyboard can legitimately place its bottom row close
+    # to the lower edge of the normalized frame.  Keep a small center margin,
+    # while leaving row order and spacing as the authoritative geometry checks.
+    if not (450.0 <= top_y < middle_y < bottom_y <= 980.0):
         raise WorkflowNotReady("动态拼音键盘行位置或上下顺序异常，拒绝执行。")
     if not (35.0 <= middle_y - top_y <= 140.0):
         raise WorkflowNotReady("动态拼音键盘第一、二行间距异常。")

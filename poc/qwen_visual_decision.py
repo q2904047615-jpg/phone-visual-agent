@@ -1447,6 +1447,32 @@ class QwenVisualDecisionObserver:
             )
             return decision
 
+        deterministic_selection = _deterministic_exact_selection_payload(
+            context,
+            canonical_choices,
+        )
+        if deterministic_selection is not None:
+            raw = json.dumps(
+                deterministic_selection,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            decision = _parse_model_decision(
+                raw,
+                context=context,
+                observation=trusted_observation,
+                available_action_kinds=available_actions,
+            )
+            self.last_raw_response = raw
+            self.last_diagnostics.update(
+                {
+                    "local_deterministic_selection": True,
+                    "decision_status": decision.proposal.status,
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                }
+            )
+            return decision
+
         prompt = _selection_decision_prompt(
             context,
             trusted_observation,
@@ -1735,6 +1761,28 @@ def _selection_decision_prompt(
 9. 这是第{decision_number}轮。不要Markdown，不要identity、page_state、next_action、target_region、
    expected_result、bounds或额外字段。
 """
+
+
+def _deterministic_exact_selection_payload(
+    context: QwenTaskContext,
+    choices: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Select the sole canonical candidate for a structured exact action."""
+
+    active_id = str(context.current_subgoal.get("subgoal_id") or "").strip()
+    if not active_id.startswith("exact_") or len(choices) != 1:
+        return None
+    choice_id = str(choices[0].get("choice_id") or "").strip()
+    if not choice_id:
+        return None
+    return {
+        "status": "action",
+        "choice_id": choice_id,
+        "completes_current_subgoal_on_success": False,
+        "confidence": 1.0,
+        "reason": "结构化直推目录只有一个合法 canonical candidate。",
+        "completion_evidence_element_ids": [],
+    }
 
 
 def _parse_model_decision(

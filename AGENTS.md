@@ -172,7 +172,7 @@
 ## 当前阶段临时执行锁（完成后必须更新）
 
 - 阶段 1 已完成。
-- 阶段 2 已完成严格单会话真机闭环验收。session `18c29c4db30246d1a3ffaa8f5116f047` 从新鲜桌面目标出发，在同一 universal-agent session 依次完成 `tap_semantic` 打开系统设置和 `home` 返回桌面两个真实动作；每步均有动作前后 4 帧、新 observation/fingerprint、matched typed receipt 和 revision `1→2→3`，最终 `status=succeeded`、任务图 `completed`、`active_subgoal=null`，无旧 scope 复用、无自动重试。报告位于 `poc/output/web/generic_supervised_20260817_111820_18c29c4d/report.json`。
+- 阶段 2 已完成严格单会话真机闭环验收。session `18c29c4db30246d1a3ffaa8f5116f047` 从新鲜桌面目标出发，在同一 universal-agent session 依次完成 `tap_semantic` 打开系统设置和 `home` 返回桌面两个真实动作；每步均记录动作前后 4 帧、新 observation/fingerprint、matched typed receipt 和 revision `1→2→3`，最终 `status=succeeded`、任务图 `completed`、`active_subgoal=null`，无旧 scope 复用、无自动重试。原报告路径 `poc/output/web/generic_supervised_20260817_111820_18c29c4d/report.json` 当前已缺失；在找回前不得声称磁盘仍保留完整原始证据。
 - 独立 `/api/agent/generic-scene` 四帧只读复核为 `executed=false`、`physical_action_requested=false`，确认最终 `launcher/home_screen` 稳定可见；它只是补充，未替代上述两动作同会话证据。
 - 阶段 3 已完成三个不同真实 App 的真机验收，且未复用阶段 2 session：Browser session
   `61f26496f1a046118468e922eacb5741` 为 `succeeded/3 actions`；Settings session

@@ -1703,6 +1703,23 @@ def compile_canonical_action_catalog(
     unique_candidates = {item.candidate_id: item for item in candidates}
     element_by_id = {item.element_id: item for item in sorted_elements}
 
+    def clears_nonprefix_active_input(candidate: CanonicalActionCandidate) -> bool:
+        if candidate.action_kind != "clear_verified_text":
+            return False
+        element = element_by_id.get(
+            str(candidate.parameters.get("element_id") or "")
+        )
+        if element is None or len(active_input_payload_entities) != 1:
+            return False
+        current_value = element.states.get("value")
+        authorized_value = active_input_payload_entities[0].value
+        return bool(
+            isinstance(current_value, str)
+            and current_value
+            and isinstance(authorized_value, str)
+            and not authorized_value.startswith(current_value)
+        )
+
     def belongs_to_active_subgoal(candidate: CanonicalActionCandidate) -> bool:
         if candidate.effect_ref:
             return candidate.effect_ref in active_effect_refs
@@ -1735,7 +1752,10 @@ def compile_canonical_action_catalog(
                         return False
                 elif (
                     action_kind == "clear_verified_text"
-                    and "clear_verified_text" in active_required_actions
+                    and (
+                        "clear_verified_text" in active_required_actions
+                        or clears_nonprefix_active_input(candidate)
+                    )
                 ):
                     pass
                 else:

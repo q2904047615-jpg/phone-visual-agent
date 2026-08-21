@@ -8431,6 +8431,103 @@ class GenericSceneObserverTests(unittest.TestCase):
             any(item.meaning == "input_exact_enter_key" for item in rejected.elements)
         )
 
+    def test_typed_prefix_survives_invalid_keyboard_only_as_verification_evidence(
+        self,
+    ) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="f" * 64,
+        )
+        target = "abcdefghijklmnopqrstuvwxyzabcdefghijk"
+        prefix = "abcdefghijklmnopqrst"
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "enter_text",
+                    "objective": "输入长文本",
+                    "constraints": [],
+                    "completion_conditions": [],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": target,
+                        "active_input_field_id": "input_field_1",
+                        "active_input_field_label": "长文本",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+        structure = audited_application_input(
+            bounds=[130, 590, 870, 740],
+            text=prefix,
+            field_labels=["长文本"],
+        )
+        structure["visible_editable_cues"] = ["cursor", "border"]
+        invalid_keyboard = {
+            "visible": True,
+            "bounds": [0, 830, 1000, 1000],
+            "layout": "qwerty",
+            "input_mode": "direct_latin",
+            "case_mode": "lower",
+            "qwerty_anchors": {
+                "q": [110, 910],
+                "p": [890, 910],
+                "a": [160, 950],
+                "l": [840, 950],
+                "z": [260, 990],
+                "m": [740, 990],
+                "backspace": [890, 990],
+            },
+            "mode_switch": None,
+            "backspace_key": None,
+            "enter_key": None,
+            "case_switch": None,
+            "literal_keys": [],
+            "layout_switches": [],
+        }
+        audit = input_audit_payload(
+            application_inputs=[structure],
+            keyboard=invalid_keyboard,
+        )
+
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value=prefix,
+        )
+
+        field = projected.get_element("local_audited_input_1")
+        self.assertEqual(prefix, field.states["value"])
+        self.assertEqual("input_field_1", field.states["input_field_id"])
+        self.assertFalse(field.states["goal_relevant"])
+        self.assertNotIn("keyboard_geometry", field.states)
+        self.assertNotIn("focused", field.states)
+
+        for invalid_inputs in (
+            [{**structure, "text": "wrong-prefix"}],
+            [structure, {**structure, "structure_id": "other-input"}],
+            [{**structure, "text": target}],
+        ):
+            with self.subTest(invalid_inputs=invalid_inputs), self.assertRaisesRegex(
+                VisionAgentError,
+                "可见键盘必须提供有效 bounds",
+            ):
+                _apply_input_structure_audit(
+                    base,
+                    json.dumps(
+                        input_audit_payload(
+                            application_inputs=invalid_inputs,
+                            keyboard=invalid_keyboard,
+                        ),
+                        ensure_ascii=False,
+                    ),
+                    fingerprint="f" * 64,
+                    goal_context=context,
+                    coarse_input_value=prefix,
+                )
+
     def test_input_audit_rejects_protocol_external_fields(self) -> None:
         empty = scene_payload()
         empty["elements"] = []

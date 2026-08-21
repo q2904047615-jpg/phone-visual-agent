@@ -4213,6 +4213,83 @@ def _valid_1000_bounds(value: Any) -> bool:
     return 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
 
 
+def _typed_prefix_input_survives_invalid_keyboard_geometry(
+    application_inputs: Any,
+    goal_context: dict[str, Any],
+) -> bool:
+    """Keep one typed prefix as verification-only evidence.
+
+    A post-action audit can read the exact application value while returning
+    unusable keyboard geometry. The field value is independent evidence, but
+    it may survive only as a non-actionable typed prefix. No keyboard fact or
+    coordinate from the malformed portion is retained.
+    """
+
+    target_text = _goal_active_input_transaction_text(goal_context)
+    field_id, field_label, _multiline = _goal_active_input_field(goal_context)
+    if (
+        not target_text
+        or not field_id
+        or not isinstance(application_inputs, list)
+        or len(application_inputs) != 1
+    ):
+        return False
+    item = application_inputs[0]
+    required = {
+        "structure_id",
+        "bounds",
+        "fully_visible",
+        "text",
+        "placeholder",
+        "visible_editable_cues",
+        "confidence",
+        "right_button",
+    }
+    if (
+        not isinstance(item, dict)
+        or not required.issubset(item)
+        or set(item) - required - {"field_labels"}
+        or item.get("fully_visible") is not True
+        or not _valid_1000_bounds(item.get("bounds"))
+    ):
+        return False
+    confidence = item.get("confidence")
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or float(confidence) < 0.9
+    ):
+        return False
+    observed = item.get("text")
+    if (
+        not isinstance(observed, str)
+        or not observed
+        or observed == target_text
+        or not target_text.startswith(observed)
+    ):
+        return False
+    cues = item.get("visible_editable_cues")
+    if (
+        not isinstance(cues, list)
+        or not cues
+        or len(cues) > 4
+        or any(not isinstance(value, str) or not value.strip() for value in cues)
+    ):
+        return False
+    labels = item.get("field_labels", [])
+    if (
+        not isinstance(labels, list)
+        or len(labels) > 6
+        or any(not isinstance(value, str) or not value.strip() for value in labels)
+    ):
+        return False
+    if field_label and sum(
+        value.strip().casefold() == field_label.casefold() for value in labels
+    ) != 1:
+        return False
+    return True
+
+
 def _strip_preliminary_elements_for_keyboard_mode_audit(
     payload: dict[str, Any],
     goal_context: dict[str, Any],
@@ -5861,6 +5938,7 @@ def _apply_input_structure_audit(
             raise UISceneError("输入结构审计 keyboard.case_mode 无效。")
         keyboard_bounds: tuple[float, float, float, float] | None = None
         boundsless_keyboard_dismissal = False
+        typed_prefix_verification_only = False
         if keyboard_visible:
             valid_keyboard_bounds = _valid_1000_bounds(keyboard.get("bounds"))
             if valid_keyboard_bounds:
@@ -5870,28 +5948,46 @@ def _apply_input_structure_audit(
                     and keyboard_bounds[3] - keyboard_bounds[1] >= 180
                 )
             if not valid_keyboard_bounds:
-                if not (
+                if _typed_prefix_input_survives_invalid_keyboard_geometry(
+                    application_inputs,
+                    goal_context,
+                ):
+                    typed_prefix_verification_only = True
+                    keyboard_bounds = None
+                    keyboard_layout = "unknown"
+                    keyboard_input_mode = "unknown"
+                    keyboard_case_mode = "unknown"
+                    keyboard["mode_switch"] = None
+                    keyboard["backspace_key"] = None
+                    keyboard["enter_key"] = None
+                    keyboard["case_switch"] = None
+                    keyboard["literal_keys"] = []
+                    keyboard["layout_switches"] = []
+                    keyboard.pop("qwerty_anchors", None)
+                    ime_preedit_regions = []
+                elif not (
                     _goal_requests_keyboard_dismissal(goal_context)
                     and _scene_reports_keyboard(scene)
                 ):
                     raise UISceneError("可见键盘必须提供有效 bounds。")
-                # A dismissal-only subgoal can safely authorize Android Back
-                # without touching the keyboard.  Keep only dual-source
-                # presence/focus facts; discard all ungrounded keyboard
-                # geometry, mode and switch claims so text input remains
-                # impossible from this observation.
-                keyboard_bounds = None
-                boundsless_keyboard_dismissal = True
-                keyboard_layout = "unknown"
-                keyboard_input_mode = "unknown"
-                keyboard_case_mode = "unknown"
-                keyboard["mode_switch"] = None
-                keyboard["backspace_key"] = None
-                keyboard["enter_key"] = None
-                keyboard["case_switch"] = None
-                keyboard["literal_keys"] = []
-                keyboard["layout_switches"] = []
-                keyboard.pop("qwerty_anchors", None)
+                else:
+                    # A dismissal-only subgoal can safely authorize Android Back
+                    # without touching the keyboard. Keep only dual-source
+                    # presence/focus facts; discard all ungrounded keyboard
+                    # geometry, mode and switch claims so text input remains
+                    # impossible from this observation.
+                    keyboard_bounds = None
+                    boundsless_keyboard_dismissal = True
+                    keyboard_layout = "unknown"
+                    keyboard_input_mode = "unknown"
+                    keyboard_case_mode = "unknown"
+                    keyboard["mode_switch"] = None
+                    keyboard["backspace_key"] = None
+                    keyboard["enter_key"] = None
+                    keyboard["case_switch"] = None
+                    keyboard["literal_keys"] = []
+                    keyboard["layout_switches"] = []
+                    keyboard.pop("qwerty_anchors", None)
         elif (
             keyboard.get("bounds") is not None
             or keyboard.get("mode_switch") is not None
@@ -6425,6 +6521,7 @@ def _apply_input_structure_audit(
             and input_step.kind in {"direct_latin", "chinese_pinyin"}
             and exact_case_switch is None
             and qwerty_geometry is None
+            and not typed_prefix_verification_only
         ):
             raise UISceneError(
                 "文字输入授权要求本轮输入结构审计提供有效 QWERTY anchors。"
@@ -6477,6 +6574,7 @@ def _apply_input_structure_audit(
                     not switch_is_goal
                     and not pending_auxiliary_input_action
                     and not input_requires_auxiliary_action
+                    and not typed_prefix_verification_only
                 ),
                 "fully_visible": True,
                 "value": trusted_input["text"],

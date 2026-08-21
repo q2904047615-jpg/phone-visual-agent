@@ -157,6 +157,63 @@ class TypedPlannerTransportTests(unittest.TestCase):
                 self.assertEqual("active", graph.subgoals[0].status)
                 self.assertEqual("step", graph.active_subgoal_id)
 
+        bound_refresh = payload(
+            objective=(
+                "点击当前页面可见的刷新按钮，使多行输入框恢复为空白；"
+                "不要输入文字，不要发送或提交。"
+            )
+        )
+        bound_refresh["goal"]["entities"] = {
+            "target_ui_label": "刷新按钮",
+            "target_surface": "current_surface",
+        }
+        bound_refresh["subgoals"][0].update(
+            {
+                "subgoal_id": "click_refresh",
+                "objective": "点击当前页面可见的刷新按钮，使多行输入框恢复为空白",
+                "status": "pending",
+                "completion_conditions": ["多行输入框恢复为空白"],
+                "execution_class": "effect",
+                "effect_ids": ["clear_input"],
+            }
+        )
+        bound_refresh["active_subgoal_id"] = "click_refresh"
+        bound_refresh["effect_intents"] = [
+            {
+                "effect_id": "clear_input",
+                "kind": "data_mutation",
+                "target_entity_roles": ["target_ui_label"],
+                "payload_entity_roles": [],
+                "source_subgoal_ids": ["click_refresh"],
+                "expected_results": ["多行输入框恢复为空白"],
+            }
+        ]
+        normalized_bound_refresh = DeepSeekTaskGraphPlanner(
+            FakeProvider(bound_refresh)
+        ).plan(
+            bound_refresh["goal"]["objective"],
+            device_id="phone-1",
+        )
+        self.assertEqual((), normalized_bound_refresh.risk_actions)
+        self.assertEqual(
+            "navigation_only",
+            normalized_bound_refresh.subgoals[0].external_impact,
+        )
+        self.assertEqual("active", normalized_bound_refresh.subgoals[0].status)
+        self.assertEqual(
+            "click_refresh",
+            normalized_bound_refresh.active_subgoal_id,
+        )
+
+        true_effect = copy.deepcopy(bound_refresh)
+        true_effect["goal"]["objective"] = "刷新当前页面后提交表单"
+        true_effect["subgoals"][0]["objective"] = "刷新当前页面后提交表单"
+        with self.assertRaises(TaskGraphError):
+            DeepSeekTaskGraphPlanner(FakeProvider(true_effect)).plan(
+                true_effect["goal"]["objective"],
+                device_id="phone-1",
+            )
+
         for objective in (
             "刷新当前页面后提交表单",
             "刷新当前页面并登录账号",

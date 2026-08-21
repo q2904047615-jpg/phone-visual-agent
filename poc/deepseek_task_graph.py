@@ -3230,7 +3230,7 @@ def _normalize_local_refresh_execution_class(
         return payload
     effects = payload.get("effect_intents")
     subgoals = payload.get("subgoals")
-    if effects != [] or not isinstance(subgoals, list):
+    if not isinstance(effects, list) or not isinstance(subgoals, list):
         return payload
     goal_payload = payload.get("goal")
     goal_objective = (
@@ -3264,7 +3264,39 @@ def _normalize_local_refresh_execution_class(
         r"place\s+order|sync|upload",
         re.IGNORECASE,
     )
+    negated_effect_prefix_pattern = re.compile(
+        r"(?:不要|不得|不应|不能|不会|尚未|未|无需|禁止|"
+        r"do\s+not|don't|must\s+not|should\s+not|cannot|can't|"
+        r"without|never|not\s+yet)\s*"
+        r"(?:(?:执行|进行|触发|产生|发生|任何|该|此|"
+        r"execute|perform|trigger|cause|any|the)\s*)?"
+        r"(?:(?:发送|提交|保存|发布|删除|关注|评论|点赞|收藏|加入|登录|"
+        r"退出登录|付款|支付|购买|下单|同步|上传|send\w*|submit\w*|"
+        r"save\w*|publish\w*|delete\w*|follow\w*|comment\w*|like\w*|"
+        r"favorite\w*|join\w*|log\s*in|sign\s*in|pay\w*|purchase\w*|"
+        r"place\s+order|sync\w*|upload\w*)\s*"
+        r"(?:或|和|、|/|以及|and|or)\s*)*$",
+        re.IGNORECASE,
+    )
+
+    def has_positive_external_effect(text: str) -> bool:
+        for match in external_effect_pattern.finditer(text):
+            clause_prefix = re.split(
+                r"[，。；;,.]",
+                text[max(0, match.start() - 96) : match.start()],
+            )[-1]
+            if negated_effect_prefix_pattern.search(clause_prefix):
+                continue
+            return True
+        return False
+
+    effects_by_id = {
+        str(item.get("effect_id") or ""): item
+        for item in effects
+        if isinstance(item, dict)
+    }
     changed = False
+    removed_effect_ids: set[str] = set()
     normalized_subgoals: list[Any] = []
     for item in subgoals:
         if not isinstance(item, dict):
@@ -3285,19 +3317,35 @@ def _normalize_local_refresh_execution_class(
             current_surface_pattern.search(context)
             and refresh_control_pattern.search(local_context)
         )
+        subgoal_id = str(item.get("subgoal_id") or "")
+        bound_effect_ids = tuple(
+            str(value)
+            for value in item.get("effect_ids", [])
+            if isinstance(value, str) and value
+        )
+        removable_bound_effects = bool(bound_effect_ids) and all(
+            isinstance(effects_by_id.get(effect_id), dict)
+            and effects_by_id[effect_id].get("kind") == "data_mutation"
+            and effects_by_id[effect_id].get("payload_entity_roles") == []
+            and effects_by_id[effect_id].get("source_subgoal_ids")
+            == [subgoal_id]
+            for effect_id in bound_effect_ids
+        )
         if (
             item.get("execution_class") in {"effect", "unknown"}
-            and item.get("effect_ids") == []
+            and (item.get("effect_ids") == [] or removable_bound_effects)
             and (
                 refresh_pattern.search(context)
                 or explicit_current_surface_refresh
             )
             and re.search(r"刷新|重新加载|重新载入|\brefresh\b|\breload\b", local_context, re.IGNORECASE)
-            and not external_effect_pattern.search(context)
+            and not has_positive_external_effect(context)
         ):
             normalized = dict(item)
             normalized["execution_class"] = "navigate"
+            normalized["effect_ids"] = []
             normalized_subgoals.append(normalized)
+            removed_effect_ids.update(bound_effect_ids)
             changed = True
         else:
             normalized_subgoals.append(item)
@@ -3305,6 +3353,13 @@ def _normalize_local_refresh_execution_class(
         return payload
     value = json.loads(json.dumps(payload, ensure_ascii=False))
     value["subgoals"] = normalized_subgoals
+    if removed_effect_ids:
+        value["effect_intents"] = [
+            item
+            for item in value["effect_intents"]
+            if not isinstance(item, dict)
+            or str(item.get("effect_id") or "") not in removed_effect_ids
+        ]
     return value
 
 

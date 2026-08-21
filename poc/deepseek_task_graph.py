@@ -1496,6 +1496,7 @@ class DeepSeekTaskGraphPlanner:
             raise TaskGraphError(str(exc)) from exc
         payload = _normalize_unique_planner_transport_aliases(payload)
         payload = _normalize_explicit_ui_label_payload(payload, raw_user_goal)
+        payload = _normalize_local_input_execution_class(payload)
         payload = _normalize_local_refresh_execution_class(payload)
         graph = _graph_from_payload(
             payload,
@@ -3253,6 +3254,125 @@ def _normalize_local_refresh_execution_class(
             )
             and re.search(r"刷新|重新加载|重新载入|\brefresh\b|\breload\b", local_context, re.IGNORECASE)
             and not external_effect_pattern.search(context)
+        ):
+            normalized = dict(item)
+            normalized["execution_class"] = "navigate"
+            normalized_subgoals.append(normalized)
+            changed = True
+        else:
+            normalized_subgoals.append(item)
+    if not changed:
+        return payload
+    value = json.loads(json.dumps(payload, ensure_ascii=False))
+    value["subgoals"] = normalized_subgoals
+    return value
+
+
+def _normalize_local_input_execution_class(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep exact unsubmitted field edits out of typed effect authority."""
+
+    if not isinstance(payload, dict):
+        return payload
+    goal_payload = payload.get("goal")
+    entities = (
+        goal_payload.get("entities")
+        if isinstance(goal_payload, dict)
+        else None
+    )
+    subgoals = payload.get("subgoals")
+    effects = payload.get("effect_intents")
+    if not isinstance(entities, dict) or not isinstance(subgoals, list):
+        return payload
+
+    input_text = entities.get("input_text")
+    input_fields = entities.get("input_fields")
+    has_typed_input = bool(
+        isinstance(input_text, str) and input_text
+    ) or bool(
+        isinstance(input_fields, list)
+        and any(
+            isinstance(field, dict)
+            and isinstance(field.get("text"), str)
+            and field.get("text")
+            for field in input_fields
+        )
+    )
+    if not has_typed_input:
+        return payload
+
+    bound_effect_subgoals = {
+        str(subgoal_id)
+        for effect in (effects if isinstance(effects, list) else [])
+        for subgoal_id in (
+            effect.get("source_subgoal_ids", [])
+            if isinstance(effect, dict)
+            and isinstance(effect.get("source_subgoal_ids"), list)
+            else []
+        )
+    }
+    local_input_pattern = re.compile(
+        r"输入|键入|填写|写入|录入|追加|换行|回车|"
+        r"\b(?:type|enter|input|fill|write|newline|line\s+break|press\s+enter)\b",
+        re.IGNORECASE,
+    )
+    external_effect_pattern = re.compile(
+        r"发送|提交|保存|发布|删除|关注|评论|点赞|收藏|加入|登录|退出登录|"
+        r"付款|支付|购买|下单|同步|上传|send|submit|save|publish|delete|"
+        r"follow|comment|like|favorite|join|log\s*in|sign\s*in|pay|purchase|"
+        r"place\s+order|sync|upload",
+        re.IGNORECASE,
+    )
+    negated_effect_prefix_pattern = re.compile(
+        r"(?:不要|不得|不应|不能|不会|尚未|未|无需|禁止|"
+        r"do\s+not|don't|must\s+not|should\s+not|cannot|can't|"
+        r"without|never|not\s+yet)\s*"
+        r"(?:(?:执行|进行|触发|产生|发生|任何|该|此|"
+        r"execute|perform|trigger|cause|any|the)\s*)?"
+        r"(?:(?:发送|提交|保存|发布|删除|关注|评论|点赞|收藏|加入|登录|"
+        r"退出登录|付款|支付|购买|下单|同步|上传|send\w*|submit\w*|"
+        r"save\w*|publish\w*|delete\w*|follow\w*|comment\w*|like\w*|"
+        r"favorite\w*|join\w*|log\s*in|sign\s*in|pay\w*|purchase\w*|"
+        r"place\s+order|sync\w*|upload\w*)\s*"
+        r"(?:或|和|、|/|以及|and|or)\s*)*$",
+        re.IGNORECASE,
+    )
+
+    def has_positive_external_effect(text: str) -> bool:
+        for match in external_effect_pattern.finditer(text):
+            clause_prefix = re.split(
+                r"[，。；;,.]",
+                text[max(0, match.start() - 96) : match.start()],
+            )[-1]
+            if negated_effect_prefix_pattern.search(clause_prefix):
+                continue
+            return True
+        return False
+
+    changed = False
+    normalized_subgoals: list[Any] = []
+    for item in subgoals:
+        if not isinstance(item, dict):
+            normalized_subgoals.append(item)
+            continue
+        local_context = " ".join(
+            [
+                str(item.get("objective") or ""),
+                *(
+                    str(value)
+                    for value in item.get("completion_conditions", [])
+                    if isinstance(value, str)
+                ),
+            ]
+        )
+        subgoal_id = str(item.get("subgoal_id") or "")
+        if (
+            item.get("execution_class") in {"effect", "unknown"}
+            and item.get("effect_ids") == []
+            and subgoal_id not in bound_effect_subgoals
+            and local_input_pattern.search(local_context)
+            and not has_positive_external_effect(local_context)
         ):
             normalized = dict(item)
             normalized["execution_class"] = "navigate"

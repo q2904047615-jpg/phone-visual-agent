@@ -192,6 +192,183 @@ class TypedPlannerTransportTests(unittest.TestCase):
                 device_id="phone-1",
             )
 
+    def test_exact_local_input_cannot_be_upgraded_to_unbound_effect(self):
+        for objective, input_text, subgoal_objective in (
+            (
+                "在当前多行正文框输入两行文字但不要发送",
+                "first line\nsecond line",
+                "在正文输入框中输入first line；不要提交或发送",
+            ),
+            (
+                "Type the exact draft in the current field without submitting",
+                "draft text",
+                "Type draft text in the current input field",
+            ),
+        ):
+            with self.subTest(objective=objective):
+                raw = payload(objective=objective)
+                raw["goal"]["entities"]["input_text"] = input_text
+                raw["subgoals"][0].update(
+                    {
+                        "objective": subgoal_objective,
+                        "completion_conditions": [
+                            f"输入框逐字显示{input_text.splitlines()[0]}，"
+                            "且未提交或发送"
+                        ],
+                        "execution_class": "effect",
+                        "effect_ids": [],
+                    }
+                )
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                    objective,
+                    device_id="phone-1",
+                )
+                self.assertEqual(
+                    "navigation_only",
+                    graph.subgoals[0].external_impact,
+                )
+
+        newline = payload(objective="输入两行文字并保留真实换行")
+        newline["goal"]["entities"]["input_text"] = "first line\nsecond line"
+        newline["subgoals"][0].update(
+            {
+                "objective": "按一次真正的换行键",
+                "completion_conditions": ["当前值追加一个真实换行"],
+                "execution_class": "effect",
+                "effect_ids": [],
+            }
+        )
+        newline_graph = DeepSeekTaskGraphPlanner(FakeProvider(newline)).plan(
+            newline["goal"]["objective"],
+            device_id="phone-1",
+        )
+        self.assertEqual(
+            "navigation_only",
+            newline_graph.subgoals[0].external_impact,
+        )
+
+        multifield = payload(objective="分别填写主题和正文")
+        multifield["goal"]["entities"]["input_fields"] = [
+            {
+                "field_id": "subject",
+                "field_label": "主题",
+                "text": "周报",
+            },
+            {
+                "field_id": "body",
+                "field_label": "正文",
+                "text": "本周完成",
+            },
+        ]
+        multifield["subgoals"][0].update(
+            {
+                "objective": "在主题字段填写周报",
+                "completion_conditions": ["主题字段逐字显示周报"],
+                "execution_class": "unknown",
+                "effect_ids": [],
+            }
+        )
+        multifield_graph = DeepSeekTaskGraphPlanner(
+            FakeProvider(multifield)
+        ).plan(multifield["goal"]["objective"], device_id="phone-1")
+        self.assertEqual(
+            "navigation_only",
+            multifield_graph.subgoals[0].external_impact,
+        )
+
+    def test_local_input_normalization_preserves_external_effect_rejections(self):
+        for objective, subgoal_objective, entities in (
+            (
+                "输入消息并发送",
+                "输入消息并发送",
+                {"input_text": "hello"},
+            ),
+            (
+                "输入消息，不提交直接发送",
+                "输入消息，不提交直接发送",
+                {"input_text": "hello"},
+            ),
+            (
+                "提交当前表单",
+                "提交当前表单",
+                {"input_text": "hello"},
+            ),
+            (
+                "在当前输入框输入文字",
+                "在当前输入框输入文字",
+                {},
+            ),
+        ):
+            with self.subTest(objective=objective), self.assertRaisesRegex(
+                TaskGraphError,
+                "effect 子目标必须引用",
+            ):
+                raw = payload(objective=objective)
+                raw["goal"]["entities"].update(entities)
+                raw["subgoals"][0].update(
+                    {
+                        "objective": subgoal_objective,
+                        "completion_conditions": ["目标状态可见"],
+                        "execution_class": "effect",
+                        "effect_ids": [],
+                    }
+                )
+                DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                    objective,
+                    device_id="phone-1",
+                )
+
+    def test_recorded_multiline_planner_shape_normalizes_pending_input(self):
+        objective = (
+            "在当前页面唯一的空白多行正文输入框中输入两行文字；"
+            "最终值为first line后接真实换行再接second line。不要提交或发送。"
+        )
+        raw = payload(objective=objective)
+        raw["goal"]["entities"].update(
+            {
+                "input_text": "first line\nsecond line",
+                "target_ui_label": "正文",
+            }
+        )
+        raw["subgoals"] = [
+            {
+                "subgoal_id": "locate_input",
+                "objective": "定位当前页面唯一的空白多行正文输入框",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["仅观察"],
+                "completion_conditions": ["正文输入框可见且可聚焦"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "observe",
+            },
+            {
+                "subgoal_id": "enter_text",
+                "objective": (
+                    "在正文输入框中输入first line，按一次真正的换行键，"
+                    "再输入second line。不要提交或发送。"
+                ),
+                "status": "pending",
+                "depends_on": ["locate_input"],
+                "constraints": ["不得提交或发送输入内容"],
+                "completion_conditions": [
+                    "输入框显示两行精确文字，且未提交或发送"
+                ],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "effect",
+            },
+        ]
+        raw["active_subgoal_id"] = "locate_input"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+            objective,
+            device_id="phone-1",
+        )
+
+        self.assertEqual("read_only", graph.subgoals[0].external_impact)
+        self.assertEqual("navigation_only", graph.subgoals[1].external_impact)
+
     def test_functional_page_modifiers_are_not_treated_as_page_names(self):
         for text in (
             "可输入搜索内容的页面可见",

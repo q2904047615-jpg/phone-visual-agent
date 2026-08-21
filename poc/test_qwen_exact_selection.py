@@ -16,7 +16,20 @@ class DeterministicExactSelectionTests(unittest.TestCase):
         self.assertEqual("choice_1", payload["choice_id"])
         self.assertEqual("action", payload["status"])
 
-    def test_non_exact_or_ambiguous_catalog_still_requires_model(self) -> None:
+    def test_exact_subgoal_selects_unique_matching_action_among_other_kinds(self) -> None:
+        context = SimpleNamespace(
+            current_subgoal={"subgoal_id": "exact_tap_semantic"}
+        )
+        payload = _deterministic_exact_selection_payload(
+            context,
+            (
+                {"choice_id": "choice_1", "action": "back"},
+                {"choice_id": "choice_2", "action": "tap_semantic"},
+            ),
+        )
+        self.assertEqual("choice_2", payload["choice_id"])
+
+    def test_non_exact_or_same_action_ambiguous_catalog_still_requires_model(self) -> None:
         regular = SimpleNamespace(current_subgoal={"subgoal_id": "navigate"})
         exact = SimpleNamespace(
             current_subgoal={"subgoal_id": "exact_tap_semantic"}
@@ -31,8 +44,8 @@ class DeterministicExactSelectionTests(unittest.TestCase):
             _deterministic_exact_selection_payload(
                 exact,
                 (
-                    {"choice_id": "choice_1"},
-                    {"choice_id": "choice_2"},
+                    {"choice_id": "choice_1", "action": "tap_semantic"},
+                    {"choice_id": "choice_2", "action": "tap_semantic"},
                 ),
             )
         )

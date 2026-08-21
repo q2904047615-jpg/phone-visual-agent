@@ -9582,6 +9582,31 @@ class GenericSceneObserverTests(unittest.TestCase):
         with self.assertRaises(VisionAgentError):
             _strict_foreground_app_identity_audit(duplicate)
 
+    def test_foreground_app_identity_audit_filters_unsafe_unknown_evidence(self) -> None:
+        payload = app_identity_audit_payload(
+            "unknown",
+            confidence=0.0,
+            evidence=[
+                "Title text shows a generic acceptance page",
+                "Menu option says Swipe Up",
+                "Generic browser navigation bar is visible",
+            ],
+        )
+
+        app_id, confidence, evidence = _strict_foreground_app_identity_audit(
+            json.dumps(payload, ensure_ascii=False)
+        )
+
+        self.assertEqual("unknown", app_id)
+        self.assertEqual(0.0, confidence)
+        self.assertEqual(
+            (
+                "Title text shows a generic acceptance page",
+                "Generic browser navigation bar is visible",
+            ),
+            evidence,
+        )
+
     def test_foreground_app_identity_prompts_forbid_context_placeholders(self) -> None:
         compact = _compact_prompt(
             {"app_id": "current_foreground", "objective": "读取当前画面"}

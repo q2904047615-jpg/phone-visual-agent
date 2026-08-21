@@ -2808,20 +2808,31 @@ def _strict_foreground_app_identity_audit(
     if not 0.0 <= confidence <= 1.0:
         raise VisionAgentError("前台应用身份审计 confidence 越界。")
     evidence = payload["evidence"]
-    if (
-        not isinstance(evidence, list)
-        or not 1 <= len(evidence) <= 3
-        or any(
-            not camera_alignment_evidence_is_safe(item)
-            or len(str(item).strip()) > 120
-            for item in evidence
+    if not isinstance(evidence, list) or not 1 <= len(evidence) <= 3:
+        raise VisionAgentError("前台应用身份审计 evidence 不安全或格式无效。")
+    evidence_items = tuple(
+        str(item).strip()
+        for item in evidence
+        if isinstance(item, str) and item.strip() and len(item.strip()) <= 120
+    )
+    if len(evidence_items) != len(evidence):
+        raise VisionAgentError("前台应用身份审计 evidence 不安全或格式无效。")
+    identity_established = (
+        app_id != "unknown"
+        and confidence >= _MIN_FOREGROUND_APP_IDENTITY_CONFIDENCE
+    )
+    if not identity_established:
+        app_id = "unknown"
+        evidence_items = tuple(
+            item
+            for item in evidence_items
+            if camera_alignment_evidence_is_safe(item)
         )
+    elif any(
+        not camera_alignment_evidence_is_safe(item) for item in evidence_items
     ):
         raise VisionAgentError("前台应用身份审计 evidence 不安全或格式无效。")
-    evidence_tuple = tuple(str(item).strip() for item in evidence)
-    if app_id == "unknown" or confidence < _MIN_FOREGROUND_APP_IDENTITY_CONFIDENCE:
-        app_id = "unknown"
-    return app_id, confidence, evidence_tuple
+    return app_id, confidence, evidence_items
 
 
 def _extract_compact_json_object(raw: str) -> dict[str, Any]:

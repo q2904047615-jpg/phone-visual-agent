@@ -2487,6 +2487,28 @@ class GenericSingleActionAdapter:
                     and role_agnostic_matches[0].role in selector_roles
                 ):
                     matches = role_agnostic_matches
+            # The same unlabeled glyph is commonly described as either an
+            # icon or a button across two reads of identical pixels.  Rebind
+            # only when its exact meaning and stable states still identify one
+            # unlabeled control; the independent crop geometry audit below
+            # remains mandatory before any physical action.
+            if (
+                not matches
+                and requested.action in {"tap_semantic", "dismiss_overlay"}
+                and prefix == ""
+                and not original.label
+                and original.role in {"icon", "button"}
+            ):
+                role_agnostic_matches = tuple(
+                    element
+                    for element in fresh_scene.find_elements(
+                        meaning=original.meaning,
+                        states=stable_rebind_states(dict(original.states)),
+                    )
+                    if element.role in {"icon", "button"} and not element.label
+                )
+                if len(role_agnostic_matches) == 1:
+                    matches = role_agnostic_matches
             if len(matches) != 1:
                 raise GenericActionAdapterError(
                     "确认时目标语义不再严格唯一："

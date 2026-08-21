@@ -1767,12 +1767,24 @@ def _deterministic_exact_selection_payload(
     context: QwenTaskContext,
     choices: tuple[dict[str, Any], ...] | list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Select the sole canonical candidate for a structured exact action."""
+    """Select the sole matching candidate for a structured exact action."""
 
     active_id = str(context.current_subgoal.get("subgoal_id") or "").strip()
-    if not active_id.startswith("exact_") or len(choices) != 1:
+    expected_action = {
+        "exact_back": "back",
+        "exact_home": "home",
+        "exact_tap_semantic": "tap_semantic",
+    }.get(active_id)
+    if expected_action is None:
         return None
-    choice_id = str(choices[0].get("choice_id") or "").strip()
+    matching_choices = tuple(
+        choice
+        for choice in choices
+        if str(choice.get("action") or "").strip() == expected_action
+    )
+    if len(matching_choices) != 1:
+        return None
+    choice_id = str(matching_choices[0].get("choice_id") or "").strip()
     if not choice_id:
         return None
     return {

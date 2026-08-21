@@ -3650,6 +3650,115 @@ class GenericActionAdapterTests(unittest.TestCase):
                 self.assertEqual("text", rebound.params["role"])
                 self.assertEqual("navigation_link", rebound.params["target"])
 
+    def test_rebind_accepts_unique_unlabeled_icon_button_role_drift(self):
+        states = {"goal_relevant": True, "fully_visible": True}
+        planned = UIScene(
+            app_id="browser",
+            screen_id="page",
+            summary="浏览器页面",
+            elements=(
+                UIElement(
+                    element_id="planned-home",
+                    role="icon",
+                    meaning="home",
+                    label="",
+                    bounds=(0.83, 0.91, 0.93, 0.97),
+                    confidence=1.0,
+                    states=states,
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    element_id="fresh-home",
+                    role="button",
+                ),
+            ),
+            fingerprint="fresh",
+        )
+
+        rebound = self._adapter(
+            FakeSceneObserver([fresh]), FakeRobot()
+        )._rebind_action(
+            SemanticAction(
+                node_id="open-home",
+                action="tap_semantic",
+                params={
+                    "element_id": "planned-home",
+                    "target": "home",
+                    "role": "icon",
+                    "label": "",
+                    "states": states,
+                    "formal_candidate_id": "candidate-home",
+                },
+            ),
+            planned,
+            fresh,
+        )
+
+        self.assertEqual("fresh-home", rebound.params["element_id"])
+        self.assertEqual("button", rebound.params["role"])
+
+    def test_rebind_rejects_ambiguous_unlabeled_icon_button_role_drift(self):
+        states = {"goal_relevant": True, "fully_visible": True}
+        planned = UIScene(
+            app_id="browser",
+            screen_id="page",
+            summary="浏览器页面",
+            elements=(
+                UIElement(
+                    element_id="planned-icon",
+                    role="icon",
+                    meaning="navigation",
+                    label="",
+                    bounds=(0.1, 0.9, 0.2, 0.97),
+                    confidence=1.0,
+                    states=states,
+                ),
+            ),
+            fingerprint="planned",
+        )
+        fresh = replace(
+            planned,
+            elements=(
+                replace(planned.elements[0], element_id="fresh-a", role="button"),
+                replace(
+                    planned.elements[0],
+                    element_id="fresh-b",
+                    role="button",
+                    bounds=(0.3, 0.9, 0.4, 0.97),
+                ),
+            ),
+            fingerprint="fresh",
+        )
+
+        with self.assertRaisesRegex(
+            GenericActionAdapterError,
+            "目标语义不再严格唯一",
+        ):
+            self._adapter(
+                FakeSceneObserver([fresh]), FakeRobot()
+            )._rebind_action(
+                SemanticAction(
+                    node_id="ambiguous-navigation",
+                    action="tap_semantic",
+                    params={
+                        "element_id": "planned-icon",
+                        "target": "navigation",
+                        "role": "icon",
+                        "label": "",
+                        "states": states,
+                        "formal_candidate_id": "candidate-navigation",
+                    },
+                ),
+                planned,
+                fresh,
+            )
+
     def test_rebind_accepts_fresh_positive_fully_visible_attestation(self):
         planned = scene("planned")
         fresh_element = replace(

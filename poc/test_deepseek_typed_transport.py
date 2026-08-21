@@ -245,6 +245,81 @@ class TypedPlannerTransportTests(unittest.TestCase):
         self.assertEqual("type_text", revised.active_subgoal_id)
         self.assertEqual("completed", revised.subgoals[0].status)
 
+    def test_named_page_text_does_not_add_second_visual_evidence_veto(self):
+        claim_id = "b" * 64
+        scene_id = "obs-named-page"
+        ref_id = f"visual_claim:{scene_id}:{claim_id}"
+        initial = payload(objective="确认订单详情页面可见")
+        initial["subgoals"] = [
+            {
+                "subgoal_id": "locate_page",
+                "objective": "确认订单详情页面可见",
+                "status": "active",
+                "depends_on": [],
+                "constraints": [],
+                "completion_conditions": ["订单详情页面可见"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "observe",
+            },
+            {
+                "subgoal_id": "inspect_content",
+                "objective": "继续读取当前页面内容",
+                "status": "pending",
+                "depends_on": ["locate_page"],
+                "constraints": [],
+                "completion_conditions": ["当前页面内容已读取"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "observe",
+            },
+        ]
+        initial["active_subgoal_id"] = "locate_page"
+        candidate = copy.deepcopy(initial)
+        candidate["status"] = "running"
+        candidate["subgoals"][0]["status"] = "completed"
+        candidate["subgoals"][0]["completion_evidence"] = [ref_id]
+        candidate["subgoals"][1]["status"] = "active"
+        candidate["active_subgoal_id"] = "inspect_content"
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(copy.deepcopy(initial), candidate)
+        )
+        graph = planner.plan(initial["goal"]["objective"], device_id="phone-1")
+        fact = json.dumps(
+            {
+                "element_id": "page_body",
+                "role": "container",
+                "label": "当前内容区域",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        revised = planner.replan(
+            graph,
+            ObservedState(
+                scene_id=scene_id,
+                summary="当前命名页面稳定可见",
+                visible_evidence=(ref_id,),
+                grounded_visual_facts=(fact,),
+                visual_claim_evidence_refs=(
+                    VisualClaimEvidenceRef(
+                        ref_id=ref_id,
+                        claim_id=claim_id,
+                        scene_id=scene_id,
+                        subject_ref="page_body",
+                        predicate="element.visible",
+                        fact=fact,
+                    ),
+                ),
+            ),
+            trigger="observation_changed",
+            reason="当前视觉证据已证明页面可见",
+        )
+
+        self.assertEqual("inspect_content", revised.active_subgoal_id)
+        self.assertEqual("completed", revised.subgoals[0].status)
+
     def test_real_named_pages_still_require_structured_identity(self):
         unrelated_facts = ('{"app_id":"settings","screen_id":"main"}',)
         for text in (

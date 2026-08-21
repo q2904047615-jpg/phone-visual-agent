@@ -605,7 +605,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.context = task_context()
         self.observation = trusted_observation(self.frames)
 
-    def test_reload_literal_alias_requires_unique_local_visual_audit(self) -> None:
+    def test_semantic_reload_label_does_not_become_literal_preblock(self) -> None:
         audited_reload = UIElement(
             element_id="local_audited_reload_control_1",
             role="icon",
@@ -637,10 +637,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             frozenset({"tap_semantic"}),
         )
         self.assertIsNone(_exact_text_candidate_block(context, observation))
-        self.assertEqual(
-            {"local_audited_reload_control_1"},
-            _required_exact_candidate_ids(context, observation),
-        )
+        self.assertEqual(set(), _required_exact_candidate_ids(context, observation))
 
         for states, required_text in (
             ({"goal_relevant": True, "fully_visible": True}, "刷新图标"),
@@ -662,12 +659,11 @@ class QwenVisualDecisionTests(unittest.TestCase):
                     blocked_observation,
                     frozenset({"tap_semantic"}),
                 )
-                self.assertEqual(
-                    "exact_text_missing",
+                self.assertIsNone(
                     _exact_text_candidate_block(
                         blocked_context,
                         blocked_observation,
-                    )[1],
+                    )
                 )
 
     def test_cross_surface_app_entry_offers_home_before_app_controls(self) -> None:
@@ -1106,7 +1102,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             "在文件传输助手页面的备注输入框输入指定文字"
         )
         different_parsed = QwenTaskContext.from_dict(different_field)
-        self.assertIn("备注", different_parsed.exact_text_requirements)
+        self.assertNotIn("备注", different_parsed.exact_text_requirements)
         self.assertIn(
             "文件传输助手",
             different_parsed.identity_text_requirements,
@@ -1216,16 +1212,12 @@ class QwenVisualDecisionTests(unittest.TestCase):
             elements=(message_list,),
             observation_id="obs_18181818181818181818181818181818",
         )
-        self.assertEqual(
-            "exact_text_missing",
-            _exact_text_candidate_block(swipe_context, missing_identity)[1],
+        self.assertIsNone(
+            _exact_text_candidate_block(swipe_context, missing_identity)
         )
 
         tap_context = with_required_action("tap_semantic")
-        self.assertEqual(
-            "exact_text_missing",
-            _exact_text_candidate_block(tap_context, observation)[1],
-        )
+        self.assertIsNone(_exact_text_candidate_block(tap_context, observation))
 
     def test_non_element_surface_identity_accepts_only_generic_type_suffix(self) -> None:
         raw = task_context(task_id="task_surface_suffix", revision=19)
@@ -1306,20 +1298,14 @@ class QwenVisualDecisionTests(unittest.TestCase):
             elements=(identity("文件传输"),),
             observation_id="obs_21212121212121212121212121212121",
         )
-        self.assertEqual(
-            "exact_text_missing",
-            _exact_text_candidate_block(chat_context, partial)[1],
-        )
+        self.assertIsNone(_exact_text_candidate_block(chat_context, partial))
 
         ambiguous = trusted_observation(
             self.frames,
             elements=(identity("设置", "title_a"), identity("设置页面", "title_b")),
             observation_id="obs_22222222222222222222222222222222",
         )
-        self.assertEqual(
-            "exact_text_ambiguous",
-            _exact_text_candidate_block(parsed, ambiguous)[1],
-        )
+        self.assertIsNone(_exact_text_candidate_block(parsed, ambiguous))
 
     def test_page_descriptor_does_not_become_input_element_label(self) -> None:
         raw = task_context(task_id="task_page_input", revision=21)
@@ -1364,10 +1350,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             elements=(field,),
             observation_id="obs_24242424242424242424242424242424",
         )
-        self.assertEqual(
-            "exact_text_missing",
-            _exact_text_candidate_block(context, missing_title)[1],
-        )
+        self.assertIsNone(_exact_text_candidate_block(context, missing_title))
 
     def decide(
         self,
@@ -1710,10 +1693,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             observation_id="obs_12121212121212121212121212121212",
         )
         self.assertIsNone(_exact_text_candidate_block(context, observation))
-        self.assertEqual(
-            {"local_audited_input_1"},
-            _required_exact_candidate_ids(context, observation),
-        )
+        self.assertEqual(set(), _required_exact_candidate_ids(context, observation))
         _observer, decision = self.decide(
             FakeProvider(
                 minimal_selection_payload(status="action", choice_id="choice_1")
@@ -1743,9 +1723,8 @@ class QwenVisualDecisionTests(unittest.TestCase):
                     else "obs_56565656565656565656565656565656"
                 ),
             )
-            self.assertEqual(
-                "exact_text_missing",
-                _exact_text_candidate_block(context, wrong_observation)[1],
+            self.assertIsNone(
+                _exact_text_candidate_block(context, wrong_observation)
             )
 
     def test_typed_input_prefix_identity_varies_by_field_label_and_payload(self) -> None:
@@ -1800,10 +1779,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             ),
         )
         self.assertIsNone(_exact_text_candidate_block(context, observation))
-        self.assertEqual(
-            {"local_audited_notes_input"},
-            _required_exact_candidate_ids(context, observation),
-        )
+        self.assertEqual(set(), _required_exact_candidate_ids(context, observation))
 
         unrelated_nonempty = replace(
             field,
@@ -1827,10 +1803,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             observation_id="obs_89898989898989898989898989898989",
         )
         self.assertIsNone(_exact_text_candidate_block(context, empty_observation))
-        self.assertEqual(
-            {"local_audited_notes_input"},
-            _required_exact_candidate_ids(context, empty_observation),
-        )
+        self.assertEqual(set(), _required_exact_candidate_ids(context, empty_observation))
 
     def test_minimal_clear_choice_uses_local_empty_postcondition_without_text(self) -> None:
         context = task_context(task_id="task_minimal_clear", revision=4)
@@ -3118,7 +3091,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         )
         self.assertEqual(observer.status()["final_blocked_rate"], 1.0)
 
-    def test_missing_or_ambiguous_exact_text_blocks_before_qwen(self) -> None:
+    def test_semantic_target_label_never_blocks_before_qwen(self) -> None:
         missing_context = task_context(task_id="task_exact_missing", revision=12)
         missing_context["goal"]["entities"] = {"target_ui_label": "火星入口"}
         missing_provider = FakeProvider(action_payload(self.context, self.observation))
@@ -3126,10 +3099,9 @@ class QwenVisualDecisionTests(unittest.TestCase):
             missing_provider,
             context=missing_context,
         )
-        self.assertEqual(missing_provider.calls, 0)
-        self.assertEqual(missing_decision.proposal.status, "blocked")
-        self.assertEqual(
-            missing_observer.last_diagnostics["local_safety_block"],
+        self.assertEqual(missing_provider.calls, 1)
+        self.assertNotEqual(
+            missing_observer.last_diagnostics.get("local_safety_block"),
             "exact_text_missing",
         )
 
@@ -3175,10 +3147,9 @@ class QwenVisualDecisionTests(unittest.TestCase):
             ),
             trusted_observation=duplicate_observation,
         )
-        self.assertEqual(ambiguous_provider.calls, 0)
-        self.assertEqual(decision.proposal.status, "blocked")
-        self.assertEqual(
-            observer.last_diagnostics["local_safety_block"],
+        self.assertEqual(ambiguous_provider.calls, 1)
+        self.assertNotEqual(
+            observer.last_diagnostics.get("local_safety_block"),
             "exact_text_ambiguous",
         )
 
@@ -3443,7 +3414,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
             )
         )
 
-    def test_action_cannot_ignore_unique_exact_text_candidate(self) -> None:
+    def test_action_cannot_ignore_unique_semantic_target_candidate(self) -> None:
         context = task_context(task_id="task_exact_select", revision=14)
         context["goal"]["entities"] = {"target_ui_label": "设置"}
         wrong = action_payload(
@@ -3454,7 +3425,7 @@ class QwenVisualDecisionTests(unittest.TestCase):
         provider = SequenceProvider([wrong, wrong])
         _observer, decision = self.decide(provider, context=context)
         self.assertEqual(decision.proposal.status, "blocked")
-        self.assertIn("逐字一致唯一候选", decision.reason)
+        self.assertIn("唯一的语义目标候选", decision.reason)
 
     def test_confirmed_external_context_can_propose_one_bound_action(self) -> None:
         context = task_context(external=True, confirmed=True)
@@ -4388,12 +4359,31 @@ class QwenVisualDecisionTests(unittest.TestCase):
         self.assertIn("不存在元素", decision.reason)
 
     def test_unlabelled_icon_can_only_be_selected_by_existing_id(self) -> None:
+        elements = tuple(
+            replace(
+                item,
+                states={
+                    **item.states,
+                    "goal_relevant": item.element_id == "unlabelled_camera_icon",
+                    "fully_visible": True,
+                },
+            )
+            for item in self.observation.scene.elements
+        )
+        observation = trusted_observation(
+            self.frames,
+            elements=elements,
+            observation_id="obs_91919191919191919191919191919191",
+        )
         payload = action_payload(
             self.context,
-            self.observation,
+            observation,
             element_id="unlabelled_camera_icon",
         )
-        _observer, decision = self.decide(FakeProvider(payload))
+        _observer, decision = self.decide(
+            FakeProvider(payload),
+            observation=observation,
+        )
         self.assertEqual(
             decision.proposal.action.params["element_id"],
             "unlabelled_camera_icon",

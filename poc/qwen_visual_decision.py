@@ -510,30 +510,19 @@ class QwenTaskContext(Mapping[str, Any]):
 
     @property
     def exact_text_requirements(self) -> tuple[str, ...]:
-        """Structured exact-text requirements supplied by the task graph.
+        """Return only literals whose active operation is literal selection.
 
-        The visual selector must not infer an exact string from prose. When
-        DeepSeek supplies one of these generic entity fields, local candidate
-        matching becomes authoritative and is performed before Qwen is called.
+        ``target_ui_label`` is visual context, not a second action authority.
+        A phrase such as ``刷新图标`` or ``发送键`` may describe an icon whose
+        visible label is empty.  Pre-blocking Qwen because that phrase is not
+        present verbatim duplicates the canonical catalog and turns ordinary
+        semantic navigation into a product boundary.  Recipient selection is
+        different: the requested party is user data and must remain exact.
+        Typed input payloads and field identities are enforced by the typed
+        input transaction rather than by this visual-label gate.
         """
 
-        entities = self.goal.get("entities") or {}
-        if not isinstance(entities, dict):
-            raise VisionAgentError("goal.entities 必须是JSON对象。")
         values: list[str] = []
-        target_label = entities.get("target_ui_label")
-        if target_label is not None:
-            if not isinstance(target_label, str) or not target_label.strip():
-                raise VisionAgentError("goal.entities.target_ui_label 格式无效。")
-            normalized_target = target_label.strip()
-            # The planner may preserve the same user literal in both the
-            # recipient and legacy target-label fields.  On a later input
-            # subgoal that literal identifies the current surface; it does
-            # not name the (often unlabelled) input control.  Keep the
-            # independent identity gate below, but do not require the same
-            # string a second time as the physical action target.
-            if normalized_target not in self.identity_text_requirements:
-                values.append(normalized_target)
         for recipient in self.recipient_values:
             if subgoal_targets_recipient_control(recipient, self.current_subgoal):
                 if recipient not in values:
@@ -1155,6 +1144,16 @@ class QwenVisualDecision:
                 )
             except UniversalActionError as exc:
                 raise GenericStepPlanningError(f"本地控制器拒绝动作：{exc}") from exc
+            local_semantic_target = self.trusted_observation.target_local_candidate()
+            if (
+                local_semantic_target is not None
+                and action.action in SINGLE_ELEMENT_ACTIONS
+                and str(action.params.get("element_id") or "")
+                != local_semantic_target.element_id
+            ):
+                raise GenericStepPlanningError(
+                    "动作没有绑定当前画面唯一的语义目标候选。"
+                )
             if exact_candidate_ids and action.action not in SINGLE_ELEMENT_ACTIONS:
                 raise GenericStepPlanningError(
                     "存在逐字一致文字约束时，动作必须绑定该唯一候选。"
@@ -3370,25 +3369,7 @@ def _matching_exact_text_candidates(
         if float(element.confidence) < MIN_TARGET_CONFIDENCE:
             continue
         literal_match = required_text in (element.label, *element.evidence)
-        audited_reload_alias = (
-            required_text.strip().casefold()
-            in {
-                "刷新",
-                "刷新图标",
-                "重新加载",
-                "重新加载图标",
-                "refresh",
-                "refresh icon",
-                "reload",
-                "reload icon",
-            }
-            and element.role in {"button", "icon"}
-            and element.meaning.strip().casefold() == "reload"
-            and element.states.get("reload_visual_audit") is True
-            and element.states.get("independent_geometry_verified") is True
-            and element.states.get("fully_visible") is True
-        )
-        if not literal_match and not audited_reload_alias:
+        if not literal_match:
             continue
         if roles and element.role not in roles:
             continue

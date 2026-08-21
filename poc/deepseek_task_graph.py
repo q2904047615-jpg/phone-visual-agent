@@ -2273,14 +2273,6 @@ _GENERIC_VISUAL_LOCATION_PATTERN = re.compile(
     r"(?:local\s+)?(?:page|screen|view)\b",
     re.IGNORECASE,
 )
-_QUOTED_VISUAL_IDENTITY_PATTERN = re.compile(
-    r"“([^”]{2,80})”|\"([^\"]{2,80})\""
-)
-_QUOTED_VISUAL_IDENTITY_CONTEXT_PATTERN = re.compile(
-    r"标题|文字|标签|按钮|入口|链接|"
-    r"\b(?:title|heading|text|label|button|entry|link)\b",
-    re.IGNORECASE,
-)
 _LEADING_UNNAMED_VISUAL_CONTAINER_PATTERN = re.compile(
     r"^(?:主页面|主页|首页|页面|界面|屏幕|视图|面板|卡片)(?:中|内|上)?|"
     r"^(?:the\s+)?(?:page|screen|view|panel|card)\b",
@@ -2464,25 +2456,6 @@ def _named_visual_identity_anchor(texts: tuple[str, ...]) -> str:
     return min(anchors, key=len) if anchors else ""
 
 
-def _quoted_visual_identity_anchor(texts: tuple[str, ...]) -> str:
-    """Return an explicitly quoted UI label that must match verbatim."""
-
-    anchors: list[str] = []
-    for item in texts:
-        value = str(item or "").strip()
-        if not _QUOTED_VISUAL_IDENTITY_CONTEXT_PATTERN.search(value):
-            continue
-        for match in _QUOTED_VISUAL_IDENTITY_PATTERN.finditer(value):
-            literal = next(
-                (group for group in match.groups() if group is not None),
-                "",
-            )
-            anchor = _compact_identity_text(literal)
-            if len(anchor) >= 4 and anchor not in anchors:
-                anchors.append(anchor)
-    return min(anchors, key=len) if anchors else ""
-
-
 def _identity_anchor_is_grounded(anchor: str, facts: tuple[str, ...]) -> bool:
     anchor_semantics = _visual_identity_semantic_keys(anchor)
     for fact in facts:
@@ -2519,33 +2492,6 @@ def named_visual_identity_is_grounded(
     if not anchor:
         return True
     return bool(facts and _identity_anchor_is_grounded(anchor, facts))
-
-
-def _require_named_visual_identity_grounding(
-    texts: tuple[str, ...],
-    observation: ObservedState,
-    *,
-    field: str,
-) -> None:
-    literal_anchor = _quoted_visual_identity_anchor(texts)
-    if literal_anchor and observation.grounded_visual_facts:
-        if not any(
-            literal_anchor in _compact_identity_text(fact)
-            for fact in observation.grounded_visual_facts
-        ):
-            raise TaskGraphError(
-                f"逐字 UI 完成声明缺少完整结构化画面锚点：{field}"
-            )
-        return
-    anchor = _named_visual_identity_anchor(texts)
-    if not anchor:
-        return
-    if not observation.grounded_visual_facts:
-        return
-    if not _identity_anchor_is_grounded(anchor, observation.grounded_visual_facts):
-        raise TaskGraphError(
-            f"命名页面完成声明缺少结构化画面身份锚点：{field}"
-        )
 
 
 def _restore_completed_history_evidence(
@@ -2832,22 +2778,10 @@ def _validate_revision(
             raise TaskGraphError(f"重规划不能撤销已满足完成条件：{condition_id}")
         if not old.satisfied and new.satisfied and not set(new.evidence).issubset(evidence):
             raise TaskGraphError(f"完成条件使用了当前观察之外的证据：{condition_id}")
-        if not old.satisfied and new.satisfied:
-            _require_named_visual_identity_grounding(
-                (new.description, *new.evidence_required),
-                observation,
-                field=f"completion_conditions.{condition_id}",
-            )
     for condition_id in set(new_conditions) - set(old_conditions):
         condition = new_conditions[condition_id]
         if condition.satisfied and not set(condition.evidence).issubset(evidence):
             raise TaskGraphError(f"新增完成条件使用了当前观察之外的证据：{condition_id}")
-        if condition.satisfied:
-            _require_named_visual_identity_grounding(
-                (condition.description, *condition.evidence_required),
-                observation,
-                field=f"completion_conditions.{condition_id}",
-            )
 
     old_risks = {item.risk_id: item for item in previous.risk_actions}
     new_risks = {item.risk_id: item for item in candidate.risk_actions}
@@ -2923,12 +2857,6 @@ def _validate_revision(
                         raise TaskGraphError(
                             "controller_transition 证据跨子目标使用。"
                         )
-        if newly_completed and not controller_claims:
-            _require_named_visual_identity_grounding(
-                (new.objective, *new.completion_conditions),
-                observation,
-                field=f"subgoals.{subgoal_id}",
-            )
     transition = observation.verified_action_transition
     if (
         transition is not None

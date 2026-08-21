@@ -822,6 +822,33 @@ def compile_canonical_action_catalog(
     active_input_payload_refs = frozenset(
         item.payload_ref for item in active_input_fields
     )
+    predecessor_input_field_ids = {
+        item.field_id
+        for item in semantic_ir.input_fields
+        if set(item.source_subgoal_ids).intersection(active_subgoal.depends_on)
+    }
+    direct_successor_ids = {
+        item.subgoal_id
+        for item in semantic_ir.subgoals
+        if active_subgoal.subgoal_id in item.depends_on
+    }
+    successor_input_field_ids = {
+        item.field_id
+        for item in semantic_ir.input_fields
+        if set(item.source_subgoal_ids).intersection(direct_successor_ids)
+    }
+    if predecessor_input_field_ids and successor_input_field_ids:
+        boundary_input_field_ids = (
+            predecessor_input_field_ids & successor_input_field_ids
+        )
+    else:
+        boundary_input_field_ids = (
+            predecessor_input_field_ids | successor_input_field_ids
+        )
+    enter_input_field_ids = frozenset(
+        {item.field_id for item in active_input_fields}
+        | boundary_input_field_ids
+    )
     active_effect_refs = frozenset(active_subgoal.effect_refs)
     effects_by_id = {item.effect_id: item for item in semantic_ir.effects}
     active_entity_refs = set(active_subgoal.entity_refs)
@@ -1724,6 +1751,23 @@ def compile_canonical_action_catalog(
                 return bool(active_input_payload_refs) or bool(
                     "clear_verified_text" in active_required_actions
                     and active_targets_input
+                )
+            if action_kind == "press_enter":
+                enter_element = element_by_id.get(
+                    str(candidate.parameters.get("element_id") or "")
+                )
+                enter_field_id = str(
+                    enter_element.states.get("input_field_id")
+                    if enter_element is not None
+                    else ""
+                ).strip()
+                return bool(
+                    active_input_payload_refs
+                    or (
+                        "press_enter" in active_required_actions
+                        and len(enter_input_field_ids) == 1
+                        and enter_field_id in enter_input_field_ids
+                    )
                 )
             return bool(active_input_payload_refs)
         if action_kind == "tap_semantic":

@@ -505,11 +505,136 @@ class CanonicalActionProtocolTests(unittest.TestCase):
         self.assertEqual(1, len(matches))
         self.assertEqual("enter", matches[0].parameters["element_id"])
         self.assertEqual("first\n", matches[0].transition.expectations[0].value)
+
         self.assertFalse(
             any(
                 item.action_kind == "tap_semantic"
                 and item.parameters.get("element_id") == "enter"
                 for item in report.candidates
+            )
+        )
+
+    def test_split_newline_subgoal_inherits_unique_adjacent_input_field(self) -> None:
+        semantic_ir = input_ir(active="type_last_char")
+        semantic_ir = replace(
+            semantic_ir,
+            entities=tuple(
+                replace(item, value="first\nsecond")
+                if item.role == "input_text"
+                else item
+                for item in semantic_ir.entities
+            ),
+            constraints=(
+                ConstraintIntent(
+                    constraint_id="constraint.enter",
+                    kind="required_action",
+                    value="press_enter",
+                    source_text="click newline key",
+                    authoritative=True,
+                ),
+            ),
+            subgoals=(
+                replace(
+                    semantic_ir.subgoals[0],
+                    subgoal_id="input_first_line",
+                    status="completed",
+                ),
+                replace(
+                    semantic_ir.subgoals[1],
+                    subgoal_id="press_enter",
+                    status="active",
+                    depends_on=("input_first_line",),
+                    constraint_refs=("constraint.enter",),
+                    entity_refs=(),
+                ),
+                replace(
+                    semantic_ir.subgoals[1],
+                    subgoal_id="input_second_line",
+                    status="pending",
+                    depends_on=("press_enter",),
+                    constraint_refs=(),
+                    entity_refs=(),
+                ),
+            ),
+            input_fields=(
+                replace(
+                    semantic_ir.input_fields[0],
+                    multiline=True,
+                    source_subgoal_ids=(
+                        "input_first_line",
+                        "input_second_line",
+                    ),
+                ),
+            ),
+        )
+        current_scene = scene(
+            element(
+                "input",
+                label="first",
+                meaning="application_text_input",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "first",
+                    "input_field_id": "field_primary",
+                    "input_multiline": True,
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                },
+            ),
+            element(
+                "enter",
+                label="↵",
+                meaning="input_exact_enter_key",
+                states={
+                    "input_enter_key": True,
+                    "key_action": "newline",
+                    "key_value": "\n",
+                    "prior_input_value": "first",
+                    "expected_input_value": "first\n",
+                    "input_element_id": "input",
+                    "input_field_id": "field_primary",
+                },
+                bounds=(0.8, 0.8, 0.94, 0.92),
+            ),
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            semantic_ir,
+            {"tap_semantic", "input_verified_text", "press_enter"},
+        )
+
+        matches = [
+            candidate
+            for candidate in report.candidates
+            if candidate.action_kind == "press_enter"
+        ]
+        self.assertEqual(1, len(matches))
+        self.assertEqual("enter", matches[0].parameters["element_id"])
+        self.assertEqual("first\n", matches[0].transition.expectations[0].value)
+
+        wrong_field_scene = replace(
+            current_scene,
+            elements=tuple(
+                replace(
+                    item,
+                    states={**item.states, "input_field_id": "field_other"},
+                )
+                if item.meaning == "input_exact_enter_key"
+                else item
+                for item in current_scene.elements
+            ),
+        )
+        wrong_field_report = compile_canonical_action_catalog(
+            wrong_field_scene,
+            semantic_ir,
+            {"tap_semantic", "input_verified_text", "press_enter"},
+        )
+        self.assertFalse(
+            any(
+                candidate.action_kind == "press_enter"
+                for candidate in wrong_field_report.candidates
             )
         )
 

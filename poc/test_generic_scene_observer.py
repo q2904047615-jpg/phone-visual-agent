@@ -6876,7 +6876,7 @@ class GenericSceneObserverTests(unittest.TestCase):
 
         self.assertEqual(3, provider.calls)
 
-    def test_input_goal_revokes_same_mode_claim_but_still_requires_strict_audit(
+    def test_input_goal_removes_compact_keyboard_claim_and_uses_strict_audit(
         self,
     ) -> None:
         payload = scene_payload()
@@ -6886,7 +6886,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "role": "button",
                 "meaning": "switch_keyboard_input_mode",
                 "label": "英",
-                "bounds": [690, 890, 790, 930],
+                "bounds": [730, 1130, 810, 1210],
                 "confidence": 0.92,
                 "states": {
                     "goal_relevant": True,
@@ -6898,13 +6898,62 @@ class GenericSceneObserverTests(unittest.TestCase):
             }
         ]
 
-        provider = FakeProvider(payload)
-        with self.assertRaises(VisionAgentError):
-            GenericSceneObserver(provider).observe(
-                frames=stable_frames(),
-                goal_context={"objective": "让当前输入框显示 agent"},
-            )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(text="", placeholder="消息")
+            ]
+        )
+        provider = SequenceProvider([payload, audit])
+        scene = GenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "让当前输入框显示 agent",
+                "entities": {"input_text": "agent"},
+            },
+        )
         self.assertEqual(2, provider.calls)
+        self.assertEqual(
+            "local_audited_input_1",
+            scene.unique_trusted_goal_element().element_id,
+        )
+        self.assertFalse(
+            any(
+                item.meaning == "switch_keyboard_input_mode"
+                for item in scene.elements
+            )
+        )
+
+    def test_input_goal_does_not_hide_action_bearing_compact_keyboard_claim(
+        self,
+    ) -> None:
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "bad-switch",
+                "role": "button",
+                "meaning": "switch_keyboard_input_mode",
+                "label": "英",
+                "bounds": [730, 1130, 810, 1210],
+                "confidence": 0.92,
+                "states": {
+                    "goal_relevant": True,
+                    "keyboard_input_mode_switch": True,
+                    "current_mode": "direct_latin",
+                    "target_mode": "chinese_pinyin",
+                    "action": "tap",
+                },
+                "evidence": ["协议外动作字段"],
+            }
+        ]
+
+        with self.assertRaises(VisionAgentError):
+            GenericSceneObserver(FakeProvider(payload)).observe(
+                frames=stable_frames(),
+                goal_context={
+                    "objective": "让当前输入框显示 agent",
+                    "entities": {"input_text": "agent"},
+                },
+            )
 
     def test_non_input_goal_cannot_hide_action_field_on_keyboard_switch(self) -> None:
         payload = scene_payload()

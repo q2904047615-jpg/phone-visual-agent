@@ -4254,18 +4254,19 @@ def _strip_preliminary_keyboard_containers_for_dedicated_audit(
     payload: dict[str, Any],
     goal_context: dict[str, Any],
 ) -> bool:
-    """Remove passive compact keyboard containers before strict input audit.
+    """Remove compact keyboard geometry before the sole strict input audit.
 
-    A keyboard-wide container is neither an application input nor an
-    actionable key.  During an active input goal the later independent input
-    structure audit is the sole authority for keyboard layout, mode and key
-    geometry.  We therefore discard only an exact, well-formed passive scene
-    element whose role/meaning/states unambiguously describe that redundant
-    keyboard container.  Malformed, action-bearing or otherwise ambiguous
-    elements remain so the normal scene parser can fail closed.
+    During an explicit text-input goal the later independent input-structure
+    audit is the sole authority for keyboard layout, mode and key geometry.
+    Compact observation may still redundantly emit a keyboard container or a
+    keyboard-specific control.  Keeping either copy lets malformed compact
+    geometry veto the dedicated audit before it can run.  Discard only exact
+    scene elements whose typed meaning unambiguously belongs to that dedicated
+    keyboard catalog.  Action-bearing or otherwise ambiguous elements remain
+    so the normal scene parser still fails closed.
     """
 
-    if not _goal_requests_input(goal_context):
+    if not _goal_has_explicit_input_text(goal_context):
         return False
     elements = payload.get("elements")
     if not isinstance(elements, list):
@@ -4305,6 +4306,13 @@ def _strip_preliminary_keyboard_containers_for_dedicated_audit(
 
     retained: list[Any] = []
     isolated = False
+    dedicated_keyboard_meanings = {
+        "input_exact_enter_key",
+        "input_exact_literal_key",
+        "switch_keyboard_case",
+        "switch_keyboard_input_mode",
+        "switch_keyboard_layout",
+    }
     for item in elements:
         states = item.get("states") if isinstance(item, dict) else None
         meaning = (
@@ -4367,7 +4375,20 @@ def _strip_preliminary_keyboard_containers_for_dedicated_audit(
             and all(isinstance(part, str) for part in item["evidence"])
             and not contains_action_like_key(item)
         )
-        if removable_keyboard_container:
+        removable_keyboard_control = (
+            isinstance(item, dict)
+            and set(item) == exact_fields
+            and isinstance(item.get("element_id"), str)
+            and bool(item["element_id"].strip())
+            and str(item.get("role") or "").strip() in {"button", "key"}
+            and meaning in dedicated_keyboard_meanings
+            and isinstance(item.get("label"), str)
+            and isinstance(states, dict)
+            and isinstance(item.get("evidence"), list)
+            and all(isinstance(part, str) for part in item["evidence"])
+            and not contains_action_like_key(item)
+        )
+        if removable_keyboard_container or removable_keyboard_control:
             isolated = True
             continue
         retained.append(item)

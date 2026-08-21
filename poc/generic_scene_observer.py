@@ -3178,7 +3178,7 @@ def _normalize_targeted_delta_evidence_shorthand(payload: Any) -> None:
 
 
 def _normalize_targeted_delta_xywh_bounds_shorthand(payload: Any) -> None:
-    """Normalize only exact finite x/y/w/h or x/y/width/height bounds."""
+    """Normalize only exact finite rectangular bounds shorthands."""
 
     if not isinstance(payload, dict) or not isinstance(payload.get("elements"), list):
         return
@@ -3192,6 +3192,21 @@ def _normalize_targeted_delta_xywh_bounds_shorthand(payload: Any) -> None:
             keys = ("x", "y", "w", "h")
         elif set(bounds) == {"x", "y", "width", "height"}:
             keys = ("x", "y", "width", "height")
+        elif set(bounds) == {"x1", "y1", "x2", "y2"}:
+            values = tuple(bounds[key] for key in ("x1", "y1", "x2", "y2"))
+            if (
+                any(
+                    isinstance(value, bool) or not isinstance(value, (int, float))
+                    for value in values
+                )
+                or any(not math.isfinite(float(value)) for value in values)
+            ):
+                continue
+            x1, y1, x2, y2 = (float(value) for value in values)
+            if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1 or x2 > 1000 or y2 > 1000:
+                continue
+            element["bounds"] = [x1, y1, x2, y2]
+            continue
         else:
             continue
         values = tuple(bounds[key] for key in keys)

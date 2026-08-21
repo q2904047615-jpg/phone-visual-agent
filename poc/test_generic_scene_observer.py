@@ -4264,7 +4264,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     fingerprint="local-fingerprint",
                 )
 
-    def test_targeted_delta_normalizes_only_exact_valid_xywh_bounds_shorthand(self) -> None:
+    def test_targeted_delta_normalizes_only_exact_valid_bounds_shorthand(self) -> None:
         base = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),
             fingerprint="local-fingerprint",
@@ -4292,6 +4292,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         valid_bounds = (
             {"x": 145, "y": 535, "w": 560, "h": 45},
             {"x": 145, "y": 535, "width": 560, "height": 45},
+            {"x1": 145, "y1": 535, "x2": 705, "y2": 580},
         )
         for bounds in valid_bounds:
             with self.subTest(valid_bounds=bounds):
@@ -4323,6 +4324,10 @@ class GenericSceneObserverTests(unittest.TestCase):
             {"x": 145, "y": 535, "width": 560, "height": 45, "r": 705},
             {"x": 145, "y": 535, "width": "560", "height": 45},
             {"x": 145, "y": 535, "width": 560, "height": 0},
+            {"x1": 145, "y1": 535, "x2": 145, "y2": 580},
+            {"x1": 145, "y1": 535, "x2": 705, "y2": 1001},
+            {"x1": 145, "y1": 535, "x2": "705", "y2": 580},
+            {"x1": 145, "y1": 535, "x2": 705},
         ):
             with self.subTest(bounds=invalid_bounds), self.assertRaisesRegex(
                 VisionAgentError,

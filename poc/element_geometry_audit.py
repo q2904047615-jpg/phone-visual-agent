@@ -630,7 +630,7 @@ def element_geometry_audit_prompt(
                 "literal_label": label,
                 "visual_role": visual_role,
                 "bounds": [0, 0, 1000, 1000],
-                "confidence": 0.0,
+                "confidence": 0.99,
                 "fully_visible": True,
                 "whole_control": True,
                 "evidence": ["literal visible fact"],
@@ -651,6 +651,9 @@ def element_geometry_audit_prompt(
         "not merely a broad row or neighboring control. If the crop is unclear, an "
         "occurrence is clipped, or enumeration cannot be completed, report those facts "
         "without guessing. The local controller will map accepted crop-local bounds.\n"
+        "Confidence must be your assessment of the visible match, not a copied "
+        "placeholder. A confidence of 0.0 means there is no visible match, so matches "
+        "must then be empty.\n"
         "Each match evidence array must contain 1 to 4 short visible facts.\n"
         f"source_ref={source_ref}\n"
         f"literal_label={json.dumps(label, ensure_ascii=False)}\n"

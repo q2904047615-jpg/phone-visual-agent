@@ -263,6 +263,21 @@ class StrictGeometryAuditProtocolTests(unittest.TestCase):
                 visible_literal_labels=("返回验收模式选择",),
             )
 
+    def test_prompt_does_not_seed_a_zero_confidence_visible_match(self):
+        prompt = element_geometry_audit_prompt(
+            source_ref=SOURCE_REF,
+            literal_label="多行文字与真实换行",
+            visual_role="button",
+            visible_evidence="深色圆角按钮内逐字标签清晰可见",
+        )
+
+        self.assertIn('"confidence":0.99', prompt)
+        self.assertNotIn('"confidence":0.0', prompt)
+        self.assertIn(
+            "A confidence of 0.0 means there is no visible match",
+            prompt,
+        )
+
     def test_duplicate_json_keys_are_rejected_at_top_and_nested_levels(self):
         top = self.render()[:-1] + ',"matches":[]}'
         with self.assertRaisesRegex(ElementGeometryAuditError, "重复JSON字段"):

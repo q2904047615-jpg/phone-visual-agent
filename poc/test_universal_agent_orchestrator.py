@@ -26,7 +26,7 @@ from generic_action_adapter import (
     GenericActionAdapterError,
     GenericActionExecutionResult,
 )
-from semantic_executor import SemanticAction
+from semantic_action import SemanticAction
 from ui_scene import SystemUIFacts, UIElement, UIScene
 from universal_action_controller import ResolvedSemanticAction
 from qwen_visual_decision import QwenTaskContext, _scene_matches_target_app_surface

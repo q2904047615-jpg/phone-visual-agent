@@ -26,7 +26,7 @@ from deepseek_task_graph import (
 from deepseek_failure_diagnostics import persist_deepseek_failure_diagnostic
 from device_exclusivity import InterProcessLease
 from generic_action_adapter import GenericActionAdapterError
-from generic_intent import GenericIntentDraft
+from generic_goal import GenericIntentDraft
 from generic_step_planner import GenericStepProposal
 from qwen_visual_decision import (
     QwenTaskContext,

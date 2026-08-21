@@ -29,7 +29,7 @@ from message_intent import (
     subgoal_targets_recipient_control,
 )
 from qwen_runtime_errors import classify_qwen_error, failure_diagnostics
-from semantic_executor import SemanticAction
+from semantic_action import SemanticAction
 from task_semantic_ir import TaskSemanticIR
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
 from universal_action_controller import UniversalActionController, UniversalActionError

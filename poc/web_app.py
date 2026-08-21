@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import re
 import secrets
 import sqlite3
@@ -28,7 +27,6 @@ from capability_acceptance import (
 from capability_acceptance_runtime import CapabilityAcceptanceManager
 from capability_acceptance_planner import CapabilityAcceptanceTaskGraphPlanner
 from intent_provider import DeepSeekIntentProvider, IntentProviderError
-from generic_intent import GenericIntentError, GenericIntentParser
 from generic_action_adapter import (
     GenericActionAdapterError,
     GenericSingleActionAdapter,
@@ -61,51 +59,15 @@ from task_semantic_ir import (
 )
 from canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
 
-from operation_specs import (
-    STRUCTURED_OPERATIONS,
-    build_state_workflow_params,
-)
-
 from robot_core import (
     MockRobotController,
     RobotController,
     RobotWorkflowError,
     WEB_OUTPUT_DIR,
-    workflow_readiness,
 )
 from vision_agent import (
     DashScopeVisionProvider,
     VisionAgentError,
-    _extract_json_object,
-    goal_is_forbidden,
-)
-from state_controller import (
-    STATE_CONTROLLER_PROTOCOL_VERSION,
-    DashScopePageObserver,
-    StateGraphRunner,
-)
-from task_orchestrator import (
-    GenericTaskOrchestrator,
-    GoalSpec,
-    TaskPlanError,
-)
-from live_semantic_dry_run import (
-    ReadOnlySemanticDryRunner,
-    to_semantic_observation,
-)
-from semantic_action_adapter import (
-    EnsureAppActionAdapter,
-    ObserveActionAdapter,
-    PhysicalActionVerificationError,
-    SemanticActionAdapterError,
-    SemanticActionRouter,
-    SwipeUpActionAdapter,
-    TapHeartActionAdapter,
-)
-from semantic_executor import ActionResult, SemanticAction, SingleStepSemanticExecutor
-from supervised_semantic_runtime import (
-    SupervisedSemanticSession,
-    SupervisedSemanticSessionError,
 )
 
 
@@ -119,12 +81,6 @@ DEVICE_REGISTRY_PATH = Path(
         Path(__file__).with_name("device_registry.json"),
     )
 )
-# The fixed-App workflow runtime is permanently retired.  Historical route
-# tests can still monkeypatch this module-local flag, but no production launch
-# configuration can restore the old execution path.
-LEGACY_WORKFLOWS_ENABLED = False
-
-
 def current_code_revision() -> str:
     """Return a reproducible revision; dirty worktrees are never promotable."""
 
@@ -154,16 +110,6 @@ def current_code_revision() -> str:
         raise CapabilityAcceptanceError("当前 Git 提交为空。")
     return revision + ("+dirty" if dirty else "")
 
-OPERATION_APP = {
-    "wechat.send_text_to_file_transfer": "wechat",
-    "wechat.send_text": "wechat",
-    "wechat.send_album_image": "wechat",
-    "douyin.like_current": "douyin",
-    "douyin.comment_current": "douyin",
-    "douyin.search": "douyin",
-    "douyin.batch_interact": "douyin",
-}
-
 APP_CATALOG = [
     {
         "id": "universal-agent",
@@ -175,19 +121,6 @@ APP_CATALOG = [
         "note": "唯一默认入口；按当前画面逐步观察、执行和验证",
     },
 ]
-
-
-def require_legacy_workflows_enabled() -> None:
-    if not LEGACY_WORKFLOWS_ENABLED:
-        raise HTTPException(
-            status_code=410,
-            detail=(
-                "固定 App 工作流已退出默认产品路径；请使用 "
-                "/api/agent/generic-supervised/start。"
-            ),
-        )
-
-
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -951,7 +884,6 @@ class DeviceControllerRegistry:
 class Runtime:
     def __init__(self) -> None:
         self.loaded_code_revision = current_code_revision()
-        self.store = TaskStore(DB_PATH)
         self.device_controllers = DeviceControllerRegistry(
             DEVICE_REGISTRY_PATH,
             mock=os.environ.get("ROBOT_WEB_MOCK") == "1",
@@ -961,7 +893,6 @@ class Runtime:
         )
         self.vision_provider = DashScopeVisionProvider()
         self.intent_provider = DeepSeekIntentProvider()
-        self.generic_intent_parser = GenericIntentParser(self.intent_provider)
         self.input_lineage_store = TypedInputLineageStore(
             WEB_OUTPUT_DIR / "state"
         )
@@ -1007,39 +938,12 @@ class Runtime:
             registry_path=DEVICE_REGISTRY_PATH,
             code_revision_provider=self.capability_code_revision,
         )
-        self.state_observer = DashScopePageObserver(self.vision_provider)
-        self.state_runner = StateGraphRunner(
-            self.controller,
-            self.state_observer,
-        )
-        self.generic_orchestrator = GenericTaskOrchestrator()
-        self.dry_run_lock = threading.Lock()
         self.device_coordination_lock_guard = threading.RLock()
         self.device_coordination_locks: dict[str, threading.Lock] = {
-            self.device_controllers.default_device_id: self.dry_run_lock,
+            self.device_controllers.default_device_id: threading.Lock(),
         }
-        self.supervised_sessions: dict[str, SupervisedSemanticSession] = {}
-        self.supervised_session_dirs: dict[str, Path] = {}
-        self.supervised_session_lock = threading.RLock()
         self.generic_supervised_sessions: dict[str, UniversalAgentSessionState] = {}
         self.generic_supervised_session_lock = threading.RLock()
-        requested_orchestrator = os.environ.get(
-            "ROBOT_ORCHESTRATOR_MODE",
-            "legacy",
-        ).strip().lower()
-        self.orchestrator_mode = (
-            requested_orchestrator
-            if requested_orchestrator in {"legacy", "generic"}
-            else "legacy"
-        )
-        self.agent = HybridAgent(self.intent_provider)
-        self.jobs: queue.Queue[str] = queue.Queue()
-        self.stop = threading.Event()
-        self.worker = threading.Thread(
-            target=self._worker_loop,
-            name="robot-task-worker",
-            daemon=True,
-        )
 
     def controller_for_device(self, device_id: str) -> RobotController:
         if str(device_id or "").strip() == self.device_controllers.default_device_id:
@@ -1099,15 +1003,10 @@ class Runtime:
             )
 
     def start(self) -> None:
-        if LEGACY_WORKFLOWS_ENABLED:
-            self.worker.start()
+        return None
 
     def shutdown(self) -> None:
-        self.stop.set()
         self.controller.request_stop()
-        if self.worker.is_alive():
-            self.jobs.put("")
-            self.worker.join(timeout=3)
 
     def _worker_loop(self) -> None:
         while not self.stop.is_set():
@@ -1358,10 +1257,7 @@ def session() -> dict[str, Any]:
 
 @app.get("/api/apps")
 def apps() -> dict[str, Any]:
-    readiness = workflow_readiness()
-    if isinstance(runtime.controller, MockRobotController):
-        readiness = runtime.controller.device_status()["readiness"]
-    readiness["vision_agent"] = {
+    readiness = {"vision_agent": {
         "ready": bool(runtime.vision_provider.status().get("configured")),
         "mode": runtime.vision_provider.status().get("model", "unknown"),
         "thinking_enabled": runtime.vision_provider.status().get(
@@ -1373,7 +1269,7 @@ def apps() -> dict[str, Any]:
             if runtime.vision_provider.status().get("configured")
             else ["DASHSCOPE_API_KEY"]
         ),
-    }
+    }}
     readiness["intent_agent"] = {
         "ready": bool(runtime.intent_provider.configured),
         "mode": runtime.intent_provider.model,
@@ -1420,28 +1316,19 @@ def device() -> dict[str, Any]:
         }
         for descriptor in runtime.device_controllers.descriptors()
     ]
-    status["state_controller_protocol"] = STATE_CONTROLLER_PROTOCOL_VERSION
-    status["vision_agent"] = runtime.state_runner.status()
+    status["vision_agent"] = runtime.vision_provider.status()
     status["intent_agent"] = runtime.intent_provider.status()
     status["execution_architecture"] = {
         "model_role": "observation_only",
         "controller": "single_state_controller",
-        "legacy_free_agent_enabled": False,
-        # The public web console always enters the universal supervised loop.
-        # ``orchestrator_mode`` only selects the retained compatibility worker
-        # for old queued tasks and must not be reported as the product path.
+        "fixed_app_workflows_retired": True,
         "active_orchestrator": "universal_agent",
-        "background_compatibility_worker": {
-            "enabled": LEGACY_WORKFLOWS_ENABLED,
-            "mode": runtime.orchestrator_mode,
-            "default_user_path": False,
-        },
         "universal_agent": {
-            "goal_protocol": "2026-08-10-generic-intent-v1",
+            "goal_protocol": "2026-08-20-deepseek-typed-task-graph-v4",
             "scene_protocol": UI_SCENE_PROTOCOL_VERSION,
             "action_protocol": CANONICAL_ACTION_PROTOCOL,
             "controller_protocol": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
-            "goal_preview_enabled": True,
+            "goal_preview_enabled": False,
             "scene_preview_enabled": True,
             "hardware_execution_enabled": True,
             "automatic_loop_enabled": True,
@@ -1481,48 +1368,8 @@ def device() -> dict[str, Any]:
             },
             "observer": runtime.generic_scene_observer.status(),
         },
-        "generic_orchestrator": {
-            **runtime.generic_orchestrator.status(),
-            "role": "compatibility_only",
-            "default_user_path": False,
-        },
-        "semantic_action_adapter": {
-            "role": "compatibility_only",
-            "default_user_path": False,
-            "execution_enabled": True,
-            "enabled_real_actions": [
-                "ensure_app",
-                "tap_semantic:heart",
-                "swipe:up_on_live_preview_or_ad",
-            ],
-            "enabled_read_only_actions": ["observe"],
-            "max_physical_actions_per_request": 1,
-        },
     }
-    status["active_tasks"] = [
-        item
-        for item in runtime.store.list(20)
-        if item["status"] in {"queued", "running"}
-    ]
-    with runtime.supervised_session_lock:
-        active_sessions = [
-            item.snapshot()
-            for item in runtime.supervised_sessions.values()
-            if item.snapshot()["status"] == "action"
-        ]
-    status["supervised_execution"] = {
-        "enabled": True,
-        "automatic_loop_enabled": False,
-        "active_sessions": [
-            {
-                "session_id": item["session_id"],
-                "status": item["status"],
-                "decision": item["decision"],
-                "step_count": item["step_count"],
-            }
-            for item in active_sessions
-        ],
-    }
+    status["active_tasks"] = []
     with runtime.generic_supervised_session_lock:
         generic_sessions = [
             item.snapshot()
@@ -3521,22 +3368,9 @@ def stop_all(
     capability_stop_requested = (
         runtime.capability_acceptance_manager.request_stop_all()
     )
-    cancelled: list[str] = []
-    for item in runtime.store.list(100):
-        if item["status"] == "queued":
-            try:
-                runtime.store.transition(
-                    item["id"],
-                    {"queued"},
-                    "cancelled",
-                    message="全局停止：队列任务已取消。",
-                )
-                cancelled.append(item["id"])
-            except ValueError:
-                pass
     return {
         "stop_requested": True,
-        "queued_cancelled": cancelled,
+        "queued_cancelled": [],
         "capability_stop_requested": capability_stop_requested,
         "note": "正在执行的任务会在当前最小动作结束后停止。",
     }
@@ -3644,3 +3478,42 @@ def task_report(task_id: str) -> FileResponse:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="任务报告文件不存在。")
     return FileResponse(path, media_type="application/json", filename="report.json")
+
+
+# The old fixed-App handlers remain only as Git-readable migration history.
+# They are removed from the application unconditionally and cannot be restored
+# by an environment variable or runtime flag.
+RETIRED_FIXED_APP_ROUTE_NAMES = frozenset(
+    {
+        "tasks",
+        "task",
+        "parse_agent",
+        "parse_generic_agent_goal",
+        "preview_agent_plan",
+        "start_supervised_session",
+        "get_supervised_session",
+        "advance_supervised_session",
+        "cancel_supervised_session",
+        "preview_real_observation_step",
+        "execute_ensure_app_step",
+        "execute_observe_step",
+        "execute_tap_heart_step",
+        "create_task",
+        "confirm_task",
+        "cancel_task",
+        "events",
+        "evidence",
+        "task_report",
+    }
+)
+
+
+def _retire_fixed_app_routes() -> None:
+    app.router.routes[:] = [
+        route
+        for route in app.router.routes
+        if getattr(route, "name", None) not in RETIRED_FIXED_APP_ROUTE_NAMES
+    ]
+
+
+_retire_fixed_app_routes()

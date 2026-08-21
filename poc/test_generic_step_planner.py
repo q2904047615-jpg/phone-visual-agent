@@ -18,7 +18,7 @@ from generic_action_adapter import (
     _post_action_observation_context,
     stable_qwerty_ocr_anchors,
 )
-from generic_intent import GenericIntentDraft
+from generic_goal import GenericIntentDraft
 from generic_scene_observer import GenericSceneObserver, _local_frame_fingerprint
 from input_value_lineage import TypedInputLineageStore
 from observation_images import measure_frame_sharpness
@@ -32,7 +32,7 @@ from generic_step_planner import (
     GenericStepPlanningError,
     GenericStepProposal,
 )
-from semantic_executor import SemanticAction
+from semantic_action import SemanticAction
 from ui_scene import CameraAlignmentFacts, SystemUIFacts, UIElement, UIScene
 from universal_action_controller import (
     ResolvedSemanticAction,

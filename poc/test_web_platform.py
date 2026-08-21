@@ -1234,6 +1234,7 @@ class RuleAgentTests(unittest.TestCase):
         self.assertFalse(result["understood"])
 
 
+@unittest.skip("固定 App HybridAgent 已从正式服务退役")
 class HybridAgentStateGraphTests(unittest.TestCase):
     class Provider:
         configured = True
@@ -4351,8 +4352,13 @@ class DeviceControllerRegistryTests(unittest.TestCase):
     def test_legacy_fixed_workflows_cannot_be_reenabled_by_environment(self) -> None:
         source = Path(web_app.__file__).read_text(encoding="utf-8")
 
-        self.assertFalse(web_app.LEGACY_WORKFLOWS_ENABLED)
+        self.assertFalse(hasattr(web_app, "LEGACY_WORKFLOWS_ENABLED"))
         self.assertNotIn("PHONE_AGENT_ENABLE_LEGACY_WORKFLOWS", source)
+        self.assertTrue(
+            web_app.RETIRED_FIXED_APP_ROUTE_NAMES.isdisjoint(
+                {route.name for route in web_app.app.routes}
+            )
+        )
 
     def test_default_real_device_advertises_only_actions_with_live_evidence(self) -> None:
         registry = web_app.DeviceControllerRegistry(web_app.DEVICE_REGISTRY_PATH, mock=False)
@@ -4422,6 +4428,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
                 web_app.DeviceControllerRegistry(path)
 
 
+@unittest.skip("固定 App API 已从正式 OpenAPI 退役")
 class ApiEndToEndTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

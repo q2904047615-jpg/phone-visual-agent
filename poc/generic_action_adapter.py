@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from PIL import Image, ImageChops, ImageStat
 
-from generic_intent import GenericIntentDraft
+from generic_goal import GenericIntentDraft
 from generic_scene_observer import (
     GenericSceneObserver,
     POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS,
@@ -42,7 +42,7 @@ from orientation_safety import (
     validate_device_id,
 )
 from qwen_runtime_errors import FORMAT_ERROR_TYPES, classify_qwen_error
-from semantic_executor import SemanticAction
+from semantic_action import SemanticAction
 from ui_scene import UIElement, UIScene, UISceneError
 from universal_action_controller import (
     ResolvedSemanticAction,

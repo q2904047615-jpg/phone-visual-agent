@@ -15,7 +15,7 @@ import httpx
 from PIL import Image, ImageChops, ImageStat
 
 import robot_gui_poc as legacy
-from operation_specs import (
+from text_input_utils import (
     InputAttemptState,
     InputRecoveryCoordinator,
     editable_character_count,

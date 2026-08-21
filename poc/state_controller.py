@@ -9,7 +9,7 @@ from typing import Any, Protocol
 
 from PIL import Image
 
-from operation_specs import editable_character_count, split_input_segments
+from text_input_utils import editable_character_count, split_input_segments
 from observation_images import (
     ObservationRoi,
     build_overview,

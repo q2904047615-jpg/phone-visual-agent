@@ -6,8 +6,8 @@ import math
 import re
 from typing import Any
 
-from semantic_executor import SemanticAction
-from operation_specs import editable_character_count
+from semantic_action import SemanticAction
+from text_input_utils import editable_character_count
 from verified_text_transaction import (
     VerifiedTextTransactionError,
     plan_from_input_states,

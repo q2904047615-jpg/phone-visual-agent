@@ -5,8 +5,8 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
-from generic_intent import GenericIntentDraft, GenericIntentError, _parse_json_object
-from semantic_executor import SemanticAction
+from generic_goal import GenericIntentDraft, GenericIntentError, _parse_json_object
+from semantic_action import SemanticAction
 from ui_scene import UIScene
 
 

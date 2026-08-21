@@ -1,7 +1,7 @@
 import unittest
 from dataclasses import replace
 
-from semantic_executor import SemanticAction
+from semantic_action import SemanticAction
 from task_orchestrator import (
     GenericTaskOrchestrator,
     GoalSpec,

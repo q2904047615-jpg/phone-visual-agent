@@ -13,7 +13,7 @@ from deepseek_task_graph import TargetApp
 from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
 from generic_step_planner import GenericStepProposal
 from orientation_safety import _claim_audit_seal, _mint_audited_credential
-from semantic_executor import SemanticAction
+from semantic_action import SemanticAction
 from ui_scene import CameraAlignmentFacts, UIElement, UIScene
 from universal_agent_orchestrator import UniversalAgentOrchestrator
 

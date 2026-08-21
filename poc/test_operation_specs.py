@@ -158,21 +158,6 @@ class StructuredOperationPlanTests(unittest.TestCase):
             ["做得很好", "1"],
         )
 
-    def test_legacy_file_transfer_is_normalized_to_specified_chat(self) -> None:
-        normalized = normalize_task_request(
-            TaskRequest(
-                app_id="wechat",
-                operation="wechat.send_text_to_file_transfer",
-                params={"text": "你好"},
-            )
-        )
-        self.assertEqual(normalized.operation, "wechat.send_text")
-        self.assertEqual(
-            normalized.params["source_params"]["chat_name"],
-            "文件传输助手",
-        )
-
-
 class NewRuleAgentTests(unittest.TestCase):
     def setUp(self) -> None:
         self.agent = RuleAgent()

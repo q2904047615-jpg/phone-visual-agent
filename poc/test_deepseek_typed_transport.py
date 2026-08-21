@@ -136,6 +136,27 @@ class TypedPlannerTransportTests(unittest.TestCase):
         )
         self.assertEqual("navigation_only", split_graph.subgoals[0].external_impact)
 
+        for objective, execution_class in (
+            ("点击当前浏览器顶部的刷新按钮", "unknown"),
+            ("点击当前界面唯一的重新加载图标", "effect"),
+            ("Click the refresh button in the current browser", "unknown"),
+        ):
+            with self.subTest(
+                current_surface_control=objective,
+                execution_class=execution_class,
+            ):
+                raw = payload(objective=objective)
+                raw["subgoals"][0]["status"] = "pending"
+                raw["subgoals"][0]["execution_class"] = execution_class
+                raw["subgoals"][0]["effect_ids"] = []
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                    objective,
+                    device_id="phone-1",
+                )
+                self.assertEqual("navigation_only", graph.subgoals[0].external_impact)
+                self.assertEqual("active", graph.subgoals[0].status)
+                self.assertEqual("step", graph.active_subgoal_id)
+
         for objective in (
             "刷新当前页面后提交表单",
             "刷新当前页面并登录账号",

@@ -3204,6 +3204,18 @@ def _normalize_local_refresh_execution_class(
         r"\b(?:current\s+)?(?:page|tab|view)\b.{0,24}\b(?:refresh|reload)\b",
         re.IGNORECASE,
     )
+    current_surface_pattern = re.compile(
+        r"当前|本页|这个(?:页面|界面|视图)|"
+        r"\b(?:current|this)\s+(?:page|tab|view|screen|browser)\b",
+        re.IGNORECASE,
+    )
+    refresh_control_pattern = re.compile(
+        r"(?:刷新|重新加载|重新载入).{0,8}(?:按钮|图标|控件)|"
+        r"(?:按钮|图标|控件).{0,8}(?:刷新|重新加载|重新载入)|"
+        r"\b(?:refresh|reload)\b.{0,12}\b(?:button|icon|control)\b|"
+        r"\b(?:button|icon|control)\b.{0,12}\b(?:refresh|reload)\b",
+        re.IGNORECASE,
+    )
     external_effect_pattern = re.compile(
         r"发送|提交|保存|发布|删除|关注|评论|点赞|收藏|加入|登录|退出登录|"
         r"付款|支付|购买|下单|同步|上传|send|submit|save|publish|delete|"
@@ -3228,10 +3240,17 @@ def _normalize_local_refresh_execution_class(
             ]
         )
         context = " ".join((goal_objective, local_context))
+        explicit_current_surface_refresh = bool(
+            current_surface_pattern.search(context)
+            and refresh_control_pattern.search(local_context)
+        )
         if (
-            item.get("execution_class") == "effect"
+            item.get("execution_class") in {"effect", "unknown"}
             and item.get("effect_ids") == []
-            and refresh_pattern.search(context)
+            and (
+                refresh_pattern.search(context)
+                or explicit_current_surface_refresh
+            )
             and re.search(r"刷新|重新加载|重新载入|\brefresh\b|\breload\b", local_context, re.IGNORECASE)
             and not external_effect_pattern.search(context)
         ):

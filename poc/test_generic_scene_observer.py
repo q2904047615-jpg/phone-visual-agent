@@ -8255,6 +8255,8 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("body", target.states["input_field_id"])
         self.assertEqual("正文", target.states["input_field_label"])
         self.assertEqual("第一行", target.states["value"])
+        self.assertIn("正文", target.evidence)
+        self.assertNotIn("主题", target.evidence)
         enter = projected.get_element("local_audited_enter_key_1")
         self.assertEqual("input_exact_enter_key", enter.meaning)
         self.assertEqual("第一行\n", enter.states["expected_input_value"])

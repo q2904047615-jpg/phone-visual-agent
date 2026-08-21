@@ -6478,7 +6478,18 @@ def _apply_input_structure_audit(
                     }
                 )
             input_label = trusted_input["text"] or trusted_input["placeholder"]
-            input_evidence = list(trusted_input["visible_editable_cues"])
+            # ``field_labels`` are literal, field-attached observations from
+            # the dedicated input audit.  Preserve them as exact candidate
+            # evidence so a labelled input remains addressable after the
+            # preliminary scene element is replaced by this audited input.
+            input_evidence = list(
+                dict.fromkeys(
+                    (
+                        *trusted_input["field_labels"],
+                        *trusted_input["visible_editable_cues"],
+                    )
+                )
+            )
             if trusted_input["text"]:
                 input_evidence.insert(0, f"应用输入框当前文字：{trusted_input['text']}")
                 lineage_visual_text = trusted_input.get("lineage_visual_text")

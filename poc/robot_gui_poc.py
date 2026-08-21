@@ -76,12 +76,14 @@ VK_A = 0x41
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 INPUT_KEYBOARD = 1
+GW_OWNER = 4
 
 # 卖家控制端底部控制条的固定横坐标。纵坐标使用“客户区底部向上偏移”
 # 计算，以兼容窗口标题栏高度变化。
 ACTION_BUTTON_X = 130
 ACTION_DROPDOWN_X = 176
 CLICK_COUNT_INPUT_X = 308
+TEXT_INPUT_BUTTON_X_FROM_RIGHT = 20
 CONTROL_Y_FROM_BOTTOM = 18
 BASELINE_TOOLBAR_HEIGHT = 50
 SELLER_POSITION_OVERLAY_WIDTH = 180
@@ -104,6 +106,8 @@ user32.WindowFromPoint.argtypes = [POINT]
 user32.WindowFromPoint.restype = wintypes.HWND
 user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 user32.GetAncestor.restype = wintypes.HWND
+user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+user32.GetWindow.restype = wintypes.HWND
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -882,6 +886,35 @@ def press_virtual_key(key_code: int) -> None:
     time.sleep(0.08)
 
 
+def type_unicode_text(text: str) -> None:
+    """Type bounded BMP text into the focused seller control."""
+
+    if (
+        not isinstance(text, str)
+        or not 1 <= len(text) <= 100
+        or any(char in "\r\n\x00" or ord(char) > 0xFFFF for char in text)
+    ):
+        raise ValueError("控制端文字必须是1～100个无换行 BMP 字符。")
+
+    events = (INPUT * (len(text) * 2))()
+    event_index = 0
+    for char in text:
+        for flags in (KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP):
+            events[event_index].type = INPUT_KEYBOARD
+            events[event_index].ki = KEYBDINPUT(
+                wVk=0,
+                wScan=ord(char),
+                dwFlags=flags,
+                time=0,
+                dwExtraInfo=0,
+            )
+            event_index += 1
+    sent = user32.SendInput(len(events), events, ctypes.sizeof(INPUT))
+    if sent != len(events):
+        raise ctypes.WinError()
+    time.sleep(0.08)
+
+
 def configure_single_click_count(hwnd: int) -> None:
     """Force the seller software's 连点次数 field to one."""
     ensure_window_fully_visible(hwnd)
@@ -895,9 +928,95 @@ def configure_single_click_count(hwnd: int) -> None:
     user32.keybd_event(VK_CONTROL, 0, 0, 0)
     press_virtual_key(VK_A)
     user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
-    type_unicode_digit("1")
+    type_unicode_text("1")
     press_virtual_key(VK_RETURN)
     time.sleep(0.25)
+
+
+def _visible_owned_windows(owner: int) -> set[int]:
+    matches: set[int] = set()
+
+    @EnumWindowsProc
+    def callback(hwnd: int, _lparam: int) -> bool:
+        if user32.IsWindowVisible(hwnd) and user32.GetWindow(hwnd, GW_OWNER) == owner:
+            matches.add(int(hwnd))
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return matches
+
+
+def _window_title(hwnd: int) -> str:
+    length = user32.GetWindowTextLengthW(hwnd)
+    buffer = ctypes.create_unicode_buffer(max(1, length + 1))
+    user32.GetWindowTextW(hwnd, buffer, len(buffer))
+    return buffer.value
+
+
+def submit_direct_latin_batch(
+    hwnd: int,
+    text: str,
+    *,
+    open_timeout: float = 3.0,
+    close_timeout: float = 3.0,
+) -> None:
+    """Submit one exact lowercase-Latin batch through the seller text dialog.
+
+    This is a transport primitive only.  The universal controller establishes
+    the current input field, keyboard mode, authorized fragment, and exact
+    post-action value before and after this call.
+    """
+
+    if (
+        not isinstance(text, str)
+        or not 1 <= len(text) <= 20
+        or not text.isascii()
+        or not text.isalpha()
+        or text != text.lower()
+    ):
+        raise ValueError("控制端批量输入只接受1～20个小写英文字母。")
+    if open_timeout <= 0 or close_timeout <= 0:
+        raise ValueError("控制端输入对话框超时必须大于0。")
+
+    existing = _visible_owned_windows(hwnd)
+    ensure_window_fully_visible(hwnd)
+    _left, _top, width, height = client_geometry(hwnd)
+    control_x, control_y = seller_control_point(
+        width,
+        height,
+        BASELINE_CLIENT_WIDTH - TEXT_INPUT_BUTTON_X_FROM_RIGHT,
+        CONTROL_Y_FROM_BOTTOM,
+    )
+    click_client_control(hwnd, control_x, control_y)
+
+    deadline = time.monotonic() + float(open_timeout)
+    dialog: int | None = None
+    while time.monotonic() < deadline:
+        _check_escape("用户按下 Esc，已取消批量文字输入。")
+        new_windows = _visible_owned_windows(hwnd) - existing
+        if new_windows:
+            dialog = next(iter(new_windows))
+            break
+        time.sleep(0.05)
+    if dialog is None:
+        raise RuntimeError("点击控制端文字输入后没有发现输入对话框，已停止。")
+
+    user32.ShowWindow(dialog, SW_RESTORE)
+    user32.SetForegroundWindow(dialog)
+    time.sleep(0.2)
+    type_unicode_text(text)
+    press_virtual_key(VK_RETURN)
+
+    deadline = time.monotonic() + float(close_timeout)
+    while time.monotonic() < deadline:
+        _check_escape("用户按下 Esc，已停止等待批量文字输入。")
+        if not user32.IsWindow(dialog) or not user32.IsWindowVisible(dialog):
+            move_cursor_outside_camera(hwnd)
+            return
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"控制端文字输入对话框未关闭（标题“{_window_title(dialog)}”），已停止。"
+    )
 
 
 def cursor_parking_client_point(width: int, height: int) -> tuple[int, int]:

@@ -75,6 +75,9 @@ DEFAULT_CONTROLLER_CONFIG: dict[str, Any] = {
         "pre_key_wait": 0.45,
         "first_key_settle": 0.35,
     },
+    "direct_latin_batch": {
+        "wait_per_character": 0.8,
+    },
     "digit_long_press_hold": 0.78,
 }
 
@@ -359,6 +362,9 @@ class RobotController:
         actions["input_verified_text"]["text"] = {
             "canonical_max_chars": 4000,
             "max_chars_per_physical_step": MAX_DIRECT_LATIN_SEGMENT_CHARS,
+            "direct_latin_transport": "seller_text_dialog_batch",
+            "direct_latin_batch_max_chars": MAX_DIRECT_LATIN_SEGMENT_CHARS,
+            "non_lowercase_transport": "audited_visible_key_sequence",
             "max_fields": 32,
             "max_targets": 32,
             "segments": ["direct_latin", "chinese_pinyin", "visible_literal_key"],
@@ -843,7 +849,48 @@ class RobotController:
             raise WorkflowNotReady("通用英文分段必须是1～30个同一可见大小写状态的字母。")
         if not isinstance(keyboard_layout, dict):
             raise WorkflowNotReady("通用文字输入缺少本轮视觉键盘几何。")
+        if re.fullmatch(r"[a-z]{1,20}", text):
+            self.vision_type_direct_latin_batch(text, keyboard_layout)
+            return
         self.vision_type_pinyin(text, text.casefold(), keyboard_layout)
+
+    def vision_type_direct_latin_batch(
+        self,
+        text: str,
+        keyboard_layout: dict[str, Any],
+    ) -> None:
+        """Use the seller's fast dialog only for one audited lowercase batch."""
+
+        self._require_verified_action("input_verified_text", "输入文字")
+        if not re.fullmatch(r"[a-z]{1,20}", text):
+            raise WorkflowNotReady("快速英文分段必须是1～20个小写字母。")
+        if (
+            not isinstance(keyboard_layout, dict)
+            or keyboard_layout.get("type") != "qwerty"
+        ):
+            raise WorkflowNotReady("快速英文分段缺少本轮视觉 QWERTY 几何。")
+        # Validate the same seven anchors used by the per-key fallback.  The
+        # seller dialog decides only transport; it never supplies keyboard or
+        # target-field authority.
+        qwerty_keyboard_config_from_anchors(keyboard_layout.get("anchors"))
+        try:
+            wait_per_character = float(
+                load_controller_config()["direct_latin_batch"]["wait_per_character"]
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WorkflowNotReady("控制端批量输入等待配置无效。") from exc
+        if not 0.1 <= wait_per_character <= 2.0:
+            raise WorkflowNotReady("控制端批量输入逐字符等待必须在0.1～2.0秒之间。")
+        hwnd, _title = seller_gui.find_window(self.title)
+        frame = self._capture_phone(hwnd)
+        self._consume_physical_execution("input_verified_text", frame)
+        if frame.width < 400 or frame.height < 700:
+            raise RobotWorkflowError("键盘画面尺寸异常，拒绝批量文字输入。")
+        seller_gui.submit_direct_latin_batch(hwnd, text)
+        # The dialog closes after accepting the queue, not after the arm has
+        # finished it.  The vendor's existing calibrated rate is 0.8 s/key;
+        # wait for that bounded queue before the adapter starts fresh frames.
+        self._sleep(len(text) * wait_per_character)
 
     def validate_verified_text(
         self,

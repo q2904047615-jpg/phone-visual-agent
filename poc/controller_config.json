@@ -28,5 +28,8 @@
     "inter_key_wait": 0.12,
     "pre_key_wait": 0.45,
     "first_key_settle": 0.35
+  },
+  "direct_latin_batch": {
+    "wait_per_character": 0.8
   }
 }

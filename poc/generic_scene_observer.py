@@ -6511,6 +6511,30 @@ def _apply_input_structure_audit(
             == {"label", "bounds", "confidence", "current_mode", "target_mode"}
             and not _valid_1000_bounds(raw_mode_switch.get("bounds"))
         )
+        discardable_mode_switch_semantic_conflict = False
+        if (
+            isinstance(raw_mode_switch, dict)
+            and set(raw_mode_switch)
+            == {"label", "bounds", "confidence", "current_mode", "target_mode"}
+        ):
+            raw_switch_current_mode = raw_mode_switch.get("current_mode")
+            raw_switch_label_mode = _keyboard_mode_implied_by_label(
+                str(raw_mode_switch.get("label") or "").strip()
+            )
+            discardable_mode_switch_semantic_conflict = bool(
+                (
+                    raw_switch_current_mode
+                    in {"direct_latin", "chinese_pinyin"}
+                    and keyboard_input_mode in {"direct_latin", "chinese_pinyin"}
+                    and raw_switch_current_mode != keyboard_input_mode
+                )
+                or (
+                    raw_switch_label_mode is not None
+                    and raw_switch_current_mode
+                    in {"direct_latin", "chinese_pinyin"}
+                    and raw_switch_label_mode != raw_switch_current_mode
+                )
+            )
         if (
             not switch_is_goal
             and not input_needs_mode_switch
@@ -6521,12 +6545,14 @@ def _apply_input_structure_audit(
             and (
                 _is_incomplete_optional_keyboard_mode_switch(raw_mode_switch)
                 or discardable_mode_switch_geometry
+                or discardable_mode_switch_semantic_conflict
             )
         ):
             # The current deterministic segment does not consume this optional
-            # control. Revoke only a missing-field subset or an exact-shaped
-            # claim whose coordinates are invalid. Valid read-only switch facts,
-            # extra protocol fields and semantic contradictions remain strict.
+            # control. Revoke a missing-field subset or an exact-shaped claim
+            # whose coordinates or semantics conflict with the independently
+            # audited whole-keyboard mode. When switching is the actual next
+            # action, the same contradictions remain strict.
             mode_switch = None
         else:
             mode_switch = _validated_keyboard_mode_switch(

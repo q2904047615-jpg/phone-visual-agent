@@ -152,6 +152,10 @@ class FixedAppRetirementTests(unittest.TestCase):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, text)
 
+    def test_robot_has_no_second_direct_latin_character_veto(self) -> None:
+        text = (ROOT / "robot_core.py").read_text(encoding="utf-8")
+        self.assertNotIn("英文分段包含未认证字符", text)
+
     def test_runtime_has_no_fixed_app_workers_or_stores(self) -> None:
         runtime = self.web_app.runtime
         for attribute in (

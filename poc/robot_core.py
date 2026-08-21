@@ -920,8 +920,6 @@ class RobotController:
         if step is None or text != step.segment or input_method != step.kind:
             raise WorkflowNotReady("设备收到的文字分段与本地精确事务不一致。")
         if step.kind == "direct_latin":
-            if not re.fullmatch(r"[A-Za-z]{1,30}", text):
-                raise WorkflowNotReady("英文分段包含未认证字符。")
             if (
                 step.required_case_mode
                 and input_states.get("keyboard_case_mode") != step.required_case_mode
@@ -931,7 +929,7 @@ class RobotController:
             if pinyin != step.pinyin:
                 raise WorkflowNotReady("设备收到的拼音与本地确定性结果不一致。")
         else:
-            raise WorkflowNotReady("数字、空格或符号仍要求独立可见键位审计。")
+            raise WorkflowNotReady("数字或符号仍要求独立可见键位审计。")
         if input_states.get("focused") is not True:
             raise WorkflowNotReady("当前输入框没有可信聚焦证据。")
         if input_states.get("keyboard_layout") != "qwerty":

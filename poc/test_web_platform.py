@@ -768,6 +768,12 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             target_text="agent",
             input_method="direct_latin",
         )
+        controller.validate_verified_text(
+            "first line",
+            valid,
+            target_text="first line\nsecond line",
+            input_method="direct_latin",
+        )
         cases = (
             ({**valid, "value": "old"}, "精确前缀"),
             ({**valid, "keyboard_layout": "symbol"}, "QWERTY"),

@@ -2516,13 +2516,11 @@ class GenericSingleActionAdapter:
                 )
             current = matches[0]
             if current.meaning.casefold() != original.meaning.casefold():
-                if str(
-                    requested.params.get("formal_candidate_id") or ""
-                ).strip():
-                    raise GenericActionAdapterError(
-                        "确认时正式候选 meaning 已变化，旧 authority 失效："
-                        f"{original.meaning} -> {current.meaning}。"
-                    )
+                # ``meaning`` is observation wording, not a second formal
+                # candidate identity.  Formal and non-formal candidates use
+                # the same label/role/state/geometry and semantic-class checks
+                # below, so harmless wording drift cannot regain a veto only
+                # because the candidate also carries formal authority.
                 def semantic_class(meaning: str, label: str) -> str:
                     normalized = str(meaning or "").casefold()
                     if requested.action == "drag" and prefix in {

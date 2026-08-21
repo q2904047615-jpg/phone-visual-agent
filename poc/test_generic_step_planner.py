@@ -3289,7 +3289,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
         self.assertEqual(robot.actions, [])
 
-    def test_rebind_accepts_same_navigation_class_after_model_wording_drift(self):
+    def test_formal_rebind_accepts_same_navigation_class_after_model_wording_drift(self):
         planned = UIScene(
             app_id="unknown",
             screen_id="unknown",
@@ -3337,11 +3337,11 @@ class GenericActionAdapterTests(unittest.TestCase):
             fingerprint="after",
         )
         robot = FakeRobot()
-        result = self._adapter(
-            FakeSceneObserver([fresh, after]),
+        rebound = self._adapter(
+            FakeSceneObserver([]),
             robot,
-        ).execute(
-            requested_action=SemanticAction(
+        )._rebind_action(
+            SemanticAction(
                 node_id="open-browser",
                 action="tap_semantic",
                 params={
@@ -3350,15 +3350,15 @@ class GenericActionAdapterTests(unittest.TestCase):
                     "role": "icon",
                     "label": "浏览器",
                     "states": {"goal_relevant": True},
+                    "formal_candidate_id": "candidate-browser",
                 },
             ),
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
+            planned,
+            fresh,
         )
 
-        self.assertEqual([("tap", 225, 95)], robot.actions)
-        self.assertEqual("launch_browser_app", result.rebound_action.params["target"])
+        self.assertEqual([], robot.actions)
+        self.assertEqual("launch_browser_app", rebound.params["target"])
 
     def test_rebind_accepts_exact_local_gesture_mode_selector_label(self):
         states = {"goal_relevant": True, "fully_visible": True}
@@ -4448,6 +4448,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                         "role": "button",
                         "label": "返回",
                         "states": {"enabled": True},
+                        "formal_candidate_id": "candidate-return",
                     },
                 ),
                 planned_scene=planned,

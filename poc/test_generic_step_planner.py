@@ -9,7 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from capability_acceptance import _validate_live_promotion_source
 from generic_action_adapter import (
@@ -5239,6 +5239,126 @@ class GenericActionAdapterTests(unittest.TestCase):
             (candidate[1] + candidate[2]) / 2 / reference,
             0.80,
         )
+
+    def test_continuous_action_waits_until_camera_returns_to_phone_view(self):
+        reference = textured_phone_frame()
+        off_phone = ImageOps.invert(reference)
+        recovered = reference.copy()
+        ImageDraw.Draw(recovered).rectangle(
+            (180, 300, 360, 340),
+            fill="white",
+            outline="black",
+        )
+        capture = SequenceCapture([off_phone] * 4 + [recovered] * 4)
+        adapter = GenericSingleActionAdapter(
+            capture=capture,
+            observer=FakeSceneObserver([]),
+            robot=FakeRobot(),
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=1,
+            post_action_continuous_timeout=45,
+        )
+
+        frames, _paths = adapter._capture_stable_post_action_frames(
+            deadline=10**9,
+            evidence_dir=None,
+            prefix="camera_returns",
+            clarity_reference_frames=tuple(reference.copy() for _ in range(4)),
+            require_relative_clarity=True,
+            require_phone_view_identity=True,
+        )
+
+        self.assertEqual(8, capture.calls)
+        self.assertEqual(4, len(frames))
+        self.assertEqual(recovered.tobytes(), frames[-1].tobytes())
+
+    def test_stable_off_phone_view_times_out_before_model_observation(self):
+        reference = textured_phone_frame()
+        off_phone = ImageOps.invert(reference)
+        observer = FakeSceneObserver([])
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture([off_phone] * 4),
+            observer=observer,
+            robot=FakeRobot(),
+            frame_interval=0,
+            post_action_settle=0,
+            post_action_timeout=1,
+            post_action_continuous_timeout=45,
+        )
+
+        with patch(
+            "generic_action_adapter.time.monotonic",
+            side_effect=[0.0, 0.0, 0.0, 1.0],
+        ):
+            with self.assertRaisesRegex(
+                GenericActionAdapterError,
+                "相机尚未回到手机取景.*取景差异.*要求最多45.0",
+            ):
+                adapter._capture_stable_post_action_frames(
+                    deadline=0.5,
+                    evidence_dir=None,
+                    prefix="off_phone_timeout",
+                    clarity_reference_frames=tuple(
+                        reference.copy() for _ in range(4)
+                    ),
+                    require_relative_clarity=True,
+                    require_phone_view_identity=True,
+                )
+
+        self.assertEqual(0, observer.calls)
+
+    def test_continuous_actions_receive_adaptive_post_action_budget(self):
+        production_defaults = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"]),
+            observer=FakeSceneObserver([]),
+            robot=FakeRobot(),
+        )
+        self.assertEqual(10, production_defaults.post_action_timeout)
+        self.assertEqual(45, production_defaults.post_action_continuous_timeout)
+
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"]),
+            observer=FakeSceneObserver([]),
+            robot=FakeRobot(),
+            post_action_timeout=10,
+            post_action_continuous_timeout=45,
+        )
+        for kind in (
+            "clear_verified_text",
+            "drag",
+            "input_verified_text",
+            "long_press",
+        ):
+            with self.subTest(kind=kind):
+                resolved = ResolvedSemanticAction(
+                    node_id="continuous",
+                    kind=kind,
+                    expected_effect={},
+                )
+                self.assertTrue(
+                    adapter._requires_post_action_phone_view_identity(resolved)
+                )
+                self.assertEqual(45, adapter._post_action_timeout_for(resolved))
+
+        navigation = ResolvedSemanticAction(
+            node_id="navigation",
+            kind="tap_semantic",
+            expected_effect={"scene_changed": True},
+        )
+        self.assertFalse(
+            adapter._requires_post_action_phone_view_identity(navigation)
+        )
+        self.assertEqual(10, adapter._post_action_timeout_for(navigation))
+
+        explicit_test_budget = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"]),
+            observer=FakeSceneObserver([]),
+            robot=FakeRobot(),
+            post_action_timeout=1,
+        )
+        self.assertEqual(1, explicit_test_budget.post_action_timeout)
+        self.assertEqual(1, explicit_test_budget.post_action_continuous_timeout)
 
     def test_relative_clarity_threshold_separates_observed_input_samples(self):
         adapter = GenericSingleActionAdapter(

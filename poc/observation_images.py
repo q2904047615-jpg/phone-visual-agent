@@ -491,6 +491,44 @@ def measure_local_stability(
     )
 
 
+def measure_static_band_identity_delta(
+    reference_frames: list[Image.Image] | tuple[Image.Image, ...],
+    candidate_frames: list[Image.Image] | tuple[Image.Image, ...],
+) -> float:
+    """Compare camera framing while tolerating changes in central App content.
+
+    The outer-band descriptor deliberately excludes most of the editable or
+    scrollable center.  Each candidate is matched to its closest fresh
+    pre-action reference, then the median candidate distance is returned so a
+    single transient frame cannot establish camera-return authority.
+    """
+
+    references = tuple(reference_frames)
+    candidates = tuple(candidate_frames)
+    if not references or not candidates:
+        raise ValueError("取景身份比较需要动作前后真实帧。")
+    sizes = {frame.size for frame in references + candidates}
+    if len(sizes) != 1:
+        raise ValueError("取景身份比较的动作前后画面尺寸不一致。")
+    reference_sheets = tuple(_static_band_sheet(frame) for frame in references)
+    candidate_sheets = tuple(_static_band_sheet(frame) for frame in candidates)
+    nearest_deltas = sorted(
+        min(
+            float(
+                ImageStat.Stat(
+                    ImageChops.difference(candidate, reference)
+                ).mean[0]
+            )
+            for reference in reference_sheets
+        )
+        for candidate in candidate_sheets
+    )
+    middle = len(nearest_deltas) // 2
+    if len(nearest_deltas) % 2:
+        return nearest_deltas[middle]
+    return (nearest_deltas[middle - 1] + nearest_deltas[middle]) / 2.0
+
+
 def measure_frame_sharpness(image: Image.Image) -> float:
     """Return a local, content-agnostic sharpness score for frame selection.
 

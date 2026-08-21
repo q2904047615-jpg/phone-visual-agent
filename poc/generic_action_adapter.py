@@ -29,7 +29,11 @@ from input_value_lineage import (
     build_pending_text_lineage,
 )
 from ocr_runtime import recognize as recognize_ocr
-from observation_images import measure_frame_sharpness, measure_local_stability
+from observation_images import (
+    measure_frame_sharpness,
+    measure_local_stability,
+    measure_static_band_identity_delta,
+)
 from orientation_safety import (
     OrientationCredential,
     OrientationFrameMismatchError,
@@ -694,10 +698,12 @@ class GenericSingleActionAdapter:
         controller: UniversalActionController | None = None,
         frame_interval: float = 0.5,
         post_action_settle: float = 1.5,
-        post_action_timeout: float = 10.0,
+        post_action_timeout: float | None = None,
+        post_action_continuous_timeout: float | None = None,
         post_action_max_observations: int = 2,
         post_action_min_relative_sharpness: float = 0.80,
         post_action_min_reference_sharpness: float = 2.0,
+        post_action_phone_view_delta_max: float = 45.0,
         confirmation_frame_delta_max: float = 6.0,
         qwerty_row_snapper: Callable[
             [tuple[Image.Image, ...] | list[Image.Image], dict[str, Any]],
@@ -714,7 +720,21 @@ class GenericSingleActionAdapter:
         self.controller = controller or UniversalActionController()
         self.frame_interval = max(0.0, float(frame_interval))
         self.post_action_settle = max(0.0, float(post_action_settle))
-        self.post_action_timeout = max(0.0, float(post_action_timeout))
+        self.post_action_timeout = max(
+            0.0,
+            10.0 if post_action_timeout is None else float(post_action_timeout),
+        )
+        self.post_action_continuous_timeout = max(
+            self.post_action_timeout,
+            (
+                45.0
+                if post_action_continuous_timeout is None
+                and post_action_timeout is None
+                else self.post_action_timeout
+                if post_action_continuous_timeout is None
+                else float(post_action_continuous_timeout)
+            ),
+        )
         self.post_action_max_observations = min(
             2,
             max(1, int(post_action_max_observations)),
@@ -726,6 +746,10 @@ class GenericSingleActionAdapter:
         self.post_action_min_reference_sharpness = max(
             0.0,
             float(post_action_min_reference_sharpness),
+        )
+        self.post_action_phone_view_delta_max = max(
+            0.0,
+            float(post_action_phone_view_delta_max),
         )
         self.confirmation_frame_delta_max = max(
             0.0,
@@ -892,6 +916,25 @@ class GenericSingleActionAdapter:
             and element_state.get("meaning") == "application_text_input"
         )
 
+    @staticmethod
+    def _requires_post_action_phone_view_identity(
+        resolved: ResolvedSemanticAction,
+    ) -> bool:
+        return resolved.kind in {
+            "clear_verified_text",
+            "drag",
+            "input_verified_text",
+            "long_press",
+        }
+
+    def _post_action_timeout_for(
+        self,
+        resolved: ResolvedSemanticAction,
+    ) -> float:
+        if self._requires_post_action_phone_view_identity(resolved):
+            return self.post_action_continuous_timeout
+        return self.post_action_timeout
+
     def _capture_stable_post_action_frames(
         self,
         *,
@@ -900,6 +943,7 @@ class GenericSingleActionAdapter:
         prefix: str,
         clarity_reference_frames: tuple[Image.Image, ...] = (),
         require_relative_clarity: bool = False,
+        require_phone_view_identity: bool = False,
     ) -> tuple[list[Image.Image], tuple[str, ...]]:
         """Wait for four stable, and when required relatively clear, frames.
 
@@ -917,15 +961,25 @@ class GenericSingleActionAdapter:
                 measure_frame_sharpness(frame)
                 for frame in clarity_reference_frames
             )
-            if require_relative_clarity and clarity_reference_frames
+            if (
+                require_relative_clarity or require_phone_view_identity
+            )
+            and clarity_reference_frames
             else None
         )
         clarity_is_comparable = bool(
-            reference_sharpness is not None
+            require_relative_clarity
+            and reference_sharpness is not None
+            and reference_sharpness >= self.post_action_min_reference_sharpness
+        )
+        phone_view_is_comparable = bool(
+            require_phone_view_identity
+            and reference_sharpness is not None
             and reference_sharpness >= self.post_action_min_reference_sharpness
         )
         last_candidate_sharpness: float | None = None
         last_relative_sharpness: float | None = None
+        last_phone_view_delta: float | None = None
         while True:
             frames.append(self._capture_frame())
             if len(frames) > 4:
@@ -945,7 +999,17 @@ class GenericSingleActionAdapter:
                             last_relative_sharpness
                             >= self.post_action_min_relative_sharpness
                         )
-                    if clarity_accepted:
+                    phone_view_accepted = True
+                    if phone_view_is_comparable:
+                        last_phone_view_delta = measure_static_band_identity_delta(
+                            clarity_reference_frames,
+                            frames,
+                        )
+                        phone_view_accepted = (
+                            last_phone_view_delta
+                            <= self.post_action_phone_view_delta_max
+                        )
+                    if clarity_accepted and phone_view_accepted:
                         paths = self._save_frames(frames, evidence_dir, prefix)
                         return list(frames), paths
                 if time.monotonic() >= deadline:
@@ -954,6 +1018,19 @@ class GenericSingleActionAdapter:
                         evidence_dir,
                         f"{prefix}_timeout",
                     )
+                    if (
+                        last_stability.stable
+                        and last_phone_view_delta is not None
+                        and last_phone_view_delta
+                        > self.post_action_phone_view_delta_max
+                    ):
+                        raise GenericActionAdapterError(
+                            "动作后画面已稳定但相机尚未回到手机取景："
+                            f"取景差异{last_phone_view_delta:.1f}，"
+                            "要求最多"
+                            f"{self.post_action_phone_view_delta_max:.1f}",
+                            evidence=paths,
+                        )
                     if (
                         last_stability.stable
                         and last_relative_sharpness is not None
@@ -1013,8 +1090,9 @@ class GenericSingleActionAdapter:
         tuple[str, ...],
         tuple[str, ...],
     ]:
+        action_timeout = self._post_action_timeout_for(resolved)
         if self.post_action_settle:
-            time.sleep(min(self.post_action_settle, self.post_action_timeout))
+            time.sleep(min(self.post_action_settle, action_timeout))
 
         all_paths: tuple[str, ...] = ()
         observation_errors: list[str] = []
@@ -1022,7 +1100,7 @@ class GenericSingleActionAdapter:
         last_error: Exception | None = None
         observation_context = _post_action_observation_context(goal, resolved)
         for attempt in range(1, self.post_action_max_observations + 1):
-            attempt_deadline = time.monotonic() + self.post_action_timeout
+            attempt_deadline = time.monotonic() + action_timeout
             try:
                 frames, paths = self._capture_stable_post_action_frames(
                     deadline=attempt_deadline,
@@ -1031,6 +1109,9 @@ class GenericSingleActionAdapter:
                     clarity_reference_frames=before_frames,
                     require_relative_clarity=(
                         self._requires_post_action_relative_clarity(resolved)
+                    ),
+                    require_phone_view_identity=(
+                        self._requires_post_action_phone_view_identity(resolved)
                     ),
                 )
             except GenericActionAdapterError as exc:

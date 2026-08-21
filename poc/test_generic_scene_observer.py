@@ -3719,6 +3719,92 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
         self.assertTrue(observer.last_diagnostics["input_structure_audit_retry_used"])
 
+    def test_read_only_input_locator_retries_from_unique_compact_field_hint(
+        self,
+    ) -> None:
+        first = scene_payload()
+        first["elements"][0].update(
+            {
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "正文",
+                "bounds": [130, 590, 870, 740],
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "focused": True,
+                    "value": "",
+                },
+            }
+        )
+        recovered = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="multiline-field",
+                    bounds=[130, 80, 870, 230],
+                    text="",
+                    placeholder="正文",
+                )
+            ]
+        )
+        provider = SequenceProvider(
+            [first, input_audit_payload(application_inputs=[]), recovered]
+        )
+        context = {
+            "objective": "输入两行文本",
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "locate_input",
+                    "objective": "定位当前页面唯一的多行输入框，并确认其可见",
+                    "constraints": ["不得点击或输入"],
+                    "completion_conditions": ["当前页面唯一的多行输入框可见"],
+                    "execution_class": "observe",
+                    "goal_entities": {
+                        "input_text": "first line\nsecond line",
+                        "target_ui_label": "多行输入框",
+                    },
+                }
+            },
+        }
+
+        scene = GenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context=context,
+        )
+
+        self.assertEqual(3, provider.calls)
+        self.assertEqual(
+            "local_audited_input_1",
+            scene.unique_trusted_goal_element().element_id,
+        )
+
+    def test_non_input_subgoal_cannot_reuse_future_input_crop_hint(self) -> None:
+        context = {
+            "objective": "输入文本后刷新页面",
+            "entities": {
+                "input_text": "future text",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "reload",
+                    "objective": "刷新当前页面",
+                    "constraints": [],
+                    "completion_conditions": ["页面刷新完成"],
+                    "execution_class": "navigate",
+                    "goal_entities": {"input_text": "future text"},
+                },
+            },
+        }
+
+        self.assertIsNone(
+            _input_audit_retry_roi(
+                context,
+                preliminary_input_bounds_hint=(130, 590, 870, 740),
+                first_audit_raw=json.dumps(
+                    input_audit_payload(application_inputs=[]),
+                    ensure_ascii=False,
+                ),
+            )
+        )
+
     def test_empty_input_audit_retry_keeps_keyboard_panned_field_in_crop(
         self,
     ) -> None:
@@ -8546,6 +8632,345 @@ class GenericSceneObserverTests(unittest.TestCase):
                     goal_context=context,
                     coarse_input_value=prefix,
                 )
+
+    def test_local_ocr_rows_repair_compressed_qwerty_before_input_authorization(
+        self,
+    ) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="f" * 64,
+        )
+        context = {
+            "objective": "在唯一输入框输入 agent",
+            "entities": {"input_text": "agent"},
+        }
+        audit = input_audit_payload(
+            application_inputs=[audited_application_input(text="", placeholder="输入")],
+            keyboard={
+                "visible": True,
+                "bounds": [50, 830, 950, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [110, 895],
+                    "p": [890, 895],
+                    "a": [160, 945],
+                    "l": [840, 945],
+                    "z": [260, 990],
+                    "m": [740, 990],
+                    "backspace": [890, 990],
+                },
+                "mode_switch": None,
+            },
+        )
+        snapped = {
+            "q": [110, 704],
+            "p": [890, 704],
+            "a": [160, 774],
+            "l": [840, 774],
+            "z": [260, 844],
+            "m": [740, 844],
+            "backspace": [890, 844],
+        }
+
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="",
+            qwerty_row_snapper=lambda _frames, _anchors: snapped,
+            qwerty_row_frames=stable_frames()[-3:],
+        )
+
+        geometry = projected.get_element(
+            "local_audited_input_1"
+        ).states["keyboard_geometry"]
+        self.assertEqual("input_structure_audit", geometry["source"])
+        self.assertEqual(snapped, geometry["anchors"])
+
+    def test_invalid_keyboard_bounds_still_fail_without_local_row_evidence(
+        self,
+    ) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="f" * 64,
+        )
+        audit = input_audit_payload(
+            application_inputs=[audited_application_input(text="", placeholder="输入")],
+            keyboard={
+                "visible": True,
+                "bounds": [50, 830, 950, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "qwerty_anchors": {
+                    "q": [110, 895],
+                    "p": [890, 895],
+                    "a": [160, 945],
+                    "l": [840, 945],
+                    "z": [260, 990],
+                    "m": [740, 990],
+                    "backspace": [890, 990],
+                },
+                "mode_switch": None,
+            },
+        )
+
+        with self.assertRaisesRegex(VisionAgentError, "可见键盘必须提供有效 bounds"):
+            _apply_input_structure_audit(
+                base,
+                json.dumps(audit, ensure_ascii=False),
+                fingerprint="f" * 64,
+                goal_context={
+                    "objective": "在唯一输入框输入 agent",
+                    "entities": {"input_text": "agent"},
+                },
+                coarse_input_value="",
+                qwerty_row_snapper=lambda _frames, _anchors: None,
+                qwerty_row_frames=stable_frames()[-3:],
+            )
+
+    def test_multiline_contract_accepts_tall_field_but_single_line_does_not(
+        self,
+    ) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="f" * 64,
+        )
+        tall_input = audited_application_input(
+            bounds=[130, 240, 870, 590],
+            text="",
+            placeholder="正文",
+            field_labels=["正文"],
+        )
+        keyboard = {
+            "visible": True,
+            "bounds": [50, 630, 980, 1000],
+            "layout": "qwerty",
+            "input_mode": "direct_latin",
+            "case_mode": "lower",
+            "qwerty_anchors": {
+                "q": [110, 760],
+                "p": [890, 760],
+                "a": [160, 840],
+                "l": [840, 840],
+                "z": [260, 920],
+                "m": [740, 920],
+                "backspace": [890, 920],
+            },
+            "mode_switch": None,
+        }
+        raw = json.dumps(
+            input_audit_payload(
+                application_inputs=[tall_input],
+                keyboard=keyboard,
+            ),
+            ensure_ascii=False,
+        )
+        multiline_context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "enter_text",
+                    "objective": "输入两行文本",
+                    "constraints": [],
+                    "completion_conditions": [],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "input_text": "first line\nsecond line",
+                        "active_input_transaction_text": "first line\nsecond line",
+                        "active_input_field_id": "input_field_1",
+                        "active_input_multiline": True,
+                    },
+                }
+            }
+        }
+
+        projected = _apply_input_structure_audit(
+            base,
+            raw,
+            fingerprint="f" * 64,
+            goal_context=multiline_context,
+            coarse_input_value="",
+        )
+
+        field = projected.get_element("local_audited_input_1")
+        self.assertEqual((0.13, 0.24, 0.87, 0.59), field.bounds)
+        self.assertTrue(field.states["input_multiline"])
+
+        single_line_context = json.loads(json.dumps(multiline_context))
+        single_entities = single_line_context["entities"][
+            "active_subgoal_visual_context"
+        ]["goal_entities"]
+        single_entities["input_text"] = "first line"
+        single_entities["active_input_transaction_text"] = "first line"
+        single_entities["active_input_multiline"] = False
+        rejected = _apply_input_structure_audit(
+            base,
+            raw,
+            fingerprint="f" * 64,
+            goal_context=single_line_context,
+            coarse_input_value="",
+        )
+        self.assertFalse(
+            any(item.element_id == "local_audited_input_1" for item in rejected.elements)
+        )
+
+    def test_newline_locator_can_recover_tall_multiline_field_without_action_identity(
+        self,
+    ) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="f" * 64,
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[130, 240, 870, 590],
+                    text="",
+                    placeholder="正文",
+                )
+            ]
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "locate_input",
+                    "objective": "定位唯一多行输入框",
+                    "constraints": ["不得点击或输入"],
+                    "completion_conditions": ["多行输入框可见"],
+                    "execution_class": "observe",
+                    "goal_entities": {
+                        "input_text": "first line\nsecond line",
+                        "target_ui_label": "多行输入框",
+                    },
+                }
+            }
+        }
+
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="",
+        )
+
+        field = projected.get_element("local_audited_input_1")
+        self.assertNotIn("input_field_id", field.states)
+        self.assertEqual((0.13, 0.24, 0.87, 0.59), field.bounds)
+
+    def test_direct_segment_discards_invalid_unused_keyboard_controls(self) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="f" * 64,
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[135, 490, 860, 730],
+                    text="",
+                    placeholder="正文",
+                    field_labels=["正文"],
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [60, 830, 990, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [110, 915],
+                    "p": [880, 915],
+                    "a": [150, 955],
+                    "l": [810, 955],
+                    "z": [250, 990],
+                    "m": [730, 990],
+                    "backspace": [900, 990],
+                },
+                "mode_switch": {
+                    "label": "英",
+                    "bounds": [710, 1160, 790, 1200],
+                    "confidence": 1.0,
+                    "current_mode": "direct_latin",
+                    "target_mode": "chinese_pinyin",
+                },
+                "backspace_key": {
+                    "label": "",
+                    "bounds": [860, 1140, 960, 1200],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                },
+                "enter_key": {
+                    "label": "↵",
+                    "bounds": [860, 1210, 960, 1270],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                    "key_action": "newline",
+                },
+                "case_switch": {
+                    "label": "⇧",
+                    "bounds": [60, 1140, 160, 1200],
+                    "confidence": 1.0,
+                    "current_mode": "lower",
+                    "target_mode": "upper",
+                },
+                "literal_keys": [],
+                "layout_switches": [
+                    {
+                        "label": "123",
+                        "bounds": [210, 1210, 310, 1270],
+                        "confidence": 1.0,
+                        "current_layout": "qwerty",
+                        "target_layout": "numeric",
+                    }
+                ],
+            },
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "enter_text",
+                    "objective": "输入两行文本",
+                    "constraints": [],
+                    "completion_conditions": [],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "input_text": "first line\nsecond line",
+                        "active_input_transaction_text": "first line\nsecond line",
+                        "active_input_field_id": "input_field_1",
+                        "active_input_multiline": True,
+                    },
+                }
+            }
+        }
+        snapped = {
+            "q": [110, 708],
+            "p": [880, 708],
+            "a": [150, 780],
+            "l": [810, 780],
+            "z": [250, 853],
+            "m": [730, 853],
+            "backspace": [900, 853],
+        }
+
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="",
+            qwerty_row_snapper=lambda _frames, _anchors: snapped,
+            qwerty_row_frames=stable_frames()[-3:],
+        )
+
+        field = projected.get_element("local_audited_input_1")
+        self.assertTrue(field.states["goal_relevant"])
+        self.assertEqual(snapped, field.states["keyboard_geometry"]["anchors"])
+        self.assertFalse(
+            any(item.element_id.startswith("local_audited_keyboard_") for item in projected.elements)
+        )
 
     def test_input_audit_rejects_protocol_external_fields(self) -> None:
         empty = scene_payload()

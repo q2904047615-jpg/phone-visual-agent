@@ -1613,6 +1613,74 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(844, snapped["z"][1])
         self.assertEqual(844, snapped["backspace"][1])
 
+    def test_stable_local_ocr_repairs_vertically_compressed_model_rows(self):
+        payload = {
+            "lines": [
+                {
+                    "words": [
+                        {"text": "q", "top": 1000, "height": 24},
+                        {"text": "w", "top": 1002, "height": 22},
+                        {"text": "e", "top": 1001, "height": 24},
+                        {"text": "c", "top": 1204, "height": 22},
+                        {"text": "v", "top": 1203, "height": 24},
+                        {"text": "b", "top": 1205, "height": 22},
+                    ]
+                }
+            ]
+        }
+        frames = [Image.new("RGB", (810, 1440), "gray") for _ in range(3)]
+        compressed = {
+            "q": [110, 895],
+            "p": [890, 895],
+            "a": [160, 945],
+            "l": [840, 945],
+            "z": [260, 990],
+            "m": [740, 990],
+            "backspace": [890, 990],
+        }
+
+        snapped = stable_qwerty_ocr_anchors(
+            frames,
+            compressed,
+            ocr_recognizer=lambda *_args, **_kwargs: payload,
+        )
+
+        self.assertIsNotNone(snapped)
+        self.assertEqual(703, snapped["q"][1])
+        self.assertEqual(774, snapped["a"][1])
+        self.assertEqual(844, snapped["z"][1])
+
+    def test_stable_local_ocr_rejects_incomplete_row_evidence(self):
+        payload = {
+            "lines": [
+                {
+                    "words": [
+                        {"text": "q", "top": 1000, "height": 24},
+                        {"text": "w", "top": 1002, "height": 22},
+                        {"text": "z", "top": 1204, "height": 22},
+                    ]
+                }
+            ]
+        }
+        frames = [Image.new("RGB", (810, 1440), "gray") for _ in range(3)]
+        compressed = {
+            "q": [110, 895],
+            "p": [890, 895],
+            "a": [160, 945],
+            "l": [840, 945],
+            "z": [260, 990],
+            "m": [740, 990],
+            "backspace": [890, 990],
+        }
+
+        self.assertIsNone(
+            stable_qwerty_ocr_anchors(
+                frames,
+                compressed,
+                ocr_recognizer=lambda *_args, **_kwargs: payload,
+            )
+        )
+
     def _assert_public_observation_failure_before_robot(self, responses):
         provider = RawSceneProvider(responses)
         robot = FakeRobot()

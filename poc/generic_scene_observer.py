@@ -8,7 +8,7 @@ import statistics
 import threading
 import time
 from dataclasses import replace
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from PIL import Image, ImageChops, ImageFilter
 
@@ -64,7 +64,7 @@ from system_navigation_privacy import (
 )
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-19-generic-scene-observer-v62"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-21-generic-scene-observer-v66"
 POST_NAVIGATION_RESULT_OBSERVATION_PHASE = "verified_navigation_result_v1"
 POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
 POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被重新观察"]
@@ -222,9 +222,15 @@ class GenericSceneObserver:
         provider: Any,
         *,
         input_lineage_store: TypedInputLineageStore | None = None,
+        qwerty_row_snapper: Callable[
+            [list[Image.Image] | tuple[Image.Image, ...], dict[str, Any]],
+            dict[str, list[int]] | None,
+        ]
+        | None = None,
     ) -> None:
         self.provider = provider
         self.input_lineage_store = input_lineage_store
+        self.qwerty_row_snapper = qwerty_row_snapper
         self.last_raw_response = ""
         self.last_diagnostics: dict[str, Any] = {}
         self._stage_lock = threading.RLock()
@@ -1231,6 +1237,8 @@ class GenericSceneObserver:
                             verified_input_lineage=verified_input_lineage,
                             device_id=device_id,
                             lineage_frame=frame,
+                            qwerty_row_snapper=self.qwerty_row_snapper,
+                            qwerty_row_frames=frames[stable_tail_start:],
                         ),
                         visual_obstructions,
                         fingerprint=fingerprint,
@@ -1297,6 +1305,8 @@ class GenericSceneObserver:
                                 verified_input_lineage=verified_input_lineage,
                                 device_id=device_id,
                                 lineage_frame=frame,
+                                qwerty_row_snapper=self.qwerty_row_snapper,
+                                qwerty_row_frames=frames[stable_tail_start:],
                             ),
                             visual_obstructions,
                             fingerprint=fingerprint,
@@ -4001,7 +4011,7 @@ def _input_audit_retry_roi(
     if goal_roi is not None:
         return goal_roi
     if (
-        not _goal_active_input_transaction_text(context)
+        not _goal_requests_input(context)
         or preliminary_input_bounds_hint is None
     ):
         return None
@@ -5629,9 +5639,13 @@ def _input_audit_established_local_target(scene: UIScene) -> bool:
     """Return true only for authority minted by the dedicated input audit."""
 
     local_ids = {
-            "local_audited_input_1",
-            "local_audited_keyboard_mode_switch_1",
-            "local_audited_ime_candidate_1",
+        "local_audited_input_1",
+        "local_audited_keyboard_mode_switch_1",
+        "local_audited_ime_candidate_1",
+        "local_audited_literal_key_1",
+        "local_audited_enter_key_1",
+        "local_audited_keyboard_layout_switch_1",
+        "local_audited_keyboard_case_switch_1",
     }
     candidates = tuple(
         element
@@ -5887,6 +5901,12 @@ def _apply_input_structure_audit(
     verified_input_lineage: TypedInputLineage | None = None,
     device_id: str | None = None,
     lineage_frame: Image.Image | None = None,
+    qwerty_row_snapper: Callable[
+        [list[Image.Image] | tuple[Image.Image, ...], dict[str, Any]],
+        dict[str, list[int]] | None,
+    ]
+    | None = None,
+    qwerty_row_frames: list[Image.Image] | tuple[Image.Image, ...] | None = None,
 ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
@@ -5950,6 +5970,18 @@ def _apply_input_structure_audit(
             raise UISceneError("输入结构审计 keyboard.input_mode 无效。")
         if keyboard_case_mode not in {"lower", "upper", "unknown"}:
             raise UISceneError("输入结构审计 keyboard.case_mode 无效。")
+        locally_snapped_qwerty_anchors: dict[str, list[int]] | None = None
+        if (
+            keyboard_visible is True
+            and keyboard_layout == "qwerty"
+            and callable(qwerty_row_snapper)
+            and qwerty_row_frames is not None
+            and isinstance(keyboard.get("qwerty_anchors"), dict)
+        ):
+            locally_snapped_qwerty_anchors = qwerty_row_snapper(
+                qwerty_row_frames,
+                keyboard["qwerty_anchors"],
+            )
         keyboard_bounds: tuple[float, float, float, float] | None = None
         boundsless_keyboard_dismissal = False
         typed_prefix_verification_only = False
@@ -5961,6 +5993,24 @@ def _apply_input_structure_audit(
                     keyboard_bounds[2] - keyboard_bounds[0] >= 300
                     and keyboard_bounds[3] - keyboard_bounds[1] >= 180
                 )
+                if (
+                    not valid_keyboard_bounds
+                    and keyboard_bounds[2] - keyboard_bounds[0] >= 300
+                    and locally_snapped_qwerty_anchors is not None
+                ):
+                    local_row_y = [
+                        float(point[1])
+                        for point in locally_snapped_qwerty_anchors.values()
+                    ]
+                    keyboard_bounds = (
+                        keyboard_bounds[0],
+                        min(keyboard_bounds[1], min(local_row_y)),
+                        keyboard_bounds[2],
+                        max(keyboard_bounds[3], max(local_row_y)),
+                    )
+                    valid_keyboard_bounds = bool(
+                        keyboard_bounds[3] - keyboard_bounds[1] >= 180
+                    )
             if not valid_keyboard_bounds:
                 if _typed_prefix_input_survives_invalid_keyboard_geometry(
                     application_inputs,
@@ -6082,6 +6132,16 @@ def _apply_input_structure_audit(
                     }
                 )
 
+        active_field_id, active_field_label, active_multiline = (
+            _goal_active_input_field(goal_context)
+        )
+        explicit_input_text = _goal_explicit_input_text(goal_context)
+        multiline_input_contract = bool(
+            active_multiline
+            or "\n" in explicit_input_text
+            or "\r" in explicit_input_text
+        )
+        maximum_input_height = 600 if multiline_input_contract else 180
         matches: list[dict[str, Any]] = []
         for item in application_inputs:
             required_input_fields = {
@@ -6154,7 +6214,7 @@ def _apply_input_structure_audit(
                 bounds[1] <= 10
                 or bounds[3] >= 990
                 or width < 240
-                or not 20 <= height <= 180
+                or not 20 <= height <= maximum_input_height
                 or (
                     keyboard_bounds is not None
                     and _bounds_overlap_ratio(bounds, keyboard_bounds) >= 0.25
@@ -6210,9 +6270,6 @@ def _apply_input_structure_audit(
             )
 
         switch_is_goal = _goal_requests_keyboard_mode_switch(goal_context)
-        active_field_id, active_field_label, active_multiline = (
-            _goal_active_input_field(goal_context)
-        )
         if active_field_label:
             field_matches = [
                 item
@@ -6361,8 +6418,9 @@ def _apply_input_structure_audit(
             ):
                 raise UISceneError("QWERTY anchors 必须绑定完整可见的 QWERTY 键盘。")
             qwerty_geometry = _validated_qwerty_keyboard_geometry(
-                raw_qwerty_anchors,
+                locally_snapped_qwerty_anchors or raw_qwerty_anchors,
                 keyboard_bounds=keyboard_bounds,
+                locally_snapped=locally_snapped_qwerty_anchors is not None,
             )
         raw_backspace_key = keyboard.get("backspace_key")
         if (
@@ -6395,24 +6453,28 @@ def _apply_input_structure_audit(
             and keyboard_input_mode != input_step.required_mode
         )
         switch_is_goal = switch_is_goal or input_needs_mode_switch
+        discardable_mode_switch_geometry = bool(
+            isinstance(raw_mode_switch, dict)
+            and set(raw_mode_switch)
+            == {"label", "bounds", "confidence", "current_mode", "target_mode"}
+            and not _valid_1000_bounds(raw_mode_switch.get("bounds"))
+        )
         if (
             not switch_is_goal
+            and not input_needs_mode_switch
             and trusted_input is not None
             and keyboard_visible
             and keyboard_layout == "qwerty"
             and keyboard_input_mode in {"direct_latin", "chinese_pinyin"}
-            and _is_incomplete_optional_keyboard_mode_switch(raw_mode_switch)
+            and (
+                _is_incomplete_optional_keyboard_mode_switch(raw_mode_switch)
+                or discardable_mode_switch_geometry
+            )
         ):
-            # A text-entry target does not consume the keyboard switch. When
-            # the current input and a known QWERTY keyboard state are independently
-            # proven, discard only an incomplete subset of the optional switch
-            # schema. This applies both before input (empty value) and while
-            # verifying the exact non-empty result. Action authorization still
-            # requires an empty value plus direct_latin in
-            # UniversalActionController, so discarding this unused optional object
-            # cannot authorize typing in chinese_pinyin. Extra fields, malformed
-            # geometry and all switch goals reach strict validation below and fail
-            # closed.
+            # The current deterministic segment does not consume this optional
+            # control. Revoke only a missing-field subset or an exact-shaped
+            # claim whose coordinates are invalid. Valid read-only switch facts,
+            # extra protocol fields and semantic contradictions remain strict.
             mode_switch = None
         else:
             mode_switch = _validated_keyboard_mode_switch(
@@ -6464,8 +6526,23 @@ def _apply_input_structure_audit(
             keyboard_bounds=keyboard_bounds,
             current_layout=keyboard_layout,
         )
+        input_needs_case_switch = bool(
+            input_step is not None
+            and input_step.kind == "direct_latin"
+            and bool(input_step.required_case_mode)
+            and keyboard_case_mode != input_step.required_case_mode
+        )
+        raw_case_switch = keyboard.get("case_switch")
+        if (
+            not input_needs_case_switch
+            and isinstance(raw_case_switch, dict)
+            and set(raw_case_switch)
+            == {"label", "bounds", "confidence", "current_mode", "target_mode"}
+            and not _valid_1000_bounds(raw_case_switch.get("bounds"))
+        ):
+            raw_case_switch = None
         case_switch = _validated_keyboard_case_switch(
-            keyboard.get("case_switch"),
+            raw_case_switch,
             keyboard_bounds=keyboard_bounds,
             keyboard_layout=keyboard_layout,
             keyboard_input_mode=keyboard_input_mode,
@@ -7030,6 +7107,7 @@ def _validated_qwerty_keyboard_geometry(
     value: Any,
     *,
     keyboard_bounds: tuple[float, float, float, float],
+    locally_snapped: bool = False,
 ) -> dict[str, Any]:
     """Mint a locally checked execution profile from current-frame facts."""
 
@@ -7051,9 +7129,14 @@ def _validated_qwerty_keyboard_geometry(
         ):
             raise UISceneError(f"QWERTY anchor {key} 格式无效。")
         x, y = float(point[0]), float(point[1])
-        if not (
+        within_horizontal_bounds = (
             keyboard_bounds[0] - 20 <= x <= keyboard_bounds[2] + 20
-            and keyboard_bounds[1] - 20 <= y <= keyboard_bounds[3] + 20
+        )
+        within_vertical_bounds = (
+            keyboard_bounds[1] - 20 <= y <= keyboard_bounds[3] + 20
+        )
+        if not within_horizontal_bounds or (
+            not locally_snapped and not within_vertical_bounds
         ):
             raise UISceneError(f"QWERTY anchor {key} 不在已审计键盘区域内。")
         normalized[key] = [round(x), round(y)]

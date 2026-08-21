@@ -364,6 +364,7 @@ class Runtime:
         self.generic_scene_observer = GenericSceneObserver(
             self.vision_provider,
             input_lineage_store=self.input_lineage_store,
+            qwerty_row_snapper=stable_qwerty_ocr_anchors,
         )
         self.generic_step_planner = GenericStepPlanner(self.intent_provider)
         self.deepseek_task_graph_planner = DeepSeekTaskGraphPlanner(

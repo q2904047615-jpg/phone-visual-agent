@@ -1238,6 +1238,7 @@ class GenericSceneObserver:
                     input_retry_roi = _input_audit_retry_roi(
                         context,
                         preliminary_input_bounds_hint=preliminary_input_bounds_hint,
+                        first_audit_raw=raw,
                     )
                     if (
                         _goal_has_explicit_input_text(context)
@@ -3988,6 +3989,7 @@ def _input_audit_retry_roi(
     context: dict[str, Any],
     *,
     preliminary_input_bounds_hint: tuple[int, int, int, int] | None,
+    first_audit_raw: str | None = None,
 ) -> tuple[int, int, int, int] | None:
     """Choose one detail crop without granting compact geometry authority."""
 
@@ -3999,7 +4001,47 @@ def _input_audit_retry_roi(
         or preliminary_input_bounds_hint is None
     ):
         return None
-    top = max(0, preliminary_input_bounds_hint[1] - 120)
+    top_candidates = [preliminary_input_bounds_hint[1] - 120]
+    # Focusing an input can pan the App content upward while a compact scene
+    # still reports the pre-focus field box.  When the first dedicated audit
+    # independently proves a complete keyboard, use only that broad keyboard
+    # geometry to widen the retry crop above it.  The keyboard hint never
+    # mints an input target or executable coordinates; the retry must still
+    # re-establish the complete field and keyboard in its own local audit.
+    try:
+        first_payload = (
+            _extract_json_object(first_audit_raw)
+            if isinstance(first_audit_raw, str) and first_audit_raw.strip()
+            else None
+        )
+    except (VisionAgentError, ValueError, TypeError):
+        first_payload = None
+    if (
+        isinstance(first_payload, dict)
+        and first_payload.get("protocol_version")
+        == INPUT_STRUCTURE_AUDIT_VERSION
+    ):
+        keyboard = first_payload.get("keyboard")
+        keyboard_bounds = (
+            keyboard.get("bounds") if isinstance(keyboard, dict) else None
+        )
+        if (
+            isinstance(keyboard, dict)
+            and keyboard.get("visible") is True
+            and _valid_1000_bounds(keyboard_bounds)
+        ):
+            left, keyboard_top, right, keyboard_bottom = (
+                round(float(value)) for value in keyboard_bounds
+            )
+            keyboard_width = right - left
+            keyboard_height = keyboard_bottom - keyboard_top
+            if keyboard_width >= 300 and keyboard_height >= 180:
+                upward_context = max(
+                    240,
+                    min(420, round(keyboard_height * 0.8)),
+                )
+                top_candidates.append(keyboard_top - upward_context)
+    top = max(0, min(top_candidates))
     # A crop must materially improve resolution and must include the complete
     # keyboard below the coarse field.  The dedicated audit independently
     # re-establishes all actionable bounds inside the crop.

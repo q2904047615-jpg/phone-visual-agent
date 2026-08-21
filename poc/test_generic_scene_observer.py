@@ -27,6 +27,7 @@ from generic_scene_observer import (
     _foreground_app_identity_audit_prompt,
     _goal_requests_input,
     _input_audit_literal_key_targets,
+    _input_audit_retry_roi,
     _input_structure_audit_prompt,
     _apply_input_structure_audit,
     _map_input_structure_crop_audit_to_full,
@@ -3706,6 +3707,163 @@ class GenericSceneObserverTests(unittest.TestCase):
             scene.unique_trusted_goal_element().bounds,
         )
         self.assertTrue(observer.last_diagnostics["input_structure_audit_retry_used"])
+
+    def test_empty_input_audit_retry_keeps_keyboard_panned_field_in_crop(
+        self,
+    ) -> None:
+        first = scene_payload()
+        first["elements"][0].update(
+            {
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "长文本",
+                "bounds": [135, 590, 860, 690],
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "focused": True,
+                    "value": "",
+                    "soft_keyboard_visible": True,
+                },
+            }
+        )
+        first_keyboard = {
+            "visible": True,
+            "bounds": [40, 580, 960, 930],
+            "layout": "qwerty",
+            "input_mode": "direct_latin",
+            "mode_switch": None,
+        }
+        recovered_keyboard = {
+            "visible": True,
+            "bounds": [40, 430, 960, 950],
+            "layout": "qwerty",
+            "input_mode": "direct_latin",
+            "mode_switch": None,
+        }
+        recovered = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="long-text-field",
+                    bounds=[130, 80, 870, 230],
+                    text="",
+                    placeholder="长文本",
+                    field_labels=["长文本"],
+                )
+            ],
+            keyboard=recovered_keyboard,
+        )
+        provider = SequenceProvider(
+            [
+                first,
+                input_audit_payload(
+                    application_inputs=[],
+                    keyboard=first_keyboard,
+                ),
+                recovered,
+            ]
+        )
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "在唯一长文本输入框输入 alphabet continuation",
+                "entities": {
+                    "input_text": "alphabet continuation",
+                    "active_subgoal_visual_context": {
+                        "subgoal_id": "input_text",
+                        "objective": "在唯一长文本输入框输入 alphabet continuation",
+                        "constraints": [],
+                        "completion_conditions": [
+                            "长文本输入框逐字等于 alphabet continuation"
+                        ],
+                        "execution_class": "navigate",
+                        "goal_entities": {
+                            "input_text": "alphabet continuation",
+                            "active_input_transaction_text": "alphabet continuation",
+                            "active_input_field_id": "input_field_1",
+                            "active_input_field_label": "长文本",
+                            "active_input_multiline": False,
+                        },
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(3, provider.calls)
+        target = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(target)
+        self.assertEqual("input_field_1", target.states["input_field_id"])
+        self.assertEqual((0.13, 0.356, 0.87, 0.461), target.bounds)
+        retry_prompt = provider.messages_seen[2][1]["content"][0]["text"]
+        self.assertIn("[0, 300, 1000, 1000]", retry_prompt)
+        self.assertTrue(observer.last_diagnostics["input_structure_audit_retry_used"])
+
+    def test_input_audit_retry_keyboard_hint_varies_and_remains_fail_closed(
+        self,
+    ) -> None:
+        context = {
+            "objective": "在备注输入框输入 release candidate",
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "type_notes",
+                    "objective": "在备注输入框输入 release candidate",
+                    "constraints": [],
+                    "completion_conditions": [
+                        "备注输入框逐字等于 release candidate"
+                    ],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "release candidate",
+                        "active_input_field_id": "notes_field",
+                        "active_input_field_label": "备注",
+                    }
+                }
+            },
+        }
+        keyboard_audit = input_audit_payload(
+            application_inputs=[],
+            keyboard={
+                "visible": True,
+                "bounds": [50, 650, 950, 980],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "mode_switch": None,
+            },
+        )
+
+        self.assertEqual(
+            (0, 386, 1000, 1000),
+            _input_audit_retry_roi(
+                context,
+                preliminary_input_bounds_hint=(120, 720, 880, 810),
+                first_audit_raw=json.dumps(keyboard_audit, ensure_ascii=False),
+            ),
+        )
+        invalid_keyboard = {
+            **keyboard_audit,
+            "keyboard": {
+                **keyboard_audit["keyboard"],
+                "bounds": [50, 650, 200, 760],
+            },
+        }
+        self.assertEqual(
+            (0, 600, 1000, 1000),
+            _input_audit_retry_roi(
+                context,
+                preliminary_input_bounds_hint=(120, 720, 880, 810),
+                first_audit_raw=json.dumps(invalid_keyboard, ensure_ascii=False),
+            ),
+        )
+        self.assertEqual(
+            (0, 600, 1000, 1000),
+            _input_audit_retry_roi(
+                context,
+                preliminary_input_bounds_hint=(120, 720, 880, 810),
+                first_audit_raw="not-json",
+            ),
+        )
 
     def test_active_input_transaction_fails_as_observation_when_two_audits_are_empty(
         self,

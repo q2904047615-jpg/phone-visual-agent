@@ -156,6 +156,31 @@ class FixedAppRetirementTests(unittest.TestCase):
         text = (ROOT / "robot_core.py").read_text(encoding="utf-8")
         self.assertNotIn("英文分段包含未认证字符", text)
 
+    def test_seller_text_dialog_transport_is_physically_absent(self) -> None:
+        text = "\n".join(
+            (ROOT / name).read_text(encoding="utf-8")
+            for name in (
+                "robot_core.py",
+                "robot_gui_poc.py",
+                "controller_config.json",
+            )
+        )
+        for retired in (
+            "seller_text_dialog_batch",
+            "direct_latin_batch",
+            "vision_type_direct_latin_batch",
+            "submit_direct_latin_batch",
+            "_accept_owned_text_dialog",
+            "GetDlgItem",
+            "PostMessageW",
+            "BM_CLICK",
+            "IDOK",
+            "TEXT_INPUT_BUTTON_X_FROM_RIGHT",
+            "GW_OWNER",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, text)
+
     def test_runtime_has_no_fixed_app_workers_or_stores(self) -> None:
         runtime = self.web_app.runtime
         for attribute in (

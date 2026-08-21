@@ -10,7 +10,7 @@ from semantic_action import SemanticAction
 from text_input_utils import editable_character_count
 from verified_text_transaction import (
     VerifiedTextTransactionError,
-    is_direct_latin_batch_segment,
+    is_direct_latin_segment,
     plan_from_input_states,
 )
 from ui_scene import (
@@ -509,7 +509,7 @@ class UniversalActionController:
                 "element_state" not in expected_effect
                 and input_step.kind == "direct_latin"
                 and input_step.current_text == ""
-                and is_direct_latin_batch_segment(input_step.segment)
+                and is_direct_latin_segment(input_step.segment)
             ):
                 # Backward-compatible stage-1 authority: the first certified
                 # profile already bound an empty direct-Latin field and exact

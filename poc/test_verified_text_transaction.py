@@ -2,7 +2,7 @@ import unittest
 
 from verified_text_transaction import (
     VerifiedTextTransactionError,
-    is_direct_latin_batch_segment,
+    is_direct_latin_segment,
     local_pinyin,
     plan_next_verified_input,
 )
@@ -11,18 +11,31 @@ from verified_text_transaction import (
 class VerifiedTextTransactionTests(unittest.TestCase):
     def test_ascii_progress_uses_exact_remaining_segment(self) -> None:
         step = plan_next_verified_input("meeting at eight", "meeting ")
-        self.assertEqual("at eight", step.segment)
+        self.assertEqual("at", step.segment)
         self.assertEqual("direct_latin", step.kind)
-        self.assertEqual("meeting at eight", step.expected_value)
+        self.assertEqual("meeting at", step.expected_value)
 
-    def test_multiline_phrase_uses_two_text_batches_and_one_newline(self) -> None:
-        first = plan_next_verified_input("first line\nsecond line", "")
-        newline = plan_next_verified_input("first line\nsecond line", "first line")
-        second = plan_next_verified_input("first line\nsecond line", "first line\n")
+    def test_multiline_phrase_keeps_spaces_and_newline_as_visible_keys(self) -> None:
+        target = "first line\nsecond line"
+        current = ""
+        actual = []
+        while current != target:
+            step = plan_next_verified_input(target, current)
+            actual.append((step.segment, step.kind))
+            current = step.expected_value
 
-        self.assertEqual(("first line", "direct_latin"), (first.segment, first.kind))
-        self.assertEqual(("\n", "literal_key"), (newline.segment, newline.kind))
-        self.assertEqual(("second line", "direct_latin"), (second.segment, second.kind))
+        self.assertEqual(
+            [
+                ("first", "direct_latin"),
+                (" ", "literal_key"),
+                ("line", "direct_latin"),
+                ("\n", "literal_key"),
+                ("second", "direct_latin"),
+                (" ", "literal_key"),
+                ("line", "direct_latin"),
+            ],
+            actual,
+        )
 
     def test_chinese_progress_is_capped_and_locally_converted(self) -> None:
         first = plan_next_verified_input("你好世界继续", "")
@@ -49,6 +62,7 @@ class VerifiedTextTransactionTests(unittest.TestCase):
 
     def test_digits_and_punctuation_are_one_visible_key_step(self) -> None:
         for target, current, expected in (
+            ("a 8", "a", " "),
             ("a 8", "a ", "8"),
             ("a。", "a", "。"),
         ):
@@ -58,13 +72,13 @@ class VerifiedTextTransactionTests(unittest.TestCase):
                 self.assertEqual("literal_key", step.kind)
                 self.assertEqual("visible_key", step.required_mode)
 
-    def test_batch_charset_has_one_authoritative_validator(self) -> None:
-        for value in ("first line", " leading", "trailing ", " ", "a" * 20):
+    def test_direct_latin_charset_has_one_authoritative_validator(self) -> None:
+        for value in ("first", "line", "a" * 20):
             with self.subTest(value=value):
-                self.assertTrue(is_direct_latin_batch_segment(value))
-        for value in ("", "Agent", "agent1", "agent.com", "a" * 21, "中文"):
+                self.assertTrue(is_direct_latin_segment(value))
+        for value in ("", "first line", " ", "Agent", "agent1", "agent.com", "a" * 21, "中文"):
             with self.subTest(value=value):
-                self.assertFalse(is_direct_latin_batch_segment(value))
+                self.assertFalse(is_direct_latin_segment(value))
 
     def test_finished_returns_none(self) -> None:
         self.assertIsNone(plan_next_verified_input("你好", "你好"))

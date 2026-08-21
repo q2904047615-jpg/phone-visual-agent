@@ -13,16 +13,16 @@ class VerifiedTextTransactionError(ValueError):
 
 _CHINESE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+\Z")
 MAX_DIRECT_LATIN_SEGMENT_CHARS = 20
-DIRECT_LATIN_BATCH_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz ")
+DIRECT_LATIN_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz")
 
 
-def is_direct_latin_batch_segment(value: Any) -> bool:
-    """Return whether one fragment can use the audited seller batch transport."""
+def is_direct_latin_segment(value: Any) -> bool:
+    """Return whether one fragment is an audited visible lowercase sequence."""
 
     return bool(
         isinstance(value, str)
         and 1 <= len(value) <= MAX_DIRECT_LATIN_SEGMENT_CHARS
-        and all(char in DIRECT_LATIN_BATCH_CHARACTERS for char in value)
+        and all(char in DIRECT_LATIN_CHARACTERS for char in value)
     )
 
 
@@ -76,7 +76,7 @@ class VerifiedInputStep:
                 or self.required_case_mode not in {"", "upper"}
                 or self.physical_keys != self.segment.casefold()
                 or not all(
-                    char in DIRECT_LATIN_BATCH_CHARACTERS
+                    char in DIRECT_LATIN_CHARACTERS
                     for char in self.physical_keys
                 )
             ):
@@ -121,11 +121,11 @@ def plan_next_verified_input(
             pinyin=local_pinyin(segment),
             physical_keys=local_pinyin(segment),
         )
-    elif first in DIRECT_LATIN_BATCH_CHARACTERS:
+    elif first in DIRECT_LATIN_CHARACTERS:
         segment = ""
         for char in remaining:
             if (
-                char not in DIRECT_LATIN_BATCH_CHARACTERS
+                char not in DIRECT_LATIN_CHARACTERS
                 or len(segment) >= MAX_DIRECT_LATIN_SEGMENT_CHARS
             ):
                 break

@@ -16,9 +16,6 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageGrab
 
-from verified_text_transaction import is_direct_latin_batch_segment
-
-
 # 新旧版本标题分别包含“智联新途机械臂控制端”和
 # “智联新途AI机械臂控制端”，只匹配稳定前缀。
 DEFAULT_WINDOW_TITLE = "智联新途"
@@ -62,11 +59,6 @@ EnumWindowsProc = ctypes.WINFUNCTYPE(
 
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
-WM_CLOSE = 0x0010
-WM_KEYDOWN = 0x0100
-WM_KEYUP = 0x0101
-BM_CLICK = 0x00F5
-IDOK = 1
 MK_LBUTTON = 0x0001
 SW_RESTORE = 9
 GA_ROOT = 2
@@ -83,14 +75,12 @@ VK_A = 0x41
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 INPUT_KEYBOARD = 1
-GW_OWNER = 4
 
 # 卖家控制端底部控制条的固定横坐标。纵坐标使用“客户区底部向上偏移”
 # 计算，以兼容窗口标题栏高度变化。
 ACTION_BUTTON_X = 130
 ACTION_DROPDOWN_X = 176
 CLICK_COUNT_INPUT_X = 308
-TEXT_INPUT_BUTTON_X_FROM_RIGHT = 20
 CONTROL_Y_FROM_BOTTOM = 18
 BASELINE_TOOLBAR_HEIGHT = 50
 SELLER_POSITION_OVERLAY_WIDTH = 180
@@ -115,22 +105,6 @@ user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 user32.GetAncestor.restype = wintypes.HWND
 user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
 user32.GetWindow.restype = wintypes.HWND
-user32.GetDlgItem.argtypes = [wintypes.HWND, ctypes.c_int]
-user32.GetDlgItem.restype = wintypes.HWND
-user32.SendMessageW.argtypes = [
-    wintypes.HWND,
-    wintypes.UINT,
-    wintypes.WPARAM,
-    wintypes.LPARAM,
-]
-user32.SendMessageW.restype = ctypes.c_ssize_t
-user32.PostMessageW.argtypes = [
-    wintypes.HWND,
-    wintypes.UINT,
-    wintypes.WPARAM,
-    wintypes.LPARAM,
-]
-user32.PostMessageW.restype = wintypes.BOOL
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -954,129 +928,6 @@ def configure_single_click_count(hwnd: int) -> None:
     type_unicode_text("1")
     press_virtual_key(VK_RETURN)
     time.sleep(0.25)
-
-
-def _visible_owned_windows(owner: int) -> set[int]:
-    matches: set[int] = set()
-
-    @EnumWindowsProc
-    def callback(hwnd: int, _lparam: int) -> bool:
-        if user32.IsWindowVisible(hwnd) and user32.GetWindow(hwnd, GW_OWNER) == owner:
-            matches.add(int(hwnd))
-        return True
-
-    user32.EnumWindows(callback, 0)
-    return matches
-
-
-def _window_title(hwnd: int) -> str:
-    length = user32.GetWindowTextLengthW(hwnd)
-    buffer = ctypes.create_unicode_buffer(max(1, length + 1))
-    user32.GetWindowTextW(hwnd, buffer, len(buffer))
-    return buffer.value
-
-
-def _accept_owned_text_dialog(dialog: int) -> None:
-    """Accept one exact owned dialog without emitting a global Enter key.
-
-    Native dialogs expose an IDOK child and are invoked directly. Qt and other
-    single-HWND dialogs do not expose native child controls; for those, queue
-    Return only to the exact dialog HWND. Destroyed HWND messages are discarded
-    rather than retargeted to the phone or seller main window.
-    """
-
-    if (
-        not dialog
-        or not user32.IsWindow(dialog)
-        or not user32.IsWindowVisible(dialog)
-        or not user32.IsWindowEnabled(dialog)
-    ):
-        raise RuntimeError("控制端文字输入对话框已失效，拒绝提交批次。")
-
-    accept = int(user32.GetDlgItem(dialog, IDOK) or 0)
-    if (
-        accept
-        and user32.IsWindow(accept)
-        and user32.IsWindowVisible(accept)
-        and user32.IsWindowEnabled(accept)
-        and int(user32.GetAncestor(accept, GA_ROOT) or 0) == int(dialog)
-    ):
-        user32.SendMessageW(accept, BM_CLICK, 0, 0)
-        return
-
-    down_posted = bool(user32.PostMessageW(dialog, WM_KEYDOWN, VK_RETURN, 1))
-    up_posted = bool(
-        user32.PostMessageW(dialog, WM_KEYUP, VK_RETURN, 0xC0000001)
-    )
-    if not down_posted or not up_posted:
-        if user32.IsWindow(dialog):
-            user32.SendMessageW(dialog, WM_CLOSE, 0, 0)
-        raise RuntimeError(
-            "无法把确定键投递到控制端文字输入对话框，已取消批次。"
-        )
-
-
-def submit_direct_latin_batch(
-    hwnd: int,
-    text: str,
-    *,
-    open_timeout: float = 3.0,
-    close_timeout: float = 3.0,
-) -> None:
-    """Submit one exact lowercase-and-space batch through the seller dialog.
-
-    This is a transport primitive only.  The universal controller establishes
-    the current input field, keyboard mode, authorized fragment, and exact
-    post-action value before and after this call.
-    """
-
-    if not is_direct_latin_batch_segment(text):
-        raise ValueError("控制端批量输入只接受1～20个小写英文字母或空格。")
-    if open_timeout <= 0 or close_timeout <= 0:
-        raise ValueError("控制端输入对话框超时必须大于0。")
-
-    existing = _visible_owned_windows(hwnd)
-    ensure_window_fully_visible(hwnd)
-    _left, _top, width, height = client_geometry(hwnd)
-    control_x, control_y = seller_control_point(
-        width,
-        height,
-        BASELINE_CLIENT_WIDTH - TEXT_INPUT_BUTTON_X_FROM_RIGHT,
-        CONTROL_Y_FROM_BOTTOM,
-    )
-    click_client_control(hwnd, control_x, control_y)
-
-    deadline = time.monotonic() + float(open_timeout)
-    dialog: int | None = None
-    while time.monotonic() < deadline:
-        _check_escape("用户按下 Esc，已取消批量文字输入。")
-        new_windows = _visible_owned_windows(hwnd) - existing
-        if new_windows:
-            dialog = next(iter(new_windows))
-            break
-        time.sleep(0.05)
-    if dialog is None:
-        raise RuntimeError("点击控制端文字输入后没有发现输入对话框，已停止。")
-
-    user32.ShowWindow(dialog, SW_RESTORE)
-    user32.SetForegroundWindow(dialog)
-    time.sleep(0.2)
-    type_unicode_text(text)
-    _accept_owned_text_dialog(dialog)
-
-    deadline = time.monotonic() + float(close_timeout)
-    while time.monotonic() < deadline:
-        _check_escape("用户按下 Esc，已停止等待批量文字输入。")
-        if not user32.IsWindow(dialog) or not user32.IsWindowVisible(dialog):
-            move_cursor_outside_camera(hwnd)
-            return
-        time.sleep(0.05)
-    dialog_title = _window_title(dialog)
-    if user32.IsWindow(dialog):
-        user32.SendMessageW(dialog, WM_CLOSE, 0, 0)
-    raise RuntimeError(
-        f"控制端文字输入对话框未关闭（标题“{dialog_title}”），已停止。"
-    )
 
 
 def cursor_parking_client_point(width: int, height: int) -> tuple[int, int]:

@@ -32,7 +32,7 @@ from universal_action_controller import (
     UniversalActionController,
     UniversalActionError,
 )
-from verified_text_transaction import is_direct_latin_batch_segment
+from verified_text_transaction import is_direct_latin_segment
 
 
 PROMOTABLE_ACTIONS = frozenset(
@@ -229,7 +229,7 @@ def exact_input_evidence_error(execution: Any) -> str:
     target_id = str(resolved.get("target_element_id") or "").strip()
     if (
         not isinstance(expected, str)
-        or not is_direct_latin_batch_segment(expected)
+        or not is_direct_latin_segment(expected)
         or not target_id
     ):
         return "输入验收缺少精确文字或目标输入框身份。"

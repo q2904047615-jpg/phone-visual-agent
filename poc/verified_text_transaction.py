@@ -13,6 +13,17 @@ class VerifiedTextTransactionError(ValueError):
 
 _CHINESE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+\Z")
 MAX_DIRECT_LATIN_SEGMENT_CHARS = 20
+DIRECT_LATIN_BATCH_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz ")
+
+
+def is_direct_latin_batch_segment(value: Any) -> bool:
+    """Return whether one fragment can use the audited seller batch transport."""
+
+    return bool(
+        isinstance(value, str)
+        and 1 <= len(value) <= MAX_DIRECT_LATIN_SEGMENT_CHARS
+        and all(char in DIRECT_LATIN_BATCH_CHARACTERS for char in value)
+    )
 
 
 def local_pinyin(text: str) -> str:
@@ -64,7 +75,10 @@ class VerifiedInputStep:
                 or self.pinyin
                 or self.required_case_mode not in {"", "upper"}
                 or self.physical_keys != self.segment.casefold()
-                or not re.fullmatch(r"[a-z]+", self.physical_keys)
+                or not all(
+                    char in DIRECT_LATIN_BATCH_CHARACTERS
+                    for char in self.physical_keys
+                )
             ):
                 raise VerifiedTextTransactionError("英文分段缺少确定性键序列。")
         elif (
@@ -107,11 +121,11 @@ def plan_next_verified_input(
             pinyin=local_pinyin(segment),
             physical_keys=local_pinyin(segment),
         )
-    elif first in "abcdefghijklmnopqrstuvwxyz":
+    elif first in DIRECT_LATIN_BATCH_CHARACTERS:
         segment = ""
         for char in remaining:
             if (
-                char not in "abcdefghijklmnopqrstuvwxyz"
+                char not in DIRECT_LATIN_BATCH_CHARACTERS
                 or len(segment) >= MAX_DIRECT_LATIN_SEGMENT_CHARS
             ):
                 break

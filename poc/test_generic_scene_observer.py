@@ -6048,60 +6048,6 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("nihao", field.states["ime_preedit_text"])
         self.assertEqual("你好", field.states["ime_exact_candidate_text"])
 
-    def test_input_audit_mints_only_exact_next_literal_key(self) -> None:
-        base_scene = _parse_scene(
-            json.dumps(scene_payload(), ensure_ascii=False),
-            fingerprint="frame-literal-key",
-        )
-        audit = input_audit_payload(
-            application_inputs=[
-                audited_application_input(
-                    structure_id="message-field",
-                    bounds=[80, 120, 920, 210],
-                    text="draft",
-                )
-            ],
-            keyboard={
-                "visible": True,
-                "bounds": [0, 480, 1000, 1000],
-                "layout": "qwerty",
-                "input_mode": "direct_latin",
-                "case_mode": "lower",
-                "qwerty_anchors": {
-                    "q": [115, 610], "p": [875, 610],
-                    "a": [157, 700], "l": [832, 700],
-                    "z": [241, 790], "m": [747, 790],
-                    "backspace": [875, 790],
-                },
-                "mode_switch": None,
-                "case_switch": None,
-                "literal_keys": [
-                    {
-                        "value": " ", "label": "空格", "key_kind": "space",
-                        "bounds": [310, 870, 690, 970], "confidence": 0.98,
-                        "fully_visible": True,
-                    },
-                ],
-                "layout_switches": [],
-            },
-        )
-        scene = _apply_input_structure_audit(
-            base_scene,
-            json.dumps(audit, ensure_ascii=False),
-            fingerprint="frame-literal-key",
-            goal_context={
-                "objective": "草稿内容为draft message",
-                "entities": {"input_text": "draft message"},
-            },
-        )
-        target = scene.unique_trusted_goal_element()
-        self.assertEqual("local_audited_literal_key_1", target.element_id)
-        self.assertEqual(" ", target.states["key_value"])
-        self.assertEqual("draft ", target.states["expected_input_value"])
-        self.assertFalse(
-            scene.get_element("local_audited_input_1").states["goal_relevant"]
-        )
-
     def test_qwerty_secondary_digit_hint_is_not_a_direct_literal_key(self) -> None:
         base_scene = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),

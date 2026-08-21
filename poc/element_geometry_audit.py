@@ -19,6 +19,13 @@ LITERAL_ROI_MIN_WIDTH_SPAN = 0.60
 LITERAL_ROI_MIN_HEIGHT_SPAN = 0.20
 LITERAL_ROI_WIDTH_TARGET_SCALE = 1.50
 LITERAL_ROI_HEIGHT_TARGET_SCALE = 3.00
+INPUT_ROI_WIDTH_TARGET_SCALE = 1.50
+# Input-structure bounds are deliberately coarse and may describe the text
+# region rather than the outer editable border.  Preserve at least one rough
+# field height above and below a tall field so the independent audit can see
+# the complete control.  This remains role-relative and resolution-independent;
+# it does not weaken the fully-visible/whole-control gates below.
+INPUT_ROI_HEIGHT_TARGET_SCALE = 3.25
 DEFAULT_INTERNAL_EDGE_MARGIN = 20.0
 MAX_GEOMETRY_MATCHES = 8
 MAX_GEOMETRY_LITERAL_LABELS = 8
@@ -275,6 +282,22 @@ def build_literal_candidate_crop_transform(
         minimum_height_span=LITERAL_ROI_MIN_HEIGHT_SPAN,
         width_target_scale=LITERAL_ROI_WIDTH_TARGET_SCALE,
         height_target_scale=LITERAL_ROI_HEIGHT_TARGET_SCALE,
+    )
+
+
+def build_input_candidate_crop_transform(
+    full_size: tuple[int, int],
+    rough_bounds: tuple[float, float, float, float],
+) -> CropTransform:
+    """Build a broad ROI with field-height context for editable controls."""
+
+    return _build_candidate_crop_transform(
+        full_size,
+        rough_bounds,
+        minimum_width_span=DEFAULT_ROI_MIN_SPAN,
+        minimum_height_span=DEFAULT_ROI_MIN_SPAN,
+        width_target_scale=INPUT_ROI_WIDTH_TARGET_SCALE,
+        height_target_scale=INPUT_ROI_HEIGHT_TARGET_SCALE,
     )
 
 

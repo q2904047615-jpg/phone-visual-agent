@@ -523,7 +523,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
 
         find_window.assert_not_called()
 
-    def test_verified_lowercase_text_profile_uses_fast_audited_batch(self):
+    def test_verified_lowercase_phrase_uses_fast_audited_batch(self):
         controller = RobotController(
             title="test",
             verified_actions={"input_verified_text"},
@@ -533,9 +533,9 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             patch.object(controller, "vision_type_direct_latin_batch") as batch,
             patch.object(controller, "vision_type_pinyin") as type_pinyin,
         ):
-            controller.vision_type_text_with_layout("agent", TEST_QWERTY_LAYOUT)
+            controller.vision_type_text_with_layout("agent ready", TEST_QWERTY_LAYOUT)
 
-        batch.assert_called_once_with("agent", TEST_QWERTY_LAYOUT)
+        batch.assert_called_once_with("agent ready", TEST_QWERTY_LAYOUT)
         type_pinyin.assert_not_called()
 
     def test_universal_uppercase_profile_uses_same_audited_key_geometry(self):
@@ -574,11 +574,11 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             patch("robot_core.seller_gui.submit_direct_latin_batch") as submit,
             patch.object(controller, "_sleep") as sleep,
         ):
-            controller.vision_type_direct_latin_batch("abcdefghijklmnopqrst", TEST_QWERTY_LAYOUT)
+            controller.vision_type_direct_latin_batch("first line", TEST_QWERTY_LAYOUT)
 
         consume.assert_called_once_with("input_verified_text", frame)
-        submit.assert_called_once_with(123, "abcdefghijklmnopqrst")
-        sleep.assert_called_once_with(16.0)
+        submit.assert_called_once_with(123, "first line")
+        sleep.assert_called_once_with(8.0)
 
     def test_fast_batch_rejects_case_and_symbols_before_hardware(self):
         controller = RobotController(
@@ -586,10 +586,10 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             verified_actions={"input_verified_text"},
         )
         with patch("robot_core.seller_gui.find_window") as find_window:
-            for text in ("Agent", "agent1", "agent.com", "a" * 21):
+            for text in ("Agent", "agent1", "agent.com", "a" * 21, "中文"):
                 with self.subTest(text=text), self.assertRaisesRegex(
                     Exception,
-                    "小写字母",
+                    "小写字母或空格",
                 ):
                     controller.vision_type_direct_latin_batch(text, TEST_QWERTY_LAYOUT)
         find_window.assert_not_called()
@@ -675,24 +675,78 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             patch.object(robot_gui_poc.user32, "SetForegroundWindow"),
             patch.object(robot_gui_poc.user32, "IsWindow", return_value=False),
             patch("robot_gui_poc.type_unicode_text") as type_text,
-            patch("robot_gui_poc.press_virtual_key") as press,
+            patch("robot_gui_poc._accept_owned_text_dialog") as accept,
             patch("robot_gui_poc.move_cursor_outside_camera") as move_out,
             patch("robot_gui_poc.time.monotonic", return_value=0.0),
             patch("robot_gui_poc.time.sleep"),
         ):
-            robot_gui_poc.submit_direct_latin_batch(123, "abcdefghijklmnopqrst")
+            robot_gui_poc.submit_direct_latin_batch(123, "first line")
 
         click.assert_called_once_with(123, 520, 992)
-        type_text.assert_called_once_with("abcdefghijklmnopqrst")
-        press.assert_called_once_with(robot_gui_poc.VK_RETURN)
+        type_text.assert_called_once_with("first line")
+        accept.assert_called_once_with(456)
         move_out.assert_called_once_with(123)
+
+    def test_dialog_accept_uses_visible_enabled_standard_idok(self):
+        with (
+            patch.object(robot_gui_poc.user32, "GetDlgItem", return_value=456),
+            patch.object(robot_gui_poc.user32, "IsWindow", return_value=True),
+            patch.object(robot_gui_poc.user32, "IsWindowVisible", return_value=True),
+            patch.object(robot_gui_poc.user32, "IsWindowEnabled", return_value=True),
+            patch.object(robot_gui_poc.user32, "GetAncestor", return_value=123),
+            patch.object(robot_gui_poc.user32, "SendMessageW") as send,
+        ):
+            robot_gui_poc._accept_owned_text_dialog(123)
+
+        send.assert_called_once_with(456, robot_gui_poc.BM_CLICK, 0, 0)
+
+    def test_qt_dialog_accept_posts_return_only_to_exact_dialog(self):
+        with (
+            patch.object(robot_gui_poc.user32, "GetDlgItem", return_value=0),
+            patch.object(robot_gui_poc.user32, "IsWindow", return_value=True),
+            patch.object(robot_gui_poc.user32, "IsWindowVisible", return_value=True),
+            patch.object(robot_gui_poc.user32, "IsWindowEnabled", return_value=True),
+            patch.object(robot_gui_poc.user32, "PostMessageW", return_value=True) as post,
+            patch("robot_gui_poc.press_virtual_key") as press,
+        ):
+            robot_gui_poc._accept_owned_text_dialog(123)
+
+        press.assert_not_called()
+        self.assertEqual(
+            [
+                (123, robot_gui_poc.WM_KEYDOWN, robot_gui_poc.VK_RETURN, 1),
+                (
+                    123,
+                    robot_gui_poc.WM_KEYUP,
+                    robot_gui_poc.VK_RETURN,
+                    0xC0000001,
+                ),
+            ],
+            [call.args for call in post.call_args_list],
+        )
+
+    def test_dialog_accept_cancels_exact_dialog_when_scoped_post_fails(self):
+        with (
+            patch.object(robot_gui_poc.user32, "GetDlgItem", return_value=0),
+            patch.object(robot_gui_poc.user32, "IsWindow", return_value=True),
+            patch.object(robot_gui_poc.user32, "IsWindowVisible", return_value=True),
+            patch.object(robot_gui_poc.user32, "IsWindowEnabled", return_value=True),
+            patch.object(robot_gui_poc.user32, "PostMessageW", return_value=False),
+            patch.object(robot_gui_poc.user32, "SendMessageW") as send,
+            patch("robot_gui_poc.press_virtual_key") as press,
+            self.assertRaisesRegex(RuntimeError, "已取消批次"),
+        ):
+            robot_gui_poc._accept_owned_text_dialog(123)
+
+        press.assert_not_called()
+        send.assert_called_once_with(123, robot_gui_poc.WM_CLOSE, 0, 0)
 
     def test_seller_batch_rejects_non_lowercase_without_opening_dialog(self):
         with patch("robot_gui_poc._visible_owned_windows") as windows:
-            for text in ("Agent", "abc1", "a" * 21, "中文"):
+            for text in ("Agent", "abc1", "agent.com", "a" * 21, "中文"):
                 with self.subTest(text=text), self.assertRaisesRegex(
                     ValueError,
-                    "小写英文字母",
+                    "小写英文字母或空格",
                 ):
                     robot_gui_poc.submit_direct_latin_batch(123, text)
         windows.assert_not_called()
@@ -1360,7 +1414,7 @@ class ApiEndToEndTests(unittest.TestCase):
         observer = universal.pop("observer")
         self.assertEqual(
             observer["observer_version"],
-            "2026-08-21-generic-scene-observer-v66",
+            "2026-08-21-generic-scene-observer-v69",
         )
         self.assertEqual(observer["supported_app_scope"], "dynamic")
         architecture["universal_agent"] = universal

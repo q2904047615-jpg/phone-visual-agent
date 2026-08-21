@@ -15,6 +15,7 @@ from PIL import Image, ImageChops, ImageFilter
 from element_geometry_audit import (
     ElementGeometryAuditError,
     build_candidate_crop_transform,
+    build_input_candidate_crop_transform,
     build_literal_candidate_crop_transform,
     element_geometry_audit_prompt,
     select_unique_audited_geometry,
@@ -64,7 +65,7 @@ from system_navigation_privacy import (
 )
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-21-generic-scene-observer-v66"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-21-generic-scene-observer-v69"
 POST_NAVIGATION_RESULT_OBSERVATION_PHASE = "verified_navigation_result_v1"
 POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
 POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被重新观察"]
@@ -290,11 +291,21 @@ class GenericSceneObserver:
                 element.role,
                 element.label,
             )
-            transform = (
-                build_literal_candidate_crop_transform(frame.size, element.bounds)
-                if literal_selector
-                else build_candidate_crop_transform(frame.size, element.bounds)
-            )
+            if literal_selector:
+                transform = build_literal_candidate_crop_transform(
+                    frame.size, element.bounds
+                )
+                crop_profile = "literal_selector"
+            elif element.role == "input":
+                transform = build_input_candidate_crop_transform(
+                    frame.size, element.bounds
+                )
+                crop_profile = "input_structural_context"
+            else:
+                transform = build_candidate_crop_transform(
+                    frame.size, element.bounds
+                )
+                crop_profile = "broad_structural"
             source_digest = hashlib.sha256(
                 frame.tobytes()
                 + element.element_id.encode("utf-8")
@@ -395,9 +406,7 @@ class GenericSceneObserver:
                     "label": element.label,
                     "visible_evidence": selected_evidence,
                     "pixel_bounds": list(transform.pixel_bounds),
-                    "crop_profile": (
-                        "literal_selector" if literal_selector else "broad_structural"
-                    ),
+                    "crop_profile": crop_profile,
                     "local_bounds": list(audited.local_bounds),
                     "full_bounds": list(audited.full_bounds),
                     "local_border_snap_used": snapped_input_bounds is not None,
@@ -6203,7 +6212,13 @@ def _apply_input_structure_audit(
             )
             if not item["fully_visible"] or confidence < 0.9:
                 continue
-            text = str(item.get("text") or "").strip()
+            raw_text = item.get("text")
+            if not isinstance(raw_text, str):
+                raise UISceneError("应用输入结构 text 必须是字符串。")
+            # Exact input values may intentionally begin or end with spaces or
+            # real line feeds.  Placeholder/cue strings are descriptive, but
+            # the value itself must never be trimmed.
+            text = raw_text
             placeholder = str(item.get("placeholder") or "").strip()
             if not text and not placeholder and not cues:
                 continue
@@ -6361,13 +6376,16 @@ def _apply_input_structure_audit(
                     verified_input_lineage.exact_value
                 )
                 trusted_input["text"] = verified_input_lineage.exact_value
-            elif verified_input_lineage.matches_visual(
+            elif (
+                not _goal_active_input_field(goal_context)[2]
+                and verified_input_lineage.matches_visual(
                 device_id=str(device_id or ""),
                 app_id=scene.app_id,
                 screen_id=scene.screen_id,
                 raw_value=raw_lineage_text,
                 input_bounds=lineage_bounds,
                 current_frame=lineage_frame,
+                )
             ):
                 trusted_input = dict(trusted_input)
                 trusted_input["lineage_visual_text"] = raw_lineage_text

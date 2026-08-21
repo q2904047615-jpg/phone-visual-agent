@@ -16,6 +16,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageGrab
 
+from verified_text_transaction import is_direct_latin_batch_segment
+
 
 # 新旧版本标题分别包含“智联新途机械臂控制端”和
 # “智联新途AI机械臂控制端”，只匹配稳定前缀。
@@ -60,6 +62,11 @@ EnumWindowsProc = ctypes.WINFUNCTYPE(
 
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
+WM_CLOSE = 0x0010
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+BM_CLICK = 0x00F5
+IDOK = 1
 MK_LBUTTON = 0x0001
 SW_RESTORE = 9
 GA_ROOT = 2
@@ -108,6 +115,22 @@ user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
 user32.GetAncestor.restype = wintypes.HWND
 user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
 user32.GetWindow.restype = wintypes.HWND
+user32.GetDlgItem.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetDlgItem.restype = wintypes.HWND
+user32.SendMessageW.argtypes = [
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+]
+user32.SendMessageW.restype = ctypes.c_ssize_t
+user32.PostMessageW.argtypes = [
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.WPARAM,
+    wintypes.LPARAM,
+]
+user32.PostMessageW.restype = wintypes.BOOL
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -953,6 +976,46 @@ def _window_title(hwnd: int) -> str:
     return buffer.value
 
 
+def _accept_owned_text_dialog(dialog: int) -> None:
+    """Accept one exact owned dialog without emitting a global Enter key.
+
+    Native dialogs expose an IDOK child and are invoked directly. Qt and other
+    single-HWND dialogs do not expose native child controls; for those, queue
+    Return only to the exact dialog HWND. Destroyed HWND messages are discarded
+    rather than retargeted to the phone or seller main window.
+    """
+
+    if (
+        not dialog
+        or not user32.IsWindow(dialog)
+        or not user32.IsWindowVisible(dialog)
+        or not user32.IsWindowEnabled(dialog)
+    ):
+        raise RuntimeError("控制端文字输入对话框已失效，拒绝提交批次。")
+
+    accept = int(user32.GetDlgItem(dialog, IDOK) or 0)
+    if (
+        accept
+        and user32.IsWindow(accept)
+        and user32.IsWindowVisible(accept)
+        and user32.IsWindowEnabled(accept)
+        and int(user32.GetAncestor(accept, GA_ROOT) or 0) == int(dialog)
+    ):
+        user32.SendMessageW(accept, BM_CLICK, 0, 0)
+        return
+
+    down_posted = bool(user32.PostMessageW(dialog, WM_KEYDOWN, VK_RETURN, 1))
+    up_posted = bool(
+        user32.PostMessageW(dialog, WM_KEYUP, VK_RETURN, 0xC0000001)
+    )
+    if not down_posted or not up_posted:
+        if user32.IsWindow(dialog):
+            user32.SendMessageW(dialog, WM_CLOSE, 0, 0)
+        raise RuntimeError(
+            "无法把确定键投递到控制端文字输入对话框，已取消批次。"
+        )
+
+
 def submit_direct_latin_batch(
     hwnd: int,
     text: str,
@@ -960,21 +1023,15 @@ def submit_direct_latin_batch(
     open_timeout: float = 3.0,
     close_timeout: float = 3.0,
 ) -> None:
-    """Submit one exact lowercase-Latin batch through the seller text dialog.
+    """Submit one exact lowercase-and-space batch through the seller dialog.
 
     This is a transport primitive only.  The universal controller establishes
     the current input field, keyboard mode, authorized fragment, and exact
     post-action value before and after this call.
     """
 
-    if (
-        not isinstance(text, str)
-        or not 1 <= len(text) <= 20
-        or not text.isascii()
-        or not text.isalpha()
-        or text != text.lower()
-    ):
-        raise ValueError("控制端批量输入只接受1～20个小写英文字母。")
+    if not is_direct_latin_batch_segment(text):
+        raise ValueError("控制端批量输入只接受1～20个小写英文字母或空格。")
     if open_timeout <= 0 or close_timeout <= 0:
         raise ValueError("控制端输入对话框超时必须大于0。")
 
@@ -1005,7 +1062,7 @@ def submit_direct_latin_batch(
     user32.SetForegroundWindow(dialog)
     time.sleep(0.2)
     type_unicode_text(text)
-    press_virtual_key(VK_RETURN)
+    _accept_owned_text_dialog(dialog)
 
     deadline = time.monotonic() + float(close_timeout)
     while time.monotonic() < deadline:
@@ -1014,8 +1071,11 @@ def submit_direct_latin_batch(
             move_cursor_outside_camera(hwnd)
             return
         time.sleep(0.05)
+    dialog_title = _window_title(dialog)
+    if user32.IsWindow(dialog):
+        user32.SendMessageW(dialog, WM_CLOSE, 0, 0)
     raise RuntimeError(
-        f"控制端文字输入对话框未关闭（标题“{_window_title(dialog)}”），已停止。"
+        f"控制端文字输入对话框未关闭（标题“{dialog_title}”），已停止。"
     )
 
 

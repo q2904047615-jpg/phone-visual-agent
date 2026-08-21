@@ -1650,6 +1650,88 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(774, snapped["a"][1])
         self.assertEqual(844, snapped["z"][1])
 
+    def test_stable_local_ocr_allows_one_frame_row_dropout(self):
+        complete = {
+            "lines": [
+                {
+                    "words": [
+                        {"text": "q", "top": 1000, "height": 24},
+                        {"text": "w", "top": 1002, "height": 22},
+                        {"text": "e", "top": 1001, "height": 24},
+                        {"text": "c", "top": 1204, "height": 22},
+                        {"text": "v", "top": 1203, "height": 24},
+                        {"text": "b", "top": 1205, "height": 22},
+                    ]
+                }
+            ]
+        }
+        top_only = {
+            "lines": [
+                {
+                    "words": [
+                        {"text": "q", "top": 1000, "height": 24},
+                        {"text": "w", "top": 1002, "height": 22},
+                        {"text": "e", "top": 1001, "height": 24},
+                    ]
+                }
+            ]
+        }
+        payloads = iter((complete, complete, top_only))
+        frames = [Image.new("RGB", (810, 1440), "gray") for _ in range(3)]
+        compressed = {
+            "q": [110, 900],
+            "p": [890, 900],
+            "a": [150, 945],
+            "l": [850, 945],
+            "z": [250, 985],
+            "m": [750, 985],
+            "backspace": [890, 985],
+        }
+
+        snapped = stable_qwerty_ocr_anchors(
+            frames,
+            compressed,
+            ocr_recognizer=lambda *_args, **_kwargs: next(payloads),
+        )
+
+        self.assertIsNotNone(snapped)
+        self.assertEqual(703, snapped["q"][1])
+        self.assertEqual(844, snapped["z"][1])
+
+    def test_stable_local_ocr_rejects_only_one_complete_frame(self):
+        complete = {
+            "lines": [
+                {
+                    "words": [
+                        {"text": "q", "top": 1000, "height": 24},
+                        {"text": "w", "top": 1002, "height": 22},
+                        {"text": "c", "top": 1204, "height": 22},
+                        {"text": "v", "top": 1203, "height": 24},
+                    ]
+                }
+            ]
+        }
+        empty = {"lines": []}
+        payloads = iter((complete, empty, empty))
+        frames = [Image.new("RGB", (810, 1440), "gray") for _ in range(3)]
+        compressed = {
+            "q": [110, 900],
+            "p": [890, 900],
+            "a": [150, 945],
+            "l": [850, 945],
+            "z": [250, 985],
+            "m": [750, 985],
+            "backspace": [890, 985],
+        }
+
+        self.assertIsNone(
+            stable_qwerty_ocr_anchors(
+                frames,
+                compressed,
+                ocr_recognizer=lambda *_args, **_kwargs: next(payloads),
+            )
+        )
+
     def test_stable_local_ocr_rejects_incomplete_row_evidence(self):
         payload = {
             "lines": [
@@ -5614,7 +5696,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
         )
 
-    def test_relative_clarity_is_scoped_to_input_surface_continuity(self):
+    def test_relative_clarity_is_scoped_to_comparable_input_mutations(self):
         input_focus = ResolvedSemanticAction(
             node_id="focus-input",
             kind="tap_semantic",
@@ -5631,7 +5713,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             expected_effect={"scene_changed": True},
         )
 
-        self.assertTrue(
+        self.assertFalse(
             GenericSingleActionAdapter._requires_post_action_relative_clarity(
                 input_focus
             )
@@ -5641,6 +5723,26 @@ class GenericActionAdapterTests(unittest.TestCase):
                 navigation
             )
         )
+        for kind in (
+            "input_verified_text",
+            "press_enter",
+            "clear_verified_text",
+        ):
+            with self.subTest(kind=kind):
+                mutation = ResolvedSemanticAction(
+                    node_id=kind,
+                    kind=kind,
+                    expected_effect={
+                        "element_state": {
+                            "meaning": "application_text_input",
+                        }
+                    },
+                )
+                self.assertTrue(
+                    GenericSingleActionAdapter._requires_post_action_relative_clarity(
+                        mutation
+                    )
+                )
 
     def test_input_post_action_stable_blur_times_out_before_model_call(self):
         sharp = textured_phone_frame()

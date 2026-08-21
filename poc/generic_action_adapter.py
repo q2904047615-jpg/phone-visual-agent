@@ -291,12 +291,16 @@ def stable_qwerty_ocr_anchors(
                         )
                     )
             if not candidates:
-                return None
+                # OCR can drop an otherwise stable keyboard row in one of the
+                # three near-identical frames.  Keep collecting independent
+                # frames; authority is minted only when at least two frames
+                # below agree on both row centers.
+                continue
             candidates.sort(reverse=True)
             _balanced_count, _total_count, _distance, top_y, bottom_y = candidates[0]
             per_frame_rows.append((top_y, bottom_y))
 
-        if (
+        if len(per_frame_rows) < 2 or (
             max(item[0] for item in per_frame_rows)
             - min(item[0] for item in per_frame_rows)
             > 10
@@ -977,19 +981,22 @@ class GenericSingleActionAdapter:
     def _requires_post_action_relative_clarity(
         resolved: ResolvedSemanticAction,
     ) -> bool:
-        """Return whether the action must preserve a readable input surface."""
+        """Return whether the action preserves a comparable input surface.
 
-        if resolved.kind in {
+        Text mutations keep the keyboard/page structure in place, so their
+        post-action frame sharpness can be compared with the fresh pre-action
+        frames.  Focusing an input is different: opening the soft keyboard
+        replaces a large part of the frame and changes the score even when the
+        new view is plainly readable.  Focus still passes the ordinary stable
+        frame and trusted-observation clarity gates; it must not use this
+        content-sensitive *relative* comparison.
+        """
+
+        return resolved.kind in {
             "input_verified_text",
             "press_enter",
             "clear_verified_text",
-        }:
-            return True
-        element_state = resolved.expected_effect.get("element_state")
-        return bool(
-            isinstance(element_state, dict)
-            and element_state.get("meaning") == "application_text_input"
-        )
+        }
 
     @staticmethod
     def _requires_post_action_phone_view_identity(

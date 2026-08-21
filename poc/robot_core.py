@@ -17,6 +17,7 @@ from orientation_safety import (
 from verified_text_transaction import (
     MAX_DIRECT_LATIN_SEGMENT_CHARS,
     VerifiedTextTransactionError,
+    is_direct_latin_batch_segment,
     plan_next_verified_input,
 )
 
@@ -364,6 +365,7 @@ class RobotController:
             "max_chars_per_physical_step": MAX_DIRECT_LATIN_SEGMENT_CHARS,
             "direct_latin_transport": "seller_text_dialog_batch",
             "direct_latin_batch_max_chars": MAX_DIRECT_LATIN_SEGMENT_CHARS,
+            "direct_latin_batch_charset": "lowercase_ascii_and_space",
             "non_lowercase_transport": "audited_visible_key_sequence",
             "max_fields": 32,
             "max_targets": 32,
@@ -845,13 +847,16 @@ class RobotController:
         """Universal-agent input path; never falls back to static geometry."""
 
         self._require_verified_action("input_verified_text", "输入文字")
-        if not isinstance(text, str) or not re.fullmatch(r"[A-Za-z]{1,30}", text):
-            raise WorkflowNotReady("通用英文分段必须是1～30个同一可见大小写状态的字母。")
         if not isinstance(keyboard_layout, dict):
             raise WorkflowNotReady("通用文字输入缺少本轮视觉键盘几何。")
-        if re.fullmatch(r"[a-z]{1,20}", text):
+        if is_direct_latin_batch_segment(text):
             self.vision_type_direct_latin_batch(text, keyboard_layout)
             return
+        if not isinstance(text, str) or not re.fullmatch(r"[A-Za-z]{1,30}", text):
+            raise WorkflowNotReady(
+                "通用英文分段必须是1～30个同一可见大小写状态的字母，"
+                "或1～20个小写字母与空格的批次。"
+            )
         self.vision_type_pinyin(text, text.casefold(), keyboard_layout)
 
     def vision_type_direct_latin_batch(
@@ -859,11 +864,11 @@ class RobotController:
         text: str,
         keyboard_layout: dict[str, Any],
     ) -> None:
-        """Use the seller's fast dialog only for one audited lowercase batch."""
+        """Use the seller dialog for one audited lowercase-and-space batch."""
 
         self._require_verified_action("input_verified_text", "输入文字")
-        if not re.fullmatch(r"[a-z]{1,20}", text):
-            raise WorkflowNotReady("快速英文分段必须是1～20个小写字母。")
+        if not is_direct_latin_batch_segment(text):
+            raise WorkflowNotReady("快速英文分段必须是1～20个小写字母或空格。")
         if (
             not isinstance(keyboard_layout, dict)
             or keyboard_layout.get("type") != "qwerty"

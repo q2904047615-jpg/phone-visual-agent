@@ -29,10 +29,10 @@ from tap_calibration import (
 from ui_scene import UIScene, UISceneError
 from universal_action_controller import (
     ResolvedSemanticAction,
-    SAFE_VERIFIED_TEXT_RE,
     UniversalActionController,
     UniversalActionError,
 )
+from verified_text_transaction import is_direct_latin_batch_segment
 
 
 PROMOTABLE_ACTIONS = frozenset(
@@ -229,7 +229,7 @@ def exact_input_evidence_error(execution: Any) -> str:
     target_id = str(resolved.get("target_element_id") or "").strip()
     if (
         not isinstance(expected, str)
-        or not SAFE_VERIFIED_TEXT_RE.fullmatch(expected)
+        or not is_direct_latin_batch_segment(expected)
         or not target_id
     ):
         return "输入验收缺少精确文字或目标输入框身份。"

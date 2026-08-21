@@ -12,6 +12,7 @@ try:
         CropTransform,
         ElementGeometryAuditError,
         build_candidate_crop_transform,
+        build_input_candidate_crop_transform,
         build_literal_candidate_crop_transform,
         element_geometry_audit_prompt,
         parse_element_geometry_audit,
@@ -23,6 +24,7 @@ except ModuleNotFoundError:  # Support ``python -m unittest poc/test_...py``.
         CropTransform,
         ElementGeometryAuditError,
         build_candidate_crop_transform,
+        build_input_candidate_crop_transform,
         build_literal_candidate_crop_transform,
         element_geometry_audit_prompt,
         parse_element_geometry_audit,
@@ -107,6 +109,44 @@ class CropTransformTests(unittest.TestCase):
                 self.assertLessEqual(
                     transform.crop_size[1], round(height * 0.20) + 1
                 )
+
+    def test_tall_input_roi_preserves_context_above_shifted_outer_border(self):
+        transform = build_input_candidate_crop_transform(
+            (810, 1440),
+            (0.135, 0.49, 0.865, 0.73),
+        )
+        left, top, right, bottom = transform.pixel_bounds
+        actual_outer_border = (0.15, 0.26, 0.85, 0.45)
+        self.assertLessEqual(left / 810, actual_outer_border[0])
+        self.assertLessEqual(top / 1440, actual_outer_border[1])
+        self.assertGreaterEqual(right / 810, actual_outer_border[2])
+        self.assertGreaterEqual(bottom / 1440, actual_outer_border[3])
+        self.assertGreaterEqual(
+            actual_outer_border[1] * 1440 - top,
+            0.02 * (bottom - top),
+        )
+
+    def test_input_context_profile_varies_by_field_height_and_resolution(self):
+        for full_size in ((540, 960), (810, 1440), (1080, 2400)):
+            with self.subTest(full_size=full_size):
+                transform = build_input_candidate_crop_transform(
+                    full_size,
+                    (0.10, 0.38, 0.90, 0.58),
+                )
+                width, height = full_size
+                left, top, right, bottom = transform.pixel_bounds
+                actual_outer_border = (0.12, 0.22, 0.88, 0.40)
+                self.assertLessEqual(left / width, actual_outer_border[0])
+                self.assertLessEqual(top / height, actual_outer_border[1])
+                self.assertGreaterEqual(right / width, actual_outer_border[2])
+                self.assertGreaterEqual(bottom / height, actual_outer_border[3])
+
+    def test_input_roi_at_frame_edge_does_not_invent_missing_context(self):
+        transform = build_input_candidate_crop_transform(
+            (810, 1440),
+            (0.10, 0.01, 0.90, 0.28),
+        )
+        self.assertEqual(0, transform.pixel_bounds[1])
 
     def test_roi_clamps_near_full_frame_edge(self):
         transform = build_candidate_crop_transform(
@@ -892,7 +932,7 @@ class GenericSceneGeometryAuditIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(690 / 810, bounds[2], delta=0.01)
         self.assertAlmostEqual(847 / 1440, bounds[3], delta=0.01)
         diagnostics = observer.last_geometry_audit_diagnostics["audits"][0]
-        self.assertEqual("broad_structural", diagnostics["crop_profile"])
+        self.assertEqual("input_structural_context", diagnostics["crop_profile"])
         self.assertTrue(diagnostics["local_border_snap_used"])
         self.assertNotEqual(
             diagnostics["full_bounds"], diagnostics["snapped_full_bounds"]

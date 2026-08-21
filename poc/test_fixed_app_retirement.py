@@ -135,6 +135,23 @@ class FixedAppRetirementTests(unittest.TestCase):
         self.assertNotIn("@unittest.skip", text)
         self.assertNotIn("固定 App", text)
 
+    def test_retired_input_segmentation_authority_is_physically_absent(self) -> None:
+        text = (ROOT / "text_input_utils.py").read_text(encoding="utf-8")
+        for retired in (
+            "split_input_segments",
+            "InputAttemptState",
+            "InputRecoveryCoordinator",
+            "MAX_FULL_RETYPES",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, text)
+
+    def test_retired_full_qwen_action_prompt_is_physically_absent(self) -> None:
+        text = (ROOT / "qwen_visual_decision.py").read_text(encoding="utf-8")
+        for retired in ("def _decision_prompt(", "def _decision_retry_prompt("):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, text)
+
     def test_runtime_has_no_fixed_app_workers_or_stores(self) -> None:
         runtime = self.web_app.runtime
         for attribute in (

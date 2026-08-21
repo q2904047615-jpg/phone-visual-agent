@@ -10,6 +10,7 @@ from semantic_action import SemanticAction
 from text_input_utils import editable_character_count
 from verified_text_transaction import (
     VerifiedTextTransactionError,
+    is_direct_latin_batch_segment,
     plan_from_input_states,
 )
 from ui_scene import (
@@ -27,10 +28,9 @@ REVEAL_SYSTEM_NAVIGATION_EFFECT = {
     "system_ui": {"navigation_bar_visible": True}
 }
 
-# Certified direct-Latin hardware profile retained for capability promotion.
-# The universal transaction layer may also use Chinese pinyin, but it never
-# broadens this direct key path to digits, uppercase letters or symbols.
-SAFE_VERIFIED_TEXT_RE = re.compile(r"[a-z]{1,30}\Z")
+# The seller batch accepts only the deterministic lowercase-and-space fragment
+# minted by verified_text_transaction. Digits, uppercase and symbols continue
+# through their independently audited visible-key paths.
 GESTURE_EDGE_MARGIN = 0.02
 MIN_DRAG_DISTANCE = 0.08
 MAX_DRAG_DISTANCE = 0.90
@@ -509,7 +509,7 @@ class UniversalActionController:
                 "element_state" not in expected_effect
                 and input_step.kind == "direct_latin"
                 and input_step.current_text == ""
-                and SAFE_VERIFIED_TEXT_RE.fullmatch(input_step.segment)
+                and is_direct_latin_batch_segment(input_step.segment)
             ):
                 # Backward-compatible stage-1 authority: the first certified
                 # profile already bound an empty direct-Latin field and exact

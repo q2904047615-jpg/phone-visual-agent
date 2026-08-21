@@ -17,12 +17,12 @@ from qwen_visual_decision import (
     QwenTaskContext,
     QwenVisualDecisionObserver,
     TrustedObservation,
-    _decision_retry_prompt,
     _exact_text_candidate_block,
     _identity_text_candidate_block,
     _launcher_app_entry_candidate_ids,
     _required_exact_candidate_ids,
     _scene_matches_target_app_surface,
+    _selection_decision_prompt,
     _selection_choices,
 )
 from ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
@@ -2000,9 +2000,7 @@ class RawSequenceProvider(FakeProvider):
             self.assertIn(field, parsed.to_dict())
 
     def test_prompt_requires_completion_check_before_any_action(self) -> None:
-        from qwen_visual_decision import _decision_prompt
-
-        prompt = _decision_prompt(
+        prompt = _selection_decision_prompt(
             QwenTaskContext.from_dict(self.context),
             self.observation,
             decision_number=1,
@@ -2010,23 +2008,18 @@ class RawSequenceProvider(FakeProvider):
         )
 
         self.assertIn("必须先做完成判定", prompt)
-        self.assertIn("禁止再点击", prompt)
-        self.assertIn("已选中tab", prompt)
+        self.assertIn("当前状态已经满足完成条件时禁止再点击或选择入口", prompt)
 
     def test_prompt_treats_negative_constraints_as_candidate_filter(self) -> None:
-        from qwen_visual_decision import _decision_prompt
-
-        prompt = _decision_prompt(
+        prompt = _selection_decision_prompt(
             QwenTaskContext.from_dict(self.context),
             self.observation,
             decision_number=1,
             available_action_kinds=frozenset({"tap_semantic", "back"}),
         )
 
-        self.assertIn("候选选择前的硬过滤条件", prompt)
-        self.assertIn("即使它看起来是最短路径", prompt)
-        self.assertIn("应使用无element_id、无坐标的back", prompt)
-        self.assertIn("绝不能把back伪装成页面元素tap_semantic", prompt)
+        self.assertIn("是选择前硬过滤", prompt)
+        self.assertIn("无法安全满足时blocked", prompt)
 
     def test_negative_constraint_removes_candidate_from_model_surface_only(self) -> None:
         from qwen_visual_decision import _decision_observation_prompt_dict
@@ -2127,51 +2120,6 @@ class RawSequenceProvider(FakeProvider):
             [item.element_id for item in self.observation.scene.elements],
             [item["element_id"] for item in prompt_observation["candidates"]],
         )
-
-    def test_prompt_allows_one_bounded_swipe_for_clipped_navigation_list(self) -> None:
-        from qwen_visual_decision import _decision_prompt
-
-        prompt = _decision_prompt(
-            QwenTaskContext.from_dict(self.context),
-            self.observation,
-            decision_number=1,
-            available_action_kinds=frozenset({"swipe", "tap_semantic"}),
-        )
-
-        self.assertIn("目标字面标签或目标区域尚未出现在可信候选中", prompt)
-        self.assertIn("边缘存在", prompt)
-        self.assertIn("被裁切的后续内容", prompt)
-        self.assertIn("连续引导轨/连接线明确接触该边缘", prompt)
-        self.assertIn('expected_result只写{"content_changed":true}', prompt)
-        self.assertIn("动作后必须重新观察，不能连续执行", prompt)
-
-    def test_drag_prompt_uses_flat_endpoint_fields_and_container_destination(self) -> None:
-        from qwen_visual_decision import _decision_prompt
-
-        prompt = _decision_prompt(
-            QwenTaskContext.from_dict(self.context),
-            self.observation,
-            decision_number=1,
-            available_action_kinds=frozenset({"drag"}),
-        )
-
-        self.assertIn("source_element_id/source_target/source_role", prompt)
-        self.assertIn("destination_element_id/destination_target/destination_role", prompt)
-        self.assertIn("绝不能返回source或destination嵌套对象", prompt)
-        self.assertIn("container可以逐字复制为destination_element_id", prompt)
-        self.assertIn("代表单个源物体的", prompt)
-
-    def test_prompt_forbids_redundant_focus_on_focused_input(self) -> None:
-        from qwen_visual_decision import _decision_prompt
-
-        prompt = _decision_prompt(
-            QwenTaskContext.from_dict(self.context),
-            self.observation,
-            decision_number=1,
-            available_action_kinds=frozenset({"tap_semantic", "input_verified_text"}),
-        )
-
-        self.assertIn("states.focused=true时禁止再用tap_semantic重复聚焦", prompt)
 
     def test_unfocused_input_hides_verified_input_until_fresh_focus(self) -> None:
         context_payload = copy.deepcopy(self.context)
@@ -2392,37 +2340,6 @@ class RawSequenceProvider(FakeProvider):
             expected.report_digest,
             decision.proposal.action.params["formal_report_digest"],
         )
-
-    def test_retry_prompt_makes_status_and_action_fields_mutually_exclusive(self) -> None:
-        prompt = _decision_retry_prompt(
-            QwenTaskContext.from_dict(self.context),
-            self.observation,
-            error=VisionAgentError("finished/blocked 不能携带 next_action"),
-            decision_number=1,
-            available_action_kinds=frozenset({"tap_semantic", "back"}),
-        )
-
-        self.assertIn('status="action"', prompt)
-        self.assertIn('status="blocked"', prompt)
-        self.assertIn('status="finished"', prompt)
-        self.assertIn("不要混合三种形状", prompt)
-        self.assertIn("绝不能保留B/C的status", prompt)
-        self.assertIn('"status":"action"', prompt)
-        self.assertIn('"element_id":"逐字复制可信候选ID"', prompt)
-        self.assertIn('"target_region":{"kind":"element"', prompt)
-        self.assertIn('"expected_result":{"scene_changed":true}', prompt)
-        self.assertIn('"source_element_id":"逐字复制起点候选ID"', prompt)
-        self.assertIn('"destination_element_id":"逐字复制终点候选ID"', prompt)
-        self.assertIn('"kind":"element_path"', prompt)
-        self.assertIn("绝不能返回source或destination对象", prompt)
-        self.assertIn(
-            '"element_state":{"meaning":"逐字复制输入候选meaning",'
-            '"states":{"value":"逐字复制goal.entities.input_text"}}',
-            prompt,
-        )
-        self.assertIn("element_state和states都必须是JSON对象", prompt)
-        self.assertIn('"status":"blocked","next_action":null', prompt)
-        self.assertIn('"status":"finished","next_action":null', prompt)
 
     def test_motion_blur_cannot_establish_trusted_observation(self) -> None:
         blurred = load_replay_image("motion_blur_after_pinyin.jpg")

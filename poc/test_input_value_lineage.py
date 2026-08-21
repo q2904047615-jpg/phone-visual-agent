@@ -1159,6 +1159,63 @@ class TypedInputLineageTests(unittest.TestCase):
             "line1\nDIFFERENT",
         )
 
+    def test_multiline_field_never_collapses_real_trailing_newline_to_lineage(self) -> None:
+        record = TypedInputLineage(
+            version=TYPED_INPUT_LINEAGE_VERSION,
+            device_id=DEVICE,
+            exact_value="first",
+            app_id="sample.app",
+            screen_id="editor",
+            input_meaning="application_text_input",
+            input_bounds=(0.13, 0.54, 0.69, 0.61),
+            before_fingerprint="before-fp",
+            after_fingerprint="after-fp",
+            action_digest="a" * 64,
+            receipt_digest="b" * 64,
+            surface_descriptors=tuple(
+                _surface_descriptor(
+                    surface_frame(variation=index % 2),
+                    (0.13, 0.54, 0.69, 0.61),
+                )
+                for index in range(4)
+            ),
+            recorded_at_epoch=time.time(),
+            source="verified_live_literal_action",
+        )
+        base = UIScene.from_dict(scene("first\n", "current-fp"))
+        goal = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "enter_text",
+                    "objective": "输入两行文本",
+                    "constraints": [],
+                    "completion_conditions": [],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "input_text": "first line\nsecond line",
+                        "active_input_transaction_text": "first line\nsecond line",
+                        "active_input_field_id": "input_field_1",
+                        "active_input_multiline": True,
+                    },
+                }
+            }
+        }
+
+        audited = _apply_input_structure_audit(
+            base,
+            input_audit_raw("first\n", None),
+            fingerprint="current-fp",
+            goal_context=goal,
+            verified_input_lineage=record,
+            device_id=DEVICE,
+            lineage_frame=surface_frame(variation=1),
+        )
+
+        self.assertEqual(
+            "first\n",
+            audited.get_element("local_audited_input_1").states["value"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

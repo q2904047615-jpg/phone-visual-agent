@@ -1707,6 +1707,88 @@ def build_exact_input_task_graph(
     return graph
 
 
+def build_exact_action_task_graph(
+    raw_goal: str,
+    *,
+    action_kind: str,
+    target_label: str = "",
+    device_id: str,
+    task_id: str | None = None,
+) -> DynamicTaskGraph:
+    """Build one locally authorized navigation action without model planning."""
+
+    goal_text = str(raw_goal or "").strip()
+    resolved_action = str(action_kind or "").strip()
+    label = str(target_label or "").strip()
+    if not goal_text:
+        raise TaskGraphError("用户目标不能为空。")
+    if resolved_action not in {"back", "home", "tap_semantic"}:
+        raise TaskGraphError("exact_action_kind 只允许 back、home 或 tap_semantic。")
+    if resolved_action == "tap_semantic" and not label:
+        raise TaskGraphError("tap_semantic 直推必须提供 exact_target_label。")
+    if resolved_action != "tap_semantic" and label:
+        raise TaskGraphError("back/home 直推不得携带 exact_target_label。")
+    if len(label) > 120 or "\n" in label or "\r" in label:
+        raise TaskGraphError("exact_target_label 必须为不超过120字符的单行文字。")
+    _validate_device_id(device_id)
+    resolved_task_id = task_id or uuid.uuid4().hex
+    _validate_task_id(resolved_task_id)
+    objective_by_action = {
+        "back": "按一次返回键",
+        "home": "回到系统主屏幕",
+        "tap_semantic": "点击当前画面中的目标控件",
+    }
+    entities: dict[str, Any] = {"target_surface": "current_surface"}
+    if label:
+        entities["target_ui_label"] = label
+    completion = "动作后出现新的稳定画面"
+    graph = DynamicTaskGraph(
+        task_id=resolved_task_id,
+        device_id=device_id,
+        revision=1,
+        status="ready",
+        goal=GraphGoal(
+            objective=objective_by_action[resolved_action],
+            target_apps=(),
+            entities=entities,
+        ),
+        constraints=(),
+        completion_conditions=(
+            CompletionCondition(
+                condition_id="action_completed",
+                description=completion,
+                evidence_required=("动作后的稳定画面",),
+            ),
+        ),
+        risk_actions=(),
+        subgoals=(
+            Subgoal(
+                subgoal_id=f"exact_{resolved_action}",
+                objective=objective_by_action[resolved_action],
+                status="active",
+                depends_on=(),
+                constraints=(),
+                completion_conditions=(completion,),
+                completion_evidence=(),
+                risk_action_ids=(),
+                external_impact="navigation_only",
+            ),
+        ),
+        active_subgoal_id=f"exact_{resolved_action}",
+        raw_user_goal=goal_text,
+    )
+    graph.validate()
+    semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+    required_actions = {
+        str(constraint.value)
+        for constraint in semantic_ir.constraints
+        if constraint.kind == "required_action"
+    }
+    if resolved_action not in required_actions:
+        raise TaskGraphError("本地直推动作没有编译为请求的 canonical action。")
+    return graph
+
+
 def _pure_prohibited_effect_families(value: str) -> frozenset[str]:
     """Classify a clause that contains only a prohibited-effect invariant.
 

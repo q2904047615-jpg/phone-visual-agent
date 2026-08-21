@@ -143,6 +143,8 @@ class LocalAgentApiClient:
         *,
         text: str,
         exact_input_text: str | None = None,
+        exact_action_kind: str | None = None,
+        exact_target_label: str = "",
         device_id: str,
         auto_advance: bool = False,
     ) -> JsonObject:
@@ -153,6 +155,10 @@ class LocalAgentApiClient:
         }
         if exact_input_text is not None:
             payload["exact_input_text"] = exact_input_text
+        if exact_action_kind is not None:
+            payload["exact_action_kind"] = exact_action_kind
+        if exact_target_label:
+            payload["exact_target_label"] = exact_target_label
         return self._request(
             "POST",
             self.START_ROUTE,

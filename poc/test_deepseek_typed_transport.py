@@ -11,6 +11,7 @@ from deepseek_task_graph import (
     TaskGraphError,
     VisualClaimEvidenceRef,
     _named_visual_identity_anchor,
+    build_exact_action_task_graph,
     build_exact_input_task_graph,
     named_visual_identity_is_grounded,
 )
@@ -69,6 +70,30 @@ def payload(*, objective="进入普通会话并聚焦空输入框", effects=()):
 
 
 class TypedPlannerTransportTests(unittest.TestCase):
+    def test_structured_navigation_action_builds_requested_canonical_step(self):
+        for action_kind, target_label in (
+            ("back", ""),
+            ("home", ""),
+            ("tap_semantic", "刷新"),
+        ):
+            with self.subTest(action_kind=action_kind):
+                graph = build_exact_action_task_graph(
+                    "执行一个结构化导航动作",
+                    action_kind=action_kind,
+                    target_label=target_label,
+                    device_id="device-local-01",
+                )
+                semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+                self.assertEqual(f"exact_{action_kind}", graph.active_subgoal_id)
+                self.assertIn(
+                    action_kind,
+                    {
+                        constraint.value
+                        for constraint in semantic_ir.constraints
+                        if constraint.kind == "required_action"
+                    },
+                )
+
     def test_structured_exact_input_builds_one_local_typed_subgoal(self):
         graph = build_exact_input_task_graph(
             "将当前唯一输入框精确填写为授权文字",

@@ -134,6 +134,8 @@ class GenericSupervisedStartRequest(StrictAgentRequest):
         min_length=1,
         max_length=4000,
     )
+    exact_action_kind: StrictStr | None = Field(default=None, max_length=32)
+    exact_target_label: StrictStr = Field(default="", max_length=120)
     device_id: StrictStr = Field(min_length=1, max_length=128)
     auto_advance: StrictBool = True
 
@@ -1277,6 +1279,8 @@ def start_generic_supervised_session(
                 session_id=session_id,
                 raw_goal=body.text,
                 exact_input_text=body.exact_input_text,
+                exact_action_kind=body.exact_action_kind,
+                exact_target_label=body.exact_target_label,
                 device_id=body.device_id,
                 run_dir=run_dir,
             )

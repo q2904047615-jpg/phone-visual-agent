@@ -57,6 +57,13 @@ def _openapi(*, version="0.2.0", include_start=True):
                         {"type": "null"},
                     ]
                 },
+                "exact_action_kind": {
+                    "anyOf": [
+                        {"type": "string", "maxLength": 32},
+                        {"type": "null"},
+                    ]
+                },
+                "exact_target_label": {"type": "string", "maxLength": 120},
                 "device_id": string,
                 "auto_advance": {"type": "boolean"},
             },
@@ -208,6 +215,29 @@ class LocalAgentApiClientTests(unittest.TestCase):
         self.assertEqual(posts[0][0], "secret")
         self.assertIn('"auto_advance":false', posts[0][1])
         self.assertIn('"exact_input_text":"first\\nsecond"', posts[0][1])
+
+    def test_start_sends_structured_navigation_action(self):
+        posts = []
+
+        def handler(request):
+            if request.url.path == "/api/session":
+                return httpx.Response(200, json={"token": "secret", "version": "0.2.0"})
+            if request.url.path == "/openapi.json":
+                return httpx.Response(200, json=_openapi())
+            posts.append(request.read().decode())
+            return httpx.Response(200, json={"session": {"session_id": "abc"}})
+
+        with self._client(handler) as client:
+            client.start_session(
+                text="点击刷新",
+                exact_action_kind="tap_semantic",
+                exact_target_label="刷新",
+                device_id="device-local-01",
+                auto_advance=False,
+            )
+        self.assertEqual(1, len(posts))
+        self.assertIn('"exact_action_kind":"tap_semantic"', posts[0])
+        self.assertIn('"exact_target_label":"刷新"', posts[0])
 
     def test_confirm_fetches_latest_scope_and_posts_it_once(self):
         confirms = []

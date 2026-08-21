@@ -21,6 +21,7 @@ from deepseek_task_graph import (
     ObservedState,
     VerifiedActionTransition,
     VisualClaimEvidenceRef,
+    build_exact_action_task_graph,
     build_exact_input_task_graph,
     named_visual_identity_is_grounded,
 )
@@ -5892,6 +5893,8 @@ class UniversalAgentOrchestrator:
         session_id: str,
         raw_goal: str,
         exact_input_text: str | None = None,
+        exact_action_kind: str | None = None,
+        exact_target_label: str = "",
         device_id: str,
         run_dir: Path,
     ) -> UniversalAgentSessionState:
@@ -5904,6 +5907,8 @@ class UniversalAgentOrchestrator:
                     session_id=resolved_session,
                     raw_goal=raw_goal,
                     exact_input_text=exact_input_text,
+                    exact_action_kind=exact_action_kind,
+                    exact_target_label=exact_target_label,
                     device_id=resolved_device,
                     run_dir=run_dir,
                 )
@@ -5919,6 +5924,8 @@ class UniversalAgentOrchestrator:
         session_id: str,
         raw_goal: str,
         exact_input_text: str | None,
+        exact_action_kind: str | None,
+        exact_target_label: str,
         device_id: str,
         run_dir: Path,
     ) -> UniversalAgentSessionState:
@@ -5941,6 +5948,10 @@ class UniversalAgentOrchestrator:
             )
         try:
             session.status = "planning"
+            if exact_input_text is not None and exact_action_kind is not None:
+                raise UniversalAgentOrchestratorError(
+                    "exact_input_text 与 exact_action_kind 不能同时使用。"
+                )
             graph = (
                 build_exact_input_task_graph(
                     session.raw_goal,
@@ -5948,6 +5959,13 @@ class UniversalAgentOrchestrator:
                     device_id=session.device_id,
                 )
                 if exact_input_text is not None
+                else build_exact_action_task_graph(
+                    session.raw_goal,
+                    action_kind=exact_action_kind,
+                    target_label=exact_target_label,
+                    device_id=session.device_id,
+                )
+                if exact_action_kind is not None
                 else self.deepseek_planner.plan(
                     session.raw_goal,
                     device_id=session.device_id,

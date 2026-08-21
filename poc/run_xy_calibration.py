@@ -17,9 +17,9 @@ from urllib.request import Request, urlopen
 import numpy as np
 from PIL import Image, ImageDraw
 
-import robot_gui_poc as legacy
+import robot_gui_poc as seller_gui
 from device_exclusivity import InterProcessLease, SHARED_DEVICE_LEASE_DIR
-from robot_core import RobotController, load_workflow_config
+from robot_core import RobotController, load_controller_config
 from tap_calibration import (
     CALIBRATION_PATH,
     Affine2D,
@@ -109,17 +109,17 @@ def click_raw_pixel(robot: RobotController, frame: Image.Image, point: tuple[int
     if not (0 <= x < frame.width and 0 <= y < frame.height):
         raise TapCalibrationError(f"校准落点{x, y}超出相机画面。")
     robot._consume_physical_execution("tap_semantic", frame)
-    hwnd, _title = legacy.find_window(robot.title)
+    hwnd, _title = seller_gui.find_window(robot.title)
     robot._checkpoint()
-    legacy.configure_single_click_count(hwnd)
-    legacy.click_client_point(
+    seller_gui.configure_single_click_count(hwnd)
+    seller_gui.click_client_point(
         hwnd,
         x,
         y,
         countdown=0,
-        hold_seconds=float(load_workflow_config()["vision_agent"]["tap_hold"]),
+        hold_seconds=float(load_controller_config()["tap_hold"]),
     )
-    legacy.move_cursor_outside_camera(hwnd)
+    seller_gui.move_cursor_outside_camera(hwnd)
 
 
 def wait_for_new_sample(base_url: str, previous_count: int, timeout: float = 8.0) -> dict:

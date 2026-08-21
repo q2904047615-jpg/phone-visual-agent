@@ -671,20 +671,6 @@ class TaskSemanticIRTests(unittest.TestCase):
         )
         self.assertFalse(hasattr(planner, "last_semantic_shadow"))
 
-    def test_formal_planner_no_longer_accepts_legacy_risk_audit_controls(self):
-        provider = OneResponseProvider(current_send_failure_payload())
-
-        with self.assertRaises(TypeError):
-            DeepSeekTaskGraphPlanner(
-                provider,
-                enable_legacy_risk_diagnostics=True,
-            )
-        with self.assertRaises(TypeError):
-            DeepSeekTaskGraphPlanner(
-                provider,
-                risk_audit_provider=provider,
-            )
-
     def test_unknown_effect_is_rejected_by_new_transport(self):
         payload = current_send_failure_payload()
         payload["effect_intents"][0]["kind"] = "unknown_external_effect"

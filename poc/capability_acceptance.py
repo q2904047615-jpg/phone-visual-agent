@@ -380,11 +380,6 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
             if isinstance(raw_resolved.get("text"), str)
             else None
         )
-        legacy_direct_input = bool(
-            resolved_kind == "input_verified_text"
-            and resolved_text
-            and "input_method" not in raw_resolved
-        )
         resolved = ResolvedSemanticAction(
             node_id=str(raw_resolved.get("node_id") or "acceptance"),
             kind=resolved_kind,
@@ -398,13 +393,12 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
             ),
             text=resolved_text,
             input_fragment=(
-                str(raw_resolved.get("input_fragment") or "") or resolved_text
-                if legacy_direct_input or raw_resolved.get("input_fragment") is not None
+                str(raw_resolved.get("input_fragment") or "") or None
+                if raw_resolved.get("input_fragment") is not None
                 else None
             ),
             input_method=(
-                str(raw_resolved.get("input_method") or "")
-                or ("direct_latin" if legacy_direct_input else None)
+                str(raw_resolved.get("input_method") or "") or None
             ),
             input_pinyin=(
                 str(raw_resolved.get("input_pinyin") or "") or None
@@ -412,12 +406,12 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
             prior_input_value=(
                 str(raw_resolved.get("prior_input_value") or "")
                 if raw_resolved.get("prior_input_value") is not None
-                else ("" if legacy_direct_input else None)
+                else None
             ),
             expected_input_value=(
                 str(raw_resolved.get("expected_input_value") or "")
                 if raw_resolved.get("expected_input_value") is not None
-                else (resolved_text if legacy_direct_input else None)
+                else None
             ),
             direction=(
                 raw_resolved.get("direction")

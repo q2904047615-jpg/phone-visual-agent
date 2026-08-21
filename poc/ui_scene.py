@@ -795,58 +795,6 @@ class UIScene:
         scene.validate()
         return scene
 
-    @classmethod
-    def from_legacy_observation(
-        cls,
-        observed: Any,
-        *,
-        frame_size: tuple[int, int],
-    ) -> "UIScene":
-        """Compatibility adapter; new perception should emit UIScene directly."""
-        width, height = frame_size
-        if width <= 0 or height <= 0:
-            raise UISceneError("frame_size 无效。")
-        targets = dict(getattr(observed, "targets", {}) or {})
-        target_bounds = dict(getattr(observed, "target_bounds", {}) or {})
-        elements: list[UIElement] = []
-        for index, (meaning, point) in enumerate(targets.items(), start=1):
-            bounds = target_bounds.get(meaning)
-            if bounds is None:
-                x, y = point
-                radius = max(4, min(width, height) // 100)
-                bounds = (x - radius, y - radius, x + radius, y + radius)
-            left, top, right, bottom = bounds
-            normalized = (
-                max(0.0, left / width),
-                max(0.0, top / height),
-                min(1.0, right / width),
-                min(1.0, bottom / height),
-            )
-            if normalized[0] >= normalized[2] or normalized[1] >= normalized[3]:
-                continue
-            elements.append(
-                UIElement(
-                    element_id=f"legacy-{index}-{meaning}",
-                    role="unknown",
-                    meaning=str(meaning),
-                    label=str(meaning),
-                    bounds=normalized,
-                    confidence=float(getattr(observed, "confidence", 0.0)),
-                    evidence=("legacy_target_adapter",),
-                )
-            )
-        return cls(
-            app_id=_infer_app_id(str(getattr(observed, "state", "unknown"))),
-            screen_id=str(getattr(observed, "state", "unknown")),
-            summary=str(getattr(observed, "reason", "")),
-            elements=tuple(elements),
-            overlays=tuple(getattr(observed, "overlays", ()) or ()),
-            stable=bool(getattr(observed, "stable", False)),
-            confidence=float(getattr(observed, "confidence", 0.0)),
-            fingerprint=str(getattr(observed, "page_fingerprint", "")),
-        )
-
-
 def _infer_app_id(screen_id: str) -> str:
     normalized_screen = screen_id.strip().lower()
     if normalized_screen in {

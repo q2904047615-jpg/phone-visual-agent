@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-import robot_gui_poc as legacy
+import robot_gui_poc as seller_gui
 from robot_core import RobotController
 
 
@@ -31,7 +31,7 @@ def capture_click_burst(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     robot = RobotController(device_id=device_id)
-    hwnd, title = legacy.find_window(robot.title)
+    hwnd, title = seller_gui.find_window(robot.title)
     frames: list[tuple[float, Image.Image]] = []
     capture_errors: list[str] = []
     started = time.monotonic()
@@ -40,8 +40,8 @@ def capture_click_burst(
     def recorder() -> None:
         while time.monotonic() < stop_at:
             try:
-                frame = legacy.camera_crop(
-                    legacy.capture_client(hwnd), legacy.DEFAULT_CAMERA_HEIGHT
+                frame = seller_gui.camera_crop(
+                    seller_gui.capture_client(hwnd), seller_gui.DEFAULT_CAMERA_HEIGHT
                 ).convert("RGB")
                 frames.append((time.monotonic() - started, frame))
             except Exception as exc:  # Preserve a partial burst for diagnosis.

@@ -2,12 +2,6 @@ import unittest
 from dataclasses import replace
 
 from semantic_action import SemanticAction
-from task_orchestrator import (
-    GenericTaskOrchestrator,
-    GoalSpec,
-    PlanNode,
-    TaskPlanError,
-)
 from ui_scene import (
     UI_SCENE_PROTOCOL_VERSION,
     SystemUIFacts,
@@ -170,59 +164,6 @@ class UISceneTests(unittest.TestCase):
         )
         self.assertEqual(current.foreground_app_id, "launcher")
         self.assertEqual(current.to_dict()["foreground_app_id"], "launcher")
-
-    def test_arbitrary_app_goal_and_plan_are_valid(self) -> None:
-        goal = GoalSpec.from_dynamic(
-            app_id="calculator",
-            objective="打开计算器并点击数字5",
-            success_criteria={"screen_contains": "5"},
-        )
-        plan = GenericTaskOrchestrator().compile_dynamic(
-            goal,
-            {
-                "root": {
-                    "kind": "sequence",
-                    "node_id": "root",
-                    "children": [
-                        {
-                            "kind": "action",
-                            "node_id": "open",
-                            "action": "ensure_app",
-                            "params": {"app_id": "calculator"},
-                        },
-                        {
-                            "kind": "action",
-                            "node_id": "tap_five",
-                            "action": "tap_semantic",
-                            "params": {"target": "digit_5"},
-                        },
-                        {
-                            "kind": "action",
-                            "node_id": "verify",
-                            "action": "verify",
-                            "params": {"expected": "display_5"},
-                        },
-                    ],
-                }
-            },
-        )
-        self.assertEqual(plan.app_id, "calculator")
-        self.assertEqual(plan.goal, goal)
-
-    def test_dynamic_plan_rejects_raw_coordinates(self) -> None:
-        goal = GoalSpec.from_dynamic(app_id="settings", objective="打开设置")
-        with self.assertRaisesRegex(TaskPlanError, "禁止字段"):
-            GenericTaskOrchestrator().compile_dynamic(
-                goal,
-                {
-                    "root": {
-                        "kind": "action",
-                        "node_id": "bad",
-                        "action": "tap_semantic",
-                        "params": {"target": "settings", "x": 0.5},
-                    }
-                },
-            )
 
     def test_scene_rejects_model_action_fields(self) -> None:
         with self.assertRaisesRegex(UISceneError, "动作字段"):

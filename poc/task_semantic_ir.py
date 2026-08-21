@@ -1579,7 +1579,7 @@ def compile_runtime_graph_semantics(
     for subgoal_id, subgoal in subgoals.items():
         # A read-only node can describe an already completed action (for
         # example, "after input, verify no send").  It never owns a new
-        # physical action, so legacy wording must not mint required_action.
+        # physical action, so free-form wording must not mint required_action.
         if str(getattr(subgoal, "external_impact", "") or "") == "read_only":
             continue
         objective = str(getattr(subgoal, "objective", "") or "")
@@ -2014,7 +2014,7 @@ def compile_formal_semantic_authority(
 
     The runtime graph is already a deterministic projection of the strict
     typed planner transport.  Only ``EffectIntent.kind`` and the local policy
-    decide confirmation; model-supplied legacy risk fields are not accepted.
+    decide confirmation; model-supplied free-form risk fields are not accepted.
     """
 
     if any(
@@ -2022,7 +2022,7 @@ def compile_formal_semantic_authority(
         for item in tuple(getattr(graph, "risk_actions", ()) or ())
     ):
         raise TaskSemanticIRError(
-            "正式语义权威拒绝旧风险投影；必须由 typed effect_intents 创建新任务图。"
+            "正式语义权威只接受由 typed effect_intents 创建的风险条目。"
         )
     compilation = compile_runtime_graph_semantics(graph, risk_policy=risk_policy)
     decisions = {item.effect_id: item for item in compilation.risk_decisions}

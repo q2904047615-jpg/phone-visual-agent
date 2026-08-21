@@ -524,6 +524,10 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 "resolved_action": {
                     "kind": "input_verified_text",
                     "text": "agent",
+                    "input_fragment": "agent",
+                    "input_method": "direct_latin",
+                    "prior_input_value": "",
+                    "expected_input_value": "agent",
                     "target_element_id": "field",
                     "before_fingerprint": "fingerprint-execution-before",
                 },
@@ -606,6 +610,10 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 "resolved_action": {
                     "kind": "input_verified_text",
                     "text": "agent",
+                    "input_fragment": "agent",
+                    "input_method": "direct_latin",
+                    "prior_input_value": "",
+                    "expected_input_value": "agent",
                     "target_element_id": "field",
                     "before_fingerprint": "fingerprint-execution-before",
                 },
@@ -672,6 +680,10 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
                 "resolved_action": {
                     "kind": "input_verified_text",
                     "text": "agent",
+                    "input_fragment": "agent",
+                    "input_method": "direct_latin",
+                    "prior_input_value": "",
+                    "expected_input_value": "agent",
                     "target_element_id": "field",
                     "before_fingerprint": "fingerprint-execution-before",
                 },

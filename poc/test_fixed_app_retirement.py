@@ -5,8 +5,11 @@ import json
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
+
+ROOT = Path(__file__).resolve().parent
 
 RETIRED_RUNTIME_MODULES = {
     "operation_specs",
@@ -18,6 +21,47 @@ RETIRED_RUNTIME_MODULES = {
     "live_semantic_dry_run",
     "semantic_executor",
     "generic_intent",
+    "target_locator",
+    "vision_replay",
+    "analyze_state_graph_reliability",
+    "build_vision_history_index",
+    "build_vision_review_queue",
+}
+
+RETIRED_SOURCE_FILES = {
+    "operation_specs.py",
+    "task_orchestrator.py",
+    "state_controller.py",
+    "douyin_page_signals.py",
+    "supervised_semantic_runtime.py",
+    "semantic_action_adapter.py",
+    "live_semantic_dry_run.py",
+    "semantic_executor.py",
+    "generic_intent.py",
+    "target_locator.py",
+    "vision_replay.py",
+    "replay_vision_eval.py",
+    "analyze_state_graph_reliability.py",
+    "build_vision_history_index.py",
+    "build_vision_review_queue.py",
+    "web_workflows.json",
+    "sequence.example.json",
+    "templates/douyin_home.png",
+}
+
+RETIRED_TEST_FILES = {
+    "test_operation_specs.py",
+    "test_task_orchestrator.py",
+    "test_state_controller.py",
+    "test_douyin_page_signals.py",
+    "test_supervised_semantic_runtime.py",
+    "test_semantic_action_adapter.py",
+    "test_live_semantic_dry_run.py",
+    "test_semantic_executor.py",
+    "test_generic_intent.py",
+    "test_reliability.py",
+    "test_vision_replay.py",
+    "test_vision_review_queue.py",
 }
 
 RETIRED_PATHS = {
@@ -49,6 +93,47 @@ class FixedAppRetirementTests(unittest.TestCase):
         paths = set(self.web_app.app.openapi()["paths"])
         self.assertTrue(RETIRED_PATHS.isdisjoint(paths))
         self.assertIn("/api/agent/generic-supervised/start", paths)
+
+    def test_retired_sources_and_tests_are_physically_absent(self) -> None:
+        leftovers = sorted(
+            relative
+            for relative in RETIRED_SOURCE_FILES | RETIRED_TEST_FILES
+            if (ROOT / relative).exists()
+        )
+        self.assertEqual([], leftovers)
+
+    def test_current_runtime_sources_cannot_restore_fixed_app_authority(self) -> None:
+        forbidden = {
+            "class TaskStore",
+            "class RuleAgent",
+            "class HybridAgent",
+            "class VisionAgentRunner",
+            "RETIRED_FIXED_APP_ROUTE_NAMES",
+            "def send_wechat_text",
+            "def execute_douyin",
+            "def detect_douyin_heart",
+            "from_legacy_observation",
+            "QWEN_VL_MODEL",
+            "DASHSCOPE_BASE_URL",
+        }
+        sources = (
+            "web_app.py",
+            "vision_agent.py",
+            "robot_core.py",
+            "robot_gui_poc.py",
+            "ui_scene.py",
+            "vision_model_config.py",
+        )
+        hits = []
+        for name in sources:
+            text = (ROOT / name).read_text(encoding="utf-8")
+            hits.extend(f"{name}:{token}" for token in forbidden if token in text)
+        self.assertEqual([], sorted(hits))
+
+    def test_retired_tests_are_not_hidden_as_skips(self) -> None:
+        text = (ROOT / "test_web_platform.py").read_text(encoding="utf-8")
+        self.assertNotIn("@unittest.skip", text)
+        self.assertNotIn("固定 App", text)
 
     def test_runtime_has_no_fixed_app_workers_or_stores(self) -> None:
         runtime = self.web_app.runtime

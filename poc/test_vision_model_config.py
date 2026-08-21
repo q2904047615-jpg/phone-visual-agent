@@ -24,27 +24,15 @@ class VisionModelConfigTests(unittest.TestCase):
         self.assertFalse(config.enable_thinking)
         self.assertEqual(config.coordinate_scale, 1000)
 
-    def test_generic_environment_names_override_legacy_names(self) -> None:
+    def test_current_environment_names_override_defaults(self) -> None:
         config = load_vision_model_config(
             environ={
                 "VISION_MODEL": "qwen3.7-plus",
-                "QWEN_VL_MODEL": "legacy-model",
                 "VISION_MODEL_BASE_URL": "https://new.example/v1/",
-                "DASHSCOPE_BASE_URL": "https://legacy.example/v1",
             }
         )
         self.assertEqual(config.model, "qwen3.7-plus")
         self.assertEqual(config.base_url, "https://new.example/v1")
-
-    def test_legacy_environment_names_remain_compatible(self) -> None:
-        config = load_vision_model_config(
-            environ={
-                "QWEN_VL_MODEL": "qwen3-vl-plus",
-                "DASHSCOPE_BASE_URL": "https://legacy.example/v1/",
-            }
-        )
-        self.assertEqual(config.model, "qwen3-vl-plus")
-        self.assertEqual(config.base_url, "https://legacy.example/v1")
 
     def test_invalid_model_or_remote_http_url_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "模型 ID"):

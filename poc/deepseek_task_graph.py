@@ -164,9 +164,6 @@ NATURAL_ACTION_INTENT_PATTERN = re.compile(
     r"type[ _-]?text|input[ _-]?text|press[ _-]?key)\b)",
     re.IGNORECASE,
 )
-# Kept as an internal compatibility alias.  The validator now rejects only
-# executable control details; natural click/swipe/input/drag intent is legal.
-LOW_LEVEL_INSTRUCTION_PATTERN = FORBIDDEN_EXECUTION_INSTRUCTION_PATTERN
 TARGET_SURFACES = frozenset({"device", "system", "current_surface"})
 MAX_CANONICAL_INPUT_CHARS = 4000
 MAX_INPUT_FIELDS = 32
@@ -516,7 +513,7 @@ class Subgoal:
             raise TaskGraphError(
                 f"子目标执行类别无效：{self.external_impact}"
             )
-        # Free-form legacy prose is not an input-value authority.  Canonical
+        # Free-form prose is not an input-value authority. Canonical
         # payload ownership is validated later by TaskSemanticIR's typed
         # InputFieldIntent + required_action binding.  In particular, visible,
         # focused, editable and empty preparation states must never be forced to
@@ -1822,19 +1819,14 @@ def _normalize_unique_active_frontier(graph: DynamicTaskGraph) -> DynamicTaskGra
 
 
 def _planner_transport_snapshot(graph: DynamicTaskGraph) -> dict[str, Any]:
-    """Serialize only the new typed planner transport.
-
-    Runtime risk projections exist for current controller/Qwen compatibility,
-    but they are intentionally absent here and can never flow back into a
-    DeepSeek plan or replan.
-    """
+    """Serialize only the current typed planner transport."""
 
     graph.validate()
     effect_intents = []
     for effect in graph.risk_actions:
         if not effect.effect_kind:
             raise TaskGraphError(
-                "旧风险任务图不能进入正式重规划；请从用户原始目标创建新会话。"
+                "风险条目缺少 typed effect_kind，不能进入正式重规划。"
             )
         effect_intents.append(
             {
@@ -3055,7 +3047,7 @@ def _reject_low_level_instruction(
         and INPUT_CONTENT_STATE_CONSTRAINT_PATTERN.fullmatch(value)
     ):
         return
-    for match in LOW_LEVEL_INSTRUCTION_PATTERN.finditer(value):
+    for match in FORBIDDEN_EXECUTION_INSTRUCTION_PATTERN.finditer(value):
         prefix = value[: match.start()].lower()
         resets = tuple(LOW_LEVEL_NEGATION_SCOPE_RESET_PATTERN.finditer(prefix))
         if resets:

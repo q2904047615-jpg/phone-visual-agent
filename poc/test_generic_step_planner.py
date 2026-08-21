@@ -219,9 +219,6 @@ class FakeRobot:
         self.actions.append(("home",))
         return (500, 950)
 
-    def vision_type_text(self, text):
-        raise AssertionError("universal input must not use static keyboard geometry")
-
     def vision_type_text_with_layout(self, text, keyboard_layout):
         self._consume("input_verified_text")
         self.keyboard_layouts.append(keyboard_layout)

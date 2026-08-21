@@ -1981,22 +1981,9 @@ def _parse_model_decision(
     observation: TrustedObservation,
     available_action_kinds: frozenset[str] | None = None,
 ) -> QwenVisualDecision:
-    """Hydrate the model's minimal selection into the existing formal object.
-
-    Full legacy-shaped payloads remain accepted as migration/test input, but
-    production prompts only request the minimal selection envelope.  All
-    authority-bearing identity, candidate semantics and geometry are local.
-    """
+    """Hydrate the model's minimal selection into the formal decision object."""
 
     payload = _extract_qwen_json_object(raw)
-    if "protocol_version" in payload or "next_action" in payload:
-        return _parse_decision(
-            raw,
-            context=context,
-            observation=observation,
-            available_action_kinds=available_action_kinds,
-        )
-
     allowed = {
         "status",
         "choice_id",
@@ -2553,8 +2540,8 @@ def _parse_action(
                 "next_action.distance 只允许作为swipe的非权威提示。"
             )
         # The device exposes only a calibrated fixed swipe.  Model-authored
-        # distance never reaches the controller or hardware.  Discard legacy
-        # numeric or descriptive hints instead of treating display-only data
+        # distance never reaches the controller or hardware. Discard numeric
+        # or descriptive hints instead of treating display-only data
         # as an executable protocol failure.
     allowed = {
         "kind", "element_id", "target", "role", "label", "states", "direction",
@@ -3290,7 +3277,7 @@ def _surface_descriptor_identity_candidate_ids(
 ) -> tuple[str, ...]:
     """Bind a generic page descriptor to its visible literal title.
 
-    A legacy ``target_ui_label`` can name the current page while the physical
+    A typed ``target_ui_label`` can name the current page while the physical
     target is a separate input or button.  Only a strict generic type suffix
     plus a shorter visible title establishes this relation.  Exact labels stay
     element targets; zero or multiple titles never grant action authority.
@@ -3327,7 +3314,7 @@ def _identity_scoped_exact_text_matches(
 ) -> list[str] | None:
     """Resolve exact text as surface identity for non-element actions.
 
-    A literal carried by the legacy transport may name the current page or
+    A literal carried by the typed goal may name the current page or
     container (for example a conversation title) while the typed active
     action is a viewport gesture or a coordinate-free system action.  In that
     case the literal must still be uniquely visible, but binding the physical

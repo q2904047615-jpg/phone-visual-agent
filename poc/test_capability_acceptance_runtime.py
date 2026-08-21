@@ -78,7 +78,7 @@ class ProvisionalControllerTests(unittest.TestCase):
         original = self.registry.controller("device-a")
         descriptors_before = self.registry.descriptors()
 
-        with patch("robot_core.legacy.find_window") as find_window:
+        with patch("robot_core.seller_gui.find_window") as find_window:
             provisional = self.registry.provisional_controller("device-a", "drag")
 
         self.assertIsNot(provisional, original)
@@ -102,7 +102,7 @@ class ProvisionalControllerTests(unittest.TestCase):
             ("missing-device", "drag", "未登记或未启用"),
         )
 
-        with patch("robot_core.legacy.find_window") as find_window:
+        with patch("robot_core.seller_gui.find_window") as find_window:
             for device_id, action, message in cases:
                 with self.subTest(device_id=device_id, action=action):
                     with self.assertRaisesRegex(CapabilityAcceptanceError, message):

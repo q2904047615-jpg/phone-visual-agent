@@ -1,27 +1,18 @@
 from __future__ import annotations
 
-import ctypes
-import datetime as dt
 import json
 import re
 import threading
 import time
-from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw
 
-import robot_gui_poc as legacy
+import robot_gui_poc as seller_gui
 from orientation_safety import (
     OrientationCredential,
     PhysicalExecutionGate,
-)
-from ocr_runtime import (
-    OcrMatch,
-    find_text as find_ocr_text,
-    is_available as ocr_available,
-    recognize as recognize_ocr,
 )
 from verified_text_transaction import (
     MAX_DIRECT_LATIN_SEGMENT_CHARS,
@@ -30,9 +21,8 @@ from verified_text_transaction import (
 )
 
 
-WEB_TEMPLATE_DIR = legacy.TEMPLATE_DIR / "web"
-WEB_OUTPUT_DIR = legacy.OUTPUT_DIR / "web"
-WEB_CONFIG_PATH = legacy.ROOT / "web_workflows.json"
+WEB_OUTPUT_DIR = seller_gui.OUTPUT_DIR / "web"
+CONTROL_CONFIG_PATH = Path(__file__).with_name("controller_config.json")
 
 # A normal seller control window is portrait and tall enough to contain the
 # phone camera view plus its bottom controls.  Startup/error dialogs can share
@@ -48,7 +38,7 @@ def controller_client_has_camera(width: int, height: int) -> bool:
         return False
     if width > height:
         return width >= 800 and height >= 450 and 1.45 <= width / height <= 2.0
-    return legacy.seller_layout_has_full_camera(width, height)
+    return seller_gui.seller_layout_has_full_camera(width, height)
 
 
 def oriented_navigation_ratio(
@@ -66,98 +56,27 @@ def oriented_navigation_ratio(
     return x_ratio, y_ratio
 
 
-DEFAULT_CONFIG: dict[str, Any] = {
-    "wechat": {
-        "input_wait_per_character": 0.8,
-        "ocr_language": "zh-Hans-CN",
-        "ocr_scale": 3.0,
-        "ocr_timeout": 10.0,
-        "home_icon_y_offset": -46,
-        "android_home_x_ratio": 0.50,
-        "android_home_y_ratio": 0.976,
-        "input_x_ratio": 0.50,
-        "input_y_ratio": 0.89,
+DEFAULT_CONTROLLER_CONFIG: dict[str, Any] = {
+    "tap_hold": 0.35,
+    "android_home_x_ratio": 0.50,
+    "android_home_y_ratio": 0.976,
+    "android_back_x_ratio": 0.685,
+    "android_back_y_ratio": 0.976,
+    "keyboard_backspace_x_ratio": 0.862,
+    "keyboard_backspace_y_ratio": 0.844,
+    "pinyin_keyboard": {
+        "rows": [
+            {"keys": "qwertyuiop", "x_start": 0.115, "x_step": 0.0844, "y": 0.704},
+            {"keys": "asdfghjkl", "x_start": 0.157, "x_step": 0.0844, "y": 0.773},
+            {"keys": "zxcvbnm", "x_start": 0.241, "x_step": 0.0844, "y": 0.844},
+        ],
+        "key_hold": 0.18,
+        "inter_key_wait": 0.12,
+        "pre_key_wait": 0.45,
+        "first_key_settle": 0.35,
     },
-    "douyin": {
-        "threshold": 0.82,
-        "page_ready_timeout": 8.0,
-        "classify_hold": 1.5,
-        "verify_wait": 0.6,
-        "verify_timeout": 4.0,
-        "tap_hold": 0.35,
-    },
-    "vision_agent": {
-        "tap_hold": 0.35,
-        "android_home_x_ratio": 0.50,
-        "android_home_y_ratio": 0.976,
-        "android_back_x_ratio": 0.685,
-        "android_back_y_ratio": 0.976,
-        "keyboard_backspace_x_ratio": 0.862,
-        "keyboard_backspace_y_ratio": 0.844,
-        "pinyin_keyboard": {
-            "rows": [
-                {
-                    "keys": "qwertyuiop",
-                    "x_start": 0.115,
-                    "x_step": 0.0844,
-                    "y": 0.704,
-                },
-                {
-                    "keys": "asdfghjkl",
-                    "x_start": 0.157,
-                    "x_step": 0.0844,
-                    "y": 0.773,
-                },
-                {
-                    "keys": "zxcvbnm",
-                    "x_start": 0.241,
-                    "x_step": 0.0844,
-                    "y": 0.844,
-                },
-            ],
-            "key_hold": 0.18,
-            "inter_key_wait": 0.12,
-            "pre_key_wait": 0.45,
-            "first_key_settle": 0.35,
-        },
-        "digit_long_press_hold": 0.78,
-    },
+    "digit_long_press_hold": 0.78,
 }
-
-TEMPLATE_FILES = {
-    "wechat_home_icon": "wechat_home_icon.png",
-    "wechat_file_transfer_entry": "wechat_file_transfer_entry.png",
-    "wechat_file_transfer_title": "wechat_file_transfer_title.png",
-    "wechat_input_field": "wechat_input_field.png",
-    "wechat_send_button": "wechat_send_button.png",
-    "douyin_comment_button": "douyin_comment_button.png",
-    "douyin_comment_input": "douyin_comment_input.png",
-    "douyin_comment_send": "douyin_comment_send.png",
-}
-
-WECHAT_REQUIRED = (
-    "wechat_home_icon",
-    "wechat_file_transfer_entry",
-    "wechat_file_transfer_title",
-    "wechat_input_field",
-    "wechat_send_button",
-)
-DOUYIN_COMMENT_REQUIRED = (
-    "douyin_comment_button",
-    "douyin_comment_input",
-    "douyin_comment_send",
-)
-
-INPUT_BUTTON_X_FROM_RIGHT = 20
-CONTROL_Y_FROM_BOTTOM = legacy.CONTROL_Y_FROM_BOTTOM
-GW_OWNER = 4
-CF_UNICODETEXT = 13
-GMEM_MOVEABLE = 0x0002
-
-ALLOWED_TEXT_RE = re.compile(
-    r"^[\u3400-\u4dbf\u4e00-\u9fffA-Za-z0-9 "
-    r"，。！？、；：,.!?;:'\"（）()《》【】\[\]\-—_+@#%&*/=]+$"
-)
 
 
 class RobotWorkflowError(RuntimeError):
@@ -166,10 +85,6 @@ class RobotWorkflowError(RuntimeError):
 
 class WorkflowNotReady(RobotWorkflowError):
     """Required local calibration/template data is missing."""
-
-
-class UnsafePageError(RobotWorkflowError):
-    """The current page is unknown or differs from the expected safe state."""
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -182,16 +97,16 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
-def load_workflow_config() -> dict[str, Any]:
-    if not WEB_CONFIG_PATH.exists():
-        return json.loads(json.dumps(DEFAULT_CONFIG))
+def load_controller_config() -> dict[str, Any]:
+    if not CONTROL_CONFIG_PATH.exists():
+        return json.loads(json.dumps(DEFAULT_CONTROLLER_CONFIG))
     try:
-        raw = json.loads(WEB_CONFIG_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(CONTROL_CONFIG_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise WorkflowNotReady(f"工作流配置损坏：{exc}") from exc
+        raise WorkflowNotReady(f"控制器配置损坏：{exc}") from exc
     if not isinstance(raw, dict):
-        raise WorkflowNotReady("工作流配置必须是 JSON 对象。")
-    return _deep_merge(DEFAULT_CONFIG, raw)
+        raise WorkflowNotReady("控制器配置必须是 JSON 对象。")
+    return _deep_merge(DEFAULT_CONTROLLER_CONFIG, raw)
 
 
 def qwerty_key_point(
@@ -350,188 +265,12 @@ def qwerty_keyboard_config_from_anchors(
     }
 
 
-def template_path(name: str) -> Path:
-    try:
-        filename = TEMPLATE_FILES[name]
-    except KeyError as exc:
-        raise KeyError(f"未知工作流模板：{name}") from exc
-    return WEB_TEMPLATE_DIR / filename
-
-
-def workflow_readiness() -> dict[str, Any]:
-    def missing(names: tuple[str, ...]) -> list[str]:
-        return [name for name in names if not template_path(name).is_file()]
-
-    douyin_comment_missing = missing(DOUYIN_COMMENT_REQUIRED)
-    wechat_ocr_ready = ocr_available()
-    return {
-        "wechat": {
-            "ready": wechat_ocr_ready,
-            "mode": "runtime_ocr",
-            "missing_templates": [],
-            "missing_capabilities": (
-                [] if wechat_ocr_ready else ["windows_zh_hans_ocr"]
-            ),
-        },
-        "douyin_like": {
-            "ready": legacy.DEFAULT_DOUYIN_TEMPLATE.is_file(),
-            "missing_templates": (
-                [] if legacy.DEFAULT_DOUYIN_TEMPLATE.is_file() else ["douyin_home"]
-            ),
-        },
-        "douyin_comment": {
-            "ready": (
-                legacy.DEFAULT_DOUYIN_TEMPLATE.is_file()
-                and not douyin_comment_missing
-            ),
-            "missing_templates": (
-                ([] if legacy.DEFAULT_DOUYIN_TEMPLATE.is_file() else ["douyin_home"])
-                + douyin_comment_missing
-            ),
-        },
-    }
-
-
-def _ocr_matches_in_region(
-    payload: dict[str, Any],
-    target: str,
-    width: int,
-    height: int,
-    region: tuple[float, float, float, float],
-) -> list[OcrMatch]:
-    left, top, right, bottom = region
-    return [
-        match
-        for match in find_ocr_text(payload, target)
-        if left * width <= match.center[0] <= right * width
-        and top * height <= match.center[1] <= bottom * height
-    ]
-
-
-def classify_wechat_page(
-    payload: dict[str, Any],
-    width: int,
-    height: int,
-) -> str:
-    """Classify the current WeChat navigation state from runtime OCR output."""
-    bottom_region = (0.0, 0.78, 1.0, 0.98)
-    has_bottom_navigation = any(
-        _ocr_matches_in_region(payload, text, width, height, bottom_region)
-        for text in ("通讯录", "发现")
-    )
-    if has_bottom_navigation:
-        return "conversation_list"
-
-    title_region = (0.0, 0.02, 1.0, 0.105)
-    if _ocr_matches_in_region(
-        payload,
-        "文件传输助手",
-        width,
-        height,
-        title_region,
-    ):
-        return "target_chat"
-
-    conversation_region = (0.0, 0.08, 1.0, 0.82)
-    if _ocr_matches_in_region(
-        payload,
-        "文件传输助手",
-        width,
-        height,
-        conversation_region,
-    ):
-        return "conversation_list"
-
-    if _ocr_matches_in_region(
-        payload,
-        "微信",
-        width,
-        height,
-        (0.02, 0.08, 0.98, 0.92),
-    ):
-        return "android_home"
-    return "unknown"
-
-
-def classify_obscured_wechat_title(payload: dict[str, Any]) -> bool:
-    """Recognize the visible suffix of 文件传输助手 below the PX/MM overlay."""
-    text = "".join(
-        str(line.get("text", "")) for line in (payload.get("lines") or [])
-    )
-    chinese_only = re.sub(r"[^\u3400-\u4dbf\u4e00-\u9fff]", "", text)
-    marker = chinese_only.find("件传输")
-    return marker >= 0 and "手" in chinese_only[marker + len("件传输") :]
-
-
-def _set_clipboard_text(text: str) -> None:
-    """Put Unicode text on the Windows clipboard without shelling out."""
-    kernel32 = ctypes.windll.kernel32
-    user32 = ctypes.windll.user32
-
-    kernel32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
-    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
-    kernel32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
-    kernel32.GlobalLock.restype = ctypes.c_void_p
-    kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
-    kernel32.GlobalUnlock.restype = wintypes.BOOL
-    user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
-    user32.SetClipboardData.restype = wintypes.HANDLE
-
-    encoded = (text + "\0").encode("utf-16-le")
-    handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
-    if not handle:
-        raise ctypes.WinError()
-    pointer = kernel32.GlobalLock(handle)
-    if not pointer:
-        raise ctypes.WinError()
-    try:
-        ctypes.memmove(pointer, encoded, len(encoded))
-    finally:
-        kernel32.GlobalUnlock(handle)
-
-    if not user32.OpenClipboard(None):
-        raise RobotWorkflowError("无法打开 Windows 剪贴板。")
-    try:
-        if not user32.EmptyClipboard():
-            raise ctypes.WinError()
-        if not user32.SetClipboardData(CF_UNICODETEXT, handle):
-            raise ctypes.WinError()
-        # Ownership transfers to the clipboard on success.
-        handle = None
-    finally:
-        user32.CloseClipboard()
-        if handle:
-            kernel32.GlobalFree(handle)
-
-
-def _visible_owned_windows(owner: int) -> set[int]:
-    matches: set[int] = set()
-
-    @legacy.EnumWindowsProc
-    def callback(hwnd: int, _lparam: int) -> bool:
-        if legacy.user32.IsWindowVisible(hwnd):
-            window_owner = legacy.user32.GetWindow(hwnd, GW_OWNER)
-            if window_owner == owner:
-                matches.add(int(hwnd))
-        return True
-
-    legacy.user32.EnumWindows(callback, 0)
-    return matches
-
-
-def _window_title(hwnd: int) -> str:
-    length = legacy.user32.GetWindowTextLengthW(hwnd)
-    buffer = ctypes.create_unicode_buffer(max(1, length + 1))
-    legacy.user32.GetWindowTextW(hwnd, buffer, len(buffer))
-    return buffer.value
-
-
 class RobotController:
     """Safe, single-machine adapter used by the local web task worker."""
 
     def __init__(
         self,
-        title: str = legacy.DEFAULT_WINDOW_TITLE,
+        title: str = seller_gui.DEFAULT_WINDOW_TITLE,
         *,
         calibration_path: Path | None = None,
         verified_actions: set[str] | frozenset[str] | None = None,
@@ -711,7 +450,7 @@ class RobotController:
     def _checkpoint(self) -> None:
         if self.stop_event.is_set():
             raise RobotWorkflowError("用户已请求停止任务。")
-        legacy._check_escape()
+        seller_gui._check_escape()
 
     def _sleep(self, seconds: float) -> None:
         deadline = time.monotonic() + max(0.0, seconds)
@@ -723,8 +462,8 @@ class RobotController:
 
     def device_status(self) -> dict[str, Any]:
         try:
-            hwnd, title = legacy.find_window(self.title)
-            _left, _top, width, height = legacy.client_geometry(hwnd)
+            hwnd, title = seller_gui.find_window(self.title)
+            _left, _top, width, height = seller_gui.client_geometry(hwnd)
             online = width > 0 and height > 0
             camera_online = online and controller_client_has_camera(width, height)
             error = None
@@ -754,23 +493,22 @@ class RobotController:
             "busy": self.operation_lock.locked(),
             "error": error,
             "camera_error": camera_error,
-            "readiness": workflow_readiness(),
         }
 
     def _capture_phone(self, hwnd: int) -> Image.Image:
         with self.capture_lock:
-            return legacy.camera_crop(
-                legacy.capture_client(hwnd), legacy.DEFAULT_CAMERA_HEIGHT
+            return seller_gui.camera_crop(
+                seller_gui.capture_client(hwnd), seller_gui.DEFAULT_CAMERA_HEIGHT
             )
 
     def _capture_phone_passive(self, hwnd: int) -> Image.Image:
         with self.capture_lock:
-            return legacy.camera_crop(
-                legacy.capture_client_passive(hwnd), legacy.DEFAULT_CAMERA_HEIGHT
+            return seller_gui.camera_crop(
+                seller_gui.capture_client_passive(hwnd), seller_gui.DEFAULT_CAMERA_HEIGHT
             )
 
     def capture_preview(self, quality: int = 72) -> bytes:
-        hwnd, _title = legacy.find_window(self.title)
+        hwnd, _title = seller_gui.find_window(self.title)
         image = self._capture_phone_passive(hwnd)
         from io import BytesIO
 
@@ -780,8 +518,8 @@ class RobotController:
 
     def vision_capture(self) -> Image.Image:
         """Capture exactly the phone region seen by the visual agent."""
-        hwnd, _title = legacy.find_window(self.title)
-        legacy.move_cursor_outside_camera(hwnd)
+        hwnd, _title = seller_gui.find_window(self.title)
+        seller_gui.move_cursor_outside_camera(hwnd)
         return self._capture_phone(hwnd)
 
     def vision_tap_relative(self, x: int, y: int) -> tuple[int, int]:
@@ -791,7 +529,7 @@ class RobotController:
             x,
             y,
             action="tap_semantic",
-            hold_seconds=float(load_workflow_config()["vision_agent"]["tap_hold"]),
+            hold_seconds=float(load_controller_config()["tap_hold"]),
         )
 
     def resolve_calibrated_target_grid_point(
@@ -821,7 +559,7 @@ class RobotController:
             x,
             y,
             action="dismiss_overlay",
-            hold_seconds=float(load_workflow_config()["vision_agent"]["tap_hold"]),
+            hold_seconds=float(load_controller_config()["tap_hold"]),
         )
 
     def vision_long_press_relative(
@@ -838,7 +576,7 @@ class RobotController:
             raise ValueError("通用长按时间必须在0.5～2.0秒之间。")
         if not (0 <= x <= 1000 and 0 <= y <= 1000):
             raise ValueError("视觉 Agent 坐标必须在0～1000之间。")
-        hwnd, _title = legacy.find_window(self.title)
+        hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution("long_press", frame)
         from tap_calibration import corrected_grid_point
@@ -860,7 +598,7 @@ class RobotController:
             ),
         )
         self._checkpoint()
-        receipt = legacy.long_press_client_point(
+        receipt = seller_gui.long_press_client_point(
             hwnd,
             point[0],
             point[1],
@@ -869,7 +607,7 @@ class RobotController:
         if not isinstance(receipt, dict):
             raise RuntimeError("控制端没有返回长按事件栅栏凭据。")
         self._last_long_press_receipt = dict(receipt)
-        legacy.move_cursor_outside_camera(hwnd)
+        seller_gui.move_cursor_outside_camera(hwnd)
         return point
 
     def vision_drag_relative(
@@ -887,7 +625,7 @@ class RobotController:
             raise ValueError("拖动视觉坐标必须全部在0～1000之间。")
         if (start_x, start_y) == (end_x, end_y):
             raise ValueError("拖动起点和终点不能相同。")
-        hwnd, _title = legacy.find_window(self.title)
+        hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution("drag", frame)
         from tap_calibration import corrected_grid_point
@@ -922,8 +660,8 @@ class RobotController:
         if start == end:
             raise ValueError("标定后的拖动起点和终点重合。")
         self._checkpoint()
-        legacy.drag_client_path(hwnd, start, end)
-        legacy.move_cursor_outside_camera(hwnd)
+        seller_gui.drag_client_path(hwnd, start, end)
+        seller_gui.move_cursor_outside_camera(hwnd)
         return start, end
 
     def vision_reveal_system_navigation(self) -> dict[str, Any]:
@@ -933,7 +671,7 @@ class RobotController:
             "reveal_system_navigation",
             "系统边缘唤出导航栏",
         )
-        hwnd, _title = legacy.find_window(self.title)
+        hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution(
             "reveal_system_navigation", frame
@@ -956,8 +694,8 @@ class RobotController:
         if start == end:
             raise ValueError("系统边缘轨迹纠偏后起终点重合。")
         self._checkpoint()
-        legacy.drag_client_path(hwnd, start, end)
-        legacy.move_cursor_outside_camera(hwnd)
+        seller_gui.drag_client_path(hwnd, start, end)
+        seller_gui.move_cursor_outside_camera(hwnd)
         return {
             **evidence,
             "client_path": [list(start), list(end)],
@@ -974,7 +712,7 @@ class RobotController:
         if not (0 <= x <= 1000 and 0 <= y <= 1000):
             raise ValueError("视觉 Agent 坐标必须在0～1000之间。")
         self._last_click_receipt = None
-        hwnd, _title = legacy.find_window(self.title)
+        hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution(action, frame)
         # Multi-position calibration corrects camera-to-physical XY distortion.
@@ -997,8 +735,8 @@ class RobotController:
         # of 2 can focus a text box with the first physical tap and then click
         # the old screen coordinate again after the keyboard moves the layout.
         # Every visual-agent tap is one atomic action, so force single-click.
-        legacy.configure_single_click_count(hwnd)
-        receipt = legacy.click_client_point(
+        seller_gui.configure_single_click_count(hwnd)
+        receipt = seller_gui.click_client_point(
             hwnd,
             point[0],
             point[1],
@@ -1009,14 +747,14 @@ class RobotController:
         if not isinstance(receipt, dict):
             raise RuntimeError("控制端没有返回单击事件栅栏凭据。")
         self._last_click_receipt = dict(receipt)
-        legacy.move_cursor_outside_camera(hwnd)
+        seller_gui.move_cursor_outside_camera(hwnd)
         return point
 
     def _vision_nav_tap(
         self, x_ratio: float, y_ratio: float, *, action: str
     ) -> tuple[int, int]:
         self._last_click_receipt = None
-        hwnd, _title = legacy.find_window(self.title)
+        hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution(action, frame)
         x_ratio, y_ratio = oriented_navigation_ratio(
@@ -1033,21 +771,21 @@ class RobotController:
         # Navigation must be one atomic tap just like a visual target tap;
         # otherwise one Back/Home request can issue multiple physical taps and
         # make the observed transition non-deterministic.
-        legacy.configure_single_click_count(hwnd)
-        receipt = legacy.click_client_point(
+        seller_gui.configure_single_click_count(hwnd)
+        receipt = seller_gui.click_client_point(
             hwnd,
             point[0],
             point[1],
             countdown=0,
             hold_seconds=float(
-                load_workflow_config()["vision_agent"]["tap_hold"]
+                load_controller_config()["tap_hold"]
             ),
             require_event_barrier=True,
         )
         if not isinstance(receipt, dict):
             raise RuntimeError("控制端没有返回单击事件栅栏凭据。")
         self._last_click_receipt = dict(receipt)
-        legacy.move_cursor_outside_camera(hwnd)
+        seller_gui.move_cursor_outside_camera(hwnd)
         return point
 
     def vision_android_home(self) -> tuple[int, int]:
@@ -1055,7 +793,7 @@ class RobotController:
         # It must never inherit ordinary semantic-tap authority because it is
         # not an App/browser "home page" element.
         self._require_verified_action("home", "Android系统Home")
-        cfg = load_workflow_config()["vision_agent"]
+        cfg = load_controller_config()
         return self._vision_nav_tap(
             float(cfg["android_home_x_ratio"]),
             float(cfg["android_home_y_ratio"]),
@@ -1064,7 +802,7 @@ class RobotController:
 
     def vision_android_back(self) -> tuple[int, int]:
         self._require_verified_action("back", "返回")
-        cfg = load_workflow_config()["vision_agent"]
+        cfg = load_controller_config()
         return self._vision_nav_tap(
             float(cfg["android_back_x_ratio"]),
             float(cfg["android_back_y_ratio"]),
@@ -1073,13 +811,13 @@ class RobotController:
 
     def _vision_swipe(self, direction: str) -> None:
         self._require_verified_action("swipe", "滑动")
-        hwnd, _title = legacy.find_window(self.title)
+        hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution("swipe", frame)
         self._checkpoint()
-        legacy.configure_swipe(hwnd, direction)
-        legacy.trigger_selected_action(hwnd)
-        legacy.move_cursor_outside_camera(hwnd)
+        seller_gui.configure_swipe(hwnd, direction)
+        seller_gui.trigger_selected_action(hwnd)
+        seller_gui.move_cursor_outside_camera(hwnd)
 
     def vision_swipe_up(self) -> None:
         self._vision_swipe("up")
@@ -1092,15 +830,6 @@ class RobotController:
 
     def vision_swipe_right(self) -> None:
         self._vision_swipe("right")
-
-    def vision_type_text(self, text: str) -> None:
-        self._require_verified_action("input_verified_text", "输入文字")
-        self._validate_verified_text_characters(text)
-        # The seller controller's bulk-input command is not exact for digits
-        # and symbol pages (a historical real-device run turned "1" into
-        # ".com").  The first verified profile therefore uses only the
-        # calibrated QWERTY letter path and fails closed for every other text.
-        self.vision_type_pinyin(text, text)
 
     def vision_type_text_with_layout(
         self,
@@ -1116,14 +845,6 @@ class RobotController:
             raise WorkflowNotReady("通用文字输入缺少本轮视觉键盘几何。")
         self.vision_type_pinyin(text, text.casefold(), keyboard_layout)
 
-    @staticmethod
-    def _validate_verified_text_characters(text: str) -> None:
-        if not isinstance(text, str) or not re.fullmatch(r"[a-z]{1,30}", text):
-            raise WorkflowNotReady(
-                "当前设备的安全文字输入仅验收了1～30个小写英文字母；"
-                "大写、数字、中文和符号尚未验收。"
-            )
-
     def validate_verified_text(
         self,
         text: str,
@@ -1136,29 +857,14 @@ class RobotController:
         """Fail before hardware unless the current visual keyboard profile is exact."""
 
         self._require_verified_action("input_verified_text", "输入文字")
-        legacy_direct_profile = target_text is None and input_method is None
-        if legacy_direct_profile:
-            self._validate_verified_text_characters(text)
-            if input_states.get("focused") is not True:
-                raise WorkflowNotReady("当前输入框没有可信聚焦证据。")
-            if input_states.get("value") != "":
-                raise WorkflowNotReady("当前安全文字输入只允许从视觉确认的空输入框开始。")
-            if input_states.get("keyboard_layout") != "qwerty":
-                raise WorkflowNotReady("当前安全文字输入要求画面确认标准 QWERTY 键盘。")
-            if input_states.get("keyboard_input_mode") != "direct_latin":
-                raise WorkflowNotReady(
-                    "当前安全文字输入要求画面确认 direct_latin 英文直输模式；"
-                    "中文拼音 QWERTY 会产生组合文本。"
-                )
-            return
         if target_text is None:
-            target_text = text
+            raise WorkflowNotReady("文字输入缺少 canonical 目标全文。")
         try:
             step = plan_next_verified_input(target_text, input_states.get("value"))
         except (ValueError, VerifiedTextTransactionError) as exc:
             raise WorkflowNotReady(f"无法建立精确文字输入事务：{exc}") from exc
         if input_method is None:
-            input_method = step.kind if step is not None else None
+            raise WorkflowNotReady("文字输入缺少 canonical 输入方式。")
         if step is None or text != step.segment or input_method != step.kind:
             raise WorkflowNotReady("设备收到的文字分段与本地精确事务不一致。")
         if step.kind == "direct_latin":
@@ -1193,7 +899,7 @@ class RobotController:
         del text
         if not re.fullmatch(r"[a-z]{1,30}", pinyin):
             raise ValueError("拼音必须是1～30个小写英文字母。")
-        cfg = load_workflow_config()["vision_agent"]
+        cfg = load_controller_config()
         configured_keyboard = cfg["pinyin_keyboard"]
         if keyboard_layout is None:
             keyboard_cfg = configured_keyboard
@@ -1205,23 +911,23 @@ class RobotController:
                 key_hold=float(configured_keyboard["key_hold"]),
                 inter_key_wait=float(configured_keyboard["inter_key_wait"]),
             )
-        hwnd, _title = legacy.find_window(self.title)
+        hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution("input_verified_text", frame)
         if frame.width < 400 or frame.height < 700:
             raise RobotWorkflowError("键盘画面尺寸异常，拒绝执行拼音点击。")
-        legacy.configure_single_click_count(hwnd)
+        seller_gui.configure_single_click_count(hwnd)
         # Editing the seller control's click-count field changes focus and can
         # leave the physical actuator settling.  Starting the first phone tap
         # immediately after that UI edit caused an intermittent duplicated
         # first letter on real hardware.  Move away from the camera and give
         # the controller/actuator a short deterministic settling window.
-        legacy.move_cursor_outside_camera(hwnd)
+        seller_gui.move_cursor_outside_camera(hwnd)
         self._sleep(float(configured_keyboard.get("pre_key_wait", 0.45)))
         for index, key in enumerate(pinyin):
             self._checkpoint()
             point = qwerty_key_point(frame.width, frame.height, key, keyboard_cfg)
-            legacy.click_client_point(
+            seller_gui.click_client_point(
                 hwnd,
                 point[0],
                 point[1],
@@ -1235,7 +941,7 @@ class RobotController:
                     float(configured_keyboard.get("first_key_settle", 0.35)),
                 )
             self._sleep(wait_seconds)
-        legacy.move_cursor_outside_camera(hwnd)
+        seller_gui.move_cursor_outside_camera(hwnd)
 
     def vision_clear_text(
         self,
@@ -1257,7 +963,7 @@ class RobotController:
             raise WorkflowNotReady(
                 "退格次数必须是视觉确认后的1～100之间整数，拒绝固定次数清空。"
             )
-        cfg = load_workflow_config()["vision_agent"]
+        cfg = load_controller_config()
         backspace_x_ratio = float(cfg["keyboard_backspace_x_ratio"])
         backspace_y_ratio = float(cfg["keyboard_backspace_y_ratio"])
         if keyboard_layout is not None:
@@ -1288,7 +994,7 @@ class RobotController:
                 raise WorkflowNotReady(
                     "当前键盘布局不支持安全退格。"
                 )
-        hwnd, _title = legacy.find_window(self.title)
+        hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution("input_verified_text", frame)
         point = (
@@ -1317,10 +1023,10 @@ class RobotController:
                 ),
             ),
         )
-        legacy.configure_single_click_count(hwnd)
+        seller_gui.configure_single_click_count(hwnd)
         for _index in range(delete_count):
             self._checkpoint()
-            legacy.click_client_point(
+            seller_gui.click_client_point(
                 hwnd,
                 point[0],
                 point[1],
@@ -1328,635 +1034,7 @@ class RobotController:
                 hold_seconds=0.18,
             )
             self._sleep(0.08)
-        legacy.move_cursor_outside_camera(hwnd)
-
-    def _new_run_dir(self, operation: str) -> Path:
-        WEB_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        run_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        safe_operation = operation.replace(".", "_")
-        run_dir = WEB_OUTPUT_DIR / f"{safe_operation}_{run_id}"
-        run_dir.mkdir(parents=True, exist_ok=False)
-        return run_dir
-
-    def _save_frame(self, image: Image.Image, path: Path, label: str) -> None:
-        result = image.copy()
-        draw = ImageDraw.Draw(result)
-        draw.rectangle((0, 0, min(result.width, 500), 28), fill=(20, 24, 34))
-        draw.text((8, 7), label, fill=(245, 247, 255))
-        result.save(path, quality=90)
-
-    def _required_template(self, name: str) -> Path:
-        path = template_path(name)
-        if not path.is_file():
-            raise WorkflowNotReady(
-                f"缺少模板 {path.name}。请先按网页“设置”页说明采集。"
-            )
-        return path
-
-    def _stable_template_match(
-        self,
-        hwnd: int,
-        name: str,
-        *,
-        timeout: float = 8.0,
-        threshold: float = 0.82,
-        hold: float = 1.0,
-        required_samples: int = 3,
-    ) -> tuple[Image.Image, float, int, int, Image.Image]:
-        path = self._required_template(name)
-        template = Image.open(path).convert("RGB")
-        deadline = time.monotonic() + timeout
-        stable_since: float | None = None
-        samples = 0
-        last_center: tuple[int, int] | None = None
-        best: tuple[Image.Image, float, int, int, Image.Image] | None = None
-        while time.monotonic() < deadline:
-            self._checkpoint()
-            frame = self._capture_phone(hwnd)
-            score, x, y = legacy.match_template(frame, template)
-            center = (x + template.width // 2, y + template.height // 2)
-            now = time.monotonic()
-            if score >= threshold and (
-                last_center is None
-                or (abs(center[0] - last_center[0]) <= 6 and abs(center[1] - last_center[1]) <= 6)
-            ):
-                if stable_since is None:
-                    stable_since = now
-                    samples = 1
-                else:
-                    samples += 1
-                last_center = center
-                best = (frame, score, x, y, template)
-                if samples >= required_samples and now - stable_since >= hold:
-                    return best
-            else:
-                stable_since = None
-                samples = 0
-                last_center = None
-            self._sleep(0.2)
-        raise UnsafePageError(
-            f"等待 {timeout:.1f} 秒仍未稳定识别到 {path.name}，拒绝继续操作。"
-        )
-
-    def _click_template(
-        self,
-        hwnd: int,
-        name: str,
-        *,
-        timeout: float = 8.0,
-        threshold: float = 0.82,
-        hold: float = 0.35,
-    ) -> tuple[int, int]:
-        _frame, _score, x, y, template = self._stable_template_match(
-            hwnd, name, timeout=timeout, threshold=threshold
-        )
-        center = (x + template.width // 2, y + template.height // 2)
-        self._checkpoint()
-        legacy.click_client_point(
-            hwnd,
-            center[0],
-            center[1],
-            countdown=0,
-            hold_seconds=hold,
-        )
-        return center
-
-    @staticmethod
-    def _match_in_region(
-        matches: list[OcrMatch],
-        width: int,
-        height: int,
-        region: tuple[float, float, float, float],
-    ) -> list[OcrMatch]:
-        left, top, right, bottom = region
-        return [
-            match
-            for match in matches
-            if left * width <= match.center[0] <= right * width
-            and top * height <= match.center[1] <= bottom * height
-        ]
-
-    def _stable_wechat_page(
-        self,
-        hwnd: int,
-        *,
-        timeout: float,
-        required_samples: int = 2,
-    ) -> tuple[Image.Image, dict[str, Any], str]:
-        cfg = load_workflow_config()["wechat"]
-        language = str(cfg["ocr_language"])
-        scale = float(cfg["ocr_scale"])
-        deadline = time.monotonic() + timeout
-        last_status: str | None = None
-        stable_samples = 0
-        last_result: tuple[Image.Image, dict[str, Any], str] | None = None
-
-        # The seller preview paints a black PX/MM tooltip at the most recent
-        # camera click. It can cover WeChat's title and make OCR see only the
-        # tooltip. Moving the desktop pointer to the title bar clears that
-        # obstruction without operating the phone.
-        legacy.move_cursor_outside_camera(hwnd)
-        while time.monotonic() < deadline:
-            self._checkpoint()
-            frame = self._capture_phone(hwnd)
-            payload = recognize_ocr(frame, language, scale=scale)
-            status = classify_wechat_page(
-                payload,
-                frame.width,
-                frame.height,
-            )
-            if status == "unknown":
-                # The seller software leaves an opaque PX/MM overlay over the
-                # left half of WeChat's title. OCR the still-visible title
-                # suffix separately; this is used only for the exact
-                # 文件传输助手 marker, never for arbitrary contacts.
-                title_left = int(round(frame.width * 0.32))
-                title_bottom = int(round(frame.height * 0.12))
-                title_crop = frame.crop(
-                    (title_left, 0, frame.width, title_bottom)
-                )
-                title_payload = recognize_ocr(
-                    title_crop,
-                    language,
-                    scale=scale,
-                )
-                if classify_obscured_wechat_title(title_payload):
-                    status = "target_chat"
-            if status != "unknown" and status == last_status:
-                stable_samples += 1
-            elif status != "unknown":
-                stable_samples = 1
-            else:
-                stable_samples = 0
-            last_status = status
-            last_result = (frame, payload, status)
-            if status != "unknown" and stable_samples >= required_samples:
-                return last_result
-            self._sleep(0.25)
-
-        final_status = last_result[2] if last_result else "unknown"
-        raise UnsafePageError(
-            f"等待 {timeout:.1f} 秒仍未稳定识别微信页面"
-            f"（最后状态：{final_status}），拒绝继续操作。"
-        )
-
-    def _stable_ocr_match(
-        self,
-        hwnd: int,
-        target: str,
-        *,
-        timeout: float = 10.0,
-        region: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
-        required_samples: int = 2,
-        max_center_delta: int = 18,
-    ) -> tuple[Image.Image, OcrMatch, dict[str, Any]]:
-        cfg = load_workflow_config()["wechat"]
-        language = str(cfg["ocr_language"])
-        scale = float(cfg["ocr_scale"])
-        deadline = time.monotonic() + timeout
-        stable_samples = 0
-        last_center: tuple[int, int] | None = None
-        last_result: tuple[Image.Image, OcrMatch, dict[str, Any]] | None = None
-
-        while time.monotonic() < deadline:
-            self._checkpoint()
-            frame = self._capture_phone(hwnd)
-            payload = recognize_ocr(frame, language, scale=scale)
-            matches = self._match_in_region(
-                find_ocr_text(payload, target),
-                frame.width,
-                frame.height,
-                region,
-            )
-            if matches:
-                match = min(matches, key=lambda item: (item.top, item.left))
-                center = match.center
-                if last_center is not None and (
-                    abs(center[0] - last_center[0]) <= max_center_delta
-                    and abs(center[1] - last_center[1]) <= max_center_delta
-                ):
-                    stable_samples += 1
-                else:
-                    stable_samples = 1
-                last_center = center
-                last_result = (frame, match, payload)
-                if stable_samples >= required_samples:
-                    return last_result
-            else:
-                stable_samples = 0
-                last_center = None
-                last_result = None
-            self._sleep(0.25)
-
-        raise UnsafePageError(
-            f"等待 {timeout:.1f} 秒仍未稳定识别到文字“{target}”，拒绝继续操作。"
-        )
-
-    def _click_ocr_text(
-        self,
-        hwnd: int,
-        target: str,
-        *,
-        timeout: float = 10.0,
-        region: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
-        offset: tuple[int, int] = (0, 0),
-        hold: float = 0.35,
-    ) -> tuple[int, int]:
-        frame, match, _payload = self._stable_ocr_match(
-            hwnd,
-            target,
-            timeout=timeout,
-            region=region,
-        )
-        point = (
-            max(0, min(frame.width - 1, match.center[0] + offset[0])),
-            max(0, min(frame.height - 1, match.center[1] + offset[1])),
-        )
-        self._checkpoint()
-        legacy.click_client_point(
-            hwnd,
-            point[0],
-            point[1],
-            countdown=0,
-            hold_seconds=hold,
-        )
-        return point
-
-    def _invoke_seller_input(self, hwnd: int, text: str) -> None:
-        self._require_verified_action("input_verified_text", "输入文字")
-        if not text or len(text) > 100:
-            raise ValueError("文字长度必须在 1～100 个字符之间。")
-        if "\n" in text or "\r" in text or not ALLOWED_TEXT_RE.fullmatch(text):
-            raise ValueError(
-                "第一版仅支持中文、大小写字母、数字、空格和常用中英文标点。"
-            )
-
-        _set_clipboard_text(text)
-        existing = _visible_owned_windows(hwnd)
-        legacy.ensure_window_fully_visible(hwnd)
-        _left, _top, width, height = legacy.client_geometry(hwnd)
-        control_x, control_y = legacy.seller_control_point(
-            width,
-            height,
-            legacy.BASELINE_CLIENT_WIDTH - INPUT_BUTTON_X_FROM_RIGHT,
-            CONTROL_Y_FROM_BOTTOM,
-        )
-        legacy.click_client_control(
-            hwnd,
-            control_x,
-            control_y,
-        )
-
-        deadline = time.monotonic() + 3.0
-        dialog: int | None = None
-        while time.monotonic() < deadline:
-            self._checkpoint()
-            new_windows = _visible_owned_windows(hwnd) - existing
-            if new_windows:
-                dialog = next(iter(new_windows))
-                break
-            self._sleep(0.1)
-        if dialog is None:
-            raise RobotWorkflowError(
-                "点击卖家控制端“输入”后没有发现输入对话框，已停止。"
-            )
-
-        legacy.user32.ShowWindow(dialog, legacy.SW_RESTORE)
-        legacy.user32.SetForegroundWindow(dialog)
-        self._sleep(0.2)
-        legacy.user32.keybd_event(legacy.VK_CONTROL, 0, 0, 0)
-        legacy.press_virtual_key(0x56)  # V
-        legacy.user32.keybd_event(
-            legacy.VK_CONTROL, 0, legacy.KEYEVENTF_KEYUP, 0
-        )
-        legacy.press_virtual_key(legacy.VK_RETURN)
-
-        close_deadline = time.monotonic() + 3.0
-        while time.monotonic() < close_deadline:
-            self._checkpoint()
-            if not legacy.user32.IsWindow(dialog) or not legacy.user32.IsWindowVisible(dialog):
-                return
-            self._sleep(0.1)
-        raise RobotWorkflowError(
-            f"卖家输入对话框未关闭（标题“{_window_title(dialog)}”），拒绝继续。"
-        )
-
-    def execute(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:
-        del operation, params
-        raise WorkflowNotReady(
-            "旧多步 workflow 入口未绑定独立方向凭据且破坏一次动作语义，已禁用。"
-        )
-
-    def like_current_douyin(self, _params: dict[str, Any]) -> dict[str, Any]:
-        raise WorkflowNotReady(
-            "已废弃的 App 多步流程入口已禁用；必须使用通用单动作闭环。"
-        )
-        self._require_verified_action("tap_semantic", "点击")
-        ready = workflow_readiness()["douyin_like"]
-        if not ready["ready"]:
-            raise WorkflowNotReady("抖音首页模板尚未采集。")
-        cfg = load_workflow_config()["douyin"]
-        run_dir = self._new_run_dir("douyin.like_current")
-        hwnd, title = legacy.find_window(self.title)
-        legacy.configure_single_click_count(hwnd)
-        self._checkpoint()
-        (
-            before,
-            home_score,
-            _home_x,
-            _home_y,
-            _home_template,
-            page_status,
-            ready_wait,
-        ) = legacy.capture_ready_douyin_page(
-            hwnd,
-            legacy.DEFAULT_CAMERA_HEIGHT,
-            legacy.DEFAULT_DOUYIN_TEMPLATE,
-            float(cfg["threshold"]),
-            float(cfg["page_ready_timeout"]),
-            float(cfg["classify_hold"]),
-        )
-        detection = legacy.detect_douyin_heart(before)
-        before_path = run_dir / "before.jpg"
-        legacy.annotate_heart_detection(before, detection, before_path)
-        if page_status != "normal":
-            raise UnsafePageError(
-                f"当前页面分类为 {page_status}，不是普通视频；未执行点赞。"
-            )
-        if detection.state == "liked":
-            return {
-                "changed": False,
-                "already_liked": True,
-                "page_status": page_status,
-                "ready_wait_seconds": round(ready_wait, 3),
-                "home_score": round(home_score, 4),
-                "evidence": [str(before_path)],
-                "window_title": title,
-            }
-        if detection.state != "unliked" or not detection.center:
-            raise UnsafePageError("当前普通视频没有稳定白色爱心，拒绝点击。")
-
-        self._checkpoint()
-        legacy.click_client_point(
-            hwnd,
-            detection.center[0],
-            detection.center[1],
-            countdown=0,
-            hold_seconds=float(cfg["tap_hold"]),
-        )
-        legacy.move_cursor_outside_camera(hwnd)
-        (
-            after,
-            after_detection,
-            verified,
-            verification_method,
-            verification_seconds,
-            transition_metrics,
-        ) = legacy.wait_for_liked_heart(
-            hwnd,
-            legacy.DEFAULT_CAMERA_HEIGHT,
-            before,
-            detection.center,
-            float(cfg["verify_wait"]),
-            float(cfg["verify_timeout"]),
-        )
-        after_path = run_dir / "after.jpg"
-        legacy.annotate_heart_detection(after, after_detection, after_path)
-        if not verified:
-            raise RobotWorkflowError(
-                f"点击后等待 {verification_seconds:.1f} 秒仍未确认爱心变红。"
-            )
-        return {
-            "changed": True,
-            "already_liked": False,
-            "page_status": page_status,
-            "ready_wait_seconds": round(ready_wait, 3),
-            "verification_method": verification_method,
-            "verification_seconds": round(verification_seconds, 3),
-            "transition_metrics": transition_metrics,
-            "evidence": [str(before_path), str(after_path)],
-            "window_title": title,
-        }
-
-    def comment_current_douyin(self, params: dict[str, Any]) -> dict[str, Any]:
-        raise WorkflowNotReady(
-            "已废弃的 App 多步流程入口已禁用；必须使用通用单动作闭环。"
-        )
-        self._require_verified_action("input_verified_text", "输入文字")
-        self._require_verified_action("tap_semantic", "点击")
-        text = str(params.get("text", "")).strip()
-        ready = workflow_readiness()["douyin_comment"]
-        if not ready["ready"]:
-            raise WorkflowNotReady(
-                "抖音评论工作流尚未就绪，缺少：" + "、".join(ready["missing_templates"])
-            )
-        cfg = load_workflow_config()["douyin"]
-        run_dir = self._new_run_dir("douyin.comment_current")
-        hwnd, title = legacy.find_window(self.title)
-        (
-            page,
-            _score,
-            _x,
-            _y,
-            _template,
-            page_status,
-            ready_wait,
-        ) = legacy.capture_ready_douyin_page(
-            hwnd,
-            legacy.DEFAULT_CAMERA_HEIGHT,
-            legacy.DEFAULT_DOUYIN_TEMPLATE,
-            float(cfg["threshold"]),
-            float(cfg["page_ready_timeout"]),
-            float(cfg["classify_hold"]),
-        )
-        self._save_frame(page, run_dir / "01_page.jpg", "stable normal page")
-        if page_status != "normal":
-            raise UnsafePageError(
-                f"当前页面分类为 {page_status}，不是普通视频；未执行评论。"
-            )
-        self._click_template(hwnd, "douyin_comment_button")
-        self._click_template(hwnd, "douyin_comment_input")
-        self._checkpoint()
-        self._invoke_seller_input(hwnd, text)
-        self._sleep(max(2.0, len(text) * 0.8))
-        before_send = self._capture_phone(hwnd)
-        self._save_frame(before_send, run_dir / "02_before_send.jpg", "before send")
-        send_point = self._click_template(hwnd, "douyin_comment_send")
-        self._sleep(1.5)
-        after_send = self._capture_phone(hwnd)
-        self._save_frame(after_send, run_dir / "03_after_send.jpg", "after send")
-        change = legacy.image_change_score(before_send, after_send)
-        if change < 0.008:
-            raise RobotWorkflowError(
-                "点击评论发送后画面没有足够变化，无法确认发送成功。"
-            )
-        return {
-            "changed": True,
-            "page_status": page_status,
-            "ready_wait_seconds": round(ready_wait, 3),
-            "send_point": list(send_point),
-            "visual_change": round(change, 4),
-            "evidence": [
-                str(run_dir / "01_page.jpg"),
-                str(run_dir / "02_before_send.jpg"),
-                str(run_dir / "03_after_send.jpg"),
-            ],
-            "window_title": title,
-        }
-
-    def send_wechat_text(self, params: dict[str, Any]) -> dict[str, Any]:
-        raise WorkflowNotReady(
-            "已废弃的 App 多步流程入口已禁用；必须使用通用单动作闭环。"
-        )
-        self._require_verified_action("input_verified_text", "输入文字")
-        self._require_verified_action("tap_semantic", "点击")
-        text = str(params.get("text", "")).strip()
-        ready = workflow_readiness()["wechat"]
-        if not ready["ready"]:
-            raise WorkflowNotReady(
-                "微信工作流尚未就绪，缺少运行时中文 OCR。"
-            )
-        cfg = load_workflow_config()["wechat"]
-        ocr_timeout = float(cfg["ocr_timeout"])
-        run_dir = self._new_run_dir("wechat.send_text_to_file_transfer")
-        hwnd, title = legacy.find_window(self.title)
-
-        # Always start from Android home. Besides making the navigation
-        # deterministic, this avoids trusting a chat title that may have been
-        # obscured by the seller preview's coordinate overlay.
-        legacy.configure_single_click_count(hwnd)
-        initial_frame = self._capture_phone(hwnd)
-        android_home_point = (
-            int(round(initial_frame.width * float(cfg["android_home_x_ratio"]))),
-            int(round(initial_frame.height * float(cfg["android_home_y_ratio"]))),
-        )
-        self._checkpoint()
-        legacy.click_client_point(
-            hwnd,
-            android_home_point[0],
-            android_home_point[1],
-            countdown=0,
-            hold_seconds=0.25,
-        )
-        legacy.move_cursor_outside_camera(hwnd)
-        self._sleep(1.2)
-
-        current_frame, _payload, page_status = self._stable_wechat_page(
-            hwnd,
-            timeout=ocr_timeout,
-        )
-        if page_status != "android_home":
-            raise UnsafePageError(
-                f"点击手机主页键后页面分类为 {page_status}，"
-                "未确认回到安卓桌面，拒绝继续操作。"
-            )
-
-        self._click_ocr_text(
-            hwnd,
-            "微信",
-            timeout=ocr_timeout,
-            region=(0.02, 0.08, 0.98, 0.92),
-            offset=(0, int(cfg["home_icon_y_offset"])),
-        )
-        legacy.move_cursor_outside_camera(hwnd)
-        self._sleep(2.0)
-        current_frame, _payload, page_status = self._stable_wechat_page(
-            hwnd,
-            timeout=ocr_timeout,
-        )
-
-        if page_status == "conversation_list":
-            self._click_ocr_text(
-                hwnd,
-                "文件传输助手",
-                timeout=ocr_timeout,
-                region=(0.0, 0.08, 1.0, 0.82),
-            )
-            legacy.move_cursor_outside_camera(hwnd)
-            self._sleep(1.0)
-            current_frame, _payload, page_status = self._stable_wechat_page(
-                hwnd,
-                timeout=ocr_timeout,
-            )
-
-        if page_status != "target_chat":
-            raise UnsafePageError(
-                f"当前微信页面分类为 {page_status}，"
-                "未确认进入文件传输助手，拒绝输入。"
-            )
-
-        verified_chat = current_frame
-        self._save_frame(
-            verified_chat, run_dir / "01_verified_chat.jpg", "verified chat title"
-        )
-
-        # WeChat's input field has no stable text before focus. Locate it by
-        # the phone page geometry only after the target title is verified.
-        input_point = (
-            int(round(verified_chat.width * float(cfg["input_x_ratio"]))),
-            int(round(verified_chat.height * float(cfg["input_y_ratio"]))),
-        )
-        self._checkpoint()
-        legacy.click_client_point(
-            hwnd,
-            input_point[0],
-            input_point[1],
-            countdown=0,
-            hold_seconds=0.25,
-        )
-        self._sleep(0.6)
-        self._invoke_seller_input(hwnd, text)
-        legacy.move_cursor_outside_camera(hwnd)
-        self._sleep(max(2.0, len(text) * float(cfg["input_wait_per_character"])))
-
-        # Re-verify the contact immediately before the irreversible send.
-        _guard_frame, _guard_payload, guard_status = self._stable_wechat_page(
-            hwnd,
-            timeout=4.0,
-        )
-        if guard_status != "target_chat":
-            raise UnsafePageError(
-                f"发送前微信页面变为 {guard_status}，拒绝点击发送。"
-            )
-        before_send = self._capture_phone(hwnd)
-        self._save_frame(before_send, run_dir / "02_before_send.jpg", "before send")
-        send_point = self._click_ocr_text(
-            hwnd,
-            "发送",
-            timeout=ocr_timeout,
-            region=(0.45, 0.48, 1.0, 0.98),
-        )
-        legacy.move_cursor_outside_camera(hwnd)
-        self._sleep(1.5)
-        after_send = self._capture_phone(hwnd)
-        self._save_frame(after_send, run_dir / "03_after_send.jpg", "after send")
-        _after_frame, _after_payload, after_status = self._stable_wechat_page(
-            hwnd,
-            timeout=3.0,
-        )
-        if after_status != "target_chat":
-            raise UnsafePageError(
-                f"发送后微信页面变为 {after_status}，无法确认结果。"
-            )
-        change = legacy.image_change_score(before_send, after_send)
-        if change < 0.006:
-            raise RobotWorkflowError(
-                "点击发送后画面变化不足，无法确认文件传输助手收到新消息。"
-            )
-        return {
-            "changed": True,
-            "android_home_point": list(android_home_point),
-            "input_point": list(input_point),
-            "send_point": list(send_point),
-            "visual_change": round(change, 4),
-            "evidence": [
-                str(run_dir / "01_verified_chat.jpg"),
-                str(run_dir / "02_before_send.jpg"),
-                str(run_dir / "03_after_send.jpg"),
-            ],
-            "window_title": title,
-        }
-
+        seller_gui.move_cursor_outside_camera(hwnd)
 
 class MockRobotController(RobotController):
     """No-hardware controller for API tests and UI demonstrations."""
@@ -1997,11 +1075,6 @@ class MockRobotController(RobotController):
             "stop_requested": self.stop_event.is_set(),
             "busy": self.operation_lock.locked(),
             "error": None,
-            "readiness": {
-                "wechat": {"ready": True, "missing_templates": []},
-                "douyin_like": {"ready": True, "missing_templates": []},
-                "douyin_comment": {"ready": True, "missing_templates": []},
-            },
         }
 
     def capture_preview(self, quality: int = 72) -> bytes:
@@ -2111,10 +1184,6 @@ class MockRobotController(RobotController):
         self._consume_mock_execution("swipe")
         self.executions.append({"action": "swipe_right"})
 
-    def vision_type_text(self, text: str) -> None:
-        self._consume_mock_execution("input_verified_text")
-        self.executions.append({"action": "type_text", "text": text})
-
     def vision_type_text_with_layout(
         self,
         text: str,
@@ -2158,9 +1227,3 @@ class MockRobotController(RobotController):
         if keyboard_layout is not None:
             record["keyboard_layout"] = keyboard_layout
         self.executions.append(record)
-
-    def execute(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:
-        del operation, params
-        raise WorkflowNotReady(
-            "旧多步 workflow 入口未绑定独立方向凭据且破坏一次动作语义，已禁用。"
-        )

@@ -7,11 +7,7 @@ if not defined DASHSCOPE_API_KEY (
 )
 
 if not defined VISION_MODEL (
-  if defined QWEN_VL_MODEL (
-    set "VISION_MODEL=%QWEN_VL_MODEL%"
-  ) else (
-    set "VISION_MODEL=qwen3.7-plus"
-  )
+  set "VISION_MODEL=qwen3.7-plus"
 )
 
 if not exist ".venv\Scripts\python.exe" (

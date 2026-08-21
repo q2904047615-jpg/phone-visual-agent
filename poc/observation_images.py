@@ -347,9 +347,9 @@ def build_overview(
 ) -> EncodedObservationImage:
     """Build a readable full-page image used for page classification.
 
-    The former 160-pixel overview erased small Douyin labels and icon colors.
-    320 pixels still keeps the request small while preserving roughly four
-    times as many pixels for the observer.
+    The former 160-pixel overview erased small labels and icon colors. 320
+    pixels keeps the request small while preserving roughly four times as many
+    pixels for the observer.
     """
 
     return _encode_bounded_jpeg(
@@ -370,14 +370,13 @@ def build_roi(
     """Build a crop with more pixel density than the full-page overview."""
 
     crop = _normalized_crop(image, roi.bounds)
-    key_douyin_rois = {
-        "douyin_page_evidence",
+    high_detail_rois = {
         "page_state_right",
         "right_actions",
     }
     width_candidates = (
         (400, 360, 320, 288, 256, 224)
-        if roi.name in key_douyin_rois
+        if roi.name in high_detail_rois
         else (320, 288, 256, 224, 192, 160)
     )
     return _encode_bounded_jpeg(

@@ -62,25 +62,12 @@ def load_vision_model_config(
     enable_thinking: bool = False,
     environ: Mapping[str, str] | None = None,
 ) -> VisionModelConfig:
-    """Resolve the visual model without coupling callers to one model name.
-
-    New generic environment names take precedence.  The former Qwen-specific
-    names remain read-only compatibility inputs so existing launch setups keep
-    working during migration.
-    """
+    """Resolve the visual model from the single current configuration surface."""
 
     values = os.environ if environ is None else environ
-    resolved_model = (
-        model
-        or values.get("VISION_MODEL")
-        or values.get("QWEN_VL_MODEL")
-        or DEFAULT_VISION_MODEL
-    )
+    resolved_model = model or values.get("VISION_MODEL") or DEFAULT_VISION_MODEL
     resolved_base_url = (
-        base_url
-        or values.get("VISION_MODEL_BASE_URL")
-        or values.get("DASHSCOPE_BASE_URL")
-        or DEFAULT_VISION_BASE_URL
+        base_url or values.get("VISION_MODEL_BASE_URL") or DEFAULT_VISION_BASE_URL
     )
     return VisionModelConfig(
         model=resolved_model,

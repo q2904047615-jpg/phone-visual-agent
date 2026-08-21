@@ -16,7 +16,7 @@ from orientation_safety import (
     _CLAIMED_AUDIT_CREDENTIALS,
     _mint_audited_credential,
 )
-from robot_core import RobotController, WorkflowNotReady
+from robot_core import RobotController
 from run_xy_calibration import click_raw_pixel
 
 
@@ -194,7 +194,21 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
             ("swipe_down", lambda c: c.vision_swipe_down()),
             ("swipe_left", lambda c: c.vision_swipe_left()),
             ("swipe_right", lambda c: c.vision_swipe_right()),
-            ("type_text", lambda c: c.vision_type_text("agent")),
+            (
+                "type_text",
+                lambda c: c.vision_type_text_with_layout(
+                    "agent",
+                    {
+                        "type": "qwerty",
+                        "anchors": {
+                            "q": [115, 704], "p": [875, 704],
+                            "a": [157, 773], "l": [832, 773],
+                            "z": [241, 844], "m": [747, 844],
+                            "backspace": [862, 844],
+                        },
+                    },
+                ),
+            ),
             ("type_pinyin", lambda c: c.vision_type_pinyin("agent", "agent")),
             ("clear_text", lambda c: c.vision_clear_text(delete_count=2)),
         )
@@ -207,14 +221,14 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
             with self.subTest(label=label):
                 controller = self._controller()
                 with (
-                    patch("robot_core.legacy.find_window", return_value=(123, "test")),
+                    patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
                     patch.object(controller, "_capture_phone", return_value=FRAME.copy()),
-                    patch("robot_core.legacy.configure_single_click_count") as configure,
-                    patch("robot_core.legacy.click_client_point") as click,
-                    patch("robot_core.legacy.long_press_client_point") as long_press,
-                    patch("robot_core.legacy.drag_client_path") as drag,
-                    patch("robot_core.legacy.configure_swipe") as configure_swipe,
-                    patch("robot_core.legacy.trigger_selected_action") as trigger,
+                    patch("robot_core.seller_gui.configure_single_click_count") as configure,
+                    patch("robot_core.seller_gui.click_client_point") as click,
+                    patch("robot_core.seller_gui.long_press_client_point") as long_press,
+                    patch("robot_core.seller_gui.drag_client_path") as drag,
+                    patch("robot_core.seller_gui.configure_swipe") as configure_swipe,
+                    patch("robot_core.seller_gui.trigger_selected_action") as trigger,
                 ):
                     with self.assertRaisesRegex(OrientationSafetyError, "一次性方向授权"):
                         invoke(controller)
@@ -254,7 +268,7 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                     )
                 with (
                     patch(
-                        "robot_core.legacy.find_window",
+                        "robot_core.seller_gui.find_window",
                         return_value=(123, "test"),
                     ),
                     patch.object(
@@ -262,11 +276,11 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                         "_capture_phone",
                         return_value=FRAME.copy(),
                     ),
-                    patch("robot_core.legacy.configure_single_click_count") as configure,
-                    patch("robot_core.legacy.click_client_point") as click,
-                    patch("robot_core.legacy.drag_client_path") as drag,
-                    patch("robot_core.legacy.configure_swipe") as configure_swipe,
-                    patch("robot_core.legacy.trigger_selected_action") as trigger,
+                    patch("robot_core.seller_gui.configure_single_click_count") as configure,
+                    patch("robot_core.seller_gui.click_client_point") as click,
+                    patch("robot_core.seller_gui.drag_client_path") as drag,
+                    patch("robot_core.seller_gui.configure_swipe") as configure_swipe,
+                    patch("robot_core.seller_gui.trigger_selected_action") as trigger,
                 ):
                     with self.assertRaisesRegex(
                         OrientationSafetyError,
@@ -284,73 +298,18 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                         ],
                     )
 
-    def test_legacy_multi_step_and_calibration_bypasses_are_closed(self):
+    def test_calibration_bypass_is_closed(self):
         controller = self._controller()
-        with self.assertRaisesRegex(WorkflowNotReady, "旧多步 workflow"):
-            controller.execute("wechat.send_text_to_file_transfer", {})
-
         with (
-            patch("run_xy_calibration.legacy.find_window") as find_window,
-            patch("run_xy_calibration.legacy.configure_single_click_count") as configure,
-            patch("run_xy_calibration.legacy.click_client_point") as click,
+            patch("run_xy_calibration.seller_gui.find_window") as find_window,
+            patch("run_xy_calibration.seller_gui.configure_single_click_count") as configure,
+            patch("run_xy_calibration.seller_gui.click_client_point") as click,
         ):
             with self.assertRaisesRegex(OrientationSafetyError, "一次性方向授权"):
                 click_raw_pixel(controller, FRAME.copy(), (100, 100))
             self.assertEqual(0, find_window.call_count)
             self.assertEqual(0, configure.call_count)
             self.assertEqual(0, click.call_count)
-
-    def test_deprecated_public_app_workflows_are_zero_physical_with_or_without_authorization(self):
-        entries = (
-            ("like", lambda controller: controller.like_current_douyin({})),
-            (
-                "comment",
-                lambda controller: controller.comment_current_douyin(
-                    {"text": "draft"}
-                ),
-            ),
-            (
-                "wechat",
-                lambda controller: controller.send_wechat_text(
-                    {"text": "draft"}
-                ),
-            ),
-        )
-        for authorized in (False, True):
-            for label, invoke in entries:
-                with self.subTest(authorized=authorized, entry=label):
-                    controller = self._controller()
-                    if authorized:
-                        controller.arm_physical_execution(
-                            audited_credential(),
-                            action="tap_semantic",
-                            scene_fingerprint="scene-a",
-                        )
-                    with (
-                        patch("robot_core.legacy.find_window") as find_window,
-                        patch("robot_core.legacy.configure_single_click_count") as configure,
-                        patch("robot_core.legacy.click_client_point") as click,
-                        patch("robot_core.legacy.drag_client_path") as drag,
-                        patch("robot_core.legacy.trigger_selected_action") as trigger,
-                        patch("robot_core.legacy.click_client_control") as control,
-                    ):
-                        with self.assertRaisesRegex(
-                            WorkflowNotReady,
-                            "已废弃的 App 多步流程入口已禁用",
-                        ):
-                            invoke(controller)
-                        self.assertEqual(
-                            [0, 0, 0, 0, 0, 0],
-                            [
-                                find_window.call_count,
-                                configure.call_count,
-                                click.call_count,
-                                drag.call_count,
-                                trigger.call_count,
-                                control.call_count,
-                            ],
-                        )
-
 
 if __name__ == "__main__":
     unittest.main()

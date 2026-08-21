@@ -2736,6 +2736,106 @@ def _map_input_structure_crop_audit_to_full(
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _normalize_input_audit_pixel_coordinates(
+    payload: dict[str, Any],
+    *,
+    frame_size: tuple[int, int],
+) -> None:
+    """Normalize a whole-frame audit emitted in source-image pixel space.
+
+    The formal contract is 0..1000 on both axes, but a model can consistently
+    copy the actual source-image coordinates instead. Accept that alternative
+    only when at least one coordinate exceeds 1000 and every declared geometry
+    value fits the current frame exactly; then convert the entire audit as one
+    coordinate system. Mixed or out-of-frame geometry remains invalid.
+    """
+
+    frame_width, frame_height = frame_size
+    if frame_width <= 0 or frame_height <= 0:
+        return
+    bounds_refs: list[tuple[dict[str, Any], str]] = []
+    point_refs: list[tuple[dict[str, Any], str]] = []
+
+    def add_bounds(owner: Any, key: str = "bounds") -> None:
+        if isinstance(owner, dict) and owner.get(key) is not None:
+            bounds_refs.append((owner, key))
+
+    def add_point(owner: Any, key: str) -> None:
+        if isinstance(owner, dict) and owner.get(key) is not None:
+            point_refs.append((owner, key))
+
+    for item in payload.get("application_inputs") or []:
+        add_bounds(item)
+        if isinstance(item, dict):
+            add_bounds(item.get("right_button"))
+    for region in payload.get("ime_preedit_regions") or []:
+        add_bounds(region)
+        if isinstance(region, dict):
+            for candidate in region.get("candidates") or []:
+                add_bounds(candidate)
+    keyboard = payload.get("keyboard")
+    if isinstance(keyboard, dict):
+        add_bounds(keyboard)
+        for key in ("mode_switch", "backspace_key", "enter_key", "case_switch"):
+            add_bounds(keyboard.get(key))
+        for collection_name in ("literal_keys", "layout_switches"):
+            for item in keyboard.get(collection_name) or []:
+                add_bounds(item)
+        anchors = keyboard.get("qwerty_anchors")
+        if isinstance(anchors, dict):
+            for key in anchors:
+                add_point(anchors, key)
+
+    coordinates: list[tuple[float, float]] = []
+    for owner, key in bounds_refs:
+        value = owner.get(key)
+        if (
+            not isinstance(value, (list, tuple))
+            or len(value) != 4
+            or any(
+                isinstance(part, bool) or not isinstance(part, (int, float))
+                for part in value
+            )
+        ):
+            return
+        left, top, right, bottom = (float(part) for part in value)
+        if not (0 <= left < right <= frame_width and 0 <= top < bottom <= frame_height):
+            return
+        coordinates.extend(((left, top), (right, bottom)))
+    for owner, key in point_refs:
+        value = owner.get(key)
+        if (
+            not isinstance(value, (list, tuple))
+            or len(value) != 2
+            or any(
+                isinstance(part, bool) or not isinstance(part, (int, float))
+                for part in value
+            )
+        ):
+            return
+        x, y = (float(part) for part in value)
+        if not (0 <= x <= frame_width and 0 <= y <= frame_height):
+            return
+        coordinates.append((x, y))
+    if not coordinates or not any(x > 1000 or y > 1000 for x, y in coordinates):
+        return
+
+    for owner, key in bounds_refs:
+        left, top, right, bottom = (float(part) for part in owner[key])
+        owner[key] = [
+            round(left * 1000 / frame_width),
+            round(top * 1000 / frame_height),
+            round(right * 1000 / frame_width),
+            round(bottom * 1000 / frame_height),
+        ]
+    for owner, key in point_refs:
+        x, y = (float(part) for part in owner[key])
+        owner[key] = [
+            round(x * 1000 / frame_width),
+            round(y * 1000 / frame_height),
+        ]
+
+
 _JSON_STRUCTURAL_PUNCTUATION = "{}[],:"
 _JSON_STRUCTURAL_REPAIR_WINDOW = 2
 _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES = 40
@@ -5945,6 +6045,11 @@ def _apply_input_structure_audit(
 ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
+        if qwerty_row_frames:
+            _normalize_input_audit_pixel_coordinates(
+                payload,
+                frame_size=qwerty_row_frames[-1].size,
+            )
         if set(payload) != {
             "protocol_version",
             "application_inputs",
@@ -6332,6 +6437,27 @@ def _apply_input_structure_audit(
             trusted_input = field_matches[0] if len(field_matches) == 1 else None
         else:
             trusted_input = matches[0] if len(matches) == 1 else None
+        active_transaction_text = _goal_active_input_transaction_text(goal_context)
+        if (
+            trusted_input is not None
+            and active_field_id
+            and active_multiline
+            and isinstance(coarse_input_value, str)
+            and coarse_input_value
+            and coarse_input_value != active_transaction_text
+            and active_transaction_text.startswith(coarse_input_value)
+            and coarse_input_value.endswith(("\n", "\r"))
+            and trusted_input["text"] == coarse_input_value.rstrip("\r\n")
+            and trusted_input["visible_editable_cues"]
+        ):
+            # A trailing empty line has no glyphs for the read-only audit to
+            # transcribe. Preserve the already typed exact prefix only for the
+            # same bridge-minted field identity and unique multiline target.
+            trusted_input = dict(trusted_input)
+            trusted_input["visible_trailing_newline_projection"] = trusted_input[
+                "text"
+            ]
+            trusted_input["text"] = coarse_input_value
         if (
             trusted_input is not None
             and not trusted_input["text"]

@@ -8963,6 +8963,88 @@ class GenericSceneObserverTests(unittest.TestCase):
             any(item.element_id == "local_audited_input_1" for item in rejected.elements)
         )
 
+    def test_typed_multiline_prefix_survives_placeholder_loss_and_pixel_coordinates(
+        self,
+    ) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="f" * 64,
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_exact_text",
+                    "objective": "输入两行文字",
+                    "constraints": ["不要提交"],
+                    "completion_conditions": ["输入框逐字等于授权文字"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "input_text": "first\nsecond",
+                        "active_input_transaction_text": "first\nsecond",
+                        "active_input_field_id": "input_field_1",
+                        "active_input_multiline": True,
+                    },
+                }
+            }
+        }
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[135, 490, 860, 810],
+                    text="first",
+                    placeholder="",
+                    field_labels=["正文"],
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [60, 1080, 940, 1980],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [110, 1380],
+                    "p": [890, 1380],
+                    "a": [160, 1560],
+                    "l": [840, 1560],
+                    "z": [260, 1740],
+                    "m": [740, 1740],
+                    "backspace": [890, 1740],
+                },
+                "mode_switch": None,
+                "enter_key": {
+                    "label": "↵",
+                    "bounds": [840, 1840, 940, 1940],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                    "key_action": "newline",
+                },
+            },
+        )
+        audit["application_inputs"][0]["visible_editable_cues"] = [
+            "border",
+            "cursor",
+        ]
+        frames = tuple(
+            Image.new("RGB", (1000, 2000), "white") for _ in range(4)
+        )
+
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="first\n",
+            qwerty_row_frames=frames,
+        )
+
+        field = projected.get_element("local_audited_input_1")
+        self.assertEqual("input_field_1", field.states["input_field_id"])
+        self.assertEqual("first\n", field.states["value"])
+        self.assertTrue(field.states["goal_relevant"])
+        self.assertEqual("qwerty", field.states["keyboard_geometry"]["type"])
+        self.assertEqual([110, 690], field.states["keyboard_geometry"]["anchors"]["q"])
+
     def test_newline_locator_can_recover_tall_multiline_field_without_action_identity(
         self,
     ) -> None:

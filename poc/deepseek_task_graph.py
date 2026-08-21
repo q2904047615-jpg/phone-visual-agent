@@ -1494,6 +1494,7 @@ class DeepSeekTaskGraphPlanner:
             payload = _parse_json_object(raw)
         except GenericIntentError as exc:
             raise TaskGraphError(str(exc)) from exc
+        payload = _normalize_unique_planner_transport_aliases(payload)
         payload = _normalize_explicit_ui_label_payload(payload, raw_user_goal)
         payload = _normalize_local_refresh_execution_class(payload)
         graph = _graph_from_payload(
@@ -1540,11 +1541,13 @@ Shell、ADB、keycode、main.exe 指令或其他可直接驱动设备的控制�
    多字段输入时，input_fields 每项使用 field_id、field_label、text：field_id 是稳定ASCII身份，
    field_label 必须逐字复制该字段在页面上的可见标签或占位提示，text 是用户要求写入的逐字正文；
    不得用“第一个/第二个”替代可见字段标签。
-   device/system/current_surface 目标可将 target_apps 留空并设置 target_surface；
+   device/system/current_surface 目标可将 target_apps 留空并设置 target_surface；target_surface 只能放在
+   goal.entities 内，禁止作为 goal 的直辖字段；
    App 目标仍应使用 target_apps。
 3. 只能有一个 active 子目标；其依赖必须已经 completed（初始图通常无依赖）。
 4. 初始规划没有画面证据，所有完成条件 satisfied=false，任何子目标都不能 completed。
-5. 每个子目标只用 execution_class 标为 observe、navigate、effect 或 unknown；模型不得输出风险等级、
+5. 每个子目标只用 execution_class 标为 observe、navigate、effect 或 unknown；不得输出内部运行态名称
+   read_only、navigation_only 或 external_state；模型不得输出风险等级、
    confirmation_required、external_impact 或 risk_actions。真正产生外部结果的子目标必须声明 typed
    effect_intents，并让 expected_results 逐字引用该子目标的正向完成条件。禁止、未发生、保持不变、
    按钮可见但未触发等约束或状态不得声明为 effect。纯粹的“不要发送、未提交、未保存、未登录”等
@@ -3243,6 +3246,52 @@ def _normalize_local_refresh_execution_class(
     value = json.loads(json.dumps(payload, ensure_ascii=False))
     value["subgoals"] = normalized_subgoals
     return value
+
+
+def _normalize_unique_planner_transport_aliases(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Repair only bijective schema leaks without changing task semantics.
+
+    The public planner protocol stores ``target_surface`` in ``goal.entities``
+    and uses planner execution classes.  The corresponding runtime impact names
+    are internal projections with a one-to-one mapping, so moving or translating
+    these exact known values is deterministic.  Conflicts and unknown values are
+    intentionally left untouched for strict validation to reject.
+    """
+
+    if not isinstance(payload, dict):
+        return payload
+    value = json.loads(json.dumps(payload, ensure_ascii=False))
+    changed = False
+    goal = value.get("goal")
+    if isinstance(goal, dict) and "target_surface" in goal:
+        target_surface = goal.get("target_surface")
+        entities = goal.get("entities")
+        if (
+            target_surface in TARGET_SURFACES
+            and isinstance(entities, dict)
+            and "target_surface" not in entities
+        ):
+            entities["target_surface"] = target_surface
+            del goal["target_surface"]
+            changed = True
+
+    planner_class_by_runtime_impact = {
+        runtime_impact: planner_class
+        for planner_class, runtime_impact in _RUNTIME_IMPACT_BY_EXECUTION_CLASS.items()
+    }
+    subgoals = value.get("subgoals")
+    if isinstance(subgoals, list):
+        for item in subgoals:
+            if not isinstance(item, dict):
+                continue
+            execution_class = str(item.get("execution_class") or "").strip().lower()
+            normalized = planner_class_by_runtime_impact.get(execution_class)
+            if normalized is not None and execution_class not in PLANNER_EXECUTION_CLASSES:
+                item["execution_class"] = normalized
+                changed = True
+    return value if changed else payload
 
 
 def _reject_control_fields(value: Any, path: str) -> None:

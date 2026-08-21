@@ -67,6 +67,38 @@ def payload(*, objective="进入普通会话并聚焦空输入框", effects=()):
 
 
 class TypedPlannerTransportTests(unittest.TestCase):
+    def test_unique_internal_transport_aliases_normalize_to_formal_schema(self):
+        raw = payload(objective="清空当前输入框中的临时文字")
+        raw["goal"]["target_apps"] = []
+        raw["goal"]["target_surface"] = "current_surface"
+        raw["subgoals"][0]["execution_class"] = "navigation_only"
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+            raw["goal"]["objective"],
+            device_id="phone-1",
+        )
+
+        self.assertEqual("current_surface", graph.goal.entities["target_surface"])
+        self.assertEqual("navigation_only", graph.subgoals[0].external_impact)
+
+    def test_conflicting_or_unknown_transport_aliases_remain_rejected(self):
+        conflicting = payload()
+        conflicting["goal"]["target_surface"] = "current_surface"
+        conflicting["goal"]["entities"]["target_surface"] = "device"
+        with self.assertRaisesRegex(TaskGraphError, "goal 包含协议外字段"):
+            DeepSeekTaskGraphPlanner(FakeProvider(conflicting)).plan(
+                conflicting["goal"]["objective"],
+                device_id="phone-1",
+            )
+
+        unknown = payload()
+        unknown["subgoals"][0]["execution_class"] = "navigation"
+        with self.assertRaisesRegex(TaskGraphError, "execution_class 无效"):
+            DeepSeekTaskGraphPlanner(FakeProvider(unknown)).plan(
+                unknown["goal"]["objective"],
+                device_id="phone-1",
+            )
+
     def test_current_page_refresh_cannot_be_upgraded_to_unbound_effect(self):
         for objective in (
             "点击当前浏览器顶部可见的刷新图标，重新加载当前页面",

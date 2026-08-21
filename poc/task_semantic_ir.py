@@ -1533,7 +1533,7 @@ def compile_runtime_graph_semantics(
         (
             "clear_verified_text",
             re.compile(
-                r"(?:清空|清除|置空).{0,8}(?:输入框|文本|文字|内容|草稿)|"
+                r"(?:清空|清除|置空|删除).{0,8}(?:输入框|文本|文字|内容|草稿)|"
                 r"(?:clear|empty).{0,8}(?:input|text|draft)",
                 re.I,
             ),

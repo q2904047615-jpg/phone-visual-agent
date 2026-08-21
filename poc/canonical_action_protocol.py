@@ -849,6 +849,7 @@ def compile_canonical_action_catalog(
     ).casefold()
     active_targets_input = bool(
         active_input_fields
+        or "clear_verified_text" in active_required_actions
         or any(
             token in active_text
             for token in ("input", "text field", "输入框", "文本框", "编辑框")
@@ -1719,6 +1720,11 @@ def compile_canonical_action_catalog(
             "press_enter",
             "clear_verified_text",
         }:
+            if action_kind == "clear_verified_text":
+                return bool(active_input_payload_refs) or bool(
+                    "clear_verified_text" in active_required_actions
+                    and active_targets_input
+                )
             return bool(active_input_payload_refs)
         if action_kind == "tap_semantic":
             element_id = str(candidate.parameters.get("element_id") or "")

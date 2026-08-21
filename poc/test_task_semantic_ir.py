@@ -222,7 +222,7 @@ class TaskSemanticIRTests(unittest.TestCase):
         payload["subgoals"] = [
             {
                 "subgoal_id": "clear_input",
-                "objective": "清空当前输入框中的现有草稿，使输入框变为空白",
+                "objective": "删除当前输入框中的现有草稿，使输入框变为空白",
                 "status": "active",
                 "depends_on": [],
                 "constraints": ["不得发送"],

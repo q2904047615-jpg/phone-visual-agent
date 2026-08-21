@@ -217,6 +217,67 @@ class CanonicalActionProtocolTests(unittest.TestCase):
             [item.action_kind for item in report.candidates],
         )
 
+    def test_clear_only_goal_does_not_require_a_new_input_payload(self) -> None:
+        target = SemanticEntity(
+            entity_id="entity_input_target",
+            entity_type="text",
+            role="target_ui_label",
+            value="唯一已聚焦输入框",
+        )
+        required_clear = ConstraintIntent(
+            constraint_id="constraint.clear",
+            kind="required_action",
+            value="clear_verified_text",
+            source_text="删除唯一已聚焦输入框中的全部现有文字",
+            authoritative=True,
+        )
+        semantic_ir = TaskSemanticIR(
+            task_id="task-clear-only",
+            device_id="device-1",
+            revision=1,
+            raw_goal="删除唯一已聚焦输入框中的全部现有文字",
+            surfaces=(SurfaceRef("surface_current", "current_surface"),),
+            entities=(target,),
+            effects=(),
+            constraints=(required_clear,),
+            subgoals=(
+                SemanticSubgoal(
+                    subgoal_id="clear_input",
+                    surface_ref="surface_current",
+                    status="active",
+                    external_impact="navigation_only",
+                    constraint_refs=(required_clear.constraint_id,),
+                    entity_refs=(target.entity_id,),
+                ),
+            ),
+            input_fields=(),
+        )
+        current_scene = scene(
+            element(
+                "input",
+                label="existing draft",
+                meaning="application_text_input",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "existing draft",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                },
+            )
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            semantic_ir,
+            {"back", "clear_verified_text", "wait_for_change"},
+        )
+
+        self.assertEqual(
+            ["clear_verified_text"],
+            [item.action_kind for item in report.candidates],
+        )
+
     def test_catalog_is_the_only_action_protocol(self) -> None:
         report = compile_canonical_action_catalog(
             input_scene(),

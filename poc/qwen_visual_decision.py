@@ -1065,7 +1065,14 @@ class QwenVisualDecision:
                 element = self.trusted_observation.get_candidate(
                     str(action.params.get("element_id") or "")
                 )
-                if exact_candidate_ids and element.element_id not in exact_candidate_ids:
+                exact_bound_element_ids = {
+                    element.element_id,
+                    str(element.states.get("input_element_id") or "").strip(),
+                }
+                exact_bound_element_ids.discard("")
+                if exact_candidate_ids and exact_candidate_ids.isdisjoint(
+                    exact_bound_element_ids
+                ):
                     raise GenericStepPlanningError(
                         "动作目标不是本地确认的逐字一致唯一候选。"
                     )
@@ -1148,10 +1155,7 @@ class QwenVisualDecision:
                 )
             except UniversalActionError as exc:
                 raise GenericStepPlanningError(f"本地控制器拒绝动作：{exc}") from exc
-            if exact_candidate_ids and action.action not in {
-                "tap_semantic",
-                "dismiss_overlay",
-            }:
+            if exact_candidate_ids and action.action not in SINGLE_ELEMENT_ACTIONS:
                 raise GenericStepPlanningError(
                     "存在逐字一致文字约束时，动作必须绑定该唯一候选。"
                 )

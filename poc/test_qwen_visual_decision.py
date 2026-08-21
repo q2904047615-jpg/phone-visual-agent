@@ -1624,6 +1624,33 @@ class QwenVisualDecisionTests(unittest.TestCase):
             decision.expected_result,
         )
 
+        exact_context = copy.deepcopy(context)
+        exact_context["goal"]["entities"]["target_ui_label"] = "长文本"
+        exact_context["current_subgoal"]["objective"] = (
+            "在当前唯一的长文本输入框输入目标文字"
+        )
+        exact_field = replace(field, label="长文本")
+        exact_observation = trusted_observation(
+            self.frames,
+            elements=(exact_field,),
+            observation_id="obs_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        )
+        _observer, exact_decision = self.decide(
+            FakeProvider(
+                minimal_selection_payload(status="action", choice_id="choice_1")
+            ),
+            context=exact_context,
+            observation=exact_observation,
+            available_action_kinds={"input_verified_text"},
+        )
+        self.assertEqual("action", exact_decision.proposal.status)
+        self.assertEqual(
+            "input_verified_text", exact_decision.proposal.action.action
+        )
+        self.assertEqual(
+            "query_field", exact_decision.proposal.action.params["element_id"]
+        )
+
     def test_minimal_clear_choice_uses_local_empty_postcondition_without_text(self) -> None:
         context = task_context(task_id="task_minimal_clear", revision=4)
         context["current_subgoal"]["objective"] = "恢复唯一错误草稿输入框为空"
@@ -2098,7 +2125,10 @@ class QwenVisualDecisionTests(unittest.TestCase):
 
     def test_literal_key_and_keyboard_switches_are_local_exact_choices(self) -> None:
         context = task_context()
-        context["goal"]["entities"] = {"input_text": "draft 8"}
+        context["goal"]["entities"] = {
+            "input_text": "draft 8",
+            "target_ui_label": "消息",
+        }
         context["current_subgoal"]["objective"] = "消息草稿逐字为draft 8"
         parsed = QwenTaskContext.from_dict(context)
         field = UIElement(

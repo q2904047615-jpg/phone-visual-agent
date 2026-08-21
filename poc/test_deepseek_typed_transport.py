@@ -9,6 +9,7 @@ from deepseek_task_graph import (
     DeepSeekTaskGraphPlanner,
     ObservedState,
     TaskGraphError,
+    VisualClaimEvidenceRef,
     _named_visual_identity_anchor,
     named_visual_identity_is_grounded,
 )
@@ -148,6 +149,101 @@ class TypedPlannerTransportTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual("", _named_visual_identity_anchor((text,)))
                 self.assertTrue(named_visual_identity_is_grounded((text,), ()))
+
+    def test_locating_an_element_on_current_page_does_not_name_the_page(self):
+        for text in (
+            "找到当前页面中占位文字为“长文本”的唯一输入框",
+            "定位当前界面内唯一可编辑字段",
+            "Find the only input on the current page",
+            "Locate the only field in the current view",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual("", _named_visual_identity_anchor((text,)))
+                self.assertTrue(named_visual_identity_is_grounded((text,), ()))
+
+    def test_replan_can_complete_current_page_input_location_from_typed_claim(self):
+        claim_id = "a" * 64
+        scene_id = "obs-current-input"
+        ref_id = f"visual_claim:{scene_id}:{claim_id}"
+        initial = payload(
+            objective="在当前页面占位文字为“长文本”的唯一输入框中输入正文"
+        )
+        initial["goal"]["entities"] = {
+            "input_text": "正文",
+            "target_ui_label": "长文本",
+        }
+        initial["subgoals"] = [
+            {
+                "subgoal_id": "locate_input",
+                "objective": "找到当前页面中占位文字为“长文本”的唯一输入框",
+                "status": "active",
+                "depends_on": [],
+                "constraints": [],
+                "completion_conditions": [
+                    "当前页面中占位文字为“长文本”的唯一输入框可见"
+                ],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "observe",
+            },
+            {
+                "subgoal_id": "type_text",
+                "objective": "在占位文字为“长文本”的唯一输入框中输入正文",
+                "status": "pending",
+                "depends_on": ["locate_input"],
+                "constraints": [],
+                "completion_conditions": ["输入框的值逐字等于正文"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            },
+        ]
+        initial["active_subgoal_id"] = "locate_input"
+        candidate = copy.deepcopy(initial)
+        candidate["status"] = "running"
+        candidate["subgoals"][0]["status"] = "completed"
+        candidate["subgoals"][0]["completion_evidence"] = [ref_id]
+        candidate["subgoals"][1]["status"] = "active"
+        candidate["active_subgoal_id"] = "type_text"
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(copy.deepcopy(initial), candidate)
+        )
+        graph = planner.plan(initial["goal"]["objective"], device_id="phone-1")
+        fact = json.dumps(
+            {
+                "element_id": "local_audited_input_1",
+                "role": "input",
+                "label": "长文本",
+                "states": {"value": ""},
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        revised = planner.replan(
+            graph,
+            ObservedState(
+                scene_id=scene_id,
+                summary="当前页面唯一的长文本输入框可见",
+                visible_evidence=(ref_id,),
+                grounded_visual_facts=(fact,),
+                visual_claim_evidence_refs=(
+                    VisualClaimEvidenceRef(
+                        ref_id=ref_id,
+                        claim_id=claim_id,
+                        scene_id=scene_id,
+                        subject_ref="local_audited_input_1",
+                        predicate="element.visible",
+                        fact=fact,
+                    ),
+                ),
+            ),
+            trigger="observation_changed",
+            reason="当前输入框已经可见",
+        )
+
+        self.assertEqual("type_text", revised.active_subgoal_id)
+        self.assertEqual("completed", revised.subgoals[0].status)
 
     def test_real_named_pages_still_require_structured_identity(self):
         unrelated_facts = ('{"app_id":"settings","screen_id":"main"}',)

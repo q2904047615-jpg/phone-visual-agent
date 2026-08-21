@@ -916,6 +916,7 @@ class UniversalAgentSessionState:
     status: str = "created"
     step_number: int = 1
     physical_actions: int = 0
+    local_exact_input_authority: bool = field(default=False, repr=False)
     automatic_loop_enabled: bool = False
     auto_pause_reason: str = ""
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -978,6 +979,7 @@ class UniversalAgentSessionState:
             "status": self.status,
             "step_number": self.step_number,
             "physical_actions": self.physical_actions,
+            "local_exact_input_authority": self.local_exact_input_authority,
             "failed_reason": self.failed_reason,
             "confirm_stage": self.confirm_stage,
             "task_graph": graph,
@@ -3598,6 +3600,7 @@ class UniversalAgentOrchestrator:
         result: Any,
         before_observation: Any,
         new_observation: Any,
+        allow_terminal: bool = False,
     ) -> bool:
         """Recognize one controller-verified step inside canonical text input.
 
@@ -3640,16 +3643,81 @@ class UniversalAgentOrchestrator:
         if proposal_action is None:
             return False
 
+        resolved_kind = str(getattr(resolved, "kind", ""))
+        if resolved_kind == "tap_semantic":
+            target_id = str(
+                getattr(resolved, "target_element_id", "") or ""
+            ).strip()
+            try:
+                focus_target = before_scene.get_element(
+                    target_id,
+                    min_confidence=MIN_TARGET_CONFIDENCE,
+                )
+            except UISceneError:
+                focus_target = None
+            if focus_target is not None and focus_target.role == "input":
+                expected_effect = getattr(resolved, "expected_effect", None)
+                expected_element = (
+                    expected_effect.get("element_state")
+                    if isinstance(expected_effect, Mapping)
+                    else None
+                )
+                expected_states = (
+                    expected_element.get("states")
+                    if isinstance(expected_element, Mapping)
+                    else None
+                )
+                raw_value = focus_target.states.get("value")
+                placeholder = focus_target.states.get("placeholder")
+                prior_value = (
+                    ""
+                    if isinstance(raw_value, str)
+                    and isinstance(placeholder, str)
+                    and raw_value == placeholder
+                    and focus_target.states.get("focused") is not True
+                    else raw_value
+                )
+                field_id = str(
+                    focus_target.states.get("input_field_id") or ""
+                ).strip()
+                after_inputs = tuple(
+                    element
+                    for element in after_scene.elements
+                    if element.role == "input"
+                    and float(element.confidence) >= MIN_TARGET_CONFIDENCE
+                    and element.states.get("visible") is not False
+                    and element.states.get("focused") is True
+                    and element.meaning == focus_target.meaning
+                    and element.states.get("value") == prior_value
+                    and (
+                        not field_id
+                        or str(element.states.get("input_field_id") or "").strip()
+                        == field_id
+                    )
+                )
+                return bool(
+                    str(getattr(proposal_action, "action", "")) == "tap_semantic"
+                    and isinstance(prior_value, str)
+                    and canonical.startswith(prior_value)
+                    and prior_value != canonical
+                    and isinstance(expected_element, Mapping)
+                    and str(expected_element.get("meaning") or "").strip()
+                    == focus_target.meaning
+                    and expected_states == {"focused": True}
+                    and len(after_inputs) == 1
+                )
+
         auxiliary_meanings = {
             "ime_exact_candidate",
             "input_exact_literal_key",
+            "input_exact_enter_key",
             "switch_keyboard_layout",
             "switch_keyboard_case",
             "switch_keyboard_input_mode",
         }
         before_input_id = ""
         auxiliary = None
-        if str(getattr(resolved, "kind", "")) == "input_verified_text":
+        if resolved_kind == "input_verified_text":
             before_input_id = str(
                 getattr(resolved, "target_element_id", "") or ""
             ).strip()
@@ -3659,7 +3727,7 @@ class UniversalAgentOrchestrator:
                 or str(getattr(resolved, "text", "")) != canonical
             ):
                 return False
-        elif str(getattr(resolved, "kind", "")) == "tap_semantic":
+        elif resolved_kind in {"tap_semantic", "press_enter"}:
             target_id = str(
                 getattr(resolved, "target_element_id", "") or ""
             ).strip()
@@ -3671,7 +3739,7 @@ class UniversalAgentOrchestrator:
             except UISceneError:
                 return False
             if (
-                str(getattr(proposal_action, "action", "")) != "tap_semantic"
+                str(getattr(proposal_action, "action", "")) != resolved_kind
                 or auxiliary.meaning not in auxiliary_meanings
                 or auxiliary.states.get("fully_visible") is not True
             ):
@@ -3755,7 +3823,10 @@ class UniversalAgentOrchestrator:
             states = auxiliary.states
             if states.get("prior_input_value") != prior_value:
                 return False
-            if auxiliary.meaning == "input_exact_literal_key":
+            if auxiliary.meaning in {
+                "input_exact_literal_key",
+                "input_exact_enter_key",
+            }:
                 if (
                     input_step.kind != "literal_key"
                     or states.get("key_value") != input_step.segment
@@ -3830,8 +3901,10 @@ class UniversalAgentOrchestrator:
         # typed receipt / DeepSeek completion path instead of asking Qwen to
         # enumerate the same text again (for example, input value and a stale
         # IME candidate carrying an identical literal).
-        if len(after_inputs) != 1 or expected_value == canonical:
+        if len(after_inputs) != 1:
             return False
+        if expected_value == canonical:
+            return bool(allow_terminal)
         if UniversalAgentOrchestrator._input_step_reaches_formal_successor(
             graph=graph,
             current_subgoal_id=current.subgoal_id,
@@ -3840,6 +3913,83 @@ class UniversalAgentOrchestrator:
         ):
             return False
         return True
+
+    @staticmethod
+    def _input_transaction_reached_canonical(
+        graph: DynamicTaskGraph,
+        result: Any,
+    ) -> bool:
+        canonical = graph.goal.entities.get("input_text")
+        resolved = getattr(result, "resolved_action", None)
+        expected_effect = getattr(resolved, "expected_effect", None)
+        expected_element = (
+            expected_effect.get("element_state")
+            if isinstance(expected_effect, Mapping)
+            else None
+        )
+        expected_states = (
+            expected_element.get("states")
+            if isinstance(expected_element, Mapping)
+            else None
+        )
+        return bool(
+            isinstance(canonical, str)
+            and canonical
+            and isinstance(expected_states, Mapping)
+            and expected_states.get("value") == canonical
+        )
+
+    @staticmethod
+    def _complete_local_exact_input_graph(
+        graph: DynamicTaskGraph,
+        *,
+        new_observation: Any,
+    ) -> DynamicTaskGraph:
+        current = graph.active_subgoal()
+        if (
+            graph.status not in {"ready", "running", "awaiting_confirmation"}
+            or current is None
+            or len(graph.subgoals) != 1
+            or graph.subgoals[0].subgoal_id != current.subgoal_id
+            or current.external_impact != "navigation_only"
+            or graph.risk_actions
+            or not isinstance(graph.goal.entities.get("input_text"), str)
+        ):
+            raise UniversalAgentOrchestratorError(
+                "本地 exact_input_text 完成只允许单一、无效果的输入子目标。"
+            )
+        observation_id = str(
+            getattr(new_observation, "observation_id", "") or ""
+        ).strip()
+        fingerprint = str(
+            getattr(new_observation, "fingerprint", "") or ""
+        ).strip()
+        if not observation_id or not fingerprint:
+            raise UniversalAgentOrchestratorError(
+                "本地 exact_input_text 完成缺少新 observation/fingerprint。"
+            )
+        evidence = (
+            f"动作后观察 {observation_id} 已验证输入框精确值，fingerprint={fingerprint}",
+        )
+        completed = replace(
+            graph,
+            revision=graph.revision + 1,
+            status="completed",
+            completion_conditions=tuple(
+                replace(condition, satisfied=True, evidence=evidence)
+                for condition in graph.completion_conditions
+            ),
+            subgoals=(
+                replace(
+                    current,
+                    status="completed",
+                    completion_evidence=evidence,
+                ),
+            ),
+            active_subgoal_id=None,
+        )
+        completed.validate()
+        return completed
 
     @staticmethod
     def _input_step_reaches_formal_successor(
@@ -4079,6 +4229,12 @@ class UniversalAgentOrchestrator:
             result=result,
             before_observation=before_observation,
             new_observation=new_observation,
+            allow_terminal=session.local_exact_input_authority,
+        )
+        input_transaction_terminal = bool(
+            input_transaction_microstep
+            and session.local_exact_input_authority
+            and self._input_transaction_reached_canonical(previous_graph, result)
         )
         wait_transition = (
             result.resolved_action.kind == "wait_for_change"
@@ -4181,7 +4337,9 @@ class UniversalAgentOrchestrator:
             ),
             "disposition": "replanning",
         }
-        if input_transaction_microstep:
+        if input_transaction_terminal:
+            transition_record["input_transaction_completed"] = True
+        elif input_transaction_microstep:
             transition_record["input_transaction_progress"] = True
 
         def persist_transition() -> None:
@@ -4204,7 +4362,14 @@ class UniversalAgentOrchestrator:
         session.confirmed_effect_ids = ()
         try:
             if input_transaction_microstep:
-                revised = previous_graph
+                revised = (
+                    self._complete_local_exact_input_graph(
+                        previous_graph,
+                        new_observation=new_observation,
+                    )
+                    if input_transaction_terminal
+                    else previous_graph
+                )
             else:
                 revised = self.deepseek_planner.replan(
                     previous_graph,
@@ -4270,7 +4435,7 @@ class UniversalAgentOrchestrator:
         )
         if receipt is not None:
             transition_record["receipt_consumed_revision"] = revised.revision
-        if not input_transaction_microstep:
+        if not input_transaction_microstep or input_transaction_terminal:
             self._remember(
                 session,
                 session.evidence_store.write_task_graph(revised),
@@ -5941,6 +6106,7 @@ class UniversalAgentOrchestrator:
             run_dir=Path(run_dir),
             adapter=adapter,
             evidence_store=store,
+            local_exact_input_authority=exact_input_text is not None,
         )
         if not session.session_id or not session.raw_goal or not session.device_id:
             raise UniversalAgentOrchestratorError(

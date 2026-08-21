@@ -5270,6 +5270,147 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             )
         )
 
+    def test_verified_exact_input_focus_keeps_local_transaction(self) -> None:
+        graph = self._input_graph()
+        before_base = self._input_scene("", fingerprint="focus-before")
+        before = replace(
+            before_base,
+            elements=(
+                replace(
+                    before_base.elements[0],
+                    states={
+                        **before_base.elements[0].states,
+                        "focused": False,
+                        "value": "正文",
+                        "placeholder": "正文",
+                        "input_field_id": "input_field_1",
+                    },
+                ),
+            ),
+        )
+        after_base = self._input_scene("", fingerprint="focus-after")
+        after = replace(
+            after_base,
+            elements=(
+                replace(
+                    after_base.elements[0],
+                    states={
+                        **after_base.elements[0].states,
+                        "input_field_id": "input_field_1",
+                    },
+                ),
+            ),
+        )
+        effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"focused": True},
+            }
+        }
+        action = SemanticAction(
+            node_id="focus-input",
+            action="tap_semantic",
+            params={"expected_effect": effect},
+        )
+        result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=before,
+            after_scene=after,
+            resolved_action=ResolvedSemanticAction(
+                node_id="focus-input",
+                kind="tap_semantic",
+                target_element_id="input-1",
+                before_fingerprint=before.fingerprint,
+                expected_effect=effect,
+            ),
+        )
+
+        self.assertTrue(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=SimpleNamespace(
+                    proposal=GenericStepProposal(status="action", action=action)
+                ),
+                result=result,
+                before_observation=SimpleNamespace(fingerprint=before.fingerprint),
+                new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+            )
+        )
+
+    def test_verified_enter_key_keeps_multiline_transaction(self) -> None:
+        graph = self._input_graph()
+        graph = replace(
+            graph,
+            goal=replace(
+                graph.goal,
+                entities={"input_text": "first\nsecond"},
+            ),
+        )
+        enter = UIElement(
+            element_id="enter-key",
+            role="button",
+            meaning="input_exact_enter_key",
+            label="↵",
+            bounds=(0.78, 0.78, 0.94, 0.9),
+            confidence=0.98,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "input_enter_key": True,
+                "key_action": "newline",
+                "key_value": "\n",
+                "prior_input_value": "first",
+                "expected_input_value": "first\n",
+                "input_element_id": "input-1",
+            },
+            evidence=("多行输入框的唯一换行键",),
+        )
+        before = self._input_scene(
+            "first",
+            fingerprint="enter-before",
+            auxiliary=enter,
+        )
+        after = self._input_scene("first\n", fingerprint="enter-after")
+        effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": "first\n"},
+            }
+        }
+        action = SemanticAction(
+            node_id="enter-step",
+            action="press_enter",
+            params={"expected_effect": effect},
+        )
+        result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=before,
+            after_scene=after,
+            resolved_action=ResolvedSemanticAction(
+                node_id="enter-step",
+                kind="press_enter",
+                target_element_id="enter-key",
+                before_fingerprint=before.fingerprint,
+                expected_effect=effect,
+            ),
+        )
+
+        self.assertTrue(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=SimpleNamespace(
+                    proposal=GenericStepProposal(status="action", action=action)
+                ),
+                result=result,
+                before_observation=SimpleNamespace(fingerprint=before.fingerprint),
+                new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+            )
+        )
+
     def test_verified_first_line_exits_microstep_for_formal_newline_successor(
         self,
     ) -> None:
@@ -5354,7 +5495,6 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 new_observation=SimpleNamespace(fingerprint=after.fingerprint),
             )
         )
-
         unrelated = replace(
             graph,
             subgoals=(
@@ -5449,6 +5589,35 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 new_observation=SimpleNamespace(fingerprint=after.fingerprint),
             )
         )
+        self.assertTrue(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=SimpleNamespace(
+                    proposal=GenericStepProposal(status="action", action=action)
+                ),
+                result=result,
+                before_observation=SimpleNamespace(fingerprint=before.fingerprint),
+                new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+                allow_terminal=True,
+            )
+        )
+
+    def test_local_exact_input_completion_builds_valid_terminal_graph(self) -> None:
+        graph = self._input_graph()
+
+        completed = UniversalAgentOrchestrator._complete_local_exact_input_graph(
+            graph,
+            new_observation=SimpleNamespace(
+                observation_id="obs-exact-input-complete",
+                fingerprint="exact-input-fingerprint",
+            ),
+        )
+
+        self.assertEqual("completed", completed.status)
+        self.assertEqual(graph.revision + 1, completed.revision)
+        self.assertIsNone(completed.active_subgoal_id)
+        self.assertTrue(all(item.satisfied for item in completed.completion_conditions))
+        self.assertTrue(all(item.status == "completed" for item in completed.subgoals))
 
     def test_verified_pinyin_preedit_uses_fresh_rebound_scene_and_continues_to_candidate(self) -> None:
         graph = self._input_graph()
@@ -5822,6 +5991,38 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertNotEqual(old_scope["observation_id"], new_scope["observation_id"])
         self.assertNotEqual(old_scope["fingerprint"], new_scope["fingerprint"])
         self.assertNotEqual(old_scope["action_digest"], new_scope["action_digest"])
+
+    def test_local_exact_input_terminal_skips_deepseek_and_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, planner, _qwen, _adapter = self._started(temp)
+            session.task_graph = self._input_graph()
+            session.local_exact_input_authority = True
+            with patch.object(
+                orchestrator,
+                "_verified_input_transaction_microstep",
+                return_value=True,
+            ), patch.object(
+                orchestrator,
+                "_input_transaction_reached_canonical",
+                return_value=True,
+            ):
+                result = orchestrator.confirm_one(
+                    session,
+                    _confirmation(session),
+                )
+            persisted = json.loads(
+                (Path(temp) / "post_action_transition_step_1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual("completed", session.task_graph.status)
+        self.assertIsNone(session.task_graph.active_subgoal_id)
+        self.assertTrue(persisted["input_transaction_completed"])
+        self.assertEqual("task_completed", persisted["disposition"])
 
     def test_authority_digest_is_exact_while_progress_digest_is_semantic(self) -> None:
         first = SemanticAction(

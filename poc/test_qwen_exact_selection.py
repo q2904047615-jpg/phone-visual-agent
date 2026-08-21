@@ -134,6 +134,37 @@ class DeterministicExactSelectionTests(unittest.TestCase):
             )
         )
 
+    def test_exact_input_selects_clear_when_current_value_is_not_a_prefix(self) -> None:
+        context = SimpleNamespace(
+            current_subgoal={"subgoal_id": "input_exact_text"},
+            requested_input_text="x\ny",
+        )
+        observation = SimpleNamespace(
+            target_local_candidate=lambda: SimpleNamespace(
+                element_id="field",
+                states={"value": "first\n"},
+            )
+        )
+
+        payload = _deterministic_exact_selection_payload(
+            context,
+            (
+                {
+                    "choice_id": "choice_1",
+                    "action": "clear_verified_text",
+                    "element_id": "field",
+                },
+                {
+                    "choice_id": "choice_2",
+                    "action": "tap_semantic",
+                    "element_id": "mode-switch",
+                },
+            ),
+            observation=observation,
+        )
+
+        self.assertEqual("choice_1", payload["choice_id"])
+
 
 if __name__ == "__main__":
     unittest.main()

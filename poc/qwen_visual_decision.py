@@ -1781,18 +1781,27 @@ def _deterministic_exact_selection_payload(
         )
         if local_target is None:
             return None
+        current_value = getattr(local_target, "states", {}).get("value")
+        authorized_text = getattr(context, "requested_input_text", None)
+        permitted_actions = {
+            "clear_verified_text"
+        } if (
+            isinstance(current_value, str)
+            and isinstance(authorized_text, str)
+            and not authorized_text.startswith(current_value)
+        ) else {
+            "tap_semantic",
+            "input_verified_text",
+            "press_enter",
+            "clear_verified_text",
+        }
         matching_choices = tuple(
             choice
             for choice in choices
             if str(choice.get("element_id") or "").strip()
             == local_target.element_id
             and str(choice.get("action") or "").strip()
-            in {
-                "tap_semantic",
-                "input_verified_text",
-                "press_enter",
-                "clear_verified_text",
-            }
+            in permitted_actions
         )
     else:
         expected_action = {

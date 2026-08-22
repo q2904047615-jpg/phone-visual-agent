@@ -8837,6 +8837,240 @@ class GenericSceneObserverTests(unittest.TestCase):
             any(item.meaning == "input_exact_enter_key" for item in rejected.elements)
         )
 
+    def test_local_rows_snap_newline_key_from_untrusted_portrait_grid(self) -> None:
+        coarse = scene_payload()
+        coarse["elements"].append(
+            {
+                "element_id": "coarse-body",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "正文",
+                "bounds": [100, 250, 900, 450],
+                "confidence": 0.98,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "placeholder": "正文",
+                },
+                "evidence": ["正文"],
+            }
+        )
+        base = _parse_scene(
+            json.dumps(coarse, ensure_ascii=False),
+            fingerprint="f" * 64,
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "fill_body",
+                    "objective": "正文内容逐字等于目标文本",
+                    "constraints": [],
+                    "completion_conditions": [],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "first\nsecond",
+                        "active_input_field_id": "body",
+                        "active_input_field_label": "正文",
+                        "active_input_multiline": True,
+                    },
+                }
+            }
+        }
+        raw_keyboard = {
+            "visible": True,
+            "bounds": [60, 1160, 940, 1900],
+            "layout": "qwerty",
+            "input_mode": "direct_latin",
+            "case_mode": "lower",
+            "qwerty_anchors": {
+                "q": [110, 1430],
+                "p": [890, 1430],
+                "a": [160, 1580],
+                "l": [840, 1580],
+                "z": [260, 1730],
+                "m": [740, 1730],
+                "backspace": [890, 1730],
+            },
+            "mode_switch": None,
+            "enter_key": {
+                "label": "↵",
+                "bounds": [840, 1830, 930, 1890],
+                "confidence": 0.98,
+                "fully_visible": True,
+                "key_action": "newline",
+            },
+        }
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="body",
+                    bounds=[100, 330, 900, 430],
+                    text="first",
+                    field_labels=["正文"],
+                )
+            ],
+            keyboard=raw_keyboard,
+        )
+
+        for snapped in (
+            {
+                "q": [122, 708],
+                "p": [881, 708],
+                "a": [164, 780],
+                "l": [839, 780],
+                "z": [249, 852],
+                "m": [755, 852],
+                "backspace": [881, 852],
+            },
+            {
+                "q": [122, 620],
+                "p": [881, 620],
+                "a": [164, 700],
+                "l": [839, 700],
+                "z": [249, 780],
+                "m": [755, 780],
+                "backspace": [881, 780],
+            },
+        ):
+            with self.subTest(snapped=snapped):
+                projected = _apply_input_structure_audit(
+                    base,
+                    json.dumps(audit, ensure_ascii=False),
+                    fingerprint="f" * 64,
+                    goal_context=context,
+                    coarse_input_value="first",
+                    qwerty_row_snapper=lambda _frames, _anchors: snapped,
+                    qwerty_row_frames=stable_frames()[-3:],
+                )
+                enter = projected.get_element("local_audited_enter_key_1")
+                field = projected.get_element("local_audited_input_1")
+                self.assertEqual((0.1, 0.25, 0.9, 0.45), field.bounds)
+                expected_center_y = (
+                    snapped["z"][1]
+                    + (snapped["a"][1] - snapped["q"][1])
+                ) / 1000.0
+                self.assertAlmostEqual(
+                    expected_center_y,
+                    (enter.bounds[1] + enter.bounds[3]) / 2.0,
+                    places=3,
+                )
+                self.assertEqual("first\n", enter.states["expected_input_value"])
+
+        audit["keyboard"]["enter_key"]["label"] = "开始"
+        rejected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="first",
+            qwerty_row_snapper=lambda _frames, _anchors: {
+                "q": [122, 708],
+                "p": [881, 708],
+                "a": [164, 780],
+                "l": [839, 780],
+                "z": [249, 852],
+                "m": [755, 852],
+                "backspace": [881, 852],
+            },
+            qwerty_row_frames=stable_frames()[-3:],
+        )
+        self.assertFalse(
+            any(item.meaning == "input_exact_enter_key" for item in rejected.elements)
+        )
+
+    def test_local_rows_do_not_reattach_ambiguous_scene_fields(self) -> None:
+        coarse = scene_payload()
+        for index, top in enumerate((180, 330), start=1):
+            coarse["elements"].append(
+                {
+                    "element_id": f"coarse-body-{index}",
+                    "role": "input",
+                    "meaning": "application_text_input",
+                    "label": "正文",
+                    "bounds": [100, top, 900, top + 100],
+                    "confidence": 0.98,
+                    "states": {"goal_relevant": True, "fully_visible": True},
+                    "evidence": ["正文"],
+                }
+            )
+        base = _parse_scene(
+            json.dumps(coarse, ensure_ascii=False),
+            fingerprint="f" * 64,
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "fill_body",
+                    "objective": "正文内容逐字等于目标文本",
+                    "constraints": [],
+                    "completion_conditions": [],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "first\nsecond",
+                        "active_input_field_id": "body",
+                        "active_input_field_label": "正文",
+                        "active_input_multiline": True,
+                    },
+                }
+            }
+        }
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="body",
+                    bounds=[135, 490, 865, 730],
+                    text="first",
+                    field_labels=["正文"],
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [50, 870, 950, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [100, 935],
+                    "p": [890, 935],
+                    "a": [140, 965],
+                    "l": [820, 965],
+                    "z": [250, 990],
+                    "m": [740, 990],
+                    "backspace": [890, 990],
+                },
+                "mode_switch": None,
+                "enter_key": {
+                    "label": "↵",
+                    "bounds": [890, 990, 950, 1000],
+                    "confidence": 0.98,
+                    "fully_visible": True,
+                    "key_action": "newline",
+                },
+            },
+        )
+        snapped = {
+            "q": [122, 708],
+            "p": [881, 708],
+            "a": [164, 780],
+            "l": [839, 780],
+            "z": [249, 852],
+            "m": [755, 852],
+            "backspace": [881, 852],
+        }
+
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="first",
+            qwerty_row_snapper=lambda _frames, _anchors: snapped,
+            qwerty_row_frames=stable_frames()[-3:],
+        )
+
+        field = projected.get_element("local_audited_input_1")
+        self.assertEqual((0.135, 0.49, 0.865, 0.73), field.bounds)
+
     def test_invalid_keyboard_bounds_still_fail_without_local_row_evidence(
         self,
     ) -> None:

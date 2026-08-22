@@ -2836,6 +2836,240 @@ def _normalize_input_audit_pixel_coordinates(
         ]
 
 
+def _normalize_input_audit_portrait_grid_from_local_rows(
+    payload: dict[str, Any],
+    *,
+    locally_snapped_anchors: dict[str, list[int]],
+) -> None:
+    """Normalize a model portrait Y grid from independently snapped rows.
+
+    Some audits keep X in 0..1000 but emit Y in a taller logical phone grid.
+    No conventional screen height is guessed.  A single affine Y transform is
+    accepted only when all three model QWERTY rows map to the stable local OCR
+    rows with low residual, then it is applied atomically to the whole audit.
+    """
+
+    keyboard = payload.get("keyboard")
+    raw_anchors = keyboard.get("qwerty_anchors") if isinstance(keyboard, dict) else None
+    if not isinstance(raw_anchors, dict):
+        return
+    try:
+        raw_rows = (
+            statistics.mean((float(raw_anchors["q"][1]), float(raw_anchors["p"][1]))),
+            statistics.mean((float(raw_anchors["a"][1]), float(raw_anchors["l"][1]))),
+            statistics.mean(
+                (
+                    float(raw_anchors["z"][1]),
+                    float(raw_anchors["m"][1]),
+                    float(raw_anchors["backspace"][1]),
+                )
+            ),
+        )
+        local_rows = (
+            statistics.mean(
+                (
+                    float(locally_snapped_anchors["q"][1]),
+                    float(locally_snapped_anchors["p"][1]),
+                )
+            ),
+            statistics.mean(
+                (
+                    float(locally_snapped_anchors["a"][1]),
+                    float(locally_snapped_anchors["l"][1]),
+                )
+            ),
+            statistics.mean(
+                (
+                    float(locally_snapped_anchors["z"][1]),
+                    float(locally_snapped_anchors["m"][1]),
+                    float(locally_snapped_anchors["backspace"][1]),
+                )
+            ),
+        )
+    except (KeyError, TypeError, ValueError):
+        return
+    if not (
+        raw_rows[2] > 1000
+        and raw_rows[0] < raw_rows[1] < raw_rows[2]
+        and local_rows[0] < local_rows[1] < local_rows[2]
+    ):
+        return
+    raw_mean = statistics.mean(raw_rows)
+    local_mean = statistics.mean(local_rows)
+    denominator = sum((value - raw_mean) ** 2 for value in raw_rows)
+    if denominator <= 0:
+        return
+    scale = sum(
+        (raw_value - raw_mean) * (local_value - local_mean)
+        for raw_value, local_value in zip(raw_rows, local_rows)
+    ) / denominator
+    offset = local_mean - scale * raw_mean
+    if not 0.25 <= scale <= 1.0 or max(
+        abs(scale * raw_value + offset - local_value)
+        for raw_value, local_value in zip(raw_rows, local_rows)
+    ) > 15:
+        return
+
+    bounds_refs: list[tuple[dict[str, Any], str]] = []
+    point_refs: list[tuple[dict[str, Any], str]] = []
+
+    def add_bounds(owner: Any, key: str = "bounds") -> None:
+        if isinstance(owner, dict) and owner.get(key) is not None:
+            bounds_refs.append((owner, key))
+
+    for item in payload.get("application_inputs") or []:
+        add_bounds(item)
+        if isinstance(item, dict):
+            add_bounds(item.get("right_button"))
+    for region in payload.get("ime_preedit_regions") or []:
+        add_bounds(region)
+        if isinstance(region, dict):
+            for candidate in region.get("candidates") or []:
+                add_bounds(candidate)
+    add_bounds(keyboard)
+    for key in ("mode_switch", "backspace_key", "enter_key", "case_switch"):
+        add_bounds(keyboard.get(key))
+    for collection_name in ("literal_keys", "layout_switches"):
+        for item in keyboard.get(collection_name) or []:
+            add_bounds(item)
+    for key in raw_anchors:
+        point_refs.append((raw_anchors, key))
+
+    transformed_bounds: list[tuple[dict[str, Any], str, list[int]]] = []
+    transformed_points: list[tuple[dict[str, Any], str, list[int]]] = []
+    for owner, key in bounds_refs:
+        value = owner.get(key)
+        if (
+            not isinstance(value, (list, tuple))
+            or len(value) != 4
+            or any(
+                isinstance(part, bool) or not isinstance(part, (int, float))
+                for part in value
+            )
+        ):
+            return
+        left, top, right, bottom = (float(part) for part in value)
+        normalized_top = scale * top + offset
+        normalized_bottom = scale * bottom + offset
+        if not (
+            0 <= left < right <= 1000
+            and 0 <= normalized_top < normalized_bottom <= 1000
+        ):
+            return
+        transformed_bounds.append(
+            (
+                owner,
+                key,
+                [round(left), round(normalized_top), round(right), round(normalized_bottom)],
+            )
+        )
+    for owner, key in point_refs:
+        value = owner.get(key)
+        if (
+            not isinstance(value, (list, tuple))
+            or len(value) != 2
+            or any(
+                isinstance(part, bool) or not isinstance(part, (int, float))
+                for part in value
+            )
+        ):
+            return
+        x, y = (float(part) for part in value)
+        normalized_y = scale * y + offset
+        if not (0 <= x <= 1000 and 0 <= normalized_y <= 1000):
+            return
+        transformed_points.append(
+            (owner, key, [round(x), round(normalized_y)])
+        )
+    for owner, key, value in transformed_bounds:
+        owner[key] = value
+    for owner, key, value in transformed_points:
+        owner[key] = value
+
+
+def _reattach_input_audit_to_unique_scene_field(
+    scene: UIScene,
+    application_inputs: Any,
+    *,
+    goal_context: dict[str, Any],
+) -> None:
+    """Use one same-frame typed field as local input geometry authority.
+
+    The compact scene contributes only a coarse rectangle from the same
+    fingerprint.  The dedicated audit must still independently provide the
+    editable cues, exact value and field label.  Ambiguous or conflicting
+    fields are never reattached.
+    """
+
+    if not isinstance(application_inputs, list) or not application_inputs:
+        return
+    active_field_id, active_field_label, _active_multiline = (
+        _goal_active_input_field(goal_context)
+    )
+    audit_matches = []
+    for item in application_inputs:
+        if not isinstance(item, dict):
+            continue
+        labels = item.get("field_labels")
+        if not isinstance(labels, list):
+            continue
+        if active_field_label:
+            if sum(
+                isinstance(label, str)
+                and label.strip().casefold() == active_field_label.casefold()
+                for label in labels
+            ) != 1:
+                continue
+        audit_matches.append(item)
+    if len(audit_matches) != 1:
+        return
+
+    scene_matches = []
+    for element in scene.elements:
+        if (
+            element.role != "input"
+            or element.confidence < 0.9
+            or element.states.get("fully_visible") is not True
+            or element.states.get("goal_relevant") is not True
+        ):
+            continue
+        visible_field_id = str(element.states.get("input_field_id") or "").strip()
+        if (
+            active_field_id
+            and visible_field_id
+            and visible_field_id != active_field_id
+        ):
+            continue
+        visible_identity = {
+            str(element.label or "").strip().casefold(),
+            str(element.states.get("placeholder") or "").strip().casefold(),
+            *(
+                str(value).strip().casefold()
+                for value in element.evidence
+                if str(value).strip()
+            ),
+        }
+        if active_field_label and active_field_label.casefold() not in visible_identity:
+            continue
+        scene_matches.append(element)
+    if len(scene_matches) != 1:
+        return
+    bounds = scene_matches[0].bounds
+    if (
+        not isinstance(bounds, (list, tuple))
+        or len(bounds) != 4
+        or not all(
+            isinstance(part, (int, float)) and not isinstance(part, bool)
+            for part in bounds
+        )
+    ):
+        return
+    normalized = [round(float(part) * 1000) for part in bounds]
+    if not _valid_1000_bounds(normalized):
+        return
+    audit_matches[0]["bounds"] = normalized
+
+
 _JSON_STRUCTURAL_PUNCTUATION = "{}[],:"
 _JSON_STRUCTURAL_REPAIR_WINDOW = 2
 _MAX_JSON_STRUCTURAL_REPAIR_CANDIDATES = 40
@@ -6122,13 +6356,35 @@ def _apply_input_structure_audit(
                 qwerty_row_frames,
                 keyboard["qwerty_anchors"],
             )
+            if locally_snapped_qwerty_anchors is not None:
+                _normalize_input_audit_portrait_grid_from_local_rows(
+                    payload,
+                    locally_snapped_anchors=locally_snapped_qwerty_anchors,
+                )
+                _reattach_input_audit_to_unique_scene_field(
+                    scene,
+                    application_inputs,
+                    goal_context=goal_context,
+                )
         keyboard_bounds: tuple[float, float, float, float] | None = None
         boundsless_keyboard_dismissal = False
         typed_prefix_verification_only = False
         if keyboard_visible:
-            valid_keyboard_bounds = _valid_1000_bounds(keyboard.get("bounds"))
+            locally_rebuilt_keyboard_bounds = (
+                _keyboard_bounds_from_locally_snapped_qwerty_anchors(
+                    locally_snapped_qwerty_anchors
+                )
+                if locally_snapped_qwerty_anchors is not None
+                else None
+            )
+            valid_keyboard_bounds = locally_rebuilt_keyboard_bounds is not None
             if valid_keyboard_bounds:
-                keyboard_bounds = tuple(float(value) for value in keyboard["bounds"])
+                keyboard_bounds = locally_rebuilt_keyboard_bounds
+            else:
+                valid_keyboard_bounds = _valid_1000_bounds(keyboard.get("bounds"))
+            if valid_keyboard_bounds:
+                if keyboard_bounds is None:
+                    keyboard_bounds = tuple(float(value) for value in keyboard["bounds"])
                 valid_keyboard_bounds = bool(
                     keyboard_bounds[2] - keyboard_bounds[0] >= 300
                     and keyboard_bounds[3] - keyboard_bounds[1] >= 180
@@ -6151,14 +6407,6 @@ def _apply_input_structure_audit(
                     valid_keyboard_bounds = bool(
                         keyboard_bounds[3] - keyboard_bounds[1] >= 180
                     )
-            if (
-                not valid_keyboard_bounds
-                and locally_snapped_qwerty_anchors is not None
-            ):
-                keyboard_bounds = _keyboard_bounds_from_locally_snapped_qwerty_anchors(
-                    locally_snapped_qwerty_anchors
-                )
-                valid_keyboard_bounds = keyboard_bounds is not None
             if not valid_keyboard_bounds:
                 if _typed_prefix_input_survives_invalid_keyboard_geometry(
                     application_inputs,
@@ -6210,6 +6458,18 @@ def _apply_input_structure_audit(
             or keyboard.get("layout_switches") not in (None, [])
         ):
             raise UISceneError("不可见键盘不能包含键位或切换控件。")
+        application_keyboard_bounds = keyboard_bounds
+        if _valid_1000_bounds(keyboard.get("bounds")):
+            reported_keyboard_bounds = tuple(
+                float(value) for value in keyboard["bounds"]
+            )
+            if (
+                reported_keyboard_bounds[2] - reported_keyboard_bounds[0] >= 300
+            ):
+                # A same-frame model outer rectangle may remain useful only to
+                # separate App fields from the IME surface.  Execution geometry
+                # still comes from the independently snapped local rows above.
+                application_keyboard_bounds = reported_keyboard_bounds
         if keyboard_layout not in {"qwerty", "numeric", "symbol", "unknown"}:
             keyboard_layout = _evidenced_composite_symbol_layout(
                 keyboard_layout,
@@ -6370,8 +6630,12 @@ def _apply_input_structure_audit(
                 or width < 240
                 or not 20 <= height <= maximum_input_height
                 or (
-                    keyboard_bounds is not None
-                    and _bounds_overlap_ratio(bounds, keyboard_bounds) >= 0.25
+                    application_keyboard_bounds is not None
+                    and _bounds_overlap_ratio(
+                        bounds,
+                        application_keyboard_bounds,
+                    )
+                    >= 0.25
                 )
                 or any(
                     _bounds_overlap_ratio(bounds, preedit) >= 0.35
@@ -6617,10 +6881,18 @@ def _apply_input_structure_audit(
             raw_backspace_key,
             keyboard_bounds=keyboard_bounds,
         )
-        enter_key = _validated_keyboard_enter_key(
-            keyboard.get("enter_key"),
-            keyboard_bounds=keyboard_bounds,
-        )
+        enter_key = None
+        if locally_snapped_qwerty_anchors is not None:
+            enter_key = _locally_snapped_keyboard_enter_key(
+                keyboard.get("enter_key"),
+                anchors=locally_snapped_qwerty_anchors,
+                keyboard_bounds=keyboard_bounds,
+            )
+        else:
+            enter_key = _validated_keyboard_enter_key(
+                keyboard.get("enter_key"),
+                keyboard_bounds=keyboard_bounds,
+            )
         raw_mode_switch = keyboard.get("mode_switch")
         input_needs_mode_switch = bool(
             input_step is not None
@@ -7570,6 +7842,109 @@ def _validated_keyboard_enter_key(
         "bounds": [round(part) for part in bounds],
         "confidence": confidence,
         "key_action": key_action,
+    }
+
+
+def _locally_snapped_keyboard_enter_key(
+    value: Any,
+    *,
+    anchors: dict[str, list[int]],
+    keyboard_bounds: tuple[float, float, float, float] | None,
+) -> dict[str, Any] | None:
+    """Bind an audited Enter semantic to stable local QWERTY row geometry.
+
+    Qwen remains responsible for identifying the visible key and its current
+    newline semantic.  Its rectangle is not execution authority once local OCR
+    has independently stabilized the whole QWERTY grid; only the horizontal
+    vicinity of the reported key is retained as a cross-check.
+    """
+
+    if keyboard_bounds is None or not isinstance(value, dict) or set(value) != {
+        "label",
+        "bounds",
+        "confidence",
+        "fully_visible",
+        "key_action",
+    }:
+        return None
+    if value.get("fully_visible") is not True or value.get("key_action") != "newline":
+        return None
+    label = str(value.get("label") or "").strip()
+    normalized_label = re.sub(r"\s+", "", label).casefold()
+    if not normalized_label or not (
+        any(glyph in label for glyph in ("↵", "⏎", "⤶", "⮐"))
+        or normalized_label in {"enter", "return", "回车", "换行"}
+    ):
+        return None
+    confidence = _audit_confidence(value.get("confidence"), "enter_key")
+    raw_bounds = value.get("bounds")
+    if (
+        confidence < 0.9
+        or not isinstance(raw_bounds, (list, tuple))
+        or len(raw_bounds) != 4
+        or any(
+            isinstance(part, bool) or not isinstance(part, (int, float))
+            for part in raw_bounds
+        )
+    ):
+        return None
+    raw_left, raw_top, raw_right, raw_bottom = (
+        float(part) for part in raw_bounds
+    )
+    if not (
+        0 <= raw_left < raw_right <= 1000
+        and math.isfinite(raw_top)
+        and math.isfinite(raw_bottom)
+        and raw_top < raw_bottom
+    ):
+        return None
+    try:
+        q_x = float(anchors["q"][0])
+        p_x = float(anchors["p"][0])
+        backspace_x = float(anchors["backspace"][0])
+        top_y = statistics.mean(
+            (float(anchors["q"][1]), float(anchors["p"][1]))
+        )
+        middle_y = statistics.mean(
+            (float(anchors["a"][1]), float(anchors["l"][1]))
+        )
+        bottom_y = statistics.mean(
+            (
+                float(anchors["z"][1]),
+                float(anchors["m"][1]),
+                float(anchors["backspace"][1]),
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    horizontal_pitch = (p_x - q_x) / 9.0
+    vertical_pitch = statistics.mean(
+        (middle_y - top_y, bottom_y - middle_y)
+    )
+    if not (45 <= horizontal_pitch <= 130 and 35 <= vertical_pitch <= 140):
+        return None
+    raw_center_x = (raw_left + raw_right) / 2.0
+    if abs(raw_center_x - backspace_x) > max(2.0 * horizontal_pitch, 180.0):
+        return None
+    center_y = bottom_y + vertical_pitch
+    half_width = 0.65 * horizontal_pitch
+    half_height = 0.45 * vertical_pitch
+    snapped_bounds = (
+        max(keyboard_bounds[0], backspace_x - half_width),
+        max(keyboard_bounds[1], center_y - half_height),
+        min(keyboard_bounds[2], backspace_x + half_width),
+        min(keyboard_bounds[3], center_y + half_height),
+    )
+    if (
+        not _valid_1000_bounds(snapped_bounds)
+        or not _bounds_inside(snapped_bounds, keyboard_bounds, tolerance=0)
+    ):
+        return None
+    return {
+        "label": label,
+        "bounds": [round(part) for part in snapped_bounds],
+        "confidence": confidence,
+        "key_action": "newline",
     }
 
 

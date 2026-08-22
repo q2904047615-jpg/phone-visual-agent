@@ -1650,6 +1650,80 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(774, snapped["a"][1])
         self.assertEqual(844, snapped["z"][1])
 
+    def test_stable_local_ocr_rebuilds_untrusted_portrait_grid_geometry(self):
+        payload = {
+            "lines": [
+                {
+                    "words": [
+                        {"text": "q", "left": 90, "width": 20, "top": 1000, "height": 24},
+                        {"text": "w", "left": 170, "width": 20, "top": 1002, "height": 22},
+                        {"text": "e", "left": 250, "width": 20, "top": 1001, "height": 24},
+                        {"text": "c", "left": 370, "width": 20, "top": 1204, "height": 22},
+                        {"text": "v", "left": 450, "width": 20, "top": 1203, "height": 24},
+                        {"text": "b", "left": 530, "width": 20, "top": 1205, "height": 22},
+                    ]
+                }
+            ]
+        }
+        frames = [Image.new("RGB", (1000, 1440), "gray") for _ in range(3)]
+        portrait_grid = {
+            "q": [110, 1430],
+            "p": [890, 1430],
+            "a": [160, 1580],
+            "l": [840, 1580],
+            "z": [260, 1730],
+            "m": [740, 1730],
+            "backspace": [890, 1730],
+        }
+
+        snapped = stable_qwerty_ocr_anchors(
+            frames,
+            portrait_grid,
+            ocr_recognizer=lambda *_args, **_kwargs: payload,
+        )
+
+        self.assertEqual([100, 703], snapped["q"])
+        self.assertEqual([820, 703], snapped["p"])
+        self.assertEqual([140, 774], snapped["a"])
+        self.assertEqual([780, 774], snapped["l"])
+        self.assertEqual([220, 844], snapped["z"])
+        self.assertEqual([700, 844], snapped["m"])
+        self.assertEqual([820, 844], snapped["backspace"])
+
+    def test_stable_local_ocr_rejects_untrusted_grid_without_local_row_layout(self):
+        payload = {
+            "lines": [
+                {
+                    "words": [
+                        {"text": "q", "left": 90, "width": 20, "top": 1000, "height": 24},
+                        {"text": "w", "left": 390, "width": 20, "top": 1002, "height": 22},
+                        {"text": "e", "left": 250, "width": 20, "top": 1001, "height": 24},
+                        {"text": "c", "left": 370, "width": 20, "top": 1204, "height": 22},
+                        {"text": "v", "left": 150, "width": 20, "top": 1203, "height": 24},
+                        {"text": "b", "left": 530, "width": 20, "top": 1205, "height": 22},
+                    ]
+                }
+            ]
+        }
+        frames = [Image.new("RGB", (1000, 1440), "gray") for _ in range(3)]
+        portrait_grid = {
+            "q": [110, 1430],
+            "p": [890, 1430],
+            "a": [160, 1580],
+            "l": [840, 1580],
+            "z": [260, 1730],
+            "m": [740, 1730],
+            "backspace": [890, 1730],
+        }
+
+        self.assertIsNone(
+            stable_qwerty_ocr_anchors(
+                frames,
+                portrait_grid,
+                ocr_recognizer=lambda *_args, **_kwargs: payload,
+            )
+        )
+
     def test_stable_local_ocr_allows_one_frame_row_dropout(self):
         complete = {
             "lines": [

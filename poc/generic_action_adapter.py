@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import statistics
 import time
@@ -182,12 +183,21 @@ def stable_qwerty_ocr_anchors(
         }
         if set(original) != {"q", "p", "a", "l", "z", "m", "backspace"}:
             return None
-        if any(
-            not 0 <= coordinate <= 1000
-            for point in original.values()
-            for coordinate in point
-        ):
+        if any(not 0 <= point[0] <= 1000 for point in original.values()):
             return None
+        model_top_y = (original["q"][1] + original["p"][1]) / 2.0
+        model_middle_y = (original["a"][1] + original["l"][1]) / 2.0
+        model_bottom_y = (
+            original["z"][1]
+            + original["m"][1]
+            + original["backspace"][1]
+        ) / 3.0
+        model_vertical_is_trusted = bool(
+            all(0 <= point[1] <= 1000 for point in original.values())
+            and model_top_y < model_middle_y < model_bottom_y
+            and model_middle_y - model_top_y >= 35
+            and model_bottom_y - model_middle_y >= 35
+        )
         # Validate Qwen's horizontal QWERTY evidence independently from its row
         # heights.  The latter are exactly what local OCR is responsible for
         # correcting, so requiring them to pass first would make the correction
@@ -200,36 +210,88 @@ def stable_qwerty_ocr_anchors(
         for key in ("z", "m", "backspace"):
             horizontal_probe[key][1] = 850
         qwerty_keyboard_config_from_anchors(horizontal_probe)
-        per_frame_rows: list[tuple[float, float]] = []
+        per_frame_rows: list[
+            tuple[float, float, float | None, float | None]
+        ] = []
         top_letters = set("qwertyuiop")
         middle_letters = set("asdfghjkl")
         bottom_letters = set("zxcvbnm")
 
         def row_clusters(
-            hits: list[tuple[str, float]],
+            hits: list[tuple[str, float | None, float]],
             *,
             frame_height: int,
-        ) -> list[tuple[float, int]]:
+        ) -> list[tuple[float, int, list[tuple[str, float | None, float]]]]:
             tolerance = max(8.0, frame_height * 0.025)
-            clusters: list[list[tuple[str, float]]] = []
-            for hit in sorted(hits, key=lambda item: item[1]):
+            clusters: list[list[tuple[str, float | None, float]]] = []
+            for hit in sorted(hits, key=lambda item: item[2]):
                 if not clusters or abs(
-                    hit[1] - statistics.median(item[1] for item in clusters[-1])
+                    hit[2] - statistics.median(item[2] for item in clusters[-1])
                 ) > tolerance:
                     clusters.append([hit])
                 else:
                     clusters[-1].append(hit)
-            resolved: list[tuple[float, int]] = []
+            resolved: list[
+                tuple[float, int, list[tuple[str, float | None, float]]]
+            ] = []
             for cluster in clusters:
                 labels = {item[0] for item in cluster}
                 if len(labels) >= 2:
                     resolved.append(
                         (
-                            float(statistics.median(item[1] for item in cluster)),
+                            float(statistics.median(item[2] for item in cluster)),
                             len(labels),
+                            cluster,
                         )
                     )
             return resolved
+
+        def fit_row_horizontal_geometry(
+            cluster: list[tuple[str, float | None, float]],
+            *,
+            alphabet: str,
+            frame_width: int,
+        ) -> tuple[float, float] | None:
+            if frame_width <= 0:
+                return None
+            centers: dict[str, list[float]] = {}
+            for label, center_x, _center_y in cluster:
+                if center_x is None or not math.isfinite(center_x):
+                    continue
+                centers.setdefault(label, []).append(
+                    1000.0 * center_x / frame_width
+                )
+            points = [
+                (alphabet.index(label), statistics.median(values))
+                for label, values in centers.items()
+                if label in alphabet
+            ]
+            if len(points) < 3:
+                return None
+            mean_index = statistics.mean(point[0] for point in points)
+            mean_x = statistics.mean(point[1] for point in points)
+            denominator = sum(
+                (point[0] - mean_index) ** 2 for point in points
+            )
+            if denominator <= 0:
+                return None
+            pitch = sum(
+                (index - mean_index) * (center_x - mean_x)
+                for index, center_x in points
+            ) / denominator
+            first_x = mean_x - pitch * mean_index
+            maximum_residual = max(
+                abs(center_x - (first_x + pitch * index))
+                for index, center_x in points
+            )
+            if not (
+                45 <= pitch <= 130
+                and 0 <= first_x <= 1000
+                and first_x + pitch * (len(alphabet) - 1) <= 1000
+                and maximum_residual <= 25
+            ):
+                return None
+            return first_x, pitch
 
         for frame in frame_list:
             payload = ocr_recognizer(
@@ -237,9 +299,9 @@ def stable_qwerty_ocr_anchors(
                 "zh-Hans-CN",
                 scale=3.0,
             )
-            top_hits: list[tuple[str, float]] = []
-            middle_hits: list[tuple[str, float]] = []
-            bottom_hits: list[tuple[str, float]] = []
+            top_hits: list[tuple[str, float | None, float]] = []
+            middle_hits: list[tuple[str, float | None, float]] = []
+            bottom_hits: list[tuple[str, float | None, float]] = []
             for line in payload.get("lines") or []:
                 for word in line.get("words") or []:
                     text = str(word.get("text") or "").strip().casefold()
@@ -248,24 +310,32 @@ def stable_qwerty_ocr_anchors(
                     center_y = float(word.get("top", 0)) + float(
                         word.get("height", 0)
                     ) / 2.0
+                    left = word.get("left")
+                    width = word.get("width")
+                    center_x = (
+                        float(left) + float(width) / 2.0
+                        if isinstance(left, (int, float))
+                        and not isinstance(left, bool)
+                        and isinstance(width, (int, float))
+                        and not isinstance(width, bool)
+                        else None
+                    )
                     if text in top_letters:
-                        top_hits.append((text, center_y))
+                        top_hits.append((text, center_x, center_y))
                     if text in middle_letters:
-                        middle_hits.append((text, center_y))
+                        middle_hits.append((text, center_x, center_y))
                     if text in bottom_letters:
-                        bottom_hits.append((text, center_y))
+                        bottom_hits.append((text, center_x, center_y))
             top_clusters = row_clusters(top_hits, frame_height=frame.height)
             middle_clusters = row_clusters(middle_hits, frame_height=frame.height)
             bottom_clusters = row_clusters(bottom_hits, frame_height=frame.height)
-            candidates: list[tuple[int, int, float, float, float]] = []
-            expected_top = frame.height * (
-                (original["q"][1] + original["p"][1]) / 2000.0
-            )
-            expected_bottom = frame.height * (
-                (original["z"][1] + original["m"][1]) / 2000.0
-            )
-            for top_y, top_count in top_clusters:
-                for bottom_y, bottom_count in bottom_clusters:
+            candidates: list[
+                tuple[int, int, int, float, float, float, float, float]
+            ] = []
+            expected_top = frame.height * model_top_y / 1000.0
+            expected_bottom = frame.height * model_bottom_y / 1000.0
+            for top_y, top_count, top_cluster in top_clusters:
+                for bottom_y, bottom_count, bottom_cluster in bottom_clusters:
                     gap = bottom_y - top_y
                     if not frame.height * 0.08 <= gap <= frame.height * 0.22:
                         continue
@@ -273,21 +343,70 @@ def stable_qwerty_ocr_anchors(
                     middle_count = max(
                         (
                             count
-                            for center, count in middle_clusters
+                            for center, count, _cluster in middle_clusters
                             if abs(center - midpoint) <= frame.height * 0.04
                         ),
                         default=0,
                     )
-                    model_distance = abs(top_y - expected_top) + abs(
-                        bottom_y - expected_bottom
+                    top_fit = fit_row_horizontal_geometry(
+                        top_cluster,
+                        alphabet="qwertyuiop",
+                        frame_width=frame.width,
+                    )
+                    bottom_fit = fit_row_horizontal_geometry(
+                        bottom_cluster,
+                        alphabet="zxcvbnm",
+                        frame_width=frame.width,
+                    )
+                    local_first_x: float | None = None
+                    local_pitch: float | None = None
+                    horizontal_fit_count = int(top_fit is not None) + int(
+                        bottom_fit is not None
+                    )
+                    has_local_horizontal_centers = any(
+                        item[1] is not None
+                        for item in (*top_cluster, *bottom_cluster)
+                    )
+                    if has_local_horizontal_centers and horizontal_fit_count == 0:
+                        continue
+                    if top_fit is not None and bottom_fit is not None:
+                        top_first, top_pitch = top_fit
+                        bottom_first, bottom_pitch = bottom_fit
+                        if (
+                            abs(top_pitch - bottom_pitch) > 18
+                            or abs(
+                                bottom_first
+                                - (top_first + 1.5 * top_pitch)
+                            )
+                            > 60
+                        ):
+                            continue
+                        local_first_x = statistics.mean(
+                            (top_first, bottom_first - 1.5 * bottom_pitch)
+                        )
+                        local_pitch = statistics.mean(
+                            (top_pitch, bottom_pitch)
+                        )
+                    elif top_fit is not None:
+                        local_first_x, local_pitch = top_fit
+                    elif bottom_fit is not None:
+                        bottom_first, local_pitch = bottom_fit
+                        local_first_x = bottom_first - 1.5 * local_pitch
+                    model_distance = (
+                        abs(top_y - expected_top) + abs(bottom_y - expected_bottom)
+                        if model_vertical_is_trusted
+                        else 0.0
                     )
                     candidates.append(
                         (
+                            horizontal_fit_count,
                             min(top_count, bottom_count),
                             top_count + middle_count + bottom_count,
                             -model_distance,
                             top_y,
                             bottom_y,
+                            local_first_x if local_first_x is not None else math.nan,
+                            local_pitch if local_pitch is not None else math.nan,
                         )
                     )
             if not candidates:
@@ -297,8 +416,24 @@ def stable_qwerty_ocr_anchors(
                 # below agree on both row centers.
                 continue
             candidates.sort(reverse=True)
-            _balanced_count, _total_count, _distance, top_y, bottom_y = candidates[0]
-            per_frame_rows.append((top_y, bottom_y))
+            (
+                _horizontal_fit_count,
+                _balanced_count,
+                _total_count,
+                _distance,
+                top_y,
+                bottom_y,
+                local_first_x,
+                local_pitch,
+            ) = candidates[0]
+            per_frame_rows.append(
+                (
+                    top_y,
+                    bottom_y,
+                    local_first_x if math.isfinite(local_first_x) else None,
+                    local_pitch if math.isfinite(local_pitch) else None,
+                )
+            )
 
         if len(per_frame_rows) < 2 or (
             max(item[0] for item in per_frame_rows)
@@ -316,16 +451,46 @@ def stable_qwerty_ocr_anchors(
         )
         middle_y = round((top_y + bottom_y) / 2.0)
         discovered_span = bottom_y - top_y
-        if discovered_span <= 0 or any(
-            abs(discovered - original[key][1]) > discovered_span * 1.5
-            for key, discovered in (
-                ("q", top_y),
-                ("a", middle_y),
-                ("z", bottom_y),
+        if discovered_span <= 0 or (
+            model_vertical_is_trusted
+            and any(
+                abs(discovered - original[key][1]) > discovered_span * 1.5
+                for key, discovered in (
+                    ("q", top_y),
+                    ("a", middle_y),
+                    ("z", bottom_y),
+                )
             )
         ):
             return None
         snapped = {key: list(value) for key, value in original.items()}
+        local_horizontal = [
+            (item[2], item[3])
+            for item in per_frame_rows
+            if item[2] is not None and item[3] is not None
+        ]
+        if len(local_horizontal) >= 2:
+            first_values = [float(item[0]) for item in local_horizontal]
+            pitch_values = [float(item[1]) for item in local_horizontal]
+            if max(first_values) - min(first_values) > 15 or (
+                max(pitch_values) - min(pitch_values) > 6
+            ):
+                return None
+            q_x = round(statistics.median(first_values))
+            pitch = float(statistics.median(pitch_values))
+            local_x = {
+                "q": q_x,
+                "p": round(q_x + 9.0 * pitch),
+                "a": round(q_x + 0.5 * pitch),
+                "l": round(q_x + 8.5 * pitch),
+                "z": round(q_x + 1.5 * pitch),
+                "m": round(q_x + 7.5 * pitch),
+                "backspace": round(q_x + 9.0 * pitch),
+            }
+            if any(not 0 <= value <= 1000 for value in local_x.values()):
+                return None
+            for key, value in local_x.items():
+                snapped[key][0] = value
         for key in ("q", "p"):
             snapped[key][1] = top_y
         for key in ("a", "l"):

@@ -177,6 +177,37 @@ def _post_action_observation_context(
     return result_context
 
 
+def _typed_exact_tap_target_label(
+    goal: GenericIntentDraft,
+    requested: SemanticAction,
+) -> str:
+    """Return the adapter-owned typed exact target, never a model alias."""
+
+    if requested.action != "tap_semantic":
+        return ""
+    entities = goal.entities
+    if not isinstance(entities, dict):
+        return ""
+    focus = entities.get("active_subgoal_visual_context")
+    if not isinstance(focus, dict):
+        return ""
+    goal_entities = focus.get("goal_entities")
+    if (
+        str(focus.get("subgoal_id") or "").strip() != "exact_tap_semantic"
+        or str(focus.get("execution_class") or "").strip() != "navigate"
+        or not isinstance(goal_entities, dict)
+    ):
+        return ""
+    target_label = str(goal_entities.get("target_ui_label") or "").strip()
+    if (
+        not target_label
+        or str(entities.get("target_ui_label") or "").strip() != target_label
+        or str(requested.params.get("label") or "").strip() != target_label
+    ):
+        return ""
+    return target_label
+
+
 def stable_qwerty_ocr_anchors(
     frames: tuple[Image.Image, ...] | list[Image.Image],
     anchors: dict[str, Any],
@@ -1837,6 +1868,10 @@ class GenericSingleActionAdapter:
     ) -> GenericActionExecutionResult:
         if confirmed is not True:
             raise GenericActionAdapterError("必须明确确认当前这一个语义动作。")
+        typed_exact_target_label = _typed_exact_tap_target_label(
+            goal,
+            requested_action,
+        )
         safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
         evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
         local_frame_identity_verified = False
@@ -1932,6 +1967,7 @@ class GenericSingleActionAdapter:
                         requested_action,
                         planned_scene,
                         before,
+                        typed_exact_target_label=typed_exact_target_label,
                         local_frame_identity_verified=(
                             local_frame_identity_verified
                         ),
@@ -2011,6 +2047,7 @@ class GenericSingleActionAdapter:
                 requested_action,
                 rebind_planned_scene,
                 before,
+                typed_exact_target_label=typed_exact_target_label,
                 local_frame_identity_verified=local_frame_identity_verified,
                 # A verified text-input action never executes at the input
                 # element's model-drawn center.  Once the original and fresh
@@ -2698,6 +2735,7 @@ class GenericSingleActionAdapter:
         planned_scene: UIScene,
         fresh_scene: UIScene,
         *,
+        typed_exact_target_label: str = "",
         local_frame_identity_verified: bool = False,
         require_geometry_overlap: bool = True,
     ) -> SemanticAction:
@@ -2988,11 +3026,39 @@ class GenericSingleActionAdapter:
                         dict(original.states), dict(current.states)
                     )[0]
                 )
+                typed_exact_label_identity = bool(
+                    requested.action == "tap_semantic"
+                    and prefix == ""
+                    and typed_exact_target_label
+                    and original.label == typed_exact_target_label
+                    and current.label == typed_exact_target_label
+                    and original.role == current.role
+                    and original.states.get("goal_relevant") is True
+                    and current.states.get("goal_relevant") is True
+                    and current.states.get("fully_visible") is True
+                    and len(
+                        tuple(
+                            element
+                            for element in planned_scene.elements
+                            if element.label == typed_exact_target_label
+                        )
+                    )
+                    == 1
+                    and len(
+                        tuple(
+                            element
+                            for element in fresh_scene.elements
+                            if element.label == typed_exact_target_label
+                        )
+                    )
+                    == 1
+                )
                 if not (
                     labelled_drag_endpoint
                     or labelled_local_mode_selector
                     or labelled_long_press_target
                     or stable_input_field
+                    or typed_exact_label_identity
                 ) and (
                     not original_class
                     or original_class == "forbidden"

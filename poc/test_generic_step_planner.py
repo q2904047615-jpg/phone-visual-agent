@@ -16,6 +16,7 @@ from generic_action_adapter import (
     GenericActionAdapterError,
     GenericSingleActionAdapter as _GenericSingleActionAdapter,
     _post_action_observation_context,
+    _typed_exact_tap_target_label,
     stable_qwerty_ocr_anchors,
 )
 from generic_goal import GenericIntentDraft
@@ -383,6 +384,30 @@ def navigation_goal(*, execution_class="navigate"):
             }
         },
         success_criteria={"screen": "浏览器结果页面"},
+    )
+
+
+def exact_tap_goal(label="两个字段分别输入"):
+    return GenericIntentDraft(
+        understood=True,
+        app_id="current_surface",
+        app_name="当前界面",
+        objective="点击当前画面中的目标控件",
+        entities={
+            "target_ui_label": label,
+            "active_subgoal_visual_context": {
+                "subgoal_id": "exact_tap_semantic",
+                "objective": "点击当前画面中的目标控件",
+                "constraints": [],
+                "completion_conditions": ["动作后出现新的稳定画面"],
+                "execution_class": "navigate",
+                "goal_entities": {
+                    "target_surface": "current_surface",
+                    "target_ui_label": label,
+                },
+            },
+        },
+        success_criteria={"action_completed": "动作后出现新的稳定画面"},
     )
 
 
@@ -5147,6 +5172,242 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
 
         self.assertEqual([], robot.actions)
+
+    def test_exact_typed_label_identity_survives_free_meaning_drift(self):
+        states = {"goal_relevant": True, "fully_visible": True, "enabled": True}
+
+        def target_scene(
+            fingerprint,
+            *,
+            label,
+            meaning,
+            element_id,
+            bounds=(0.13, 0.45, 0.87, 0.53),
+        ):
+            return UIScene(
+                app_id="unknown",
+                screen_id="acceptance_modes",
+                summary="唯一目标完整可见",
+                elements=(
+                    UIElement(
+                        element_id=element_id,
+                        role="button",
+                        meaning=meaning,
+                        label=label,
+                        bounds=bounds,
+                        confidence=1.0,
+                        states=states,
+                    ),
+                ),
+                stable=True,
+                confidence=1.0,
+                fingerprint=fingerprint,
+            )
+
+        cases = (
+            (
+                "两个字段分别输入",
+                "two_fields_input_test",
+                "two_fields_input",
+            ),
+            ("Open details", "open_details_card", "details_entry"),
+        )
+        adapter = self._adapter(FakeSceneObserver([]), FakeRobot())
+        for label, planned_meaning, fresh_meaning in cases:
+            with self.subTest(label=label):
+                planned = target_scene(
+                    "planned",
+                    label=label,
+                    meaning=planned_meaning,
+                    element_id="planned-target",
+                )
+                fresh = target_scene(
+                    "fresh",
+                    label=label,
+                    meaning=fresh_meaning,
+                    element_id="fresh-target",
+                    bounds=(0.132, 0.451, 0.868, 0.531),
+                )
+                requested = SemanticAction(
+                    node_id="exact-target",
+                    action="tap_semantic",
+                    params={
+                        "element_id": "planned-target",
+                        "target": planned_meaning,
+                        "role": "button",
+                        "label": label,
+                        "states": states,
+                    },
+                )
+                exact_label = _typed_exact_tap_target_label(
+                    exact_tap_goal(label),
+                    requested,
+                )
+
+                rebound = adapter._rebind_action(
+                    requested,
+                    planned,
+                    fresh,
+                    typed_exact_target_label=exact_label,
+                )
+
+                self.assertEqual(label, exact_label)
+                self.assertEqual("fresh-target", rebound.params["element_id"])
+                self.assertEqual(fresh_meaning, rebound.params["target"])
+
+    def test_exact_typed_label_does_not_bypass_other_rebind_gates(self):
+        label = "两个字段分别输入"
+        states = {"goal_relevant": True, "fully_visible": True, "enabled": True}
+        planned_element = UIElement(
+            element_id="planned-target",
+            role="button",
+            meaning="two_fields_input_test",
+            label=label,
+            bounds=(0.13, 0.45, 0.87, 0.53),
+            confidence=1.0,
+            states=states,
+        )
+
+        def target_scene(
+            fingerprint,
+            *,
+            element=planned_element,
+            app_id="settings",
+            screen_id="acceptance_modes",
+            extra_elements=(),
+        ):
+            return UIScene(
+                app_id=app_id,
+                screen_id=screen_id,
+                summary="验收模式列表",
+                elements=(element, *extra_elements),
+                stable=True,
+                confidence=1.0,
+                fingerprint=fingerprint,
+            )
+
+        planned = target_scene("planned")
+        requested = SemanticAction(
+            node_id="exact-target",
+            action="tap_semantic",
+            params={
+                "element_id": "planned-target",
+                "target": planned_element.meaning,
+                "role": planned_element.role,
+                "label": label,
+                "states": states,
+            },
+        )
+        exact_label = _typed_exact_tap_target_label(
+            exact_tap_goal(label),
+            requested,
+        )
+        drifted = replace(
+            planned_element,
+            element_id="fresh-target",
+            meaning="two_fields_input",
+        )
+        duplicate = replace(
+            drifted,
+            element_id="duplicate-target",
+            bounds=(0.13, 0.55, 0.87, 0.63),
+        )
+        cases = (
+            (
+                "different-label",
+                target_scene(
+                    "fresh-label",
+                    element=replace(drifted, label="另一个入口"),
+                ),
+            ),
+            (
+                "different-role",
+                target_scene(
+                    "fresh-role",
+                    element=replace(drifted, role="text"),
+                ),
+            ),
+            (
+                "duplicate-label",
+                target_scene(
+                    "fresh-duplicate",
+                    element=drifted,
+                    extra_elements=(duplicate,),
+                ),
+            ),
+            (
+                "state-conflict",
+                target_scene(
+                    "fresh-state",
+                    element=replace(
+                        drifted,
+                        states={**states, "enabled": False},
+                    ),
+                ),
+            ),
+            (
+                "fresh-not-goal-relevant",
+                target_scene(
+                    "fresh-goal",
+                    element=replace(
+                        drifted,
+                        states={**states, "goal_relevant": False},
+                    ),
+                ),
+            ),
+            (
+                "fresh-not-fully-visible",
+                target_scene(
+                    "fresh-visible",
+                    element=replace(
+                        drifted,
+                        states={**states, "fully_visible": False},
+                    ),
+                ),
+            ),
+            (
+                "app-switch",
+                target_scene("fresh-app", element=drifted, app_id="browser"),
+            ),
+            (
+                "screen-switch",
+                target_scene(
+                    "fresh-screen",
+                    element=drifted,
+                    screen_id="other_screen",
+                ),
+            ),
+            (
+                "geometry-conflict",
+                target_scene(
+                    "fresh-geometry",
+                    element=replace(
+                        drifted,
+                        bounds=(0.05, 0.75, 0.35, 0.84),
+                    ),
+                ),
+            ),
+        )
+        adapter = self._adapter(FakeSceneObserver([]), FakeRobot())
+        for name, fresh in cases:
+            with self.subTest(name=name), self.assertRaises(GenericActionAdapterError):
+                adapter._rebind_action(
+                    requested,
+                    planned,
+                    fresh,
+                    typed_exact_target_label=exact_label,
+                )
+
+        self.assertEqual(
+            "",
+            _typed_exact_tap_target_label(goal(), requested),
+        )
+        with self.assertRaisesRegex(GenericActionAdapterError, "语义"):
+            adapter._rebind_action(
+                requested,
+                planned,
+                target_scene("fresh-ordinary", element=drifted),
+            )
 
     def test_rebind_allows_unique_overlapping_input_meaning_alias(self):
         states = {"goal_relevant": True, "fully_visible": True, "value": ""}

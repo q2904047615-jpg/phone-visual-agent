@@ -20,6 +20,7 @@ from deepseek_task_graph import (
     TaskGraphError,
     TargetApp,
     VerifiedActionTransition,
+    _graph_from_payload,
 )
 from generic_step_planner import GenericStepProposal
 from generic_action_adapter import (
@@ -369,6 +370,101 @@ def _external_graph(*, impact: str = "external_state") -> DynamicTaskGraph:
     )
     graph.validate()
     return graph
+
+
+def _ordinary_send_graph(*, revision: int = 1) -> DynamicTaskGraph:
+    raw_goal = "向测试收件人乙发送 freshsendproof"
+    return _graph_from_payload(
+        {
+            "status": "ready",
+            "goal": {
+                "objective": raw_goal,
+                "target_apps": [
+                    {"app_id": "sample.messaging", "app_name": "示例消息工具"}
+                ],
+                "entities": {
+                    "recipient": "测试收件人乙",
+                    "input_text": "freshsendproof",
+                },
+            },
+            "constraints": ["只发送一次指定正文"],
+            "completion_conditions": [
+                {
+                    "condition_id": "message_sent",
+                    "description": "测试收件人乙的会话中显示 freshsendproof",
+                    "evidence_required": [
+                        "新鲜画面逐字显示已发送正文 freshsendproof"
+                    ],
+                    "satisfied": False,
+                    "evidence": [],
+                }
+            ],
+            "effect_intents": [
+                {
+                    "effect_id": "effect_send_fresh",
+                    "kind": "send_message",
+                    "target_entity_roles": ["recipient"],
+                    "payload_entity_roles": ["input_text"],
+                    "source_subgoal_ids": ["send_fresh_message"],
+                    "expected_results": [
+                        "测试收件人乙的会话中显示 freshsendproof"
+                    ],
+                }
+            ],
+            "subgoals": [
+                {
+                    "subgoal_id": "send_fresh_message",
+                    "objective": "向测试收件人乙发送正文 freshsendproof",
+                    "status": "active",
+                    "depends_on": [],
+                    "constraints": ["只允许一次普通发送动作"],
+                    "completion_conditions": [
+                        "测试收件人乙的会话中显示 freshsendproof"
+                    ],
+                    "completion_evidence": [],
+                    "effect_ids": ["effect_send_fresh"],
+                    "execution_class": "effect",
+                }
+            ],
+            "active_subgoal_id": "send_fresh_message",
+            "clarification_questions": [],
+        },
+        task_id="task-ordinary-send-fresh",
+        device_id="device-1",
+        revision=revision,
+        raw_user_goal=raw_goal,
+    )
+
+
+def _complete_with_current_visual_claim(
+    graph: DynamicTaskGraph,
+    observation: object,
+) -> DynamicTaskGraph:
+    visual_refs = tuple(
+        item.ref_id for item in observation.visual_claim_evidence_refs
+    )
+    if not visual_refs:
+        raise AssertionError("send result completion requires a current visual claim")
+    completed = replace(
+        graph,
+        revision=graph.revision + 1,
+        status="completed",
+        completion_conditions=tuple(
+            replace(item, satisfied=True, evidence=(visual_refs[0],))
+            for item in graph.completion_conditions
+        ),
+        subgoals=tuple(
+            replace(
+                item,
+                status="completed",
+                completion_evidence=(visual_refs[0],),
+            )
+            for item in graph.subgoals
+        ),
+        active_subgoal_id=None,
+    )
+    completed.validate()
+    return completed
 
 
 def _completed_graph(graph: DynamicTaskGraph) -> DynamicTaskGraph:
@@ -6283,6 +6379,133 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertEqual(
             session.last_post_action_transition,
             persisted_transition,
+        )
+
+    def test_ordinary_send_succeeds_once_with_fresh_visual_effect_receipt(self) -> None:
+        initial = _ordinary_send_graph()
+        before = _scene(
+            meaning="send_message",
+            label="发送",
+            app_id="sample.messaging",
+        )
+        after = _scene(
+            fingerprint="frame-send-result",
+            meaning="message_sent_result",
+            label="freshsendproof",
+            role="text",
+            evidence=("新消息气泡逐字显示 freshsendproof",),
+            app_id="sample.messaging",
+        )
+
+        class SendCompletionPlanner(FakeDeepSeekPlanner):
+            def replan(self, graph, observation, *, trigger, reason):
+                self.replan_calls.append((graph, observation, trigger, reason))
+                return _complete_with_current_visual_claim(graph, observation)
+
+        planner = SendCompletionPlanner(initial)
+        qwen = FakeQwenObserver()
+        adapter = FakeExecutingAdapter(before, after)
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = UniversalAgentOrchestrator(
+                deepseek_planner=planner,
+                qwen_observer=qwen,
+                adapter_factory=lambda _device_id: adapter,
+                trusted_observation_factory=_trusted_factory,
+            )
+            session = orchestrator.start(
+                session_id="session-ordinary-send-fresh",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            self.assertEqual("awaiting_confirmation", session.status)
+            self.assertIsNone(session.snapshot()["effect_confirmation_scope"])
+
+            result = orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual("completed", session.task_graph.status)
+        self.assertIsNone(session.task_graph.active_subgoal_id)
+        self.assertEqual(1, len(qwen.calls))
+        receipt = planner.replan_calls[0][1].verified_action_transition
+        self.assertEqual("matched", receipt.outcome)
+        self.assertEqual(1, receipt.physical_actions)
+        self.assertEqual("frame-send-result", receipt.after_fingerprint)
+        self.assertEqual("send_message", session.effect_previews[0]["effect_kind"])
+        self.assertEqual(
+            ["freshsendproof"],
+            [item["value"] for item in session.effect_previews[0]["payloads"]],
+        )
+        self.assertEqual("automatic", session.effect_previews[0]["policy"])
+        self.assertIsNone(session.effect_verification)
+
+    def test_ordinary_send_uses_one_zero_action_result_refresh_without_resending(
+        self,
+    ) -> None:
+        initial = _ordinary_send_graph()
+        before = _scene(
+            meaning="send_message",
+            label="发送",
+            app_id="sample.messaging",
+        )
+        after = _scene(
+            fingerprint="frame-send-result",
+            meaning="message_sent_result",
+            label="freshsendproof",
+            role="text",
+            evidence=("新消息气泡逐字显示 freshsendproof",),
+            app_id="sample.messaging",
+        )
+
+        class DeferredSendCompletionPlanner(FakeDeepSeekPlanner):
+            def replan(self, graph, observation, *, trigger, reason):
+                self.replan_calls.append((graph, observation, trigger, reason))
+                if len(self.replan_calls) == 1:
+                    return replace(graph, revision=graph.revision + 1)
+                return _complete_with_current_visual_claim(graph, observation)
+
+        planner = DeferredSendCompletionPlanner(initial)
+        qwen = FakeQwenObserver()
+        adapter = FakeExecutingAdapter(before, after)
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = UniversalAgentOrchestrator(
+                deepseek_planner=planner,
+                qwen_observer=qwen,
+                adapter_factory=lambda _device_id: adapter,
+                trusted_observation_factory=_trusted_factory,
+            )
+            session = orchestrator.start(
+                session_id="session-ordinary-send-read-only-proof",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+            result = orchestrator.confirm_one(session, _confirmation(session))
+            self.assertEqual("needs_effect_verification", session.status)
+            self.assertEqual(1, session.physical_actions)
+            self.assertIsNone(session.snapshot()["confirmation_scope"])
+
+            adapter.scene = after
+            refresh = orchestrator.refresh_decision(session)
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("finished", refresh.proposal.status)
+        self.assertEqual("succeeded", session.status)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(
+            ["action_result_matched", "observation_changed"],
+            [call[2] for call in planner.replan_calls],
+        )
+        self.assertEqual("verified", session.effect_verification["status"])
+        self.assertEqual(1, session.effect_verification["verification_attempts"])
+        self.assertEqual(
+            "frame-send-result",
+            session.effect_verification["verification_fingerprint"],
         )
 
     def test_wait_for_change_is_zero_action_observation_transition(self) -> None:

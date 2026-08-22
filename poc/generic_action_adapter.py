@@ -1095,6 +1095,110 @@ class GenericSingleActionAdapter:
         restored.validate()
         return restored
 
+    @classmethod
+    def _recover_conflicting_clear_input_scene(
+        cls,
+        requested: SemanticAction,
+        planned_scene: UIScene,
+        fresh_scene: UIScene,
+    ) -> UIScene | None:
+        """Keep one typed input identity across committed/preedit read drift.
+
+        A visible IME composition can be reported as the application value in
+        one read and as an empty application value in the next read.  This
+        recovery is used only after the adapter has independently proved that
+        the planned and confirmation frame sets are unchanged.  It preserves
+        the already-authorized conflicting text solely for computing the
+        bounded delete count, while taking current bounds and keyboard geometry
+        from the fresh typed field.
+        """
+
+        if requested.action != "clear_verified_text" or not str(
+            requested.params.get("formal_candidate_id") or ""
+        ).strip():
+            return None
+        target_id = str(requested.params.get("element_id") or "").strip()
+        try:
+            target = planned_scene.get_element(target_id)
+        except UISceneError:
+            return None
+        planned_states = dict(target.states)
+        field_id = str(planned_states.get("input_field_id") or "").strip()
+        planned_value = planned_states.get("value")
+        planned_preedit = planned_states.get("ime_preedit_text", "")
+        expected = requested.params.get("expected_effect")
+        expected_element = (
+            expected.get("element_state") if isinstance(expected, dict) else None
+        )
+        if (
+            target.role != "input"
+            or target.meaning != "application_text_input"
+            or field_id in {"", "unknown"}
+            or planned_states.get("focused") is not True
+            or planned_states.get("fully_visible") is not True
+            or not isinstance(planned_value, str)
+            or not isinstance(planned_preedit, str)
+            or not (planned_value or planned_preedit)
+            or requested.params.get("target") != target.meaning
+            or requested.params.get("role") != target.role
+            or requested.params.get("label") != target.label
+            or requested.params.get("states") != planned_states
+            or not isinstance(expected_element, dict)
+            or expected_element.get("meaning") != target.meaning
+            or expected_element.get("states") != {"value": ""}
+        ):
+            return None
+
+        input_like = tuple(
+            element
+            for element in fresh_scene.elements
+            if element.role == "input"
+            or element.meaning == "application_text_input"
+        )
+        compatible = tuple(
+            element
+            for element in input_like
+            if element.role == "input"
+            and element.meaning == "application_text_input"
+            and element.states.get("focused") is True
+            and element.states.get("fully_visible") is True
+            and str(element.states.get("input_field_id") or "").strip()
+            == field_id
+            and element.states.get("value") in {"", planned_value}
+            and element.states.get("ime_preedit_text", "")
+            in {"", planned_preedit, planned_value}
+            and element.states.get("input_multiline")
+            == planned_states.get("input_multiline")
+            and element.states.get("keyboard_layout")
+            == planned_states.get("keyboard_layout")
+            and element.states.get("keyboard_input_mode")
+            == planned_states.get("keyboard_input_mode")
+        )
+        if len(input_like) != 1 or len(compatible) != 1:
+            return None
+        visible = compatible[0]
+        recovered_states = dict(planned_states)
+        fresh_keyboard_geometry = visible.states.get("keyboard_geometry")
+        if isinstance(fresh_keyboard_geometry, dict):
+            recovered_states["keyboard_geometry"] = fresh_keyboard_geometry
+        recovered = replace(
+            target,
+            bounds=visible.bounds,
+            confidence=min(target.confidence, visible.confidence),
+            states=recovered_states,
+            evidence=tuple(visible.evidence)
+            + (
+                "稳定同帧与 typed input_field_id 证明同一输入框；"
+                "保留已授权冲突文字用于精确清理",
+            ),
+        )
+        retained = tuple(
+            element for element in fresh_scene.elements if element is not visible
+        )
+        restored = replace(fresh_scene, elements=retained + (recovered,))
+        restored.validate()
+        return restored
+
     def capability_gap(
         self,
         requested_action: str,
@@ -1932,6 +2036,14 @@ class GenericSingleActionAdapter:
                     planned_scene,
                     before,
                 )
+                if recovered_input_scene is None:
+                    recovered_input_scene = (
+                        self._recover_conflicting_clear_input_scene(
+                            requested_action,
+                            planned_scene,
+                            before,
+                        )
+                    )
                 if recovered_input_scene is not None:
                     before = recovered_input_scene
                 local_input_recovery = (

@@ -8,7 +8,10 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from generic_scene_observer import _apply_input_structure_audit
+from generic_scene_observer import (
+    INPUT_STRUCTURE_AUDIT_VERSION,
+    _apply_input_structure_audit,
+)
 from input_value_lineage import (
     InputValueLineageError,
     TYPED_INPUT_LINEAGE_VERSION,
@@ -270,7 +273,7 @@ def resolved_text(*, prior: str = "", fragment: str = "longinput") -> dict:
 def input_audit_raw(value: str, literal: str | None = "x") -> str:
     return json.dumps(
         {
-            "protocol_version": "2026-08-18-input-structure-audit-v7",
+            "protocol_version": INPUT_STRUCTURE_AUDIT_VERSION,
             "application_inputs": [
                 {
                     "structure_id": "input-1",
@@ -311,7 +314,7 @@ def state_switch_audit_raw(*, cue: str = PRIOR, literal: str = "2") -> str:
 
     return json.dumps(
         {
-            "protocol_version": "2026-08-18-input-structure-audit-v7",
+            "protocol_version": INPUT_STRUCTURE_AUDIT_VERSION,
             "application_inputs": [
                 {
                     "structure_id": "app-input-1",

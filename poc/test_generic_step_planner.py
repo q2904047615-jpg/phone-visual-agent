@@ -3418,6 +3418,127 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual("matched", result.action_outcome)
 
+    def test_clear_recovery_keeps_typed_field_across_preedit_read_drift(self):
+        planned_states = {
+            "goal_relevant": True,
+            "fully_visible": True,
+            "focused": True,
+            "value": "longinp",
+            "input_field_id": "input_field_1",
+            "input_multiline": False,
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "chinese_pinyin",
+            "keyboard_case_mode": "lower",
+            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+        }
+        planned = UIScene(
+            app_id="chat",
+            screen_id="conversation",
+            summary="输入框中显示带下划线的 longinp",
+            elements=(UIElement(
+                element_id="planned-input",
+                role="input",
+                meaning="application_text_input",
+                label="longinp",
+                bounds=(0.13, 0.54, 0.70, 0.59),
+                confidence=1.0,
+                states=planned_states,
+            ),),
+            fingerprint="planned",
+        )
+        fresh_states = {
+            **planned_states,
+            "goal_relevant": False,
+            "value": "",
+            "keyboard_geometry": {
+                **TEST_QWERTY_GEOMETRY,
+                "anchors": {
+                    **TEST_QWERTY_GEOMETRY["anchors"],
+                    "backspace": [879, 853],
+                },
+            },
+        }
+        fresh_input = replace(
+            planned.elements[0],
+            element_id="fresh-input",
+            label="",
+            bounds=(0.13, 0.54, 0.70, 0.60),
+            states=fresh_states,
+        )
+        fresh = replace(
+            planned,
+            elements=(fresh_input,),
+            fingerprint="fresh",
+        )
+        requested = SemanticAction(
+            node_id="clear-conflicting-preedit",
+            action="clear_verified_text",
+            params={
+                "element_id": "planned-input",
+                "target": "application_text_input",
+                "role": "input",
+                "label": "longinp",
+                "states": planned_states,
+                "formal_candidate_id": "candidate-clear-longinp",
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "application_text_input",
+                        "states": {"value": ""},
+                    }
+                },
+            },
+        )
+
+        recovered = GenericSingleActionAdapter._recover_conflicting_clear_input_scene(
+            requested,
+            planned,
+            fresh,
+        )
+
+        self.assertIsNotNone(recovered)
+        recovered_input = recovered.get_element("planned-input")
+        self.assertEqual("longinp", recovered_input.states["value"])
+        self.assertEqual(
+            [879, 853],
+            recovered_input.states["keyboard_geometry"]["anchors"]["backspace"],
+        )
+        self.assertEqual((0.13, 0.54, 0.70, 0.60), recovered_input.bounds)
+
+        for name, conflicting in (
+            (
+                "different-field",
+                replace(
+                    fresh_input,
+                    states={**fresh_states, "input_field_id": "input_field_2"},
+                ),
+            ),
+            (
+                "different-visible-value",
+                replace(fresh_input, states={**fresh_states, "value": "useful"}),
+            ),
+        ):
+            with self.subTest(name=name):
+                rejected = replace(fresh, elements=(conflicting,))
+                self.assertIsNone(
+                    GenericSingleActionAdapter._recover_conflicting_clear_input_scene(
+                        requested,
+                        planned,
+                        rejected,
+                    )
+                )
+
+        ambiguous = replace(
+            fresh,
+            elements=(fresh_input, replace(fresh_input, element_id="other-input")),
+        )
+        self.assertIsNone(
+            GenericSingleActionAdapter._recover_conflicting_clear_input_scene(
+                requested,
+                planned,
+                ambiguous,
+            )
+        )
+
     def test_matched_direct_input_persists_lineage_and_clear_discards_it(self):
         def input_scene(fingerprint, value, *, goal_relevant=True):
             return UIScene(

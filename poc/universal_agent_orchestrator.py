@@ -3430,6 +3430,7 @@ class UniversalAgentOrchestrator:
         error: Exception,
         *,
         stage: str,
+        previous_graph: DynamicTaskGraph | None = None,
     ) -> None:
         if not isinstance(error, TaskGraphError):
             return
@@ -3440,6 +3441,7 @@ class UniversalAgentOrchestrator:
                 prefix=f"deepseek_{stage}_step_{session.step_number}",
                 failed_stage=stage,
                 error=error,
+                previous_graph=previous_graph,
             )
         except Exception:
             return
@@ -4489,6 +4491,12 @@ class UniversalAgentOrchestrator:
         except Exception as exc:
             session.status = "blocked"
             session.failed_reason = f"DeepSeek 重规划失败：{exc}"
+            self._record_deepseek_failure(
+                session,
+                exc,
+                stage="post_action_replan",
+                previous_graph=previous_graph,
+            )
             transition_record["disposition"] = "blocked_replan_failure"
             transition_record["diagnostic"] = session.failed_reason
             persist_transition()

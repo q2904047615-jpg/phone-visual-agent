@@ -71,6 +71,79 @@ class DeepSeekFailureDiagnosticTests(unittest.TestCase):
             self.assertEqual((), paths)
             self.assertEqual([], list(Path(temp).iterdir()))
 
+    def test_structured_diff_whitelists_goal_fields_and_redacts_secrets(self) -> None:
+        previous = SimpleNamespace(
+            to_dict=lambda: {
+                "goal": {
+                    "objective": "依次填写两个字段",
+                    "target_apps": [
+                        {"app_id": "current", "app_name": "当前应用"}
+                    ],
+                    "entities": {
+                        "input_fields": [
+                            {"field_id": "subject", "field_label": "主题", "text": "first"},
+                            {"field_id": "body", "field_label": "正文", "text": "second"},
+                        ]
+                    },
+                },
+                "subgoals": [
+                    {
+                        "subgoal_id": "fill_subject",
+                        "objective": "填写主题",
+                        "status": "active",
+                        "depends_on": [],
+                        "constraints": [],
+                        "completion_conditions": ["主题为 first"],
+                        "effect_ids": [],
+                        "execution_class": "navigate",
+                    }
+                ],
+            }
+        )
+        raw = json.dumps(
+            {
+                "authorization": "Bearer secret-value",
+                "goal": {
+                    "objective": "依次填写两个字段",
+                    "target_apps": [
+                        {
+                            "app_id": "current",
+                            "app_name": "当前应用",
+                            "token": "hidden-app-token",
+                        }
+                    ],
+                    "entities": {
+                        "input_fields": [
+                            {"field_id": "body", "field_label": "正文", "text": "second"},
+                            {"field_id": "subject", "field_label": "主题", "text": "first"},
+                        ],
+                        "shell": "must-not-enter-structured-diff",
+                    },
+                },
+                "subgoals": previous.to_dict()["subgoals"],
+            },
+            ensure_ascii=False,
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            paths = persist_deepseek_failure_diagnostic(
+                SimpleNamespace(last_raw_response=raw),
+                evidence_dir=Path(temp),
+                prefix="post_action_replan",
+                failed_stage="post_action_replan",
+                error=RuntimeError("goal changed"),
+                previous_graph=previous,
+            )
+            artifact = json.loads(Path(paths[0]).read_text(encoding="utf-8"))
+
+        structured = artifact["structured_candidate_diff"]
+        self.assertEqual(["input_fields"], structured["changed_fields"])
+        structured_text = json.dumps(structured, ensure_ascii=False)
+        self.assertNotIn("authorization", structured_text)
+        self.assertNotIn("shell", structured_text)
+        self.assertNotIn("hidden-app-token", structured_text)
+        self.assertNotIn("secret-value", json.dumps(artifact, ensure_ascii=False))
+
     def test_retired_semantic_shadow_is_not_serialized(self) -> None:
         shadow = SimpleNamespace(
             to_dict=lambda: {

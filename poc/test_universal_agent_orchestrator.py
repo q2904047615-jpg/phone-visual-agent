@@ -7783,6 +7783,76 @@ class UniversalAgentConfirmFailureTests(unittest.TestCase):
         self.assertEqual(1, adapter.execute_calls)
         self.assertEqual(1, len(qwen.calls))
 
+    def test_post_action_task_graph_failure_persists_redacted_candidate_diff(self) -> None:
+        initial = _graph()
+        candidate = initial.to_dict()
+        candidate["goal"]["objective"] = "模型错误改写后的目标"
+        candidate["authorization"] = "Bearer post-action-secret"
+        planner = FakeDeepSeekPlanner(
+            initial,
+            replan_error=TaskGraphError(
+                "重规划不能改写用户目标、目标 App 或目标实体。"
+            ),
+        )
+        planner.last_raw_response = json.dumps(candidate, ensure_ascii=False)
+
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            orchestrator, session, _planner, _qwen, adapter = self._started(
+                temp,
+                planner=planner,
+            )
+
+            result = orchestrator.confirm_one(session, _confirmation(session))
+            diagnostics = list(run_dir.glob("*post_action_replan*_deepseek_failure.json"))
+            artifact = json.loads(diagnostics[0].read_text(encoding="utf-8"))
+            report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("blocked", session.status)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(1, len(planner.replan_calls))
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, len(diagnostics))
+        self.assertEqual("post_action_replan", artifact["failed_stage"])
+        self.assertEqual(
+            ["goal_objective"],
+            artifact["structured_candidate_diff"]["changed_fields"],
+        )
+        self.assertNotIn(
+            "post-action-secret",
+            json.dumps(artifact, ensure_ascii=False),
+        )
+        self.assertIn(str(diagnostics[0]), session.evidence_paths)
+        self.assertIn(str(diagnostics[0]), report["session"]["evidence"])
+        self.assertEqual("blocked_replan_failure", session.last_post_action_transition["disposition"])
+
+    def test_post_action_task_graph_failure_without_raw_keeps_existing_terminal(self) -> None:
+        planner = FakeDeepSeekPlanner(
+            _graph(),
+            replan_error=TaskGraphError("候选解析前失败"),
+        )
+        planner.last_raw_response = ""
+
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            orchestrator, session, _planner, _qwen, adapter = self._started(
+                temp,
+                planner=planner,
+            )
+
+            result = orchestrator.confirm_one(session, _confirmation(session))
+            diagnostics = list(run_dir.glob("*_deepseek_failure.json"))
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("blocked", session.status)
+        self.assertIn("候选解析前失败", session.failed_reason)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(1, len(planner.replan_calls))
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual([], diagnostics)
+        self.assertEqual("blocked_replan_failure", session.last_post_action_transition["disposition"])
+
     def test_next_qwen_decision_uses_only_new_revision_and_observation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             orchestrator, session, _planner, qwen, _adapter = self._started(temp)

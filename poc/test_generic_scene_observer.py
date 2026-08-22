@@ -4464,6 +4464,54 @@ class GenericSceneObserverTests(unittest.TestCase):
                 fingerprint="local-fingerprint",
             )
 
+    def test_targeted_delta_rejects_live_unknown_portrait_canvas_shapes(self) -> None:
+        base_payload = scene_payload()
+        base_payload["elements"] = []
+        base = _parse_scene(
+            json.dumps(base_payload, ensure_ascii=False),
+            fingerprint="local-fingerprint",
+        )
+        live_shapes = (
+            {
+                "element_id": "sys_nav_back_btn",
+                "role": "button",
+                "meaning": "back",
+                "label": "<",
+                "bounds": {"x": 130, "y": 1950, "w": 80, "h": 80},
+                "confidence": 0.95,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": "底部系统导航栏左侧可见返回图标",
+            },
+            {
+                "element_id": "container_list_view",
+                "role": "container",
+                "meaning": "list_container",
+                "label": "模式选择列表",
+                "bounds": {"x": 100, "y": 50, "w": 800, "h": 1400},
+                "confidence": 1.0,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": False,
+                    "scrollable": True,
+                    "scroll_axis": "vertical",
+                },
+                "evidence": "底部边缘可见内容被截断",
+            },
+        )
+        for element in live_shapes:
+            with self.subTest(element_id=element["element_id"]), self.assertRaisesRegex(
+                VisionAgentError,
+                "最小增量协议",
+            ):
+                _parse_targeted_scene_delta(
+                    json.dumps(
+                        targeted_delta_payload(elements=[element]),
+                        ensure_ascii=False,
+                    ),
+                    base_scene=base,
+                    fingerprint="local-fingerprint",
+                )
+
     def test_targeted_delta_discards_only_explicit_non_goal_out_of_range_peripheral(self) -> None:
         base = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),

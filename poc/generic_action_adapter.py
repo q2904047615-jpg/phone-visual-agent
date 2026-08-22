@@ -100,6 +100,8 @@ _POST_NAVIGATION_ALLOWED_EFFECT_KEYS = frozenset(
 def _post_action_observation_context(
     goal: GenericIntentDraft,
     resolved: ResolvedSemanticAction,
+    *,
+    physical_action_executed: bool = False,
 ) -> dict[str, Any]:
     """Return a result-focused context only for a proven navigation boundary."""
 
@@ -127,13 +129,29 @@ def _post_action_observation_context(
             entities = sanitized_entities
             focus = sanitized_focus
     expected = resolved.expected_effect
+    changed_result = (
+        isinstance(expected, dict)
+        and (
+            expected.get("scene_changed") is True
+            or expected.get("content_changed") is True
+        )
+    )
+    completed_navigation = (
+        isinstance(expected, dict)
+        and expected.get("scene_changed") is True
+        and expected.get("goal_complete_on_success") is True
+    )
+    exact_result_action = (
+        resolved.kind in {"back", "swipe"}
+        and changed_result
+    )
     if (
-        not isinstance(focus, dict)
+        not physical_action_executed
+        or not isinstance(focus, dict)
         or str(focus.get("execution_class") or "").strip() != "navigate"
         or resolved.kind not in _POST_NAVIGATION_RESULT_KINDS
         or not isinstance(expected, dict)
-        or expected.get("scene_changed") is not True
-        or expected.get("goal_complete_on_success") is not True
+        or not (completed_navigation or exact_result_action)
         or "element_state" in expected
         or set(expected) - _POST_NAVIGATION_ALLOWED_EFFECT_KEYS
     ):
@@ -1469,7 +1487,11 @@ class GenericSingleActionAdapter:
         observation_errors: list[str] = []
         verification_errors: list[str] = []
         last_error: Exception | None = None
-        observation_context = _post_action_observation_context(goal, resolved)
+        observation_context = _post_action_observation_context(
+            goal,
+            resolved,
+            physical_action_executed=True,
+        )
         for attempt in range(1, self.post_action_max_observations + 1):
             attempt_deadline = time.monotonic() + action_timeout
             try:

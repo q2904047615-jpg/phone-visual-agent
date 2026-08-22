@@ -1835,6 +1835,15 @@ class GenericActionAdapterTests(unittest.TestCase):
         original = navigation_goal().to_dict()
         self.assertNotEqual(
             original,
+            _post_action_observation_context(
+                navigation_goal(),
+                safe,
+                physical_action_executed=True,
+            ),
+        )
+
+        self.assertEqual(
+            original,
             _post_action_observation_context(navigation_goal(), safe),
         )
 
@@ -1862,14 +1871,6 @@ class GenericActionAdapterTests(unittest.TestCase):
                 navigation_goal(),
                 replace(
                     safe,
-                    kind="swipe",
-                    expected_effect={"scene_changed": True},
-                ),
-            ),
-            (
-                navigation_goal(),
-                replace(
-                    safe,
                     expected_effect={
                         "scene_changed": True,
                         "goal_complete_on_success": True,
@@ -1888,7 +1889,11 @@ class GenericActionAdapterTests(unittest.TestCase):
             ):
                 self.assertEqual(
                     case_goal.to_dict(),
-                    _post_action_observation_context(case_goal, resolved),
+                    _post_action_observation_context(
+                        case_goal,
+                        resolved,
+                        physical_action_executed=True,
+                    ),
                 )
 
         spoofed = navigation_goal(execution_class="effect")
@@ -1907,6 +1912,163 @@ class GenericActionAdapterTests(unittest.TestCase):
                 "goal_entities"
             ],
         )
+
+    def test_executed_back_and_swipe_use_result_focused_compact_observation(self):
+        cases = (
+            (
+                "back-live",
+                "back",
+                {"scene_changed": True},
+                "按一次返回键",
+                ["动作后出现新的稳定画面"],
+            ),
+            (
+                "swipe-live",
+                "swipe",
+                {"content_changed": True},
+                "在当前模式选择页向上滑动一次",
+                ["验收模式选项出现在当前画面中"],
+            ),
+            (
+                "back-content-variation",
+                "back",
+                {"content_changed": True},
+                "返回上一层并观察内容变化",
+                ["当前内容已变化"],
+            ),
+            (
+                "swipe-scene-variation",
+                "swipe",
+                {"scene_changed": True},
+                "横向滑动到下一页",
+                ["下一页稳定画面已显示"],
+            ),
+        )
+        for node_id, kind, expected_effect, objective, conditions in cases:
+            with self.subTest(kind=kind, expected_effect=expected_effect):
+                current_goal = navigation_goal()
+                focus = current_goal.entities["active_subgoal_visual_context"]
+                focus["objective"] = objective
+                focus["completion_conditions"] = conditions
+                resolved = ResolvedSemanticAction(
+                    node_id=node_id,
+                    kind=kind,
+                    expected_effect=expected_effect,
+                )
+
+                result = _post_action_observation_context(
+                    current_goal,
+                    resolved,
+                    physical_action_executed=True,
+                )
+
+                result_focus = result["entities"]["active_subgoal_visual_context"]
+                self.assertNotIn("target_ui_label", result_focus["goal_entities"])
+                self.assertEqual(
+                    "verified_navigation_result_v1",
+                    result_focus["goal_entities"]["observation_phase"],
+                )
+                self.assertEqual(
+                    "观察本次导航后的当前稳定画面",
+                    result_focus["objective"],
+                )
+
+    def test_executed_back_and_swipe_attest_result_context_in_adapter(self):
+        cases = (
+            ("back", {"scene_changed": True}, {}),
+            ("swipe", {"content_changed": True}, {"direction": "up"}),
+        )
+        for kind, expected_effect, action_params in cases:
+            with self.subTest(kind=kind):
+                planned = scene("planned", screen_id="verification_list")
+                after = scene("after", screen_id="verification_list_after")
+                observer = FakeSceneObserver([after])
+                robot = FakeRobot()
+                adapter = GenericSingleActionAdapter(
+                    capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+                    observer=observer,
+                    robot=robot,
+                    frame_interval=0,
+                    post_action_settle=0,
+                )
+                params = dict(action_params)
+                params["expected_effect"] = expected_effect
+
+                result = adapter.execute(
+                    requested_action=SemanticAction(
+                        node_id=f"live-{kind}",
+                        action=kind,
+                        params=params,
+                    ),
+                    planned_scene=planned,
+                    planned_frames=tuple(
+                        Image.new("RGB", (540, 960), "gray") for _ in range(4)
+                    ),
+                    goal=navigation_goal(),
+                    confirmed=True,
+                )
+
+                self.assertEqual(1, result.physical_actions)
+                post_focus = observer.goal_contexts[-1]["entities"][
+                    "active_subgoal_visual_context"
+                ]
+                self.assertEqual(
+                    "verified_navigation_result_v1",
+                    post_focus["goal_entities"]["observation_phase"],
+                )
+
+    def test_back_and_swipe_result_marker_rejects_unexecuted_or_wrong_effect(self):
+        base_goal = navigation_goal()
+        cases = (
+            (
+                False,
+                ResolvedSemanticAction(
+                    node_id="unexecuted-back",
+                    kind="back",
+                    expected_effect={"scene_changed": True},
+                ),
+            ),
+            (
+                True,
+                ResolvedSemanticAction(
+                    node_id="unchanged-swipe",
+                    kind="swipe",
+                    expected_effect={"content_changed": False},
+                ),
+            ),
+            (
+                True,
+                ResolvedSemanticAction(
+                    node_id="wrong-effect-back",
+                    kind="back",
+                    expected_effect={
+                        "scene_changed": True,
+                        "element_state": {"meaning": "toggle"},
+                    },
+                ),
+            ),
+            (
+                True,
+                ResolvedSemanticAction(
+                    node_id="unknown-effect-swipe",
+                    kind="swipe",
+                    expected_effect={
+                        "content_changed": True,
+                        "coordinates_changed": True,
+                    },
+                ),
+            ),
+        )
+        for executed, resolved in cases:
+            with self.subTest(node_id=resolved.node_id):
+                self.assertEqual(
+                    base_goal.to_dict(),
+                    _post_action_observation_context(
+                        base_goal,
+                        resolved,
+                        physical_action_executed=executed,
+                    ),
+                )
 
     def test_stable_local_ocr_snaps_qwerty_row_heights(self):
         payload = {

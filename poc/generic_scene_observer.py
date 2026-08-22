@@ -6077,6 +6077,34 @@ def _goal_active_input_field(context: dict[str, Any]) -> tuple[str, str, bool]:
     return (field_id, field_label, multiline)
 
 
+def _goal_has_unique_typed_active_input_field(context: dict[str, Any]) -> bool:
+    """Return whether the active input marker exactly names one root typed field."""
+
+    root_entities = context.get("entities")
+    if not isinstance(root_entities, dict):
+        return False
+    fields = root_entities.get("input_fields")
+    if not isinstance(fields, list):
+        return False
+    field_id, field_label, _multiline = _goal_active_input_field(context)
+    text = _goal_active_input_transaction_text(context)
+    if not field_id or not field_label or not text:
+        return False
+    exact_field_matches = sum(
+        isinstance(item, dict)
+        and item.get("field_id") == field_id
+        and item.get("field_label") == field_label
+        and item.get("text") == text
+        for item in fields
+    )
+    exact_label_matches = sum(
+        isinstance(item, dict)
+        and item.get("field_label") == field_label
+        for item in fields
+    )
+    return exact_field_matches == 1 and exact_label_matches == 1
+
+
 def _goal_active_input_predecessor_field(
     context: dict[str, Any],
 ) -> tuple[str, str, str]:
@@ -6614,7 +6642,23 @@ def _apply_input_structure_audit(
             or "\n" in explicit_input_text
             or "\r" in explicit_input_text
         )
-        maximum_input_height = 600 if multiline_input_contract else 180
+        unique_typed_active_field = _goal_has_unique_typed_active_input_field(
+            goal_context
+        )
+        active_label_occurrences = sum(
+            sum(
+                isinstance(label, str)
+                and label.strip().casefold() == active_field_label.casefold()
+                for label in item.get("field_labels", [])
+            )
+            for item in application_inputs
+            if active_field_label
+            and isinstance(item, dict)
+            and isinstance(item.get("field_labels", []), list)
+        )
+        tall_typed_active_contract = bool(
+            unique_typed_active_field and active_label_occurrences == 1
+        )
         matches: list[dict[str, Any]] = []
         for item in application_inputs:
             required_input_fields = {
@@ -6689,6 +6733,20 @@ def _apply_input_structure_audit(
             bounds = tuple(float(value) for value in item["bounds"])
             width = bounds[2] - bounds[0]
             height = bounds[3] - bounds[1]
+            exact_active_label = bool(
+                active_field_label
+                and sum(
+                    label.casefold() == active_field_label.casefold()
+                    for label in field_labels
+                )
+                == 1
+            )
+            maximum_input_height = (
+                600
+                if multiline_input_contract
+                or (tall_typed_active_contract and exact_active_label)
+                else 180
+            )
             if (
                 bounds[1] <= 10
                 or bounds[3] >= 990

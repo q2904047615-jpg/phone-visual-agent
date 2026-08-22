@@ -407,6 +407,7 @@ def audited_application_input(
     confidence: float = 0.98,
     right_button: dict | None = None,
     field_labels: list[str] | None = None,
+    visible_editable_cues: list[str] | None = None,
 ) -> dict:
     value = {
         "structure_id": structure_id,
@@ -414,7 +415,11 @@ def audited_application_input(
         "fully_visible": fully_visible,
         "text": text,
         "placeholder": placeholder,
-        "visible_editable_cues": ["完整横向输入边框"],
+        "visible_editable_cues": list(
+            ["完整横向输入边框"]
+            if visible_editable_cues is None
+            else visible_editable_cues
+        ),
         "confidence": confidence,
         "right_button": right_button,
     }
@@ -9345,90 +9350,164 @@ class GenericSceneObserverTests(unittest.TestCase):
                 qwerty_row_frames=stable_frames()[-3:],
             )
 
-    def test_multiline_contract_accepts_tall_field_but_single_line_does_not(
+    def test_unique_typed_active_field_accepts_tall_input_without_minting_multiline(
         self,
     ) -> None:
         base = _parse_scene(
             json.dumps(scene_payload(), ensure_ascii=False),
             fingerprint="f" * 64,
         )
-        tall_input = audited_application_input(
-            bounds=[130, 240, 870, 590],
-            text="",
-            placeholder="正文",
-            field_labels=["正文"],
-        )
-        keyboard = {
-            "visible": True,
-            "bounds": [50, 630, 980, 1000],
-            "layout": "qwerty",
-            "input_mode": "direct_latin",
-            "case_mode": "lower",
-            "qwerty_anchors": {
-                "q": [110, 760],
-                "p": [890, 760],
-                "a": [160, 840],
-                "l": [840, 840],
-                "z": [260, 920],
-                "m": [740, 920],
-                "backspace": [890, 920],
-            },
-            "mode_switch": None,
-        }
-        raw = json.dumps(
-            input_audit_payload(
-                application_inputs=[tall_input],
-                keyboard=keyboard,
+        cases = [
+            (MULTIFIELD_FIELDS, [130, 630, 870, 830]),
+            (
+                [
+                    {"field_id": "body_field", "field_label": "详细内容", "text": "second"},
+                    {"field_id": "subject_field", "field_label": "标题内容", "text": "first"},
+                ],
+                [130, 300, 870, 850],
             ),
-            ensure_ascii=False,
-        )
-        multiline_context = {
-            "entities": {
-                "active_subgoal_visual_context": {
-                    "subgoal_id": "enter_text",
-                    "objective": "输入两行文本",
-                    "constraints": [],
-                    "completion_conditions": [],
-                    "execution_class": "navigate",
-                    "goal_entities": {
-                        "input_text": "first line\nsecond line",
-                        "active_input_transaction_text": "first line\nsecond line",
-                        "active_input_field_id": "input_field_1",
-                        "active_input_multiline": True,
-                    },
+        ]
+        for fields, body_bounds in cases:
+            with self.subTest(fields=fields, body_bounds=body_bounds):
+                source = next(item for item in fields if item["field_id"] == "subject_field")
+                target = next(item for item in fields if item["field_id"] == "body_field")
+                inputs_by_id = {
+                    "subject_field": audited_application_input(
+                        structure_id="subject",
+                        bounds=[130, 150, 870, 250],
+                        text=source["text"],
+                        field_labels=[source["field_label"]],
+                    ),
+                    "body_field": audited_application_input(
+                        structure_id="body",
+                        bounds=body_bounds,
+                        text="",
+                        placeholder=target["field_label"],
+                        field_labels=[target["field_label"]],
+                    ),
                 }
-            }
-        }
+                raw = json.dumps(
+                    input_audit_payload(
+                        application_inputs=[inputs_by_id[item["field_id"]] for item in fields]
+                    ),
+                    ensure_ascii=False,
+                )
 
-        projected = _apply_input_structure_audit(
-            base,
-            raw,
+                projected = _apply_input_structure_audit(
+                    base,
+                    raw,
+                    fingerprint="f" * 64,
+                    goal_context=multifield_next_context(fields),
+                    coarse_input_value="",
+                )
+
+                field = projected.get_element("local_audited_input_1")
+                self.assertEqual(target["field_id"], field.states["input_field_id"])
+                self.assertEqual(target["field_label"], field.states["input_field_label"])
+                self.assertEqual("", field.states["value"])
+                self.assertFalse(field.states["input_multiline"])
+                self.assertFalse(field.states["soft_keyboard_visible"])
+
+    def test_tall_single_line_typed_field_override_remains_fail_closed(self) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
             fingerprint="f" * 64,
-            goal_context=multiline_context,
+        )
+        subject = audited_application_input(
+            structure_id="subject", bounds=[130, 490, 870, 590],
+            text="first", field_labels=["主题"],
+        )
+        body = audited_application_input(
+            structure_id="body", bounds=[130, 630, 870, 830],
+            text="", placeholder="正文", field_labels=["正文"],
+        )
+        cases: list[tuple[str, list[dict], dict | None, list[dict] | None]] = []
+        cases.append(("duplicate-label", [subject, body, {
+            **body, "structure_id": "body-duplicate", "bounds": [130, 260, 870, 460],
+        }], None, None))
+        for name, changes in (
+            ("no-label", {"field_labels": []}),
+            ("low-confidence", {"confidence": 0.7}),
+            ("incomplete", {"fully_visible": False}),
+            ("no-editable-evidence", {"placeholder": "", "visible_editable_cues": []}),
+            ("over-maximum-height", {"bounds": [130, 100, 870, 750]}),
+        ):
+            cases.append((name, [subject, {**body, **changes}], None, None))
+        cases.append((
+            "keyboard-overlap", [subject, body],
+            {
+                "visible": True, "bounds": [0, 600, 1000, 1000],
+                "layout": "qwerty", "input_mode": "direct_latin",
+                "case_mode": "lower", "mode_switch": None,
+            }, None,
+        ))
+        cases.append((
+            "preedit-overlap", [subject, body], None,
+            [{
+                "region_id": "preedit", "bounds": [130, 630, 870, 830],
+                "text": "second", "confidence": 0.98, "candidates": [],
+            }],
+        ))
+
+        for name, inputs, keyboard, preedits in cases:
+            with self.subTest(name=name):
+                rejected = _apply_input_structure_audit(
+                    base,
+                    json.dumps(input_audit_payload(
+                        application_inputs=inputs,
+                        keyboard=keyboard,
+                        ime_preedit_regions=preedits,
+                    ), ensure_ascii=False),
+                    fingerprint="f" * 64,
+                    goal_context=multifield_next_context(MULTIFIELD_FIELDS),
+                    coarse_input_value="",
+                )
+                self.assertFalse(any(
+                    item.element_id == "local_audited_input_1"
+                    for item in rejected.elements
+                ))
+
+        untyped = _apply_input_structure_audit(
+            base,
+            json.dumps(input_audit_payload(
+                application_inputs=[body],
+            ), ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context={"objective": "输入second", "entities": {"input_text": "second"}},
             coarse_input_value="",
         )
+        self.assertFalse(any(
+            item.element_id == "local_audited_input_1"
+            for item in untyped.elements
+        ))
 
-        field = projected.get_element("local_audited_input_1")
-        self.assertEqual((0.13, 0.24, 0.87, 0.59), field.bounds)
-        self.assertTrue(field.states["input_multiline"])
-
-        single_line_context = json.loads(json.dumps(multiline_context))
-        single_entities = single_line_context["entities"][
-            "active_subgoal_visual_context"
-        ]["goal_entities"]
-        single_entities["input_text"] = "first line"
-        single_entities["active_input_transaction_text"] = "first line"
-        single_entities["active_input_multiline"] = False
-        rejected = _apply_input_structure_audit(
+        duplicate_typed_label = json.loads(json.dumps(MULTIFIELD_FIELDS))
+        duplicate_typed_label[0]["field_label"] = "正文"
+        ambiguous_typed = _apply_input_structure_audit(
             base,
-            raw,
+            json.dumps(input_audit_payload(
+                application_inputs=[subject, body],
+            ), ensure_ascii=False),
             fingerprint="f" * 64,
-            goal_context=single_line_context,
+            goal_context=multifield_next_context(duplicate_typed_label),
             coarse_input_value="",
         )
-        self.assertFalse(
-            any(item.element_id == "local_audited_input_1" for item in rejected.elements)
-        )
+        self.assertFalse(any(
+            item.element_id == "local_audited_input_1"
+            for item in ambiguous_typed.elements
+        ))
+
+        invalid = {**body, "bounds": [130, 630, 870, 1001]}
+        with self.assertRaisesRegex(VisionAgentError, "bounds"):
+            _apply_input_structure_audit(
+                base,
+                json.dumps(input_audit_payload(
+                    application_inputs=[subject, invalid],
+                ), ensure_ascii=False),
+                fingerprint="f" * 64,
+                goal_context=multifield_next_context(MULTIFIELD_FIELDS),
+                coarse_input_value="",
+            )
 
     def test_typed_multiline_prefix_survives_placeholder_loss_and_pixel_coordinates(
         self,

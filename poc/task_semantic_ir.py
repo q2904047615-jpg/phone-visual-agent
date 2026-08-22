@@ -1585,7 +1585,12 @@ def compile_runtime_graph_semantics(
         ("tap_semantic", re.compile(r"点击|轻触|点按|tap|click", re.I)),
     )
 
-    def has_positive_action_match(text: str, pattern: re.Pattern[str]) -> bool:
+    def has_positive_action_match(
+        text: str,
+        pattern: re.Pattern[str],
+        *,
+        action_kind: str,
+    ) -> bool:
         """Ignore explicitly negated mentions while retaining later positive ones."""
 
         for match in pattern.finditer(text):
@@ -1600,6 +1605,15 @@ def compile_runtime_graph_semantics(
                 re.I,
             ):
                 continue
+            if action_kind == "input_verified_text" and re.search(
+                r"(?:可|可以|能|能够|支持)(?:直接|正常|精确)?\s*$",
+                clause_prefix,
+                re.I,
+            ):
+                # A field capability/state such as "可输入" or
+                # "能够正常输入" describes the preparation result; it does
+                # not authorize entering the future typed payload.
+                continue
             return True
         return False
 
@@ -1611,7 +1625,11 @@ def compile_runtime_graph_semantics(
             continue
         objective = str(getattr(subgoal, "objective", "") or "")
         for action_kind, pattern in action_patterns:
-            if not has_positive_action_match(objective, pattern):
+            if not has_positive_action_match(
+                objective,
+                pattern,
+                action_kind=action_kind,
+            ):
                 continue
             # A visible title, mode name, or capability description may contain
             # the word "input" without requesting any text entry.  Only a

@@ -441,6 +441,99 @@ class TaskSemanticIRTests(unittest.TestCase):
             authority.semantic_ir.input_fields[0].source_subgoal_ids,
         )
 
+    def test_input_capability_state_does_not_mint_input_action(self):
+        for objective, completion in (
+            ("定位主题字段并使其可见可输入", "主题字段可见且可输入"),
+            ("确认主题字段当前可以正常输入且可编辑", "主题字段可编辑"),
+        ):
+            with self.subTest(objective=objective):
+                payload = current_send_failure_payload()
+                payload["goal"]["entities"] = {
+                    "input_fields": [
+                        {
+                            "field_id": "subject",
+                            "field_label": "主题",
+                            "text": "first",
+                        },
+                        {
+                            "field_id": "body",
+                            "field_label": "正文",
+                            "text": "second",
+                        },
+                    ]
+                }
+                payload["effect_intents"] = []
+                payload["subgoals"] = [
+                    {
+                        **payload["subgoals"][0],
+                        "objective": objective,
+                        "constraints": ["不得输入任何内容"],
+                        "completion_conditions": [completion],
+                    },
+                    {
+                        "subgoal_id": "input_subject",
+                        "objective": "在主题字段精确输入first",
+                        "status": "pending",
+                        "depends_on": ["open_wechat"],
+                        "constraints": ["不得发送或提交"],
+                        "completion_conditions": ["主题字段内容为first"],
+                        "completion_evidence": [],
+                        "effect_ids": [],
+                        "execution_class": "navigate",
+                    },
+                    {
+                        "subgoal_id": "input_body",
+                        "objective": "在正文字段精确输入second",
+                        "status": "pending",
+                        "depends_on": ["input_subject"],
+                        "constraints": ["不得发送或提交"],
+                        "completion_conditions": ["正文字段内容为second"],
+                        "completion_evidence": [],
+                        "effect_ids": [],
+                        "execution_class": "navigate",
+                    },
+                ]
+                authority = compile_formal_semantic_authority(
+                    graph_from_payload(payload)
+                )
+                constraints = {
+                    item.constraint_id: item
+                    for item in authority.semantic_ir.constraints
+                }
+                actions_by_subgoal = {
+                    item.subgoal_id: {
+                        constraints[ref].value
+                        for ref in item.constraint_refs
+                        if constraints[ref].kind == "required_action"
+                    }
+                    for item in authority.semantic_ir.subgoals
+                }
+
+                self.assertNotIn(
+                    "input_verified_text",
+                    actions_by_subgoal["open_wechat"],
+                )
+                self.assertIn(
+                    "input_verified_text",
+                    actions_by_subgoal["input_subject"],
+                )
+                self.assertIn(
+                    "input_verified_text",
+                    actions_by_subgoal["input_body"],
+                )
+                fields = {
+                    item.field_id: item
+                    for item in authority.semantic_ir.input_fields
+                }
+                self.assertEqual(
+                    ("input_subject",),
+                    fields["subject"].source_subgoal_ids,
+                )
+                self.assertEqual(
+                    ("input_body",),
+                    fields["body"].source_subgoal_ids,
+                )
+
     def test_english_input_carrier_presence_does_not_mint_input_action(self):
         payload = current_send_failure_payload()
         payload["subgoals"][0]["objective"] = (

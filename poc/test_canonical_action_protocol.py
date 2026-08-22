@@ -166,6 +166,35 @@ def exact_tap_ir(*, target_label: str) -> TaskSemanticIR:
     )
 
 
+def swipe_ir() -> TaskSemanticIR:
+    required_swipe = ConstraintIntent(
+        constraint_id="constraint.swipe",
+        kind="required_action",
+        value="swipe",
+        source_text="向上滑动一次",
+        authoritative=True,
+    )
+    return TaskSemanticIR(
+        task_id="task-swipe",
+        device_id="device-1",
+        revision=1,
+        raw_goal="向上滑动一次，让下方内容进入画面",
+        surfaces=(SurfaceRef("surface_current", "current_surface"),),
+        entities=(),
+        effects=(),
+        constraints=(required_swipe,),
+        subgoals=(
+            SemanticSubgoal(
+                subgoal_id="swipe_up_once",
+                surface_ref="surface_current",
+                status="active",
+                external_impact="navigation_only",
+                constraint_refs=(required_swipe.constraint_id,),
+            ),
+        ),
+    )
+
+
 def input_scene() -> UIScene:
     return scene(
         element(
@@ -197,6 +226,121 @@ def input_scene() -> UIScene:
 
 
 class CanonicalActionProtocolTests(unittest.TestCase):
+    def test_swipe_preserves_fully_visible_cross_app_viewport(self) -> None:
+        current_scene = scene(
+            element(
+                "viewport",
+                label="Scrollable content",
+                meaning="content_viewport",
+                role="container",
+                states={
+                    "goal_relevant": False,
+                    "scrollable": True,
+                    "scroll_axis": "vertical",
+                },
+            ),
+            app_id="sample.cross.app",
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            swipe_ir(),
+            {"swipe"},
+        )
+
+        self.assertEqual(
+            {"up", "down", "left", "right"},
+            {item.parameters.get("direction") for item in report.candidates},
+        )
+
+    def test_swipe_admits_unique_goal_relevant_cropped_viewport(self) -> None:
+        for axis in ("vertical", "horizontal"):
+            with self.subTest(axis=axis):
+                current_scene = scene(
+                    element(
+                        "viewport",
+                        label="More content",
+                        meaning="content_viewport",
+                        role="container",
+                        states={
+                            "goal_relevant": True,
+                            "fully_visible": False,
+                            "scrollable": True,
+                            "scroll_axis": axis,
+                        },
+                    )
+                )
+
+                report = compile_canonical_action_catalog(
+                    current_scene,
+                    swipe_ir(),
+                    {"swipe"},
+                )
+
+                self.assertEqual(4, len(report.candidates))
+                self.assertEqual(
+                    {"swipe"},
+                    {item.action_kind for item in report.candidates},
+                )
+
+    def test_swipe_rejects_untrusted_or_ambiguous_cropped_viewports(self) -> None:
+        valid_states = {
+            "goal_relevant": True,
+            "fully_visible": False,
+            "scrollable": True,
+            "scroll_axis": "vertical",
+        }
+        base = element(
+            "viewport",
+            label="More content",
+            meaning="content_viewport",
+            role="container",
+            states=valid_states,
+        )
+        cases = {
+            "not_goal_relevant": scene(
+                replace(
+                    base,
+                    states={**base.states, "goal_relevant": False},
+                )
+            ),
+            "low_confidence": scene(replace(base, confidence=0.5)),
+            "missing_axis": scene(
+                replace(
+                    base,
+                    states={
+                        key: value
+                        for key, value in base.states.items()
+                        if key != "scroll_axis"
+                    },
+                )
+            ),
+            "not_scrollable": scene(
+                replace(
+                    base,
+                    states={**base.states, "scrollable": False},
+                )
+            ),
+            "missing_evidence": scene(replace(base, evidence=())),
+            "duplicate_viewports": scene(
+                base,
+                replace(
+                    base,
+                    element_id="viewport-2",
+                    bounds=(0.5, 0.2, 0.9, 0.4),
+                ),
+            ),
+        }
+        for reason, current_scene in cases.items():
+            with self.subTest(reason=reason):
+                report = compile_canonical_action_catalog(
+                    current_scene,
+                    swipe_ir(),
+                    {"swipe"},
+                )
+                self.assertFalse(report.candidates)
+                self.assertEqual("blocked", report.status)
+
     def test_exact_tap_admits_unique_visible_text_target(self) -> None:
         current_scene = scene(
             element(

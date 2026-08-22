@@ -1584,6 +1584,25 @@ def compile_runtime_graph_semantics(
         ("hardware_key", re.compile(r"音量键|电源键|hardware\s*key", re.I)),
         ("tap_semantic", re.compile(r"点击|轻触|点按|tap|click", re.I)),
     )
+
+    def has_positive_action_match(text: str, pattern: re.Pattern[str]) -> bool:
+        """Ignore explicitly negated mentions while retaining later positive ones."""
+
+        for match in pattern.finditer(text):
+            prefix = text[max(0, match.start() - 32) : match.start()]
+            clause_prefix = re.split(r"[，。；;,.!?！？\n\r]", prefix)[-1]
+            if re.search(
+                r"(?:不(?:要|得|可|能|用|是)?|别|勿|禁止|避免|无需|无须)"
+                r"(?:执行|进行|使用)?\s*$|"
+                r"(?:do\s+not|don['’]?t|must\s+not|never|without|avoid|no)"
+                r"(?:\s+to)?\s*$",
+                clause_prefix,
+                re.I,
+            ):
+                continue
+            return True
+        return False
+
     for subgoal_id, subgoal in subgoals.items():
         # A read-only node can describe an already completed action (for
         # example, "after input, verify no send").  It never owns a new
@@ -1592,7 +1611,7 @@ def compile_runtime_graph_semantics(
             continue
         objective = str(getattr(subgoal, "objective", "") or "")
         for action_kind, pattern in action_patterns:
-            if not pattern.search(objective):
+            if not has_positive_action_match(objective, pattern):
                 continue
             # A visible title, mode name, or capability description may contain
             # the word "input" without requesting any text entry.  Only a

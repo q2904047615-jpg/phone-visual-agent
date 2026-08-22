@@ -673,14 +673,24 @@ def _verified_text_affordance_ready(
 def _element_proves_scrollable_viewport(element: UIElement) -> bool:
     """Grant swipe affordance only from a typed, evidenced viewport fact."""
 
-    return (
+    base_evidence = bool(
         element.role == "container"
         and float(element.confidence) >= MIN_ELEMENT_CONFIDENCE
         and element.states.get("visible") is not False
-        and element.states.get("fully_visible") is True
         and element.states.get("scrollable") is True
         and element.states.get("scroll_axis") in {"vertical", "horizontal"}
         and any(str(item).strip() for item in element.evidence)
+    )
+    if not base_evidence:
+        return False
+    if element.states.get("fully_visible") is True:
+        # Preserve the already verified cross-App swipe contract.
+        return True
+    # For a scrollable viewport, fully_visible=false is the typed content-crop
+    # fact; non-empty element evidence above must independently support it.
+    return bool(
+        element.states.get("fully_visible") is False
+        and element.states.get("goal_relevant") is True
     )
 
 
@@ -1142,13 +1152,15 @@ def compile_canonical_action_catalog(
     relation_by_id = {item.relation_id: item for item in relations}
     relations = sorted(relation_by_id.values(), key=lambda item: item.relation_id)
 
+    scrollable_viewports = tuple(
+        element
+        for element in sorted_elements
+        if _element_proves_scrollable_viewport(element)
+    )
     affordances: list[Affordance] = []
     for action_kind in sorted(available):
         if action_kind in {"back", "home", "reveal_system_navigation", "swipe", "wait_for_change"}:
-            if action_kind == "swipe" and not any(
-                _element_proves_scrollable_viewport(element)
-                for element in sorted_elements
-            ):
+            if action_kind == "swipe" and len(scrollable_viewports) != 1:
                 continue
             if action_kind == "reveal_system_navigation" and not (
                 scene.system_ui.immersive_or_fullscreen is True

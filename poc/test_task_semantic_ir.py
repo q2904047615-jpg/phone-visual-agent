@@ -99,6 +99,57 @@ def graph_from_payload(payload=None):
     )
 
 
+def required_actions_for_objective(objective: str) -> set[str]:
+    payload = current_send_failure_payload()
+    payload["goal"] = {
+        "objective": objective,
+        "target_apps": [
+            {"app_id": "current_foreground", "app_name": "当前前台应用"}
+        ],
+        "entities": {},
+    }
+    payload["effect_intents"] = []
+    payload["constraints"] = []
+    payload["completion_conditions"] = [
+        {
+            "condition_id": "gesture_completed",
+            "description": "目标手势后的页面状态可见",
+            "evidence_required": ["动作后的稳定画面"],
+            "satisfied": False,
+            "evidence": [],
+        }
+    ]
+    payload["subgoals"] = [
+        {
+            "subgoal_id": "gesture_once",
+            "objective": objective,
+            "status": "active",
+            "depends_on": [],
+            "constraints": [],
+            "completion_conditions": ["目标手势后的页面状态可见"],
+            "completion_evidence": [],
+            "effect_ids": [],
+            "execution_class": "navigate",
+        }
+    ]
+    payload["active_subgoal_id"] = "gesture_once"
+    semantic_ir = compile_formal_semantic_authority(
+        _graph_from_payload(
+            payload,
+            task_id="gesture-task",
+            device_id="device-local-01",
+            revision=1,
+            raw_user_goal=objective,
+        )
+    ).semantic_ir
+    constraints = {item.constraint_id: item for item in semantic_ir.constraints}
+    return {
+        str(constraints[ref].value)
+        for ref in semantic_ir.subgoals[0].constraint_refs
+        if constraints[ref].kind == "required_action"
+    }
+
+
 class OneResponseProvider:
     configured = True
 
@@ -122,6 +173,29 @@ class RawResponseProvider:
 
 
 class TaskSemanticIRTests(unittest.TestCase):
+    def test_negated_action_mentions_do_not_mint_required_actions(self):
+        cases = (
+            (
+                "向上滑动一次，不点击任何列表项",
+                {"swipe"},
+            ),
+            (
+                "Swipe up once without clicking any list item",
+                {"swipe"},
+            ),
+            (
+                "不要滑动页面，点击继续",
+                {"tap_semantic"},
+            ),
+            (
+                "不要点击取消，改为点击继续",
+                {"tap_semantic"},
+            ),
+        )
+        for objective, expected in cases:
+            with self.subTest(objective=objective):
+                self.assertEqual(expected, required_actions_for_objective(objective))
+
     def test_phone_home_screen_phrase_compiles_launcher_and_home_action(self):
         payload = current_send_failure_payload()
         payload["goal"] = {

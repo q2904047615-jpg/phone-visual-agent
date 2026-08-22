@@ -2204,6 +2204,9 @@ def _graph_from_payload(
         target_apps=target_apps,
         entities=entities,
     )
+    # Validate typed recipient/payload entities before any redundant effect
+    # result reference can be normalized.
+    goal.validate()
     active_value = payload.get("active_subgoal_id")
     active_subgoal_id = None if active_value is None else str(active_value).strip()
     raw_subgoals = tuple(
@@ -2215,6 +2218,8 @@ def _graph_from_payload(
     }
     if len(subgoals_by_id) != len(raw_subgoals):
         raise TaskGraphError("子目标 ID 重复。")
+    for subgoal in raw_subgoals:
+        subgoal.validate()
     effects = tuple(
         _effect_from_payload(item, subgoals=subgoals_by_id, entities=entities)
         for item in _expect_list(payload.get("effect_intents"), "effect_intents")
@@ -2387,24 +2392,38 @@ def _effect_from_payload(
         item.get("expected_results"),
         "effect_intents.expected_results",
     )
-    allowed_results = {
+    source_results = tuple(
         condition
         for subgoal_id in source_subgoal_ids
         for condition in subgoals[subgoal_id].completion_conditions
-    }
-    if not expected_results or any(
-        result not in allowed_results for result in expected_results
-    ):
+    )
+    allowed_results = set(source_results)
+    if not expected_results:
         raise TaskGraphError(
             "effect_intents.expected_results 必须逐字来自绑定子目标的正向完成条件。"
         )
-    required_type = _RUNTIME_RISK_TYPE_BY_EFFECT_KIND[kind]
     if any(
         DIRECT_PROHIBITION_CLAUSE_PATTERN.search(result)
         or NON_EFFECT_RESULT_PATTERN.search(result)
         for result in expected_results
     ):
         raise TaskGraphError("禁止或未发生状态不能声明为 effect_intent。")
+    if any(result not in allowed_results for result in expected_results):
+        # expected_results is a redundant textual reference to the bound
+        # source subgoal's completion condition.  Repair only the uniquely
+        # determined reference: one source condition in total, and that sole
+        # condition must itself describe a positive effect.  Multiple source
+        # conditions, cross-subgoal alternatives, missing results and
+        # prohibited/non-effect states remain fail-closed.
+        if len(source_results) != 1 or (
+            DIRECT_PROHIBITION_CLAUSE_PATTERN.search(source_results[0])
+            or NON_EFFECT_RESULT_PATTERN.search(source_results[0])
+        ):
+            raise TaskGraphError(
+                "effect_intents.expected_results 必须逐字来自绑定子目标的正向完成条件。"
+            )
+        expected_results = source_results
+    required_type = _RUNTIME_RISK_TYPE_BY_EFFECT_KIND[kind]
     return RiskAction(
         risk_id=effect_id,
         description=expected_results[0],

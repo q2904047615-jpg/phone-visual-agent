@@ -640,6 +640,125 @@ class TaskSemanticIRTests(unittest.TestCase):
             {"input_text"},
         )
 
+    def test_unique_bound_effect_result_is_projected_to_exact_source_text(self):
+        payload = current_send_failure_payload()
+        raw_goal = (
+            "进入文件传输助手，输入精确正文 freshsendproof，只发送一次；"
+            "验证新我方消息气泡正文逐字为 freshsendproof 且输入框为空。"
+        )
+        payload["goal"]["objective"] = raw_goal
+        payload["effect_intents"][0]["effect_id"] = "send_message_freshsendproof"
+        payload["effect_intents"][0]["expected_results"] = [
+            "发送后新消息气泡正文逐字为 freshsendproof"
+        ]
+        payload["goal"]["entities"] = {
+            "recipient": "文件传输助手",
+            "input_text": "freshsendproof",
+        }
+        send = payload["subgoals"][1]
+        send["effect_ids"] = ["send_message_freshsendproof"]
+        send["completion_conditions"] = ["消息已发送，且发送后输入框为空"]
+        payload["subgoals"].append(
+            {
+                "subgoal_id": "verify_sent_message",
+                "objective": "验证新消息气泡正文与输入框状态",
+                "status": "pending",
+                "depends_on": ["send_message"],
+                "constraints": [],
+                "completion_conditions": [
+                    "新消息气泡正文逐字为 freshsendproof",
+                    "输入框为空",
+                ],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "observe",
+            }
+        )
+
+        graph = DeepSeekTaskGraphPlanner(OneResponseProvider(payload)).plan(
+            raw_goal,
+            device_id="device-local-01",
+            task_id="unique-effect-result",
+        )
+
+        effect = graph.risk_actions[0]
+        self.assertEqual(
+            ("消息已发送，且发送后输入框为空",),
+            effect.expected_result_texts,
+        )
+        self.assertEqual("send_message", effect.effect_kind)
+        self.assertEqual(("send_message",), effect.subgoal_ids)
+        self.assertEqual(("recipient",), effect.target_roles)
+        self.assertEqual(("input_text",), effect.payload_roles)
+        self.assertEqual("文件传输助手", graph.goal.entities["recipient"])
+        self.assertEqual("freshsendproof", graph.goal.entities["input_text"])
+
+    def test_unique_bound_result_projection_is_effect_kind_and_wording_agnostic(self):
+        payload = current_send_failure_payload()
+        payload["effect_intents"][0].update(
+            {
+                "kind": "data_mutation",
+                "expected_results": ["提交后可看到新的保存结果"],
+            }
+        )
+        payload["subgoals"][1]["completion_conditions"] = [
+            "指定记录已保存且编辑框为空"
+        ]
+
+        graph = DeepSeekTaskGraphPlanner(OneResponseProvider(payload)).plan(
+            RAW_GOAL,
+            device_id="device-local-01",
+            task_id="unique-data-mutation-result",
+        )
+
+        effect = graph.risk_actions[0]
+        self.assertEqual("data_mutation", effect.effect_kind)
+        self.assertEqual(
+            ("指定记录已保存且编辑框为空",),
+            effect.expected_result_texts,
+        )
+
+    def test_effect_result_projection_keeps_ambiguous_or_invalid_graphs_closed(self):
+        def conditions(values):
+            return lambda payload: payload["subgoals"][1].update(
+                {"completion_conditions": values}
+            )
+
+        def effect(**values):
+            return lambda payload: payload["effect_intents"][0].update(values)
+
+        mutations = (
+            conditions([]),
+            conditions(["消息已发送", "输入框为空"]),
+            conditions(["不得发送消息"]),
+            conditions(["消息尚未发送"]),
+            effect(source_subgoal_ids=["open_wechat", "send_message"]),
+            effect(source_subgoal_ids=["missing_subgoal"]),
+            effect(target_entity_roles=["missing_recipient"]),
+            effect(payload_entity_roles=["missing_payload"]),
+            lambda payload: payload["goal"]["entities"].update(
+                {"recipient": " 文件传输助手"}
+            ),
+            lambda payload: payload["goal"]["entities"].update(
+                {"input_text": "bad\rpayload"}
+            ),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(case=index):
+                payload = current_send_failure_payload()
+                payload["effect_intents"][0]["expected_results"] = [
+                    "发送结果可见"
+                ]
+                mutate(payload)
+                planner = DeepSeekTaskGraphPlanner(OneResponseProvider(payload))
+
+                with self.assertRaises(TaskGraphError):
+                    planner.plan(
+                        RAW_GOAL,
+                        device_id="device-local-01",
+                        task_id=f"closed-effect-result-{index}",
+                    )
+
     def test_constraint_wording_never_changes_shadow_risk(self):
         variants = (
             "确认发送对象为文件传输助手",

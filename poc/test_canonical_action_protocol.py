@@ -15,6 +15,7 @@ from verified_text_transaction import plan_from_input_states
 from canonical_action_protocol import (
     CANONICAL_ACTION_PROTOCOL,
     CanonicalActionProtocolError,
+    canonical_candidate_expected_result,
     compile_canonical_action_catalog,
     select_canonical_action_candidate,
 )
@@ -398,6 +399,195 @@ class CanonicalActionProtocolTests(unittest.TestCase):
         self.assertEqual(
             "draftmore",
             matches[0].transition.expectations[0].value,
+        )
+
+    def test_chinese_input_first_commits_preedit_then_unique_candidate(self) -> None:
+        semantic_ir = input_ir(active="type_last_char")
+        semantic_ir = replace(
+            semantic_ir,
+            entities=tuple(
+                replace(item, value="你好")
+                if item.role == "input_text"
+                else item
+                for item in semantic_ir.entities
+            ),
+        )
+        current_scene = scene(
+            element(
+                "input",
+                label="消息",
+                meaning="application_text_input",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "chinese_pinyin",
+                    "keyboard_case_mode": "lower",
+                    "input_field_id": "field_primary",
+                },
+            )
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            semantic_ir,
+            {"tap_semantic", "input_verified_text"},
+        )
+        candidate = next(
+            item
+            for item in report.candidates
+            if item.action_kind == "input_verified_text"
+        )
+
+        self.assertEqual(
+            {
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {
+                        "value": "",
+                        "ime_preedit_text": "nihao",
+                        "ime_exact_candidate_text": "你好",
+                    },
+                }
+            },
+            canonical_candidate_expected_result(candidate, current_scene),
+        )
+
+        candidate_scene = replace(
+            current_scene,
+            elements=(
+                replace(
+                    current_scene.elements[0],
+                    states={
+                        **current_scene.elements[0].states,
+                        "goal_relevant": False,
+                        "ime_preedit_text": "nihao",
+                        "ime_exact_candidate_text": "你好",
+                    },
+                ),
+                element(
+                    "local_audited_ime_candidate_1",
+                    label="你好",
+                    meaning="ime_exact_candidate",
+                    states={
+                        "goal_relevant": True,
+                        "ime_candidate": True,
+                        "input_element_id": "input",
+                        "prior_input_value": "",
+                        "expected_input_value": "你好",
+                        "pinyin": "nihao",
+                    },
+                    bounds=(0.1, 0.6, 0.25, 0.66),
+                ),
+            ),
+        )
+        candidate_report = compile_canonical_action_catalog(
+            candidate_scene,
+            semantic_ir,
+            {"tap_semantic", "input_verified_text"},
+        )
+        candidate_tap = next(
+            item
+            for item in candidate_report.candidates
+            if item.action_kind == "tap_semantic"
+            and item.parameters.get("element_id")
+            == "local_audited_ime_candidate_1"
+        )
+        self.assertEqual(
+            {
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {"value": "你好"},
+                }
+            },
+            canonical_candidate_expected_result(candidate_tap, candidate_scene),
+        )
+
+    def test_chinese_preedit_projection_varies_without_changing_latin_steps(self) -> None:
+        semantic_ir = input_ir(active="type_last_char")
+        semantic_ir = replace(
+            semantic_ir,
+            entities=tuple(
+                replace(item, value="验收")
+                if item.role == "input_text"
+                else item
+                for item in semantic_ir.entities
+            ),
+        )
+        current_scene = scene(
+            element(
+                "input",
+                label="备注",
+                meaning="application_text_input",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "chinese_pinyin",
+                    "keyboard_case_mode": "lower",
+                    "input_field_id": "field_primary",
+                },
+            )
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            semantic_ir,
+            {"tap_semantic", "input_verified_text"},
+        )
+        candidate = next(
+            item
+            for item in report.candidates
+            if item.action_kind == "input_verified_text"
+        )
+        states = canonical_candidate_expected_result(candidate, current_scene)[
+            "element_state"
+        ]["states"]
+        self.assertEqual("yanshou", states["ime_preedit_text"])
+        self.assertEqual("验收", states["ime_exact_candidate_text"])
+        self.assertEqual("", states["value"])
+
+        latin_ir = replace(
+            semantic_ir,
+            entities=tuple(
+                replace(item, value="agent")
+                if item.role == "input_text"
+                else item
+                for item in semantic_ir.entities
+            ),
+        )
+        latin_scene = replace(
+            current_scene,
+            elements=(
+                replace(
+                    current_scene.elements[0],
+                    states={
+                        **current_scene.elements[0].states,
+                        "keyboard_input_mode": "direct_latin",
+                    },
+                ),
+            ),
+        )
+        latin_report = compile_canonical_action_catalog(
+            latin_scene,
+            latin_ir,
+            {"tap_semantic", "input_verified_text"},
+        )
+        latin_candidate = next(
+            item
+            for item in latin_report.candidates
+            if item.action_kind == "input_verified_text"
+        )
+        self.assertEqual(
+            {
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {"value": "agent"},
+                }
+            },
+            canonical_candidate_expected_result(latin_candidate, latin_scene),
         )
 
     def test_long_qwerty_candidate_binds_only_next_deterministic_segment(self) -> None:

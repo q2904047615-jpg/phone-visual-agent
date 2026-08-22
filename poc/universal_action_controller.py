@@ -1288,8 +1288,40 @@ class UniversalActionController:
                 if after.system_ui.navigation_bar_visible is not value:
                     raise UniversalActionError("typed system_ui 后置状态未满足。")
             elif predicate == "element.state.value" and operator == "equals":
-                if resolved.expected_input_value != value and resolved.text != value:
+                expected_transition_value = (
+                    resolved.prior_input_value
+                    if (
+                        resolved.kind == "input_verified_text"
+                        and resolved.input_method == "chinese_pinyin"
+                    )
+                    else resolved.expected_input_value
+                )
+                if expected_transition_value != value and resolved.text != value:
                     raise UniversalActionError("typed input value 与已验证事务不一致。")
+            elif (
+                predicate == "element.state.ime_preedit_text"
+                and operator == "equals"
+            ):
+                if (
+                    resolved.kind != "input_verified_text"
+                    or resolved.input_method != "chinese_pinyin"
+                    or resolved.input_pinyin != value
+                ):
+                    raise UniversalActionError(
+                        "typed 拼音组合状态与已验证中文事务不一致。"
+                    )
+            elif (
+                predicate == "element.state.ime_exact_candidate_text"
+                and operator == "equals"
+            ):
+                if (
+                    resolved.kind != "input_verified_text"
+                    or resolved.input_method != "chinese_pinyin"
+                    or resolved.input_fragment != value
+                ):
+                    raise UniversalActionError(
+                        "typed 中文候选状态与已验证中文事务不一致。"
+                    )
             elif predicate == "effect.applied" and operator == "equals":
                 if value is not True or before.fingerprint == after.fingerprint:
                     raise UniversalActionError("typed effect receipt 缺少动作后变化证据。")

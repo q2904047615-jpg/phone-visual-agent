@@ -743,6 +743,107 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
         )
         controller.verify_after_action(resolved, before, after)
 
+    def test_formal_chinese_input_verifies_preedit_before_candidate_selection(self):
+        controller = UniversalActionController()
+        before_states = {
+            "focused": True,
+            "value": "",
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "chinese_pinyin",
+            "keyboard_case_mode": "lower",
+            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+            "input_field_id": "field_primary",
+            "goal_relevant": False,
+        }
+        before = UIScene(
+            app_id="generic_app",
+            screen_id="editor",
+            summary="唯一聚焦中文输入框",
+            elements=(
+                UIElement(
+                    element_id="field",
+                    role="input",
+                    meaning="application_text_input",
+                    label="消息",
+                    bounds=(0.1, 0.1, 0.9, 0.2),
+                    confidence=0.97,
+                    states=before_states,
+                ),
+            ),
+            stable=True,
+            confidence=0.96,
+            fingerprint="before-chinese-input",
+        )
+        expected_states = {
+            "value": "",
+            "ime_preedit_text": "nihao",
+            "ime_exact_candidate_text": "你好",
+        }
+        action = SemanticAction(
+            node_id="formal-chinese-input",
+            action="input_verified_text",
+            params={
+                "element_id": "field",
+                "target": "application_text_input",
+                "role": "input",
+                "label": "消息",
+                "states": before_states,
+                "text": "你好",
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "application_text_input",
+                        "states": expected_states,
+                    }
+                },
+                "formal_candidate_id": "candidate.chinese-input",
+                "formal_report_digest": "d" * 64,
+                "formal_transition": {
+                    "transition_id": "transition.chinese-input",
+                    "precondition_claim_ids": ["claim.field"],
+                    "expectations": [
+                        {
+                            "subject_ref": "element.field",
+                            "predicate": f"element.state.{name}",
+                            "operator": "equals",
+                            "value": value,
+                        }
+                        for name, value in expected_states.items()
+                    ],
+                    "exploratory": False,
+                },
+            },
+        )
+
+        resolved = controller.resolve_one(action, before, confirmed=True)
+        after = replace(
+            before,
+            summary="拼音组合和唯一候选可见",
+            fingerprint="after-chinese-input",
+            elements=(
+                replace(
+                    before.elements[0],
+                    states={**before_states, **expected_states},
+                ),
+            ),
+        )
+        controller.verify_after_action(resolved, before, after)
+
+        wrong_candidate = replace(
+            after,
+            fingerprint="wrong-chinese-candidate",
+            elements=(
+                replace(
+                    after.elements[0],
+                    states={
+                        **after.elements[0].states,
+                        "ime_exact_candidate_text": "您好",
+                    },
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(UniversalActionError, "唯一逐字一致的中文候选"):
+            controller.verify_after_action(resolved, before, wrong_candidate)
+
     def test_press_enter_requires_newline_key_and_verifies_exact_multiline_value(self):
         controller = UniversalActionController()
         before = UIScene(

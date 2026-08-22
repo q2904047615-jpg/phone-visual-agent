@@ -115,6 +115,8 @@ EXPECTATION_PREDICATES = frozenset(
         "scene.changed",
         "element.state.focused",
         "element.state.value",
+        "element.state.ime_preedit_text",
+        "element.state.ime_exact_candidate_text",
         "element.state.keyboard_layout",
         "element.state.keyboard_input_mode",
         "element.state.keyboard_case_mode",
@@ -1458,10 +1460,14 @@ def compile_canonical_action_catalog(
                     deterministic_input_step = None
                 if deterministic_input_step is None:
                     continue
-                expected_input_value = (
-                    deterministic_input_step.expected_value
-                    if deterministic_input_step.kind == "direct_latin"
-                    else payload.value
+                expected_input_states = (
+                    {
+                        "value": deterministic_input_step.current_text,
+                        "ime_preedit_text": deterministic_input_step.pinyin,
+                        "ime_exact_candidate_text": deterministic_input_step.segment,
+                    }
+                    if deterministic_input_step.kind == "chinese_pinyin"
+                    else {"value": deterministic_input_step.expected_value}
                 )
                 payload_effects = sorted(
                     effect.effect_id
@@ -1475,13 +1481,14 @@ def compile_canonical_action_catalog(
                         affordance_ids=(input_affordance.affordance_id,),
                         relation_ids=tuple(sorted(set(unique_relation_ids))),
                         precondition_claim_ids=tuple(element_claim_ids[element.element_id]),
-                        expectations=(
+                        expectations=tuple(
                             StateExpectation(
                                 element_ref,
-                                "element.state.value",
+                                f"element.state.{state_name}",
                                 "equals",
-                                expected_input_value,
-                            ),
+                                state_value,
+                            )
+                            for state_name, state_value in expected_input_states.items()
                         ),
                         effect_ref=payload_effects[0] if len(payload_effects) == 1 else "",
                         parameters={"element_id": element.element_id},

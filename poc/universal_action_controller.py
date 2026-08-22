@@ -1514,25 +1514,6 @@ class UniversalActionController:
             before.foreground_app_id,
             after.foreground_app_id,
         )
-        if not cls._input_screen_identity_is_compatible(
-            before.screen_id,
-            after.screen_id,
-        ):
-            return False
-        if not app_identity_compatible:
-            if (
-                cls._input_app_identity_is_concrete_package(
-                    before.foreground_app_id
-                )
-                or cls._input_app_identity_is_concrete_package(
-                    after.foreground_app_id
-                )
-            ):
-                return False
-            before_family = cls._input_screen_identity_family(before.screen_id)
-            after_family = cls._input_screen_identity_family(after.screen_id)
-            if not before_family or before_family != after_family:
-                return False
         before_states = before_input.states
         after_states = after_input.states
         typed_field_id = str(before_states.get("input_field_id") or "").strip()
@@ -1559,6 +1540,29 @@ class UniversalActionController:
                 and before_field_label != after_field_label
             )
         )
+        screen_identity_compatible = cls._input_screen_identity_is_compatible(
+            before.screen_id,
+            after.screen_id,
+        )
+        if not screen_identity_compatible and not typed_field_identity:
+            return False
+        if not app_identity_compatible:
+            if (
+                cls._input_app_identity_is_concrete_package(
+                    before.foreground_app_id
+                )
+                or cls._input_app_identity_is_concrete_package(
+                    after.foreground_app_id
+                )
+            ):
+                return False
+            before_family = cls._input_screen_identity_family(before.screen_id)
+            after_family = cls._input_screen_identity_family(after.screen_id)
+            if (
+                (not before_family or before_family != after_family)
+                and not typed_field_identity
+            ):
+                return False
         if not (
             cls._input_regions_stably_overlap(
                 before_input.bounds,

@@ -2846,6 +2846,128 @@ class GenericActionAdapterTests(unittest.TestCase):
             UniversalActionController._input_screen_identity_family("unknown"),
         )
 
+    def test_typed_field_identity_bridges_only_model_screen_wording_drift(self):
+        states = {
+            "focused": True,
+            "fully_visible": True,
+            "value": "first\n",
+            "input_field_id": "input_field_1",
+            "input_multiline": True,
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "goal_relevant": True,
+        }
+        before = UIScene(
+            app_id="unknown",
+            screen_id="通用动作具机验收页",
+            summary="同一多行输入框",
+            elements=(
+                UIElement(
+                    element_id="before-field",
+                    role="input",
+                    meaning="application_text_input",
+                    label="first",
+                    bounds=(0.14, 0.52, 0.71, 0.60),
+                    confidence=1.0,
+                    states=states,
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint="before",
+            camera_alignment=aligned_camera_facts(),
+        )
+        after = replace(
+            before,
+            screen_id="通用动作真机验收页",
+            fingerprint="after",
+            elements=(
+                replace(
+                    before.elements[0],
+                    element_id="after-field",
+                    bounds=(0.13, 0.51, 0.72, 0.61),
+                    label="first\nsecond",
+                    states={**states, "value": "first\nsecond"},
+                ),
+            ),
+        )
+        resolved = ResolvedSemanticAction(
+            node_id="append-second",
+            kind="input_verified_text",
+            text="first\nsecond",
+            input_fragment="second",
+            input_method="direct_latin",
+            prior_input_value="first\n",
+            expected_input_value="first\nsecond",
+            target_element_id="before-field",
+            before_fingerprint=before.fingerprint,
+            expected_effect={
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {"value": "first\nsecond"},
+                }
+            },
+            formal_candidate_id="candidate-append-second",
+            formal_transition={
+                "transition_id": "transition-append-second",
+                "precondition_claim_ids": ["claim-append-second"],
+                "expectations": [
+                    {
+                        "subject_ref": "element.input_field_1",
+                        "predicate": "element.state.value",
+                        "operator": "equals",
+                        "value": "first\nsecond",
+                    }
+                ],
+                "exploratory": False,
+            },
+        )
+
+        UniversalActionController().verify_after_action(resolved, before, after)
+
+        different_field = replace(
+            after,
+            elements=(
+                replace(
+                    after.elements[0],
+                    states={
+                        **after.elements[0].states,
+                        "input_field_id": "input_field_2",
+                    },
+                ),
+            ),
+        )
+        concrete_before = replace(before, app_id="com.example.source")
+        different_package = replace(after, app_id="com.example.other")
+        changed_mode = replace(
+            after,
+            elements=(
+                replace(
+                    after.elements[0],
+                    states={
+                        **after.elements[0].states,
+                        "keyboard_input_mode": "chinese_pinyin",
+                    },
+                ),
+            ),
+        )
+        for unsafe_before, unsafe_after in (
+            (before, different_field),
+            (concrete_before, different_package),
+            (before, changed_mode),
+        ):
+            with self.subTest(
+                before_app_id=unsafe_before.app_id,
+                app_id=unsafe_after.app_id,
+                states=unsafe_after.elements[0].states,
+            ):
+                with self.assertRaises(UniversalActionError):
+                    UniversalActionController().verify_after_action(
+                        resolved,
+                        unsafe_before,
+                        unsafe_after,
+                    )
+
     def test_post_action_second_verified_scene_clears_transient_mismatch(self):
         states = {
             "focused": True,

@@ -922,6 +922,130 @@ class GenericSingleActionAdapter:
             return None
         return target
 
+    @classmethod
+    def _recover_omitted_verified_input_scene(
+        cls,
+        requested: SemanticAction,
+        planned_scene: UIScene,
+        fresh_scene: UIScene,
+    ) -> UIScene | None:
+        """Restore one typed field omitted after its placeholder disappears.
+
+        This is only a seed for the mandatory fresh crop geometry audit.  The
+        stable confirmation frames prove that the pixels did not change, while
+        the typed field id and the exact authorized-text prefix prove which
+        input transaction is continuing.  Any visible conflicting/duplicate
+        input remains fail-closed.
+        """
+
+        if requested.action != "input_verified_text" or not str(
+            requested.params.get("formal_candidate_id") or ""
+        ).strip():
+            return None
+        target_id = str(requested.params.get("element_id") or "").strip()
+        try:
+            target = planned_scene.get_element(target_id)
+        except UISceneError:
+            return None
+        states = dict(target.states)
+        field_id = str(states.get("input_field_id") or "").strip()
+        prior_value = states.get("value")
+        authorized_text = requested.params.get("text")
+        expected = requested.params.get("expected_effect")
+        expected_element = (
+            expected.get("element_state") if isinstance(expected, dict) else None
+        )
+        expected_states = (
+            expected_element.get("states")
+            if isinstance(expected_element, dict)
+            else None
+        )
+        expected_value = (
+            expected_states.get("value")
+            if isinstance(expected_states, dict)
+            else None
+        )
+        if (
+            target.role != "input"
+            or target.meaning != "application_text_input"
+            or field_id in {"", "unknown"}
+            or states.get("focused") is not True
+            or states.get("fully_visible") is not True
+            or not isinstance(prior_value, str)
+            or not isinstance(authorized_text, str)
+            or not isinstance(expected_element, dict)
+            or not isinstance(expected_value, str)
+            or not authorized_text.startswith(expected_value)
+            or not expected_value.startswith(prior_value)
+            or expected_value == prior_value
+            or requested.params.get("target") != target.meaning
+            or requested.params.get("role") != target.role
+            or requested.params.get("label") != target.label
+            or requested.params.get("states") != states
+            or expected_element.get("meaning") != target.meaning
+        ):
+            return None
+
+        input_like = tuple(
+            element
+            for element in fresh_scene.elements
+            if element.role == "input"
+            or element.meaning == "application_text_input"
+        )
+        if input_like:
+            def visible_value_is_same_prefix(element: UIElement) -> bool:
+                observed = element.states.get("value")
+                if observed == prior_value:
+                    return True
+                if not isinstance(observed, str) or not observed:
+                    return False
+                hidden_suffix = prior_value[len(observed) :]
+                return (
+                    prior_value.startswith(observed)
+                    and bool(hidden_suffix)
+                    and len(hidden_suffix) <= 3
+                    and not hidden_suffix.replace("\r", "").replace("\n", "")
+                    and any(observed in str(item) for item in element.evidence)
+                )
+
+            compatible = tuple(
+                element
+                for element in input_like
+                if element.role == "input"
+                and element.meaning == "application_text_input"
+                and element.states.get("focused") is True
+                and visible_value_is_same_prefix(element)
+                and str(element.states.get("input_field_id") or "").strip()
+                in {"", field_id}
+            )
+            if len(input_like) != 1 or len(compatible) != 1:
+                return None
+            visible = compatible[0]
+            recovered = replace(
+                target,
+                bounds=visible.bounds,
+                confidence=min(target.confidence, visible.confidence),
+                evidence=tuple(visible.evidence)
+                + (
+                    "稳定同帧、typed input_field_id 与授权文字精确前缀续接同一输入框",
+                ),
+            )
+            retained = tuple(
+                element for element in fresh_scene.elements if element is not visible
+            )
+        else:
+            recovered = replace(
+                target,
+                evidence=target.evidence
+                + (
+                    "稳定同帧、typed input_field_id 与授权文字精确前缀续接同一输入框",
+                ),
+            )
+            retained = fresh_scene.elements
+        restored = replace(fresh_scene, elements=retained + (recovered,))
+        restored.validate()
+        return restored
+
     def capability_gap(
         self,
         requested_action: str,
@@ -1746,6 +1870,13 @@ class GenericSingleActionAdapter:
                     raise GenericActionAdapterError(
                         "当前观察器没有独立目标几何审计，拒绝几何绑定动作。"
                     )
+                recovered_input_scene = self._recover_omitted_verified_input_scene(
+                    requested_action,
+                    planned_scene,
+                    before,
+                )
+                if recovered_input_scene is not None:
+                    before = recovered_input_scene
                 local_input_recovery = (
                     self._local_input_auxiliary_recovery_target(
                         requested_action,

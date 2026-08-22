@@ -1431,6 +1431,237 @@ class GenericActionAdapterTests(unittest.TestCase):
             )
         )
 
+    def test_typed_field_identity_recovers_placeholder_loss_only_for_exact_prefix(self):
+        def typed_scene(fingerprint, value="first\n"):
+            source = self._literal_input_scene(
+                fingerprint,
+                value=value,
+                include_key=False,
+            )
+            field = source.elements[0]
+            return replace(
+                source,
+                elements=(
+                    replace(
+                        field,
+                        label="first",
+                        states={
+                            **field.states,
+                            "input_field_id": "input_field_1",
+                            "input_multiline": True,
+                            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+                        },
+                    ),
+                ),
+            )
+
+        planned = typed_scene("planned")
+        field = planned.elements[0]
+        expected_effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": "first\nsecond"},
+            }
+        }
+        requested = SemanticAction(
+            node_id="append-second",
+            action="input_verified_text",
+            params={
+                "formal_candidate_id": "candidate-append-second",
+                "element_id": field.element_id,
+                "target": field.meaning,
+                "role": field.role,
+                "label": field.label,
+                "states": dict(field.states),
+                "text": "first\nsecond",
+                "expected_effect": expected_effect,
+            },
+        )
+        empty_fresh = replace(planned, fingerprint="fresh", elements=())
+
+        recovered = GenericSingleActionAdapter._recover_omitted_verified_input_scene(
+            requested,
+            planned,
+            empty_fresh,
+        )
+
+        self.assertIsNotNone(recovered)
+        recovered_field = recovered.get_element("local_audited_input_1")
+        self.assertEqual("input_field_1", recovered_field.states["input_field_id"])
+        self.assertEqual("first\n", recovered_field.states["value"])
+        self.assertIn("授权文字精确前缀", recovered_field.evidence[-1])
+
+        visible_without_typed_id = replace(
+            empty_fresh,
+            elements=(
+                replace(
+                    field,
+                    element_id="fresh-visible-input",
+                    bounds=(0.14, 0.51, 0.72, 0.61),
+                    states={
+                        key: ("first" if key == "value" else value)
+                        for key, value in field.states.items()
+                        if key != "input_field_id"
+                    },
+                    evidence=("应用输入框当前文字：first", "caret"),
+                ),
+                UIElement(
+                    element_id="fresh-enter",
+                    role="button",
+                    meaning="input_exact_enter_key",
+                    label="↵",
+                    bounds=(0.82, 0.89, 0.94, 0.96),
+                    confidence=1.0,
+                    states={
+                        "input_enter_key": True,
+                        "input_field_id": "input_field_1",
+                    },
+                    evidence=("可见换行键",),
+                ),
+            ),
+        )
+        varied = GenericSingleActionAdapter._recover_omitted_verified_input_scene(
+            requested,
+            planned,
+            visible_without_typed_id,
+        )
+        self.assertIsNotNone(varied)
+        varied_field = varied.get_element("local_audited_input_1")
+        self.assertEqual((0.14, 0.51, 0.72, 0.61), varied_field.bounds)
+        self.assertEqual("input_field_1", varied_field.states["input_field_id"])
+
+        wrong_prefix = replace(
+            requested,
+            params={
+                **requested.params,
+                "text": "other\nsecond",
+            },
+        )
+        duplicate = replace(
+            empty_fresh,
+            elements=(field, replace(field, element_id="duplicate-field")),
+        )
+        for unsafe_request, unsafe_fresh in (
+            (wrong_prefix, empty_fresh),
+            (requested, duplicate),
+        ):
+            with self.subTest(
+                text=unsafe_request.params["text"],
+                element_count=len(unsafe_fresh.elements),
+            ):
+                self.assertIsNone(
+                    GenericSingleActionAdapter._recover_omitted_verified_input_scene(
+                        unsafe_request,
+                        planned,
+                        unsafe_fresh,
+                    )
+                )
+
+    def test_placeholder_loss_recovery_executes_only_authorized_suffix(self):
+        gray = Image.new("RGB", (540, 960), "gray")
+
+        def typed_scene(fingerprint, value, *, bounds=(0.15, 0.53, 0.70, 0.59)):
+            source = self._literal_input_scene(
+                fingerprint,
+                value=value,
+                include_key=False,
+            )
+            field = source.elements[0]
+            return replace(
+                source,
+                elements=(
+                    replace(
+                        field,
+                        label="first",
+                        bounds=bounds,
+                        states={
+                            **field.states,
+                            "input_field_id": "input_field_1",
+                            "input_multiline": True,
+                            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+                        },
+                    ),
+                ),
+            )
+
+        planned = typed_scene("planned", "first\n")
+        fresh_missing = replace(planned, fingerprint="fresh", elements=())
+        planned_audited = typed_scene("planned-audited", "first\n")
+        fresh_audited = typed_scene(
+            "fresh-audited",
+            "first\n",
+            bounds=(0.14, 0.52, 0.71, 0.60),
+        )
+        after = typed_scene("after", "first\nsecond")
+        observer = FakeSceneObserver(
+            [fresh_missing, after],
+            geometry_scenes=[planned_audited, fresh_audited],
+        )
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+            qwerty_row_snapper=lambda _frames, anchors: anchors,
+            require_local_qwerty_row_snap=True,
+        )
+        field = planned.elements[0]
+        expected = "first\nsecond"
+
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="append-second",
+                action="input_verified_text",
+                params={
+                    "formal_candidate_id": "candidate-append-second",
+                    "formal_report_digest": "a" * 64,
+                    "formal_transition": {
+                        "transition_id": "transition-append-second",
+                        "precondition_claim_ids": ["claim-append-second"],
+                        "expectations": [
+                            {
+                                "subject_ref": "element.input_field_1",
+                                "predicate": "element.state.value",
+                                "operator": "equals",
+                                "value": expected,
+                            }
+                        ],
+                        "exploratory": False,
+                    },
+                    "element_id": field.element_id,
+                    "target": field.meaning,
+                    "role": field.role,
+                    "label": field.label,
+                    "states": dict(field.states),
+                    "text": expected,
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": field.meaning,
+                            "states": {"value": expected},
+                        }
+                    },
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=tuple(gray.copy() for _ in range(4)),
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("input", "second")], robot.actions)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("matched", result.action_outcome)
+        self.assertEqual("input_field_1", result.before_scene.elements[0].states["input_field_id"])
+        self.assertEqual(
+            [
+                ("local_audited_input_1",),
+                ("local_audited_input_1",),
+            ],
+            observer.geometry_audit_calls,
+        )
+
     def test_completed_navigation_observes_result_without_source_target(self):
         planned = scene("planned")
         fresh = replace(planned, fingerprint="fresh")

@@ -546,6 +546,66 @@ class ObservationBridge:
         value = transaction.get("text")
         return value if isinstance(value, str) else ""
 
+    @staticmethod
+    def _active_input_verification_projection(
+        graph: DynamicTaskGraph,
+        active: Any,
+    ) -> dict[str, Any]:
+        """Project exact typed values needed by the current read-only node.
+
+        A multi-field graph keeps its complete ``input_fields`` authority at
+        the task root.  Copying that nested array into the active visual
+        context both exposes future writes to the current observation and
+        exceeds the observer's deliberately bounded context depth.  A final
+        verification node still needs every exact desired value, so expose
+        parallel typed maps whose leaves stay within that existing bound.
+        """
+
+        if active is None or active.external_impact != "read_only":
+            return {}
+        try:
+            semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+        except TaskSemanticIRError:
+            return {}
+        typed_subgoal = next(
+            (
+                item
+                for item in semantic_ir.subgoals
+                if item.subgoal_id == active.subgoal_id
+            ),
+            None,
+        )
+        if typed_subgoal is None:
+            return {}
+        desired_by_id = {
+            item.state_id: item for item in semantic_ir.desired_states
+        }
+        fields_by_payload = {
+            item.payload_ref: item for item in semantic_ir.input_fields
+        }
+        values: dict[str, str] = {}
+        labels: dict[str, str] = {}
+        for state_ref in typed_subgoal.desired_state_refs:
+            state = desired_by_id.get(state_ref)
+            if (
+                state is None
+                or state.predicate != "input.value_equals"
+                or not isinstance(state.value, str)
+            ):
+                continue
+            field = fields_by_payload.get(state.subject_ref)
+            if field is None:
+                continue
+            values[field.field_id] = state.value
+            if field.field_label:
+                labels[field.field_id] = field.field_label
+        if not values:
+            return {}
+        result: dict[str, Any] = {"desired_input_values": values}
+        if labels:
+            result["desired_input_labels"] = labels
+        return result
+
     def goal_draft(self, graph: DynamicTaskGraph) -> GenericIntentDraft:
         graph.validate()
         target_surface = str(
@@ -576,7 +636,14 @@ class ObservationBridge:
         if graph.raw_user_goal.strip():
             entities["original_goal_visual_context"] = graph.raw_user_goal.strip()
         if active is not None:
-            active_goal_entities = dict(graph.goal.entities)
+            # The complete typed graph remains at the root.  The observation
+            # focus contains only current-step authority and shallow,
+            # non-input visual hints; it must not repeat the whole field list.
+            active_goal_entities = {
+                key: value
+                for key, value in graph.goal.entities.items()
+                if key != "input_fields"
+            }
             for local_marker in (
                 "active_input_transaction_text",
                 "active_input_field_id",
@@ -602,6 +669,10 @@ class ObservationBridge:
                     ]
                 active_goal_entities["active_input_multiline"] = bool(
                     active_input.get("multiline")
+                )
+            else:
+                active_goal_entities.update(
+                    self._active_input_verification_projection(graph, active)
                 )
             entities["active_subgoal_visual_context"] = {
                 "subgoal_id": active.subgoal_id,

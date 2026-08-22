@@ -39,6 +39,7 @@ from generic_scene_observer import (
     _parse_targeted_scene_delta,
     _parse_scene,
     _scene_enum_values,
+    _safe_goal_context,
     _single_json_structural_edits,
     _snap_reload_audit_to_local_glyph,
     _strict_icon_cluster_audit_payload,
@@ -423,6 +424,20 @@ def audited_application_input(
 
 
 class GenericSceneObserverTests(unittest.TestCase):
+    def test_goal_context_still_rejects_genuinely_excessive_nesting(self) -> None:
+        context = {
+            "level_1": {
+                "level_2": {
+                    "level_3": {
+                        "level_4": {"level_5": {"level_6": "too deep"}}
+                    }
+                }
+            }
+        }
+
+        with self.assertRaisesRegex(VisionAgentError, "目标上下文嵌套过深"):
+            _safe_goal_context(context)
+
     def test_verified_navigation_result_uses_one_compact_coordinate_space(self) -> None:
         payload = scene_payload()
         payload.update(

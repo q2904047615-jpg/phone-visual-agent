@@ -23,6 +23,7 @@ from deepseek_task_graph import (
     _graph_from_payload,
 )
 from generic_step_planner import GenericStepProposal
+from generic_scene_observer import _safe_goal_context
 from generic_action_adapter import (
     GenericActionAdapterError,
     GenericActionExecutionResult,
@@ -30,6 +31,7 @@ from generic_action_adapter import (
 from semantic_action import SemanticAction
 from ui_scene import SystemUIFacts, UIElement, UIScene
 from universal_action_controller import ResolvedSemanticAction
+from vision_agent import VisionAgentError
 from qwen_visual_decision import QwenTaskContext, _scene_matches_target_app_surface
 from task_semantic_ir import compile_formal_semantic_authority
 from canonical_action_protocol import compile_canonical_action_catalog
@@ -275,6 +277,133 @@ def _graph(*, device_id: str = "device-1") -> DynamicTaskGraph:
         ),
         active_subgoal_id="subgoal-1",
         raw_user_goal="看看图片工具里的风景分类",
+    )
+    graph.validate()
+    return graph
+
+
+def _multifield_graph(
+    *,
+    fields: tuple[tuple[str, str, str], ...] = (
+        ("subject_field", "主题", "first"),
+        ("body_field", "正文", "second"),
+    ),
+    active_subgoal_id: str = "input_subject",
+) -> DynamicTaskGraph:
+    field_by_id = {field_id: (label, text) for field_id, label, text in fields}
+    subject_label, subject_text = field_by_id["subject_field"]
+    body_label, body_text = field_by_id["body_field"]
+    statuses = {
+        "input_subject": (
+            "active" if active_subgoal_id == "input_subject" else "completed"
+        ),
+        "input_body": (
+            "pending"
+            if active_subgoal_id == "input_subject"
+            else "active" if active_subgoal_id == "input_body" else "completed"
+        ),
+        "verify_fields": (
+            "active" if active_subgoal_id == "verify_fields" else "pending"
+        ),
+    }
+
+    def completed_evidence(subgoal_id: str) -> tuple[str, ...]:
+        return (
+            ("主题字段已逐字核对",)
+            if subgoal_id == "input_subject"
+            else ("正文字段已逐字核对",)
+        ) if statuses[subgoal_id] == "completed" else ()
+
+    graph = DynamicTaskGraph(
+        task_id="multifield-observation-task",
+        device_id="device-local-01",
+        revision=1,
+        status="running",
+        goal=GraphGoal(
+            objective=(
+                f"在{subject_label}字段输入 {subject_text}，再在{body_label}字段输入 "
+                f"{body_text}，最后同时逐字核对"
+            ),
+            target_apps=(
+                TargetApp(
+                    app_id="current_foreground",
+                    app_name="当前前台应用",
+                ),
+            ),
+            entities={
+                "input_fields": [
+                    {
+                        "field_id": field_id,
+                        "field_label": label,
+                        "text": text,
+                    }
+                    for field_id, label, text in fields
+                ],
+                "target_surface": "current_surface",
+            },
+        ),
+        constraints=("不要发送或提交",),
+        completion_conditions=(
+            CompletionCondition(
+                condition_id="both_fields_exact",
+                description=(
+                    f"{subject_label}字段逐字为 {subject_text} 且"
+                    f"{body_label}字段逐字为 {body_text}"
+                ),
+                evidence_required=("两个字段当前值同时可见",),
+            ),
+        ),
+        risk_actions=(),
+        subgoals=(
+            Subgoal(
+                subgoal_id="input_subject",
+                objective=f"在{subject_label}字段输入 {subject_text}",
+                status=statuses["input_subject"],
+                depends_on=(),
+                constraints=("不要发送或提交",),
+                completion_conditions=(
+                    f"{subject_label}字段逐字为 {subject_text}",
+                ),
+                completion_evidence=completed_evidence("input_subject"),
+                risk_action_ids=(),
+                external_impact="navigation_only",
+            ),
+            Subgoal(
+                subgoal_id="input_body",
+                objective=f"在{body_label}字段输入 {body_text}",
+                status=statuses["input_body"],
+                depends_on=("input_subject",),
+                constraints=("不要发送或提交",),
+                completion_conditions=(
+                    f"{body_label}字段逐字为 {body_text}",
+                ),
+                completion_evidence=completed_evidence("input_body"),
+                risk_action_ids=(),
+                external_impact="navigation_only",
+            ),
+            Subgoal(
+                subgoal_id="verify_fields",
+                objective=(
+                    f"同时逐字核对{subject_label}为 {subject_text}、"
+                    f"{body_label}为 {body_text}"
+                ),
+                status=statuses["verify_fields"],
+                depends_on=("input_subject", "input_body"),
+                constraints=("只读核对",),
+                completion_conditions=(
+                    f"{subject_label}字段逐字为 {subject_text}",
+                    f"{body_label}字段逐字为 {body_text}",
+                ),
+                completion_evidence=(),
+                risk_action_ids=(),
+                external_impact="read_only",
+            ),
+        ),
+        active_subgoal_id=active_subgoal_id,
+        raw_user_goal=(
+            f"在{subject_label}字段输入 {subject_text}，再在{body_label}字段输入 "
+            f"{body_text}，最后同时逐字核对；不要发送或提交"
+        ),
     )
     graph.validate()
     return graph
@@ -1173,6 +1302,105 @@ class ObservationBridgeTests(unittest.TestCase):
             "active_input_transaction_text",
             unrelated_focus["goal_entities"],
         )
+
+    def test_multifield_live_context_projects_only_current_typed_field(self) -> None:
+        graph = _multifield_graph()
+
+        goal = self.bridge.goal_draft(graph)
+        focus = goal.entities["active_subgoal_visual_context"]
+        observation_context = {
+            "device_id": graph.device_id,
+            "objective": focus["objective"],
+            "entities": goal.entities,
+            "constraints": list(goal.constraints),
+            "completion_conditions": list(focus["completion_conditions"]),
+            "execution_class": focus["execution_class"],
+        }
+
+        self.assertEqual(
+            graph.goal.entities["input_fields"],
+            goal.entities["input_fields"],
+        )
+        self.assertNotIn("input_fields", focus["goal_entities"])
+        self.assertEqual(
+            {
+                "active_input_transaction_text": "first",
+                "active_input_field_id": "subject_field",
+                "active_input_field_label": "主题",
+                "active_input_multiline": False,
+            },
+            {
+                key: focus["goal_entities"][key]
+                for key in (
+                    "active_input_transaction_text",
+                    "active_input_field_id",
+                    "active_input_field_label",
+                    "active_input_multiline",
+                )
+            },
+        )
+        self.assertEqual("current_surface", focus["goal_entities"]["target_surface"])
+        self.assertIsInstance(_safe_goal_context(observation_context), dict)
+
+        historical_context = json.loads(json.dumps(observation_context))
+        historical_context["entities"]["active_subgoal_visual_context"][
+            "goal_entities"
+        ]["input_fields"] = list(graph.goal.entities["input_fields"])
+        with self.assertRaisesRegex(VisionAgentError, "目标上下文嵌套过深"):
+            _safe_goal_context(historical_context)
+
+    def test_multifield_projection_tracks_field_identity_across_order_and_labels(self) -> None:
+        cases = (
+            (
+                (
+                    ("subject_field", "标题", "alpha"),
+                    ("body_field", "备注", "beta"),
+                ),
+                "input_subject",
+                ("subject_field", "标题", "alpha"),
+            ),
+            (
+                (
+                    ("body_field", "内容", "delta"),
+                    ("subject_field", "名称", "gamma"),
+                ),
+                "input_body",
+                ("body_field", "内容", "delta"),
+            ),
+        )
+        for fields, active_subgoal_id, expected in cases:
+            with self.subTest(active_subgoal_id=active_subgoal_id):
+                graph = _multifield_graph(
+                    fields=fields,
+                    active_subgoal_id=active_subgoal_id,
+                )
+
+                focus = self.bridge.goal_draft(graph).entities[
+                    "active_subgoal_visual_context"
+                ]["goal_entities"]
+
+                self.assertNotIn("input_fields", focus)
+                self.assertEqual(expected[0], focus["active_input_field_id"])
+                self.assertEqual(expected[1], focus["active_input_field_label"])
+                self.assertEqual(expected[2], focus["active_input_transaction_text"])
+
+    def test_multifield_final_verify_keeps_two_typed_desired_states(self) -> None:
+        graph = _multifield_graph(active_subgoal_id="verify_fields")
+
+        goal = self.bridge.goal_draft(graph)
+        focus = goal.entities["active_subgoal_visual_context"]["goal_entities"]
+
+        self.assertEqual(2, len(goal.entities["input_fields"]))
+        self.assertNotIn("input_fields", focus)
+        self.assertEqual(
+            {"subject_field": "first", "body_field": "second"},
+            focus["desired_input_values"],
+        )
+        self.assertEqual(
+            {"subject_field": "主题", "body_field": "正文"},
+            focus["desired_input_labels"],
+        )
+        self.assertNotIn("active_input_transaction_text", focus)
 
     def test_current_open_app_node_projects_exact_app_label_without_mutating_graph(self) -> None:
         for app_id, app_name, verb in (

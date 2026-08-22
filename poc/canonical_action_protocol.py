@@ -725,9 +725,24 @@ def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> boo
     return len(title_matches) == 1
 
 
+def _exact_tap_text_target_eligible(element: UIElement) -> bool:
+    """Admit only an exact-authorized visible text target for a semantic tap."""
+
+    return (
+        element.role == "text"
+        and float(element.confidence) >= MIN_ELEMENT_CONFIDENCE
+        and element.states.get("enabled") is not False
+        and element.states.get("visible") is not False
+        and element.states.get("fully_visible") is True
+        and element.states.get("goal_relevant") is True
+    )
+
+
 def _unique_exact_matches(
     elements: tuple[UIElement, ...],
     entity: SemanticEntity,
+    *,
+    allow_exact_tap_text: bool = False,
 ) -> tuple[UIElement, ...]:
     if not isinstance(entity.value, str) or not entity.value:
         return ()
@@ -735,7 +750,13 @@ def _unique_exact_matches(
     return tuple(
         element
         for element in elements
-        if _element_eligible(element)
+        if (
+            _element_eligible(element)
+            or (
+                allow_exact_tap_text
+                and _exact_tap_text_target_eligible(element)
+            )
+        )
         and literal
         in {
             element.label.strip().casefold(),
@@ -1041,9 +1062,28 @@ def compile_canonical_action_catalog(
             direct_payload_bindings.add(
                 (element.element_id, effect.effect_id, entity.entity_id)
             )
+    exact_tap_authority = bool(
+        active_subgoal.subgoal_id == "exact_tap_semantic"
+        and active_required_actions == {"tap_semantic"}
+    )
+    exact_tap_text_element_ids: set[str] = set()
     for entity in semantic_ir.entities:
-        matches = _unique_exact_matches(sorted_elements, entity)
+        allow_exact_tap_text = bool(
+            exact_tap_authority
+            and entity.role == "target_ui_label"
+        )
+        matches = _unique_exact_matches(
+            sorted_elements,
+            entity,
+            allow_exact_tap_text=allow_exact_tap_text,
+        )
         exact_elements_by_entity[entity.entity_id] = matches
+        if (
+            allow_exact_tap_text
+            and len(matches) == 1
+            and matches[0].role == "text"
+        ):
+            exact_tap_text_element_ids.add(matches[0].element_id)
         for element in matches:
             literal_claims = tuple(
                 claim_id
@@ -1117,14 +1157,16 @@ def compile_canonical_action_catalog(
                 continue
             affordances.append(_affordance(surface_ref, action_kind, surface_claim_ids))
     for element in sorted_elements:
-        if not _element_eligible(element):
+        normally_actionable = _element_eligible(element)
+        exact_tap_text_target = element.element_id in exact_tap_text_element_ids
+        if not normally_actionable and not exact_tap_text_target:
             continue
         supported: set[str] = set()
         if "tap_semantic" in available:
             supported.add("tap_semantic")
-        if "long_press" in available:
+        if normally_actionable and "long_press" in available:
             supported.add("long_press")
-        if "drag" in available:
+        if normally_actionable and "drag" in available:
             supported.add("drag")
         if element.role == "input" and element.states.get("focused") is True:
             active_field = active_input_fields[0] if len(active_input_fields) == 1 else None

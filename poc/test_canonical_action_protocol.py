@@ -128,6 +128,44 @@ def input_ir(*, active: str) -> TaskSemanticIR:
     )
 
 
+def exact_tap_ir(*, target_label: str) -> TaskSemanticIR:
+    target = SemanticEntity(
+        entity_id="entity_exact_tap_target",
+        entity_type="ui_literal",
+        role="target_ui_label",
+        value=target_label,
+    )
+    required_tap = ConstraintIntent(
+        constraint_id="constraint.exact_tap",
+        kind="required_action",
+        value="tap_semantic",
+        source_text="点击当前画面中的目标控件",
+        authoritative=True,
+    )
+    return TaskSemanticIR(
+        task_id="task-exact-tap",
+        device_id="device-1",
+        revision=1,
+        raw_goal=f"点击{target_label}",
+        surfaces=(SurfaceRef("surface_current", "current_surface"),),
+        entities=(target,),
+        effects=(),
+        constraints=(required_tap,),
+        subgoals=(
+            SemanticSubgoal(
+                subgoal_id="exact_tap_semantic",
+                surface_ref="surface_current",
+                status="active",
+                external_impact="navigation_only",
+                constraint_refs=(required_tap.constraint_id,),
+                # The locally built exact-action graph keeps the target label
+                # as typed goal authority rather than a model-owned subgoal ref.
+                entity_refs=(),
+            ),
+        ),
+    )
+
+
 def input_scene() -> UIScene:
     return scene(
         element(
@@ -159,6 +197,124 @@ def input_scene() -> UIScene:
 
 
 class CanonicalActionProtocolTests(unittest.TestCase):
+    def test_exact_tap_admits_unique_visible_text_target(self) -> None:
+        current_scene = scene(
+            element(
+                "target-link",
+                label="返回验收模式选择",
+                meaning="return_to_mode_selection",
+                role="text",
+                states={"goal_relevant": True},
+            ),
+            element(
+                "other-button",
+                label="等待动作",
+                meaning="wait_for_action",
+            ),
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            exact_tap_ir(target_label="返回验收模式选择"),
+            {"tap_semantic"},
+        )
+
+        self.assertTrue(
+            any(
+                candidate.action_kind == "tap_semantic"
+                and candidate.parameters.get("element_id") == "target-link"
+                for candidate in report.candidates
+            )
+        )
+
+    def test_exact_tap_visible_text_target_is_label_and_language_agnostic(self) -> None:
+        current_scene = scene(
+            element(
+                "advanced-link",
+                label="Advanced options",
+                meaning="open_advanced_options",
+                role="text",
+                states={"goal_relevant": True},
+            ),
+            element(
+                "cancel-button",
+                label="Cancel",
+                meaning="cancel",
+            ),
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            exact_tap_ir(target_label="Advanced options"),
+            {"tap_semantic"},
+        )
+
+        self.assertTrue(
+            any(
+                candidate.parameters.get("element_id") == "advanced-link"
+                for candidate in report.candidates
+            )
+        )
+
+    def test_exact_tap_rejects_duplicate_visible_text_targets(self) -> None:
+        current_scene = scene(
+            element(
+                "duplicate-a",
+                label="More",
+                meaning="more_information",
+                role="text",
+                states={"goal_relevant": True},
+            ),
+            element(
+                "duplicate-b",
+                label="More",
+                meaning="more_information",
+                role="text",
+                states={"goal_relevant": True},
+                bounds=(0.5, 0.2, 0.8, 0.3),
+            ),
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            exact_tap_ir(target_label="More"),
+            {"tap_semantic"},
+        )
+
+        self.assertFalse(report.candidates)
+        self.assertEqual("blocked", report.status)
+
+    def test_plain_navigation_does_not_make_visible_text_actionable(self) -> None:
+        exact_ir = exact_tap_ir(target_label="Documentation")
+        semantic_ir = replace(
+            exact_ir,
+            subgoals=(
+                SemanticSubgoal(
+                    subgoal_id="navigate",
+                    surface_ref="surface_current",
+                    status="active",
+                    external_impact="navigation_only",
+                    constraint_refs=(exact_ir.constraints[0].constraint_id,),
+                ),
+            ),
+        )
+        current_scene = scene(
+            element(
+                "documentation-text",
+                label="Documentation",
+                meaning="documentation",
+                role="text",
+            )
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            semantic_ir,
+            {"tap_semantic"},
+        )
+
+        self.assertFalse(report.candidates)
+
     def test_active_clear_step_exposes_only_owned_clear_candidate(self) -> None:
         semantic_ir = input_ir(active="type_last_char")
         semantic_ir = replace(

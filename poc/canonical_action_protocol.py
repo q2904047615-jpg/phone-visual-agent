@@ -84,6 +84,7 @@ RELATION_KINDS = frozenset(
         "binds_effect_target",
         "binds_effect_payload",
         "binds_surface",
+        "binds_next_input_field",
     }
 )
 EXPECTATION_OPERATORS = frozenset(
@@ -122,6 +123,7 @@ EXPECTATION_PREDICATES = frozenset(
         "element.state.keyboard_case_mode",
         "element.state.interaction_result",
         "element.state.location_relation",
+        "input_field.focused",
         "effect.applied",
     }
 )
@@ -138,6 +140,11 @@ _SAFE_STATE_KEYS = frozenset(
         "keyboard_layout",
         "keyboard_input_mode",
         "keyboard_case_mode",
+        "input_next_field_key",
+        "key_action",
+        "source_input_field_id",
+        "target_input_field_id",
+        "target_input_field_label",
         "ime_preedit_text",
         "navigation_bar_visible",
     }
@@ -507,6 +514,7 @@ class CanonicalActionCatalog:
         claim_ids = {item.claim_id for item in self.claims}
         claimed_subjects = {item.subject_ref for item in self.claims}
         relation_ids = {item.relation_id for item in self.relations}
+        relation_by_id = {item.relation_id: item for item in self.relations}
         affordance_ids = {item.affordance_id for item in self.affordances}
         affordance_by_id = {item.affordance_id: item for item in self.affordances}
         for relation in self.relations:
@@ -537,9 +545,15 @@ class CanonicalActionCatalog:
                 raise CanonicalActionProtocolError("candidate 与 affordance 绑定不一致。")
             if not set(candidate.transition.precondition_claim_ids).issubset(claim_ids):
                 raise CanonicalActionProtocolError("transition 引用未知 claim。")
+            candidate_next_field_subjects = {
+                relation_by_id[value].object_ref
+                for value in candidate.relation_ids
+                if relation_by_id[value].relation == "binds_next_input_field"
+            }
             if any(
                 item.subject_ref not in claimed_subjects
                 and item.subject_ref != candidate.effect_ref
+                and item.subject_ref not in candidate_next_field_subjects
                 for item in candidate.transition.expectations
             ):
                 raise CanonicalActionProtocolError("transition expectation 没有事实主体。")
@@ -1072,6 +1086,46 @@ def compile_canonical_action_catalog(
             direct_payload_bindings.add(
                 (element.element_id, effect.effect_id, entity.entity_id)
             )
+    if len(active_input_fields) == 1 and len(predecessor_input_field_ids) == 1:
+        active_field = active_input_fields[0]
+        predecessor_field_id = next(iter(predecessor_input_field_ids))
+        predecessor_field = next(
+            item for item in semantic_ir.input_fields
+            if item.field_id == predecessor_field_id
+        )
+        predecessor_payload = entity_by_id.get(predecessor_field.payload_ref)
+        focused_predecessors = [
+            item for item in focused_inputs
+            if item.states.get("input_field_id") == predecessor_field_id
+            and item.states.get("input_field_label") == predecessor_field.field_label
+            and predecessor_payload is not None
+            and predecessor_payload.role == "input_text"
+            and item.states.get("value") == predecessor_payload.value
+        ]
+        for element in sorted_elements:
+            if not (
+                len(focused_predecessors) == 1
+                and _element_eligible(element)
+                and element.meaning == "input_next_field_key"
+                and element.role == "button"
+                and element.states.get("input_next_field_key") is True
+                and element.states.get("key_action") == "next"
+                and element.states.get("source_input_field_id") == predecessor_field_id
+                and element.states.get("target_input_field_id") == active_field.field_id
+                and element.states.get("target_input_field_label") == active_field.field_label
+            ):
+                continue
+            support = tuple(element_claim_ids[element.element_id])
+            binding = _relation(
+                _element_ref(element.element_id),
+                "binds_next_input_field",
+                active_field.field_id,
+                support,
+            )
+            relations.append(binding)
+            relation_ids_by_element.setdefault(element.element_id, []).append(
+                binding.relation_id
+            )
     exact_tap_authority = bool(
         active_subgoal.subgoal_id == "exact_tap_semantic"
         and active_required_actions == {"tap_semantic"}
@@ -1299,6 +1353,14 @@ def compile_canonical_action_catalog(
                     for entity_id in related_entities
                 ):
                     unique_relation_ids.append(relation_id)
+            elif relation.relation == "binds_next_input_field":
+                same_bindings = [
+                    item for item in relations
+                    if item.relation == "binds_next_input_field"
+                    and item.object_ref == relation.object_ref
+                ]
+                if len(same_bindings) == 1:
+                    unique_relation_ids.append(relation_id)
             elif relation.relation == "on_surface":
                 unique_relation_ids.append(relation_id)
         if not unique_relation_ids:
@@ -1326,6 +1388,22 @@ def compile_canonical_action_catalog(
                     "surface.active_ref",
                     "equals",
                     surface_binding.object_ref,
+                )
+            elif element.meaning == "input_next_field_key":
+                target_field_id = str(
+                    element.states.get("target_input_field_id") or ""
+                ).strip()
+                if not any(
+                    relation_by_id[value].relation == "binds_next_input_field"
+                    and relation_by_id[value].object_ref == target_field_id
+                    for value in unique_relation_ids
+                ):
+                    continue
+                expectation = StateExpectation(
+                    target_field_id,
+                    "input_field.focused",
+                    "equals",
+                    True,
                 )
             elif element.meaning in {
                 "ime_exact_candidate",
@@ -1446,6 +1524,7 @@ def compile_canonical_action_catalog(
                             "switch_keyboard_layout",
                             "switch_keyboard_case",
                             "switch_keyboard_input_mode",
+                            "input_next_field_key",
                         }
                     ),
                 )
@@ -1808,6 +1887,7 @@ def compile_canonical_action_catalog(
                             "switch_keyboard_layout",
                             "switch_keyboard_case",
                             "switch_keyboard_input_mode",
+                            "input_next_field_key",
                         }
                     ):
                         return False
@@ -1866,6 +1946,14 @@ def compile_canonical_action_catalog(
                 and not scene_matches_target_app_surface(scene, target_surface)
             ):
                 return False
+            if element.meaning == "input_next_field_key":
+                return any(
+                    relation_by_id[relation_id].relation
+                    == "binds_next_input_field"
+                    and relation_by_id[relation_id].object_ref
+                    in {item.field_id for item in active_input_fields}
+                    for relation_id in candidate.relation_ids
+                )
             if element.meaning in {
                 "ime_exact_candidate",
                 "input_exact_literal_key",

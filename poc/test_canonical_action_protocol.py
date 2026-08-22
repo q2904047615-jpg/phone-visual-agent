@@ -128,6 +128,67 @@ def input_ir(*, active: str) -> TaskSemanticIR:
     )
 
 
+def multifield_next_ir(*, dependency: bool = True) -> TaskSemanticIR:
+    subject = SemanticEntity("subject_text", "text", "input_text", "first")
+    body = SemanticEntity("body_text", "text", "input_text", "second")
+    required = ConstraintIntent(
+        constraint_id="constraint.body_input",
+        kind="required_action",
+        value="input_verified_text",
+        source_text="type the body",
+        authoritative=True,
+    )
+    return TaskSemanticIR(
+        task_id="task-multifield-next", device_id="device-1", revision=1,
+        raw_goal="主题输入first，再在正文输入second",
+        surfaces=(SurfaceRef("surface_current", "current_surface"),),
+        entities=(subject, body), effects=(), constraints=(required,),
+        subgoals=(
+            SemanticSubgoal(
+                "input_subject", "surface_current", "completed",
+                "navigation_only", entity_refs=(subject.entity_id,),
+            ),
+            SemanticSubgoal(
+                "input_body", "surface_current", "active", "navigation_only",
+                depends_on=("input_subject",) if dependency else (),
+                constraint_refs=(required.constraint_id,),
+                entity_refs=(body.entity_id,),
+            ),
+        ),
+        input_fields=(
+            InputFieldIntent(
+                "subject_field", subject.entity_id, "主题",
+                source_subgoal_ids=("input_subject",),
+            ),
+            InputFieldIntent(
+                "body_field", body.entity_id, "正文",
+                source_subgoal_ids=("input_body",),
+            ),
+        ),
+    )
+
+
+def multifield_next_scene(
+    *, source_id: str = "subject_field", target_id: str = "body_field",
+    source_label: str = "主题", source_value: str = "first",
+) -> UIScene:
+    return scene(
+        element(
+            "subject", label=source_value, meaning="application_text_input", role="input",
+            states={"focused": True, "value": source_value, "input_field_id": source_id,
+                    "input_field_label": source_label},
+        ),
+        element(
+            "next", label="下一步", meaning="input_next_field_key",
+            states={"input_next_field_key": True, "key_action": "next",
+                    "source_input_field_id": source_id,
+                    "target_input_field_id": target_id,
+                    "target_input_field_label": "正文"},
+            bounds=(0.8, 0.8, 0.96, 0.94),
+        ),
+    )
+
+
 def exact_tap_ir(*, target_label: str) -> TaskSemanticIR:
     target = SemanticEntity(
         entity_id="entity_exact_tap_target",
@@ -1156,6 +1217,36 @@ class CanonicalActionProtocolTests(unittest.TestCase):
                 for candidate in wrong_field_report.candidates
             )
         )
+
+    def test_next_field_key_binds_only_direct_typed_field_dependency(self) -> None:
+        report = compile_canonical_action_catalog(
+            multifield_next_scene(), multifield_next_ir(), {"tap_semantic"},
+        )
+        matches = [item for item in report.candidates
+                   if item.action_kind == "tap_semantic"]
+        self.assertEqual(1, len(matches))
+        expectation = matches[0].transition.expectations[0]
+        self.assertEqual("body_field", expectation.subject_ref)
+        self.assertEqual("input_field.focused", expectation.predicate)
+        self.assertIs(True, expectation.value)
+
+        cases = (
+            ("no dependency", multifield_next_ir(dependency=False), multifield_next_scene()),
+            ("wrong source", multifield_next_ir(), multifield_next_scene(source_id="other")),
+            ("wrong target", multifield_next_ir(), multifield_next_scene(target_id="other")),
+            ("wrong source label", multifield_next_ir(), multifield_next_scene(source_label="标题")),
+            ("wrong source value", multifield_next_ir(), multifield_next_scene(source_value="other")),
+        )
+        for name, semantic_ir, current in cases:
+            with self.subTest(name=name):
+                blocked = compile_canonical_action_catalog(
+                    current, semantic_ir, {"tap_semantic"},
+                )
+                self.assertFalse(any(
+                    item.action_kind == "tap_semantic"
+                    and item.parameters.get("element_id") == "next"
+                    for item in blocked.candidates
+                ))
 
     def test_batch_input_is_absent_when_typed_step_is_not_executable(self) -> None:
         cases = (

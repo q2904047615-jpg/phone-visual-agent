@@ -536,6 +536,32 @@ class ObservationBridge:
             "multiline": field.multiline,
         }
 
+    @staticmethod
+    def _active_input_predecessor_transaction(
+        graph: DynamicTaskGraph, active: Any,
+    ) -> dict[str, Any]:
+        """Project one direct typed predecessor needed for a Next-key focus step."""
+
+        try:
+            semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+        except TaskSemanticIRError:
+            return {}
+        typed = next((item for item in semantic_ir.subgoals
+                      if item.subgoal_id == getattr(active, "subgoal_id", "")), None)
+        if typed is None:
+            return {}
+        fields = tuple(item for item in semantic_ir.input_fields
+                       if set(item.source_subgoal_ids).intersection(typed.depends_on))
+        if len(fields) != 1:
+            return {}
+        field = fields[0]
+        payload = next((item for item in semantic_ir.entities
+                        if item.entity_id == field.payload_ref), None)
+        if payload is None or payload.role != "input_text" or not payload.value:
+            return {}
+        return {"field_id": field.field_id, "field_label": field.field_label,
+                "text": payload.value}
+
     @classmethod
     def _active_input_transaction_text(
         cls,
@@ -670,6 +696,15 @@ class ObservationBridge:
                 active_goal_entities["active_input_multiline"] = bool(
                     active_input.get("multiline")
                 )
+                predecessor = self._active_input_predecessor_transaction(
+                    graph, active
+                )
+                if predecessor:
+                    active_goal_entities.update({
+                        "active_input_predecessor_field_id": predecessor["field_id"],
+                        "active_input_predecessor_field_label": predecessor["field_label"],
+                        "active_input_predecessor_text": predecessor["text"],
+                    })
             else:
                 active_goal_entities.update(
                     self._active_input_verification_projection(graph, active)

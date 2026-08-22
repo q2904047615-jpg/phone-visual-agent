@@ -1383,6 +1383,13 @@ class ObservationBridgeTests(unittest.TestCase):
                 self.assertEqual(expected[0], focus["active_input_field_id"])
                 self.assertEqual(expected[1], focus["active_input_field_label"])
                 self.assertEqual(expected[2], focus["active_input_transaction_text"])
+                if active_subgoal_id == "input_body":
+                    self.assertEqual(
+                        "subject_field",
+                        focus["active_input_predecessor_field_id"],
+                    )
+                else:
+                    self.assertNotIn("active_input_predecessor_field_id", focus)
 
     def test_multifield_final_verify_keeps_two_typed_desired_states(self) -> None:
         graph = _multifield_graph(active_subgoal_id="verify_fields")

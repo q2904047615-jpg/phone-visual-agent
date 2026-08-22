@@ -6013,6 +6013,7 @@ def _input_audit_established_local_target(scene: UIScene) -> bool:
         "local_audited_ime_candidate_1",
         "local_audited_literal_key_1",
         "local_audited_enter_key_1",
+        "local_audited_next_field_key_1",
         "local_audited_keyboard_layout_switch_1",
         "local_audited_keyboard_case_switch_1",
     }
@@ -6074,6 +6075,47 @@ def _goal_active_input_field(context: dict[str, Any]) -> tuple[str, str, bool]:
     ):
         return ("", "", False)
     return (field_id, field_label, multiline)
+
+
+def _goal_active_input_predecessor_field(
+    context: dict[str, Any],
+) -> tuple[str, str, str]:
+    """Return one bridge-minted typed predecessor for a field transition."""
+
+    focused = _active_subgoal_visual_context(context)
+    if focused is context:
+        return ("", "", "")
+    goal_entities = focused.get("goal_entities")
+    root_entities = context.get("entities")
+    if not isinstance(goal_entities, dict) or not isinstance(root_entities, dict):
+        return ("", "", "")
+    field_id = goal_entities.get("active_input_predecessor_field_id")
+    field_label = goal_entities.get("active_input_predecessor_field_label")
+    text = goal_entities.get("active_input_predecessor_text")
+    if not all(isinstance(value, str) and value for value in (field_id, field_label, text)):
+        return ("", "", "")
+    fields = root_entities.get("input_fields")
+    active_field_id, active_field_label, _ = _goal_active_input_field(context)
+    active_text = _goal_active_input_transaction_text(context)
+    active_matches = [
+        item for item in fields if isinstance(item, dict)
+        and item.get("field_id") == active_field_id
+        and item.get("field_label", "") == active_field_label
+        and item.get("text") == active_text
+    ] if isinstance(fields, list) else []
+    matches = [
+        item for item in fields if isinstance(item, dict)
+        and item.get("field_id") == field_id
+        and item.get("field_label") == field_label
+        and item.get("text") == text
+    ] if isinstance(fields, list) else []
+    return (
+        (field_id, field_label, text)
+        if field_id != active_field_id
+        and len(matches) == 1
+        and len(active_matches) == 1
+        else ("", "", "")
+    )
 
 
 def _goal_has_explicit_input_text(context: dict[str, Any]) -> bool:
@@ -6258,6 +6300,29 @@ def _adjacent_exact_preedit_cue(
         and horizontal_overlap / smaller_width >= 0.60
         and vertical_gap <= 100
     )
+
+
+def _next_field_key_element(
+    key: dict[str, Any], *, source_field_id: str,
+    target_field_id: str, target_field_label: str,
+) -> dict[str, Any]:
+    return {
+        "element_id": "local_audited_next_field_key_1",
+        "role": "button",
+        "meaning": "input_next_field_key",
+        "label": key["label"],
+        "bounds": [part / 1000.0 for part in key["bounds"]],
+        "confidence": key["confidence"],
+        "states": {
+            "goal_relevant": True, "fully_visible": True,
+            "input_next_field_key": True, "key_action": "next",
+            "source_input_field_id": source_field_id,
+            "target_input_field_id": target_field_id,
+            "target_input_field_label": target_field_label,
+            "input_element_id": "local_audited_input_1",
+        },
+        "evidence": ["唯一聚焦typed字段与完整Next键绑定下一依赖字段"],
+    }
 
 
 def _apply_input_structure_audit(
@@ -6701,6 +6766,33 @@ def _apply_input_structure_audit(
             trusted_input = field_matches[0] if len(field_matches) == 1 else None
         else:
             trusted_input = matches[0] if len(matches) == 1 else None
+        predecessor_field_id, predecessor_field_label, predecessor_text = (
+            _goal_active_input_predecessor_field(goal_context)
+        )
+        predecessor_audit_matches = [
+            item for item in matches
+            if item["text"] == predecessor_text
+            and sum(
+                label.casefold() == predecessor_field_label.casefold()
+                for label in item["field_labels"]
+            ) == 1
+        ] if predecessor_field_id else []
+        predecessor_scene_matches = [
+            element for element in scene.elements
+            if element.role == "input"
+            and element.confidence >= 0.9
+            and element.states.get("fully_visible") is True
+            and element.states.get("focused") is True
+            and element.states.get("value") == predecessor_text
+            and element.states.get("input_field_id") == predecessor_field_id
+            and element.states.get("input_field_label") == predecessor_field_label
+        ]
+        predecessor_input = (
+            predecessor_audit_matches[0]
+            if len(predecessor_audit_matches) == 1
+            and len(predecessor_scene_matches) == 1
+            else None
+        )
         active_transaction_text = _goal_active_input_transaction_text(goal_context)
         if (
             trusted_input is not None
@@ -6893,6 +6985,13 @@ def _apply_input_structure_audit(
                 keyboard.get("enter_key"),
                 keyboard_bounds=keyboard_bounds,
             )
+        next_field_key = (
+            enter_key
+            if predecessor_input is not None
+            and enter_key is not None
+            and enter_key["key_action"] == "next"
+            else None
+        )
         raw_mode_switch = keyboard.get("mode_switch")
         input_needs_mode_switch = bool(
             input_step is not None
@@ -7093,8 +7192,16 @@ def _apply_input_structure_audit(
             raise UISceneError(
                 "文字输入授权要求本轮输入结构审计提供有效 QWERTY anchors。"
             )
-        if trusted_input is None and (mode_switch is None or not switch_is_goal):
+        if (
+            trusted_input is None
+            and next_field_key is None
+            and (mode_switch is None or not switch_is_goal)
+        ):
             return scene
+
+        rendered_input = trusted_input or (
+            predecessor_input if next_field_key is not None else None
+        )
 
         value = scene.to_dict()
         elements: list[dict[str, Any]] = []
@@ -7107,10 +7214,10 @@ def _apply_input_structure_audit(
             # A trusted audit input supersedes preliminary input proposals. Keeping
             # both would leave two overlapping high-confidence action targets and
             # correctly make unique_trusted_goal_element reject the scene.
-            if trusted_input is not None and element.get("role") == "input":
+            if rendered_input is not None and element.get("role") == "input":
                 continue
             elements.append(element)
-        if trusted_input is not None:
+        if rendered_input is not None:
             pending_auxiliary_input_action = any(
                 item is not None
                 for item in (
@@ -7139,25 +7246,35 @@ def _apply_input_structure_audit(
             states: dict[str, Any] = {
                 "goal_relevant": (
                     not switch_is_goal
+                    and next_field_key is None
                     and not pending_auxiliary_input_action
                     and not input_requires_auxiliary_action
                     and not typed_prefix_verification_only
                 ),
                 "fully_visible": True,
-                "value": trusted_input["text"],
+                "value": rendered_input["text"],
             }
-            if active_field_id:
-                states["input_field_id"] = active_field_id
-                states["input_multiline"] = active_multiline
-            if active_field_label:
-                states["input_field_label"] = active_field_label
+            rendered_field_id = (
+                predecessor_field_id if next_field_key is not None else active_field_id
+            )
+            rendered_field_label = (
+                predecessor_field_label
+                if next_field_key is not None
+                else active_field_label
+            )
+            if rendered_field_id:
+                states["input_field_id"] = rendered_field_id
+                if next_field_key is None:
+                    states["input_multiline"] = active_multiline
+            if rendered_field_label:
+                states["input_field_label"] = rendered_field_label
             if not keyboard_visible:
                 # Absence is useful task evidence only when the dedicated
                 # full-frame input audit explicitly reports keyboard.visible=false.
                 # An empty preliminary overlays list alone never mints this fact.
                 states["soft_keyboard_visible"] = False
-            if trusted_input["placeholder"]:
-                states["placeholder"] = trusted_input["placeholder"]
+            if rendered_input["placeholder"]:
+                states["placeholder"] = rendered_input["placeholder"]
             if keyboard_bounds is not None or boundsless_keyboard_dismissal:
                 states.update(
                     {
@@ -7184,7 +7301,7 @@ def _apply_input_structure_audit(
                         "ime_exact_candidate_text": input_step.segment,
                     }
                 )
-            input_label = trusted_input["text"] or trusted_input["placeholder"]
+            input_label = rendered_input["text"] or rendered_input["placeholder"]
             # ``field_labels`` are literal, field-attached observations from
             # the dedicated input audit.  Preserve them as exact candidate
             # evidence so a labelled input remains addressable after the
@@ -7192,19 +7309,19 @@ def _apply_input_structure_audit(
             input_evidence = list(
                 dict.fromkeys(
                     (
-                        *trusted_input["field_labels"],
-                        *trusted_input["visible_editable_cues"],
+                        *rendered_input["field_labels"],
+                        *rendered_input["visible_editable_cues"],
                     )
                 )
             )
-            if trusted_input["text"]:
-                input_evidence.insert(0, f"应用输入框当前文字：{trusted_input['text']}")
-                lineage_visual_text = trusted_input.get("lineage_visual_text")
+            if rendered_input["text"]:
+                input_evidence.insert(0, f"应用输入框当前文字：{rendered_input['text']}")
+                lineage_visual_text = rendered_input.get("lineage_visual_text")
                 if isinstance(lineage_visual_text, str):
                     input_evidence.append(
                         f"视觉折行转写：{lineage_visual_text}；本地逐键连续性逐字核对通过"
                     )
-                lineage_visible_cue_text = trusted_input.get(
+                lineage_visible_cue_text = rendered_input.get(
                     "lineage_visible_cue_text"
                 )
                 if isinstance(lineage_visible_cue_text, str):
@@ -7212,7 +7329,7 @@ def _apply_input_structure_audit(
                         "输入状态切换后同一应用输入区域仍逐字可见："
                         f"{lineage_visible_cue_text}；本地同值连续性核对通过"
                     )
-                lineage_persisted_visible_cue_text = trusted_input.get(
+                lineage_persisted_visible_cue_text = rendered_input.get(
                     "lineage_persisted_visible_cue_text"
                 )
                 if isinstance(lineage_persisted_visible_cue_text, str):
@@ -7220,7 +7337,7 @@ def _apply_input_structure_audit(
                         "跨会话同一应用输入区域仍逐字可见："
                         f"{lineage_persisted_visible_cue_text}；持久回执连续性核对通过"
                     )
-                same_frame_visible_cue_text = trusted_input.get(
+                same_frame_visible_cue_text = rendered_input.get(
                     "same_frame_visible_cue_text"
                 )
                 if isinstance(same_frame_visible_cue_text, str):
@@ -7228,8 +7345,8 @@ def _apply_input_structure_audit(
                         "同一帧粗场景与输入结构审计逐字一致："
                         f"{same_frame_visible_cue_text}；非授权 IME 分类已隔离"
                     )
-            elif trusted_input["placeholder"]:
-                input_evidence.insert(0, f"应用输入框为空，占位提示：{trusted_input['placeholder']}")
+            elif rendered_input["placeholder"]:
+                input_evidence.insert(0, f"应用输入框为空，占位提示：{rendered_input['placeholder']}")
             if not keyboard_visible:
                 input_evidence.append(AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE)
             elements.append(
@@ -7238,13 +7355,13 @@ def _apply_input_structure_audit(
                     "role": "input",
                     "meaning": "application_text_input",
                     "label": input_label,
-                    "bounds": [part / 1000.0 for part in trusted_input["input_bounds"]],
-                    "confidence": trusted_input["confidence"],
+                    "bounds": [part / 1000.0 for part in rendered_input["input_bounds"]],
+                    "confidence": rendered_input["confidence"],
                     "states": states,
                     "evidence": input_evidence[:6],
                 }
             )
-            right_button = trusted_input["right_button"]
+            right_button = rendered_input["right_button"]
             if right_button is not None:
                 elements.append(
                     {
@@ -7258,6 +7375,13 @@ def _apply_input_structure_audit(
                         "evidence": ["应用输入结构的相邻独立控件；不具备目标权限"],
                     }
                 )
+        if next_field_key is not None:
+            elements.append(_next_field_key_element(
+                next_field_key,
+                source_field_id=predecessor_field_id,
+                target_field_id=active_field_id,
+                target_field_label=active_field_label,
+            ))
         if exact_ime_candidate is not None and input_step is not None:
             elements.append(
                 {

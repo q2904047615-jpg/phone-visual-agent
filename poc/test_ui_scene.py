@@ -1092,6 +1092,53 @@ class UISceneTests(unittest.TestCase):
                 replace(after, elements=(conflicting_label,)),
             )
 
+    def test_next_field_tap_requires_fresh_unique_typed_focus(self) -> None:
+        next_key = element(
+            "next", "input_next_field_key",
+            states={
+                "goal_relevant": True, "fully_visible": True,
+                "input_next_field_key": True, "key_action": "next",
+                "source_input_field_id": "subject_field",
+                "target_input_field_id": "body_field",
+                "target_input_field_label": "正文",
+            },
+        )
+        before = scene(next_key, fingerprint="before-next-field")
+        action = SemanticAction(
+            node_id="focus-body", action="tap_semantic",
+            params={
+                "element_id": "next", "formal_candidate_id": "candidate-next",
+                "expected_effect": {"scene_changed": True},
+                "formal_transition": {"expectations": [{
+                    "subject_ref": "body_field",
+                    "predicate": "input_field.focused",
+                    "operator": "equals", "value": True,
+                }]},
+            },
+        )
+        controller = UniversalActionController()
+        resolved = controller.resolve_one(action, before)
+        body = element(
+            "body", "application_text_input", role="input",
+            states={"focused": True, "input_field_id": "body_field",
+                    "input_field_label": "正文", "value": ""},
+        )
+        after = scene(body, fingerprint="after-next-field")
+        controller.verify_after_action(resolved, before, after)
+
+        for name, elements in (
+            ("wrong field", (replace(body, states={**body.states, "input_field_id": "other"}),)),
+            ("not focused", (replace(body, states={**body.states, "focused": False}),)),
+            ("wrong label", (replace(body, states={**body.states, "input_field_label": "标题"}),)),
+            ("duplicate", (body, replace(body, element_id="body-duplicate"))),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                UniversalActionError, "typed目标字段聚焦后置状态未满足"
+            ):
+                controller.verify_after_action(
+                    resolved, before, replace(after, elements=elements)
+                )
+
     def test_generic_keyboard_geometry_is_strictly_backspace_only(self) -> None:
         parsed = UIElement.from_dict(
             {

@@ -388,6 +388,13 @@ class UniversalActionController:
                     expected_effect,
                     formal=bool(formal_candidate_id),
                 )
+            if element.meaning == "input_next_field_key":
+                self._validate_next_field_tap(
+                    element,
+                    formal_transition,
+                    expected_effect,
+                    formal=bool(formal_candidate_id),
+                )
             resolved = self._point_action(
                 action,
                 element,
@@ -793,6 +800,41 @@ class UniversalActionController:
             and element_height <= 1.5 * input_height
         ):
             raise UniversalActionError("本地文字清空控件没有与唯一目标输入框形成可信几何绑定。")
+
+    def _validate_next_field_tap(
+        self,
+        element: UIElement,
+        formal_transition: dict[str, Any],
+        expected_effect: dict[str, Any],
+        *,
+        formal: bool,
+    ) -> None:
+        states = element.states
+        source_id = str(states.get("source_input_field_id") or "").strip()
+        target_id = str(states.get("target_input_field_id") or "").strip()
+        target_label = str(states.get("target_input_field_label") or "").strip()
+        expectations = formal_transition.get("expectations")
+        if not (
+            formal
+            and element.role == "button"
+            and float(element.confidence) >= 0.9
+            and states.get("fully_visible") is True
+            and states.get("input_next_field_key") is True
+            and states.get("key_action") == "next"
+            and source_id
+            and target_id
+            and target_label
+            and source_id != target_id
+            and expected_effect == {"scene_changed": True}
+            and isinstance(expectations, list)
+            and expectations == [{
+                "subject_ref": target_id,
+                "predicate": "input_field.focused",
+                "operator": "equals",
+                "value": True,
+            }]
+        ):
+            raise UniversalActionError("Next键没有绑定唯一typed字段切换合同。")
 
     def _validate_input_auxiliary_tap(
         self,
@@ -1348,6 +1390,29 @@ class UniversalActionController:
                 matches = [item for item in after.elements if item.element_id == target_id]
                 if len(matches) != 1 or matches[0].states.get("focused") is not value:
                     raise UniversalActionError("typed focused 后置状态未满足。")
+            elif predicate == "input_field.focused" and operator == "equals":
+                executed_targets = [
+                    item for item in before.elements
+                    if item.element_id == resolved.target_element_id
+                    and item.meaning == "input_next_field_key"
+                ]
+                target_label = (
+                    str(executed_targets[0].states.get("target_input_field_label") or "").strip()
+                    if len(executed_targets) == 1
+                    else ""
+                )
+                matches = [
+                    item for item in after.elements
+                    if item.role == "input"
+                    and item.states.get("input_field_id") == expectation.get("subject_ref")
+                    and item.states.get("input_field_label") == target_label
+                    and item.states.get("focused") is value
+                    and float(item.confidence) >= MIN_TARGET_CONFIDENCE
+                ]
+                if value is not True or len(matches) != 1:
+                    raise UniversalActionError(
+                        "typed目标字段聚焦后置状态未满足。"
+                    )
             elif predicate == "element.state.location_relation" and operator == "equals":
                 if (
                     resolved.kind != "drag"

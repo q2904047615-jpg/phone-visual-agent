@@ -423,6 +423,80 @@ def audited_application_input(
     return value
 
 
+MULTIFIELD_FIELDS = [
+    {"field_id": "subject_field", "field_label": "主题", "text": "first"},
+    {"field_id": "body_field", "field_label": "正文", "text": "second"},
+]
+
+
+def multifield_next_context(fields: list[dict], *, dependency: bool = True) -> dict:
+    by_id = {item["field_id"]: item for item in fields}
+    source, target = by_id["subject_field"], by_id["body_field"]
+    markers = {
+        "active_input_transaction_text": target["text"],
+        "active_input_field_id": target["field_id"],
+        "active_input_field_label": target["field_label"],
+        "active_input_multiline": False,
+    }
+    if dependency:
+        markers.update({
+            "active_input_predecessor_field_id": source["field_id"],
+            "active_input_predecessor_field_label": source["field_label"],
+            "active_input_predecessor_text": source["text"],
+        })
+    return {"entities": {"input_fields": fields, "active_subgoal_visual_context": {
+        "subgoal_id": "input_body", "objective": "输入下一字段",
+        "constraints": [], "completion_conditions": [],
+        "execution_class": "navigate", "goal_entities": markers,
+    }}}
+
+
+def multifield_next_base(fields: list[dict], *, duplicate: bool = False):
+    source = next(item for item in fields if item["field_id"] == "subject_field")
+    visible = {
+        "element_id": "source-visible", "role": "input",
+        "meaning": "application_text_input", "label": source["field_label"],
+        "bounds": [120, 430, 880, 590], "confidence": 0.98,
+        "states": {
+            "goal_relevant": True, "fully_visible": True, "focused": True,
+            "value": source["text"], "input_field_id": source["field_id"],
+            "input_field_label": source["field_label"],
+        },
+        "evidence": [source["field_label"], "caret"],
+    }
+    payload = scene_payload()
+    payload["elements"] = [visible]
+    if duplicate:
+        payload["elements"].append({
+            **visible, "element_id": "source-duplicate",
+            "bounds": [120, 250, 880, 400],
+        })
+    return _parse_scene(json.dumps(payload, ensure_ascii=False), fingerprint="f" * 64)
+
+
+def multifield_next_audit(
+    fields: list[dict], *, action: str = "next",
+    fully_visible: bool = True, confidence: float = 0.98,
+) -> dict:
+    source = next(item for item in fields if item["field_id"] == "subject_field")
+    return input_audit_payload(
+        application_inputs=[audited_application_input(
+            structure_id="source", bounds=[120, 430, 880, 590],
+            text=source["text"], field_labels=[source["field_label"]],
+        )],
+        keyboard={
+            "visible": True, "bounds": [0, 600, 1000, 1000],
+            "layout": "qwerty", "input_mode": "direct_latin",
+            "case_mode": "lower", "mode_switch": None,
+            "enter_key": {
+                "label": "下一步", "bounds": [820, 920, 990, 985],
+                "confidence": confidence, "fully_visible": fully_visible,
+                "key_action": action,
+            },
+        },
+    )
+
+
 class GenericSceneObserverTests(unittest.TestCase):
     def test_goal_context_still_rejects_genuinely_excessive_nesting(self) -> None:
         context = {
@@ -8593,6 +8667,102 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertFalse(
             any(item.meaning == "input_exact_enter_key" for item in rejected.elements)
         )
+
+    def test_multifield_audit_mints_typed_next_field_key_for_hidden_active_field(self) -> None:
+        fields = MULTIFIELD_FIELDS
+        base = multifield_next_base(fields)
+        context = multifield_next_context(fields)
+        audit = multifield_next_audit(fields)
+
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="first",
+        )
+
+        target = projected.unique_trusted_goal_element()
+        self.assertIsNotNone(target)
+        self.assertEqual("input_next_field_key", target.meaning)
+        self.assertEqual("subject_field", target.states["source_input_field_id"])
+        self.assertEqual("body_field", target.states["target_input_field_id"])
+        self.assertEqual("正文", target.states["target_input_field_label"])
+        current = projected.get_element("local_audited_input_1")
+        self.assertFalse(current.states["goal_relevant"])
+        self.assertEqual("subject_field", current.states["input_field_id"])
+
+    def test_multifield_next_field_key_follows_typed_identity_not_array_order(self) -> None:
+        cases = (
+            (
+                [
+                    {"field_id": "subject_field", "field_label": "标题", "text": "alpha"},
+                    {"field_id": "body_field", "field_label": "备注", "text": "beta"},
+                ],
+                "标题",
+                "alpha",
+                "备注",
+            ),
+            (
+                [
+                    {"field_id": "body_field", "field_label": "内容", "text": "delta"},
+                    {"field_id": "subject_field", "field_label": "名称", "text": "gamma"},
+                ],
+                "名称",
+                "gamma",
+                "内容",
+            ),
+        )
+        for fields, _source_label, source_text, target_label in cases:
+            with self.subTest(fields=fields):
+                base = multifield_next_base(fields)
+                context = multifield_next_context(fields)
+                audit = multifield_next_audit(fields)
+                projected = _apply_input_structure_audit(
+                    base,
+                    json.dumps(audit, ensure_ascii=False),
+                    fingerprint="f" * 64,
+                    goal_context=context,
+                    coarse_input_value=source_text,
+                )
+                target = projected.unique_trusted_goal_element()
+                self.assertIsNotNone(target)
+                self.assertEqual("body_field", target.states["target_input_field_id"])
+                self.assertEqual(target_label, target.states["target_input_field_label"])
+
+    def test_multifield_next_field_key_rejects_ambiguous_or_unbound_cases(self) -> None:
+        cases = (
+            ("no dependency", False, False, "next", True, 0.98),
+            ("not next", True, False, "done", True, 0.98),
+            ("not fully visible", True, False, "next", False, 0.98),
+            ("low confidence", True, False, "next", True, 0.71),
+            ("duplicate current field", True, True, "next", True, 0.98),
+        )
+        for name, dependency, duplicate, action, visible, confidence in cases:
+            with self.subTest(name=name):
+                base = multifield_next_base(MULTIFIELD_FIELDS, duplicate=duplicate)
+                context = multifield_next_context(
+                    MULTIFIELD_FIELDS, dependency=dependency
+                )
+                audit = multifield_next_audit(
+                    MULTIFIELD_FIELDS, action=action,
+                    fully_visible=visible, confidence=confidence,
+                )
+                projected = _apply_input_structure_audit(
+                    base,
+                    json.dumps(audit, ensure_ascii=False),
+                    fingerprint="f" * 64,
+                    goal_context=context,
+                    coarse_input_value="first",
+                )
+                self.assertFalse(
+                    any(item.meaning == "input_next_field_key" for item in projected.elements)
+                )
+                if action != "next":
+                    self.assertNotIn(
+                        "local_audited_input_1",
+                        {item.element_id for item in projected.elements},
+                    )
 
     def test_typed_prefix_survives_invalid_keyboard_only_as_verification_evidence(
         self,

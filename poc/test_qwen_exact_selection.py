@@ -29,6 +29,59 @@ class DeterministicExactSelectionTests(unittest.TestCase):
         )
         self.assertEqual("choice_2", payload["choice_id"])
 
+    def test_exact_tap_uses_unique_local_semantic_target_among_other_taps(self) -> None:
+        context = SimpleNamespace(
+            current_subgoal={"subgoal_id": "exact_tap_semantic"}
+        )
+        observation = SimpleNamespace(
+            target_local_candidate=lambda: SimpleNamespace(
+                element_id="local_audited_reload_control_1"
+            )
+        )
+
+        payload = _deterministic_exact_selection_payload(
+            context,
+            (
+                {
+                    "choice_id": "choice_verify",
+                    "action": "tap_semantic",
+                    "element_id": "verify-button",
+                },
+                {
+                    "choice_id": "choice_reload",
+                    "action": "tap_semantic",
+                    "element_id": "local_audited_reload_control_1",
+                },
+            ),
+            observation=observation,
+        )
+
+        self.assertEqual("choice_reload", payload["choice_id"])
+
+    def test_exact_tap_does_not_invent_choice_for_unlisted_local_target(self) -> None:
+        context = SimpleNamespace(
+            current_subgoal={"subgoal_id": "exact_tap_semantic"}
+        )
+        observation = SimpleNamespace(
+            target_local_candidate=lambda: SimpleNamespace(
+                element_id="local_target_without_choice"
+            )
+        )
+
+        self.assertIsNone(
+            _deterministic_exact_selection_payload(
+                context,
+                (
+                    {
+                        "choice_id": "choice_other",
+                        "action": "tap_semantic",
+                        "element_id": "other-button",
+                    },
+                ),
+                observation=observation,
+            )
+        )
+
     def test_non_exact_or_same_action_ambiguous_catalog_still_requires_model(self) -> None:
         regular = SimpleNamespace(current_subgoal={"subgoal_id": "navigate"})
         exact = SimpleNamespace(

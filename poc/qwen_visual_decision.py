@@ -1816,6 +1816,15 @@ def _deterministic_exact_selection_payload(
             for choice in choices
             if str(choice.get("action") or "").strip() == expected_action
         )
+        if active_id == "exact_tap_semantic" and observation is not None:
+            local_target = observation.target_local_candidate()
+            if local_target is not None:
+                matching_choices = tuple(
+                    choice
+                    for choice in matching_choices
+                    if str(choice.get("element_id") or "").strip()
+                    == local_target.element_id
+                )
     if len(matching_choices) != 1:
         return None
     choice_id = str(matching_choices[0].get("choice_id") or "").strip()

@@ -1264,7 +1264,13 @@ def compile_canonical_action_catalog(
                 )
             ):
                 supported.add("input_verified_text")
-            if "clear_verified_text" in available and bool(element.states.get("value")):
+            if (
+                "clear_verified_text" in available
+                and (
+                    bool(element.states.get("value"))
+                    or bool(element.states.get("ime_preedit_text"))
+                )
+            ):
                 supported.add("clear_verified_text")
         if (
             "press_enter" in available
@@ -1630,6 +1636,22 @@ def compile_canonical_action_catalog(
 
         clear_affordance = affordance_by_pair.get((element_ref, "clear_verified_text"))
         if clear_affordance is not None:
+            clear_expectations = [
+                StateExpectation(
+                    element_ref,
+                    "element.state.value",
+                    "equals",
+                    "",
+                )
+            ]
+            if element.states.get("ime_preedit_text"):
+                clear_expectations.append(
+                    StateExpectation(
+                        element_ref,
+                        "element.state.ime_preedit_text",
+                        "absent",
+                    )
+                )
             candidates.append(
                 _candidate(
                     action_kind="clear_verified_text",
@@ -1637,14 +1659,7 @@ def compile_canonical_action_catalog(
                     affordance_ids=(clear_affordance.affordance_id,),
                     relation_ids=tuple(sorted(set(unique_relation_ids))),
                     precondition_claim_ids=tuple(element_claim_ids[element.element_id]),
-                    expectations=(
-                        StateExpectation(
-                            element_ref,
-                            "element.state.value",
-                            "equals",
-                            "",
-                        ),
-                    ),
+                    expectations=tuple(clear_expectations),
                     parameters={"element_id": element.element_id},
                 )
             )
@@ -1852,13 +1867,19 @@ def compile_canonical_action_catalog(
         if element is None or len(active_input_payload_entities) != 1:
             return False
         current_value = element.states.get("value")
+        current_preedit = element.states.get("ime_preedit_text")
+        exact_candidate = element.states.get("ime_exact_candidate_text")
         authorized_value = active_input_payload_entities[0].value
-        return bool(
-            isinstance(current_value, str)
-            and current_value
-            and isinstance(authorized_value, str)
-            and not authorized_value.startswith(current_value)
-        )
+        if not isinstance(current_value, str) or not isinstance(authorized_value, str):
+            return False
+        if isinstance(current_preedit, str) and current_preedit:
+            useful_exact_candidate = bool(
+                isinstance(exact_candidate, str)
+                and exact_candidate
+                and authorized_value.startswith(current_value + exact_candidate)
+            )
+            return not useful_exact_candidate
+        return bool(current_value and not authorized_value.startswith(current_value))
 
     def belongs_to_active_subgoal(candidate: CanonicalActionCandidate) -> bool:
         if candidate.effect_ref:

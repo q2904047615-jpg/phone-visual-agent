@@ -5967,6 +5967,35 @@ def _goal_requests_local_text_clear(context: dict[str, Any]) -> bool:
     )
 
 
+def _goal_requests_active_verified_text_clear(context: dict[str, Any]) -> bool:
+    """Return true only when the current graph node is the clear step."""
+
+    if not _goal_requests_input(context):
+        return False
+    focused = _active_subgoal_visual_context(context)
+    visible = str(focused.get("objective") or "").casefold()
+    return any(
+        term in visible
+        for term in (
+            "清空",
+            "清除",
+            "置空",
+            "删除",
+            "文字变为空",
+            "内容变为空",
+            "恢复为空",
+            "恢复为空白",
+            "clear text",
+            "clear the text",
+            "clear draft",
+            "empty the input",
+            "empty the field",
+            "remove the text",
+            "delete",
+        )
+    )
+
+
 def _should_audit_prefilled_input(scene: UIScene, context: dict[str, Any]) -> bool:
     if not _goal_requests_input(context):
         return False
@@ -6328,6 +6357,46 @@ def _adjacent_exact_preedit_cue(
         and horizontal_overlap / smaller_width >= 0.60
         and vertical_gap <= 100
     )
+
+
+def _unique_clearable_ime_preedit(
+    trusted_input: dict[str, Any],
+    trusted_preedits: list[dict[str, Any]],
+) -> str:
+    """Bind one adjacent IME composition to one typed input for clearing."""
+
+    if len(trusted_preedits) != 1:
+        return ""
+    preedit_text = trusted_preedits[0].get("text")
+    if not isinstance(preedit_text, str) or not preedit_text:
+        return ""
+    input_box = tuple(float(value) for value in trusted_input["input_bounds"])
+    preedit_box = tuple(float(value) for value in trusted_preedits[0]["bounds"])
+    if (
+        _bounds_overlap_ratio(input_box, preedit_box) > 0
+        or _bounds_overlap_ratio(preedit_box, input_box) > 0
+    ):
+        return ""
+    horizontal_overlap = max(
+        0.0,
+        min(input_box[2], preedit_box[2]) - max(input_box[0], preedit_box[0]),
+    )
+    smaller_width = min(
+        input_box[2] - input_box[0],
+        preedit_box[2] - preedit_box[0],
+    )
+    vertical_gap = max(
+        0.0,
+        preedit_box[1] - input_box[3],
+        input_box[1] - preedit_box[3],
+    )
+    if (
+        smaller_width <= 0
+        or horizontal_overlap / smaller_width < 0.60
+        or vertical_gap > 100
+    ):
+        return ""
+    return preedit_text
 
 
 def _next_field_key_element(
@@ -6811,6 +6880,7 @@ def _apply_input_structure_audit(
             )
 
         switch_is_goal = _goal_requests_keyboard_mode_switch(goal_context)
+        active_clear_goal = _goal_requests_active_verified_text_clear(goal_context)
         if active_field_label:
             field_matches = [
                 item
@@ -6966,7 +7036,11 @@ def _apply_input_structure_audit(
                 trusted_input["text"] = verified_input_lineage.exact_value
         exact_ime_candidate: dict[str, Any] | None = None
         input_step = None
-        if trusted_input is not None and _goal_has_explicit_input_text(goal_context):
+        if (
+            trusted_input is not None
+            and _goal_has_explicit_input_text(goal_context)
+            and not active_clear_goal
+        ):
             focused_context = _active_subgoal_visual_context(goal_context)
             entities = (
                 focused_context.get("goal_entities")
@@ -7031,6 +7105,22 @@ def _apply_input_structure_audit(
             raw_backspace_key,
             keyboard_bounds=keyboard_bounds,
         )
+        clearable_ime_preedit = ""
+        if (
+            trusted_input is not None
+            and active_field_id
+            and active_transaction_text
+            and keyboard_visible
+            and keyboard_bounds is not None
+            and (
+                qwerty_geometry is not None
+                or generic_backspace_geometry is not None
+            )
+        ):
+            clearable_ime_preedit = _unique_clearable_ime_preedit(
+                trusted_input,
+                trusted_preedits,
+            )
         enter_key = None
         if locally_snapped_qwerty_anchors is not None:
             enter_key = _locally_snapped_keyboard_enter_key(
@@ -7052,7 +7142,9 @@ def _apply_input_structure_audit(
         )
         raw_mode_switch = keyboard.get("mode_switch")
         input_needs_mode_switch = bool(
-            input_step is not None
+            not active_clear_goal
+            and not clearable_ime_preedit
+            and input_step is not None
             and input_step.kind in {"direct_latin", "chinese_pinyin"}
             and keyboard_visible
             and keyboard_layout == "qwerty"
@@ -7235,6 +7327,7 @@ def _apply_input_structure_audit(
             and exact_case_switch is None
             and qwerty_geometry is None
             and not typed_prefix_verification_only
+            and not active_clear_goal
         ):
             raise UISceneError(
                 "文字输入授权要求本轮输入结构审计提供有效 QWERTY anchors。"
@@ -7276,7 +7369,8 @@ def _apply_input_structure_audit(
                 )
             )
             input_requires_auxiliary_action = bool(
-                input_step is not None
+                not active_clear_goal
+                and input_step is not None
                 and keyboard_visible
                 and (
                     input_step.kind == "literal_key"
@@ -7348,6 +7442,8 @@ def _apply_input_structure_audit(
                         "ime_exact_candidate_text": input_step.segment,
                     }
                 )
+            elif clearable_ime_preedit:
+                states["ime_preedit_text"] = clearable_ime_preedit
             input_label = rendered_input["text"] or rendered_input["placeholder"]
             # ``field_labels`` are literal, field-attached observations from
             # the dedicated input audit.  Preserve them as exact candidate
@@ -7394,6 +7490,11 @@ def _apply_input_structure_audit(
                     )
             elif rendered_input["placeholder"]:
                 input_evidence.insert(0, f"应用输入框为空，占位提示：{rendered_input['placeholder']}")
+            if clearable_ime_preedit:
+                input_evidence.append(
+                    "唯一相邻输入法预编辑串已绑定当前typed输入框，"
+                    f"可清理文字：{clearable_ime_preedit}"
+                )
             if not keyboard_visible:
                 input_evidence.append(AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE)
             elements.append(

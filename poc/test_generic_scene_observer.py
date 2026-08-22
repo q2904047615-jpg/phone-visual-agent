@@ -5596,6 +5596,174 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("chinese_pinyin", mode_switch.states["current_mode"])
         self.assertEqual("direct_latin", mode_switch.states["target_mode"])
 
+    def test_active_clear_binds_unique_ime_preedit_to_typed_input(self) -> None:
+        base_scene = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="frame-clear-preedit",
+        )
+        context = {
+            "entities": {
+                "input_text": "freshsendproof",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "clear_draft",
+                    "objective": "清除输入框中任何现有错误草稿且不要发送",
+                    "constraints": ["不得发送任何现有错误草稿"],
+                    "completion_conditions": ["输入框为空"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "input_text": "freshsendproof",
+                        "active_input_transaction_text": "freshsendproof",
+                        "active_input_field_id": "input_field_1",
+                        "active_input_multiline": False,
+                    },
+                },
+            }
+        }
+
+        def audit(*, preedits: list[dict], include_backspace: bool = True) -> dict:
+            keyboard = {
+                "visible": True,
+                "bounds": [0, 660, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [122, 710], "p": [880, 710],
+                    "a": [164, 782], "l": [838, 782],
+                    "z": [248, 853], "m": [754, 853],
+                    "backspace": [880, 853],
+                },
+                "mode_switch": {
+                    "label": "英",
+                    "bounds": [730, 930, 810, 980],
+                    "confidence": 1.0,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+                "backspace_key": (
+                    {
+                        "label": "⌫",
+                        "bounds": [830, 820, 940, 890],
+                        "confidence": 1.0,
+                        "fully_visible": True,
+                    }
+                    if include_backspace
+                    else None
+                ),
+            }
+            if not include_backspace:
+                keyboard["qwerty_anchors"] = None
+            return input_audit_payload(
+                application_inputs=[
+                    audited_application_input(
+                        structure_id="message-field",
+                        bounds=[130, 540, 700, 600],
+                        text="",
+                        visible_editable_cues=["cursor"],
+                    )
+                ],
+                ime_preedit_regions=preedits,
+                keyboard=keyboard,
+            )
+
+        unique_preedit = {
+            "region_id": "ime-preedit-1",
+            "bounds": [0, 600, 1000, 660],
+            "text": "longinp",
+            "confidence": 1.0,
+            "candidates": [
+                {
+                    "text": text,
+                    "bounds": [start, 605, start + 180, 655],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                }
+                for text, start in (("longinp", 20), ("longing", 220), ("Longines", 420))
+            ],
+        }
+        projected = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit(preedits=[unique_preedit]), ensure_ascii=False),
+            fingerprint="frame-clear-preedit",
+            goal_context=context,
+            coarse_input_value="",
+        )
+
+        field = projected.get_element("local_audited_input_1")
+        self.assertEqual("", field.states["value"])
+        self.assertEqual("longinp", field.states["ime_preedit_text"])
+        self.assertEqual("input_field_1", field.states["input_field_id"])
+        self.assertTrue(field.states["goal_relevant"])
+        self.assertEqual(
+            "local_audited_input_1",
+            projected.unique_trusted_goal_element().element_id,
+        )
+
+        ambiguous = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(
+                audit(
+                    preedits=[
+                        unique_preedit,
+                        {
+                            **unique_preedit,
+                            "region_id": "ime-preedit-2",
+                            "bounds": [0, 480, 1000, 530],
+                            "candidates": [],
+                        },
+                    ]
+                ),
+                ensure_ascii=False,
+            ),
+            fingerprint="frame-clear-preedit",
+            goal_context=context,
+            coarse_input_value="",
+        )
+        self.assertNotIn(
+            "ime_preedit_text",
+            ambiguous.get_element("local_audited_input_1").states,
+        )
+
+        without_backspace = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(
+                audit(preedits=[unique_preedit], include_backspace=False),
+                ensure_ascii=False,
+            ),
+            fingerprint="frame-clear-preedit",
+            goal_context=context,
+            coarse_input_value="",
+        )
+        self.assertNotIn(
+            "ime_preedit_text",
+            without_backspace.get_element("local_audited_input_1").states,
+        )
+
+        input_context = json.loads(json.dumps(context, ensure_ascii=False))
+        active = input_context["entities"]["active_subgoal_visual_context"]
+        active.update(
+            {
+                "subgoal_id": "input_text",
+                "objective": "使用当前键盘输入精确正文 freshsendproof",
+                "constraints": ["输入框为空"],
+                "completion_conditions": ["输入框内容为 freshsendproof"],
+            }
+        )
+        input_scene = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit(preedits=[unique_preedit]), ensure_ascii=False),
+            fingerprint="frame-clear-preedit",
+            goal_context=input_context,
+            coarse_input_value="",
+        )
+        input_field = input_scene.get_element("local_audited_input_1")
+        self.assertEqual("longinp", input_field.states["ime_preedit_text"])
+        self.assertTrue(input_field.states["goal_relevant"])
+        self.assertEqual(
+            "local_audited_input_1",
+            input_scene.unique_trusted_goal_element().element_id,
+        )
+
     def test_keyboard_mode_label_does_not_override_independent_direction(self) -> None:
         keyboard_bounds = (0.0, 360.0, 1000.0, 1000.0)
         for label, current_mode, target_mode in (

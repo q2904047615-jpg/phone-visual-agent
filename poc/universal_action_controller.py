@@ -580,11 +580,19 @@ class UniversalActionController:
         if action.action == "clear_verified_text":
             element = self._resolve_target(action, scene, required_role="input")
             observed_value = element.states.get("value")
+            observed_preedit = element.states.get("ime_preedit_text", "")
             if element.states.get("focused") is not True:
                 raise UniversalActionError("清空文字前必须有当前画面证明输入框已聚焦。")
-            if not isinstance(observed_value, str) or not observed_value:
-                raise UniversalActionError("清空文字要求当前画面提供精确非空 states.value。")
-            delete_count = editable_character_count(observed_value)
+            if not isinstance(observed_value, str):
+                raise UniversalActionError("清空文字要求当前画面提供精确 states.value。")
+            if not isinstance(observed_preedit, str):
+                raise UniversalActionError("清空文字的输入法预编辑状态格式无效。")
+            if not observed_value and not observed_preedit:
+                raise UniversalActionError("清空文字要求应用值或输入法预编辑至少一项非空。")
+            delete_count = (
+                editable_character_count(observed_value)
+                + editable_character_count(observed_preedit)
+            )
             if not 1 <= delete_count <= 100:
                 raise UniversalActionError("清空文字的已验证字符数必须在1～100之间。")
             if (
@@ -605,7 +613,11 @@ class UniversalActionController:
                 )
                 and candidate.states.get("focused") is True
                 and isinstance(candidate.states.get("value"), str)
-                and bool(candidate.states.get("value"))
+                and isinstance(candidate.states.get("ime_preedit_text", ""), str)
+                and (
+                    bool(candidate.states.get("value"))
+                    or bool(candidate.states.get("ime_preedit_text"))
+                )
             )
             if len(eligible_inputs) != 1 or eligible_inputs[0].element_id != element.element_id:
                 raise UniversalActionError(
@@ -1353,6 +1365,14 @@ class UniversalActionController:
                         "typed 拼音组合状态与已验证中文事务不一致。"
                     )
             elif (
+                predicate == "element.state.ime_preedit_text"
+                and operator == "absent"
+            ):
+                if resolved.kind != "clear_verified_text":
+                    raise UniversalActionError(
+                        "typed 预编辑清空后置状态未绑定清空动作。"
+                    )
+            elif (
                 predicate == "element.state.ime_exact_candidate_text"
                 and operator == "equals"
             ):
@@ -1584,6 +1604,14 @@ class UniversalActionController:
             raise UniversalActionError(
                 f"动作后输入框文字不匹配：实际 {actual!r}，预期 {expected!r}。"
             )
+        if (
+            resolved.kind == "clear_verified_text"
+            and before_input.states.get("ime_preedit_text")
+        ):
+            if states.get("ime_preedit_text") not in (None, ""):
+                raise UniversalActionError("清空动作后输入法预编辑文字仍未清除。")
+            if states.get("focused") is not True:
+                raise UniversalActionError("清空动作后原typed输入框不再聚焦。")
         after_input = candidates[0]
         if not self._input_scene_identity_is_stable(
             before,

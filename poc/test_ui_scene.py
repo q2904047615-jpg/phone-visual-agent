@@ -540,6 +540,79 @@ class UISceneTests(unittest.TestCase):
                 ),
             )
 
+    def test_verified_clear_uses_bound_ime_preedit_when_app_value_is_empty(self) -> None:
+        states = {
+            "focused": True,
+            "value": "",
+            "ime_preedit_text": "longinp",
+            "input_field_id": "input_field_1",
+            "input_multiline": False,
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "chinese_pinyin",
+            "goal_relevant": True,
+        }
+        before = scene(
+            element(
+                "field",
+                "application_text_input",
+                role="input",
+                states=states,
+            ),
+            app_id="wechat",
+            screen_id="chat_window",
+            fingerprint="before",
+        )
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="clear-draft",
+                action="clear_verified_text",
+                params={
+                    "element_id": "field",
+                    "target": "application_text_input",
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {"value": ""},
+                        }
+                    },
+                },
+            ),
+            before,
+        )
+
+        self.assertEqual(7, resolved.delete_count)
+        after = scene(
+            element(
+                "field-after",
+                "application_text_input",
+                role="input",
+                states={
+                    **states,
+                    "value": "",
+                    "ime_preedit_text": "",
+                },
+            ),
+            app_id="wechat",
+            screen_id="chat_conversation",
+            fingerprint="after",
+        )
+        UniversalActionController().verify_after_action(resolved, before, after)
+
+        with self.assertRaisesRegex(UniversalActionError, "预编辑"):
+            UniversalActionController().verify_after_action(
+                resolved,
+                before,
+                replace(
+                    after,
+                    elements=(
+                        replace(
+                            after.elements[0],
+                            states={**states, "value": ""},
+                        ),
+                    ),
+                ),
+            )
+
     def test_verified_clear_accepts_placeholder_app_and_same_screen_family(self) -> None:
         states = {
             "focused": True,
@@ -639,7 +712,7 @@ class UISceneTests(unittest.TestCase):
                 },
             },
         )
-        with self.assertRaisesRegex(UniversalActionError, "精确非空"):
+        with self.assertRaisesRegex(UniversalActionError, "至少一项非空"):
             UniversalActionController().resolve_one(
                 action,
                 scene(element("field-a", "draft_input", role="input", states=base)),

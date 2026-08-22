@@ -707,13 +707,15 @@ class TaskSemanticIR:
                 for constraint_ref in subgoal.constraint_refs
                 if constraint_ref in constraints
             )
-            if requires_typed_input and not any(
-                subgoal.subgoal_id in input_field.source_subgoal_ids
+            bound_input_fields = tuple(
+                input_field
                 for input_field in input_fields.values()
-            ):
+                if subgoal.subgoal_id in input_field.source_subgoal_ids
+            )
+            if requires_typed_input and len(bound_input_fields) != 1:
                 raise TaskSemanticIRError(
-                    "typed input action 未绑定 InputFieldIntent："
-                    f"{subgoal.subgoal_id}"
+                    "typed input action 必须且只能绑定一个 InputFieldIntent："
+                    f"{subgoal.subgoal_id}（实际 {len(bound_input_fields)} 个）"
                 )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1686,13 +1688,23 @@ def compile_runtime_graph_semantics(
         source_subgoal_id: str,
         surface_ref: str,
     ) -> None:
-        state_number = len(desired_states) + 1
-        state_id = f"state_{state_number}"
         input_entities = tuple(entity_by_role.get("input_text", ()))
         effect_refs = effect_refs_by_subgoal.get(source_subgoal_id, [])
         compact_description = description.casefold()
+        matching_input_entities = tuple(
+            entity
+            for entity in input_entities
+            if isinstance(entity.value, str)
+            and entity.value
+            and entity.value.casefold() in compact_description
+            and (
+                len(input_entities) == 1
+                or bool(input_field_label_by_entity.get(entity.entity_id, ""))
+                and input_field_label_by_entity[entity.entity_id].casefold()
+                in compact_description
+            )
+        )
         if len(effect_refs) == 1:
-            subject_ref = effect_refs[0]
             receipt_only = any(
                 marker in compact_description
                 for marker in (
@@ -1704,55 +1716,64 @@ def compile_runtime_graph_semantics(
                     "effect applied",
                 )
             )
-            predicate = (
-                "effect.applied" if receipt_only else "effect.result_visible"
+            state_specs = (
+                (
+                    effect_refs[0],
+                    "effect.applied" if receipt_only else "effect.result_visible",
+                    True,
+                    (
+                        ("effect_receipt",)
+                        if receipt_only
+                        else ("visual_claim", "effect_receipt")
+                    ),
+                ),
             )
-            value = True
-            sources = (
-                ("effect_receipt",)
-                if receipt_only
-                else ("visual_claim", "effect_receipt")
+        elif matching_input_entities:
+            state_specs = tuple(
+                (
+                    entity.entity_id,
+                    "input.value_equals",
+                    entity.value,
+                    ("visual_claim",),
+                )
+                for entity in matching_input_entities
             )
-        elif (
-            len(input_entities) == 1
-            and isinstance(input_entities[0].value, str)
-            and input_entities[0].value
-            and input_entities[0].value.casefold() in compact_description
-        ):
-            subject_ref = input_entities[0].entity_id
-            predicate = "input.value_equals"
-            value: Any = input_entities[0].value
-            sources = ("visual_claim",)
         elif any(
             term and term in compact_description
             for term in surface_by_app_term
         ):
-            subject_ref = surface_ref
-            predicate = "surface.state_visible"
-            value = description
-            sources = ("visual_claim",)
+            state_specs = (
+                (surface_ref, "surface.state_visible", description, ("visual_claim",)),
+            )
         else:
-            subject_ref = surface_ref
-            predicate = "observation.matches_description"
-            value = description
-            sources = ("visual_claim", "controller_transition")
-        desired_states.append(
-            DesiredState(
-                state_id=state_id,
-                subject_ref=subject_ref,
-                predicate=predicate,
-                value=value,
-                source_subgoal_id=source_subgoal_id,
+            state_specs = (
+                (
+                    surface_ref,
+                    "observation.matches_description",
+                    description,
+                    ("visual_claim", "controller_transition"),
+                ),
             )
-        )
-        desired_by_subgoal.setdefault(source_subgoal_id, []).append(state_id)
-        evidence_requirements.append(
-            EvidenceRequirement(
-                requirement_id=f"evidence_{state_number}",
-                desired_state_ref=state_id,
-                allowed_sources=tuple(sources),
+        for subject_ref, predicate, value, sources in state_specs:
+            state_number = len(desired_states) + 1
+            state_id = f"state_{state_number}"
+            desired_states.append(
+                DesiredState(
+                    state_id=state_id,
+                    subject_ref=subject_ref,
+                    predicate=predicate,
+                    value=value,
+                    source_subgoal_id=source_subgoal_id,
+                )
             )
-        )
+            desired_by_subgoal.setdefault(source_subgoal_id, []).append(state_id)
+            evidence_requirements.append(
+                EvidenceRequirement(
+                    requirement_id=f"evidence_{state_number}",
+                    desired_state_ref=state_id,
+                    allowed_sources=tuple(sources),
+                )
+            )
 
     semantic_subgoals: list[SemanticSubgoal] = []
     for subgoal_id, subgoal in subgoals.items():
@@ -1902,7 +1923,10 @@ def compile_runtime_graph_semantics(
             for semantic_subgoal in semantic_subgoals
             if (
                 payload.entity_id in semantic_subgoal.entity_refs
-                or semantic_subgoal.subgoal_id in input_action_subgoal_ids
+                or (
+                    len(input_entities) == 1
+                    and semantic_subgoal.subgoal_id in input_action_subgoal_ids
+                )
                 or any(
                     desired_by_id[desired_ref].subject_ref == payload.entity_id
                     for desired_ref in semantic_subgoal.desired_state_refs

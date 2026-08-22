@@ -1541,7 +1541,9 @@ Shell、ADB、keycode、main.exe 指令或其他可直接驱动设备的控制�
    recipients/input_fields、target_ui_label、target_surface、spatial_hint 是通用常见结构，不是封闭白名单。
    多字段输入时，input_fields 每项使用 field_id、field_label、text：field_id 是稳定ASCII身份，
    field_label 必须逐字复制该字段在页面上的可见标签或占位提示，text 是用户要求写入的逐字正文；
-   不得用“第一个/第二个”替代可见字段标签。
+   不得用“第一个/第二个”替代可见字段标签。每个写入子目标只能逐字引用并绑定其中一个字段标签和
+   对应 text；多个字段必须拆成有依赖关系的多个写入子目标，最后再用独立 observe 子目标同时逐字
+   核对所有字段，不能把多个字段合并成一个可执行输入子目标。
    device/system/current_surface 目标可将 target_apps 留空并设置 target_surface；target_surface 只能放在
    goal.entities 内，禁止作为 goal 的直辖字段；
    App 目标仍应使用 target_apps。

@@ -297,12 +297,23 @@ class TaskSemanticIRTests(unittest.TestCase):
                 "execution_class": "navigate",
             },
             {
-                "subgoal_id": "enter_fields",
-                "objective": "填写主题与正文",
+                "subgoal_id": "enter_subject",
+                "objective": "在主题字段输入周报",
                 "status": "pending",
                 "depends_on": ["clear_body"],
                 "constraints": [],
-                "completion_conditions": ["主题和正文逐字正确"],
+                "completion_conditions": ["主题字段逐字为周报"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            },
+            {
+                "subgoal_id": "enter_body",
+                "objective": "在正文字段输入本周完成",
+                "status": "pending",
+                "depends_on": ["enter_subject"],
+                "constraints": [],
+                "completion_conditions": ["正文字段逐字为本周完成"],
                 "completion_evidence": [],
                 "effect_ids": [],
                 "execution_class": "navigate",
@@ -787,12 +798,43 @@ class TaskSemanticIRTests(unittest.TestCase):
                 },
             ],
         }
-        payload["subgoals"][1]["objective"] = "为张三和李四填写主题与正文"
-        payload["subgoals"][1]["completion_conditions"] = [
-            "主题为“主题”且正文为“第一行\n第二行”"
+        open_subgoal = payload["subgoals"][0]
+        send_subgoal = payload["subgoals"][1]
+        send_subgoal.update(
+            {
+                "objective": "向张三和李四发送指定内容",
+                "depends_on": ["fill_body"],
+                "completion_conditions": ["指定内容已发送给张三和李四"],
+            }
+        )
+        payload["subgoals"] = [
+            open_subgoal,
+            {
+                "subgoal_id": "fill_subject",
+                "objective": "在主题字段输入主题",
+                "status": "pending",
+                "depends_on": ["open_wechat"],
+                "constraints": ["不得发送或提交"],
+                "completion_conditions": ["主题字段逐字为主题"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            },
+            {
+                "subgoal_id": "fill_body",
+                "objective": "在正文字段输入第一行\n第二行",
+                "status": "pending",
+                "depends_on": ["fill_subject"],
+                "constraints": ["不得发送或提交"],
+                "completion_conditions": ["正文字段逐字为第一行\n第二行"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            },
+            send_subgoal,
         ]
         payload["effect_intents"][0]["expected_results"] = [
-            "主题为“主题”且正文为“第一行\n第二行”"
+            "指定内容已发送给张三和李四"
         ]
         graph = _graph_from_payload(
             payload,
@@ -813,6 +855,11 @@ class TaskSemanticIRTests(unittest.TestCase):
             {"主题", "正文"},
             {item.field_label for item in authority.semantic_ir.input_fields},
         )
+        fields = {
+            item.field_id: item for item in authority.semantic_ir.input_fields
+        }
+        self.assertEqual(("fill_subject",), fields["subject"].source_subgoal_ids)
+        self.assertEqual(("fill_body",), fields["body"].source_subgoal_ids)
         self.assertTrue(
             any(item.multiline for item in authority.semantic_ir.input_fields)
         )
@@ -826,6 +873,180 @@ class TaskSemanticIRTests(unittest.TestCase):
         changed = replace(graph, revision=2)
         with self.assertRaisesRegex(TaskSemanticIRError, "未绑定当前任务图"):
             apply_formal_semantic_risk_policy(changed, authority)
+
+    def test_multifield_input_ownership_and_final_exact_states_are_typed(self):
+        for subject_label, body_label, subject_text, body_text in (
+            ("主题", "正文", "first", "second"),
+            ("标题", "备注", "alpha", "beta"),
+        ):
+            with self.subTest(subject_label=subject_label, body_label=body_label):
+                payload = {
+                    "status": "ready",
+                    "goal": {
+                        "objective": (
+                            f"在{subject_label}字段输入 {subject_text}，"
+                            f"再在{body_label}字段输入 {body_text}，最后同时核对"
+                        ),
+                        "target_apps": [
+                            {
+                                "app_id": "current_foreground",
+                                "app_name": "当前前台应用",
+                            }
+                        ],
+                        "entities": {
+                            "input_fields": [
+                                {
+                                    "field_id": "subject",
+                                    "field_label": subject_label,
+                                    "text": subject_text,
+                                },
+                                {
+                                    "field_id": "body",
+                                    "field_label": body_label,
+                                    "text": body_text,
+                                },
+                            ]
+                        },
+                    },
+                    "constraints": ["不得发送或提交"],
+                    "completion_conditions": [
+                        {
+                            "condition_id": "both_fields_exact",
+                            "description": (
+                                f"{subject_label}字段逐字为 {subject_text} 且"
+                                f"{body_label}字段逐字为 {body_text}"
+                            ),
+                            "evidence_required": ["两个字段当前值同时可见"],
+                            "satisfied": False,
+                            "evidence": [],
+                        }
+                    ],
+                    "effect_intents": [],
+                    "subgoals": [
+                        {
+                            "subgoal_id": "fill_subject",
+                            "objective": (
+                                f"在{subject_label}字段输入 {subject_text}"
+                            ),
+                            "status": "active",
+                            "depends_on": [],
+                            "constraints": ["不得发送或提交"],
+                            "completion_conditions": [
+                                f"{subject_label}字段逐字为 {subject_text}"
+                            ],
+                            "completion_evidence": [],
+                            "effect_ids": [],
+                            "execution_class": "navigate",
+                        },
+                        {
+                            "subgoal_id": "fill_body",
+                            "objective": f"在{body_label}字段输入 {body_text}",
+                            "status": "pending",
+                            "depends_on": ["fill_subject"],
+                            "constraints": ["不得发送或提交"],
+                            "completion_conditions": [
+                                f"{body_label}字段逐字为 {body_text}"
+                            ],
+                            "completion_evidence": [],
+                            "effect_ids": [],
+                            "execution_class": "navigate",
+                        },
+                        {
+                            "subgoal_id": "verify_fields",
+                            "objective": "同时核对两个字段当前值",
+                            "status": "pending",
+                            "depends_on": ["fill_body"],
+                            "constraints": ["只读核对"],
+                            "completion_conditions": [
+                                f"{subject_label}字段逐字为 {subject_text} 且"
+                                f"{body_label}字段逐字为 {body_text}"
+                            ],
+                            "completion_evidence": [],
+                            "effect_ids": [],
+                            "execution_class": "observe",
+                        },
+                    ],
+                    "active_subgoal_id": "fill_subject",
+                    "clarification_questions": [],
+                }
+                graph = _graph_from_payload(
+                    payload,
+                    task_id="multifield-exact-task",
+                    device_id="device-local-01",
+                    revision=1,
+                    raw_user_goal=payload["goal"]["objective"],
+                )
+                semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+                fields = {
+                    item.field_id: item for item in semantic_ir.input_fields
+                }
+                self.assertEqual(
+                    {"fill_subject", "verify_fields"},
+                    set(fields["subject"].source_subgoal_ids),
+                )
+                self.assertEqual(
+                    {"fill_body", "verify_fields"},
+                    set(fields["body"].source_subgoal_ids),
+                )
+
+                verify = next(
+                    item
+                    for item in semantic_ir.subgoals
+                    if item.subgoal_id == "verify_fields"
+                )
+                desired = {
+                    item.state_id: item for item in semantic_ir.desired_states
+                }
+                exact_states = [
+                    desired[state_id]
+                    for state_id in verify.desired_state_refs
+                    if desired[state_id].predicate == "input.value_equals"
+                ]
+                self.assertEqual(
+                    {fields["subject"].payload_ref, fields["body"].payload_ref},
+                    {item.subject_ref for item in exact_states},
+                )
+                self.assertEqual(
+                    {subject_text, body_text},
+                    {item.value for item in exact_states},
+                )
+
+                combined_payload = json.loads(
+                    json.dumps(payload, ensure_ascii=False)
+                )
+                combined_payload["subgoals"] = [
+                    {
+                        "subgoal_id": "fill_both",
+                        "objective": (
+                            f"在{subject_label}字段输入 {subject_text}，"
+                            f"并在{body_label}字段输入 {body_text}"
+                        ),
+                        "status": "active",
+                        "depends_on": [],
+                        "constraints": ["不得发送或提交"],
+                        "completion_conditions": [
+                            f"{subject_label}字段逐字为 {subject_text} 且"
+                            f"{body_label}字段逐字为 {body_text}"
+                        ],
+                        "completion_evidence": [],
+                        "effect_ids": [],
+                        "execution_class": "navigate",
+                    }
+                ]
+                combined_payload["active_subgoal_id"] = "fill_both"
+                with self.assertRaisesRegex(
+                    TaskSemanticIRError,
+                    "必须且只能绑定一个 InputFieldIntent",
+                ):
+                    compile_formal_semantic_authority(
+                        _graph_from_payload(
+                            combined_payload,
+                            task_id="multifield-combined-task",
+                            device_id="device-local-01",
+                            revision=1,
+                            raw_user_goal=combined_payload["goal"]["objective"],
+                        )
+                    )
 
     def test_newline_key_wording_compiles_to_press_enter(self):
         for wording in (

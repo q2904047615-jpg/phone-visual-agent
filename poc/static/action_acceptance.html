@@ -155,7 +155,7 @@
       const body = document.querySelector('#body-input');
       const verify = () => {
         document.querySelector('#multifield-state').textContent = `主题：${subject.value || '空'}；正文：${body.value || '空'}`;
-        if (subject.value === '周报' && body.value === '本周完成') {
+        if (subject.value === 'first' && body.value === 'second') {
           report('input_verified_text', 'passed', {fields: {subject: subject.value, body: body.value}}, 'multifield-input');
         }
       };

@@ -166,6 +166,8 @@ class ActionAcceptancePageTests(unittest.TestCase):
             "first line\\nsecond line",
             "placeholder=\"主题\"",
             "placeholder=\"正文\"",
+            "subject.value === 'first'",
+            "body.value === 'second'",
             "press_enter",
             'href="/actions">返回验收模式选择',
         ):

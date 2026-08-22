@@ -5764,6 +5764,42 @@ class GenericSceneObserverTests(unittest.TestCase):
             input_scene.unique_trusted_goal_element().element_id,
         )
 
+        for cue in ("longinp", "staledraft"):
+            with self.subTest(inline_preedit_cue=cue):
+                inline_audit = audit(preedits=[])
+                inline_audit["application_inputs"][0][
+                    "visible_editable_cues"
+                ] = [cue]
+                inline_scene = _apply_input_structure_audit(
+                    base_scene,
+                    json.dumps(inline_audit, ensure_ascii=False),
+                    fingerprint="frame-inline-preedit",
+                    goal_context=input_context,
+                    coarse_input_value="",
+                )
+                inline_field = inline_scene.get_element("local_audited_input_1")
+                self.assertEqual("", inline_field.states["value"])
+                self.assertEqual(cue, inline_field.states["ime_preedit_text"])
+                self.assertTrue(inline_field.states["goal_relevant"])
+
+        for cues in (["cursor"], ["border"], ["longinp", "cursor"]):
+            with self.subTest(non_authoritative_inline_cues=cues):
+                rejected_audit = audit(preedits=[])
+                rejected_audit["application_inputs"][0][
+                    "visible_editable_cues"
+                ] = cues
+                rejected_scene = _apply_input_structure_audit(
+                    base_scene,
+                    json.dumps(rejected_audit, ensure_ascii=False),
+                    fingerprint="frame-inline-preedit-rejected",
+                    goal_context=input_context,
+                    coarse_input_value="",
+                )
+                rejected_field = rejected_scene.get_element(
+                    "local_audited_input_1"
+                )
+                self.assertNotIn("ime_preedit_text", rejected_field.states)
+
     def test_keyboard_mode_label_does_not_override_independent_direction(self) -> None:
         keyboard_bounds = (0.0, 360.0, 1000.0, 1000.0)
         for label, current_mode, target_mode in (

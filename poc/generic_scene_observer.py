@@ -6399,6 +6399,54 @@ def _unique_clearable_ime_preedit(
     return preedit_text
 
 
+def _unique_inline_ime_preedit_cue(
+    trusted_input: dict[str, Any],
+    trusted_preedits: list[dict[str, Any]],
+    *,
+    keyboard_input_mode: str,
+) -> str:
+    """Recover one literal pinyin composition rendered inside an empty field.
+
+    Some applications draw the active IME composition over their editable
+    surface while still reporting the committed application value as empty.
+    The dedicated audit then returns that literal only as an editable cue,
+    rather than as a separately bounded IME region.  Keep this recovery
+    deliberately narrow: one empty input, one non-decorative pinyin literal,
+    Chinese-pinyin mode, and no competing IME region.
+    """
+
+    cues = trusted_input.get("visible_editable_cues")
+    if (
+        keyboard_input_mode != "chinese_pinyin"
+        or trusted_input.get("text") != ""
+        or trusted_preedits
+        or not isinstance(cues, list)
+        or len(cues) != 1
+    ):
+        return ""
+    cue = cues[0]
+    if not isinstance(cue, str):
+        return ""
+    cue = cue.strip()
+    non_text_cues = {
+        "border",
+        "caret",
+        "cursor",
+        "focus border",
+        "focus ring",
+        "outline",
+    }
+    if (
+        not cue
+        or cue.casefold() in non_text_cues
+        or cue == trusted_input.get("placeholder")
+        or cue in trusted_input.get("field_labels", ())
+        or re.fullmatch(r"[a-z]+(?:'[a-z]+)*", cue, re.IGNORECASE) is None
+    ):
+        return ""
+    return cue
+
+
 def _next_field_key_element(
     key: dict[str, Any], *, source_field_id: str,
     target_field_id: str, target_field_label: str,
@@ -7121,6 +7169,12 @@ def _apply_input_structure_audit(
                 trusted_input,
                 trusted_preedits,
             )
+            if not clearable_ime_preedit:
+                clearable_ime_preedit = _unique_inline_ime_preedit_cue(
+                    trusted_input,
+                    trusted_preedits,
+                    keyboard_input_mode=keyboard_input_mode,
+                )
         enter_key = None
         if locally_snapped_qwerty_anchors is not None:
             enter_key = _locally_snapped_keyboard_enter_key(

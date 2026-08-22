@@ -5800,6 +5800,55 @@ class GenericSceneObserverTests(unittest.TestCase):
                 )
                 self.assertNotIn("ime_preedit_text", rejected_field.states)
 
+        nested_preedit = {
+            "region_id": "ime-preedit-nested",
+            "bounds": [155, 550, 275, 590],
+            "text": "longinp",
+            "confidence": 1.0,
+            "candidates": [
+                {
+                    "text": text,
+                    "bounds": [start, 605, start + 180, 655],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                }
+                for text, start in (
+                    ("longinp", 20),
+                    ("longing", 220),
+                    ("Longines", 420),
+                )
+            ],
+        }
+        nested_audit = audit(preedits=[nested_preedit])
+        nested_audit["application_inputs"][0]["visible_editable_cues"] = [
+            "longinp",
+            "caret",
+        ]
+        nested_scene = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(nested_audit, ensure_ascii=False),
+            fingerprint="frame-nested-preedit",
+            goal_context=input_context,
+            coarse_input_value="",
+        )
+        nested_field = nested_scene.get_element("local_audited_input_1")
+        self.assertEqual("", nested_field.states["value"])
+        self.assertEqual("longinp", nested_field.states["ime_preedit_text"])
+        self.assertTrue(nested_field.states["goal_relevant"])
+
+        too_far = json.loads(json.dumps(nested_audit, ensure_ascii=False))
+        too_far["ime_preedit_regions"][0]["candidates"][0]["bounds"] = [
+            20, 760, 200, 810,
+        ]
+        with self.assertRaisesRegex(VisionAgentError, "紧邻候选行"):
+            _apply_input_structure_audit(
+                base_scene,
+                json.dumps(too_far, ensure_ascii=False),
+                fingerprint="frame-distant-candidate",
+                goal_context=input_context,
+                coarse_input_value="",
+            )
+
     def test_keyboard_mode_label_does_not_override_independent_direction(self) -> None:
         keyboard_bounds = (0.0, 360.0, 1000.0, 1000.0)
         for label, current_mode, target_mode in (

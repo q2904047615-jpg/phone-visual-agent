@@ -2555,7 +2555,7 @@ Goal context (evidence selection only): {json.dumps(context, ensure_ascii=False,
 {image_contract}
 Distinguish three different visual structures; never merge them:
 1. application_inputs: editable search/address/form fields in the App content area. Include an empty field only when a complete border plus a visible placeholder, caret, focus highlight, or other literal editable cue is visible. field_labels must contain only literal labels visibly attached to that field (for example a nearby form label or its placeholder), never the local field_id. The active field selector is field_id={json.dumps(active_field_id, ensure_ascii=False)} and visible field_label={json.dumps(active_field_label, ensure_ascii=False)}; use the label only to enumerate visible evidence, never infer it from the goal.
-2. ime_preedit_regions: the input method's composition/candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Many real IMEs render an underlined Latin composition inside the otherwise empty App field while showing its candidate strip immediately beside that field. In that layout the underlined letters remain IME preedit, application_inputs.text MUST be "", the literal may also appear in visible_editable_cues, and one ime_preedit_regions item MUST use the complete adjacent candidate-strip bounds with text set to the underlined composition. Never call those underlined letters committed application text. Enumerate only complete visible candidate words inside each region; candidates are read-only facts and never application inputs.
+2. ime_preedit_regions: the input method's composition and its adjacent candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Many real IMEs render an underlined Latin composition inside the otherwise empty App field while showing its candidate strip immediately beside that field. In that layout the underlined letters remain IME preedit, application_inputs.text MUST be "", the literal may also appear in visible_editable_cues, and one ime_preedit_regions item MUST tightly bound the underlined composition with text set to that literal. Candidate words use their own complete adjacent bounds and need not lie inside the composition bounds. Never call those underlined letters committed application text. Enumerate only complete visible candidate words tied to that composition; candidates are read-only facts and never application inputs.
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
    When keyboard.visible=true, report keyboard.bounds only when it confidently encloses the complete visible keyboard in the same coordinate system, has width at least 300 and height at least 180, and contains every reported keyboard key and anchor. Measure from the four edges of Image 1; do not shift the keyboard toward the bottom or describe only its letter rows. For QWERTY, qwerty_anchors remain mandatory; when the outer bounds cannot be measured confidently, set bounds=null instead of inventing it. Local code may reconstruct an execution envelope only after independent multi-frame row evidence validates all seven anchors. Non-QWERTY actionable geometry still requires complete keyboard.bounds.
@@ -6372,11 +6372,25 @@ def _unique_clearable_ime_preedit(
         return ""
     input_box = tuple(float(value) for value in trusted_input["input_bounds"])
     preedit_box = tuple(float(value) for value in trusted_preedits[0]["bounds"])
-    if (
+    overlaps_input = bool(
         _bounds_overlap_ratio(input_box, preedit_box) > 0
         or _bounds_overlap_ratio(preedit_box, input_box) > 0
-    ):
-        return ""
+    )
+    if overlaps_input:
+        input_area = (input_box[2] - input_box[0]) * (
+            input_box[3] - input_box[1]
+        )
+        preedit_area = (preedit_box[2] - preedit_box[0]) * (
+            preedit_box[3] - preedit_box[1]
+        )
+        nested_empty_preedit = bool(
+            trusted_input.get("text") == ""
+            and _bounds_inside(preedit_box, input_box, tolerance=12)
+            and _bounds_overlap_ratio(preedit_box, input_box) >= 0.90
+            and input_area > 0
+            and preedit_area <= 0.60 * input_area
+        )
+        return preedit_text if nested_empty_preedit else ""
     horizontal_overlap = max(
         0.0,
         min(input_box[2], preedit_box[2]) - max(input_box[0], preedit_box[0]),
@@ -6692,7 +6706,6 @@ def _apply_input_structure_audit(
                 raise UISceneError("输入结构审计 keyboard.layout 无效。")
             keyboard["layout"] = keyboard_layout
 
-        preedit_bounds: list[tuple[float, float, float, float]] = []
         trusted_preedits: list[dict[str, Any]] = []
         for item in ime_preedit_regions:
             if not isinstance(item, dict) or set(item) not in (
@@ -6722,8 +6735,16 @@ def _apply_input_structure_audit(
                 )
                 if not isinstance(candidate.get("fully_visible"), bool):
                     raise UISceneError("IME候选 fully_visible 必须是布尔值。")
-                if not _bounds_inside(candidate_bounds, bounds, tolerance=12):
-                    raise UISceneError("IME候选必须完整位于对应预编辑区内。")
+                candidate_vertical_gap = max(
+                    0.0,
+                    candidate_bounds[1] - bounds[3],
+                    bounds[1] - candidate_bounds[3],
+                )
+                if (
+                    not _bounds_inside(candidate_bounds, bounds, tolerance=12)
+                    and candidate_vertical_gap > 120
+                ):
+                    raise UISceneError("IME候选必须位于对应预编辑区内或紧邻候选行。")
                 # Candidate text is optional action authority.  A model may
                 # enumerate a visible but irrelevant long preedit string here.
                 # After its schema and geometry are validated, discard that
@@ -6740,7 +6761,6 @@ def _apply_input_structure_audit(
                         }
                     )
             if confidence >= 0.9:
-                preedit_bounds.append(bounds)
                 trusted_preedits.append(
                     {
                         "text": str(item.get("text") or "").strip(),
@@ -6878,9 +6898,26 @@ def _apply_input_structure_audit(
                     >= 0.25
                 )
                 or any(
-                    _bounds_overlap_ratio(bounds, preedit) >= 0.35
-                    or _bounds_overlap_ratio(preedit, bounds) >= 0.35
-                    for preedit in preedit_bounds
+                    (
+                        _bounds_overlap_ratio(bounds, preedit["bounds"]) >= 0.35
+                        or _bounds_overlap_ratio(preedit["bounds"], bounds) >= 0.35
+                    )
+                    and not (
+                        text == ""
+                        and preedit["text"]
+                        and _bounds_inside(
+                            preedit["bounds"], bounds, tolerance=12
+                        )
+                        and _bounds_overlap_ratio(
+                            preedit["bounds"], bounds
+                        ) >= 0.90
+                        and (
+                            (preedit["bounds"][2] - preedit["bounds"][0])
+                            * (preedit["bounds"][3] - preedit["bounds"][1])
+                        )
+                        <= 0.60 * width * height
+                    )
+                    for preedit in trusted_preedits
                 )
             ):
                 continue

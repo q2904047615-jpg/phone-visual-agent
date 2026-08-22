@@ -2564,11 +2564,11 @@ Distinguish three different visual structures; never merge them:
 7. keyboard.enter_key: report at most one complete visible keyboard action key using exactly label, bounds, confidence, fully_visible and key_action. key_action must be one of newline, send, search, done, next, unknown and must describe the key's current visible behavior, never the requested goal. A plain multiline Return/Enter key may be newline. A key visibly labelled or iconographically acting as Send/Search/Done/Next must use that action and can never authorize a newline. The current transaction needs a newline={str(enter_required).lower()} and multiline={str(active_multiline).lower()}, but those facts do not change the visual classification.
 8. keyboard.layout_switches: enumerate only compact visible keys with an explicit destination layout: qwerty, numeric, or symbol. Copy the literal label and report current_layout and target_layout; never infer a destination from the goal alone.
 7. keyboard.case_mode and keyboard.case_switch apply only to direct_latin QWERTY. case_mode is lower, upper, or unknown from the visible letter glyphs. case_switch is null unless a complete visible shift/case key and its lower↔upper direction are independently clear.
-Determine keyboard.input_mode only from the current whole keyboard image, never from the goal or the JSON example. Visible Chinese composition/candidates, pinyin separators, or a current-mode label such as 中/中文/Pinyin prove chinese_pinyin. A visible current-mode label such as 英/EN/English/ABC/Latin together with a plain Latin QWERTY layout and no Chinese composition/candidate strip proves direct_latin. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
-keyboard.mode_switch.current_mode MUST equal keyboard.input_mode whenever input_mode is known. Treat an unambiguous single-mode label on the key as the current visible mode: 中/中文/Pinyin means chinese_pinyin; 英/EN/English/ABC/Latin means direct_latin. If the label could instead name a destination and the current whole-keyboard state is not independently clear, do not guess a direction; set mode_switch to null.
+Determine keyboard.input_mode only from the current whole keyboard image, never from the goal, the JSON example, or the mode-switch key label alone. Visible Chinese composition/candidates or pinyin separators prove chinese_pinyin. A plain Latin QWERTY state with no Chinese composition/candidate strip may prove direct_latin only when the whole keyboard provides independent current-mode evidence. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
+keyboard.mode_switch.current_mode MUST equal keyboard.input_mode whenever input_mode is known, and target_mode MUST be the other supported mode. Across real keyboards the visible key label may name either the current mode or the destination mode: for example, 英/EN can be shown while Chinese pinyin is current and pressing it enters direct Latin, or while direct Latin is current and pressing it enters Chinese. Copy the literal label, but never derive current_mode or target_mode from that label. If the direction is not independently clear from the whole keyboard state, set mode_switch to null.
 For a text-entry verification goal, report the proven current keyboard.input_mode; keyboard.mode_switch is optional and should be null unless its direction is independently unambiguous. Never invent a switch direction merely because the goal asks for text entry.
 keyboard.mode_switch MUST be either null or an object with exactly these five fields: label, bounds, confidence, current_mode, target_mode. Never omit confidence or target_mode. Valid non-null shapes in the two directions are:
-{{"label":"中","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"chinese_pinyin","target_mode":"direct_latin"}}
+{{"label":"英","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"chinese_pinyin","target_mode":"direct_latin"}}
 {{"label":"英","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"direct_latin","target_mode":"chinese_pinyin"}}
 These are shape examples only. Copy the literal visible label and measured bounds from Image 1, set confidence from the visible evidence, and choose the direction from the independently proven current keyboard state. Never copy either example merely to satisfy the goal.
 keyboard.case_switch uses the same five field names, but current_mode and target_mode are lower or upper. It is valid only for direct_latin QWERTY and a visible shift/case glyph. Example shape: {{"label":"⇧","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"lower","target_mode":"upper"}}.
@@ -7073,22 +7073,11 @@ def _apply_input_structure_audit(
             == {"label", "bounds", "confidence", "current_mode", "target_mode"}
         ):
             raw_switch_current_mode = raw_mode_switch.get("current_mode")
-            raw_switch_label_mode = _keyboard_mode_implied_by_label(
-                str(raw_mode_switch.get("label") or "").strip()
-            )
             discardable_mode_switch_semantic_conflict = bool(
-                (
-                    raw_switch_current_mode
-                    in {"direct_latin", "chinese_pinyin"}
-                    and keyboard_input_mode in {"direct_latin", "chinese_pinyin"}
-                    and raw_switch_current_mode != keyboard_input_mode
-                )
-                or (
-                    raw_switch_label_mode is not None
-                    and raw_switch_current_mode
-                    in {"direct_latin", "chinese_pinyin"}
-                    and raw_switch_label_mode != raw_switch_current_mode
-                )
+                raw_switch_current_mode
+                in {"direct_latin", "chinese_pinyin"}
+                and keyboard_input_mode in {"direct_latin", "chinese_pinyin"}
+                and raw_switch_current_mode != keyboard_input_mode
             )
         if (
             not switch_is_goal
@@ -7909,9 +7898,6 @@ def _validated_keyboard_mode_switch(
     if current_mode not in modes or target_mode not in modes or current_mode == target_mode:
         raise UISceneError("mode_switch 必须给出方向明确且不同的输入模式。")
     label = str(value.get("label") or "").strip()
-    label_mode = _keyboard_mode_implied_by_label(label)
-    if label_mode is not None and label_mode != current_mode:
-        raise UISceneError("mode_switch label 与 current_mode 冲突。")
     bounds = tuple(float(part) for part in value["bounds"])
     keyboard_width = keyboard_bounds[2] - keyboard_bounds[0]
     keyboard_height = keyboard_bounds[3] - keyboard_bounds[1]
@@ -8445,15 +8431,6 @@ def _input_structure_diagnostic_shape(raw: str) -> dict[str, Any]:
             for key, value in sorted(mode_switch.items(), key=lambda item: str(item[0]))
         }
     return result
-
-
-def _keyboard_mode_implied_by_label(label: str) -> str | None:
-    visible = re.sub(r"[\s_\-/]+", "", str(label or "").strip().casefold())
-    if visible in {"中", "中文", "chinese", "pinyin"}:
-        return "chinese_pinyin"
-    if visible in {"英", "en", "eng", "english", "abc", "latin"}:
-        return "direct_latin"
-    return None
 
 
 def _has_any_semantic_term(item: dict[str, Any], terms: tuple[str, ...]) -> bool:

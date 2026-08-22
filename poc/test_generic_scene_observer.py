@@ -50,6 +50,7 @@ from generic_scene_observer import (
     _validated_keyboard_layout_switches,
     _validated_keyboard_backspace_key,
     _validated_keyboard_literal_keys,
+    _validated_keyboard_mode_switch,
 )
 from ocr_runtime import OcrMatch
 from orientation_safety import ORIENTATION_AUDIT_PROTOCOL_VERSION
@@ -578,13 +579,22 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIn(INPUT_STRUCTURE_AUDIT_VERSION, prompt)
         self.assertIn('"mode_switch":null', prompt)
         self.assertIn(
-            '{"label":"中","bounds":[0,0,1000,1000],"confidence":0.0,'
+            '{"label":"英","bounds":[0,0,1000,1000],"confidence":0.0,'
             '"current_mode":"chinese_pinyin","target_mode":"direct_latin"}',
             prompt,
         )
         self.assertIn(
             '{"label":"英","bounds":[0,0,1000,1000],"confidence":0.0,'
             '"current_mode":"direct_latin","target_mode":"chinese_pinyin"}',
+            prompt,
+        )
+        self.assertIn(
+            "visible key label may name either the current mode or the "
+            "destination mode",
+            prompt,
+        )
+        self.assertIn(
+            "never derive current_mode or target_mode from that label",
             prompt,
         )
         self.assertIn("Never omit confidence or target_mode", prompt)
@@ -5538,32 +5548,114 @@ class GenericSceneObserverTests(unittest.TestCase):
                 goal_context={"objective": "切换到英文直输模式"},
             )
 
-    def test_keyboard_mode_switch_label_cannot_contradict_current_mode(self) -> None:
+    def test_chinese_pinyin_accepts_destination_english_mode_label(self) -> None:
         empty = scene_payload()
         empty["elements"] = []
         audit = input_audit_payload(
+            ime_preedit_regions=[
+                {
+                    "region_id": "ime-preedit-1",
+                    "bounds": [0, 600, 1000, 660],
+                    "text": "longinp",
+                    "confidence": 1.0,
+                    "candidates": [
+                        {
+                            "text": "longinp",
+                            "bounds": [60, 600, 260, 660],
+                            "confidence": 1.0,
+                            "fully_visible": True,
+                        }
+                    ],
+                }
+            ],
             keyboard={
                 "visible": True,
-                "bounds": [0, 360, 1000, 1000],
+                "bounds": [0, 660, 1000, 1000],
                 "layout": "qwerty",
                 "input_mode": "chinese_pinyin",
                 "mode_switch": {
                     "label": "英",
-                    "bounds": [650, 900, 760, 970],
-                    "confidence": 0.97,
+                    "bounds": [730, 930, 810, 980],
+                    "confidence": 1.0,
                     "current_mode": "chinese_pinyin",
                     "target_mode": "direct_latin",
                 },
             }
         )
 
-        with self.assertRaisesRegex(VisionAgentError, "label.*current_mode.*冲突"):
-            GenericSceneObserver(
-                SequenceProvider([empty, empty, audit])
-            ).observe(
-                frames=stable_frames(),
-                goal_context={"objective": "读取当前键盘输入模式"},
+        scene = GenericSceneObserver(
+            SequenceProvider([empty, audit])
+        ).observe(
+            frames=stable_frames(),
+            goal_context={"objective": "切换到英文直输模式 direct_latin"},
+        )
+
+        mode_switch = scene.get_element("local_audited_keyboard_mode_switch_1")
+        self.assertEqual("switch_keyboard_input_mode", mode_switch.meaning)
+        self.assertEqual("英", mode_switch.label)
+        self.assertEqual("chinese_pinyin", mode_switch.states["current_mode"])
+        self.assertEqual("direct_latin", mode_switch.states["target_mode"])
+
+    def test_keyboard_mode_label_does_not_override_independent_direction(self) -> None:
+        keyboard_bounds = (0.0, 360.0, 1000.0, 1000.0)
+        for label, current_mode, target_mode in (
+            ("中", "chinese_pinyin", "direct_latin"),
+            ("中", "direct_latin", "chinese_pinyin"),
+            ("EN", "chinese_pinyin", "direct_latin"),
+            ("EN", "direct_latin", "chinese_pinyin"),
+        ):
+            with self.subTest(label=label, current_mode=current_mode):
+                result = _validated_keyboard_mode_switch(
+                    {
+                        "label": label,
+                        "bounds": [650, 900, 760, 970],
+                        "confidence": 0.97,
+                        "current_mode": current_mode,
+                        "target_mode": target_mode,
+                    },
+                    keyboard_bounds=keyboard_bounds,
+                )
+                self.assertEqual(label, result["label"])
+                self.assertEqual(current_mode, result["current_mode"])
+                self.assertEqual(target_mode, result["target_mode"])
+
+    def test_keyboard_mode_switch_keeps_direction_and_geometry_guards(self) -> None:
+        keyboard_bounds = (0.0, 360.0, 1000.0, 1000.0)
+        with self.assertRaisesRegex(UISceneError, "方向明确"):
+            _validated_keyboard_mode_switch(
+                {
+                    "label": "英",
+                    "bounds": [650, 900, 760, 970],
+                    "confidence": 0.97,
+                    "current_mode": "direct_latin",
+                    "target_mode": "direct_latin",
+                },
+                keyboard_bounds=keyboard_bounds,
             )
+        self.assertIsNone(
+            _validated_keyboard_mode_switch(
+                {
+                    "label": "EN",
+                    "bounds": [650, 900, 760, 970],
+                    "confidence": 0.5,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+                keyboard_bounds=keyboard_bounds,
+            )
+        )
+        self.assertIsNone(
+            _validated_keyboard_mode_switch(
+                {
+                    "label": "中",
+                    "bounds": [50, 50, 150, 100],
+                    "confidence": 0.97,
+                    "current_mode": "direct_latin",
+                    "target_mode": "chinese_pinyin",
+                },
+                keyboard_bounds=keyboard_bounds,
+            )
+        )
 
     def test_direct_latin_mode_accepts_matching_english_mode_label(self) -> None:
         empty = scene_payload()
@@ -5640,7 +5732,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             )
         )
 
-    def test_text_entry_discards_conflicting_non_target_mode_switch(self) -> None:
+    def test_text_entry_keeps_valid_non_target_mode_switch_non_goal_relevant(self) -> None:
         empty = scene_payload()
         empty["elements"] = []
         audit = input_audit_payload(
@@ -5672,12 +5764,10 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertIsNotNone(input_element)
         self.assertEqual("input", input_element.role)
         self.assertEqual("direct_latin", input_element.states["keyboard_input_mode"])
-        self.assertFalse(
-            any(
-                item.element_id == "local_audited_keyboard_mode_switch_1"
-                for item in scene.elements
-            )
-        )
+        mode_switch = scene.get_element("local_audited_keyboard_mode_switch_1")
+        self.assertFalse(mode_switch.states["goal_relevant"])
+        self.assertEqual("direct_latin", mode_switch.states["current_mode"])
+        self.assertEqual("chinese_pinyin", mode_switch.states["target_mode"])
 
     def test_text_entry_result_discards_incomplete_non_target_mode_switch(self) -> None:
         empty = scene_payload()

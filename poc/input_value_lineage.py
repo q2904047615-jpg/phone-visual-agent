@@ -544,6 +544,62 @@ class TypedInputLineage:
             )
         )
 
+    def pending_text_committed_prefix(
+        self,
+        *,
+        device_id: str,
+        app_id: str,
+        screen_id: str,
+        authorized_text: str,
+        coarse_exact_value: str,
+        raw_value: str,
+        preedit_text: str,
+        input_bounds: tuple[float, float, float, float] | None,
+        input_field_id: str | None,
+        now_epoch: float | None = None,
+        ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
+    ) -> str | None:
+        """Recover only the committed prefix hidden beside an IME preedit.
+
+        A returned direct-text action may leave its new fragment in the IME
+        composition buffer.  Some dedicated audits then report that preedit
+        correctly but omit the already committed prefix after the placeholder
+        disappears.  The prefix is derivable only when the pending typed
+        lineage, the exact authorized payload, the independent coarse read,
+        the same field id and the same input surface all agree.  The preedit
+        itself remains uncommitted and must still be selected separately.
+        """
+
+        now = time.time() if now_epoch is None else float(now_epoch)
+        current_field = str(input_field_id or "").strip()
+        if (
+            self.source != "pending_verified_text_action"
+            or device_id != self.device_id
+            or now < self.recorded_at_epoch
+            or now - self.recorded_at_epoch > ttl_seconds
+            or authorized_text != self.exact_value
+            or coarse_exact_value != self.exact_value
+            or raw_value != ""
+            or not isinstance(preedit_text, str)
+            or not preedit_text
+            or not self.exact_value.endswith(preedit_text)
+            or self.exact_value == preedit_text
+            or self.input_field_id in {"", "unknown"}
+            or current_field != self.input_field_id
+            or input_bounds is None
+            or not _bounds_compatible(self.input_bounds, input_bounds)
+            or not _surface_identity_compatible(
+                recorded_app_id=self.app_id,
+                recorded_screen_id=self.screen_id,
+                current_app_id=app_id,
+                current_screen_id=screen_id,
+                exact_value=self.exact_value,
+            )
+        ):
+            return None
+        committed_prefix = self.exact_value[: -len(preedit_text)]
+        return committed_prefix if committed_prefix and "\r" not in committed_prefix else None
+
     def matches_trailing_newline_cue(
         self,
         *,

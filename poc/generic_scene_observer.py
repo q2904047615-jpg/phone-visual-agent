@@ -7726,6 +7726,34 @@ def _apply_input_structure_audit(
                 trusted_input = dict(trusted_input)
                 trusted_input["lineage_visual_text"] = raw_lineage_text
                 trusted_input["text"] = verified_input_lineage.exact_value
+            if trusted_input["text"] == "" and keyboard_input_mode == "direct_latin":
+                pending_preedit_text = _unique_clearable_ime_preedit(
+                    trusted_input,
+                    trusted_preedits,
+                )
+                pending_committed_prefix = (
+                    verified_input_lineage.pending_text_committed_prefix(
+                        device_id=str(device_id or ""),
+                        app_id=scene.app_id,
+                        screen_id=scene.screen_id,
+                        authorized_text=active_transaction_text,
+                        coarse_exact_value=(
+                            coarse_input_value
+                            if isinstance(coarse_input_value, str)
+                            else ""
+                        ),
+                        raw_value=trusted_input["text"],
+                        preedit_text=pending_preedit_text,
+                        input_bounds=lineage_bounds,
+                        input_field_id=active_field_id,
+                    )
+                )
+                if pending_committed_prefix is not None:
+                    trusted_input = dict(trusted_input)
+                    trusted_input["lineage_pending_text_prefix"] = (
+                        pending_committed_prefix
+                    )
+                    trusted_input["text"] = pending_committed_prefix
         exact_ime_candidate: dict[str, Any] | None = None
         exact_ime_preedit_text = ""
         input_step = None
@@ -8218,6 +8246,15 @@ def _apply_input_structure_audit(
                     input_evidence.append(
                         "跨会话同一应用输入区域仍逐字可见："
                         f"{lineage_persisted_visible_cue_text}；持久回执连续性核对通过"
+                    )
+                lineage_pending_text_prefix = rendered_input.get(
+                    "lineage_pending_text_prefix"
+                )
+                if isinstance(lineage_pending_text_prefix, str):
+                    input_evidence.append(
+                        "pending typed连续性、授权payload与唯一预编辑后缀"
+                        "共同确认已提交前缀："
+                        f"{lineage_pending_text_prefix}"
                     )
                 same_frame_visible_cue_text = rendered_input.get(
                     "same_frame_visible_cue_text"

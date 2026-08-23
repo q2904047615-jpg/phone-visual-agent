@@ -1330,6 +1330,152 @@ class TypedInputLineageTests(unittest.TestCase):
                 before_scene=scene("", "before-fp"),
             )
 
+    def test_pending_text_preedit_preserves_same_typed_multiline_prefix(self) -> None:
+        prior = "first\n"
+        fragment = "second"
+        expected = prior + fragment
+        before = scene(prior, "before-fp")
+        before["elements"][0]["states"].update(
+            {
+                "input_field_id": "input_field_1",
+                "input_multiline": True,
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "direct_latin",
+            }
+        )
+        pending = build_pending_text_lineage(
+            device_id=DEVICE,
+            resolved_action=resolved_text(prior=prior, fragment=fragment),
+            before_scene=before,
+        )
+        audit = {
+            "protocol_version": INPUT_STRUCTURE_AUDIT_VERSION,
+            "application_inputs": [
+                {
+                    "structure_id": "app-input-1",
+                    "bounds": [130, 540, 690, 610],
+                    "fully_visible": True,
+                    "text": "",
+                    "placeholder": "",
+                    "visible_editable_cues": [
+                        "正文",
+                        "complete border",
+                        "focus highlight",
+                    ],
+                    "caret_line_index": 1,
+                    "confidence": 1.0,
+                    "right_button": None,
+                }
+            ],
+            "ime_preedit_regions": [
+                {
+                    "region_id": "ime-preedit-1",
+                    "bounds": [150, 565, 500, 600],
+                    "text": fragment,
+                    "confidence": 1.0,
+                    "candidates": [
+                        {
+                            "text": fragment,
+                            "bounds": [100, 650, 220, 690],
+                            "confidence": 1.0,
+                            "fully_visible": True,
+                        },
+                        {
+                            "text": "secondary",
+                            "bounds": [240, 650, 430, 690],
+                            "confidence": 1.0,
+                            "fully_visible": True,
+                        },
+                    ],
+                }
+            ],
+            "keyboard": {
+                "visible": True,
+                "bounds": [0, 620, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [122, 735],
+                    "p": [880, 735],
+                    "a": [164, 810],
+                    "l": [838, 810],
+                    "z": [248, 885],
+                    "m": [754, 885],
+                    "backspace": [880, 885],
+                },
+                "mode_switch": None,
+                "backspace_key": None,
+                "enter_key": None,
+                "case_switch": None,
+                "literal_keys": [],
+                "layout_switches": [],
+            },
+        }
+
+        def goal(field_id: str = "input_field_1", text: str = expected) -> dict:
+            return {
+                "entities": {
+                    "active_subgoal_visual_context": {
+                        "subgoal_id": "input_exact_text",
+                        "objective": "输入精确多行文字",
+                        "constraints": [],
+                        "completion_conditions": [],
+                        "execution_class": "navigate",
+                        "goal_entities": {
+                            "input_text": text,
+                            "active_input_transaction_text": text,
+                            "active_input_field_id": field_id,
+                            "active_input_multiline": True,
+                        },
+                    }
+                }
+            }
+
+        base = UIScene.from_dict(scene(expected, "after-fp"))
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="after-fp",
+            goal_context=goal(),
+            coarse_input_value=expected,
+            verified_input_lineage=pending,
+            device_id=DEVICE,
+        )
+        input_element = projected.get_element("local_audited_input_1")
+        candidate = projected.get_element("local_audited_ime_candidate_1")
+        self.assertEqual(prior, input_element.states["value"])
+        self.assertEqual(fragment, input_element.states["ime_preedit_text"])
+        self.assertEqual(prior, candidate.states["prior_input_value"])
+        self.assertEqual(expected, candidate.states["expected_input_value"])
+        self.assertTrue(any("pending typed连续性" in item for item in input_element.evidence))
+
+        for changed_goal, changed_coarse in (
+            (goal(field_id="other_field"), expected),
+            (goal(text="first\nthird"), expected),
+            (goal(), "first\nother"),
+        ):
+            with self.subTest(goal=changed_goal, coarse=changed_coarse):
+                rejected = _apply_input_structure_audit(
+                    base,
+                    json.dumps(audit, ensure_ascii=False),
+                    fingerprint="after-fp",
+                    goal_context=changed_goal,
+                    coarse_input_value=changed_coarse,
+                    verified_input_lineage=pending,
+                    device_id=DEVICE,
+                )
+                self.assertEqual(
+                    "",
+                    rejected.get_element("local_audited_input_1").states["value"],
+                )
+                self.assertFalse(
+                    any(
+                        element.meaning == "ime_exact_candidate"
+                        for element in rejected.elements
+                    )
+                )
+
     def test_direct_text_lineage_rejects_broken_chain_and_missing_frames(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = self.make_store(temp)

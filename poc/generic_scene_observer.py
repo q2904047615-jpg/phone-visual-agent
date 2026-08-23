@@ -743,6 +743,13 @@ class GenericSceneObserver:
             )
             fingerprint = _local_frame_fingerprint(frame)
             context = _safe_goal_context(goal_context or {})
+            allow_omitted_local_input_auxiliary_confirmation = bool(
+                context.pop(
+                    "_allow_omitted_local_input_auxiliary_confirmation",
+                    False,
+                )
+                is True
+            )
             privacy_minimized_system_home = (
                 _goal_requests_coordinate_free_system_home(context)
             )
@@ -1350,6 +1357,7 @@ class GenericSceneObserver:
                     if (
                         _goal_active_input_transaction_text(context)
                         and not _input_audit_established_local_target(scene)
+                        and not allow_omitted_local_input_auxiliary_confirmation
                     ):
                         raise VisionAgentError(
                             "专用输入结构审计没有建立当前输入事务的唯一本地目标。"

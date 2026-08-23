@@ -1330,6 +1330,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             return replace(source, elements=tuple(elements))
 
         planned = enter_scene("first")
+        fresh_without_key = enter_scene("first", include_key=False)
         audited = enter_scene("first", audited=True)
         after = enter_scene(
             "first\n",
@@ -1337,7 +1338,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             fp="after-enter",
         )
         observer = FakeSceneObserver(
-            [planned, after, after],
+            [fresh_without_key, after, after],
             geometry_scenes=[audited, audited],
         )
         robot = ClickReceiptRobot()
@@ -1400,6 +1401,19 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual("press_enter", result.resolved_action.kind)
         self.assertEqual([("tap", 220, 735)], robot.actions)
         self.assertTrue(result.hardware_receipt["seller_event_barrier_confirmed"])
+        self.assertIs(
+            True,
+            observer.goal_contexts[0][
+                "_allow_omitted_local_input_auxiliary_confirmation"
+            ],
+        )
+        self.assertEqual(
+            [
+                ("local_audited_enter_key_1",),
+                ("local_audited_enter_key_1",),
+            ],
+            observer.geometry_audit_calls,
+        )
 
     def test_literal_key_receipt_reconciles_only_proven_visual_soft_wrap(self):
         before = self._literal_input_scene("before", value="live", audited=True)
@@ -1662,6 +1676,12 @@ class GenericActionAdapterTests(unittest.TestCase):
                 requested,
                 planned,
                 replace(planned, elements=(), fingerprint="fresh-empty"),
+            )
+        )
+        self.assertFalse(
+            GenericSingleActionAdapter._confirmation_allows_omitted_local_input_auxiliary(
+                requested,
+                planned,
             )
         )
 

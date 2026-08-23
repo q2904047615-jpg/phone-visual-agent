@@ -974,6 +974,33 @@ class GenericSingleActionAdapter:
         return target
 
     @classmethod
+    def _confirmation_allows_omitted_local_input_auxiliary(
+        cls,
+        requested: SemanticAction,
+        planned_scene: UIScene,
+    ) -> bool:
+        """Return whether confirmation may defer one missing local auxiliary.
+
+        The ordinary observer must still establish a unique actionable input
+        target.  During confirmation only, an already-authorized canonical
+        input auxiliary may be absent from the fresh full-scene pass so the
+        adapter's existing two-crop geometry recovery can examine the actual
+        fresh frames.  Reuse the recovery contract against an element-free
+        scene so this flag cannot be enabled for ordinary controls, incomplete
+        candidates, or an unbound input transaction.
+        """
+
+        omitted_scene = replace(planned_scene, elements=())
+        return (
+            cls._local_input_auxiliary_recovery_target(
+                requested,
+                planned_scene,
+                omitted_scene,
+            )
+            is not None
+        )
+
+    @classmethod
     def _recover_omitted_verified_input_scene(
         cls,
         requested: SemanticAction,
@@ -2000,7 +2027,18 @@ class GenericSingleActionAdapter:
             before = planned_scene
             if requested_action.action in self.GEOMETRY_BOUND_KINDS:
                 try:
-                    before = self._observe_scene(before_frames, goal.to_dict())
+                    confirmation_context = goal.to_dict()
+                    if self._confirmation_allows_omitted_local_input_auxiliary(
+                        requested_action,
+                        planned_scene,
+                    ):
+                        confirmation_context[
+                            "_allow_omitted_local_input_auxiliary_confirmation"
+                        ] = True
+                    before = self._observe_scene(
+                        before_frames,
+                        confirmation_context,
+                    )
                 except RuntimeError as exc:
                     diagnostic_paths = persist_observer_failure_diagnostic(
                         self.observer,

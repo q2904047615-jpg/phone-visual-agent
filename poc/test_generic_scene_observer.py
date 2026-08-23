@@ -4234,6 +4234,89 @@ class GenericSceneObserverTests(unittest.TestCase):
                 )
             ).observe(frames=stable_frames(), goal_context=context)
 
+    def test_confirmation_can_return_trusted_input_when_local_auxiliary_is_omitted(
+        self,
+    ) -> None:
+        first = scene_payload()
+        first["elements"][0].update(
+            {
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "first",
+                "bounds": [140, 285, 860, 450],
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "focused": True,
+                    "value": "first",
+                },
+                "evidence": ["正文", "first", "caret"],
+            }
+        )
+        context = {
+            "objective": "使当前唯一多行输入框内容精确等于授权文字",
+            "entities": {
+                "input_text": "first\nsecond",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_exact_text",
+                    "objective": "在当前唯一输入框中逐字输入授权文字",
+                    "constraints": ["不要发送或提交"],
+                    "completion_conditions": ["输入框逐字等于授权文字"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "input_text": "first\nsecond",
+                        "active_input_transaction_text": "first\nsecond",
+                        "active_input_field_id": "input_field_1",
+                        "active_input_field_label": "正文",
+                        "active_input_multiline": True,
+                    },
+                },
+            },
+            "_allow_omitted_local_input_auxiliary_confirmation": True,
+        }
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[140, 285, 860, 450],
+                    text="first",
+                    field_labels=["正文"],
+                    visible_editable_cues=["完整边框", "焦点高亮"],
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [100, 600, 900, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "mode_switch": None,
+                "enter_key": {
+                    "label": "",
+                    "bounds": [820, 920, 900, 985],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                    "key_action": "newline",
+                },
+            },
+        )
+
+        observed = GenericSceneObserver(
+            SequenceProvider([first, audit, audit])
+        ).observe(frames=stable_frames(), goal_context=context)
+
+        trusted_input = observed.get_element("local_audited_input_1")
+        self.assertEqual("first", trusted_input.states["value"])
+        self.assertEqual(
+            "input_field_1",
+            trusted_input.states["input_field_id"],
+        )
+        self.assertFalse(
+            any(
+                element.meaning == "input_exact_enter_key"
+                for element in observed.elements
+            )
+        )
+
     def test_system_home_direction_audit_uses_privacy_minimized_views(self):
         provider = FakeProvider(
             {

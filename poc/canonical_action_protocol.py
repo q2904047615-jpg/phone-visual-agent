@@ -1873,18 +1873,49 @@ def compile_canonical_action_catalog(
         if not isinstance(current_value, str) or not isinstance(authorized_value, str):
             return False
         if isinstance(current_preedit, str) and current_preedit:
+            useful_preedit_prefix = authorized_value.startswith(
+                current_value + current_preedit
+            )
             useful_exact_candidate = bool(
                 isinstance(exact_candidate, str)
                 and exact_candidate
                 and authorized_value.startswith(current_value + exact_candidate)
             )
-            return not useful_exact_candidate
+            return not (useful_preedit_prefix or useful_exact_candidate)
         return bool(current_value and not authorized_value.startswith(current_value))
+
+    def clears_useful_active_preedit(candidate: CanonicalActionCandidate) -> bool:
+        if candidate.action_kind != "clear_verified_text":
+            return False
+        element = element_by_id.get(
+            str(candidate.parameters.get("element_id") or "")
+        )
+        if element is None or len(active_input_payload_entities) != 1:
+            return False
+        current_value = element.states.get("value")
+        current_preedit = element.states.get("ime_preedit_text")
+        authorized_value = active_input_payload_entities[0].value
+        return bool(
+            isinstance(current_value, str)
+            and isinstance(current_preedit, str)
+            and current_preedit
+            and isinstance(authorized_value, str)
+            and authorized_value.startswith(current_value + current_preedit)
+        )
 
     def belongs_to_active_subgoal(candidate: CanonicalActionCandidate) -> bool:
         if candidate.effect_ref:
             return candidate.effect_ref in active_effect_refs
         action_kind = candidate.action_kind
+        if (
+            action_kind == "clear_verified_text"
+            and clears_useful_active_preedit(candidate)
+            and not (
+                "clear_verified_text" in active_required_actions
+                and "input_verified_text" not in active_required_actions
+            )
+        ):
+            return False
         if active_required_actions:
             if "input_verified_text" in active_required_actions:
                 if action_kind == "input_verified_text":

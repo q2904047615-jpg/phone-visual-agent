@@ -5849,6 +5849,64 @@ class GenericSceneObserverTests(unittest.TestCase):
                 coarse_input_value="",
             )
 
+        useful_direct_preedit = json.loads(
+            json.dumps(nested_audit, ensure_ascii=False)
+        )
+        useful_region = useful_direct_preedit["ime_preedit_regions"][0]
+        useful_region["text"] = "freshsendproof"
+        useful_region["candidates"] = [
+            {
+                "text": "freshsendproof",
+                "bounds": [20, 605, 260, 655],
+                "confidence": 1.0,
+                "fully_visible": True,
+            },
+            {
+                "text": "fresh send proof",
+                "bounds": [280, 605, 560, 655],
+                "confidence": 1.0,
+                "fully_visible": True,
+            },
+        ]
+        useful_direct_preedit["application_inputs"][0][
+            "visible_editable_cues"
+        ] = ["freshsendproof"]
+        useful_scene = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(useful_direct_preedit, ensure_ascii=False),
+            fingerprint="frame-useful-direct-preedit",
+            goal_context=input_context,
+            coarse_input_value="",
+        )
+        useful_field = useful_scene.get_element("local_audited_input_1")
+        self.assertEqual("", useful_field.states["value"])
+        self.assertEqual(
+            "freshsendproof", useful_field.states["ime_preedit_text"]
+        )
+        self.assertEqual(
+            "freshsendproof", useful_field.states["ime_exact_candidate_text"]
+        )
+        useful_candidate = useful_scene.unique_trusted_goal_element()
+        self.assertEqual("ime_exact_candidate", useful_candidate.meaning)
+        self.assertEqual("freshsendproof", useful_candidate.label)
+        self.assertEqual(
+            "freshsendproof",
+            useful_candidate.states["expected_input_value"],
+        )
+
+        missing_useful_candidate = json.loads(
+            json.dumps(useful_direct_preedit, ensure_ascii=False)
+        )
+        missing_useful_candidate["ime_preedit_regions"][0]["candidates"] = []
+        with self.assertRaisesRegex(VisionAgentError, "不能转为清除"):
+            _apply_input_structure_audit(
+                base_scene,
+                json.dumps(missing_useful_candidate, ensure_ascii=False),
+                fingerprint="frame-useful-preedit-without-candidate",
+                goal_context=input_context,
+                coarse_input_value="",
+            )
+
     def test_keyboard_mode_label_does_not_override_independent_direction(self) -> None:
         keyboard_bounds = (0.0, 360.0, 1000.0, 1000.0)
         for label, current_mode, target_mode in (
@@ -7121,6 +7179,93 @@ class GenericSceneObserverTests(unittest.TestCase):
                 self.assertNotIn(
                     "same_frame_visible_cue_text",
                     rejected_field.states,
+                )
+
+    def test_input_audit_recovers_exact_committed_cue_without_ime_preedit(
+        self,
+    ) -> None:
+        current_value = "freshsendproof"
+        payload = scene_payload()
+        payload["elements"] = [
+            {
+                "element_id": "coarse-input",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": current_value,
+                "bounds": [120, 530, 700, 590],
+                "confidence": 1.0,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "value": current_value,
+                    "focused": True,
+                },
+                "evidence": [current_value],
+            }
+        ]
+        base_scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-committed-cue",
+        )
+
+        def parsed(*, cues: list[str], placeholder: str = ""):
+            audit = input_audit_payload(
+                application_inputs=[
+                    audited_application_input(
+                        structure_id="app-input-1",
+                        bounds=[140, 530, 710, 590],
+                        text="",
+                        placeholder=placeholder,
+                    )
+                ],
+                ime_preedit_regions=[],
+                keyboard={
+                    "visible": True,
+                    "bounds": [0, 660, 1000, 1000],
+                    "layout": "qwerty",
+                    "input_mode": "direct_latin",
+                    "case_mode": "lower",
+                    "qwerty_anchors": {
+                        "q": [122, 710], "p": [880, 710],
+                        "a": [164, 782], "l": [838, 782],
+                        "z": [248, 853], "m": [754, 853],
+                        "backspace": [880, 853],
+                    },
+                    "mode_switch": None,
+                    "backspace_key": None,
+                    "case_switch": None,
+                    "enter_key": None,
+                    "literal_keys": [],
+                    "layout_switches": [],
+                },
+            )
+            audit["application_inputs"][0]["visible_editable_cues"] = cues
+            return _apply_input_structure_audit(
+                base_scene,
+                json.dumps(audit, ensure_ascii=False),
+                fingerprint="frame-committed-cue",
+                goal_context={
+                    "objective": "只发送一次输入框内现有正文",
+                    "entities": {"input_text": current_value},
+                },
+                coarse_input_value=current_value,
+            )
+
+        recovered = parsed(cues=[current_value])
+        field = recovered.get_element("local_audited_input_1")
+        self.assertEqual(current_value, field.states["value"])
+        self.assertNotIn("ime_preedit_text", field.states)
+
+        for cues, placeholder in (
+            (["different"], ""),
+            ([current_value, "different"], ""),
+            ([current_value], current_value),
+        ):
+            with self.subTest(cues=cues, placeholder=placeholder):
+                rejected = parsed(cues=cues, placeholder=placeholder)
+                self.assertEqual(
+                    "",
+                    rejected.get_element("local_audited_input_1").states["value"],
                 )
 
     def test_empty_optional_backspace_label_does_not_discard_valid_input(self) -> None:

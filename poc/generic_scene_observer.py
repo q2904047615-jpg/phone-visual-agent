@@ -2565,6 +2565,7 @@ Distinguish three different visual structures; never merge them:
 8. keyboard.layout_switches: enumerate only compact visible keys with an explicit destination layout: qwerty, numeric, or symbol. Copy the literal label and report current_layout and target_layout; never infer a destination from the goal alone.
 7. keyboard.case_mode and keyboard.case_switch apply only to direct_latin QWERTY. case_mode is lower, upper, or unknown from the visible letter glyphs. case_switch is null unless a complete visible shift/case key and its lower↔upper direction are independently clear.
 Determine keyboard.input_mode only from the current whole keyboard image, never from the goal, the JSON example, or the mode-switch key label alone. Visible Chinese composition/candidates or pinyin separators prove chinese_pinyin. A plain Latin QWERTY state with no Chinese composition/candidate strip may prove direct_latin only when the whole keyboard provides independent current-mode evidence. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
+When a visible preedit composition itself exactly matches a complete visible candidate, that exact candidate MUST be enumerated with its own bounds. Omitting the exact candidate while reporting the matching preedit is an incomplete audit; never silently turn useful target text into a clear/delete instruction.
 keyboard.mode_switch.current_mode MUST equal keyboard.input_mode whenever input_mode is known, and target_mode MUST be the other supported mode. Across real keyboards the visible key label may name either the current mode or the destination mode: for example, 英/EN can be shown while Chinese pinyin is current and pressing it enters direct Latin, or while direct Latin is current and pressing it enters Chinese. Copy the literal label, but never derive current_mode or target_mode from that label. If the direction is not independently clear from the whole keyboard state, set mode_switch to null.
 For a text-entry verification goal, report the proven current keyboard.input_mode; keyboard.mode_switch is optional and should be null unless its direction is independently unambiguous. Never invent a switch direction merely because the goal asks for text entry.
 keyboard.mode_switch MUST be either null or an object with exactly these five fields: label, bounds, confidence, current_mode, target_mode. Never omit confidence or target_mode. Valid non-null shapes in the two directions are:
@@ -6359,6 +6360,48 @@ def _adjacent_exact_preedit_cue(
     )
 
 
+def _same_frame_exact_committed_cue(
+    trusted_input: dict[str, Any],
+    trusted_preedits: list[dict[str, Any]],
+    exact_text: str,
+) -> bool:
+    """Accept one exact field cue only when no IME composition competes.
+
+    The coarse scene and the dedicated input audit are independent model
+    readings of the same frame.  Some focused fields are transcribed by the
+    audit as a visible editable cue instead of ``application_inputs.text``.
+    Promote that cue only when it is the sole literal, matches the coarse
+    typed value exactly, and cannot be a placeholder or IME preedit.
+    """
+
+    cues = trusted_input.get("visible_editable_cues")
+    if (
+        not exact_text
+        or trusted_input.get("text") != ""
+        or trusted_preedits
+        or not isinstance(cues, list)
+        or trusted_input.get("placeholder") == exact_text
+        or exact_text in trusted_input.get("field_labels", ())
+    ):
+        return False
+    literal_cues = tuple(
+        item.strip()
+        for item in cues
+        if isinstance(item, str)
+        and item.strip()
+        and item.strip().casefold()
+        not in {
+            "border",
+            "caret",
+            "cursor",
+            "focus border",
+            "focus ring",
+            "outline",
+        }
+    )
+    return literal_cues == (exact_text,)
+
+
 def _unique_clearable_ime_preedit(
     trusted_input: dict[str, Any],
     trusted_preedits: list[dict[str, Any]],
@@ -7035,10 +7078,17 @@ def _apply_input_structure_audit(
             and _unique_scene_input_value(scene) == coarse_input_value
             and keyboard_input_mode == "direct_latin"
             and trusted_input["visible_editable_cues"]
-            and _adjacent_exact_preedit_cue(
-                trusted_input,
-                trusted_preedits,
-                coarse_input_value,
+            and (
+                _adjacent_exact_preedit_cue(
+                    trusted_input,
+                    trusted_preedits,
+                    coarse_input_value,
+                )
+                or _same_frame_exact_committed_cue(
+                    trusted_input,
+                    trusted_preedits,
+                    coarse_input_value,
+                )
             )
         ):
             focused_context = _active_subgoal_visual_context(goal_context)
@@ -7120,6 +7170,7 @@ def _apply_input_structure_audit(
                 trusted_input["lineage_visual_text"] = raw_lineage_text
                 trusted_input["text"] = verified_input_lineage.exact_value
         exact_ime_candidate: dict[str, Any] | None = None
+        exact_ime_preedit_text = ""
         input_step = None
         if (
             trusted_input is not None
@@ -7159,6 +7210,30 @@ def _apply_input_structure_audit(
                 ]
                 if len(matching_preedits) == 1 and len(matching_candidates) == 1:
                     exact_ime_candidate = matching_candidates[0]
+                    exact_ime_preedit_text = matching_preedits[0]["text"]
+                elif len(matching_preedits) == 1:
+                    raise UISceneError(
+                        "有用输入法预编辑必须提供唯一逐字候选几何，不能转为清除。"
+                    )
+            elif input_step is not None and input_step.kind == "direct_latin":
+                matching_preedits = [
+                    item
+                    for item in trusted_preedits
+                    if item["text"] == input_step.segment
+                ]
+                matching_candidates = [
+                    candidate
+                    for item in matching_preedits
+                    for candidate in item["candidates"]
+                    if candidate["text"] == input_step.segment
+                ]
+                if len(matching_preedits) == 1 and len(matching_candidates) == 1:
+                    exact_ime_candidate = matching_candidates[0]
+                    exact_ime_preedit_text = matching_preedits[0]["text"]
+                elif len(matching_preedits) == 1:
+                    raise UISceneError(
+                        "有用输入法预编辑必须提供唯一逐字候选几何，不能转为清除。"
+                    )
         qwerty_geometry: dict[str, Any] | None = None
         raw_qwerty_anchors = keyboard.get("qwerty_anchors")
         if raw_qwerty_anchors is not None:
@@ -7235,6 +7310,7 @@ def _apply_input_structure_audit(
         input_needs_mode_switch = bool(
             not active_clear_goal
             and not clearable_ime_preedit
+            and exact_ime_candidate is None
             and input_step is not None
             and input_step.kind in {"direct_latin", "chinese_pinyin"}
             and keyboard_visible
@@ -7529,7 +7605,7 @@ def _apply_input_structure_audit(
             if exact_ime_candidate is not None and input_step is not None:
                 states.update(
                     {
-                        "ime_preedit_text": input_step.pinyin,
+                        "ime_preedit_text": exact_ime_preedit_text,
                         "ime_exact_candidate_text": input_step.segment,
                     }
                 )
@@ -7637,10 +7713,11 @@ def _apply_input_structure_audit(
                         "input_element_id": "local_audited_input_1",
                         "prior_input_value": input_step.current_text,
                         "expected_input_value": input_step.expected_value,
-                        "pinyin": input_step.pinyin,
+                        "pinyin": exact_ime_preedit_text,
                     },
                     "evidence": [
-                        f"输入结构审计确认拼音 {input_step.pinyin} 的唯一逐字候选：{input_step.segment}"
+                        "输入结构审计确认当前输入法组合的唯一逐字候选："
+                        f"{input_step.segment}"
                     ],
                 }
             )

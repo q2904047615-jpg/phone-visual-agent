@@ -1698,15 +1698,30 @@ class UniversalActionController:
             return False
         if before_states.get("focused") is not True or after_states.get("focused") is not True:
             return False
-        for key in ("keyboard_layout", "keyboard_input_mode"):
-            before_value = before_states.get(key)
-            after_value = after_states.get(key)
-            if (
-                before_value in {None, "unknown"}
-                or after_value in {None, "unknown"}
-                or before_value != after_value
-            ):
-                return False
+        before_layout = before_states.get("keyboard_layout")
+        after_layout = after_states.get("keyboard_layout")
+        if (
+            before_layout in {None, "unknown"}
+            or after_layout in {None, "unknown"}
+            or before_layout != after_layout
+        ):
+            return False
+        before_mode = before_states.get("keyboard_input_mode")
+        after_mode = after_states.get("keyboard_input_mode")
+        preedit_clear_transition = bool(
+            typed_field_identity
+            and before_states.get("value") == ""
+            and isinstance(before_states.get("ime_preedit_text"), str)
+            and bool(before_states.get("ime_preedit_text"))
+            and after_states.get("value") == ""
+            and after_states.get("ime_preedit_text") in {None, ""}
+        )
+        if (
+            before_mode in {None, "unknown"}
+            or after_mode in {None, "unknown"}
+            or (before_mode != after_mode and not preedit_clear_transition)
+        ):
+            return False
         return (
             before.camera_alignment.camera_layout_orientation
             == after.camera_alignment.camera_layout_orientation

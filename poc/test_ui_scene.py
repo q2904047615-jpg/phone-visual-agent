@@ -558,7 +558,7 @@ class UISceneTests(unittest.TestCase):
                 role="input",
                 states=states,
             ),
-            app_id="wechat",
+            app_id="微信",
             screen_id="chat_window",
             fingerprint="before",
         )
@@ -590,6 +590,7 @@ class UISceneTests(unittest.TestCase):
                     **states,
                     "value": "",
                     "ime_preedit_text": "",
+                    "keyboard_input_mode": "direct_latin",
                 },
             ),
             app_id="wechat",

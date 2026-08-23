@@ -697,6 +697,36 @@ class CanonicalActionProtocolTests(unittest.TestCase):
             [item.action_kind for item in report.candidates],
         )
 
+    def test_active_exact_input_never_clears_useful_preedit_prefix(self) -> None:
+        semantic_ir = input_ir(active="type_last_char")
+        current_scene = scene(
+            element(
+                "input",
+                label="",
+                meaning="application_text_input",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "",
+                    "ime_preedit_text": "longinputvalidation2026:12",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "chinese_pinyin",
+                    "keyboard_case_mode": "lower",
+                },
+            )
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            semantic_ir,
+            {"input_verified_text", "clear_verified_text"},
+        )
+
+        self.assertNotIn(
+            "clear_verified_text",
+            [item.action_kind for item in report.candidates],
+        )
+
     def test_clear_only_goal_does_not_require_a_new_input_payload(self) -> None:
         target = SemanticEntity(
             entity_id="entity_input_target",

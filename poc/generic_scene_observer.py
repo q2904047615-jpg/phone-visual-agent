@@ -7941,7 +7941,13 @@ def _apply_input_structure_audit(
                 ]
                 if len(matching_preedits) == 1 and len(matching_candidates) == 1:
                     exact_ime_candidate = matching_candidates[0]
-                    exact_ime_preedit_text = matching_preedits[0]["text"]
+                    # IMEs may insert a visible syllable separator (for
+                    # example ``ni'hao``).  Candidate matching above already
+                    # proves the same deterministic local pinyin.  Publish the
+                    # canonical pinyin state so the typed transition and
+                    # controller verify one authority instead of raw IME
+                    # decoration.
+                    exact_ime_preedit_text = input_step.pinyin
                 elif len(matching_preedits) == 1:
                     raise UISceneError(
                         "有用输入法预编辑必须提供唯一逐字候选几何，不能转为清除。"

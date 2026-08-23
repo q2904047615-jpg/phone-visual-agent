@@ -6840,7 +6840,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 {
                     "region_id": "candidate-strip",
                     "bounds": [40, 380, 960, 470],
-                    "text": "nihao",
+                    "text": "ni'hao",
                     "confidence": 0.98,
                     "candidates": [
                         {
@@ -6889,6 +6889,26 @@ class GenericSceneObserverTests(unittest.TestCase):
         field = scene.get_element("local_audited_input_1")
         self.assertEqual("nihao", field.states["ime_preedit_text"])
         self.assertEqual("你好", field.states["ime_exact_candidate_text"])
+        self.assertEqual("nihao", target.states["pinyin"])
+
+        audit["ime_preedit_regions"][0]["text"] = "ni’hao"
+        separator_variation = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="frame-ime-curly-separator",
+            goal_context={
+                "objective": "输入你好但不要发送",
+                "entities": {"input_text": "你好"},
+            },
+        )
+        variation_field = separator_variation.get_element(
+            "local_audited_input_1"
+        )
+        variation_candidate = separator_variation.get_element(
+            "local_audited_ime_candidate_1"
+        )
+        self.assertEqual("nihao", variation_field.states["ime_preedit_text"])
+        self.assertEqual("nihao", variation_candidate.states["pinyin"])
 
     def test_qwerty_secondary_digit_hint_is_not_a_direct_literal_key(self) -> None:
         base_scene = _parse_scene(

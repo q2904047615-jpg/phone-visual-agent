@@ -65,7 +65,7 @@ from system_navigation_privacy import (
 )
 
 
-GENERIC_SCENE_OBSERVER_VERSION = "2026-08-21-generic-scene-observer-v69"
+GENERIC_SCENE_OBSERVER_VERSION = "2026-08-24-generic-scene-observer-v70"
 POST_NAVIGATION_RESULT_OBSERVATION_PHASE = "verified_navigation_result_v1"
 POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
 POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被重新观察"]
@@ -670,7 +670,6 @@ class GenericSceneObserver:
         foreground_app_identity_audit_evidence: tuple[str, ...] = ()
         compact_geometry_discarded = False
         compact_input_geometry_isolated = False
-        preliminary_input_value_hint: str | None = None
         preliminary_input_bounds_hint: tuple[int, int, int, int] | None = None
         icon_cluster_audit_used = False
         icon_cluster_audit_candidate_count = 0
@@ -778,11 +777,8 @@ class GenericSceneObserver:
 
             def parse_compact_response(value: str) -> UIScene:
                 nonlocal compact_geometry_discarded, compact_input_geometry_isolated
-                nonlocal preliminary_input_value_hint, preliminary_input_bounds_hint
+                nonlocal preliminary_input_bounds_hint
                 payload = _extract_compact_json_object(value)
-                preliminary_input_value_hint = _unique_payload_input_value(
-                    payload
-                )
                 preliminary_input_bounds_hint = _unique_payload_input_bounds(
                     payload
                 )
@@ -1150,46 +1146,16 @@ class GenericSceneObserver:
             if _should_audit_prefilled_input(scene, context):
                 input_structure_audit_used = True
                 input_audit_base_scene = scene
-                input_audit_current_value = _unique_scene_input_value(scene)
-                if input_audit_current_value is None:
-                    input_audit_current_value = preliminary_input_value_hint
-                preliminary_inputs = tuple(
-                    element
-                    for element in scene.elements
-                    if element.role == "input"
-                )
-                preliminary_bounds = (
-                    preliminary_inputs[0].bounds
-                    if len(preliminary_inputs) == 1
-                    else None
-                )
+                active_input_field_id = _goal_active_input_field(context)[0]
                 verified_input_lineage: TypedInputLineage | None = None
                 if (
                     input_lineage_override is not None
                     and isinstance(device_id, str)
-                    and isinstance(input_audit_current_value, str)
-                    and (
-                        input_lineage_override.matches_visual(
-                            device_id=device_id,
-                            app_id=scene.app_id,
-                            screen_id=scene.screen_id,
-                            raw_value=input_audit_current_value,
-                            input_bounds=preliminary_bounds,
-                            current_frame=frame,
-                        )
-                        or input_lineage_override.matches_pending_input_state_value(
-                            device_id=device_id,
-                            app_id=scene.app_id,
-                            screen_id=scene.screen_id,
-                            raw_value=input_audit_current_value,
-                            input_bounds=preliminary_bounds,
-                        )
-                        or input_lineage_override.matches_pending_input_state_surface(
-                            device_id=device_id,
-                            app_id=scene.app_id,
-                            screen_id=scene.screen_id,
-                            input_bounds=preliminary_bounds,
-                        )
+                    and input_lineage_override.matches_typed_context(
+                        device_id=device_id,
+                        app_id=scene.app_id,
+                        screen_id=scene.screen_id,
+                        input_field_id=active_input_field_id,
                     )
                 ):
                     verified_input_lineage = input_lineage_override
@@ -1199,28 +1165,30 @@ class GenericSceneObserver:
                     and isinstance(device_id, str)
                     and device_id.strip()
                 ):
-                    verified_input_lineage = self.input_lineage_store.match_visual(
-                        device_id=device_id,
-                        app_id=scene.app_id,
-                        screen_id=scene.screen_id,
-                        raw_value=input_audit_current_value,
-                        input_bounds=preliminary_bounds,
-                        current_frame=frame,
-                    )
-                    if verified_input_lineage is None:
-                        verified_input_lineage = self.input_lineage_store.match_surface(
+                    stored_input_lineage = self.input_lineage_store.load(device_id)
+                    if (
+                        stored_input_lineage is not None
+                        and stored_input_lineage.matches_typed_context(
                             device_id=device_id,
                             app_id=scene.app_id,
                             screen_id=scene.screen_id,
-                            input_bounds=preliminary_bounds,
-                            current_frame=frame,
+                            input_field_id=active_input_field_id,
+                            now_epoch=float(self.input_lineage_store.clock()),
+                            ttl_seconds=self.input_lineage_store.ttl_seconds,
                         )
-                    if verified_input_lineage is not None:
-                        input_audit_current_value = verified_input_lineage.exact_value
-                        input_lineage_used = True
+                    ):
+                        verified_input_lineage = stored_input_lineage
                 if verified_input_lineage is not None:
-                    input_audit_current_value = verified_input_lineage.exact_value
                     input_lineage_used = True
+                # The compact pass may describe the page, but it is not an
+                # input-value authority.  Only a typed lineage may seed the
+                # dedicated audit's deterministic next-key whitelist; the
+                # final committed/preedit values are reduced from that audit.
+                input_ledger_value_hint = (
+                    verified_input_lineage.exact_value
+                    if verified_input_lineage is not None
+                    else None
+                )
                 self._set_stage("waiting_input_structure_audit")
                 temporal_input_frames = (
                     tuple(frames[stable_tail_start:])
@@ -1235,7 +1203,7 @@ class GenericSceneObserver:
                 input_audit_prompt = _input_structure_audit_prompt(
                     context,
                     roi_bounds=None,
-                    current_input_text=input_audit_current_value,
+                    current_input_text=input_ledger_value_hint,
                 )
                 if len(temporal_input_frames) > 1:
                     input_audit_prompt += (
@@ -1276,7 +1244,7 @@ class GenericSceneObserver:
                             raw,
                             fingerprint=fingerprint,
                             goal_context=context,
-                            coarse_input_value=input_audit_current_value,
+                            ledger_input_value=input_ledger_value_hint,
                             verified_input_lineage=verified_input_lineage,
                             device_id=device_id,
                             lineage_frame=frame,
@@ -1313,7 +1281,7 @@ class GenericSceneObserver:
                                     context,
                                     roi_bounds=input_retry_roi,
                                     crop_local=True,
-                                    current_input_text=input_audit_current_value,
+                                    current_input_text=input_ledger_value_hint,
                                 ),
                             },
                             {
@@ -1344,7 +1312,7 @@ class GenericSceneObserver:
                                 raw,
                                 fingerprint=fingerprint,
                                 goal_context=context,
-                                coarse_input_value=input_audit_current_value,
+                                ledger_input_value=input_ledger_value_hint,
                                 verified_input_lineage=verified_input_lineage,
                                 device_id=device_id,
                                 lineage_frame=frame,
@@ -2446,17 +2414,6 @@ cluster_complete=false and cluster_bounds=null.
 """
 
 
-def _unique_scene_input_value(scene: UIScene) -> str | None:
-    """Return one observed input value, never a guessed goal value."""
-
-    values = [
-        item.states.get("value")
-        for item in scene.elements
-        if item.role == "input" and isinstance(item.states.get("value"), str)
-    ]
-    return values[0] if len(values) == 1 else None
-
-
 def _input_audit_literal_key_targets(
     context: dict[str, Any],
     *,
@@ -2588,6 +2545,11 @@ def _input_structure_audit_prompt(
 You are a read-only, app-independent UI structure auditor. The normal scene observer did not establish an input target.
 Goal context (evidence selection only): {json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
 {image_contract}
+This response is the sole visual source for the typed input-state ledger. A
+compact scene summary or preliminary input transcription is not an input-value
+authority and is not supplied for reconciliation. Report only the structures
+literally visible in these audit images; local code combines them with typed
+action lineage and never asks you to choose between two prior visual answers.
 Distinguish three different visual structures; never merge them:
 1. application_inputs: editable search/address/form fields in the App content area. Include an empty field only when a complete border plus a visible placeholder, caret, focus highlight, or other literal editable cue is visible. field_labels must contain only literal labels visibly attached to that field (for example a nearby form label or its placeholder), never the local field_id. The active field selector is field_id={json.dumps(active_field_id, ensure_ascii=False)} and visible field_label={json.dumps(active_field_label, ensure_ascii=False)}; use the label only to enumerate visible evidence, never infer it from the goal.
 2. ime_preedit_regions: the input method's composition and its candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Many real IMEs render an underlined Latin composition inside the otherwise empty App field. In that layout the underlined letters remain IME preedit, application_inputs.text MUST be "", the literal may also appear in visible_editable_cues, and one ime_preedit_regions item MUST tightly bound the underlined composition with text set to that literal. Candidate words use their own complete bounds and may be either immediately adjacent to the composition or in one horizontal candidate row at the top of the visible keyboard, above the QWERTY letter rows. Never call those underlined letters committed application text. Enumerate only complete visible candidate words tied to that composition; candidates are read-only facts and never application inputs.
@@ -5005,23 +4967,6 @@ def _strip_preliminary_keyboard_containers_for_dedicated_audit(
     return isolated
 
 
-def _unique_payload_input_value(payload: dict[str, Any]) -> str | None:
-    """Read one preliminary input value only as an audit-selection hint."""
-
-    elements = payload.get("elements")
-    if not isinstance(elements, list):
-        return None
-    values = [
-        item["states"].get("value")
-        for item in elements
-        if isinstance(item, dict)
-        and str(item.get("role") or "").strip() == "input"
-        and isinstance(item.get("states"), dict)
-        and isinstance(item["states"].get("value"), str)
-    ]
-    return values[0] if len(values) == 1 else None
-
-
 def _drop_out_of_range_non_goal_elements(
     payload: dict[str, Any],
     goal_context: dict[str, Any] | None = None,
@@ -6423,49 +6368,7 @@ def _adjacent_exact_preedit_cue(
     )
 
 
-def _same_frame_exact_committed_cue(
-    trusted_input: dict[str, Any],
-    trusted_preedits: list[dict[str, Any]],
-    exact_text: str,
-) -> bool:
-    """Accept one exact field cue only when no IME composition competes.
-
-    The coarse scene and the dedicated input audit are independent model
-    readings of the same frame.  Some focused fields are transcribed by the
-    audit as a visible editable cue instead of ``application_inputs.text``.
-    Promote that cue only when it is the sole literal, matches the coarse
-    typed value exactly, and cannot be a placeholder or IME preedit.
-    """
-
-    cues = trusted_input.get("visible_editable_cues")
-    if (
-        not exact_text
-        or trusted_input.get("text") != ""
-        or trusted_preedits
-        or not isinstance(cues, list)
-        or trusted_input.get("placeholder") == exact_text
-        or exact_text in trusted_input.get("field_labels", ())
-    ):
-        return False
-    literal_cues = tuple(
-        item.strip()
-        for item in cues
-        if isinstance(item, str)
-        and item.strip()
-        and item.strip().casefold()
-        not in {
-            "border",
-            "caret",
-            "cursor",
-            "focus border",
-            "focus ring",
-            "outline",
-        }
-    )
-    return literal_cues == (exact_text,)
-
-
-def _pending_ime_candidate_committed_cue(
+def _resolve_pending_ime_candidate_input_state(
     trusted_input: dict[str, Any],
     trusted_preedits: list[dict[str, Any]],
     *,
@@ -6478,13 +6381,14 @@ def _pending_ime_candidate_committed_cue(
     authorized_text: str,
     keyboard_input_mode: str,
 ) -> dict[str, Any] | None:
-    """Identify one exact candidate commit misreported as full-field preedit.
+    """Reduce one receipt-bound candidate result into the typed input ledger.
 
-    Some IMEs retain a prediction row after an exact candidate is committed.
-    The visual audit can then copy the committed field text into a preedit
-    region covering the whole field.  Recover only the immediate, receipt-bound
-    candidate result on the same typed field, with an exact payload prefix and
-    either an exact application value or one explicit trailing caret cue.
+    The compact scene and its summary are deliberately absent from this
+    reducer.  A pending exact-candidate lineage supplies the prior/expected
+    transition; the dedicated audit supplies the unique field shell and the
+    post-action full-field literal.  A prediction row may repeat the committed
+    text, but it cannot retain a second preedit truth after this exact
+    transition is proven.
     """
 
     if (
@@ -6504,43 +6408,8 @@ def _pending_ime_candidate_committed_cue(
     ):
         return None
     exact_value = verified_input_lineage.exact_value
-    cues = trusted_input.get("visible_editable_cues")
-    if not isinstance(cues, list):
-        return None
-    decorative = {
-        "border",
-        "caret",
-        "cursor",
-        "focus border",
-        "focus ring",
-        "outline",
-    }
-    literal_cues = tuple(
-        cue.strip()
-        for cue in cues
-        if isinstance(cue, str)
-        and cue.strip()
-        and cue.strip().casefold() not in decorative
-    )
-    caret_markers = frozenset({"|", "｜", "│", "┃", "▏", "▎", "▍"})
     raw_text = trusted_input.get("text")
-    exact_application_text = raw_text == exact_value
-    exact_trailing_caret_cue = bool(
-        raw_text == ""
-        and len(literal_cues) == 1
-        and len(literal_cues[0]) == len(exact_value) + 1
-        and literal_cues[0].startswith(exact_value)
-        and literal_cues[0][-1] in caret_markers
-    )
-    if (
-        not (exact_application_text or exact_trailing_caret_cue)
-        or (
-            exact_application_text
-            and any(cue != exact_value for cue in literal_cues)
-        )
-        or trusted_input.get("placeholder") == exact_value
-        or exact_value in trusted_input.get("field_labels", ())
-    ):
+    if not isinstance(raw_text, str) or raw_text not in {"", exact_value}:
         return None
     preedit = trusted_preedits[0]
     preedit_text = preedit.get("text")
@@ -6576,7 +6445,10 @@ def _pending_ime_candidate_committed_cue(
         input_field_id=input_field_id,
     ):
         return None
-    return preedit
+    return {
+        "committed_value": exact_value,
+        "consumed_preedit": preedit,
+    }
 
 
 def _authorized_exact_committed_prefix_cue(
@@ -7008,7 +6880,7 @@ def _apply_input_structure_audit(
     *,
     fingerprint: str,
     goal_context: dict[str, Any],
-    coarse_input_value: str | None = None,
+    ledger_input_value: str | None = None,
     verified_input_lineage: TypedInputLineage | None = None,
     device_id: str | None = None,
     lineage_frame: Image.Image | None = None,
@@ -7223,7 +7095,7 @@ def _apply_input_structure_audit(
                 keyboard=keyboard,
                 keyboard_bounds=keyboard_bounds,
                 goal_context=goal_context,
-                current_input_text=coarse_input_value,
+                current_input_text=ledger_input_value,
             )
             if keyboard_layout is None:
                 raise UISceneError("输入结构审计 keyboard.layout 无效。")
@@ -7466,12 +7338,23 @@ def _apply_input_structure_audit(
             # the value itself must never be trimmed.
             text = raw_text
             placeholder = str(item.get("placeholder") or "").strip()
-            if not text and not placeholder and not cues:
+            pending_candidate_shell = bool(
+                verified_input_lineage is not None
+                and verified_input_lineage.source
+                == "pending_verified_ime_candidate_action"
+                and active_field_id not in {"", "unknown"}
+            )
+            if (
+                not text
+                and not placeholder
+                and not cues
+                and not pending_candidate_shell
+            ):
                 continue
             bounds = tuple(float(value) for value in item["bounds"])
             width = bounds[2] - bounds[0]
             height = bounds[3] - bounds[1]
-            pending_ime_commit_preedit = _pending_ime_candidate_committed_cue(
+            pending_ime_candidate_state = _resolve_pending_ime_candidate_input_state(
                 {
                     "text": text,
                     "placeholder": placeholder,
@@ -7523,7 +7406,11 @@ def _apply_input_structure_audit(
                         _bounds_overlap_ratio(bounds, preedit["bounds"]) >= 0.35
                         or _bounds_overlap_ratio(preedit["bounds"], bounds) >= 0.35
                     )
-                    and preedit is not pending_ime_commit_preedit
+                    and (
+                        pending_ime_candidate_state is None
+                        or preedit
+                        is not pending_ime_candidate_state["consumed_preedit"]
+                    )
                     and not (
                         text == ""
                         and preedit["text"]
@@ -7578,9 +7465,7 @@ def _apply_input_structure_audit(
                     "field_labels": field_labels,
                     "input_bounds": input_bounds,
                     "right_button": button_match,
-                    "lineage_ime_candidate_committed_preedit": (
-                        pending_ime_commit_preedit
-                    ),
+                    "pending_ime_candidate_state": pending_ime_candidate_state,
                     "confidence": min(
                         confidence,
                         float(button_match["confidence"])
@@ -7607,69 +7492,39 @@ def _apply_input_structure_audit(
             trusted_input = matches[0] if len(matches) == 1 else None
         if (
             trusted_input is not None
-            and trusted_input.get("lineage_ime_candidate_committed_preedit")
-            is not None
+            and trusted_input.get("pending_ime_candidate_state") is not None
             and verified_input_lineage is not None
         ):
-            committed_preedit = trusted_input[
-                "lineage_ime_candidate_committed_preedit"
-            ]
+            resolved_ime_state = trusted_input["pending_ime_candidate_state"]
+            committed_preedit = resolved_ime_state["consumed_preedit"]
             trusted_input = dict(trusted_input)
-            trusted_input["lineage_ime_candidate_committed_cue"] = (
-                verified_input_lineage.exact_value
+            trusted_input["lineage_ime_candidate_committed_value"] = (
+                resolved_ime_state["committed_value"]
             )
-            trusted_input["text"] = verified_input_lineage.exact_value
+            trusted_input["text"] = resolved_ime_state["committed_value"]
             trusted_preedits = [
                 item for item in trusted_preedits if item is not committed_preedit
             ]
         predecessor_field_id, predecessor_field_label, predecessor_text = (
             _goal_active_input_predecessor_field(goal_context)
         )
-        predecessor_scene_matches = [
-            element for element in scene.elements
-            if element.role == "input"
-            and element.confidence >= 0.9
-            and element.states.get("fully_visible") is True
-            and element.states.get("focused") is True
-            and element.states.get("value") == predecessor_text
-            and element.states.get("input_field_id") == predecessor_field_id
-            and element.states.get("input_field_label") == predecessor_field_label
-        ]
         predecessor_audit_matches = [
             item for item in matches
             if sum(
                 label.casefold() == predecessor_field_label.casefold()
                 for label in item["field_labels"]
             ) == 1
-            and (
-                item["text"] == predecessor_text
-                or (
-                    len(predecessor_scene_matches) == 1
-                    and _same_frame_exact_committed_cue(
-                        item,
-                        trusted_preedits,
-                        predecessor_text,
-                    )
-                )
-            )
+            and item["text"] == predecessor_text
         ] if predecessor_field_id else []
-        # The bridge-owned typed field identity and the fresh dedicated audit
-        # are the authority for this predecessor.  The preliminary coarse
-        # scene may legitimately omit a committed field once the keyboard
-        # covers it, so it must not receive a second veto here.  This still
-        # grants no geometry authority to typed data: the next-field key must
-        # independently pass the dedicated audit below.  A unique typed coarse
-        # match is used only as positive corroboration for the already bounded
-        # same-frame cue-slot normalization above; it is never required when
-        # the dedicated audit put the exact value in its proper text field.
+        # The fresh dedicated audit is the sole visual value authority for the
+        # predecessor.  A compact-scene transcription cannot restore or veto
+        # it; the typed dependency supplies identity while the audit supplies
+        # the exact committed value and the next-key geometry.
         predecessor_input = (
             dict(predecessor_audit_matches[0])
             if len(predecessor_audit_matches) == 1
             else None
         )
-        if predecessor_input is not None and not predecessor_input["text"]:
-            predecessor_input["same_frame_visible_cue_text"] = predecessor_text
-            predecessor_input["text"] = predecessor_text
         if (
             trusted_input is not None
             and trusted_input.get("caret_line_index") is None
@@ -7730,65 +7585,6 @@ def _apply_input_structure_audit(
             if extra_clear_units > 0:
                 trusted_input = dict(trusted_input)
                 trusted_input["clear_extra_delete_units"] = extra_clear_units
-        if (
-            trusted_input is not None
-            and active_field_id
-            and active_multiline
-            and isinstance(coarse_input_value, str)
-            and coarse_input_value
-            and coarse_input_value != active_transaction_text
-            and active_transaction_text.startswith(coarse_input_value)
-            and coarse_input_value.endswith(("\n", "\r"))
-            and trusted_input["text"] == coarse_input_value.rstrip("\r\n")
-            and trusted_input["visible_editable_cues"]
-        ):
-            # A trailing empty line has no glyphs for the read-only audit to
-            # transcribe. Preserve the already typed exact prefix only for the
-            # same bridge-minted field identity and unique multiline target.
-            trusted_input = dict(trusted_input)
-            trusted_input["visible_trailing_newline_projection"] = trusted_input[
-                "text"
-            ]
-            trusted_input["text"] = coarse_input_value
-        if (
-            trusted_input is not None
-            and not trusted_input["text"]
-            and isinstance(coarse_input_value, str)
-            and coarse_input_value
-            and _unique_scene_input_value(scene) == coarse_input_value
-            and keyboard_input_mode == "direct_latin"
-            and trusted_input["visible_editable_cues"]
-            and (
-                _adjacent_exact_preedit_cue(
-                    trusted_input,
-                    trusted_preedits,
-                    coarse_input_value,
-                )
-                or _same_frame_exact_committed_cue(
-                    trusted_input,
-                    trusted_preedits,
-                    coarse_input_value,
-                )
-            )
-        ):
-            focused_context = _active_subgoal_visual_context(goal_context)
-            focused_entities = (
-                focused_context.get("goal_entities")
-                if focused_context is not goal_context
-                else goal_context.get("entities")
-            )
-            focused_target_text = (
-                focused_entities.get("input_text")
-                if isinstance(focused_entities, dict)
-                else None
-            )
-            if (
-                isinstance(focused_target_text, str)
-                and focused_target_text.startswith(coarse_input_value)
-            ):
-                trusted_input = dict(trusted_input)
-                trusted_input["same_frame_visible_cue_text"] = coarse_input_value
-                trusted_input["text"] = coarse_input_value
         if (
             trusted_input is not None
             and not trusted_input["text"]
@@ -7892,11 +7688,6 @@ def _apply_input_structure_audit(
                         app_id=scene.app_id,
                         screen_id=scene.screen_id,
                         authorized_text=active_transaction_text,
-                        coarse_exact_value=(
-                            coarse_input_value
-                            if isinstance(coarse_input_value, str)
-                            else ""
-                        ),
                         raw_value=trusted_input["text"],
                         preedit_text=pending_preedit_text,
                         input_bounds=lineage_bounds,
@@ -8245,13 +8036,6 @@ def _apply_input_structure_audit(
             raise UISceneError(
                 "文字输入授权要求本轮输入结构审计提供有效 QWERTY anchors。"
             )
-        if (
-            trusted_input is None
-            and next_field_key is None
-            and (mode_switch is None or not switch_is_goal)
-        ):
-            return scene
-
         rendered_input = trusted_input or (
             predecessor_input if next_field_key is not None else None
         )
@@ -8264,12 +8048,31 @@ def _apply_input_structure_audit(
             element = dict(element)
             element["states"] = dict(element.get("states") or {})
             element["states"]["goal_relevant"] = False
-            # A trusted audit input supersedes preliminary input proposals. Keeping
-            # both would leave two overlapping high-confidence action targets and
-            # correctly make unique_trusted_goal_element reject the scene.
-            if rendered_input is not None and element.get("role") == "input":
+            # Compact input proposals never survive the dedicated audit.  The
+            # typed ledger is the only published input state even when this
+            # audit cannot establish a replacement, so an old compact value
+            # cannot reappear through the early-return path.
+            if (
+                element.get("role") == "input"
+                or element.get("meaning") == "application_text_input"
+            ):
                 continue
             elements.append(element)
+        if (
+            trusted_input is None
+            and next_field_key is None
+            and (mode_switch is None or not switch_is_goal)
+        ):
+            value["elements"] = elements
+            value["summary"] = (
+                "typed输入状态账本未建立；compact输入摘要与输入转写不参与判断。"
+            )
+            return UIScene.from_dict(
+                value,
+                coordinate_scale=1.0,
+                stable_override=True,
+                fingerprint_override=fingerprint,
+            )
         if rendered_input is not None:
             pending_auxiliary_input_action = any(
                 item is not None
@@ -8417,22 +8220,14 @@ def _apply_input_structure_audit(
                         "共同确认已提交前缀："
                         f"{lineage_pending_text_prefix}"
                     )
-                lineage_ime_candidate_committed_cue = rendered_input.get(
-                    "lineage_ime_candidate_committed_cue"
+                lineage_ime_candidate_committed_value = rendered_input.get(
+                    "lineage_ime_candidate_committed_value"
                 )
-                if isinstance(lineage_ime_candidate_committed_cue, str):
+                if isinstance(lineage_ime_candidate_committed_value, str):
                     input_evidence.append(
-                        "候选点击回执、typed字段、授权payload与应用框精确值/尾随光标"
+                        "候选点击回执、typed字段、授权payload与动作后同字段精确片段"
                         "共同确认已提交中文："
-                        f"{lineage_ime_candidate_committed_cue}；残留预测栏未作为预编辑"
-                    )
-                same_frame_visible_cue_text = rendered_input.get(
-                    "same_frame_visible_cue_text"
-                )
-                if isinstance(same_frame_visible_cue_text, str):
-                    input_evidence.append(
-                        "同一帧粗场景与输入结构审计逐字一致："
-                        f"{same_frame_visible_cue_text}；非授权 IME 分类已隔离"
+                        f"{lineage_ime_candidate_committed_value}；残留预测栏未作为预编辑"
                     )
                 authorized_prefix_visible_cue_text = rendered_input.get(
                     "authorized_prefix_visible_cue_text"
@@ -8645,6 +8440,9 @@ def _apply_input_structure_audit(
                 }
             )
         value["elements"] = elements
+        value["summary"] = (
+            "输入状态仅见typed输入账本；compact输入摘要与输入转写不参与判断。"
+        )
         return UIScene.from_dict(
             value,
             coordinate_scale=1.0,

@@ -12,7 +12,7 @@ from typing import Any
 from PIL import Image, ImageOps
 
 
-TYPED_INPUT_LINEAGE_VERSION = "2026-08-23-typed-input-lineage-v4"
+TYPED_INPUT_LINEAGE_VERSION = "2026-08-24-typed-input-lineage-v5"
 DEFAULT_LINEAGE_TTL_SECONDS = 6 * 60 * 60
 SURFACE_DESCRIPTOR_WIDTH = 32
 SURFACE_DESCRIPTOR_HEIGHT = 16
@@ -472,6 +472,55 @@ class TypedInputLineage:
             )
         )
 
+    def matches_typed_context(
+        self,
+        *,
+        device_id: str,
+        app_id: str,
+        screen_id: str,
+        input_field_id: str | None,
+        now_epoch: float | None = None,
+        ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
+    ) -> bool:
+        """Select one lineage without consulting a second visual input value.
+
+        The compact scene is not an input-state authority.  Before the
+        dedicated input audit runs, a lineage may therefore be selected only
+        from its device, typed field and compatible surface context.  Every
+        caller that publishes a value must still validate the dedicated audit
+        geometry and exact post-action evidence afterwards.
+        """
+
+        now = time.time() if now_epoch is None else float(now_epoch)
+        current_app = str(app_id or "").strip().casefold()
+        recorded_app = self.app_id.strip().casefold()
+        current_screen = str(screen_id or "").strip().casefold()
+        recorded_screen = self.screen_id.strip().casefold()
+        current_field = str(input_field_id or "").strip()
+        typed_field_matches = bool(
+            self.input_field_id not in {"", "unknown"}
+            and current_field == self.input_field_id
+        )
+        if (
+            self.input_field_id not in {"", "unknown"}
+            and not typed_field_matches
+        ):
+            return False
+        return bool(
+            device_id == self.device_id
+            and now >= self.recorded_at_epoch
+            and now - self.recorded_at_epoch <= ttl_seconds
+            and current_app
+            and current_app == recorded_app
+            and current_screen
+            and (
+                current_screen == recorded_screen
+                or current_screen.startswith(recorded_screen + "_")
+                or recorded_screen.startswith(current_screen + "_")
+                or typed_field_matches
+            )
+        )
+
     def matches_pending_input_state_surface(
         self,
         *,
@@ -485,31 +534,19 @@ class TypedInputLineage:
     ) -> bool:
         """Authorize an immediate exact visual-cue check on the same input."""
 
-        now = time.time() if now_epoch is None else float(now_epoch)
-        current_screen = str(screen_id or "").strip().casefold()
-        recorded_screen = self.screen_id.strip().casefold()
-        current_field = str(input_field_id or "").strip()
-        typed_field_matches = bool(
-            self.input_field_id not in {"", "unknown"}
-            and current_field == self.input_field_id
-        )
         return bool(
             self.source in {
                 "pending_verified_input_state_action",
                 "pending_verified_ime_candidate_action",
                 "pending_verified_newline_action",
             }
-            and device_id == self.device_id
-            and now >= self.recorded_at_epoch
-            and now - self.recorded_at_epoch <= ttl_seconds
-            and str(app_id or "").strip().casefold()
-            == self.app_id.strip().casefold()
-            and current_screen
-            and (
-                current_screen == recorded_screen
-                or current_screen.startswith(recorded_screen + "_")
-                or recorded_screen.startswith(current_screen + "_")
-                or typed_field_matches
+            and self.matches_typed_context(
+                device_id=device_id,
+                app_id=app_id,
+                screen_id=screen_id,
+                input_field_id=input_field_id,
+                now_epoch=now_epoch,
+                ttl_seconds=ttl_seconds,
             )
             and input_bounds is not None
             and _bounds_compatible(self.input_bounds, input_bounds)
@@ -552,7 +589,6 @@ class TypedInputLineage:
         app_id: str,
         screen_id: str,
         authorized_text: str,
-        coarse_exact_value: str,
         raw_value: str,
         preedit_text: str,
         input_bounds: tuple[float, float, float, float] | None,
@@ -566,36 +602,30 @@ class TypedInputLineage:
         composition buffer.  Some dedicated audits then report that preedit
         correctly but omit the already committed prefix after the placeholder
         disappears.  The prefix is derivable only when the pending typed
-        lineage, the exact authorized payload, the independent coarse read,
-        the same field id and the same input surface all agree.  The preedit
-        itself remains uncommitted and must still be selected separately.
+        action lineage, the exact authorized payload, the same field id and
+        the dedicated audit surface all agree.  A compact scene transcription
+        is deliberately not consulted.  The preedit itself remains
+        uncommitted and must still be selected separately.
         """
 
-        now = time.time() if now_epoch is None else float(now_epoch)
-        current_field = str(input_field_id or "").strip()
         if (
             self.source != "pending_verified_text_action"
-            or device_id != self.device_id
-            or now < self.recorded_at_epoch
-            or now - self.recorded_at_epoch > ttl_seconds
             or authorized_text != self.exact_value
-            or coarse_exact_value != self.exact_value
             or raw_value != ""
             or not isinstance(preedit_text, str)
             or not preedit_text
             or not self.exact_value.endswith(preedit_text)
             or self.exact_value == preedit_text
-            or self.input_field_id in {"", "unknown"}
-            or current_field != self.input_field_id
+            or not self.matches_typed_context(
+                device_id=device_id,
+                app_id=app_id,
+                screen_id=screen_id,
+                input_field_id=input_field_id,
+                now_epoch=now_epoch,
+                ttl_seconds=ttl_seconds,
+            )
             or input_bounds is None
             or not _bounds_compatible(self.input_bounds, input_bounds)
-            or not _surface_identity_compatible(
-                recorded_app_id=self.app_id,
-                recorded_screen_id=self.screen_id,
-                current_app_id=app_id,
-                current_screen_id=screen_id,
-                exact_value=self.exact_value,
-            )
         ):
             return None
         committed_prefix = self.exact_value[: -len(preedit_text)]

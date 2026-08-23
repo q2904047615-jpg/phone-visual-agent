@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import unittest
 from unittest.mock import patch
 
@@ -54,6 +55,7 @@ from generic_scene_observer import (
     _validated_keyboard_mode_switch,
 )
 from ocr_runtime import OcrMatch
+from input_value_lineage import TYPED_INPUT_LINEAGE_VERSION, TypedInputLineage
 from orientation_safety import ORIENTATION_AUDIT_PROTOCOL_VERSION
 from ui_scene import UI_SCENE_PROTOCOL_VERSION, UISceneError
 from vision_agent import VisionAgentError
@@ -714,7 +716,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             literal_prompt,
         )
 
-    def test_observer_limits_literal_key_prompt_to_observed_next_character(
+    def test_observer_does_not_use_compact_prefix_as_literal_key_authority(
         self,
     ) -> None:
         preliminary = scene_payload()
@@ -773,8 +775,14 @@ class GenericSceneObserverTests(unittest.TestCase):
         )
 
         prompt = provider.messages_seen[1][1]["content"][0]["text"]
-        self.assertIn('the local, goal-derived whitelist is ["1"]', prompt)
-        self.assertNotIn('["2","0","6",":","1","3","+","4"]', prompt)
+        self.assertIn(
+            'the local, goal-derived whitelist is ["2","0","6",":","1","3","+","4"]',
+            prompt,
+        )
+        self.assertNotIn(
+            'the local, goal-derived whitelist is ["1"]',
+            prompt,
+        )
         self.assertEqual(
             "1",
             scene.unique_trusted_goal_element().states["key_value"],
@@ -3780,6 +3788,149 @@ class GenericSceneObserverTests(unittest.TestCase):
             {item.element_id for item in scene.elements},
         )
 
+    def test_pending_candidate_ledger_ignores_conflicting_compact_input_value(
+        self,
+    ) -> None:
+        first = scene_payload()
+        first["foreground_app_id"] = "unknown"
+        first["screen_id"] = "multiline_input_acceptance"
+        first["summary"] = "正文仍为空，键盘显示预测栏"
+        first["elements"] = [
+            {
+                "element_id": "compact-input-shadow",
+                "role": "input",
+                "meaning": "application_text_input",
+                "label": "正文",
+                "bounds": [140, 270, 860, 450],
+                "confidence": 1.0,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "focused": True,
+                    "value": "错误粗值",
+                },
+                "evidence": ["compact 自由转写不得成为正文权威"],
+            }
+        ]
+        anchors = {
+            "q": [120, 710],
+            "p": [860, 710],
+            "a": [160, 790],
+            "l": [800, 790],
+            "z": [260, 870],
+            "m": [720, 870],
+            "backspace": [840, 870],
+        }
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="body-field",
+                    bounds=[140, 270, 860, 450],
+                    text="",
+                    placeholder="",
+                    field_labels=["正文"],
+                    visible_editable_cues=["bordered input area"],
+                    caret_line_index=0,
+                )
+            ],
+            ime_preedit_regions=[
+                {
+                    "region_id": "misclassified-full-field-text",
+                    "bounds": [140, 270, 860, 450],
+                    "text": "你好",
+                    "confidence": 1.0,
+                    "candidates": [
+                        {
+                            "text": "你好",
+                            "bounds": [110, 590, 230, 630],
+                            "confidence": 1.0,
+                            "fully_visible": True,
+                        },
+                        {
+                            "text": "好",
+                            "bounds": [250, 590, 330, 630],
+                            "confidence": 1.0,
+                            "fully_visible": True,
+                        },
+                    ],
+                }
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [80, 570, 920, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "case_mode": "lower",
+                "qwerty_anchors": anchors,
+                "mode_switch": None,
+                "backspace_key": None,
+                "enter_key": {
+                    "label": "↵",
+                    "bounds": [800, 900, 920, 970],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                    "key_action": "newline",
+                },
+            },
+        )
+        lineage = TypedInputLineage(
+            version=TYPED_INPUT_LINEAGE_VERSION,
+            device_id="device-local-01",
+            exact_value="你好",
+            app_id="unknown",
+            screen_id="multiline_input_acceptance",
+            input_meaning="application_text_input",
+            input_field_id="input_field_1",
+            input_bounds=(0.14, 0.27, 0.86, 0.45),
+            before_fingerprint="before-candidate",
+            after_fingerprint="pending-visual-verification",
+            action_digest="a" * 64,
+            receipt_digest="b" * 64,
+            surface_descriptors=(),
+            recorded_at_epoch=time.time(),
+            source="pending_verified_ime_candidate_action",
+        )
+        lineage.validate()
+        provider = SequenceProvider([first, audit])
+        observer = GenericSceneObserver(
+            provider,
+            qwerty_row_snapper=lambda _frames, _anchors: anchors,
+        )
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            device_id="device-local-01",
+            input_lineage_override=lineage,
+            goal_context={
+                "entities": {
+                    "active_subgoal_visual_context": {
+                        "subgoal_id": "input_exact_text",
+                        "objective": "在正文输入两行中文",
+                        "constraints": ["不得发送"],
+                        "completion_conditions": [
+                            "正文逐字等于你好换行世界"
+                        ],
+                        "execution_class": "navigate",
+                        "goal_entities": {
+                            "input_text": "你好\n世界",
+                            "active_input_transaction_text": "你好\n世界",
+                            "active_input_field_id": "input_field_1",
+                            "active_input_field_label": "正文",
+                            "active_input_multiline": True,
+                        },
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(2, provider.calls)
+        self.assertTrue(observer.last_diagnostics["input_lineage_used"])
+        field = scene.get_element("local_audited_input_1")
+        self.assertEqual("你好", field.states["value"])
+        self.assertNotIn("ime_preedit_text", field.states)
+        enter = scene.get_element("local_audited_enter_key_1")
+        self.assertEqual("你好\n", enter.states["expected_input_value"])
+
     def test_passive_keyboard_container_isolation_keeps_ambiguous_items_strict(self) -> None:
         context = {
             "objective": "输入框内容为 codex 且不提交",
@@ -5265,7 +5416,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                         "objective": "输入框逐字等于目标且不发送",
                         "entities": {"input_text": target_value},
                     },
-                    coarse_input_value=current_value,
+                    ledger_input_value=current_value,
                 )
                 key = scene.unique_trusted_goal_element()
                 self.assertEqual("local_audited_literal_key_1", key.element_id)
@@ -5295,7 +5446,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                         "objective": "输入框逐字等于目标且不发送",
                         "entities": {"input_text": current_value + digit},
                     },
-                    coarse_input_value=current_value,
+                    ledger_input_value=current_value,
                 )
                 key = scene.unique_trusted_goal_element()
                 self.assertEqual("local_audited_literal_key_1", key.element_id)
@@ -5340,7 +5491,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                             "objective": "输入框逐字等于目标且不发送",
                             "entities": {"input_text": target_value},
                         },
-                        coarse_input_value=current_value,
+                        ledger_input_value=current_value,
                     )
 
         for qwerty_target, key_kind, label in (
@@ -5370,7 +5521,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                             "objective": "输入框逐字等于目标且不发送",
                             "entities": {"input_text": current_value + qwerty_target},
                         },
-                        coarse_input_value=current_value,
+                        ledger_input_value=current_value,
                     )
 
     def test_scene_normalizes_exact_symbol_grid_layout_alias(self) -> None:
@@ -5879,7 +6030,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit(preedits=[unique_preedit]), ensure_ascii=False),
             fingerprint="frame-clear-preedit",
             goal_context=context,
-            coarse_input_value="",
+            ledger_input_value="",
         )
 
         field = projected.get_element("local_audited_input_1")
@@ -5910,7 +6061,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             ),
             fingerprint="frame-clear-preedit",
             goal_context=context,
-            coarse_input_value="",
+            ledger_input_value="",
         )
         self.assertNotIn(
             "ime_preedit_text",
@@ -5925,7 +6076,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             ),
             fingerprint="frame-clear-preedit",
             goal_context=context,
-            coarse_input_value="",
+            ledger_input_value="",
         )
         self.assertNotIn(
             "ime_preedit_text",
@@ -5947,7 +6098,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit(preedits=[unique_preedit]), ensure_ascii=False),
             fingerprint="frame-clear-preedit",
             goal_context=input_context,
-            coarse_input_value="",
+            ledger_input_value="",
         )
         input_field = input_scene.get_element("local_audited_input_1")
         self.assertEqual("longinp", input_field.states["ime_preedit_text"])
@@ -5968,7 +6119,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     json.dumps(inline_audit, ensure_ascii=False),
                     fingerprint="frame-inline-preedit",
                     goal_context=input_context,
-                    coarse_input_value="",
+                    ledger_input_value="",
                 )
                 inline_field = inline_scene.get_element("local_audited_input_1")
                 self.assertEqual("", inline_field.states["value"])
@@ -5986,7 +6137,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     json.dumps(rejected_audit, ensure_ascii=False),
                     fingerprint="frame-inline-preedit-rejected",
                     goal_context=input_context,
-                    coarse_input_value="",
+                    ledger_input_value="",
                 )
                 rejected_field = rejected_scene.get_element(
                     "local_audited_input_1"
@@ -6022,7 +6173,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(nested_audit, ensure_ascii=False),
             fingerprint="frame-nested-preedit",
             goal_context=input_context,
-            coarse_input_value="",
+            ledger_input_value="",
         )
         nested_field = nested_scene.get_element("local_audited_input_1")
         self.assertEqual("", nested_field.states["value"])
@@ -6065,7 +6216,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(keyboard_strip_audit, ensure_ascii=False),
             fingerprint="frame-keyboard-candidate-strip",
             goal_context=input_context,
-            coarse_input_value="",
+            ledger_input_value="",
         )
         keyboard_candidate = keyboard_strip_scene.unique_trusted_goal_element()
         self.assertEqual("ime_exact_candidate", keyboard_candidate.meaning)
@@ -6083,7 +6234,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 json.dumps(split_candidate_rows, ensure_ascii=False),
                 fingerprint="frame-split-keyboard-candidate-rows",
                 goal_context=input_context,
-                coarse_input_value="",
+                ledger_input_value="",
             )
 
         too_far = json.loads(json.dumps(nested_audit, ensure_ascii=False))
@@ -6096,7 +6247,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 json.dumps(too_far, ensure_ascii=False),
                 fingerprint="frame-distant-candidate",
                 goal_context=input_context,
-                coarse_input_value="",
+                ledger_input_value="",
             )
 
         useful_direct_preedit = json.loads(
@@ -6126,7 +6277,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(useful_direct_preedit, ensure_ascii=False),
             fingerprint="frame-useful-direct-preedit",
             goal_context=input_context,
-            coarse_input_value="",
+            ledger_input_value="",
         )
         useful_field = useful_scene.get_element("local_audited_input_1")
         self.assertEqual("", useful_field.states["value"])
@@ -6154,7 +6305,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 json.dumps(missing_useful_candidate, ensure_ascii=False),
                 fingerprint="frame-useful-preedit-without-candidate",
                 goal_context=input_context,
-                coarse_input_value="",
+                ledger_input_value="",
             )
 
     def test_keyboard_mode_label_does_not_override_independent_direction(self) -> None:
@@ -7318,7 +7469,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "objective": "输入框逐字等于目标且不发送",
                 "entities": {"input_text": target_value},
             },
-            coarse_input_value=current_value,
+            ledger_input_value=current_value,
         )
 
         target = projected.unique_trusted_goal_element()
@@ -7331,7 +7482,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             )
         )
 
-    def test_input_audit_recovers_same_frame_direct_latin_value_not_long_candidate(
+    def test_input_audit_rejects_compact_direct_latin_value_shadow(
         self,
     ) -> None:
         current_value = "longinputvalidation2026"
@@ -7414,20 +7565,16 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "输入框逐字等于目标且不发送",
                     "entities": {"input_text": target_value},
                 },
-                coarse_input_value=coarse_value,
+                ledger_input_value=coarse_value,
             )
 
-        recovered = parsed(
+        rejected_shadow = parsed(
             input_mode="direct_latin",
             preedit_text=current_value,
             coarse_value=current_value,
         )
-        field = recovered.get_element("local_audited_input_1")
-        self.assertEqual(current_value, field.states["value"])
-        self.assertEqual(
-            "local_audited_keyboard_layout_switch_1",
-            recovered.unique_trusted_goal_element().element_id,
-        )
+        field = rejected_shadow.get_element("local_audited_input_1")
+        self.assertEqual("", field.states["value"])
 
         for input_mode, preedit_text, coarse_value in (
             ("direct_latin", "different-visible-value", current_value),
@@ -7451,7 +7598,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     rejected_field.states,
                 )
 
-    def test_input_audit_recovers_exact_committed_cue_without_ime_preedit(
+    def test_input_audit_rejects_compact_exact_cue_shadow_without_lineage(
         self,
     ) -> None:
         current_value = "freshsendproof"
@@ -7518,12 +7665,12 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "只发送一次输入框内现有正文",
                     "entities": {"input_text": current_value},
                 },
-                coarse_input_value=current_value,
+                ledger_input_value=current_value,
             )
 
-        recovered = parsed(cues=[current_value])
-        field = recovered.get_element("local_audited_input_1")
-        self.assertEqual(current_value, field.states["value"])
+        rejected_shadow = parsed(cues=[current_value])
+        field = rejected_shadow.get_element("local_audited_input_1")
+        self.assertEqual("", field.states["value"])
         self.assertNotIn("ime_preedit_text", field.states)
 
         for cues, placeholder in (
@@ -8868,7 +9015,9 @@ class GenericSceneObserverTests(unittest.TestCase):
             any(item.meaning == "switch_keyboard_input_mode" for item in scene.elements)
         )
 
-    def test_targeted_refinement_uses_only_full_frame_for_actionable_bounds(self) -> None:
+    def test_targeted_refinement_cannot_publish_input_without_dedicated_audit(
+        self,
+    ) -> None:
         first = scene_payload()
         first["elements"] = []
         refined = scene_payload()
@@ -8895,7 +9044,11 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(scene.elements[0].bounds, (0.1, 0.1, 0.9, 0.3))
+        self.assertFalse(scene.elements)
+        self.assertEqual(
+            "typed输入状态账本未建立；compact输入摘要与输入转写不参与判断。",
+            scene.summary,
+        )
         self.assertEqual(observer.last_diagnostics["targeted_roi_bounds"], [0, 0, 1000, 420])
         compact_image = provider.messages_seen[0][1]["content"][1]["image_url"]["url"]
         targeted_overview = provider.messages_seen[1][1]["content"][1]["image_url"]["url"]
@@ -9407,7 +9560,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="第一行",
+            ledger_input_value="第一行",
         )
         target = projected.get_element("local_audited_input_1")
         self.assertEqual("body", target.states["input_field_id"])
@@ -9425,7 +9578,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="第一行",
+            ledger_input_value="第一行",
         )
         self.assertFalse(
             any(item.meaning == "input_exact_enter_key" for item in rejected.elements)
@@ -9442,7 +9595,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="first",
+            ledger_input_value="first",
         )
 
         target = projected.unique_trusted_goal_element()
@@ -9471,7 +9624,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="first",
+            ledger_input_value="first",
         )
 
         target = projected.unique_trusted_goal_element()
@@ -9480,7 +9633,7 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("subject_field", target.states["source_input_field_id"])
         self.assertEqual("body_field", target.states["target_input_field_id"])
 
-    def test_multifield_next_field_key_normalizes_unique_committed_cue_slot(
+    def test_multifield_next_field_key_rejects_compact_cue_shadow_authority(
         self,
     ) -> None:
         fields = MULTIFIELD_FIELDS
@@ -9495,14 +9648,19 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="first",
+            ledger_input_value="first",
         )
 
-        target = projected.unique_trusted_goal_element()
-        self.assertIsNotNone(target)
-        self.assertEqual("input_next_field_key", target.meaning)
-        current = projected.get_element("local_audited_input_1")
-        self.assertEqual("first", current.states["value"])
+        self.assertFalse(
+            any(item.meaning == "input_next_field_key" for item in projected.elements)
+        )
+        self.assertFalse(
+            any(
+                item.meaning == "application_text_input"
+                and item.states.get("value") == "first"
+                for item in projected.elements
+            )
+        )
 
         rejected = _apply_input_structure_audit(
             _parse_scene(
@@ -9512,7 +9670,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="first",
+            ledger_input_value="first",
         )
         self.assertFalse(
             any(item.meaning == "input_next_field_key" for item in rejected.elements)
@@ -9537,7 +9695,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="first",
+            ledger_input_value="first",
             qwerty_row_snapper=lambda _frames, _anchors: snapped,
             qwerty_row_frames=stable_frames()[-3:],
         )
@@ -9553,7 +9711,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="first",
+            ledger_input_value="first",
             qwerty_row_snapper=lambda _frames, _anchors: snapped,
             qwerty_row_frames=stable_frames()[-3:],
         )
@@ -9592,7 +9750,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     json.dumps(audit, ensure_ascii=False),
                     fingerprint="f" * 64,
                     goal_context=context,
-                    coarse_input_value=source_text,
+                    ledger_input_value=source_text,
                 )
                 target = projected.unique_trusted_goal_element()
                 self.assertIsNotNone(target)
@@ -9623,7 +9781,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     json.dumps(audit, ensure_ascii=False),
                     fingerprint="f" * 64,
                     goal_context=context,
-                    coarse_input_value="first",
+                    ledger_input_value="first",
                 )
                 self.assertFalse(
                     any(item.meaning == "input_next_field_key" for item in projected.elements)
@@ -9698,7 +9856,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value=prefix,
+            ledger_input_value=prefix,
         )
 
         field = projected.get_element("local_audited_input_1")
@@ -9728,7 +9886,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     ),
                     fingerprint="f" * 64,
                     goal_context=context,
-                    coarse_input_value=prefix,
+                    ledger_input_value=prefix,
                 )
 
     def test_local_ocr_rows_repair_compressed_qwerty_before_input_authorization(
@@ -9777,7 +9935,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="",
+            ledger_input_value="",
             qwerty_row_snapper=lambda _frames, _anchors: snapped,
             qwerty_row_frames=stable_frames()[-3:],
         )
@@ -9840,7 +9998,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     json.dumps(audit, ensure_ascii=False),
                     fingerprint="f" * 64,
                     goal_context=context,
-                    coarse_input_value="",
+                    ledger_input_value="",
                     qwerty_row_snapper=lambda _frames, _anchors: snapped,
                     qwerty_row_frames=stable_frames()[-3:],
                 )
@@ -9917,7 +10075,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="first line",
+            ledger_input_value="first line",
             qwerty_row_snapper=lambda _frames, _anchors: snapped,
             qwerty_row_frames=stable_frames()[-3:],
         )
@@ -9932,7 +10090,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="first line",
+            ledger_input_value="first line",
             qwerty_row_snapper=lambda _frames, _anchors: snapped,
             qwerty_row_frames=stable_frames()[-3:],
         )
@@ -10041,7 +10199,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     json.dumps(audit, ensure_ascii=False),
                     fingerprint="f" * 64,
                     goal_context=context,
-                    coarse_input_value="first",
+                    ledger_input_value="first",
                     qwerty_row_snapper=lambda _frames, _anchors: snapped,
                     qwerty_row_frames=stable_frames()[-3:],
                 )
@@ -10066,7 +10224,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="first",
+            ledger_input_value="first",
             qwerty_row_snapper=lambda _frames, _anchors: {
                 "q": [122, 708],
                 "p": [881, 708],
@@ -10092,7 +10250,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="first",
+            ledger_input_value="first",
             qwerty_row_snapper=lambda _frames, _anchors: {
                 "q": [122, 708],
                 "p": [881, 708],
@@ -10193,7 +10351,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="first",
+            ledger_input_value="first",
             qwerty_row_snapper=lambda _frames, _anchors: snapped,
             qwerty_row_frames=stable_frames()[-3:],
         )
@@ -10237,7 +10395,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "objective": "在唯一输入框输入 agent",
                     "entities": {"input_text": "agent"},
                 },
-                coarse_input_value="",
+                ledger_input_value="",
                 qwerty_row_snapper=lambda _frames, _anchors: None,
                 qwerty_row_frames=stable_frames()[-3:],
             )
@@ -10290,7 +10448,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     raw,
                     fingerprint="f" * 64,
                     goal_context=multifield_next_context(fields),
-                    coarse_input_value="",
+                    ledger_input_value="",
                 )
 
                 field = projected.get_element("local_audited_input_1")
@@ -10352,7 +10510,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     ), ensure_ascii=False),
                     fingerprint="f" * 64,
                     goal_context=multifield_next_context(MULTIFIELD_FIELDS),
-                    coarse_input_value="",
+                    ledger_input_value="",
                 )
                 self.assertFalse(any(
                     item.element_id == "local_audited_input_1"
@@ -10366,7 +10524,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             ), ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context={"objective": "输入second", "entities": {"input_text": "second"}},
-            coarse_input_value="",
+            ledger_input_value="",
         )
         self.assertFalse(any(
             item.element_id == "local_audited_input_1"
@@ -10382,7 +10540,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             ), ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=multifield_next_context(duplicate_typed_label),
-            coarse_input_value="",
+            ledger_input_value="",
         )
         self.assertFalse(any(
             item.element_id == "local_audited_input_1"
@@ -10398,7 +10556,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 ), ensure_ascii=False),
                 fingerprint="f" * 64,
                 goal_context=multifield_next_context(MULTIFIELD_FIELDS),
-                coarse_input_value="",
+                ledger_input_value="",
             )
 
     def test_typed_multiline_prefix_survives_placeholder_loss_and_pixel_coordinates(
@@ -10432,6 +10590,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     text="first",
                     placeholder="",
                     field_labels=["正文"],
+                    caret_line_index=1,
                 )
             ],
             keyboard={
@@ -10466,13 +10625,33 @@ class GenericSceneObserverTests(unittest.TestCase):
         frames = tuple(
             Image.new("RGB", (1000, 2000), "white") for _ in range(4)
         )
+        newline_lineage = TypedInputLineage(
+            version=TYPED_INPUT_LINEAGE_VERSION,
+            device_id="device-local-01",
+            exact_value="first\n",
+            app_id="calculator",
+            screen_id="app_home",
+            input_meaning="application_text_input",
+            input_field_id="input_field_1",
+            input_bounds=(0.135, 0.245, 0.86, 0.405),
+            before_fingerprint="before-newline",
+            after_fingerprint="pending-visual-verification",
+            action_digest="c" * 64,
+            receipt_digest="d" * 64,
+            surface_descriptors=(),
+            recorded_at_epoch=time.time(),
+            source="pending_verified_newline_action",
+        )
+        newline_lineage.validate()
 
         projected = _apply_input_structure_audit(
             base,
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="first\n",
+            ledger_input_value="conflicting compact value",
+            verified_input_lineage=newline_lineage,
+            device_id="device-local-01",
             qwerty_row_frames=frames,
         )
 
@@ -10543,7 +10722,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="authorized-prefix-frame",
             goal_context=context,
-            coarse_input_value="",
+            ledger_input_value="",
         )
 
         field = projected.get_element("local_audited_input_1")
@@ -10570,7 +10749,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(candidate_less_direct_region, ensure_ascii=False),
             fingerprint="authorized-prefix-direct-region",
             goal_context=context,
-            coarse_input_value="",
+            ledger_input_value="",
         )
         self.assertEqual(
             "first",
@@ -10616,7 +10795,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                     json.dumps(candidate_audit, ensure_ascii=False),
                     fingerprint=f"authorized-prefix-rejected-{name}",
                     goal_context=candidate_context,
-                    coarse_input_value="",
+                    ledger_input_value="",
                 )
                 self.assertNotEqual(
                     "first",
@@ -10660,7 +10839,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="",
+            ledger_input_value="",
         )
 
         field = projected.get_element("local_audited_input_1")
@@ -10767,7 +10946,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="f" * 64,
             goal_context=context,
-            coarse_input_value="",
+            ledger_input_value="",
             qwerty_row_snapper=lambda _frames, _anchors: snapped,
             qwerty_row_frames=stable_frames()[-3:],
         )
@@ -11406,7 +11585,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             goal_context={
                 "objective": "清空当前唯一已聚焦输入框中的全部应用文字，不要发送"
             },
-            coarse_input_value=None,
+            ledger_input_value=None,
         )
         target = cleared.get_element("local_audited_input_1")
         self.assertEqual("first", target.states["value"])
@@ -11419,7 +11598,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="d" * 64,
             goal_context={"objective": "读取当前输入框"},
-            coarse_input_value=None,
+            ledger_input_value=None,
         )
         ordinary = read_only.get_element("local_audited_input_1")
         self.assertEqual("", ordinary.states["value"])
@@ -11497,7 +11676,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             goal_context={
                 "objective": "清空当前唯一已聚焦输入框中的全部应用文字，不要发送"
             },
-            coarse_input_value=None,
+            ledger_input_value=None,
             qwerty_row_snapper=lambda _frames, anchors: anchors,
             qwerty_row_frames=frames,
         )
@@ -11513,7 +11692,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             goal_context={
                 "objective": "清空当前唯一已聚焦输入框中的全部应用文字，不要发送"
             },
-            coarse_input_value=None,
+            ledger_input_value=None,
             qwerty_row_snapper=lambda _frames, _anchors: None,
             qwerty_row_frames=frames,
         )
@@ -11530,7 +11709,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             goal_context={
                 "objective": "清空当前唯一已聚焦输入框中的全部应用文字，不要发送"
             },
-            coarse_input_value=None,
+            ledger_input_value=None,
             qwerty_row_snapper=lambda _frames, anchors: anchors,
             qwerty_row_frames=frames,
         )
@@ -11543,7 +11722,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="b" * 64,
             goal_context={"objective": "观察当前输入框，不修改内容"},
-            coarse_input_value=None,
+            ledger_input_value=None,
             qwerty_row_snapper=lambda _frames, anchors: anchors,
             qwerty_row_frames=frames,
         )

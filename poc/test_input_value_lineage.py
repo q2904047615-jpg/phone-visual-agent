@@ -565,6 +565,7 @@ def ime_prediction_commit_audit_raw(
     caret_marker: str = "|",
     preedit_text: str | None = None,
     application_text: str | None = None,
+    visible_editable_cues: list[str] | None = None,
 ) -> str:
     """Replay a committed candidate while the IME prediction row remains."""
 
@@ -581,9 +582,13 @@ def ime_prediction_commit_audit_raw(
                     "placeholder": "",
                     "field_labels": ["正文"],
                     "visible_editable_cues": (
-                        ["caret"]
-                        if application_text is not None
-                        else [exact_value + caret_marker]
+                        list(visible_editable_cues)
+                        if visible_editable_cues is not None
+                        else (
+                            ["caret"]
+                            if application_text is not None
+                            else [exact_value + caret_marker]
+                        )
                     ),
                     "caret_line_index": exact_value.count("\n"),
                     "confidence": 1.0,
@@ -642,6 +647,29 @@ def ime_prediction_commit_audit_raw(
 class TypedInputLineageTests(unittest.TestCase):
     def make_store(self, root: str, now: float = 1000.0) -> TypedInputLineageStore:
         return TypedInputLineageStore(Path(root), clock=lambda: now)
+
+    def test_compact_input_value_shadow_authority_is_physically_absent(self) -> None:
+        observer_source = Path(__file__).with_name(
+            "generic_scene_observer.py"
+        ).read_text(encoding="utf-8")
+        lineage_source = Path(__file__).with_name(
+            "input_value_lineage.py"
+        ).read_text(encoding="utf-8")
+        for retired in (
+            "def _unique_scene_input_value(",
+            "def _unique_payload_input_value(",
+            "preliminary_input_value_hint",
+            "same_frame_visible_cue_text",
+            "visible_trailing_newline_projection",
+            "coarse_input_value",
+        ):
+            with self.subTest(retired=retired):
+                self.assertNotIn(retired, observer_source)
+        self.assertNotIn("coarse_exact_value", lineage_source)
+        self.assertIn(
+            "def _resolve_pending_ime_candidate_input_state(",
+            observer_source,
+        )
 
     def test_verified_literal_action_round_trip_and_visual_match(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -887,7 +915,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     "objective": f"让输入框逐字显示 {EXPECTED}2",
                     "entities": {"input_text": EXPECTED + "2"},
                 },
-                coarse_input_value=EXPECTED,
+                ledger_input_value=EXPECTED,
                 verified_input_lineage=record,
                 device_id=DEVICE,
                 lineage_frame=surface_frame(variation=1),
@@ -1061,6 +1089,7 @@ class TypedInputLineageTests(unittest.TestCase):
                 app_id="sample.app",
                 screen_id="editor",
                 input_bounds=(0.14, 0.54, 0.70, 0.61),
+                input_field_id="input_field_1",
                 now_epoch=record.recorded_at_epoch,
             )
         )
@@ -1107,7 +1136,7 @@ class TypedInputLineageTests(unittest.TestCase):
             ime_commit_audit_raw(),
             fingerprint="after-ime-candidate-fp",
             goal_context=context,
-            coarse_input_value="loopok",
+            ledger_input_value="loopok",
             verified_input_lineage=record,
             device_id=DEVICE,
             lineage_frame=surface_frame(),
@@ -1126,7 +1155,7 @@ class TypedInputLineageTests(unittest.TestCase):
             ime_commit_audit_raw(),
             fingerprint="after-ime-candidate-screen-name-drift",
             goal_context=context,
-            coarse_input_value="",
+            ledger_input_value="",
             verified_input_lineage=record,
             device_id=DEVICE,
             lineage_frame=surface_frame(),
@@ -1146,7 +1175,7 @@ class TypedInputLineageTests(unittest.TestCase):
             ime_commit_audit_raw(),
             fingerprint="after-ime-candidate-wrong-field",
             goal_context=wrong_field_context,
-            coarse_input_value="",
+            ledger_input_value="",
             verified_input_lineage=record,
             device_id=DEVICE,
             lineage_frame=surface_frame(),
@@ -1166,7 +1195,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     ime_commit_audit_raw(cue=cue),
                     fingerprint="after-ime-candidate-rejected",
                     goal_context=context,
-                    coarse_input_value="loopok",
+                    ledger_input_value="loopok",
                     verified_input_lineage=record,
                     device_id=DEVICE,
                     lineage_frame=surface_frame(),
@@ -1209,6 +1238,22 @@ class TypedInputLineageTests(unittest.TestCase):
                 self.assertEqual(case["prior"] + case["segment"], record.exact_value)
                 self.assertEqual("unknown", record.app_id)
                 self.assertEqual("input_field_1", record.input_field_id)
+                self.assertTrue(
+                    record.matches_typed_context(
+                        device_id=DEVICE,
+                        app_id="unknown",
+                        screen_id="multiline_input_acceptance",
+                        input_field_id="input_field_1",
+                    )
+                )
+                self.assertFalse(
+                    record.matches_typed_context(
+                        device_id=DEVICE,
+                        app_id="unknown",
+                        screen_id="multiline_input_acceptance",
+                        input_field_id="input_field_2",
+                    )
+                )
 
     def test_pending_ime_candidate_lineage_revokes_residual_prediction_preedit(self) -> None:
         cases = (
@@ -1230,6 +1275,13 @@ class TypedInputLineageTests(unittest.TestCase):
                 "pinyin": "yanshou",
                 "caret_marker": "|",
                 "application_text": True,
+            },
+            {
+                "prior": "",
+                "segment": "你好",
+                "pinyin": "nihao",
+                "caret_marker": "|",
+                "visible_editable_cues": ["bordered input area"],
             },
         )
         records: list[tuple[dict, TypedInputLineage, dict, str]] = []
@@ -1277,10 +1329,13 @@ class TypedInputLineageTests(unittest.TestCase):
                         application_text=(
                             expected if case.get("application_text") else None
                         ),
+                        visible_editable_cues=case.get(
+                            "visible_editable_cues"
+                        ),
                     ),
                     fingerprint="after-ime-prediction-commit",
                     goal_context=context,
-                    coarse_input_value=expected,
+                    ledger_input_value=expected,
                     verified_input_lineage=record,
                     device_id=DEVICE,
                     lineage_frame=surface_frame(),
@@ -1304,16 +1359,35 @@ class TypedInputLineageTests(unittest.TestCase):
                 records.append((before, record, context, expected))
 
         before, record, context, expected = records[0]
+        for coarse_value, cues in (
+            (None, []),
+            ("", ["bordered input area"]),
+            ("conflicting compact value", ["focus border", "caret"]),
+        ):
+            with self.subTest(
+                authority="typed-ledger",
+                coarse_value=coarse_value,
+                cues=cues,
+            ):
+                projected = _apply_input_structure_audit(
+                    UIScene.from_dict(before),
+                    ime_prediction_commit_audit_raw(
+                        exact_value=expected,
+                        candidate_text="你好",
+                        visible_editable_cues=cues,
+                    ),
+                    fingerprint="after-ime-ledger-authority",
+                    goal_context=context,
+                    ledger_input_value=coarse_value,
+                    verified_input_lineage=record,
+                    device_id=DEVICE,
+                    lineage_frame=surface_frame(),
+                )
+                field = projected.get_element("local_audited_input_1")
+                self.assertEqual(expected, field.states["value"])
+                self.assertNotIn("ime_preedit_text", field.states)
+
         negative_cases = (
-            {
-                "name": "wrong_cue",
-                "raw": ime_prediction_commit_audit_raw(
-                    exact_value=expected + "错",
-                    candidate_text="你好",
-                ),
-                "lineage": record,
-                "context": context,
-            },
             {
                 "name": "wrong_preedit",
                 "raw": ime_prediction_commit_audit_raw(
@@ -1366,7 +1440,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     case["raw"],
                     fingerprint="after-ime-prediction-rejected",
                     goal_context=case["context"],
-                    coarse_input_value=expected,
+                    ledger_input_value=expected,
                     verified_input_lineage=case["lineage"],
                     device_id=DEVICE,
                     lineage_frame=surface_frame(),
@@ -1748,7 +1822,7 @@ class TypedInputLineageTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="after-fp",
             goal_context=goal(),
-            coarse_input_value=expected,
+            ledger_input_value=expected,
             verified_input_lineage=pending,
             device_id=DEVICE,
         )
@@ -1760,18 +1834,18 @@ class TypedInputLineageTests(unittest.TestCase):
         self.assertEqual(expected, candidate.states["expected_input_value"])
         self.assertTrue(any("pending typed连续性" in item for item in input_element.evidence))
 
-        for changed_goal, changed_coarse in (
+        for changed_goal in (
             (goal(field_id="other_field"), expected),
             (goal(text="first\nthird"), expected),
-            (goal(), "first\nother"),
         ):
-            with self.subTest(goal=changed_goal, coarse=changed_coarse):
+            changed_goal, changed_coarse = changed_goal
+            with self.subTest(goal=changed_goal):
                 rejected = _apply_input_structure_audit(
                     base,
                     json.dumps(audit, ensure_ascii=False),
                     fingerprint="after-fp",
                     goal_context=changed_goal,
-                    coarse_input_value=changed_coarse,
+                    ledger_input_value=changed_coarse,
                     verified_input_lineage=pending,
                     device_id=DEVICE,
                 )
@@ -1785,6 +1859,19 @@ class TypedInputLineageTests(unittest.TestCase):
                         for element in rejected.elements
                     )
                 )
+
+        compact_conflict = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="after-fp",
+            goal_context=goal(),
+            ledger_input_value="first\nother",
+            verified_input_lineage=pending,
+            device_id=DEVICE,
+        )
+        compact_input = compact_conflict.get_element("local_audited_input_1")
+        self.assertEqual(prior, compact_input.states["value"])
+        self.assertEqual(fragment, compact_input.states["ime_preedit_text"])
 
     def test_direct_text_lineage_rejects_broken_chain_and_missing_frames(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

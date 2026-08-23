@@ -7,6 +7,8 @@ import re
 import statistics
 import threading
 import time
+from collections import OrderedDict
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any, Callable, Iterator
 
@@ -58,7 +60,11 @@ from verified_text_transaction import (
     VerifiedTextTransactionError,
     plan_next_verified_input,
 )
-from input_value_lineage import TypedInputLineage, TypedInputLineageStore
+from input_value_lineage import (
+    PENDING_INPUT_LINEAGE_SOURCES,
+    TypedInputLineage,
+    TypedInputLineageStore,
+)
 from system_navigation_privacy import (
     SYSTEM_NAVIGATION_PRIVACY_VIEW_VERSION,
     privacy_minimized_system_navigation_view,
@@ -239,6 +245,10 @@ class GenericSceneObserver:
         self._last_stage = "idle"
         self.last_orientation_audit_diagnostics: dict[str, Any] = {}
         self.last_geometry_audit_diagnostics: dict[str, Any] = {}
+        self.supports_typed_input_continuation = True
+        self._observation_cache_lock = threading.RLock()
+        self._observation_cache: OrderedDict[str, UIScene] = OrderedDict()
+        self._observation_cache_limit = 32
 
     def audit_element_geometry(
         self,
@@ -341,23 +351,33 @@ class GenericSceneObserver:
                 )
             crop = transform.crop(frame)
             self._set_stage("waiting_element_geometry_audit")
-            raw = self._provider_chat(
-                [
-                    _json_only_system_message(),
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": _image_data_url(crop)},
-                            },
-                        ],
-                    },
-                ],
-                max_tokens=ELEMENT_GEOMETRY_AUDIT_TOKENS,
-                response_format={"type": "json_object"},
+            scope_factory = getattr(self.provider, "call_scope", None)
+            scope = (
+                scope_factory(
+                    stage="element_geometry_audit",
+                    fingerprint=scene.fingerprint,
+                )
+                if callable(scope_factory)
+                else nullcontext()
             )
+            with scope:
+                raw = self._provider_chat(
+                    [
+                        _json_only_system_message(),
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": _image_data_url(crop)},
+                                },
+                            ],
+                        },
+                    ],
+                    max_tokens=ELEMENT_GEOMETRY_AUDIT_TOKENS,
+                    response_format={"type": "json_object"},
+                )
             self.last_raw_response = raw
             self._set_stage("parsing_element_geometry_audit")
             try:
@@ -542,10 +562,23 @@ class GenericSceneObserver:
         model_calls = 0
         try:
             model_calls += 1
-            raw = self._provider_chat(
-                [_json_only_system_message(), {"role": "user", "content": content}],
-                max_tokens=ORIENTATION_AUDIT_TOKENS,
+            scope_factory = getattr(self.provider, "call_scope", None)
+            scope = (
+                scope_factory(
+                    stage="orientation_audit",
+                    fingerprint=scene_fingerprint,
+                )
+                if callable(scope_factory)
+                else nullcontext()
             )
+            with scope:
+                raw = self._provider_chat(
+                    [
+                        _json_only_system_message(),
+                        {"role": "user", "content": content},
+                    ],
+                    max_tokens=ORIENTATION_AUDIT_TOKENS,
+                )
             self._set_stage("parsing_orientation_audit")
             credential = _credential_from_orientation_audit(
                 raw=raw,
@@ -654,6 +687,7 @@ class GenericSceneObserver:
         goal_context: dict[str, Any] | None = None,
         device_id: str | None = None,
         input_lineage_override: TypedInputLineage | None = None,
+        prior_scene: UIScene | None = None,
     ) -> UIScene:
         self.last_raw_response = ""
         model_identity = public_model_identity(self.provider.status())
@@ -682,6 +716,8 @@ class GenericSceneObserver:
         input_structure_audit_retry_used = False
         input_structure_audit_isolated_from_attested_non_input = False
         input_lineage_used = False
+        compact_reused_from_typed_lineage = False
+        observation_cache_hit = False
         system_ui_audit_used = False
         system_ui_audit_retry_used = False
         system_ui_audit_confidence: float | None = None
@@ -699,7 +735,17 @@ class GenericSceneObserver:
             model_call_token_budgets.append(max_tokens)
             call_started = time.perf_counter()
             try:
-                return self._provider_chat(messages, max_tokens=max_tokens)
+                scope_factory = getattr(self.provider, "call_scope", None)
+                scope = (
+                    scope_factory(
+                        stage=self._current_stage,
+                        fingerprint=fingerprint,
+                    )
+                    if callable(scope_factory)
+                    else nullcontext()
+                )
+                with scope:
+                    return self._provider_chat(messages, max_tokens=max_tokens)
             finally:
                 model_identity.clear()
                 model_identity.update(public_model_identity(self.provider.status()))
@@ -742,6 +788,42 @@ class GenericSceneObserver:
             )
             fingerprint = _local_frame_fingerprint(frame)
             context = _safe_goal_context(goal_context or {})
+            cache_key = _observation_cache_key(
+                device_id=device_id,
+                fingerprint=fingerprint,
+                goal_context=context,
+                input_lineage=input_lineage_override,
+            )
+            cached_scene: UIScene | None = None
+            if cache_key is not None:
+                with self._observation_cache_lock:
+                    cached_scene = self._observation_cache.get(cache_key)
+                    if cached_scene is not None:
+                        self._observation_cache.move_to_end(cache_key)
+            if cached_scene is not None:
+                observation_cache_hit = True
+                cache_recorder = getattr(
+                    self.provider,
+                    "record_observation_cache_hit",
+                    None,
+                )
+                if callable(cache_recorder):
+                    cache_recorder(
+                        stage="same_fingerprint_observation",
+                        fingerprint=fingerprint,
+                    )
+                self.last_diagnostics = {
+                    "observer_version": GENERIC_SCENE_OBSERVER_VERSION,
+                    "vision_model": model_identity,
+                    "strategy": "exact_fingerprint_context_cache",
+                    "model_calls": 0,
+                    "observation_cache_hit": True,
+                    "fingerprint": fingerprint,
+                    "element_count": len(cached_scene.elements),
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                }
+                self._set_stage("completed")
+                return cached_scene
             allow_omitted_local_input_auxiliary_confirmation = bool(
                 context.pop(
                     "_allow_omitted_local_input_auxiliary_confirmation",
@@ -774,6 +856,22 @@ class GenericSceneObserver:
                     ],
                 }
             ]
+
+            continuation_base = _typed_input_continuation_base_scene(
+                prior_scene=prior_scene,
+                input_lineage=input_lineage_override,
+                device_id=device_id,
+                goal_context=context,
+                fingerprint=fingerprint,
+            )
+            if continuation_base is not None:
+                compact_reused_from_typed_lineage = True
+                compact_input_geometry_isolated = True
+                scene = continuation_base
+                preliminary_input_bounds_hint = tuple(
+                    round(value * 1000)
+                    for value in input_lineage_override.input_bounds
+                )
 
             def parse_compact_response(value: str) -> UIScene:
                 nonlocal compact_geometry_discarded, compact_input_geometry_isolated
@@ -833,34 +931,35 @@ class GenericSceneObserver:
                     fingerprint=fingerprint,
                 )
 
-            self._set_stage("waiting_compact_observation")
-            try:
-                raw = model_chat(
-                    first_messages,
-                    max_tokens=COMPACT_OUTPUT_TOKENS,
-                )
-                self.last_raw_response = raw
-                self._set_stage("parsing_compact_observation")
-                scene = parse_compact_response(raw)
-            except VisionAgentError as first_error:
-                first_error_type = classify_qwen_error(
-                    first_error,
-                    raw_response=self.last_raw_response,
-                )
-                if (
-                    first_error_type not in FORMAT_ERROR_TYPES
-                    or not _compact_response_has_repairable_syntax_error(
-                        self.last_raw_response
+            if not compact_reused_from_typed_lineage:
+                self._set_stage("waiting_compact_observation")
+                try:
+                    raw = model_chat(
+                        first_messages,
+                        max_tokens=COMPACT_OUTPUT_TOKENS,
                     )
-                ):
-                    raise
-                scene = parse_unique_structural_repair(self.last_raw_response)
-                if scene is None:
-                    raise VisionAgentError(
-                        "原始 compact 响应不存在唯一、严格有效的单结构标点修复。"
+                    self.last_raw_response = raw
+                    self._set_stage("parsing_compact_observation")
+                    scene = parse_compact_response(raw)
+                except VisionAgentError as first_error:
+                    first_error_type = classify_qwen_error(
+                        first_error,
+                        raw_response=self.last_raw_response,
                     )
-                format_retry_used = True
-                local_structural_repair_used = True
+                    if (
+                        first_error_type not in FORMAT_ERROR_TYPES
+                        or not _compact_response_has_repairable_syntax_error(
+                            self.last_raw_response
+                        )
+                    ):
+                        raise
+                    scene = parse_unique_structural_repair(self.last_raw_response)
+                    if scene is None:
+                        raise VisionAgentError(
+                            "原始 compact 响应不存在唯一、严格有效的单结构标点修复。"
+                        )
+                    format_retry_used = True
+                    local_structural_repair_used = True
 
             if privacy_minimized_system_home:
                 # The masked view is authority only for a coordinate-free
@@ -877,7 +976,8 @@ class GenericSceneObserver:
                 scene.validate()
 
             if (
-                not system_ui_audit_required
+                not compact_reused_from_typed_lineage
+                and not system_ui_audit_required
                 and not _goal_requests_keyboard_mode_switch(context)
                 and not compact_input_geometry_isolated
                 and not _is_verified_navigation_result_observation(context)
@@ -960,7 +1060,8 @@ class GenericSceneObserver:
                     local_structural_repair_used = True
 
             if (
-                not privacy_minimized_system_home
+                not compact_reused_from_typed_lineage
+                and not privacy_minimized_system_home
                 and _needs_foreground_app_identity_audit(scene, context)
             ):
                 foreground_app_identity_audit_used = True
@@ -991,7 +1092,10 @@ class GenericSceneObserver:
                 scene = replace(scene, app_id=foreground_app_id)
                 scene.validate()
 
-            if _goal_requests_reload(context):
+            if (
+                not compact_reused_from_typed_lineage
+                and _goal_requests_reload(context)
+            ):
                 # Reload is a generic navigation semantic, but compact toolbar
                 # glyphs are easy to confuse with bookmark and expand controls.
                 # A separate read-only audit is the only component allowed to
@@ -1098,7 +1202,7 @@ class GenericSceneObserver:
                     ),
                 )
 
-            if system_ui_audit_required:
+            if not compact_reused_from_typed_lineage and system_ui_audit_required:
                 system_ui_audit_used = True
                 system_ui_images = [
                     image_part,
@@ -1483,6 +1587,10 @@ class GenericSceneObserver:
                 ),
                 "input_structure_audit_used": input_structure_audit_used,
                 "input_lineage_used": input_lineage_used,
+                "compact_reused_from_typed_lineage": (
+                    compact_reused_from_typed_lineage
+                ),
+                "observation_cache_hit": observation_cache_hit,
                 "input_structure_audit_retry_used": (
                     input_structure_audit_retry_used
                 ),
@@ -1524,8 +1632,18 @@ class GenericSceneObserver:
                 "frame_size": list(frame.size),
                 "fingerprint": fingerprint,
                 "element_count": len(scene.elements),
-                "output_token_budget": model_call_token_budgets[-1],
+                "output_token_budget": (
+                    model_call_token_budgets[-1]
+                    if model_call_token_budgets
+                    else 0
+                ),
             }
+            if cache_key is not None:
+                with self._observation_cache_lock:
+                    self._observation_cache[cache_key] = scene
+                    self._observation_cache.move_to_end(cache_key)
+                    while len(self._observation_cache) > self._observation_cache_limit:
+                        self._observation_cache.popitem(last=False)
             self._set_stage("completed")
             return scene
         except Exception as exc:
@@ -1552,6 +1670,10 @@ class GenericSceneObserver:
                         icon_cluster_audit_reload_attested
                     ),
                     "input_structure_audit_used": input_structure_audit_used,
+                    "compact_reused_from_typed_lineage": (
+                        compact_reused_from_typed_lineage
+                    ),
+                    "observation_cache_hit": observation_cache_hit,
                     "input_structure_audit_retry_used": (
                         input_structure_audit_retry_used
                     ),
@@ -8439,6 +8561,20 @@ def _apply_input_structure_audit(
                     "evidence": ["键盘区域内方向明确的独立输入模式切换键"],
                 }
             )
+        for element in elements:
+            if not str(element.get("element_id") or "").startswith(
+                "local_audited_"
+            ):
+                continue
+            states = element.get("states")
+            if (
+                not isinstance(states, dict)
+                or states.get("fully_visible") is not True
+                or not element.get("evidence")
+            ):
+                continue
+            states["primary_input_geometry_verified"] = True
+            states["geometry_audit_source"] = "input_structure_audit"
         value["elements"] = elements
         value["summary"] = (
             "输入状态仅见typed输入账本；compact输入摘要与输入转写不参与判断。"
@@ -9891,6 +10027,108 @@ def _goal_terms(context: dict[str, Any]) -> tuple[str, ...]:
 def _local_frame_fingerprint(frame: Image.Image) -> str:
     compact = frame.convert("L").resize((64, 96), Image.Resampling.BILINEAR)
     return hashlib.sha256(compact.tobytes()).hexdigest()[:20]
+
+
+def _observation_cache_key(
+    *,
+    device_id: str | None,
+    fingerprint: str,
+    goal_context: dict[str, Any],
+    input_lineage: TypedInputLineage | None,
+) -> str | None:
+    resolved_device = str(device_id or "").strip()
+    if resolved_device.casefold() in {"", "unbound", "unknown", "none", "null"}:
+        return None
+    lineage_payload = (
+        input_lineage.to_dict() if input_lineage is not None else None
+    )
+    payload = {
+        "device_id": resolved_device,
+        "fingerprint": str(fingerprint or "").strip(),
+        "goal_context": goal_context,
+        "input_lineage": lineage_payload,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _typed_input_continuation_base_scene(
+    *,
+    prior_scene: UIScene | None,
+    input_lineage: TypedInputLineage | None,
+    device_id: str | None,
+    goal_context: dict[str, Any],
+    fingerprint: str,
+) -> UIScene | None:
+    """Carry only prior surface identity into one pending typed input audit.
+
+    The pending receipt lineage proves which already-authorized input
+    transaction produced the new frame.  All prior elements, values,
+    candidates and geometry are removed; the fresh dedicated input audit must
+    reconstruct them.  This replaces a duplicate compact model call without
+    granting stale geometry or a second input-state authority.
+    """
+
+    if prior_scene is None or input_lineage is None:
+        return None
+    resolved_device = str(device_id or "").strip()
+    active_field_id = _goal_active_input_field(goal_context)[0]
+    if (
+        not resolved_device
+        or not active_field_id
+        or input_lineage.source not in PENDING_INPUT_LINEAGE_SOURCES
+        or not _goal_requests_input(goal_context)
+        or input_lineage.before_fingerprint != prior_scene.fingerprint
+    ):
+        return None
+    try:
+        prior_scene.validate()
+        input_lineage.validate()
+    except (UISceneError, ValueError):
+        return None
+    if not input_lineage.matches_typed_context(
+        device_id=resolved_device,
+        app_id=prior_scene.app_id,
+        screen_id=prior_scene.screen_id,
+        input_field_id=active_field_id,
+    ):
+        return None
+    prior_inputs = tuple(
+        element
+        for element in prior_scene.elements
+        if element.role == "input"
+        and element.meaning == "application_text_input"
+        and str(element.states.get("input_field_id") or "").strip()
+        == active_field_id
+        and element.states.get("fully_visible") is True
+    )
+    if len(prior_inputs) != 1:
+        return None
+    prior_input = prior_inputs[0]
+    if any(
+        abs(float(left) - float(right)) > 0.08
+        for left, right in zip(prior_input.bounds, input_lineage.input_bounds)
+    ):
+        return None
+    continued = replace(
+        prior_scene,
+        summary=(
+            "沿用同一typed输入事务已验证的App/screen身份；"
+            "当前字段、正文、候选和键盘全部等待新专用审计。"
+        ),
+        elements=(),
+        overlays=(),
+        stable=True,
+        fingerprint=fingerprint,
+    )
+    continued.validate()
+    return continued
 
 
 def _safe_goal_context(value: dict[str, Any]) -> dict[str, Any]:

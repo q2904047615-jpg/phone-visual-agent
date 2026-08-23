@@ -13,12 +13,13 @@ from PIL import Image, ImageFilter
 
 
 ORIENTATION_AUDIT_PROTOCOL_VERSION = "2026-08-15-orientation-audit-v2"
-ORIENTATION_CREDENTIAL_VERSION = "2026-08-14-orientation-credential-v1"
+ORIENTATION_CREDENTIAL_VERSION = "2026-08-24-orientation-credential-v2"
 MIN_ORIENTATION_CONFIDENCE = 0.80
 MAX_ORIENTATION_BINDING_AGE_SECONDS = 3.0
 MAX_ORIENTATION_MEAN_BRIGHTNESS_DELTA = 18.0
 MAX_ORIENTATION_CENTERED_MAE = 6.0
 ORIENTATION_AUDIT_SOURCE = "independent_orientation_audit"
+LOCAL_QWERTY_ORIENTATION_SOURCE = "stable_local_qwerty_orientation_audit"
 _PLACEHOLDER_DEVICE_IDS = frozenset({"", "unbound", "unknown", "none", "null"})
 _AUDIT_SEAL_LOCK = threading.Lock()
 _LIVE_AUDIT_SEALS: dict[object, "_FrameVisualBinding"] = {}
@@ -140,8 +141,11 @@ class OrientationCredential:
     def validate(self) -> None:
         if self.version != ORIENTATION_CREDENTIAL_VERSION:
             raise OrientationSafetyError("方向凭据版本无效。")
-        if self.source != ORIENTATION_AUDIT_SOURCE:
-            raise OrientationSafetyError("方向凭据不是独立审计产生。")
+        if self.source not in {
+            ORIENTATION_AUDIT_SOURCE,
+            LOCAL_QWERTY_ORIENTATION_SOURCE,
+        }:
+            raise OrientationSafetyError("方向凭据不是正式独立审计产生。")
         for label, value in (
             ("credential_id", self.credential_id),
             ("device_id", self.device_id),
@@ -290,6 +294,90 @@ def _mint_audited_credential(
     ):
         with _AUDIT_SEAL_LOCK:
             _LIVE_AUDIT_SEALS[seal] = _frame_visual_binding(frame)
+    return item
+
+
+def _mint_locally_verified_qwerty_credential(
+    *,
+    device_id: str,
+    scene_fingerprint: str,
+    frame: Image.Image,
+    anchors: dict[str, Any],
+) -> OrientationCredential:
+    """Mint one action credential from stable local QWERTY row evidence.
+
+    The caller supplies anchors returned by the production multi-frame OCR
+    row snapper.  This function independently validates the complete upright
+    row ordering before binding the resulting one-shot seal to the actual
+    frame consumed by the physical execution gate.
+    """
+
+    required = ("q", "p", "a", "l", "z", "m", "backspace")
+    if not isinstance(anchors, dict) or set(anchors) != set(required):
+        raise OrientationSafetyError("本地方向审计缺少完整 QWERTY 七点。")
+
+    points: dict[str, tuple[float, float]] = {}
+    for key in required:
+        value = anchors.get(key)
+        if (
+            not isinstance(value, (list, tuple))
+            or len(value) != 2
+            or any(
+                isinstance(part, bool)
+                or not isinstance(part, (int, float))
+                or not 0 <= float(part) <= 1000
+                for part in value
+            )
+        ):
+            raise OrientationSafetyError("本地方向审计的 QWERTY 锚点无效。")
+        points[key] = (float(value[0]), float(value[1]))
+
+    top_y = (points["q"][1] + points["p"][1]) / 2.0
+    middle_y = (points["a"][1] + points["l"][1]) / 2.0
+    bottom_y = (
+        points["z"][1] + points["m"][1] + points["backspace"][1]
+    ) / 3.0
+    if not (
+        points["q"][0] < points["p"][0]
+        and points["a"][0] < points["l"][0]
+        and points["z"][0] < points["m"][0] < points["backspace"][0]
+        and top_y + 20 <= middle_y
+        and middle_y + 20 <= bottom_y
+        and abs(points["q"][1] - points["p"][1]) <= 18
+        and abs(points["a"][1] - points["l"][1]) <= 18
+        and max(
+            points["z"][1],
+            points["m"][1],
+            points["backspace"][1],
+        )
+        - min(
+            points["z"][1],
+            points["m"][1],
+            points["backspace"][1],
+        )
+        <= 18
+    ):
+        raise OrientationSafetyError("本地方向审计的 QWERTY 行序或水平结构无效。")
+
+    seal = object()
+    item = OrientationCredential(
+        version=ORIENTATION_CREDENTIAL_VERSION,
+        credential_id=uuid.uuid4().hex,
+        source=LOCAL_QWERTY_ORIENTATION_SOURCE,
+        device_id=validate_device_id(device_id),
+        scene_fingerprint=str(scene_fingerprint or "").strip(),
+        frame_fingerprint=frame_fingerprint(frame),
+        evidence_frame_fingerprint="",
+        frame_size=tuple(frame.size),
+        camera_layout_orientation=camera_layout_orientation(frame.size),
+        phone_content_rotation="upright",
+        confidence=1.0,
+        evidence=("本地连续多帧OCR确认完整QWERTY三行保持正向排列",),
+        _audit_seal=seal,
+    )
+    item.validate()
+    with _AUDIT_SEAL_LOCK:
+        _LIVE_AUDIT_SEALS[seal] = _frame_visual_binding(frame)
     return item
 
 

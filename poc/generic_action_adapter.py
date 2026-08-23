@@ -41,6 +41,7 @@ from orientation_safety import (
     OrientationCredential,
     OrientationFrameMismatchError,
     OrientationSafetyError,
+    _mint_locally_verified_qwerty_credential,
     frame_fingerprint,
     validate_device_id,
 )
@@ -674,6 +675,7 @@ class GenericActionExecutionResult:
     confirmation_frame_identity_verified: bool
     confirmation_frame_delta: float | None
     physical_actions: int
+    primary_input_confirmation_reused: bool = False
     action_outcome: str = "matched"
     verification_errors: tuple[str, ...] = ()
     robot_result: Any = None
@@ -721,6 +723,9 @@ class GenericActionExecutionResult:
             ),
             "confirmation_frame_delta": self.confirmation_frame_delta,
             "physical_actions": self.physical_actions,
+            "primary_input_confirmation_reused": (
+                self.primary_input_confirmation_reused
+            ),
             "action_outcome": self.action_outcome,
             "verification_errors": list(self.verification_errors),
             "robot_result": self.robot_result,
@@ -796,6 +801,118 @@ class GenericSingleActionAdapter:
             "switch_keyboard_input_mode",
         }
     )
+
+    @classmethod
+    def _primary_input_confirmation_reusable(
+        cls,
+        requested: SemanticAction,
+        scene: UIScene,
+    ) -> bool:
+        """Return whether one strict input audit may survive local recapture.
+
+        The caller has already compared the planned and fresh four-frame sets.
+        This predicate only accepts the exact canonical goal element minted by
+        the dedicated input audit; ordinary compact controls never qualify.
+        """
+
+        if requested.action not in {
+            "tap_semantic",
+            "press_enter",
+            "input_verified_text",
+            "clear_verified_text",
+        } or not str(requested.params.get("formal_candidate_id") or "").strip():
+            return False
+        element_id = str(requested.params.get("element_id") or "").strip()
+        try:
+            element = scene.get_element(element_id)
+            unique = scene.unique_trusted_goal_element()
+        except UISceneError:
+            return False
+        if unique is None or unique.element_id != element_id:
+            return False
+        states = element.states
+        if (
+            not element_id.startswith("local_audited_")
+            or states.get("primary_input_geometry_verified") is not True
+            or states.get("geometry_audit_source") != "input_structure_audit"
+            or states.get("goal_relevant") is not True
+            or states.get("fully_visible") is not True
+            or not any(str(item).strip() for item in element.evidence)
+            or requested.params.get("target") != element.meaning
+            or requested.params.get("role") != element.role
+            or requested.params.get("label") != element.label
+            or requested.params.get("states") != states
+        ):
+            return False
+        if requested.action in {"input_verified_text", "clear_verified_text"}:
+            return bool(
+                element.role == "input"
+                and element.meaning == "application_text_input"
+                and str(states.get("input_field_id") or "").strip()
+                not in {"", "unknown"}
+            )
+        if requested.action == "press_enter":
+            return bool(
+                element.meaning == "input_exact_enter_key"
+                and states.get("input_enter_key") is True
+                and states.get("key_action") == "newline"
+            )
+        return bool(
+            element.meaning == "application_text_input"
+            or element.meaning in cls.LOCAL_INPUT_AUXILIARY_MEANINGS
+            or element.meaning == "input_next_field_key"
+        )
+
+    def _local_qwerty_orientation_credential(
+        self,
+        *,
+        requested: SemanticAction,
+        scene: UIScene,
+        frames: list[Image.Image],
+    ) -> OrientationCredential | None:
+        if requested.action not in {
+            "tap_semantic",
+            "press_enter",
+            "input_verified_text",
+            "clear_verified_text",
+        } or not callable(self.qwerty_row_snapper):
+            return None
+        element_id = str(requested.params.get("element_id") or "").strip()
+        try:
+            target = scene.get_element(element_id)
+        except UISceneError:
+            return None
+        input_id = (
+            element_id
+            if target.meaning == "application_text_input"
+            else str(target.states.get("input_element_id") or "").strip()
+        )
+        try:
+            input_element = scene.get_element(input_id)
+        except UISceneError:
+            return None
+        geometry = input_element.states.get("keyboard_geometry")
+        if (
+            input_element.meaning != "application_text_input"
+            or input_element.states.get("focused") is not True
+            or not isinstance(geometry, dict)
+            or geometry.get("type") != "qwerty"
+            or geometry.get("source") != "input_structure_audit"
+        ):
+            return None
+        snapped = self.qwerty_row_snapper(frames, geometry.get("anchors"))
+        if not isinstance(snapped, dict):
+            return None
+        try:
+            qwerty_keyboard_config_from_anchors(snapped)
+            return _mint_locally_verified_qwerty_credential(
+                device_id=self.device_id,
+                scene_fingerprint=scene.fingerprint,
+                frame=frames[-1],
+                anchors=snapped,
+            )
+        except (OrientationSafetyError, WorkflowNotReady, TypeError, ValueError):
+            return None
 
     @staticmethod
     def _has_local_independent_geometry_attestation(
@@ -1398,6 +1515,7 @@ class GenericSingleActionAdapter:
         goal_context: dict[str, Any],
         *,
         input_lineage_override: TypedInputLineage | None = None,
+        prior_scene: UIScene | None = None,
     ) -> UIScene:
         kwargs: dict[str, Any] = {
             "frames": list(frames),
@@ -1406,6 +1524,16 @@ class GenericSingleActionAdapter:
         if getattr(self.observer, "input_lineage_store", None) is not None:
             kwargs["device_id"] = self.device_id
             kwargs["input_lineage_override"] = input_lineage_override
+        if (
+            prior_scene is not None
+            and getattr(
+                self.observer,
+                "supports_typed_input_continuation",
+                False,
+            )
+            is True
+        ):
+            kwargs["prior_scene"] = prior_scene
         return self.observer.observe(**kwargs)
 
     def capture_scene(
@@ -1690,6 +1818,7 @@ class GenericSingleActionAdapter:
                     frames,
                     observation_context,
                     input_lineage_override=input_lineage_override,
+                    prior_scene=before,
                 )
             except RuntimeError as exc:
                 last_error = exc
@@ -2009,6 +2138,7 @@ class GenericSingleActionAdapter:
         evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
         local_frame_identity_verified = False
         local_input_consensus_applied = False
+        primary_input_confirmation_reused = False
         confirmation_frame_delta: float | None = None
         if planned_frames:
             before_frames, before_paths = self._capture_confirmation_frames(
@@ -2026,30 +2156,37 @@ class GenericSingleActionAdapter:
             local_frame_identity_verified = True
             before = planned_scene
             if requested_action.action in self.GEOMETRY_BOUND_KINDS:
-                try:
-                    confirmation_context = goal.to_dict()
-                    if self._confirmation_allows_omitted_local_input_auxiliary(
+                primary_input_confirmation_reused = (
+                    self._primary_input_confirmation_reusable(
                         requested_action,
                         planned_scene,
-                    ):
-                        confirmation_context[
-                            "_allow_omitted_local_input_auxiliary_confirmation"
-                        ] = True
-                    before = self._observe_scene(
-                        before_frames,
-                        confirmation_context,
                     )
-                except RuntimeError as exc:
-                    diagnostic_paths = persist_observer_failure_diagnostic(
-                        self.observer,
-                        evidence_dir=evidence_dir,
-                        prefix=f"{evidence_prefix}_confirmation",
-                        error=exc,
-                    )
-                    raise GenericActionAdapterError(
-                        f"确认前目标几何复核失败：{exc}",
-                        evidence=before_paths + diagnostic_paths,
-                    ) from exc
+                )
+                if not primary_input_confirmation_reused:
+                    try:
+                        confirmation_context = goal.to_dict()
+                        if self._confirmation_allows_omitted_local_input_auxiliary(
+                            requested_action,
+                            planned_scene,
+                        ):
+                            confirmation_context[
+                                "_allow_omitted_local_input_auxiliary_confirmation"
+                            ] = True
+                        before = self._observe_scene(
+                            before_frames,
+                            confirmation_context,
+                        )
+                    except RuntimeError as exc:
+                        diagnostic_paths = persist_observer_failure_diagnostic(
+                            self.observer,
+                            evidence_dir=evidence_dir,
+                            prefix=f"{evidence_prefix}_confirmation",
+                            error=exc,
+                        )
+                        raise GenericActionAdapterError(
+                            f"确认前目标几何复核失败：{exc}",
+                            evidence=before_paths + diagnostic_paths,
+                        ) from exc
         else:
             before, before_frames, before_paths = self.capture_scene(
                 goal,
@@ -2061,6 +2198,7 @@ class GenericSingleActionAdapter:
             if (
                 planned_frames
                 and requested_action.action in self.INDEPENDENT_GEOMETRY_AUDIT_KINDS
+                and not primary_input_confirmation_reused
             ):
                 audit_geometry = getattr(
                     self.observer,
@@ -2414,28 +2552,47 @@ class GenericSingleActionAdapter:
                     "机械臂控制器未提供共享物理执行门禁，拒绝动作。",
                     evidence=before_paths,
                 )
-            if not callable(audit):
-                raise GenericActionAdapterError(
-                    "观察器未提供独立方向审计，拒绝动作。",
-                    evidence=before_paths,
-                )
             clear_authorization()
             try:
-                orientation_credential = audit(
+                orientation_credential = self._local_qwerty_orientation_credential(
+                    requested=requested_action,
+                    scene=before,
                     frames=before_frames,
-                    device_id=self.device_id,
-                    scene_fingerprint=before.fingerprint,
                 )
-                audit_diagnostics = getattr(
-                    self.observer,
-                    "last_orientation_audit_diagnostics",
-                    {},
-                )
-                selected_index = (
-                    audit_diagnostics.get("selected_frame_index")
-                    if isinstance(audit_diagnostics, dict)
-                    else None
-                )
+                selected_index: int | None = None
+                if orientation_credential is not None:
+                    selected_index = len(before_frames) - 1
+                    try:
+                        self.observer.last_orientation_audit_diagnostics = {
+                            "audit_source": orientation_credential.source,
+                            "model_calls": 0,
+                            "local_qwerty_rows_verified": True,
+                            "selected_frame_index": selected_index,
+                            "scene_fingerprint": before.fingerprint,
+                        }
+                    except Exception:
+                        pass
+                else:
+                    if not callable(audit):
+                        raise GenericActionAdapterError(
+                            "观察器未提供独立方向审计，拒绝动作。",
+                            evidence=before_paths,
+                        )
+                    orientation_credential = audit(
+                        frames=before_frames,
+                        device_id=self.device_id,
+                        scene_fingerprint=before.fingerprint,
+                    )
+                    audit_diagnostics = getattr(
+                        self.observer,
+                        "last_orientation_audit_diagnostics",
+                        {},
+                    )
+                    selected_index = (
+                        audit_diagnostics.get("selected_frame_index")
+                        if isinstance(audit_diagnostics, dict)
+                        else None
+                    )
                 if (
                     isinstance(selected_index, int)
                     and 0 <= selected_index < len(before_paths)
@@ -2783,6 +2940,9 @@ class GenericSingleActionAdapter:
             confirmation_frame_identity_verified=local_frame_identity_verified,
             confirmation_frame_delta=confirmation_frame_delta,
             physical_actions=physical_actions,
+            primary_input_confirmation_reused=(
+                primary_input_confirmation_reused
+            ),
             action_outcome=(
                 "mismatched" if verification_errors else "matched"
             ),

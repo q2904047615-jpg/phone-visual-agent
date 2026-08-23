@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -1375,7 +1376,17 @@ class QwenVisualDecisionObserver:
             self.last_diagnostics = dict(base_diagnostics)
             call_started = time.perf_counter()
             try:
-                return self._provider_chat(messages, max_tokens=max_tokens)
+                scope_factory = getattr(self.provider, "call_scope", None)
+                scope = (
+                    scope_factory(
+                        stage="visual_action_selection",
+                        fingerprint=trusted_observation.fingerprint,
+                    )
+                    if callable(scope_factory)
+                    else nullcontext()
+                )
+                with scope:
+                    return self._provider_chat(messages, max_tokens=max_tokens)
             finally:
                 model_identity.clear()
                 model_identity.update(public_model_identity(self.provider.status()))

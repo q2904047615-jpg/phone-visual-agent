@@ -24,6 +24,7 @@ from generic_scene_observer import GenericSceneObserver, _local_frame_fingerprin
 from input_value_lineage import TypedInputLineageStore
 from observation_images import measure_frame_sharpness
 from orientation_safety import (
+    LOCAL_QWERTY_ORIENTATION_SOURCE,
     OrientationFrameMismatchError,
     _claim_audit_seal,
     _mint_audited_credential,
@@ -1341,6 +1342,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             [fresh_without_key, after, after],
             geometry_scenes=[audited, audited],
         )
+
         robot = ClickReceiptRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
@@ -1413,6 +1415,239 @@ class GenericActionAdapterTests(unittest.TestCase):
                 ("local_audited_enter_key_1",),
             ],
             observer.geometry_audit_calls,
+        )
+
+    @staticmethod
+    def _strict_primary_input_scene(fingerprint="strict-input"):
+        states = {
+            "goal_relevant": True,
+            "fully_visible": True,
+            "focused": True,
+            "value": "",
+            "input_field_id": "body_field",
+            "input_field_label": "正文",
+            "input_multiline": False,
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "keyboard_case_mode": "lower",
+            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+            "primary_input_geometry_verified": True,
+            "geometry_audit_source": "input_structure_audit",
+        }
+        result = UIScene(
+            app_id="generic_app",
+            screen_id="editor",
+            summary="专用输入审计建立唯一聚焦输入框",
+            elements=(
+                UIElement(
+                    element_id="local_audited_input_1",
+                    role="input",
+                    meaning="application_text_input",
+                    label="",
+                    bounds=(0.14, 0.27, 0.86, 0.45),
+                    confidence=1.0,
+                    states=states,
+                    evidence=("正文输入框完整可见且光标位于框内",),
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint=fingerprint,
+            camera_alignment=aligned_camera_facts(),
+        )
+        result.validate()
+        return result
+
+    def test_only_strict_primary_input_audit_can_reuse_confirmation(self):
+        planned = self._strict_primary_input_scene()
+        field = planned.elements[0]
+        requested = SemanticAction(
+            node_id="type-body",
+            action="input_verified_text",
+            params={
+                "formal_candidate_id": "candidate-type-body",
+                "element_id": field.element_id,
+                "target": field.meaning,
+                "role": field.role,
+                "label": field.label,
+                "states": dict(field.states),
+                "text": "agent",
+            },
+        )
+
+        self.assertTrue(
+            GenericSingleActionAdapter._primary_input_confirmation_reusable(
+                requested,
+                planned,
+            )
+        )
+
+        ordinary_field = replace(
+            field,
+            states={
+                **field.states,
+                "primary_input_geometry_verified": False,
+            },
+        )
+        ordinary = replace(planned, elements=(ordinary_field,))
+        ordinary_request = replace(
+            requested,
+            params={**requested.params, "states": dict(ordinary_field.states)},
+        )
+        self.assertFalse(
+            GenericSingleActionAdapter._primary_input_confirmation_reusable(
+                ordinary_request,
+                ordinary,
+            )
+        )
+
+    def test_local_qwerty_rows_replace_only_direction_model_call(self):
+        planned = self._strict_primary_input_scene()
+        field = planned.elements[0]
+        requested = SemanticAction(
+            node_id="type-body",
+            action="input_verified_text",
+            params={
+                "formal_candidate_id": "candidate-type-body",
+                "element_id": field.element_id,
+                "target": field.meaning,
+                "role": field.role,
+                "label": field.label,
+                "states": dict(field.states),
+                "text": "agent",
+            },
+        )
+        anchors = {
+            key: list(value)
+            for key, value in TEST_QWERTY_GEOMETRY["anchors"].items()
+        }
+        adapter = self._adapter(
+            FakeSceneObserver([]),
+            FakeRobot(),
+            qwerty_row_snapper=lambda _frames, _anchors: anchors,
+        )
+        frames = [Image.new("RGB", (540, 960), "gray") for _ in range(4)]
+
+        credential = adapter._local_qwerty_orientation_credential(
+            requested=requested,
+            scene=planned,
+            frames=frames,
+        )
+
+        self.assertIsNotNone(credential)
+        self.assertEqual(LOCAL_QWERTY_ORIENTATION_SOURCE, credential.source)
+        self.assertEqual("upright", credential.phone_content_rotation)
+
+        rotated = {
+            **anchors,
+            "q": [115, 844],
+            "p": [875, 844],
+            "z": [241, 704],
+            "m": [747, 704],
+            "backspace": [875, 704],
+        }
+        rejected = self._adapter(
+            FakeSceneObserver([]),
+            FakeRobot(),
+            qwerty_row_snapper=lambda _frames, _anchors: rotated,
+        )._local_qwerty_orientation_credential(
+            requested=requested,
+            scene=planned,
+            frames=frames,
+        )
+        self.assertIsNone(rejected)
+
+    def test_strict_input_execute_uses_zero_duplicate_pre_action_model_audits(self):
+        gray = Image.new("RGB", (540, 960), "gray")
+        planned = self._strict_primary_input_scene(
+            _local_frame_fingerprint(gray)
+        )
+        field = planned.elements[0]
+        after_field = replace(
+            field,
+            label="agent",
+            states={**field.states, "value": "agent"},
+            evidence=("正文输入框逐字显示 agent",),
+        )
+        after = replace(
+            planned,
+            summary="正文输入框逐字显示 agent",
+            elements=(after_field,),
+            fingerprint="after-agent",
+        )
+        observer = FakeSceneObserver([after])
+        robot = FakeRobot()
+        anchors = {
+            key: list(value)
+            for key, value in TEST_QWERTY_GEOMETRY["anchors"].items()
+        }
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
+            observer=observer,
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+            qwerty_row_snapper=lambda _frames, _anchors: anchors,
+        )
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="type-body",
+                action="input_verified_text",
+                params={
+                    "formal_candidate_id": "candidate-type-body",
+                    "formal_report_digest": "a" * 64,
+                    "formal_transition": {
+                        "transition_id": "transition-type-body",
+                        "precondition_claim_ids": ["claim-body-empty"],
+                        "expectations": [
+                            {
+                                "subject_ref": "element.local_audited_input_1",
+                                "predicate": "element.state.value",
+                                "operator": "equals",
+                                "value": "agent",
+                            }
+                        ],
+                        "exploratory": False,
+                    },
+                    "element_id": field.element_id,
+                    "target": field.meaning,
+                    "role": field.role,
+                    "label": field.label,
+                    "states": dict(field.states),
+                    "text": "agent",
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {"value": "agent"},
+                        }
+                    },
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=(gray, gray.copy(), gray.copy(), gray.copy()),
+            goal=GenericIntentDraft(
+                understood=True,
+                app_id="generic_app",
+                app_name="当前应用",
+                objective="正文逐字等于 agent 且不发送",
+                entities={"input_text": "agent"},
+                success_criteria={"input": "agent"},
+            ),
+            confirmed=True,
+        )
+
+        self.assertEqual([("input", "agent")], robot.actions)
+        self.assertEqual(1, observer.calls)
+        self.assertEqual([], observer.geometry_audit_calls)
+        self.assertTrue(result.primary_input_confirmation_reused)
+        self.assertEqual("matched", result.action_outcome)
+        self.assertEqual(
+            LOCAL_QWERTY_ORIENTATION_SOURCE,
+            observer.last_orientation_audit_diagnostics["audit_source"],
+        )
+        self.assertEqual(
+            0,
+            observer.last_orientation_audit_diagnostics["model_calls"],
         )
 
     def test_literal_key_receipt_reconciles_only_proven_visual_soft_wrap(self):

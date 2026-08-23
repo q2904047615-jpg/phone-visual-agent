@@ -32,6 +32,7 @@ from semantic_action import SemanticAction
 from ui_scene import SystemUIFacts, UIElement, UIScene
 from universal_action_controller import ResolvedSemanticAction
 from vision_agent import VisionAgentError
+from vision_usage import VisionSessionUsageLedger
 from qwen_visual_decision import QwenTaskContext, _scene_matches_target_app_surface
 from task_semantic_ir import compile_formal_semantic_authority
 from canonical_action_protocol import compile_canonical_action_catalog
@@ -1656,6 +1657,65 @@ class ObservationBridgeTests(unittest.TestCase):
 
 
 class AgentEvidenceStoreTests(unittest.TestCase):
+    def test_terminal_snapshot_persists_session_scoped_qwen_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            ledger = VisionSessionUsageLedger(session_id="session-usage")
+            local_id = ledger.reserve_request(
+                model="qwen3.7-plus",
+                stage="compact_observation",
+                fingerprint="frame-usage",
+                max_completion_tokens=2600,
+            )
+            ledger.record_success(
+                local_id,
+                provider_request_id="provider-usage",
+                response_model="qwen3.7-plus",
+                network_attempts=1,
+                usage={
+                    "prompt_tokens": 120,
+                    "completion_tokens": 20,
+                    "total_tokens": 140,
+                },
+                finish_reason="stop",
+            )
+            adapter = FakeAdapter(_scene())
+            session = UniversalAgentSessionState(
+                session_id="session-usage",
+                raw_goal="只读观察当前页面",
+                device_id="device-usage",
+                run_dir=run_dir,
+                adapter=adapter,
+                evidence_store=AgentEvidenceStore(run_dir),
+                vision_usage=ledger,
+                status="succeeded",
+            )
+            orchestrator = UniversalAgentOrchestrator(
+                deepseek_planner=FakeDeepSeekPlanner(_graph()),
+                qwen_observer=FakeQwenObserver(status="blocked"),
+                adapter_factory=lambda _device_id: adapter,
+                trusted_observation_factory=_trusted_factory,
+            )
+
+            orchestrator._write_terminal_snapshot(session)
+
+            usage = json.loads(
+                (run_dir / "qwen_usage.json").read_text(encoding="utf-8")
+            )
+            persisted_session = json.loads(
+                (run_dir / "session.json").read_text(encoding="utf-8")
+            )
+            report = json.loads(
+                (run_dir / "report.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(1, usage["totals"]["model_requests"])
+            self.assertEqual("provider-usage", usage["events"][0]["provider_request_id"])
+            self.assertEqual(140, persisted_session["qwen_usage"]["totals"]["total_tokens"])
+            self.assertEqual(
+                "qwen3.7-plus",
+                report["session"]["qwen_usage"]["model"],
+            )
+
     def test_writes_all_authoritative_json_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             store = AgentEvidenceStore(Path(temp))

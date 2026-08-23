@@ -516,6 +516,173 @@ def multifield_next_audit(
 
 
 class GenericSceneObserverTests(unittest.TestCase):
+    def test_exact_device_fingerprint_and_goal_context_reuse_observation(self) -> None:
+        class PlainSequenceProvider:
+            configured = True
+
+            def __init__(self, responses: list[dict]) -> None:
+                self.responses = list(responses)
+                self.calls = 0
+
+            def status(self) -> dict:
+                return {"configured": True, "model": "offline-sequence"}
+
+            def _chat(self, messages, max_tokens, **_kwargs) -> str:
+                self.calls += 1
+                return json.dumps(
+                    self.responses.pop(0),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+
+        provider = PlainSequenceProvider([scene_payload(), scene_payload()])
+        observer = GenericSceneObserver(provider)
+        frames = stable_frames()
+        context: dict = {}
+
+        first = observer.observe(
+            frames=frames,
+            goal_context=context,
+            device_id="device-cache-a",
+        )
+        second = observer.observe(
+            frames=frames,
+            goal_context=context,
+            device_id="device-cache-a",
+        )
+
+        self.assertIs(first, second)
+        self.assertEqual(1, provider.calls)
+        self.assertTrue(observer.last_diagnostics["observation_cache_hit"])
+        self.assertEqual(0, observer.last_diagnostics["model_calls"])
+
+        observer.observe(
+            frames=frames,
+            goal_context=context,
+            device_id="device-cache-b",
+        )
+        self.assertEqual(2, provider.calls)
+
+    def test_pending_typed_lineage_reuses_only_surface_identity_then_reaudits_input(
+        self,
+    ) -> None:
+        first_compact = scene_payload()
+        first_compact["elements"] = [
+            {
+                "element_id": "model-input",
+                "role": "input",
+                "meaning": "text_input_field",
+                "label": "",
+                "bounds": [140, 270, 860, 450],
+                "confidence": 0.98,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "focused": True,
+                    "value": "a",
+                },
+                "evidence": ["正文输入框和光标可见"],
+            }
+        ]
+        first_audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="body",
+                    bounds=[140, 270, 860, 450],
+                    text="a",
+                    field_labels=["正文"],
+                    caret_line_index=0,
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [80, 570, 920, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "mode_switch": None,
+            },
+        )
+        second_audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="body",
+                    bounds=[140, 270, 860, 450],
+                    text="ab",
+                    field_labels=["正文"],
+                    caret_line_index=0,
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [80, 570, 920, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "mode_switch": None,
+            },
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input-body",
+                    "objective": "在正文输入ab",
+                    "constraints": ["不得发送"],
+                    "completion_conditions": ["正文逐字等于ab"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "input_text": "ab",
+                        "active_input_transaction_text": "ab",
+                        "active_input_field_id": "body_field",
+                        "active_input_field_label": "正文",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+        provider = SequenceProvider([first_compact, first_audit, second_audit])
+        observer = GenericSceneObserver(provider)
+        first = observer.observe(
+            frames=stable_frames((30, 40, 50)),
+            goal_context=context,
+            device_id="device-continuation",
+        )
+        self.assertEqual(2, provider.calls)
+
+        lineage = TypedInputLineage(
+            version=TYPED_INPUT_LINEAGE_VERSION,
+            device_id="device-continuation",
+            exact_value="ab",
+            app_id=first.app_id,
+            screen_id=first.screen_id,
+            input_meaning="application_text_input",
+            input_field_id="body_field",
+            input_bounds=(0.14, 0.27, 0.86, 0.45),
+            before_fingerprint=first.fingerprint,
+            after_fingerprint="pending-new-fingerprint",
+            action_digest="a" * 64,
+            receipt_digest="b" * 64,
+            surface_descriptors=(),
+            recorded_at_epoch=time.time(),
+            source="pending_verified_text_action",
+        )
+        lineage.validate()
+        continued = observer.observe(
+            frames=stable_frames((50, 60, 70)),
+            goal_context=context,
+            device_id="device-continuation",
+            input_lineage_override=lineage,
+            prior_scene=first,
+        )
+
+        self.assertEqual(3, provider.calls)
+        self.assertTrue(
+            observer.last_diagnostics["compact_reused_from_typed_lineage"]
+        )
+        self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
+        self.assertEqual(1, observer.last_diagnostics["model_calls"])
+        self.assertEqual("ab", continued.get_element("local_audited_input_1").states["value"])
+
     def test_goal_context_still_rejects_genuinely_excessive_nesting(self) -> None:
         context = {
             "level_1": {

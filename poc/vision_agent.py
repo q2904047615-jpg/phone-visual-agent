@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextvars
 import json
 import os
 import re
+import threading
 import time
+from contextlib import contextmanager
 from io import BytesIO
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 from PIL import Image
 
 from vision_model_config import VisionModelConfig, load_vision_model_config
+from vision_usage import VisionSessionUsageLedger
 
 
 class VisionAgentError(RuntimeError):
@@ -135,6 +139,19 @@ class DashScopeVisionProvider:
         self.last_network_attempts = 0
         self.last_finish_reason = ""
         self.last_response_model = ""
+        self._request_lock = threading.RLock()
+        self._active_usage_ledger: contextvars.ContextVar[
+            VisionSessionUsageLedger | None
+        ] = contextvars.ContextVar(
+            f"qwen_usage_ledger_{id(self)}",
+            default=None,
+        )
+        self._active_call_metadata: contextvars.ContextVar[
+            tuple[str, str]
+        ] = contextvars.ContextVar(
+            f"qwen_call_metadata_{id(self)}",
+            default=("unscoped", ""),
+        )
 
     @property
     def configured(self) -> bool:
@@ -159,7 +176,123 @@ class DashScopeVisionProvider:
             "error": None if self.configured else "未配置 DASHSCOPE_API_KEY",
         }
 
+    @contextmanager
+    def session_usage_scope(
+        self,
+        ledger: VisionSessionUsageLedger | None,
+    ) -> Iterator[None]:
+        token = self._active_usage_ledger.set(ledger)
+        try:
+            yield
+        finally:
+            self._active_usage_ledger.reset(token)
+
+    @contextmanager
+    def call_scope(
+        self,
+        *,
+        stage: str,
+        fingerprint: str = "",
+    ) -> Iterator[None]:
+        token = self._active_call_metadata.set(
+            (str(stage or "unscoped"), str(fingerprint or ""))
+        )
+        try:
+            yield
+        finally:
+            self._active_call_metadata.reset(token)
+
+    def record_observation_cache_hit(
+        self,
+        *,
+        stage: str,
+        fingerprint: str,
+    ) -> None:
+        ledger = self._active_usage_ledger.get()
+        if ledger is not None:
+            ledger.record_cache_hit(stage=stage, fingerprint=fingerprint)
+
     def _chat(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        *,
+        timeout: float | None = None,
+        max_attempts: int | None = None,
+        response_format: dict[str, str] | None = None,
+    ) -> str:
+        # This provider instance is shared by all device sessions.  Its
+        # response metadata is intentionally serialized with the request so a
+        # second device cannot overwrite request_id/usage before the first
+        # session ledger records them.
+        with self._request_lock:
+            return self._chat_locked(
+                messages,
+                max_tokens,
+                timeout=timeout,
+                max_attempts=max_attempts,
+                response_format=response_format,
+            )
+
+    def _chat_locked(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        *,
+        timeout: float | None = None,
+        max_attempts: int | None = None,
+        response_format: dict[str, str] | None = None,
+    ) -> str:
+        if not self.configured:
+            raise VisionAgentError("千问视觉尚未配置：请先设置 DASHSCOPE_API_KEY。")
+        ledger = self._active_usage_ledger.get()
+        stage, fingerprint = self._active_call_metadata.get()
+        local_request_id = ""
+        if ledger is not None:
+            local_request_id = ledger.reserve_request(
+                model=self.model,
+                stage=stage,
+                fingerprint=fingerprint,
+                max_completion_tokens=max_tokens,
+            )
+        try:
+            content = self._chat_untracked(
+                messages,
+                max_tokens,
+                timeout=timeout,
+                max_attempts=max_attempts,
+                response_format=response_format,
+            )
+        except Exception as exc:
+            if ledger is not None and local_request_id:
+                if self.last_usage:
+                    ledger.record_success(
+                        local_request_id,
+                        provider_request_id=self.last_request_id,
+                        response_model=self.last_response_model,
+                        network_attempts=self.last_network_attempts,
+                        usage=self.last_usage,
+                        finish_reason=self.last_finish_reason,
+                    )
+                else:
+                    ledger.record_failure(
+                        local_request_id,
+                        network_attempts=self.last_network_attempts,
+                        error=exc,
+                    )
+            raise
+        if ledger is not None and local_request_id:
+            ledger.record_success(
+                local_request_id,
+                provider_request_id=self.last_request_id,
+                response_model=self.last_response_model,
+                network_attempts=self.last_network_attempts,
+                usage=self.last_usage,
+                finish_reason=self.last_finish_reason,
+            )
+        return content
+
+    def _chat_untracked(
         self,
         messages: list[dict[str, Any]],
         max_tokens: int,

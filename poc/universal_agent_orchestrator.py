@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 import hashlib
@@ -47,6 +47,7 @@ from verified_text_transaction import (
     VerifiedTextTransactionError,
     plan_next_verified_input,
 )
+from vision_usage import VisionSessionUsageLedger
 
 
 POST_ACTION_TRANSITION_PROTOCOL_VERSION = (
@@ -1016,6 +1017,10 @@ class UniversalAgentSessionState:
     run_dir: Path
     adapter: Any = field(repr=False)
     evidence_store: AgentEvidenceStore = field(repr=False)
+    vision_usage: VisionSessionUsageLedger | None = field(
+        default=None,
+        repr=False,
+    )
     task_graph: DynamicTaskGraph | None = None
     goal_draft: GenericIntentDraft | None = None
     trusted_observation: Any = None
@@ -1091,6 +1096,11 @@ class UniversalAgentSessionState:
             "status": self.status,
             "step_number": self.step_number,
             "physical_actions": self.physical_actions,
+            "qwen_usage": (
+                self.vision_usage.to_dict()
+                if self.vision_usage is not None
+                else None
+            ),
             "local_exact_input_authority": self.local_exact_input_authority,
             "failed_reason": self.failed_reason,
             "confirm_stage": self.confirm_stage,
@@ -1316,6 +1326,14 @@ class UniversalAgentOrchestrator:
         self.policy = policy or PhaseOneNavigationPolicy()
         self.bridge = bridge or ObservationBridge()
         self.device_registry = device_registry or DeviceTaskRegistry()
+
+    def _vision_usage_scope(
+        self,
+        ledger: VisionSessionUsageLedger | None,
+    ):
+        provider = getattr(self.qwen_observer, "provider", None)
+        scope_factory = getattr(provider, "session_usage_scope", None)
+        return scope_factory(ledger) if callable(scope_factory) else nullcontext()
 
     def _release_if_terminal(self, session: UniversalAgentSessionState) -> None:
         if session.status in DeviceTaskRegistry.TERMINAL_STATUSES:
@@ -3489,6 +3507,14 @@ class UniversalAgentOrchestrator:
         self._remember(session, paths)
 
     def _write_terminal_snapshot(self, session: UniversalAgentSessionState) -> None:
+        if session.vision_usage is not None:
+            self._remember(
+                session,
+                session.evidence_store.write_json(
+                    "qwen_usage.json",
+                    session.vision_usage.to_dict(),
+                ),
+            )
         session_path = session.evidence_store.write_session(session)
         self._remember(session, session_path)
         report_path = session.evidence_store.write_report(
@@ -3512,6 +3538,7 @@ class UniversalAgentOrchestrator:
                 "failed_reason",
                 "confirm_stage",
                 "physical_actions",
+                "qwen_usage",
                 "last_post_action_transition",
                 "last_confirmation_failure",
             )
@@ -5115,7 +5142,9 @@ class UniversalAgentOrchestrator:
                 "当前会话已不再拥有该设备，禁止重新观察。"
             )
         try:
-            with self.device_registry.device_lock(session.device_id):
+            with self._vision_usage_scope(
+                session.vision_usage
+            ), self.device_registry.device_lock(session.device_id):
                 return self._refresh_decision_locked(session)
         finally:
             self._release_if_terminal(session)
@@ -5465,7 +5494,9 @@ class UniversalAgentOrchestrator:
         authority_before = session.confirmation_authority
         post_transition_before = session.last_post_action_transition
         try:
-            with self.device_registry.device_lock(session.device_id):
+            with self._vision_usage_scope(
+                session.vision_usage
+            ), self.device_registry.device_lock(session.device_id):
                 try:
                     return self._confirm_one_locked(session, confirmation)
                 except Exception as exc:
@@ -5960,7 +5991,9 @@ class UniversalAgentOrchestrator:
                 "当前会话已不再拥有该设备，禁止确认风险。"
             )
         try:
-            with self.device_registry.device_lock(session.device_id):
+            with self._vision_usage_scope(
+                session.vision_usage
+            ), self.device_registry.device_lock(session.device_id):
                 if session.status != "awaiting_effect_confirmation":
                     raise UniversalAgentOrchestratorError(
                         f"当前状态不能确认风险：{session.status}。"
@@ -6033,7 +6066,9 @@ class UniversalAgentOrchestrator:
             )
 
         try:
-            with self.device_registry.device_lock(session.device_id):
+            with self._vision_usage_scope(
+                session.vision_usage
+            ), self.device_registry.device_lock(session.device_id):
                 return self._run_safe_loop_locked(
                     session,
                     confirmation,
@@ -6122,7 +6157,9 @@ class UniversalAgentOrchestrator:
         session.automatic_loop_enabled = True
         session.auto_pause_reason = ""
         try:
-            with self.device_registry.device_lock(session.device_id):
+            with self._vision_usage_scope(
+                session.vision_usage
+            ), self.device_registry.device_lock(session.device_id):
                 while iterations < max_iterations:
                     if session.status in {
                         "succeeded",
@@ -6281,16 +6318,19 @@ class UniversalAgentOrchestrator:
         resolved_device = str(device_id or "").strip()
         self.device_registry.reserve(resolved_device, resolved_session)
         try:
+            vision_usage = VisionSessionUsageLedger(session_id=resolved_session)
             with self.device_registry.device_lock(resolved_device):
-                session = self._start_reserved(
-                    session_id=resolved_session,
-                    raw_goal=raw_goal,
-                    exact_input_text=exact_input_text,
-                    exact_action_kind=exact_action_kind,
-                    exact_target_label=exact_target_label,
-                    device_id=resolved_device,
-                    run_dir=run_dir,
-                )
+                with self._vision_usage_scope(vision_usage):
+                    session = self._start_reserved(
+                        session_id=resolved_session,
+                        raw_goal=raw_goal,
+                        exact_input_text=exact_input_text,
+                        exact_action_kind=exact_action_kind,
+                        exact_target_label=exact_target_label,
+                        device_id=resolved_device,
+                        run_dir=run_dir,
+                        vision_usage=vision_usage,
+                    )
         except Exception:
             self.device_registry.release(resolved_device, resolved_session)
             raise
@@ -6307,6 +6347,7 @@ class UniversalAgentOrchestrator:
         exact_target_label: str,
         device_id: str,
         run_dir: Path,
+        vision_usage: VisionSessionUsageLedger | None = None,
     ) -> UniversalAgentSessionState:
         adapter = self.adapter_factory(device_id)
         store = self.evidence_store_factory(Path(run_dir))
@@ -6320,6 +6361,7 @@ class UniversalAgentOrchestrator:
             run_dir=Path(run_dir),
             adapter=adapter,
             evidence_store=store,
+            vision_usage=vision_usage,
             local_exact_input_authority=exact_input_text is not None,
         )
         if not session.session_id or not session.raw_goal or not session.device_id:

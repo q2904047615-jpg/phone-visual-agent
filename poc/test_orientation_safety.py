@@ -9,12 +9,14 @@ from PIL import Image, ImageDraw, ImageEnhance
 
 from generic_action_adapter import GenericSingleActionAdapter
 from orientation_safety import (
+    LOCAL_QWERTY_ORIENTATION_SOURCE,
     OrientationCredential,
     OrientationFrameMismatchError,
     OrientationSafetyError,
     PhysicalExecutionGate,
     _CLAIMED_AUDIT_CREDENTIALS,
     _mint_audited_credential,
+    _mint_locally_verified_qwerty_credential,
 )
 from robot_core import RobotController
 from run_xy_calibration import click_raw_pixel
@@ -50,6 +52,52 @@ def audited_credential(
 
 
 class OrientationCredentialTests(unittest.TestCase):
+    def test_stable_local_qwerty_rows_mint_one_shot_upright_credential(self):
+        reference = patterned_frame()
+        credential = _mint_locally_verified_qwerty_credential(
+            device_id="device-a",
+            scene_fingerprint="scene-qwerty",
+            frame=reference,
+            anchors={
+                "q": [115, 704],
+                "p": [875, 704],
+                "a": [157, 773],
+                "l": [832, 773],
+                "z": [241, 844],
+                "m": [747, 844],
+                "backspace": [875, 844],
+            },
+        )
+        self.assertEqual(LOCAL_QWERTY_ORIENTATION_SOURCE, credential.source)
+        self.assertEqual("upright", credential.phone_content_rotation)
+
+        gate = PhysicalExecutionGate("device-a")
+        gate.arm(
+            credential,
+            action="input_verified_text",
+            scene_fingerprint="scene-qwerty",
+        )
+        gate.consume(action="input_verified_text", frame=reference.copy())
+        with self.assertRaisesRegex(OrientationSafetyError, "一次性方向授权"):
+            gate.consume(action="input_verified_text", frame=reference.copy())
+
+    def test_local_qwerty_orientation_rejects_rotated_row_order(self):
+        with self.assertRaisesRegex(OrientationSafetyError, "行序"):
+            _mint_locally_verified_qwerty_credential(
+                device_id="device-a",
+                scene_fingerprint="scene-rotated",
+                frame=patterned_frame(),
+                anchors={
+                    "q": [115, 844],
+                    "p": [875, 844],
+                    "a": [157, 773],
+                    "l": [832, 773],
+                    "z": [241, 704],
+                    "m": [747, 704],
+                    "backspace": [875, 704],
+                },
+            )
+
     def test_live_execution_source_claim_is_exact_once_and_weakly_held(self):
         gate = PhysicalExecutionGate("device-a")
         credential = audited_credential()

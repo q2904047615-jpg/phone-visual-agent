@@ -7726,7 +7726,7 @@ def _apply_input_structure_audit(
                 trusted_input = dict(trusted_input)
                 trusted_input["lineage_visual_text"] = raw_lineage_text
                 trusted_input["text"] = verified_input_lineage.exact_value
-            if trusted_input["text"] == "" and keyboard_input_mode == "direct_latin":
+            if trusted_input["text"] == "":
                 pending_preedit_text = _unique_clearable_ime_preedit(
                     trusted_input,
                     trusted_preedits,

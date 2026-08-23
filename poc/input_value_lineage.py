@@ -974,9 +974,17 @@ def build_pending_text_lineage(
     app_id = before_scene.get("app_id")
     screen_id = before_scene.get("screen_id")
     before_fingerprint = before_scene.get("fingerprint")
-    if any(
-        not isinstance(value, str) or not value.strip() or value == "unknown"
-        for value in (app_id, screen_id, before_fingerprint)
+    input_field_id = _typed_input_field_id(before_input)
+    if (
+        not isinstance(app_id, str)
+        or not app_id.strip()
+        or not isinstance(screen_id, str)
+        or not screen_id.strip()
+        or screen_id == "unknown"
+        or not isinstance(before_fingerprint, str)
+        or not before_fingerprint.strip()
+        or before_fingerprint == "unknown"
+        or (app_id == "unknown" and input_field_id == "unknown")
     ):
         raise InputValueLineageError("临时文字连续性缺少明确输入表面。")
     action_digest = _canonical_digest(resolved_action)
@@ -997,7 +1005,7 @@ def build_pending_text_lineage(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
-        input_field_id=_typed_input_field_id(before_input),
+        input_field_id=input_field_id,
         input_bounds=_valid_bounds(before_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint="pending-visual-verification",

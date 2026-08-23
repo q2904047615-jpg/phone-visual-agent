@@ -1329,6 +1329,15 @@ class TypedInputLineageTests(unittest.TestCase):
                 resolved_action=pinyin,
                 before_scene=scene("", "before-fp"),
             )
+        unknown_untyped = scene("", "before-fp")
+        unknown_untyped["foreground_app_id"] = "unknown"
+        unknown_untyped["app_id"] = "unknown"
+        with self.assertRaises(InputValueLineageError):
+            build_pending_text_lineage(
+                device_id=DEVICE,
+                resolved_action=action,
+                before_scene=unknown_untyped,
+            )
 
     def test_pending_text_preedit_preserves_same_typed_multiline_prefix(self) -> None:
         prior = "first\n"
@@ -1343,6 +1352,8 @@ class TypedInputLineageTests(unittest.TestCase):
                 "keyboard_input_mode": "direct_latin",
             }
         )
+        before["foreground_app_id"] = "unknown"
+        before["app_id"] = "unknown"
         pending = build_pending_text_lineage(
             device_id=DEVICE,
             resolved_action=resolved_text(prior=prior, fragment=fragment),
@@ -1393,7 +1404,7 @@ class TypedInputLineageTests(unittest.TestCase):
                 "visible": True,
                 "bounds": [0, 620, 1000, 1000],
                 "layout": "qwerty",
-                "input_mode": "direct_latin",
+                "input_mode": "chinese_pinyin",
                 "case_mode": "lower",
                 "qwerty_anchors": {
                     "q": [122, 735],
@@ -1432,7 +1443,10 @@ class TypedInputLineageTests(unittest.TestCase):
                 }
             }
 
-        base = UIScene.from_dict(scene(expected, "after-fp"))
+        base_payload = scene(expected, "after-fp")
+        base_payload["foreground_app_id"] = "unknown"
+        base_payload["app_id"] = "unknown"
+        base = UIScene.from_dict(base_payload)
         projected = _apply_input_structure_audit(
             base,
             json.dumps(audit, ensure_ascii=False),

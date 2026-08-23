@@ -9976,7 +9976,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             },
             "mode_switch": None,
             "enter_key": {
-                "label": "↵",
+                "label": "",
                 "bounds": [840, 1830, 930, 1890],
                 "confidence": 0.98,
                 "fully_visible": True,
@@ -10038,7 +10038,34 @@ class GenericSceneObserverTests(unittest.TestCase):
                     places=3,
                 )
                 self.assertEqual("first\n", enter.states["expected_input_value"])
+                self.assertEqual("↵", enter.label)
 
+        audit["keyboard"]["enter_key"]["key_action"] = "next"
+        rejected_unlabeled_next = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="first",
+            qwerty_row_snapper=lambda _frames, _anchors: {
+                "q": [122, 708],
+                "p": [881, 708],
+                "a": [164, 780],
+                "l": [839, 780],
+                "z": [249, 852],
+                "m": [755, 852],
+                "backspace": [881, 852],
+            },
+            qwerty_row_frames=stable_frames()[-3:],
+        )
+        self.assertFalse(
+            any(
+                item.meaning == "input_exact_enter_key"
+                for item in rejected_unlabeled_next.elements
+            )
+        )
+
+        audit["keyboard"]["enter_key"]["key_action"] = "newline"
         audit["keyboard"]["enter_key"]["label"] = "开始"
         rejected = _apply_input_structure_audit(
             base,

@@ -8901,7 +8901,10 @@ def _locally_snapped_keyboard_enter_key(
     Qwen remains responsible for identifying the visible key and its current
     newline semantic.  Its rectangle is not execution authority once local OCR
     has independently stabilized the whole QWERTY grid; only the horizontal
-    vicinity of the reported key is retained as a cross-check.
+    vicinity of the reported key is retained as a cross-check.  An icon-only
+    newline key may omit its text label, but only after that local geometry and
+    Qwen's explicit ``key_action=newline`` agree; conflicting labels and
+    unlabeled Next keys remain rejected.
     """
 
     if keyboard_bounds is None or not isinstance(value, dict) or set(value) != {
@@ -8928,8 +8931,9 @@ def _locally_snapped_keyboard_enter_key(
         any(glyph in label for glyph in ("→", "↦", "➡", "⏭"))
         or normalized_label in {"next", "下一步", "下一个", "下一项"}
     )
-    if not normalized_label or not (
-        (key_action == "newline" and newline_label)
+    unlabeled_newline = key_action == "newline" and not normalized_label
+    if not (
+        (key_action == "newline" and (newline_label or unlabeled_newline))
         or (key_action == "next" and next_label)
     ):
         return None
@@ -8998,7 +9002,7 @@ def _locally_snapped_keyboard_enter_key(
     ):
         return None
     return {
-        "label": label,
+        "label": label or "↵",
         "bounds": [round(part) for part in snapped_bounds],
         "confidence": confidence,
         "key_action": key_action,

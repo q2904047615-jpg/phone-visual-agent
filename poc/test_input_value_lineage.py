@@ -564,6 +564,7 @@ def ime_prediction_commit_audit_raw(
     candidate_text: str,
     caret_marker: str = "|",
     preedit_text: str | None = None,
+    application_text: str | None = None,
 ) -> str:
     """Replay a committed candidate while the IME prediction row remains."""
 
@@ -576,10 +577,14 @@ def ime_prediction_commit_audit_raw(
                     "structure_id": "app-input-1",
                     "bounds": [140, 270, 860, 450],
                     "fully_visible": True,
-                    "text": "",
+                    "text": application_text or "",
                     "placeholder": "",
                     "field_labels": ["正文"],
-                    "visible_editable_cues": [exact_value + caret_marker],
+                    "visible_editable_cues": (
+                        ["caret"]
+                        if application_text is not None
+                        else [exact_value + caret_marker]
+                    ),
                     "caret_line_index": exact_value.count("\n"),
                     "confidence": 1.0,
                     "right_button": None,
@@ -1219,6 +1224,13 @@ class TypedInputLineageTests(unittest.TestCase):
                 "pinyin": "shijie",
                 "caret_marker": "｜",
             },
+            {
+                "prior": "",
+                "segment": "验收",
+                "pinyin": "yanshou",
+                "caret_marker": "|",
+                "application_text": True,
+            },
         )
         records: list[tuple[dict, TypedInputLineage, dict, str]] = []
         for case in cases:
@@ -1262,6 +1274,9 @@ class TypedInputLineageTests(unittest.TestCase):
                         exact_value=expected,
                         candidate_text=case["segment"],
                         caret_marker=case["caret_marker"],
+                        application_text=(
+                            expected if case.get("application_text") else None
+                        ),
                     ),
                     fingerprint="after-ime-prediction-commit",
                     goal_context=context,
@@ -1316,6 +1331,16 @@ class TypedInputLineageTests(unittest.TestCase):
                     candidate_text="你好",
                 ),
                 "lineage": None,
+                "context": context,
+            },
+            {
+                "name": "wrong_application_text",
+                "raw": ime_prediction_commit_audit_raw(
+                    exact_value=expected,
+                    candidate_text="你好",
+                    application_text=expected + "错",
+                ),
+                "lineage": record,
                 "context": context,
             },
         )

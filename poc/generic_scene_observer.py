@@ -6484,7 +6484,7 @@ def _pending_ime_candidate_committed_cue(
     The visual audit can then copy the committed field text into a preedit
     region covering the whole field.  Recover only the immediate, receipt-bound
     candidate result on the same typed field, with an exact payload prefix and
-    one explicit trailing caret cue.
+    either an exact application value or one explicit trailing caret cue.
     """
 
     if (
@@ -6498,7 +6498,6 @@ def _pending_ime_candidate_committed_cue(
         or input_field_id != verified_input_lineage.input_field_id
         or not isinstance(authorized_text, str)
         or not authorized_text.startswith(verified_input_lineage.exact_value)
-        or trusted_input.get("text") != ""
         or trusted_input.get("right_button") is not None
         or not isinstance(trusted_input.get("caret_line_index"), int)
         or len(trusted_preedits) != 1
@@ -6524,11 +6523,21 @@ def _pending_ime_candidate_committed_cue(
         and cue.strip().casefold() not in decorative
     )
     caret_markers = frozenset({"|", "｜", "│", "┃", "▏", "▎", "▍"})
+    raw_text = trusted_input.get("text")
+    exact_application_text = raw_text == exact_value
+    exact_trailing_caret_cue = bool(
+        raw_text == ""
+        and len(literal_cues) == 1
+        and len(literal_cues[0]) == len(exact_value) + 1
+        and literal_cues[0].startswith(exact_value)
+        and literal_cues[0][-1] in caret_markers
+    )
     if (
-        len(literal_cues) != 1
-        or len(literal_cues[0]) != len(exact_value) + 1
-        or not literal_cues[0].startswith(exact_value)
-        or literal_cues[0][-1] not in caret_markers
+        not (exact_application_text or exact_trailing_caret_cue)
+        or (
+            exact_application_text
+            and any(cue != exact_value for cue in literal_cues)
+        )
         or trusted_input.get("placeholder") == exact_value
         or exact_value in trusted_input.get("field_labels", ())
     ):
@@ -8413,7 +8422,7 @@ def _apply_input_structure_audit(
                 )
                 if isinstance(lineage_ime_candidate_committed_cue, str):
                     input_evidence.append(
-                        "候选点击回执、typed字段、授权payload与尾随光标"
+                        "候选点击回执、typed字段、授权payload与应用框精确值/尾随光标"
                         "共同确认已提交中文："
                         f"{lineage_ime_candidate_committed_cue}；残留预测栏未作为预编辑"
                     )

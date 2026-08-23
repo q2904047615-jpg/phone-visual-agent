@@ -6465,6 +6465,111 @@ def _same_frame_exact_committed_cue(
     return literal_cues == (exact_text,)
 
 
+def _pending_ime_candidate_committed_cue(
+    trusted_input: dict[str, Any],
+    trusted_preedits: list[dict[str, Any]],
+    *,
+    application_input_count: int,
+    verified_input_lineage: TypedInputLineage | None,
+    device_id: str,
+    app_id: str,
+    screen_id: str,
+    input_field_id: str,
+    authorized_text: str,
+    keyboard_input_mode: str,
+) -> dict[str, Any] | None:
+    """Identify one exact candidate commit misreported as full-field preedit.
+
+    Some IMEs retain a prediction row after an exact candidate is committed.
+    The visual audit can then copy the committed field text into a preedit
+    region covering the whole field.  Recover only the immediate, receipt-bound
+    candidate result on the same typed field, with an exact payload prefix and
+    one explicit trailing caret cue.
+    """
+
+    if (
+        application_input_count != 1
+        or verified_input_lineage is None
+        or verified_input_lineage.source
+        != "pending_verified_ime_candidate_action"
+        or keyboard_input_mode != "chinese_pinyin"
+        or not input_field_id
+        or input_field_id == "unknown"
+        or input_field_id != verified_input_lineage.input_field_id
+        or not isinstance(authorized_text, str)
+        or not authorized_text.startswith(verified_input_lineage.exact_value)
+        or trusted_input.get("text") != ""
+        or trusted_input.get("right_button") is not None
+        or not isinstance(trusted_input.get("caret_line_index"), int)
+        or len(trusted_preedits) != 1
+    ):
+        return None
+    exact_value = verified_input_lineage.exact_value
+    cues = trusted_input.get("visible_editable_cues")
+    if not isinstance(cues, list):
+        return None
+    decorative = {
+        "border",
+        "caret",
+        "cursor",
+        "focus border",
+        "focus ring",
+        "outline",
+    }
+    literal_cues = tuple(
+        cue.strip()
+        for cue in cues
+        if isinstance(cue, str)
+        and cue.strip()
+        and cue.strip().casefold() not in decorative
+    )
+    caret_markers = frozenset({"|", "｜", "│", "┃", "▏", "▎", "▍"})
+    if (
+        len(literal_cues) != 1
+        or len(literal_cues[0]) != len(exact_value) + 1
+        or not literal_cues[0].startswith(exact_value)
+        or literal_cues[0][-1] not in caret_markers
+        or trusted_input.get("placeholder") == exact_value
+        or exact_value in trusted_input.get("field_labels", ())
+    ):
+        return None
+    preedit = trusted_preedits[0]
+    preedit_text = preedit.get("text")
+    candidates = preedit.get("candidates")
+    if (
+        not isinstance(preedit_text, str)
+        or not preedit_text
+        or "\r" in preedit_text
+        or "\n" in preedit_text
+        or not exact_value.endswith(preedit_text)
+        or not isinstance(candidates, list)
+        or sum(
+            isinstance(candidate, dict)
+            and candidate.get("text") == preedit_text
+            for candidate in candidates
+        )
+        != 1
+    ):
+        return None
+    input_box = tuple(float(value) for value in trusted_input["input_bounds"])
+    preedit_box = tuple(float(value) for value in preedit["bounds"])
+    if (
+        _bounds_overlap_ratio(input_box, preedit_box) < 0.90
+        or _bounds_overlap_ratio(preedit_box, input_box) < 0.90
+    ):
+        return None
+    normalized_bounds = tuple(value / 1000.0 for value in input_box)
+    if not verified_input_lineage.matches_pending_input_state_surface(
+        device_id=device_id,
+        app_id=app_id,
+        screen_id=screen_id,
+        input_bounds=normalized_bounds,
+        input_field_id=input_field_id,
+    ):
+        return None
+    return preedit
+
+
 def _authorized_exact_committed_prefix_cue(
     trusted_input: dict[str, Any],
     trusted_preedits: list[dict[str, Any]],
@@ -7246,6 +7351,7 @@ def _apply_input_structure_audit(
         active_field_id, active_field_label, active_multiline = (
             _goal_active_input_field(goal_context)
         )
+        active_transaction_text = _goal_active_input_transaction_text(goal_context)
         explicit_input_text = _goal_explicit_input_text(goal_context)
         multiline_input_contract = bool(
             active_multiline
@@ -7356,6 +7462,26 @@ def _apply_input_structure_audit(
             bounds = tuple(float(value) for value in item["bounds"])
             width = bounds[2] - bounds[0]
             height = bounds[3] - bounds[1]
+            pending_ime_commit_preedit = _pending_ime_candidate_committed_cue(
+                {
+                    "text": text,
+                    "placeholder": placeholder,
+                    "visible_editable_cues": cues,
+                    "caret_line_index": caret_line_index,
+                    "field_labels": field_labels,
+                    "input_bounds": [round(value) for value in bounds],
+                    "right_button": button,
+                },
+                trusted_preedits,
+                application_input_count=len(application_inputs),
+                verified_input_lineage=verified_input_lineage,
+                device_id=str(device_id or ""),
+                app_id=scene.app_id,
+                screen_id=scene.screen_id,
+                input_field_id=active_field_id,
+                authorized_text=active_transaction_text,
+                keyboard_input_mode=keyboard_input_mode,
+            )
             exact_active_label = bool(
                 active_field_label
                 and sum(
@@ -7388,6 +7514,7 @@ def _apply_input_structure_audit(
                         _bounds_overlap_ratio(bounds, preedit["bounds"]) >= 0.35
                         or _bounds_overlap_ratio(preedit["bounds"], bounds) >= 0.35
                     )
+                    and preedit is not pending_ime_commit_preedit
                     and not (
                         text == ""
                         and preedit["text"]
@@ -7442,6 +7569,9 @@ def _apply_input_structure_audit(
                     "field_labels": field_labels,
                     "input_bounds": input_bounds,
                     "right_button": button_match,
+                    "lineage_ime_candidate_committed_preedit": (
+                        pending_ime_commit_preedit
+                    ),
                     "confidence": min(
                         confidence,
                         float(button_match["confidence"])
@@ -7466,6 +7596,23 @@ def _apply_input_structure_audit(
             trusted_input = field_matches[0] if len(field_matches) == 1 else None
         else:
             trusted_input = matches[0] if len(matches) == 1 else None
+        if (
+            trusted_input is not None
+            and trusted_input.get("lineage_ime_candidate_committed_preedit")
+            is not None
+            and verified_input_lineage is not None
+        ):
+            committed_preedit = trusted_input[
+                "lineage_ime_candidate_committed_preedit"
+            ]
+            trusted_input = dict(trusted_input)
+            trusted_input["lineage_ime_candidate_committed_cue"] = (
+                verified_input_lineage.exact_value
+            )
+            trusted_input["text"] = verified_input_lineage.exact_value
+            trusted_preedits = [
+                item for item in trusted_preedits if item is not committed_preedit
+            ]
         predecessor_field_id, predecessor_field_label, predecessor_text = (
             _goal_active_input_predecessor_field(goal_context)
         )
@@ -7514,7 +7661,6 @@ def _apply_input_structure_audit(
         if predecessor_input is not None and not predecessor_input["text"]:
             predecessor_input["same_frame_visible_cue_text"] = predecessor_text
             predecessor_input["text"] = predecessor_text
-        active_transaction_text = _goal_active_input_transaction_text(goal_context)
         if (
             trusted_input is not None
             and trusted_input.get("caret_line_index") is None
@@ -8255,6 +8401,15 @@ def _apply_input_structure_audit(
                         "pending typed连续性、授权payload与唯一预编辑后缀"
                         "共同确认已提交前缀："
                         f"{lineage_pending_text_prefix}"
+                    )
+                lineage_ime_candidate_committed_cue = rendered_input.get(
+                    "lineage_ime_candidate_committed_cue"
+                )
+                if isinstance(lineage_ime_candidate_committed_cue, str):
+                    input_evidence.append(
+                        "候选点击回执、typed字段、授权payload与尾随光标"
+                        "共同确认已提交中文："
+                        f"{lineage_ime_candidate_committed_cue}；残留预测栏未作为预编辑"
                     )
                 same_frame_visible_cue_text = rendered_input.get(
                     "same_frame_visible_cue_text"

@@ -30,6 +30,7 @@ NEWLINE_INPUT_LINEAGE_SOURCES = frozenset(
     {
         "pending_verified_newline_action",
         "pending_verified_text_action",
+        "pending_verified_ime_candidate_action",
         "verified_live_newline_action",
         "verified_live_text_action",
         "verified_persisted_newline_execution",
@@ -1295,9 +1296,7 @@ def build_pending_ime_candidate_lineage(
         or expected == prior
         or not expected.startswith(prior)
         or "\r" in prior
-        or "\n" in prior
         or "\r" in expected
-        or "\n" in expected
         or not isinstance(target_id, str)
         or not target_id
         or not isinstance(expected_state, dict)
@@ -1307,6 +1306,11 @@ def build_pending_ime_candidate_lineage(
     ):
         raise InputValueLineageError(
             "临时候选提交连续性的 prior/expected 合同无效。"
+        )
+    segment = expected[len(prior) :]
+    if not segment or "\r" in segment or "\n" in segment:
+        raise InputValueLineageError(
+            "临时候选提交连续性只能提交一个不含换行的精确候选片段。"
         )
     before_input = _single_input(before_scene, expected_value=prior)
     input_states = before_input.get("states")
@@ -1326,7 +1330,7 @@ def build_pending_ime_candidate_lineage(
         if isinstance(item, dict)
         and item.get("role") == "button"
         and item.get("meaning") == "ime_exact_candidate"
-        and item.get("label") == expected
+        and item.get("label") == segment
         and isinstance(item.get("states"), dict)
         and item["states"].get("ime_candidate") is True
         and item["states"].get("input_element_id")
@@ -1354,9 +1358,16 @@ def build_pending_ime_candidate_lineage(
     app_id = before_scene.get("app_id")
     screen_id = before_scene.get("screen_id")
     before_fingerprint = before_scene.get("fingerprint")
-    if any(
-        not isinstance(value, str) or not value.strip() or value == "unknown"
-        for value in (app_id, screen_id, before_fingerprint)
+    if (
+        not isinstance(app_id, str)
+        or not app_id.strip()
+        or not isinstance(screen_id, str)
+        or not screen_id.strip()
+        or screen_id == "unknown"
+        or not isinstance(before_fingerprint, str)
+        or not before_fingerprint.strip()
+        or before_fingerprint == "unknown"
+        or (app_id == "unknown" and field_id == "unknown")
     ):
         raise InputValueLineageError(
             "临时候选提交连续性缺少明确输入表面。"

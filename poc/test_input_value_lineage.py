@@ -300,19 +300,34 @@ def state_switch_case(
     return before, resolved_state
 
 
-def ime_candidate_case() -> tuple[dict, dict]:
-    expected = "loopok"
-    before = scene("", "before-ime-candidate-fp")
+def ime_candidate_case(
+    *,
+    prior: str = "",
+    segment: str = "loopok",
+    pinyin: str | None = None,
+    app_id: str = "sample.app",
+    screen_id: str = "editor",
+    bounds=(0.13, 0.54, 0.69, 0.61),
+) -> tuple[dict, dict]:
+    expected = prior + segment
+    preedit = pinyin or segment
+    before = scene(
+        prior,
+        "before-ime-candidate-fp",
+        bounds=bounds,
+        app_id=app_id,
+        screen_id=screen_id,
+    )
     before_input = before["elements"][0]
     before_input["states"].update(
         {
             "input_field_id": "input_field_1",
-            "input_multiline": False,
+            "input_multiline": "\n" in expected,
             "keyboard_layout": "qwerty",
             "keyboard_input_mode": "chinese_pinyin",
             "keyboard_case_mode": "lower",
-            "ime_preedit_text": expected,
-            "ime_exact_candidate_text": expected,
+            "ime_preedit_text": preedit,
+            "ime_exact_candidate_text": segment,
         }
     )
     before["elements"].append(
@@ -322,15 +337,15 @@ def ime_candidate_case() -> tuple[dict, dict]:
             "meaning": "ime_exact_candidate",
             "bounds": [0.08, 0.62, 0.22, 0.65],
             "confidence": 1.0,
-            "label": expected,
+            "label": segment,
             "states": {
                 "goal_relevant": True,
                 "fully_visible": True,
                 "ime_candidate": True,
                 "input_element_id": "input-1",
-                "prior_input_value": "",
+                "prior_input_value": prior,
                 "expected_input_value": expected,
-                "pinyin": expected,
+                "pinyin": preedit,
                 "independent_geometry_verified": True,
                 "geometry_audit_source": "element_geometry_audit",
             },
@@ -340,7 +355,7 @@ def ime_candidate_case() -> tuple[dict, dict]:
     action = {
         **resolved(),
         "node_id": "candidate-node",
-        "prior_input_value": "",
+        "prior_input_value": prior,
         "expected_input_value": expected,
         "target_element_id": "candidate-loopok",
         "before_fingerprint": "before-ime-candidate-fp",
@@ -530,6 +545,82 @@ def ime_commit_audit_raw(*, cue: str = "loopok") -> str:
                     "z": [248, 853],
                     "m": [754, 853],
                     "backspace": [880, 853],
+                },
+                "mode_switch": None,
+                "backspace_key": None,
+                "enter_key": None,
+                "case_switch": None,
+                "literal_keys": [],
+                "layout_switches": [],
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def ime_prediction_commit_audit_raw(
+    *,
+    exact_value: str,
+    candidate_text: str,
+    caret_marker: str = "|",
+    preedit_text: str | None = None,
+) -> str:
+    """Replay a committed candidate while the IME prediction row remains."""
+
+    committed_segment = preedit_text or candidate_text
+    return json.dumps(
+        {
+            "protocol_version": INPUT_STRUCTURE_AUDIT_VERSION,
+            "application_inputs": [
+                {
+                    "structure_id": "app-input-1",
+                    "bounds": [140, 270, 860, 450],
+                    "fully_visible": True,
+                    "text": "",
+                    "placeholder": "",
+                    "field_labels": ["正文"],
+                    "visible_editable_cues": [exact_value + caret_marker],
+                    "caret_line_index": exact_value.count("\n"),
+                    "confidence": 1.0,
+                    "right_button": None,
+                }
+            ],
+            "ime_preedit_regions": [
+                {
+                    "region_id": "ime-preedit-1",
+                    "bounds": [140, 270, 860, 450],
+                    "text": committed_segment,
+                    "confidence": 1.0,
+                    "candidates": [
+                        {
+                            "text": committed_segment,
+                            "bounds": [110, 590, 230, 630],
+                            "confidence": 1.0,
+                            "fully_visible": True,
+                        },
+                        {
+                            "text": "候选",
+                            "bounds": [260, 590, 360, 630],
+                            "confidence": 1.0,
+                            "fully_visible": True,
+                        },
+                    ],
+                }
+            ],
+            "keyboard": {
+                "visible": True,
+                "bounds": [80, 570, 920, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [120, 710],
+                    "p": [860, 710],
+                    "a": [160, 790],
+                    "l": [800, 790],
+                    "z": [260, 870],
+                    "m": [720, 870],
+                    "backspace": [840, 870],
                 },
                 "mode_switch": None,
                 "backspace_key": None,
@@ -1079,6 +1170,186 @@ class TypedInputLineageTests(unittest.TestCase):
                     any(
                         element.meaning == "application_text_input"
                         and element.states.get("value") == "loopok"
+                        for element in rejected.elements
+                    )
+                )
+
+    def test_pending_ime_candidate_lineage_accepts_typed_unknown_app_and_prefix(self) -> None:
+        cases = (
+            {
+                "prior": "",
+                "segment": "你好",
+                "pinyin": "nihao",
+            },
+            {
+                "prior": "你好\n",
+                "segment": "世界",
+                "pinyin": "shijie",
+            },
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                before, action = ime_candidate_case(
+                    **case,
+                    app_id="unknown",
+                    screen_id="multiline_input_acceptance",
+                    bounds=(0.14, 0.27, 0.86, 0.45),
+                )
+                record = build_pending_ime_candidate_lineage(
+                    device_id=DEVICE,
+                    resolved_action=action,
+                    before_scene=before,
+                    hardware_receipt=receipt(),
+                )
+                self.assertEqual(case["prior"] + case["segment"], record.exact_value)
+                self.assertEqual("unknown", record.app_id)
+                self.assertEqual("input_field_1", record.input_field_id)
+
+    def test_pending_ime_candidate_lineage_revokes_residual_prediction_preedit(self) -> None:
+        cases = (
+            {
+                "prior": "",
+                "segment": "你好",
+                "pinyin": "nihao",
+                "caret_marker": "|",
+            },
+            {
+                "prior": "你好\n",
+                "segment": "世界",
+                "pinyin": "shijie",
+                "caret_marker": "｜",
+            },
+        )
+        records: list[tuple[dict, TypedInputLineage, dict, str]] = []
+        for case in cases:
+            with self.subTest(case=case):
+                before, action = ime_candidate_case(
+                    prior=case["prior"],
+                    segment=case["segment"],
+                    pinyin=case["pinyin"],
+                    app_id="unknown",
+                    screen_id="multiline_input_acceptance",
+                    bounds=(0.14, 0.27, 0.86, 0.45),
+                )
+                record = build_pending_ime_candidate_lineage(
+                    device_id=DEVICE,
+                    resolved_action=action,
+                    before_scene=before,
+                    hardware_receipt=receipt(),
+                )
+                expected = case["prior"] + case["segment"]
+                context = {
+                    "entities": {
+                        "active_subgoal_visual_context": {
+                            "subgoal_id": "input_exact_text",
+                            "objective": "在正文输入框完成精确中文",
+                            "constraints": ["不得发送"],
+                            "completion_conditions": [f"输入框逐字等于 {expected}"],
+                            "execution_class": "navigate",
+                            "goal_entities": {
+                                "input_text": expected,
+                                "active_input_transaction_text": expected,
+                                "active_input_field_id": "input_field_1",
+                                "active_input_field_label": "正文",
+                                "active_input_multiline": "\n" in expected,
+                            },
+                        }
+                    }
+                }
+                projected = _apply_input_structure_audit(
+                    UIScene.from_dict(before),
+                    ime_prediction_commit_audit_raw(
+                        exact_value=expected,
+                        candidate_text=case["segment"],
+                        caret_marker=case["caret_marker"],
+                    ),
+                    fingerprint="after-ime-prediction-commit",
+                    goal_context=context,
+                    coarse_input_value=expected,
+                    verified_input_lineage=record,
+                    device_id=DEVICE,
+                    lineage_frame=surface_frame(),
+                )
+                field = projected.get_element("local_audited_input_1")
+                self.assertEqual(expected, field.states["value"])
+                self.assertNotIn("ime_preedit_text", field.states)
+                self.assertFalse(
+                    any(
+                        element.meaning == "ime_exact_candidate"
+                        and element.states.get("goal_relevant") is True
+                        for element in projected.elements
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        "残留预测栏未作为预编辑" in evidence
+                        for evidence in field.evidence
+                    )
+                )
+                records.append((before, record, context, expected))
+
+        before, record, context, expected = records[0]
+        negative_cases = (
+            {
+                "name": "wrong_cue",
+                "raw": ime_prediction_commit_audit_raw(
+                    exact_value=expected + "错",
+                    candidate_text="你好",
+                ),
+                "lineage": record,
+                "context": context,
+            },
+            {
+                "name": "wrong_preedit",
+                "raw": ime_prediction_commit_audit_raw(
+                    exact_value=expected,
+                    candidate_text="你好",
+                    preedit_text="错误",
+                ),
+                "lineage": record,
+                "context": context,
+            },
+            {
+                "name": "missing_lineage",
+                "raw": ime_prediction_commit_audit_raw(
+                    exact_value=expected,
+                    candidate_text="你好",
+                ),
+                "lineage": None,
+                "context": context,
+            },
+        )
+        wrong_field_context = json.loads(json.dumps(context))
+        wrong_field_context["entities"]["active_subgoal_visual_context"][
+            "goal_entities"
+        ]["active_input_field_id"] = "input_field_2"
+        negative_cases += (
+            {
+                "name": "wrong_typed_field",
+                "raw": ime_prediction_commit_audit_raw(
+                    exact_value=expected,
+                    candidate_text="你好",
+                ),
+                "lineage": record,
+                "context": wrong_field_context,
+            },
+        )
+        for case in negative_cases:
+            with self.subTest(case=case["name"]):
+                rejected = _apply_input_structure_audit(
+                    UIScene.from_dict(before),
+                    case["raw"],
+                    fingerprint="after-ime-prediction-rejected",
+                    goal_context=case["context"],
+                    coarse_input_value=expected,
+                    verified_input_lineage=case["lineage"],
+                    device_id=DEVICE,
+                    lineage_frame=surface_frame(),
+                )
+                self.assertFalse(
+                    any(
+                        element.meaning == "application_text_input"
+                        and element.states.get("value") == expected
                         for element in rejected.elements
                     )
                 )

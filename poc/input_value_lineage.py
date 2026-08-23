@@ -12,7 +12,7 @@ from typing import Any
 from PIL import Image, ImageOps
 
 
-TYPED_INPUT_LINEAGE_VERSION = "2026-08-19-typed-input-lineage-v2"
+TYPED_INPUT_LINEAGE_VERSION = "2026-08-23-typed-input-lineage-v4"
 DEFAULT_LINEAGE_TTL_SECONDS = 6 * 60 * 60
 SURFACE_DESCRIPTOR_WIDTH = 32
 SURFACE_DESCRIPTOR_HEIGHT = 16
@@ -23,6 +23,17 @@ PENDING_INPUT_LINEAGE_SOURCES = frozenset(
         "pending_verified_text_action",
         "pending_verified_input_state_action",
         "pending_verified_ime_candidate_action",
+        "pending_verified_newline_action",
+    }
+)
+NEWLINE_INPUT_LINEAGE_SOURCES = frozenset(
+    {
+        "pending_verified_newline_action",
+        "pending_verified_text_action",
+        "verified_live_newline_action",
+        "verified_live_text_action",
+        "verified_persisted_newline_execution",
+        "verified_persisted_text_execution",
     }
 )
 
@@ -76,6 +87,18 @@ def _bounds_compatible(
 
 def _collapsed_visual_text(value: str) -> str:
     return value.replace("\r", "").replace("\n", "")
+
+
+def _exact_or_soft_wrapped_visual_text(raw_value: str, exact_value: str) -> bool:
+    """Compare exact values without turning a real newline into soft wrap.
+
+    A stored value that contains an authorized newline must be observed exactly.
+    Collapsing visual rows remains valid only for single-line exact values.
+    """
+
+    if "\r" in exact_value or "\n" in exact_value:
+        return raw_value == exact_value
+    return _collapsed_visual_text(raw_value) == exact_value
 
 
 def _surface_descriptor(
@@ -193,6 +216,7 @@ class TypedInputLineage:
     app_id: str
     screen_id: str
     input_meaning: str
+    input_field_id: str
     input_bounds: tuple[float, float, float, float]
     before_fingerprint: str
     after_fingerprint: str
@@ -210,6 +234,7 @@ class TypedInputLineage:
             "app_id",
             "screen_id",
             "input_meaning",
+            "input_field_id",
             "before_fingerprint",
             "after_fingerprint",
             "action_digest",
@@ -223,8 +248,12 @@ class TypedInputLineage:
             raise InputValueLineageError("输入值连续性只接受应用文字输入框。")
         if not isinstance(self.exact_value, str) or not self.exact_value:
             raise InputValueLineageError("输入值连续性 exact_value 无效。")
-        if "\r" in self.exact_value or "\n" in self.exact_value:
-            raise InputValueLineageError("输入值连续性不能把真实换行登记为软折行。")
+        if "\r" in self.exact_value:
+            raise InputValueLineageError("输入值连续性不接受回车字符。")
+        if "\n" in self.exact_value and self.source not in NEWLINE_INPUT_LINEAGE_SOURCES:
+            raise InputValueLineageError(
+                "只有经过严格换行动作链验证的连续性才能保存真实换行。"
+            )
         if _valid_bounds(self.input_bounds) is None:
             raise InputValueLineageError("输入值连续性 input_bounds 无效。")
         if self.before_fingerprint == self.after_fingerprint:
@@ -267,6 +296,7 @@ class TypedInputLineage:
             "app_id",
             "screen_id",
             "input_meaning",
+            "input_field_id",
             "input_bounds",
             "before_fingerprint",
             "after_fingerprint",
@@ -288,6 +318,7 @@ class TypedInputLineage:
             app_id=value["app_id"],
             screen_id=value["screen_id"],
             input_meaning=value["input_meaning"],
+            input_field_id=value["input_field_id"],
             input_bounds=bounds,
             before_fingerprint=value["before_fingerprint"],
             after_fingerprint=value["after_fingerprint"],
@@ -321,7 +352,7 @@ class TypedInputLineage:
             or now - self.recorded_at_epoch > ttl_seconds
             or not isinstance(raw_value, str)
             or not ({"\r", "\n"} & set(raw_value))
-            or _collapsed_visual_text(raw_value) != self.exact_value
+            or not _exact_or_soft_wrapped_visual_text(raw_value, self.exact_value)
         ):
             return False
         if input_bounds is not None and not _bounds_compatible(
@@ -420,6 +451,7 @@ class TypedInputLineage:
         screen_id: str,
         raw_value: str,
         input_bounds: tuple[float, float, float, float] | None,
+        input_field_id: str | None = None,
         now_epoch: float | None = None,
         ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
     ) -> bool:
@@ -433,6 +465,7 @@ class TypedInputLineage:
                 app_id=app_id,
                 screen_id=screen_id,
                 input_bounds=input_bounds,
+                input_field_id=input_field_id,
                 now_epoch=now_epoch,
                 ttl_seconds=ttl_seconds,
             )
@@ -445,6 +478,7 @@ class TypedInputLineage:
         app_id: str,
         screen_id: str,
         input_bounds: tuple[float, float, float, float] | None,
+        input_field_id: str | None = None,
         now_epoch: float | None = None,
         ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
     ) -> bool:
@@ -453,10 +487,16 @@ class TypedInputLineage:
         now = time.time() if now_epoch is None else float(now_epoch)
         current_screen = str(screen_id or "").strip().casefold()
         recorded_screen = self.screen_id.strip().casefold()
+        current_field = str(input_field_id or "").strip()
+        typed_field_matches = bool(
+            self.input_field_id not in {"", "unknown"}
+            and current_field == self.input_field_id
+        )
         return bool(
             self.source in {
                 "pending_verified_input_state_action",
                 "pending_verified_ime_candidate_action",
+                "pending_verified_newline_action",
             }
             and device_id == self.device_id
             and now >= self.recorded_at_epoch
@@ -468,6 +508,7 @@ class TypedInputLineage:
                 current_screen == recorded_screen
                 or current_screen.startswith(recorded_screen + "_")
                 or recorded_screen.startswith(current_screen + "_")
+                or typed_field_matches
             )
             and input_bounds is not None
             and _bounds_compatible(self.input_bounds, input_bounds)
@@ -482,6 +523,7 @@ class TypedInputLineage:
         raw_value: str,
         visible_editable_cues: tuple[str, ...],
         input_bounds: tuple[float, float, float, float] | None,
+        input_field_id: str | None = None,
         now_epoch: float | None = None,
         ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
     ) -> bool:
@@ -496,6 +538,89 @@ class TypedInputLineage:
                 screen_id=screen_id,
                 raw_value=self.exact_value,
                 input_bounds=input_bounds,
+                input_field_id=input_field_id,
+                now_epoch=now_epoch,
+                ttl_seconds=ttl_seconds,
+            )
+        )
+
+    def matches_trailing_newline_cue(
+        self,
+        *,
+        device_id: str,
+        app_id: str,
+        screen_id: str,
+        raw_value: str,
+        visible_editable_cues: tuple[str, ...],
+        caret_line_index: int | None,
+        input_bounds: tuple[float, float, float, float] | None,
+        input_field_id: str | None,
+        current_frame: Image.Image | None = None,
+        now_epoch: float | None = None,
+        ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
+    ) -> bool:
+        """Prove one trailing newline from action lineage plus caret geometry.
+
+        Visual row layout alone is never newline authority.  This matcher only
+        applies to a lineage minted by an exact ``press_enter`` action and then
+        requires the same typed field, the exact visible prior value, and the
+        caret on the newly created zero-based line.
+        """
+
+        if (
+            self.source not in NEWLINE_INPUT_LINEAGE_SOURCES
+            or not self.exact_value.endswith("\n")
+            or isinstance(caret_line_index, bool)
+            or not isinstance(caret_line_index, int)
+            or caret_line_index != self.exact_value.count("\n")
+        ):
+            return False
+        prior = self.exact_value[:-1]
+        decorative = {
+            "border",
+            "caret",
+            "cursor",
+            "focus border",
+            "focus ring",
+            "outline",
+            "|",
+        }
+        literal_cues = tuple(
+            cue
+            for cue in visible_editable_cues
+            if isinstance(cue, str)
+            and cue.strip()
+            and cue.strip().casefold() not in decorative
+        )
+        if not (
+            raw_value == prior
+            or (raw_value == "" and literal_cues == (prior,))
+        ):
+            return False
+        if (
+            self.input_field_id in {"", "unknown"}
+            or input_field_id != self.input_field_id
+        ):
+            return False
+        if self.source in PENDING_INPUT_LINEAGE_SOURCES:
+            return self.matches_pending_input_state_surface(
+                device_id=device_id,
+                app_id=app_id,
+                screen_id=screen_id,
+                input_bounds=input_bounds,
+                input_field_id=input_field_id,
+                now_epoch=now_epoch,
+                ttl_seconds=ttl_seconds,
+            )
+        return bool(
+            self.input_field_id not in {"", "unknown"}
+            and input_field_id == self.input_field_id
+            and self.matches_persisted_surface(
+                device_id=device_id,
+                app_id=app_id,
+                screen_id=screen_id,
+                input_bounds=input_bounds,
+                current_frame=current_frame,
                 now_epoch=now_epoch,
                 ttl_seconds=ttl_seconds,
             )
@@ -664,6 +789,31 @@ class TypedInputLineageStore:
         self.write(record)
         return record
 
+    def record_verified_newline_action(
+        self,
+        *,
+        device_id: str,
+        resolved_action: dict[str, Any],
+        before_scene: dict[str, Any],
+        after_scene: dict[str, Any],
+        hardware_receipt: dict[str, Any],
+        after_frames: tuple[Image.Image, ...],
+        source: str = "verified_live_newline_action",
+    ) -> TypedInputLineage:
+        record = _record_from_newline_execution(
+            device_id=device_id,
+            resolved=resolved_action,
+            before_scene=before_scene,
+            after_scene=after_scene,
+            hardware_receipt=hardware_receipt,
+            recorded_at_epoch=float(self.clock()),
+            source=source,
+            surface_fallback=self.load(device_id),
+            surface_frames=after_frames,
+        )
+        self.write(record)
+        return record
+
     def recover_from_session_file(self, path: Path) -> TypedInputLineage:
         session_path = Path(path)
         payload = json.loads(session_path.read_text(encoding="utf-8"))
@@ -718,6 +868,27 @@ class TypedInputLineageStore:
                 source="verified_persisted_text_execution",
                 surface_frames=tuple(loaded_after_frames),
             )
+        elif (
+            isinstance(resolved_action, dict)
+            and resolved_action.get("kind") == "press_enter"
+        ):
+            if (
+                execution.get("action_outcome") != "matched"
+                or execution.get("verification_errors") not in (None, [], ())
+            ):
+                raise InputValueLineageError(
+                    "历史换行动作没有通过动作后 exact verifier。"
+                )
+            record = _record_from_newline_execution(
+                device_id=device_id,
+                resolved=resolved_action,
+                before_scene=execution.get("before_scene"),
+                after_scene=execution.get("after_scene"),
+                hardware_receipt=execution.get("hardware_receipt"),
+                recorded_at_epoch=float(self.clock()),
+                source="verified_persisted_newline_execution",
+                surface_frames=tuple(loaded_after_frames),
+            )
         else:
             record = _record_from_execution(
                 device_id=device_id,
@@ -770,6 +941,7 @@ def build_pending_text_lineage(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
+        input_field_id=_typed_input_field_id(before_input),
         input_bounds=_valid_bounds(before_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint="pending-visual-verification",
@@ -780,6 +952,119 @@ def build_pending_text_lineage(
             time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
         ),
         source="pending_verified_text_action",
+    )
+    record.validate()
+    return record
+
+
+def _validated_newline_action_chain(
+    resolved: Any,
+    before_scene: Any,
+) -> tuple[dict[str, Any], str, str]:
+    if (
+        not isinstance(resolved, dict)
+        or resolved.get("kind") != "press_enter"
+        or not isinstance(before_scene, dict)
+    ):
+        raise InputValueLineageError("换行连续性只接受已解析的 Enter 动作。")
+    prior = resolved.get("prior_input_value")
+    expected = resolved.get("expected_input_value")
+    target_id = resolved.get("target_element_id")
+    expected_effect = resolved.get("expected_effect")
+    expected_state = (
+        expected_effect.get("element_state")
+        if isinstance(expected_effect, dict)
+        else None
+    )
+    expected_states = (
+        expected_state.get("states")
+        if isinstance(expected_state, dict)
+        else None
+    )
+    if (
+        not isinstance(prior, str)
+        or not isinstance(expected, str)
+        or "\r" in prior
+        or expected != prior + "\n"
+        or not isinstance(target_id, str)
+        or expected_state is None
+        or expected_state.get("meaning") != "application_text_input"
+        or expected_states != {"value": expected}
+    ):
+        raise InputValueLineageError("换行动作的 prior/newline/expected 链无效。")
+    before_input = _single_input(before_scene, expected_value=prior)
+    elements = before_scene.get("elements")
+    targets = [
+        item
+        for item in elements or []
+        if isinstance(item, dict) and item.get("element_id") == target_id
+    ]
+    if len(targets) != 1:
+        raise InputValueLineageError("换行动作缺少唯一 Enter 目标。")
+    target = targets[0]
+    states = target.get("states")
+    if (
+        target.get("meaning") != "input_exact_enter_key"
+        or not isinstance(states, dict)
+        or states.get("input_enter_key") is not True
+        or states.get("key_action") != "newline"
+        or states.get("key_value") != "\n"
+        or states.get("prior_input_value") != prior
+        or states.get("expected_input_value") != expected
+        or states.get("input_element_id") != before_input.get("element_id")
+        or states.get("input_field_id") != _typed_input_field_id(before_input)
+    ):
+        raise InputValueLineageError("换行目标没有绑定同一 typed multiline 输入框。")
+    return before_input, prior, expected
+
+
+def build_pending_newline_lineage(
+    *,
+    device_id: str,
+    resolved_action: dict[str, Any],
+    before_scene: dict[str, Any],
+    hardware_receipt: dict[str, Any],
+    recorded_at_epoch: float | None = None,
+) -> TypedInputLineage:
+    """Bind one exact Enter event to its immediate post-action observation."""
+
+    if (
+        not isinstance(hardware_receipt, dict)
+        or hardware_receipt.get("seller_event_barrier_confirmed") is not True
+        or hardware_receipt.get("round_trip_position_confirmed") is not True
+        or hardware_receipt.get("mechanical_contact_ack") is not False
+    ):
+        raise InputValueLineageError("临时换行连续性缺少有效事件栅栏。")
+    before_input, _prior, expected = _validated_newline_action_chain(
+        resolved_action,
+        before_scene,
+    )
+    app_id = before_scene.get("app_id")
+    screen_id = before_scene.get("screen_id")
+    before_fingerprint = before_scene.get("fingerprint")
+    if any(
+        not isinstance(value, str) or not value.strip() or value == "unknown"
+        for value in (app_id, screen_id, before_fingerprint)
+    ):
+        raise InputValueLineageError("临时换行连续性缺少明确输入表面。")
+    record = TypedInputLineage(
+        version=TYPED_INPUT_LINEAGE_VERSION,
+        device_id=device_id,
+        exact_value=expected,
+        app_id=app_id,
+        screen_id=screen_id,
+        input_meaning="application_text_input",
+        input_field_id=_typed_input_field_id(before_input),
+        input_bounds=_valid_bounds(before_input["bounds"]),
+        before_fingerprint=before_fingerprint,
+        after_fingerprint="pending-visual-verification",
+        action_digest=_canonical_digest(resolved_action),
+        receipt_digest=_canonical_digest(hardware_receipt),
+        surface_descriptors=(),
+        recorded_at_epoch=(
+            time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
+        ),
+        source="pending_verified_newline_action",
     )
     record.validate()
     return record
@@ -888,6 +1173,7 @@ def build_pending_input_state_lineage(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
+        input_field_id=_typed_input_field_id(before_input),
         input_bounds=_valid_bounds(before_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint="pending-visual-verification",
@@ -1018,6 +1304,7 @@ def build_pending_ime_candidate_lineage(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
+        input_field_id=field_id,
         input_bounds=_valid_bounds(before_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint="pending-visual-verification",
@@ -1109,6 +1396,7 @@ def build_pending_literal_lineage(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
+        input_field_id=_typed_input_field_id(before_input),
         input_bounds=_valid_bounds(before_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint="pending-visual-verification",
@@ -1150,6 +1438,16 @@ def _single_input(scene: dict[str, Any], *, expected_value: str | None = None) -
     return candidates[0]
 
 
+def _typed_input_field_id(element: dict[str, Any]) -> str:
+    states = element.get("states") if isinstance(element, dict) else None
+    field_id = (
+        str(states.get("input_field_id") or "").strip()
+        if isinstance(states, dict)
+        else ""
+    )
+    return field_id if field_id and field_id != "unknown" else "unknown"
+
+
 def _validated_text_action_chain(
     resolved: Any,
     before_scene: Any,
@@ -1180,7 +1478,10 @@ def _validated_text_action_chain(
         or not isinstance(expected, str)
         or not isinstance(fragment, str)
         or not fragment
-        or any("\n" in value or "\r" in value for value in (prior, expected, fragment))
+        or "\r" in prior
+        or "\r" in expected
+        or "\r" in fragment
+        or "\n" in fragment
         or expected != prior + fragment
         or expected_state is None
         or expected_state.get("meaning") != "application_text_input"
@@ -1218,7 +1519,7 @@ def _record_from_text_execution(
     after_input = _single_input(after_scene)
     raw_after = after_input["states"]["value"]
     if (
-        _collapsed_visual_text(raw_after) != expected
+        not _exact_or_soft_wrapped_visual_text(raw_after, expected)
         or not any(raw_after in str(item) for item in after_input.get("evidence", []))
         or not _bounds_compatible(
             _valid_bounds(before_input["bounds"]),
@@ -1270,11 +1571,104 @@ def _record_from_text_execution(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
+        input_field_id=_typed_input_field_id(after_input),
         input_bounds=_valid_bounds(after_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint=after_fingerprint,
         action_digest=action_digest,
         receipt_digest=receipt_digest,
+        surface_descriptors=_surface_descriptors(
+            surface_frames,
+            _valid_bounds(after_input["bounds"]),
+        ),
+        recorded_at_epoch=recorded_at_epoch,
+        source=source,
+    )
+    record.validate()
+    return record
+
+
+def _record_from_newline_execution(
+    *,
+    device_id: str,
+    resolved: Any,
+    before_scene: Any,
+    after_scene: Any,
+    hardware_receipt: Any,
+    recorded_at_epoch: float,
+    source: str,
+    surface_fallback: TypedInputLineage | None = None,
+    surface_frames: tuple[Image.Image, ...] | None = None,
+) -> TypedInputLineage:
+    if not isinstance(after_scene, dict):
+        raise InputValueLineageError("换行连续性缺少动作后场景。")
+    if (
+        not isinstance(hardware_receipt, dict)
+        or hardware_receipt.get("seller_event_barrier_confirmed") is not True
+        or hardware_receipt.get("round_trip_position_confirmed") is not True
+        or hardware_receipt.get("mechanical_contact_ack") is not False
+    ):
+        raise InputValueLineageError("换行连续性缺少有效单击事件栅栏。")
+    before_input, prior, expected = _validated_newline_action_chain(
+        resolved,
+        before_scene,
+    )
+    before_fingerprint = before_scene.get("fingerprint")
+    after_fingerprint = after_scene.get("fingerprint")
+    if (
+        not isinstance(before_fingerprint, str)
+        or not isinstance(after_fingerprint, str)
+        or before_fingerprint == after_fingerprint
+    ):
+        raise InputValueLineageError("换行连续性缺少变化后的 fingerprint。")
+    after_input = _single_input(after_scene, expected_value=expected)
+    after_states = after_input.get("states")
+    after_evidence = after_input.get("evidence")
+    if (
+        not isinstance(after_states, dict)
+        or after_states.get("value") != expected
+        or after_states.get("input_field_id") != _typed_input_field_id(before_input)
+        or after_states.get("verified_trailing_newline") is not True
+        or not isinstance(after_evidence, list)
+        or not any("已验证换行动作" in str(item) for item in after_evidence)
+        or not _bounds_compatible(
+            _valid_bounds(before_input["bounds"]),
+            _valid_bounds(after_input["bounds"]),
+        )
+    ):
+        raise InputValueLineageError("动作后场景没有证明同一字段的真实尾随换行。")
+    app_id = after_scene.get("app_id")
+    screen_id = after_scene.get("screen_id")
+    fallback_compatible = bool(
+        surface_fallback is not None
+        and surface_fallback.device_id == device_id
+        and surface_fallback.exact_value == prior
+        and surface_fallback.input_field_id == _typed_input_field_id(before_input)
+        and _bounds_compatible(
+            surface_fallback.input_bounds,
+            _valid_bounds(before_input["bounds"]),
+        )
+    )
+    if fallback_compatible:
+        app_id = surface_fallback.app_id
+        screen_id = surface_fallback.screen_id
+    if not isinstance(app_id, str) or not app_id.strip() or app_id == "unknown":
+        raise InputValueLineageError("换行连续性缺少明确 app_id。")
+    if not isinstance(screen_id, str) or not screen_id.strip() or screen_id == "unknown":
+        raise InputValueLineageError("换行连续性缺少明确 screen_id。")
+    record = TypedInputLineage(
+        version=TYPED_INPUT_LINEAGE_VERSION,
+        device_id=device_id,
+        exact_value=expected,
+        app_id=app_id,
+        screen_id=screen_id,
+        input_meaning="application_text_input",
+        input_field_id=_typed_input_field_id(after_input),
+        input_bounds=_valid_bounds(after_input["bounds"]),
+        before_fingerprint=before_fingerprint,
+        after_fingerprint=after_fingerprint,
+        action_digest=_canonical_digest(resolved),
+        receipt_digest=_canonical_digest(hardware_receipt),
         surface_descriptors=_surface_descriptors(
             surface_frames,
             _valid_bounds(after_input["bounds"]),
@@ -1395,6 +1789,7 @@ def _record_from_execution(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
+        input_field_id=_typed_input_field_id(after_input),
         input_bounds=_valid_bounds(after_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint=after_fingerprint,

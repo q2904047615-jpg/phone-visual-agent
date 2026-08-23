@@ -73,7 +73,7 @@ TARGETED_SCENE_DELTA_PROTOCOL_VERSION = "2026-08-17-targeted-scene-delta-v1"
 FOREGROUND_APP_IDENTITY_AUDIT_VERSION = (
     "2026-08-18-foreground-app-identity-audit-v1"
 )
-INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-23-input-structure-audit-v8"
+INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-23-input-structure-audit-v9"
 SYSTEM_UI_AUDIT_VERSION = "2026-08-14-system-ui-audit-v1"
 ICON_CLUSTER_AUDIT_VERSION = "2026-08-15-icon-cluster-audit-v1"
 COMPACT_OUTPUT_TOKENS = 2600
@@ -1215,16 +1215,43 @@ class GenericSceneObserver:
                     input_audit_current_value = verified_input_lineage.exact_value
                     input_lineage_used = True
                 self._set_stage("waiting_input_structure_audit")
+                temporal_input_frames = (
+                    tuple(frames[stable_tail_start:])
+                    if (
+                        _goal_requests_active_verified_text_clear(context)
+                        or _goal_active_input_field(context)[2]
+                    )
+                    else (frame,)
+                )
+                if not temporal_input_frames:
+                    temporal_input_frames = (frame,)
+                input_audit_prompt = _input_structure_audit_prompt(
+                    context,
+                    roi_bounds=None,
+                    current_input_text=input_audit_current_value,
+                )
+                if len(temporal_input_frames) > 1:
+                    input_audit_prompt += (
+                        "\nImages 1.."
+                        f"{len(temporal_input_frames)} are aligned captures of the "
+                        "same stable phone surface at different times. A text caret "
+                        "may blink, so derive caret_line_index from any frame where "
+                        "the complete caret is visible. All normalized geometry uses "
+                        "the same 0..1000 frame and must remain consistent across the "
+                        "images; do not merge any other transient content."
+                    )
                 audit_content: list[dict[str, Any]] = [
                     {
                         "type": "text",
-                        "text": _input_structure_audit_prompt(
-                            context,
-                            roi_bounds=None,
-                            current_input_text=input_audit_current_value,
-                        ),
+                        "text": input_audit_prompt,
                     },
-                    image_part,
+                    *(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": _image_data_url(item)},
+                        }
+                        for item in temporal_input_frames
+                    ),
                 ]
                 raw = model_chat(
                     [
@@ -2555,7 +2582,7 @@ Goal context (evidence selection only): {json.dumps(context, ensure_ascii=False,
 {image_contract}
 Distinguish three different visual structures; never merge them:
 1. application_inputs: editable search/address/form fields in the App content area. Include an empty field only when a complete border plus a visible placeholder, caret, focus highlight, or other literal editable cue is visible. field_labels must contain only literal labels visibly attached to that field (for example a nearby form label or its placeholder), never the local field_id. The active field selector is field_id={json.dumps(active_field_id, ensure_ascii=False)} and visible field_label={json.dumps(active_field_label, ensure_ascii=False)}; use the label only to enumerate visible evidence, never infer it from the goal.
-2. ime_preedit_regions: the input method's composition and its adjacent candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Many real IMEs render an underlined Latin composition inside the otherwise empty App field while showing its candidate strip immediately beside that field. In that layout the underlined letters remain IME preedit, application_inputs.text MUST be "", the literal may also appear in visible_editable_cues, and one ime_preedit_regions item MUST tightly bound the underlined composition with text set to that literal. Candidate words use their own complete adjacent bounds and need not lie inside the composition bounds. Never call those underlined letters committed application text. Enumerate only complete visible candidate words tied to that composition; candidates are read-only facts and never application inputs.
+2. ime_preedit_regions: the input method's composition and its candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Many real IMEs render an underlined Latin composition inside the otherwise empty App field. In that layout the underlined letters remain IME preedit, application_inputs.text MUST be "", the literal may also appear in visible_editable_cues, and one ime_preedit_regions item MUST tightly bound the underlined composition with text set to that literal. Candidate words use their own complete bounds and may be either immediately adjacent to the composition or in one horizontal candidate row at the top of the visible keyboard, above the QWERTY letter rows. Never call those underlined letters committed application text. Enumerate only complete visible candidate words tied to that composition; candidates are read-only facts and never application inputs.
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
    When keyboard.visible=true, report keyboard.bounds only when it confidently encloses the complete visible keyboard in the same coordinate system, has width at least 300 and height at least 180, and contains every reported keyboard key and anchor. Measure from the four edges of Image 1; do not shift the keyboard toward the bottom or describe only its letter rows. For QWERTY, qwerty_anchors remain mandatory; when the outer bounds cannot be measured confidently, set bounds=null instead of inventing it. Local code may reconstruct an execution envelope only after independent multi-frame row evidence validates all seven anchors. Non-QWERTY actionable geometry still requires complete keyboard.bounds.
@@ -2575,14 +2602,14 @@ These are shape examples only. Copy the literal visible label and measured bound
 keyboard.case_switch uses the same five field names, but current_mode and target_mode are lower or upper. It is valid only for direct_latin QWERTY and a visible shift/case glyph. Example shape: {{"label":"⇧","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"lower","target_mode":"upper"}}.
 Do not plan, suggest, authorize, or perform any action.
 {coordinate_contract}
-Use text="" for a visibly empty application field. Copy placeholders and visible_editable_cues literally; do not infer them from the goal. right_button describes a trailing utility control; it is structural evidence only and is never authorized for activation. Set it to null when no separate trailing control is visible.
+Use text="" for a visibly empty application field. Copy placeholders and visible_editable_cues literally; do not infer them from the goal. caret_line_index is the zero-based VISUAL row containing the complete visible insertion caret, or null when the caret row is absent, clipped, or ambiguous. It is a read-only geometry fact and by itself never proves a user-entered newline. right_button describes a trailing utility control; it is structural evidence only and is never authorized for activation. Set it to null when no separate trailing control is visible.
 An automatic visual line wrap inside a narrow editable field is presentation only: join the continuous visible glyph sequence and do not insert "\\n" into text. Report a newline character only when the image independently proves an actual user-entered line break; if that distinction is not visually provable, do not invent a newline from row layout alone.
 Return exactly this JSON schema and no other fields. Emit one compact minified
 JSON object on a single line, without Markdown or explanatory whitespace:
 {{"protocol_version":"{INPUT_STRUCTURE_AUDIT_VERSION}",
 "application_inputs":[{{"structure_id":"app-input-1","bounds":[0,0,1000,1000],
 "fully_visible":true,"text":"","placeholder":"visible placeholder or empty","field_labels":["literal visible field label"],
-"visible_editable_cues":["literal visible cue"],"confidence":0.0,
+"visible_editable_cues":["literal visible cue"],"caret_line_index":null,"confidence":0.0,
 "right_button":null}}],
 "ime_preedit_regions":[{{"region_id":"ime-preedit-1","bounds":[0,0,1000,1000],
 "text":"visible composition text or empty","confidence":0.0,
@@ -4636,6 +4663,7 @@ def _typed_prefix_input_survives_invalid_keyboard_geometry(
         "text",
         "placeholder",
         "visible_editable_cues",
+        "caret_line_index",
         "confidence",
         "right_button",
     }
@@ -5823,6 +5851,12 @@ def _goal_requests_input(context: dict[str, Any]) -> bool:
         # audit must still prove one application input, the matching preedit
         # and one complete exact candidate before minting ``ime_exact_candidate``.
         return True
+    if _goal_requests_keyboard_mode_switch(context):
+        # A standalone deterministic tap on the keyboard mode switch has no
+        # text payload, but it still requires the same independent whole-frame
+        # input audit as an ordinary text transaction.  The mode helper keeps
+        # the root-context exception limited to the exact-action wrapper.
+        return True
     if focused is context:
         input_context: dict[str, Any] = context
     else:
@@ -5925,22 +5959,43 @@ def _goal_requests_reload(context: dict[str, Any]) -> bool:
 
 
 def _goal_requests_keyboard_mode_switch(context: dict[str, Any]) -> bool:
-    visible = json.dumps(
-        _active_subgoal_visual_context(context),
-        ensure_ascii=False,
-    ).casefold()
+    focused = _active_subgoal_visual_context(context)
+    selectors: list[Any] = [focused]
+    entities = context.get("entities")
+    focused_entities = focused.get("goal_entities")
+    if (
+        focused is not context
+        and str(focused.get("subgoal_id") or "").strip()
+        == "exact_tap_semantic"
+        and isinstance(focused_entities, dict)
+        and str(focused_entities.get("target_ui_label") or "").strip()
+        and isinstance(entities, dict)
+        and isinstance(entities.get("original_goal_visual_context"), str)
+        and entities["original_goal_visual_context"].strip()
+    ):
+        # The deterministic exact-action bridge deliberately replaces the
+        # active objective with generic tap wording.  Restore only its original
+        # read-only visual intent so a keyboard-mode target can invoke the
+        # dedicated audit.  Normal graph nodes keep the active-subgoal-only
+        # boundary and cannot see future workflow text.
+        selectors.append(entities["original_goal_visual_context"])
+    visible = json.dumps(selectors, ensure_ascii=False).casefold()
     return any(
         term in visible
         for term in (
             "切换输入模式",
+            "输入模式切换",
             "切换到英文",
             "切到英文",
+            "英文直输",
             "切换到中文",
             "切到中文",
             "切换直输模式",
             "切换为直输模式",
             "switch input mode",
             "switch keyboard mode",
+            "direct_latin",
+            "chinese_pinyin",
         )
     )
 
@@ -6402,6 +6457,304 @@ def _same_frame_exact_committed_cue(
     return literal_cues == (exact_text,)
 
 
+def _authorized_exact_committed_prefix_cue(
+    trusted_input: dict[str, Any],
+    trusted_preedits: list[dict[str, Any]],
+    *,
+    goal_context: dict[str, Any],
+    keyboard_input_mode: str,
+) -> str:
+    """Recover one committed authorized prefix inside the typed field."""
+
+    field_id, _field_label, _multiline = _goal_active_input_field(goal_context)
+    authorized = _goal_active_input_transaction_text(goal_context)
+    cues = trusted_input.get("visible_editable_cues")
+    if (
+        not field_id
+        or field_id == "unknown"
+        or not isinstance(authorized, str)
+        or not authorized
+        or keyboard_input_mode != "direct_latin"
+        or trusted_input.get("text") != ""
+        or not isinstance(cues, list)
+    ):
+        return ""
+    non_text_cues = {
+        "border",
+        "caret",
+        "cursor",
+        "focus border",
+        "focus ring",
+        "outline",
+    }
+    literal_cues = tuple(
+        item.strip()
+        for item in cues
+        if isinstance(item, str)
+        and item.strip()
+        and item.strip().casefold() not in non_text_cues
+    )
+    if len(literal_cues) != 1:
+        return ""
+    cue = literal_cues[0]
+    if (
+        not authorized.startswith(cue)
+        or cue == trusted_input.get("placeholder")
+        or cue in trusted_input.get("field_labels", ())
+        or "\r" in cue
+        or "\n" in cue
+    ):
+        return ""
+    if trusted_preedits and not _adjacent_exact_preedit_cue(
+        trusted_input,
+        trusted_preedits,
+        cue,
+    ):
+        return ""
+    return cue
+
+
+def _clear_goal_unique_committed_cue(
+    trusted_input: dict[str, Any],
+    trusted_preedits: list[dict[str, Any]],
+    *,
+    keyboard_input_mode: str,
+) -> tuple[str, int]:
+    """Recover visible committed glyphs only for an explicit clear-all goal.
+
+    The extra visual-row count is not promoted to application text or a real
+    newline.  It is only a conservative backspace unit for clearing the same
+    focused field; an automatic soft wrap therefore cannot become content.
+    """
+
+    cues = trusted_input.get("visible_editable_cues")
+    if (
+        keyboard_input_mode != "direct_latin"
+        or trusted_input.get("text") != ""
+        or trusted_preedits
+        or not isinstance(cues, list)
+    ):
+        return "", 0
+    decorative = {
+        "border",
+        "caret",
+        "cursor",
+        "focus border",
+        "focus ring",
+        "outline",
+        "|",
+    }
+    literals = tuple(
+        item
+        for item in cues
+        if isinstance(item, str)
+        and item.strip()
+        and item.strip().casefold() not in decorative
+        and "caret" not in item.casefold()
+        and "cursor" not in item.casefold()
+        and "光标" not in item
+        and "插入符" not in item
+    )
+    if len(literals) != 1:
+        return "", 0
+    cue = literals[0]
+    if (
+        cue == trusted_input.get("placeholder")
+        or cue in trusted_input.get("field_labels", ())
+        or "\r" in cue
+        or "\n" in cue
+    ):
+        return "", 0
+    caret_line_index = trusted_input.get("caret_line_index")
+    extra_rows = (
+        caret_line_index
+        if isinstance(caret_line_index, int)
+        and not isinstance(caret_line_index, bool)
+        and caret_line_index > 0
+        else 0
+    )
+    return cue, extra_rows
+
+
+def _locally_detect_caret_visual_row(
+    trusted_input: dict[str, Any],
+    *,
+    frames: tuple[Image.Image, ...] | None,
+    qwerty_anchors: dict[str, list[int]] | None,
+    allow_goal_bound_local_detection: bool = False,
+) -> int | None:
+    """Locate a caret row with local calibrated pixels.
+
+    A literal model caret cue normally gates the search.  An explicit clear or
+    newline-structure goal may instead request the same bounded local search,
+    because dropping visible pixels merely when the model omits the cue would
+    make the exact structure unverifiable.  Local code searches only the field
+    band above audited QWERTY rows, rejects edge borders, finds a thin vertical
+    run longer than ordinary glyph strokes, and compares its center with the
+    remaining text-row bands.
+    """
+
+    cues = trusted_input.get("visible_editable_cues")
+    model_attests_caret = isinstance(cues, list) and any(
+        isinstance(cue, str)
+        and (
+            cue.strip() == "|"
+            or "caret" in cue.casefold()
+            or "cursor" in cue.casefold()
+            or "光标" in cue
+            or "插入符" in cue
+        )
+        for cue in cues
+    )
+    if not model_attests_caret and not allow_goal_bound_local_detection:
+        return None
+    if (
+        not frames
+        or not isinstance(qwerty_anchors, dict)
+        or not all(key in qwerty_anchors for key in ("q", "p", "a", "l"))
+    ):
+        return None
+    input_bounds = trusted_input.get("input_bounds")
+    if not _valid_1000_bounds(input_bounds):
+        return None
+    q_points = (qwerty_anchors["q"], qwerty_anchors["p"])
+    if any(
+        not isinstance(point, list)
+        or len(point) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in point
+        )
+        for point in q_points
+    ):
+        return None
+    q_row_y = sum(float(point[1]) for point in q_points) / len(q_points)
+    left = max(0.0, float(input_bounds[0]))
+    right = min(1000.0, float(input_bounds[2]))
+    top = max(0.0, q_row_y - 240.0)
+    bottom = min(1000.0, q_row_y - 80.0)
+    if right - left < 120 or bottom - top < 80:
+        return None
+
+    detected_rows: list[int] = []
+    for source in frames:
+        if not isinstance(source, Image.Image) or source.width < 100 or source.height < 100:
+            continue
+        box = (
+            round(left * source.width / 1000.0),
+            round(top * source.height / 1000.0),
+            round(right * source.width / 1000.0),
+            round(bottom * source.height / 1000.0),
+        )
+        crop = source.convert("RGB").crop(box)
+        width, height = crop.size
+        if width < 40 or height < 40:
+            continue
+        pixels = crop.load()
+        channel_values = [
+            sorted(
+                pixels[x, y][channel]
+                for x in range(width)
+                for y in range(height)
+            )
+            for channel in range(3)
+        ]
+        midpoint = width * height // 2
+        background = tuple(values[midpoint] for values in channel_values)
+
+        def foreground(x: int, y: int) -> bool:
+            pixel = pixels[x, y]
+            return bool(
+                max(abs(pixel[index] - background[index]) for index in range(3))
+                > 45
+                or max(pixel) - min(pixel) > 55
+            )
+
+        candidates: list[tuple[int, int, int, int]] = []
+        for x in range(round(width * 0.05), round(width * 0.95)):
+            run_start: int | None = None
+            previous: int | None = None
+            for y in range(height):
+                if not foreground(x, y):
+                    continue
+                if run_start is None or previous is None or y - previous > 2:
+                    if run_start is not None and previous is not None:
+                        candidates.append((previous - run_start + 1, x, run_start, previous))
+                    run_start = y
+                previous = y
+            if run_start is not None and previous is not None:
+                candidates.append((previous - run_start + 1, x, run_start, previous))
+        if not candidates:
+            continue
+        run_length, caret_x, caret_top, caret_bottom = max(candidates)
+        if run_length < max(18, round(height * 0.14)):
+            continue
+        near_columns = {
+            x
+            for length, x, start, end in candidates
+            if abs(x - caret_x) <= 4
+            and length >= 0.70 * run_length
+            and abs(start - caret_top) <= 5
+            and abs(end - caret_bottom) <= 5
+        }
+        if not 1 <= len(near_columns) <= 6:
+            continue
+
+        row_counts: list[int] = []
+        for y in range(height):
+            row_counts.append(
+                sum(
+                    foreground(x, y)
+                    for x in range(width)
+                    if abs(x - caret_x) > 5
+                )
+            )
+        bands: list[tuple[int, int]] = []
+        start: int | None = None
+        previous: int | None = None
+        for y, count in enumerate(row_counts):
+            if count < 4:
+                continue
+            if start is None or previous is None or y - previous > 2:
+                if start is not None and previous is not None:
+                    bands.append((start, previous))
+                start = y
+            previous = y
+        if start is not None and previous is not None:
+            bands.append((start, previous))
+        text_bands = [
+            band
+            for band in bands
+            if band[0] > 3
+            and band[1] < height - 4
+            and band[1] - band[0] + 1 >= 4
+        ]
+        if not text_bands:
+            continue
+        caret_center = (caret_top + caret_bottom) / 2.0
+        line_index: int | None = None
+        for index, (band_top, band_bottom) in enumerate(text_bands):
+            band_height = band_bottom - band_top + 1
+            if band_top - 0.35 * band_height <= caret_center <= band_bottom + 0.35 * band_height:
+                line_index = index
+                break
+            if caret_center < band_top:
+                line_index = max(0, index - 1)
+                break
+        if line_index is None and caret_center > text_bands[-1][1]:
+            line_index = len(text_bands)
+        if line_index is not None and 0 <= line_index <= 30:
+            detected_rows.append(line_index)
+
+    if not detected_rows:
+        return None
+    counts = {row: detected_rows.count(row) for row in set(detected_rows)}
+    best_row, best_count = max(counts.items(), key=lambda item: item[1])
+    if len(detected_rows) > 1 and best_count < 2:
+        return None
+    return best_row
+
+
 def _unique_clearable_ime_preedit(
     trusted_input: dict[str, Any],
     trusted_preedits: list[dict[str, Any]],
@@ -6611,6 +6964,11 @@ def _apply_input_structure_audit(
             raise UISceneError("输入结构审计 keyboard.input_mode 无效。")
         if keyboard_case_mode not in {"lower", "upper", "unknown"}:
             raise UISceneError("输入结构审计 keyboard.case_mode 无效。")
+        raw_audited_qwerty_anchors = (
+            keyboard.get("qwerty_anchors")
+            if isinstance(keyboard.get("qwerty_anchors"), dict)
+            else None
+        )
         locally_snapped_qwerty_anchors: dict[str, list[int]] | None = None
         if (
             keyboard_visible is True
@@ -6764,6 +7122,7 @@ def _apply_input_structure_audit(
             if not isinstance(raw_candidates, list) or len(raw_candidates) > 8:
                 raise UISceneError("IME候选必须是最多8项的数组。")
             candidates: list[dict[str, Any]] = []
+            candidate_locations: list[tuple[str, float, float]] = []
             for candidate in raw_candidates:
                 if not isinstance(candidate, dict) or set(candidate) != {
                     "text", "bounds", "confidence", "fully_visible"
@@ -6783,11 +7142,63 @@ def _apply_input_structure_audit(
                     candidate_bounds[1] - bounds[3],
                     bounds[1] - candidate_bounds[3],
                 )
+                adjacent_to_preedit = bool(
+                    _bounds_inside(candidate_bounds, bounds, tolerance=12)
+                    or candidate_vertical_gap <= 120
+                )
+                keyboard_candidate_strip = False
+                candidate_anchors = (
+                    locally_snapped_qwerty_anchors
+                    or raw_audited_qwerty_anchors
+                )
                 if (
-                    not _bounds_inside(candidate_bounds, bounds, tolerance=12)
-                    and candidate_vertical_gap > 120
+                    not adjacent_to_preedit
+                    and keyboard_visible
+                    and keyboard_layout == "qwerty"
+                    and application_keyboard_bounds is not None
+                    and isinstance(candidate_anchors, dict)
                 ):
+                    try:
+                        qwerty_top_row_y = statistics.mean(
+                            (
+                                float(candidate_anchors["q"][1]),
+                                float(candidate_anchors["p"][1]),
+                            )
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        qwerty_top_row_y = math.nan
+                    candidate_height = candidate_bounds[3] - candidate_bounds[1]
+                    keyboard_candidate_strip = bool(
+                        math.isfinite(qwerty_top_row_y)
+                        and 15 <= candidate_height <= 100
+                        and _bounds_inside(
+                            candidate_bounds,
+                            application_keyboard_bounds,
+                            tolerance=12,
+                        )
+                        and candidate_bounds[3] <= qwerty_top_row_y - 8
+                        and candidate_bounds[1]
+                        <= application_keyboard_bounds[1]
+                        + min(
+                            180.0,
+                            0.35
+                            * (
+                                application_keyboard_bounds[3]
+                                - application_keyboard_bounds[1]
+                            ),
+                        )
+                    )
+                if not adjacent_to_preedit and not keyboard_candidate_strip:
                     raise UISceneError("IME候选必须位于对应预编辑区内或紧邻候选行。")
+                candidate_locations.append(
+                    (
+                        "keyboard_strip"
+                        if keyboard_candidate_strip
+                        else "preedit_adjacent",
+                        (candidate_bounds[1] + candidate_bounds[3]) / 2.0,
+                        candidate_bounds[3] - candidate_bounds[1],
+                    )
+                )
                 # Candidate text is optional action authority.  A model may
                 # enumerate a visible but irrelevant long preedit string here.
                 # After its schema and geometry are validated, discard that
@@ -6803,6 +7214,17 @@ def _apply_input_structure_audit(
                             "confidence": candidate_confidence,
                         }
                     )
+            location_kinds = {item[0] for item in candidate_locations}
+            if len(location_kinds) > 1:
+                raise UISceneError("IME候选不能分散在预编辑附近和键盘候选栏。")
+            if location_kinds == {"keyboard_strip"} and candidate_locations:
+                centers = [item[1] for item in candidate_locations]
+                heights = [item[2] for item in candidate_locations]
+                if max(centers) - min(centers) > max(
+                    24.0,
+                    0.75 * statistics.median(heights),
+                ):
+                    raise UISceneError("键盘顶部IME候选必须位于同一水平候选行。")
             if confidence >= 0.9:
                 trusted_preedits.append(
                     {
@@ -6848,6 +7270,7 @@ def _apply_input_structure_audit(
                 "text",
                 "placeholder",
                 "visible_editable_cues",
+                "caret_line_index",
                 "confidence",
                 "right_button",
             }
@@ -6881,6 +7304,18 @@ def _apply_input_structure_audit(
             ):
                 raise UISceneError("visible_editable_cues 必须是最多4项的字符串数组。")
             cues = [value.strip()[:120] for value in cues if value.strip()]
+            caret_line_index = item.get("caret_line_index")
+            if (
+                caret_line_index is not None
+                and (
+                    isinstance(caret_line_index, bool)
+                    or not isinstance(caret_line_index, int)
+                    or not 0 <= caret_line_index <= 30
+                )
+            ):
+                raise UISceneError(
+                    "caret_line_index 必须是0..30整数或 null。"
+                )
             raw_field_labels = item.get("field_labels", [])
             if (
                 not isinstance(raw_field_labels, list)
@@ -6995,6 +7430,7 @@ def _apply_input_structure_audit(
                     "text": text,
                     "placeholder": placeholder,
                     "visible_editable_cues": cues,
+                    "caret_line_index": caret_line_index,
                     "field_labels": field_labels,
                     "input_bounds": input_bounds,
                     "right_button": button_match,
@@ -7025,14 +7461,6 @@ def _apply_input_structure_audit(
         predecessor_field_id, predecessor_field_label, predecessor_text = (
             _goal_active_input_predecessor_field(goal_context)
         )
-        predecessor_audit_matches = [
-            item for item in matches
-            if item["text"] == predecessor_text
-            and sum(
-                label.casefold() == predecessor_field_label.casefold()
-                for label in item["field_labels"]
-            ) == 1
-        ] if predecessor_field_id else []
         predecessor_scene_matches = [
             element for element in scene.elements
             if element.role == "input"
@@ -7043,13 +7471,102 @@ def _apply_input_structure_audit(
             and element.states.get("input_field_id") == predecessor_field_id
             and element.states.get("input_field_label") == predecessor_field_label
         ]
+        predecessor_audit_matches = [
+            item for item in matches
+            if sum(
+                label.casefold() == predecessor_field_label.casefold()
+                for label in item["field_labels"]
+            ) == 1
+            and (
+                item["text"] == predecessor_text
+                or (
+                    len(predecessor_scene_matches) == 1
+                    and _same_frame_exact_committed_cue(
+                        item,
+                        trusted_preedits,
+                        predecessor_text,
+                    )
+                )
+            )
+        ] if predecessor_field_id else []
+        # The bridge-owned typed field identity and the fresh dedicated audit
+        # are the authority for this predecessor.  The preliminary coarse
+        # scene may legitimately omit a committed field once the keyboard
+        # covers it, so it must not receive a second veto here.  This still
+        # grants no geometry authority to typed data: the next-field key must
+        # independently pass the dedicated audit below.  A unique typed coarse
+        # match is used only as positive corroboration for the already bounded
+        # same-frame cue-slot normalization above; it is never required when
+        # the dedicated audit put the exact value in its proper text field.
         predecessor_input = (
-            predecessor_audit_matches[0]
+            dict(predecessor_audit_matches[0])
             if len(predecessor_audit_matches) == 1
-            and len(predecessor_scene_matches) == 1
             else None
         )
+        if predecessor_input is not None and not predecessor_input["text"]:
+            predecessor_input["same_frame_visible_cue_text"] = predecessor_text
+            predecessor_input["text"] = predecessor_text
         active_transaction_text = _goal_active_input_transaction_text(goal_context)
+        if (
+            trusted_input is not None
+            and trusted_input.get("caret_line_index") is None
+        ):
+            local_caret_line_index = _locally_detect_caret_visual_row(
+                trusted_input,
+                frames=(
+                    tuple(qwerty_row_frames)
+                    if qwerty_row_frames is not None
+                    else None
+                ),
+                # Raw audited anchors may define only the pixel-search band.
+                # They never become action geometry unless the independent
+                # multi-frame row snap above also succeeds.
+                qwerty_anchors=(
+                    locally_snapped_qwerty_anchors
+                    or raw_audited_qwerty_anchors
+                ),
+                allow_goal_bound_local_detection=bool(
+                    active_clear_goal
+                    or (
+                        isinstance(active_transaction_text, str)
+                        and "\n" in active_transaction_text
+                    )
+                ),
+            )
+            if local_caret_line_index is not None:
+                trusted_input = dict(trusted_input)
+                trusted_input["caret_line_index"] = local_caret_line_index
+                trusted_input["local_caret_line_index"] = local_caret_line_index
+        if (
+            trusted_input is not None
+            and active_clear_goal
+            and not trusted_input["text"]
+        ):
+            clear_cue, extra_clear_units = _clear_goal_unique_committed_cue(
+                trusted_input,
+                trusted_preedits,
+                keyboard_input_mode=keyboard_input_mode,
+            )
+            if clear_cue:
+                trusted_input = dict(trusted_input)
+                trusted_input["clear_goal_visible_cue_text"] = clear_cue
+                trusted_input["clear_extra_delete_units"] = extra_clear_units
+                trusted_input["text"] = clear_cue
+        if (
+            trusted_input is not None
+            and active_clear_goal
+            and isinstance(trusted_input.get("text"), str)
+            and trusted_input["text"]
+            and isinstance(trusted_input.get("caret_line_index"), int)
+        ):
+            extra_clear_units = max(
+                0,
+                trusted_input["caret_line_index"]
+                - trusted_input["text"].count("\n"),
+            )
+            if extra_clear_units > 0:
+                trusted_input = dict(trusted_input)
+                trusted_input["clear_extra_delete_units"] = extra_clear_units
         if (
             trusted_input is not None
             and active_field_id
@@ -7109,6 +7626,23 @@ def _apply_input_structure_audit(
                 trusted_input = dict(trusted_input)
                 trusted_input["same_frame_visible_cue_text"] = coarse_input_value
                 trusted_input["text"] = coarse_input_value
+        if (
+            trusted_input is not None
+            and not trusted_input["text"]
+            and verified_input_lineage is None
+        ):
+            authorized_prefix_cue = _authorized_exact_committed_prefix_cue(
+                trusted_input,
+                trusted_preedits,
+                goal_context=goal_context,
+                keyboard_input_mode=keyboard_input_mode,
+            )
+            if authorized_prefix_cue:
+                trusted_input = dict(trusted_input)
+                trusted_input["authorized_prefix_visible_cue_text"] = (
+                    authorized_prefix_cue
+                )
+                trusted_input["text"] = authorized_prefix_cue
         if trusted_input is not None and verified_input_lineage is not None:
             raw_lineage_text = trusted_input["text"]
             lineage_bounds = tuple(
@@ -7128,13 +7662,28 @@ def _apply_input_structure_audit(
                     *lineage_visible_cues,
                     verified_input_lineage.exact_value,
                 )
-            if verified_input_lineage.matches_pending_input_state_cue(
+            if verified_input_lineage.matches_trailing_newline_cue(
+                device_id=str(device_id or ""),
+                app_id=scene.app_id,
+                screen_id=scene.screen_id,
+                raw_value=raw_lineage_text,
+                visible_editable_cues=lineage_visible_cues,
+                caret_line_index=trusted_input.get("caret_line_index"),
+                input_bounds=lineage_bounds,
+                input_field_id=active_field_id,
+                current_frame=lineage_frame,
+            ):
+                trusted_input = dict(trusted_input)
+                trusted_input["verified_trailing_newline"] = True
+                trusted_input["text"] = verified_input_lineage.exact_value
+            elif verified_input_lineage.matches_pending_input_state_cue(
                 device_id=str(device_id or ""),
                 app_id=scene.app_id,
                 screen_id=scene.screen_id,
                 raw_value=raw_lineage_text,
                 visible_editable_cues=lineage_visible_cues,
                 input_bounds=lineage_bounds,
+                input_field_id=active_field_id,
             ):
                 trusted_input = dict(trusted_input)
                 trusted_input["lineage_visible_cue_text"] = (
@@ -7576,6 +8125,21 @@ def _apply_input_structure_audit(
                     states["input_multiline"] = active_multiline
             if rendered_field_label:
                 states["input_field_label"] = rendered_field_label
+            if rendered_input.get("verified_trailing_newline") is True:
+                states["verified_trailing_newline"] = True
+            if isinstance(rendered_input.get("local_caret_line_index"), int):
+                states["local_caret_line_index"] = rendered_input[
+                    "local_caret_line_index"
+                ]
+            clear_extra_delete_units = rendered_input.get(
+                "clear_extra_delete_units"
+            )
+            if (
+                isinstance(clear_extra_delete_units, int)
+                and not isinstance(clear_extra_delete_units, bool)
+                and clear_extra_delete_units > 0
+            ):
+                states["clear_extra_delete_units"] = clear_extra_delete_units
             if not keyboard_visible:
                 # Absence is useful task evidence only when the dedicated
                 # full-frame input audit explicitly reports keyboard.visible=false.
@@ -7654,6 +8218,31 @@ def _apply_input_structure_audit(
                     input_evidence.append(
                         "同一帧粗场景与输入结构审计逐字一致："
                         f"{same_frame_visible_cue_text}；非授权 IME 分类已隔离"
+                    )
+                authorized_prefix_visible_cue_text = rendered_input.get(
+                    "authorized_prefix_visible_cue_text"
+                )
+                if isinstance(authorized_prefix_visible_cue_text, str):
+                    input_evidence.append(
+                        "typed字段内唯一可见文字逐字匹配授权payload前缀："
+                        f"{authorized_prefix_visible_cue_text}；同帧无IME预编辑"
+                    )
+                if rendered_input.get("verified_trailing_newline") is True:
+                    input_evidence.append(
+                        "已验证换行动作、同一typed输入框、精确可见前缀与下一行光标一致"
+                    )
+                if isinstance(rendered_input.get("local_caret_line_index"), int):
+                    input_evidence.append(
+                        "模型确认可见光标后，本地校准像素定位光标视觉行："
+                        f"{rendered_input['local_caret_line_index']}"
+                    )
+                clear_goal_visible_cue_text = rendered_input.get(
+                    "clear_goal_visible_cue_text"
+                )
+                if isinstance(clear_goal_visible_cue_text, str):
+                    input_evidence.append(
+                        "清空目标的同帧唯一已提交可见文字："
+                        f"{clear_goal_visible_cue_text}；额外视觉行仅作为保守退格单位"
                     )
             elif rendered_input["placeholder"]:
                 input_evidence.insert(0, f"应用输入框为空，占位提示：{rendered_input['placeholder']}")
@@ -7939,6 +8528,16 @@ def _apply_hidden_keyboard_only_attestation(
             "visible_editable_cues",
             "confidence",
             "right_button",
+        } and set(input_item) != {
+            "structure_id",
+            "bounds",
+            "fully_visible",
+            "text",
+            "placeholder",
+            "visible_editable_cues",
+            "caret_line_index",
+            "confidence",
+            "right_button",
         }:
             raise UISceneError("应用输入结构字段不符合协议。")
         rejected_bounds = input_item.get("bounds")
@@ -7959,6 +8558,7 @@ def _apply_hidden_keyboard_only_attestation(
             or not cues
             or len(cues) > 4
             or any(not isinstance(part, str) or not part.strip() for part in cues)
+            or input_item.get("caret_line_index") is not None
             or _audit_confidence(input_item.get("confidence"), "应用输入结构") < 0.9
             or (
                 right_button is not None
@@ -8288,7 +8888,7 @@ def _locally_snapped_keyboard_enter_key(
     anchors: dict[str, list[int]],
     keyboard_bounds: tuple[float, float, float, float] | None,
 ) -> dict[str, Any] | None:
-    """Bind an audited Enter semantic to stable local QWERTY row geometry.
+    """Bind an audited Enter/Next semantic to stable local QWERTY geometry.
 
     Qwen remains responsible for identifying the visible key and its current
     newline semantic.  Its rectangle is not execution authority once local OCR
@@ -8304,13 +8904,25 @@ def _locally_snapped_keyboard_enter_key(
         "key_action",
     }:
         return None
-    if value.get("fully_visible") is not True or value.get("key_action") != "newline":
+    key_action = value.get("key_action")
+    if value.get("fully_visible") is not True or key_action not in {
+        "newline",
+        "next",
+    }:
         return None
     label = str(value.get("label") or "").strip()
     normalized_label = re.sub(r"\s+", "", label).casefold()
-    if not normalized_label or not (
+    newline_label = bool(
         any(glyph in label for glyph in ("↵", "⏎", "⤶", "⮐"))
         or normalized_label in {"enter", "return", "回车", "换行"}
+    )
+    next_label = bool(
+        any(glyph in label for glyph in ("→", "↦", "➡", "⏭"))
+        or normalized_label in {"next", "下一步", "下一个", "下一项"}
+    )
+    if not normalized_label or not (
+        (key_action == "newline" and newline_label)
+        or (key_action == "next" and next_label)
     ):
         return None
     confidence = _audit_confidence(value.get("confidence"), "enter_key")
@@ -8381,7 +8993,7 @@ def _locally_snapped_keyboard_enter_key(
         "label": label,
         "bounds": [round(part) for part in snapped_bounds],
         "confidence": confidence,
-        "key_action": "newline",
+        "key_action": key_action,
     }
 
 

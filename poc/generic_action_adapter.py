@@ -28,6 +28,7 @@ from input_value_lineage import (
     build_pending_ime_candidate_lineage,
     build_pending_input_state_lineage,
     build_pending_literal_lineage,
+    build_pending_newline_lineage,
     build_pending_text_lineage,
 )
 from ocr_runtime import recognize as recognize_ocr
@@ -1218,7 +1219,7 @@ class GenericSingleActionAdapter:
         observer: GenericSceneObserver,
         robot: Any,
         controller: UniversalActionController | None = None,
-        frame_interval: float = 0.5,
+        frame_interval: float = 0.37,
         post_action_settle: float = 1.5,
         post_action_timeout: float | None = None,
         post_action_continuous_timeout: float | None = None,
@@ -2610,7 +2611,7 @@ class GenericSingleActionAdapter:
         pending_input_lineage: TypedInputLineage | None = None
         if hardware_receipt is not None:
             try:
-                pending_input_lineage = build_pending_literal_lineage(
+                pending_input_lineage = build_pending_newline_lineage(
                     device_id=self.device_id,
                     resolved_action=resolved.to_dict(),
                     before_scene=before.to_dict(),
@@ -2618,7 +2619,7 @@ class GenericSingleActionAdapter:
                 )
             except (InputValueLineageError, TypeError, ValueError):
                 try:
-                    pending_input_lineage = build_pending_ime_candidate_lineage(
+                    pending_input_lineage = build_pending_literal_lineage(
                         device_id=self.device_id,
                         resolved_action=resolved.to_dict(),
                         before_scene=before.to_dict(),
@@ -2626,14 +2627,22 @@ class GenericSingleActionAdapter:
                     )
                 except (InputValueLineageError, TypeError, ValueError):
                     try:
-                        pending_input_lineage = build_pending_input_state_lineage(
+                        pending_input_lineage = build_pending_ime_candidate_lineage(
                             device_id=self.device_id,
                             resolved_action=resolved.to_dict(),
                             before_scene=before.to_dict(),
                             hardware_receipt=hardware_receipt,
                         )
                     except (InputValueLineageError, TypeError, ValueError):
-                        pending_input_lineage = None
+                        try:
+                            pending_input_lineage = build_pending_input_state_lineage(
+                                device_id=self.device_id,
+                                resolved_action=resolved.to_dict(),
+                                before_scene=before.to_dict(),
+                                hardware_receipt=hardware_receipt,
+                            )
+                        except (InputValueLineageError, TypeError, ValueError):
+                            pending_input_lineage = None
         elif resolved.kind == "input_verified_text":
             try:
                 pending_input_lineage = build_pending_text_lineage(
@@ -2702,6 +2711,15 @@ class GenericSingleActionAdapter:
                     )
                 elif resolved.kind == "clear_verified_text":
                     self.input_lineage_store.discard(self.device_id)
+                elif resolved.kind == "press_enter" and hardware_receipt is not None:
+                    self.input_lineage_store.record_verified_newline_action(
+                        device_id=self.device_id,
+                        resolved_action=resolved.to_dict(),
+                        before_scene=before.to_dict(),
+                        after_scene=after.to_dict(),
+                        hardware_receipt=hardware_receipt,
+                        after_frames=after_frames,
+                    )
                 elif hardware_receipt is not None:
                     self.input_lineage_store.record_verified_literal_action(
                         device_id=self.device_id,

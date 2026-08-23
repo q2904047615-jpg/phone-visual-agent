@@ -21,6 +21,7 @@ from input_value_lineage import (
     build_pending_ime_candidate_lineage,
     build_pending_input_state_lineage,
     build_pending_literal_lineage,
+    build_pending_newline_lineage,
     build_pending_text_lineage,
 )
 from ui_scene import UIScene
@@ -168,6 +169,65 @@ def receipt() -> dict:
         "round_trip_position_confirmed": True,
         "mechanical_contact_ack": False,
     }
+
+
+def newline_case() -> tuple[dict, dict, dict]:
+    prior = "first"
+    expected = "first\n"
+    before = scene(prior, "newline-before")
+    before_input = before["elements"][0]
+    before_input["states"].update(
+        {"input_field_id": "input_field_1", "input_multiline": True}
+    )
+    before["elements"].append(
+        {
+            "element_id": "enter-1",
+            "role": "button",
+            "meaning": "input_exact_enter_key",
+            "bounds": [0.82, 0.89, 0.94, 0.96],
+            "confidence": 1.0,
+            "label": "↵",
+            "states": {
+                "goal_relevant": True,
+                "fully_visible": True,
+                "input_enter_key": True,
+                "key_action": "newline",
+                "key_value": "\n",
+                "prior_input_value": prior,
+                "expected_input_value": expected,
+                "input_element_id": "input-1",
+                "input_field_id": "input_field_1",
+            },
+            "evidence": ["唯一完整可见换行键"],
+        }
+    )
+    action = {
+        **resolved(),
+        "kind": "press_enter",
+        "prior_input_value": prior,
+        "expected_input_value": expected,
+        "target_element_id": "enter-1",
+        "before_fingerprint": "newline-before",
+        "expected_effect": {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": expected},
+            }
+        },
+    }
+    after = scene(expected, "newline-after")
+    after_input = after["elements"][0]
+    after_input["states"].update(
+        {
+            "input_field_id": "input_field_1",
+            "input_multiline": True,
+            "verified_trailing_newline": True,
+        }
+    )
+    after_input["evidence"].append(
+        "已验证换行动作、同一typed输入框、精确可见前缀与下一行光标一致"
+    )
+    return action, before, after
 
 
 def state_switch_case(
@@ -337,6 +397,7 @@ def input_audit_raw(value: str, literal: str | None = "x") -> str:
                     "text": value,
                     "placeholder": "",
                     "visible_editable_cues": ["cursor"],
+                    "caret_line_index": None,
                     "confidence": 1.0,
                     "right_button": None,
                 }
@@ -378,6 +439,7 @@ def state_switch_audit_raw(*, cue: str = PRIOR, literal: str = "2") -> str:
                     "text": "",
                     "placeholder": "",
                     "visible_editable_cues": ([] if not cue else [cue]),
+                    "caret_line_index": None,
                     "confidence": 1.0,
                     "right_button": {
                         "label": "发送",
@@ -448,6 +510,7 @@ def ime_commit_audit_raw(*, cue: str = "loopok") -> str:
                     "text": "",
                     "placeholder": "",
                     "visible_editable_cues": ([] if not cue else [cue]),
+                    "caret_line_index": None,
                     "confidence": 1.0,
                     "right_button": None,
                 }
@@ -905,6 +968,26 @@ class TypedInputLineageTests(unittest.TestCase):
                 now_epoch=record.recorded_at_epoch,
             )
         )
+        self.assertTrue(
+            record.matches_pending_input_state_surface(
+                device_id=DEVICE,
+                app_id="sample.app",
+                screen_id="chat_input",
+                input_bounds=(0.14, 0.54, 0.70, 0.61),
+                input_field_id="input_field_1",
+                now_epoch=record.recorded_at_epoch,
+            )
+        )
+        self.assertFalse(
+            record.matches_pending_input_state_surface(
+                device_id=DEVICE,
+                app_id="sample.app",
+                screen_id="chat_input",
+                input_bounds=(0.14, 0.54, 0.70, 0.61),
+                input_field_id="input_field_2",
+                now_epoch=record.recorded_at_epoch,
+            )
+        )
 
         context = {
             "entities": {
@@ -938,6 +1021,46 @@ class TypedInputLineageTests(unittest.TestCase):
         self.assertEqual("input_field_1", field.states["input_field_id"])
         self.assertTrue(
             any("应用输入框当前文字：loopok" in item for item in field.evidence)
+        )
+
+        drifted_before = json.loads(json.dumps(before))
+        drifted_before["screen_id"] = "chat_input"
+        projected_after_screen_name_drift = _apply_input_structure_audit(
+            UIScene.from_dict(drifted_before),
+            ime_commit_audit_raw(),
+            fingerprint="after-ime-candidate-screen-name-drift",
+            goal_context=context,
+            coarse_input_value="",
+            verified_input_lineage=record,
+            device_id=DEVICE,
+            lineage_frame=surface_frame(),
+        )
+        drifted_field = projected_after_screen_name_drift.get_element(
+            "local_audited_input_1"
+        )
+        self.assertEqual("loopok", drifted_field.states["value"])
+        self.assertEqual("input_field_1", drifted_field.states["input_field_id"])
+
+        wrong_field_context = json.loads(json.dumps(context))
+        wrong_field_context["entities"]["active_subgoal_visual_context"][
+            "goal_entities"
+        ]["active_input_field_id"] = "input_field_2"
+        rejected_after_screen_name_drift = _apply_input_structure_audit(
+            UIScene.from_dict(drifted_before),
+            ime_commit_audit_raw(),
+            fingerprint="after-ime-candidate-wrong-field",
+            goal_context=wrong_field_context,
+            coarse_input_value="",
+            verified_input_lineage=record,
+            device_id=DEVICE,
+            lineage_frame=surface_frame(),
+        )
+        self.assertFalse(
+            any(
+                element.meaning == "application_text_input"
+                and element.states.get("value") == "loopok"
+                for element in rejected_after_screen_name_drift.elements
+            )
         )
 
         for cue in ("", "loopo", "loopokx"):
@@ -1285,6 +1408,7 @@ class TypedInputLineageTests(unittest.TestCase):
             app_id="sample.app",
             screen_id="editor",
             input_meaning="application_text_input",
+            input_field_id="input_field_1",
             input_bounds=(0.13, 0.54, 0.69, 0.61),
             before_fingerprint="before-fp",
             after_fingerprint="after-fp",
@@ -1336,6 +1460,7 @@ class TypedInputLineageTests(unittest.TestCase):
             app_id="sample.app",
             screen_id="editor",
             input_meaning="application_text_input",
+            input_field_id="input_field_1",
             input_bounds=(0.13, 0.54, 0.69, 0.61),
             before_fingerprint="before-fp",
             after_fingerprint="after-fp",
@@ -1373,6 +1498,7 @@ class TypedInputLineageTests(unittest.TestCase):
             app_id="sample.app",
             screen_id="editor",
             input_meaning="application_text_input",
+            input_field_id="input_field_1",
             input_bounds=(0.13, 0.54, 0.69, 0.61),
             before_fingerprint="before-fp",
             after_fingerprint="after-fp",
@@ -1421,6 +1547,165 @@ class TypedInputLineageTests(unittest.TestCase):
             "first\n",
             audited.get_element("local_audited_input_1").states["value"],
         )
+
+    def test_pending_newline_requires_same_typed_field_exact_prior_and_next_caret_row(
+        self,
+    ) -> None:
+        action, before, _after = newline_case()
+        pending = build_pending_newline_lineage(
+            device_id=DEVICE,
+            resolved_action=action,
+            before_scene=before,
+            hardware_receipt=receipt(),
+            recorded_at_epoch=1000.0,
+        )
+        matching = {
+            "device_id": DEVICE,
+            "app_id": "sample.app",
+            "screen_id": "editor_input",
+            "raw_value": "",
+            "visible_editable_cues": ("first", "|"),
+            "caret_line_index": 1,
+            "input_bounds": (0.13, 0.56, 0.69, 0.63),
+            "input_field_id": "input_field_1",
+            "now_epoch": 1000.0,
+        }
+        self.assertTrue(pending.matches_trailing_newline_cue(**matching))
+        for changed in (
+            {"caret_line_index": 0},
+            {"input_field_id": "other_field"},
+            {"visible_editable_cues": ("firstx", "|")},
+            {"screen_id": "unrelated", "input_field_id": "other_field"},
+        ):
+            with self.subTest(changed=changed):
+                self.assertFalse(
+                    pending.matches_trailing_newline_cue(
+                        **{**matching, **changed}
+                    )
+                )
+
+    def test_pending_newline_projects_exact_value_into_same_typed_field(self) -> None:
+        action, before, _after = newline_case()
+        pending = build_pending_newline_lineage(
+            device_id=DEVICE,
+            resolved_action=action,
+            before_scene=before,
+            hardware_receipt=receipt(),
+            recorded_at_epoch=time.time(),
+        )
+        audit = {
+            "protocol_version": INPUT_STRUCTURE_AUDIT_VERSION,
+            "application_inputs": [
+                {
+                    "structure_id": "app-input-1",
+                    "bounds": [130, 560, 690, 630],
+                    "fully_visible": True,
+                    "text": "",
+                    "placeholder": "",
+                    "visible_editable_cues": ["first", "|"],
+                    "caret_line_index": 1,
+                    "confidence": 1.0,
+                    "right_button": None,
+                }
+            ],
+            "ime_preedit_regions": [],
+            "keyboard": {
+                "visible": True,
+                "bounds": [0, 700, 1000, 1000],
+                "layout": "symbol",
+                "input_mode": "direct_latin",
+                "mode_switch": None,
+            },
+        }
+        goal = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_exact_text",
+                    "objective": "输入精确文字",
+                    "constraints": [],
+                    "completion_conditions": [],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "input_text": "first\n",
+                        "active_input_transaction_text": "first\n",
+                        "active_input_field_id": "input_field_1",
+                        "active_input_multiline": True,
+                    },
+                }
+            }
+        }
+        base = UIScene.from_dict(scene("", "newline-current", screen_id="editor_input"))
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="newline-current",
+            goal_context=goal,
+            verified_input_lineage=pending,
+            device_id=DEVICE,
+            lineage_frame=surface_frame(variation=1),
+        )
+        input_element = projected.get_element("local_audited_input_1")
+        self.assertEqual("first\n", input_element.states["value"])
+        self.assertIs(input_element.states["verified_trailing_newline"], True)
+        self.assertTrue(
+            any("已验证换行动作" in item for item in input_element.evidence)
+        )
+
+        audit["application_inputs"][0]["caret_line_index"] = 0
+        rejected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="newline-current",
+            goal_context=goal,
+            verified_input_lineage=pending,
+            device_id=DEVICE,
+            lineage_frame=surface_frame(variation=1),
+        )
+        self.assertEqual(
+            "",
+            rejected.get_element("local_audited_input_1").states["value"],
+        )
+
+    def test_verified_newline_persists_only_after_exact_post_action_proof(self) -> None:
+        action, before, after = newline_case()
+        with tempfile.TemporaryDirectory() as temp:
+            store = TypedInputLineageStore(Path(temp), clock=lambda: 1000.0)
+            record = store.record_verified_newline_action(
+                device_id=DEVICE,
+                resolved_action=action,
+                before_scene=before,
+                after_scene=after,
+                hardware_receipt=receipt(),
+                after_frames=surface_frames(),
+            )
+            self.assertEqual("first\n", record.exact_value)
+            self.assertTrue(
+                record.matches_trailing_newline_cue(
+                    device_id=DEVICE,
+                    app_id="sample.app",
+                    screen_id="editor_input",
+                    raw_value="",
+                    visible_editable_cues=("first", "|"),
+                    caret_line_index=1,
+                    input_bounds=(0.13, 0.54, 0.69, 0.61),
+                    input_field_id="input_field_1",
+                    current_frame=surface_frame(variation=1),
+                    now_epoch=1000.0,
+                )
+            )
+            broken_after = json.loads(json.dumps(after))
+            broken_after["elements"][0]["states"].pop(
+                "verified_trailing_newline"
+            )
+            with self.assertRaises(InputValueLineageError):
+                store.record_verified_newline_action(
+                    device_id=DEVICE,
+                    resolved_action=action,
+                    before_scene=before,
+                    after_scene=broken_after,
+                    hardware_receipt=receipt(),
+                    after_frames=surface_frames(),
+                )
 
 
 if __name__ == "__main__":

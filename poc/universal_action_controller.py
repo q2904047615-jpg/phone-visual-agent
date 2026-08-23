@@ -587,11 +587,19 @@ class UniversalActionController:
                 raise UniversalActionError("清空文字要求当前画面提供精确 states.value。")
             if not isinstance(observed_preedit, str):
                 raise UniversalActionError("清空文字的输入法预编辑状态格式无效。")
+            extra_delete_units = element.states.get("clear_extra_delete_units", 0)
+            if (
+                isinstance(extra_delete_units, bool)
+                or not isinstance(extra_delete_units, int)
+                or not 0 <= extra_delete_units <= 30
+            ):
+                raise UniversalActionError("清空文字的额外视觉行退格单位无效。")
             if not observed_value and not observed_preedit:
                 raise UniversalActionError("清空文字要求应用值或输入法预编辑至少一项非空。")
             delete_count = (
                 editable_character_count(observed_value)
                 + editable_character_count(observed_preedit)
+                + extra_delete_units
             )
             if not 1 <= delete_count <= 100:
                 raise UniversalActionError("清空文字的已验证字符数必须在1～100之间。")
@@ -1046,7 +1054,21 @@ class UniversalActionController:
                     and float(element.confidence) >= self.min_confidence
                     and all(element.states.get(key) == value for key, value in states.items())
                 )
-                if len(input_aliases) != 1:
+                provisional_direct_preedits = tuple(
+                    element
+                    for element in after.elements
+                    if resolved.kind == "input_verified_text"
+                    and resolved.input_method == "direct_latin"
+                    and before_target_is_input
+                    and element.role == "input"
+                    and float(element.confidence) >= self.min_confidence
+                    and self._is_exact_direct_latin_preedit_transition(
+                        resolved,
+                        after,
+                        element,
+                    )
+                )
+                if len(input_aliases) != 1 and len(provisional_direct_preedits) != 1:
                     raise UniversalActionError(
                         f"动作结果缺少元素状态证据：{exc}"
                     ) from exc
@@ -1600,6 +1622,26 @@ class UniversalActionController:
                 raise UniversalActionError("动作后缺少逐字一致的拼音组合证据。")
             if states.get("ime_exact_candidate_text") != resolved.input_fragment:
                 raise UniversalActionError("动作后缺少唯一逐字一致的中文候选。")
+        elif (
+            resolved.kind == "input_verified_text"
+            and resolved.input_method == "direct_latin"
+            and actual != expected
+        ):
+            # Some system keyboards keep an exact Latin key sequence in an
+            # IME composition buffer until its visible identical candidate is
+            # selected.  This is verified progress, not a committed App value.
+            # Admit it only when the same typed field remains empty at the
+            # prior value and one locally audited candidate proves the exact
+            # fragment and resulting value.  The next physical action must
+            # still select that candidate and verify the committed App value.
+            if not self._is_exact_direct_latin_preedit_transition(
+                resolved,
+                after,
+                candidates[0],
+            ):
+                raise UniversalActionError(
+                    f"动作后输入框文字不匹配：实际 {actual!r}，预期 {expected!r}。"
+                )
         elif actual != expected:
             raise UniversalActionError(
                 f"动作后输入框文字不匹配：实际 {actual!r}，预期 {expected!r}。"
@@ -1620,6 +1662,43 @@ class UniversalActionController:
             after_input,
         ):
             raise UniversalActionError("输入动作后 App 或页面身份发生变化。")
+
+    def _is_exact_direct_latin_preedit_transition(
+        self,
+        resolved: ResolvedSemanticAction,
+        after: UIScene,
+        after_input: UIElement,
+    ) -> bool:
+        expected = resolved.expected_input_value
+        fragment = resolved.input_fragment
+        prior = resolved.prior_input_value
+        states = after_input.states
+        exact_candidates = tuple(
+            element
+            for element in after.elements
+            if element.meaning == "ime_exact_candidate"
+            and element.label == fragment
+            and float(element.confidence) >= self.min_confidence
+            and element.states.get("goal_relevant") is True
+            and element.states.get("fully_visible") is True
+            and element.states.get("ime_candidate") is True
+            and element.states.get("input_element_id") == after_input.element_id
+            and element.states.get("prior_input_value") == prior
+            and element.states.get("expected_input_value") == expected
+            and element.states.get("pinyin") == fragment
+        )
+        return bool(
+            resolved.kind == "input_verified_text"
+            and resolved.input_method == "direct_latin"
+            and isinstance(prior, str)
+            and isinstance(fragment, str)
+            and fragment
+            and expected == prior + fragment
+            and states.get("value") == prior
+            and states.get("ime_preedit_text") == fragment
+            and states.get("ime_exact_candidate_text") == fragment
+            and len(exact_candidates) == 1
+        )
 
     @classmethod
     def _input_scene_identity_is_stable(
@@ -1716,10 +1795,24 @@ class UniversalActionController:
             and after_states.get("value") == ""
             and after_states.get("ime_preedit_text") in {None, ""}
         )
+        preedit_start_transition = bool(
+            typed_field_identity
+            and isinstance(before_states.get("value"), str)
+            and after_states.get("value") == before_states.get("value")
+            and before_states.get("ime_preedit_text") in {None, ""}
+            and isinstance(after_states.get("ime_preedit_text"), str)
+            and bool(after_states.get("ime_preedit_text"))
+            and after_states.get("ime_exact_candidate_text")
+            == after_states.get("ime_preedit_text")
+        )
         if (
             before_mode in {None, "unknown"}
             or after_mode in {None, "unknown"}
-            or (before_mode != after_mode and not preedit_clear_transition)
+            or (
+                before_mode != after_mode
+                and not preedit_clear_transition
+                and not preedit_start_transition
+            )
         ):
             return False
         return (

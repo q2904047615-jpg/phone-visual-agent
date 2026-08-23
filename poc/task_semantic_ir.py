@@ -1558,8 +1558,14 @@ def compile_runtime_graph_semantics(
         (
             "clear_verified_text",
             re.compile(
-                r"(?:清空|清除|置空|删除).{0,8}(?:输入框|文本|文字|内容|草稿)|"
-                r"(?:clear|empty).{0,8}(?:input|text|draft)",
+                r"(?:清空|清除|置空|删除)"
+                r"[^，。；;,.!?！？\r\n]*?"
+                r"(?:输入框|文本框|编辑框|输入栏|编辑栏|输入区域|编辑区域|"
+                r"草稿|(?:输入法|IME\s*)?预编辑(?:文本)?)|"
+                r"(?:clear|empty|erase)"
+                r"[^，。；;,.!?！？\r\n]*?"
+                r"(?:input\s+(?:field|box|area)|text\s*(?:field|box|area)|"
+                r"editor|composer|draft|preedit|composition)",
                 re.I,
             ),
         ),
@@ -1577,7 +1583,7 @@ def compile_runtime_graph_semantics(
         (
             "input_verified_text",
             re.compile(
-                r"输入(?!框|法|区域|状态|控件|字段|页面|界面|模式|键盘)|填写|键入|"
+                r"输入(?!框|法|值|区域|状态|控件|字段|页面|界面|模式|键盘)|填写|键入|"
                 r"\btype\b|\binput\b(?!\s*(?:field|box|area|control|state|"
                 r"mode|method|page|screen|keyboard)\b)",
                 re.I,

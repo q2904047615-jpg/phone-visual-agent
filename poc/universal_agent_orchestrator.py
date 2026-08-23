@@ -3728,6 +3728,11 @@ class UniversalAgentOrchestrator:
 
         current = graph.active_subgoal()
         canonical = graph.goal.entities.get("input_text")
+        if not isinstance(canonical, str) or not canonical:
+            canonical = ObservationBridge._active_input_transaction_text(
+                graph,
+                current,
+            )
         resolved = getattr(result, "resolved_action", None)
         before_scene = getattr(result, "before_scene", None)
         after_scene = getattr(result, "after_scene", None)
@@ -3922,6 +3927,42 @@ class UniversalAgentOrchestrator:
                 != input_step.expected_value
             ):
                 return False
+            direct_preedit_inputs = tuple(
+                element
+                for element in after_scene.elements
+                if input_step.kind == "direct_latin"
+                and element.role == "input"
+                and float(element.confidence) >= MIN_TARGET_CONFIDENCE
+                and element.states.get("visible") is not False
+                and element.states.get("focused") is True
+                and element.meaning == expected_meaning
+                and element.states.get("value") == input_step.current_text
+                and element.states.get("ime_preedit_text") == input_step.segment
+                and element.states.get("ime_exact_candidate_text")
+                == input_step.segment
+            )
+            direct_preedit_candidates = tuple(
+                element
+                for element in after_scene.elements
+                if len(direct_preedit_inputs) == 1
+                and element.meaning == "ime_exact_candidate"
+                and element.label == input_step.segment
+                and float(element.confidence) >= MIN_TARGET_CONFIDENCE
+                and element.states.get("goal_relevant") is True
+                and element.states.get("fully_visible") is True
+                and element.states.get("ime_candidate") is True
+                and element.states.get("input_element_id")
+                == direct_preedit_inputs[0].element_id
+                and element.states.get("prior_input_value")
+                == input_step.current_text
+                and element.states.get("expected_input_value")
+                == input_step.expected_value
+                and element.states.get("pinyin") == input_step.segment
+            )
+            direct_preedit_observed = bool(
+                len(direct_preedit_inputs) == 1
+                and len(direct_preedit_candidates) == 1
+            )
             exact_expected_states = (
                 {
                     "value": input_step.current_text,
@@ -3933,7 +3974,18 @@ class UniversalAgentOrchestrator:
             )
             if expected_states != exact_expected_states:
                 return False
+            after_match_states = (
+                {
+                    "value": input_step.current_text,
+                    "ime_preedit_text": input_step.segment,
+                    "ime_exact_candidate_text": input_step.segment,
+                }
+                if direct_preedit_observed
+                else exact_expected_states
+            )
         else:
+            direct_preedit_observed = False
+            after_match_states = expected_states
             states = auxiliary.states
             if states.get("prior_input_value") != prior_value:
                 return False
@@ -3951,8 +4003,14 @@ class UniversalAgentOrchestrator:
                     return False
             elif auxiliary.meaning == "ime_exact_candidate":
                 if (
-                    input_step.kind != "chinese_pinyin"
+                    input_step.kind not in {"chinese_pinyin", "direct_latin"}
                     or auxiliary.label != input_step.segment
+                    or states.get("pinyin")
+                    != (
+                        input_step.pinyin
+                        if input_step.kind == "chinese_pinyin"
+                        else input_step.segment
+                    )
                     or states.get("expected_input_value")
                     != input_step.expected_value
                     or expected_states != {"value": input_step.expected_value}
@@ -4006,7 +4064,7 @@ class UniversalAgentOrchestrator:
             and element.meaning == expected_meaning
             and all(
                 element.states.get(key) == value
-                for key, value in expected_states.items()
+                for key, value in after_match_states.items()
             )
         )
         # Only an unfinished verified prefix remains inside the deterministic
@@ -4017,6 +4075,8 @@ class UniversalAgentOrchestrator:
         # IME candidate carrying an identical literal).
         if len(after_inputs) != 1:
             return False
+        if direct_preedit_observed:
+            return True
         if expected_value == canonical:
             return bool(allow_terminal)
         if UniversalAgentOrchestrator._input_step_reaches_formal_successor(
@@ -4046,11 +4106,45 @@ class UniversalAgentOrchestrator:
             if isinstance(expected_element, Mapping)
             else None
         )
-        return bool(
+        after_scene = getattr(result, "after_scene", None)
+        target_id = str(
+            getattr(resolved, "input_element_id", "")
+            or getattr(resolved, "target_element_id", "")
+            or ""
+        ).strip()
+        before_scene = getattr(result, "before_scene", None)
+        if target_id and before_scene is not None:
+            try:
+                before_target = before_scene.get_element(
+                    target_id,
+                    min_confidence=MIN_TARGET_CONFIDENCE,
+                )
+            except UISceneError:
+                before_target = None
+            if before_target is not None and before_target.role != "input":
+                target_id = str(
+                    before_target.states.get("input_element_id") or ""
+                ).strip()
+        if not (
             isinstance(canonical, str)
             and canonical
             and isinstance(expected_states, Mapping)
             and expected_states.get("value") == canonical
+            and after_scene is not None
+            and target_id
+        ):
+            return False
+        try:
+            after_input = after_scene.get_element(
+                target_id,
+                min_confidence=MIN_TARGET_CONFIDENCE,
+            )
+        except UISceneError:
+            return False
+        return bool(
+            after_input.role == "input"
+            and after_input.states.get("value") == canonical
+            and after_input.states.get("ime_preedit_text") in {None, ""}
         )
 
     @staticmethod

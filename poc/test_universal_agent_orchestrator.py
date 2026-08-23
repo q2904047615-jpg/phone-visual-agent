@@ -6172,6 +6172,146 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             )
         )
 
+    def test_verified_direct_latin_preedit_continues_to_exact_candidate(self) -> None:
+        base = self._input_graph()
+        graph = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="当前输入框逐字显示 first 且尚未提交",
+                entities={"input_text": "first"},
+            ),
+            raw_user_goal="在当前输入框输入 first，但不要提交",
+        )
+        graph.validate()
+        before = self._input_scene("", fingerprint="latin-preedit-before")
+        after_field = replace(
+            before.elements[0],
+            states={
+                **before.elements[0].states,
+                "keyboard_input_mode": "chinese_pinyin",
+                "ime_preedit_text": "first",
+                "ime_exact_candidate_text": "first",
+            },
+        )
+        candidate = UIElement(
+            element_id="local_audited_ime_candidate_1",
+            role="button",
+            meaning="ime_exact_candidate",
+            label="first",
+            bounds=(0.1, 0.6, 0.25, 0.64),
+            confidence=1.0,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "ime_candidate": True,
+                "input_element_id": "input-1",
+                "prior_input_value": "",
+                "expected_input_value": "first",
+                "pinyin": "first",
+            },
+            evidence=("逐字相同的英文联想候选",),
+        )
+        after = replace(
+            before,
+            fingerprint="latin-preedit-after",
+            elements=(after_field, candidate),
+        )
+        effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": "first"},
+            },
+            "goal_complete_on_success": True,
+        }
+        action = SemanticAction(
+            node_id="latin-preedit-step",
+            action="input_verified_text",
+            params={"text": "first", "expected_effect": effect},
+        )
+        result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=before,
+            after_scene=after,
+            resolved_action=ResolvedSemanticAction(
+                node_id="latin-preedit-step",
+                kind="input_verified_text",
+                text="first",
+                input_fragment="first",
+                input_method="direct_latin",
+                prior_input_value="",
+                expected_input_value="first",
+                target_element_id="input-1",
+                before_fingerprint=before.fingerprint,
+                expected_effect=effect,
+            ),
+        )
+        decision = SimpleNamespace(
+            proposal=GenericStepProposal(status="action", action=action)
+        )
+
+        self.assertTrue(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=decision,
+                result=result,
+                before_observation=SimpleNamespace(fingerprint=before.fingerprint),
+                new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+                allow_terminal=True,
+            )
+        )
+        self.assertFalse(
+            UniversalAgentOrchestrator._input_transaction_reached_canonical(
+                graph,
+                result,
+            )
+        )
+
+        committed = self._input_scene("first", fingerprint="latin-commit-after")
+        candidate_action = SemanticAction(
+            node_id="latin-candidate-step",
+            action="tap_semantic",
+            params={"expected_effect": effect},
+        )
+        candidate_result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=after,
+            after_scene=committed,
+            resolved_action=ResolvedSemanticAction(
+                node_id="latin-candidate-step",
+                kind="tap_semantic",
+                target_element_id=candidate.element_id,
+                before_fingerprint=after.fingerprint,
+                expected_effect=effect,
+            ),
+        )
+        candidate_decision = SimpleNamespace(
+            proposal=GenericStepProposal(
+                status="action",
+                action=candidate_action,
+            )
+        )
+        self.assertTrue(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=candidate_decision,
+                result=candidate_result,
+                before_observation=SimpleNamespace(fingerprint=after.fingerprint),
+                new_observation=SimpleNamespace(fingerprint=committed.fingerprint),
+                allow_terminal=True,
+            )
+        )
+        self.assertTrue(
+            UniversalAgentOrchestrator._input_transaction_reached_canonical(
+                graph,
+                candidate_result,
+            )
+        )
+
     def test_verified_literal_key_keeps_high_level_graph(self) -> None:
         graph = self._input_graph()
         key = UIElement(
@@ -6299,6 +6439,99 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                     fingerprint=final_after.fingerprint
                 ),
             )
+        )
+
+    def test_multifield_direct_latin_preedit_stays_on_active_field_candidate(self) -> None:
+        graph = _multifield_graph(active_subgoal_id="input_subject")
+        before = self._input_scene("", fingerprint="multifield-preedit-before")
+        after_field = replace(
+            before.elements[0],
+            states={
+                **before.elements[0].states,
+                "input_field_id": "subject_field",
+                "input_field_label": "主题",
+                "keyboard_input_mode": "chinese_pinyin",
+                "ime_preedit_text": "first",
+                "ime_exact_candidate_text": "first",
+            },
+        )
+        candidate = UIElement(
+            element_id="local_audited_ime_candidate_1",
+            role="button",
+            meaning="ime_exact_candidate",
+            label="first",
+            bounds=(0.1, 0.6, 0.25, 0.64),
+            confidence=1.0,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "ime_candidate": True,
+                "input_element_id": "input-1",
+                "prior_input_value": "",
+                "expected_input_value": "first",
+                "pinyin": "first",
+            },
+            evidence=("逐字相同的英文联想候选",),
+        )
+        after = replace(
+            before,
+            fingerprint="multifield-preedit-after",
+            elements=(after_field, candidate),
+        )
+        effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": "first"},
+            },
+            "goal_complete_on_success": True,
+        }
+        action = SemanticAction(
+            node_id="multifield-latin-preedit-step",
+            action="input_verified_text",
+            params={"text": "first", "expected_effect": effect},
+        )
+        result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=before,
+            after_scene=after,
+            resolved_action=ResolvedSemanticAction(
+                node_id="multifield-latin-preedit-step",
+                kind="input_verified_text",
+                text="first",
+                input_fragment="first",
+                input_method="direct_latin",
+                prior_input_value="",
+                expected_input_value="first",
+                target_element_id="input-1",
+                before_fingerprint=before.fingerprint,
+                expected_effect=effect,
+            ),
+        )
+
+        self.assertTrue(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=SimpleNamespace(
+                    proposal=GenericStepProposal(status="action", action=action)
+                ),
+                result=result,
+                before_observation=SimpleNamespace(
+                    fingerprint=before.fingerprint
+                ),
+                new_observation=SimpleNamespace(
+                    fingerprint=after.fingerprint
+                ),
+                allow_terminal=True,
+            )
+        )
+        self.assertEqual(
+            "first",
+            ObservationBridge._active_input_transaction_text(
+                graph,
+                graph.active_subgoal(),
+            ),
         )
 
     def test_input_microstep_rejects_wrong_after_value(self) -> None:

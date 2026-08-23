@@ -869,6 +869,114 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(UniversalActionError, "唯一逐字一致的中文候选"):
             controller.verify_after_action(resolved, before, wrong_candidate)
 
+    def test_formal_direct_latin_input_accepts_only_exact_visible_preedit_candidate(self):
+        controller = UniversalActionController()
+        before_states = {
+            "focused": True,
+            "value": "",
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "keyboard_case_mode": "lower",
+            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
+            "input_field_id": "field_primary",
+            "goal_relevant": False,
+        }
+        before = UIScene(
+            app_id="generic_app",
+            screen_id="editor",
+            summary="唯一聚焦英文输入框",
+            elements=(
+                UIElement(
+                    element_id="field",
+                    role="input",
+                    meaning="application_text_input",
+                    label="消息",
+                    bounds=(0.1, 0.1, 0.9, 0.2),
+                    confidence=0.97,
+                    states=before_states,
+                ),
+            ),
+            stable=True,
+            confidence=0.96,
+            fingerprint="before-direct-preedit",
+        )
+        action = SemanticAction(
+            node_id="formal-direct-preedit",
+            action="input_verified_text",
+            params={
+                "element_id": "field",
+                "target": "application_text_input",
+                "role": "input",
+                "label": "消息",
+                "states": before_states,
+                "text": "first",
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "application_text_input",
+                        "states": {"value": "first"},
+                    }
+                },
+                "formal_candidate_id": "candidate.direct-preedit",
+                "formal_report_digest": "e" * 64,
+                "formal_transition": {
+                    "transition_id": "transition.direct-preedit",
+                    "precondition_claim_ids": ["claim.field"],
+                    "expectations": [
+                        {
+                            "subject_ref": "element.field",
+                            "predicate": "element.state.value",
+                            "operator": "equals",
+                            "value": "first",
+                        }
+                    ],
+                    "exploratory": False,
+                },
+            },
+        )
+        resolved = controller.resolve_one(action, before, confirmed=True)
+        field = replace(
+            before.elements[0],
+            states={
+                **before_states,
+                "keyboard_input_mode": "chinese_pinyin",
+                "ime_preedit_text": "first",
+                "ime_exact_candidate_text": "first",
+            },
+        )
+        candidate = UIElement(
+            element_id="local_audited_ime_candidate_1",
+            role="button",
+            meaning="ime_exact_candidate",
+            label="first",
+            bounds=(0.1, 0.6, 0.25, 0.64),
+            confidence=1.0,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "ime_candidate": True,
+                "input_element_id": "field",
+                "prior_input_value": "",
+                "expected_input_value": "first",
+                "pinyin": "first",
+            },
+            evidence=("逐字相同的英文联想候选",),
+        )
+        after = replace(
+            before,
+            summary="英文预编辑及逐字相同候选可见",
+            fingerprint="after-direct-preedit",
+            elements=(field, candidate),
+        )
+        controller.verify_after_action(resolved, before, after)
+
+        wrong = replace(
+            after,
+            fingerprint="wrong-direct-preedit",
+            elements=(field, replace(candidate, label="firstly")),
+        )
+        with self.assertRaisesRegex(UniversalActionError, "文字不匹配"):
+            controller.verify_after_action(resolved, before, wrong)
+
     def test_press_enter_requires_newline_key_and_verifies_exact_multiline_value(self):
         controller = UniversalActionController()
         before = UIScene(

@@ -614,6 +614,78 @@ class UISceneTests(unittest.TestCase):
                 ),
             )
 
+    def test_verified_clear_counts_audited_extra_visual_row_units(self) -> None:
+        states = {
+            "focused": True,
+            "value": "first",
+            "clear_extra_delete_units": 1,
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "direct_latin",
+            "goal_relevant": True,
+        }
+        before = scene(
+            element(
+                "field",
+                "application_text_input",
+                role="input",
+                states=states,
+            ),
+            fingerprint="before-extra-row",
+        )
+        resolved = UniversalActionController().resolve_one(
+            SemanticAction(
+                node_id="clear-extra-row",
+                action="clear_verified_text",
+                params={
+                    "element_id": "field",
+                    "target": "application_text_input",
+                    "expected_effect": {
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {"value": ""},
+                        }
+                    },
+                },
+            ),
+            before,
+        )
+        self.assertEqual(6, resolved.delete_count)
+
+        for invalid in (-1, 31, True, "1"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                UniversalActionError,
+                "额外视觉行",
+            ):
+                bad = replace(
+                    before,
+                    elements=(
+                        replace(
+                            before.elements[0],
+                            states={
+                                **states,
+                                "clear_extra_delete_units": invalid,
+                            },
+                        ),
+                    ),
+                )
+                UniversalActionController().resolve_one(
+                    SemanticAction(
+                        node_id="clear-extra-row-invalid",
+                        action="clear_verified_text",
+                        params={
+                            "element_id": "field",
+                            "target": "application_text_input",
+                            "expected_effect": {
+                                "element_state": {
+                                    "meaning": "application_text_input",
+                                    "states": {"value": ""},
+                                }
+                            },
+                        },
+                    ),
+                    bad,
+                )
+
     def test_verified_clear_accepts_placeholder_app_and_same_screen_family(self) -> None:
         states = {
             "focused": True,

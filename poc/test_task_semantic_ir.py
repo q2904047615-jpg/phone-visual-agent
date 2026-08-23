@@ -349,6 +349,112 @@ class TaskSemanticIRTests(unittest.TestCase):
             },
         )
 
+    def test_clear_preedit_with_clause_modifiers_owns_clear_not_input(self):
+        for objective in (
+            (
+                "清除当前唯一已聚焦输入框中可见的未提交输入法预编辑 first，"
+                "直到应用输入值和输入法预编辑都为空"
+            ),
+            (
+                "Erase the visible IME composition first from the currently "
+                "focused editor until the field is empty"
+            ),
+        ):
+            with self.subTest(objective=objective):
+                payload = current_send_failure_payload()
+                payload["goal"]["entities"] = {
+                    "target_ui_label": "当前唯一已聚焦输入框",
+                    "input_text": "first",
+                }
+                payload["effect_intents"] = []
+                payload["subgoals"] = [
+                    {
+                        "subgoal_id": "clear_preedit",
+                        "objective": objective,
+                        "status": "active",
+                        "depends_on": [],
+                        "constraints": ["不得发送"],
+                        "completion_conditions": [
+                            "应用输入值和输入法预编辑都为空"
+                        ],
+                        "completion_evidence": [],
+                        "effect_ids": [],
+                        "execution_class": "navigate",
+                    }
+                ]
+                payload["active_subgoal_id"] = "clear_preedit"
+                semantic_ir = compile_formal_semantic_authority(
+                    _graph_from_payload(
+                        payload,
+                        task_id="clear-preedit-task",
+                        device_id="device-local-01",
+                        revision=1,
+                        raw_user_goal=objective,
+                    )
+                ).semantic_ir
+                constraints = {
+                    item.constraint_id: item for item in semantic_ir.constraints
+                }
+                active = next(
+                    item
+                    for item in semantic_ir.subgoals
+                    if item.subgoal_id == "clear_preedit"
+                )
+                required_actions = {
+                    constraints[ref].value
+                    for ref in active.constraint_refs
+                    if constraints[ref].kind == "required_action"
+                }
+
+                self.assertEqual({"clear_verified_text"}, required_actions)
+                self.assertIn(
+                    "clear_preedit",
+                    semantic_ir.input_fields[0].source_subgoal_ids,
+                )
+
+    def test_delete_saved_content_does_not_mint_input_clear(self):
+        payload = current_send_failure_payload()
+        payload["goal"]["entities"] = {"target_ui_label": "已保存内容"}
+        payload["effect_intents"] = []
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "delete_saved",
+                "objective": "删除当前页面中的已保存内容",
+                "status": "active",
+                "depends_on": [],
+                "constraints": [],
+                "completion_conditions": ["已保存内容不再存在"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            }
+        ]
+        payload["active_subgoal_id"] = "delete_saved"
+        semantic_ir = compile_formal_semantic_authority(
+            _graph_from_payload(
+                payload,
+                task_id="delete-saved-content-task",
+                device_id="device-local-01",
+                revision=1,
+                raw_user_goal="删除当前页面中的已保存内容",
+            )
+        ).semantic_ir
+        constraints = {item.constraint_id: item for item in semantic_ir.constraints}
+        active = next(
+            item
+            for item in semantic_ir.subgoals
+            if item.subgoal_id == "delete_saved"
+        )
+
+        self.assertNotIn(
+            "clear_verified_text",
+            {
+                constraints[ref].value
+                for ref in active.constraint_refs
+                if constraints[ref].kind == "required_action"
+            },
+        )
+
     def test_multi_field_clear_binds_only_unique_visible_field_label(self):
         payload = current_send_failure_payload()
         payload["goal"]["entities"] = {

@@ -26,6 +26,7 @@ from generic_scene_observer import (
     _compact_prompt,
     _foreground_app_identity_audit_prompt,
     _goal_requests_input,
+    _goal_requests_keyboard_mode_switch,
     _input_audit_literal_key_targets,
     _input_audit_retry_roi,
     _input_structure_audit_prompt,
@@ -409,6 +410,7 @@ def audited_application_input(
     right_button: dict | None = None,
     field_labels: list[str] | None = None,
     visible_editable_cues: list[str] | None = None,
+    caret_line_index: int | None = None,
 ) -> dict:
     value = {
         "structure_id": structure_id,
@@ -421,6 +423,7 @@ def audited_application_input(
             if visible_editable_cues is None
             else visible_editable_cues
         ),
+        "caret_line_index": caret_line_index,
         "confidence": confidence,
         "right_button": right_button,
     }
@@ -483,13 +486,20 @@ def multifield_next_base(fields: list[dict], *, duplicate: bool = False):
 def multifield_next_audit(
     fields: list[dict], *, action: str = "next",
     fully_visible: bool = True, confidence: float = 0.98,
+    duplicate: bool = False,
 ) -> dict:
     source = next(item for item in fields if item["field_id"] == "subject_field")
-    return input_audit_payload(
-        application_inputs=[audited_application_input(
-            structure_id="source", bounds=[120, 430, 880, 590],
+    application_inputs = [audited_application_input(
+        structure_id="source", bounds=[120, 430, 880, 590],
+        text=source["text"], field_labels=[source["field_label"]],
+    )]
+    if duplicate:
+        application_inputs.append(audited_application_input(
+            structure_id="source-duplicate", bounds=[120, 250, 880, 400],
             text=source["text"], field_labels=[source["field_label"]],
-        )],
+        ))
+    return input_audit_payload(
+        application_inputs=application_inputs,
         keyboard={
             "visible": True, "bounds": [0, 600, 1000, 1000],
             "layout": "qwerty", "input_mode": "direct_latin",
@@ -1021,6 +1031,106 @@ class GenericSceneObserverTests(unittest.TestCase):
         compact_prompt = provider.messages_seen[0][1]["content"][0]["text"]
         self.assertIn("独立全帧输入结构审计是模式、方向和模式键几何的唯一权威", compact_prompt)
         self.assertNotIn("必须另建role=button元素", compact_prompt)
+
+    def test_exact_tap_restores_original_keyboard_mode_visual_context(self) -> None:
+        compact = scene_payload()
+        compact["screen_id"] = "input_page"
+        compact["summary"] = "空输入框和QWERTY软键盘可见"
+        compact["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(text="", placeholder="")
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 360, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "mode_switch": {
+                    "label": "英",
+                    "bounds": [650, 900, 760, 970],
+                    "confidence": 0.97,
+                    "current_mode": "chinese_pinyin",
+                    "target_mode": "direct_latin",
+                },
+            },
+        )
+        audit["application_inputs"][0]["visible_editable_cues"] = ["caret"]
+        provider = SequenceProvider([compact, audit])
+        context = {
+            "objective": "点击当前画面中的目标控件",
+            "entities": {
+                "target_ui_label": "英",
+                "original_goal_visual_context": (
+                    "只点击当前软键盘上逐字显示为英的输入模式切换键一次，"
+                    "使键盘进入英文直输状态"
+                ),
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "exact_tap_semantic",
+                    "objective": "点击当前画面中的目标控件",
+                    "constraints": [],
+                    "completion_conditions": ["动作后出现新的稳定画面"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "target_surface": "current_surface",
+                        "target_ui_label": "英",
+                    },
+                },
+            },
+        }
+
+        scene = GenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context=context,
+        )
+
+        target = scene.unique_trusted_goal_element()
+        self.assertIsNotNone(target)
+        self.assertEqual("local_audited_keyboard_mode_switch_1", target.element_id)
+        self.assertEqual("英", target.label)
+        self.assertEqual("chinese_pinyin", target.states["current_mode"])
+        self.assertEqual("direct_latin", target.states["target_mode"])
+        self.assertEqual(2, provider.calls)
+        self.assertTrue(_goal_requests_keyboard_mode_switch(context))
+        self.assertTrue(_goal_requests_input(context))
+
+    def test_normal_subgoal_ignores_root_future_keyboard_mode_text(self) -> None:
+        context = {
+            "objective": "打开页面后切换到英文直输模式",
+            "entities": {
+                "original_goal_visual_context": "打开页面后切换到英文直输模式",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "open_page",
+                    "objective": "打开当前页面",
+                    "constraints": [],
+                    "completion_conditions": ["页面已打开"],
+                    "execution_class": "navigate",
+                    "goal_entities": {"target_ui_label": "打开"},
+                },
+            },
+        }
+
+        self.assertFalse(_goal_requests_keyboard_mode_switch(context))
+        self.assertFalse(_goal_requests_input(context))
+
+    def test_unrelated_exact_tap_does_not_trigger_keyboard_input_audit(self) -> None:
+        context = {
+            "objective": "点击当前画面中的目标控件",
+            "entities": {
+                "original_goal_visual_context": "只点击逐字显示为刷新的控件一次",
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "exact_tap_semantic",
+                    "objective": "点击当前画面中的目标控件",
+                    "constraints": [],
+                    "completion_conditions": ["动作后出现新的稳定画面"],
+                    "execution_class": "navigate",
+                    "goal_entities": {"target_ui_label": "刷新"},
+                },
+            },
+        }
+
+        self.assertFalse(_goal_requests_keyboard_mode_switch(context))
+        self.assertFalse(_goal_requests_input(context))
 
     def test_keyboard_switch_goal_defers_all_safe_preliminary_shapes_to_strict_audit(self) -> None:
         variants = (
@@ -5836,6 +5946,63 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("longinp", nested_field.states["ime_preedit_text"])
         self.assertTrue(nested_field.states["goal_relevant"])
 
+        keyboard_strip_audit = audit(preedits=[{
+            "region_id": "ime-preedit-keyboard-strip",
+            "bounds": [210, 290, 430, 330],
+            "text": "freshsendproof",
+            "confidence": 1.0,
+            "candidates": [
+                {
+                    "text": text,
+                    "bounds": [start, 590, start + width, 630],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                }
+                for text, start, width in (
+                    ("freshsendproof", 110, 220),
+                    ("fresh send proof", 350, 260),
+                )
+            ],
+        }])
+        keyboard_strip_audit["application_inputs"][0]["bounds"] = [
+            140, 270, 850, 450,
+        ]
+        keyboard_strip_audit["application_inputs"][0][
+            "visible_editable_cues"
+        ] = ["freshsendproof"]
+        keyboard_strip_audit["keyboard"]["bounds"] = [0, 570, 1000, 1000]
+        keyboard_strip_audit["keyboard"]["qwerty_anchors"].update({
+            "q": [70, 730], "p": [930, 730],
+            "a": [140, 810], "l": [860, 810],
+            "z": [280, 890], "m": [720, 890],
+            "backspace": [930, 890],
+        })
+        keyboard_strip_scene = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(keyboard_strip_audit, ensure_ascii=False),
+            fingerprint="frame-keyboard-candidate-strip",
+            goal_context=input_context,
+            coarse_input_value="",
+        )
+        keyboard_candidate = keyboard_strip_scene.unique_trusted_goal_element()
+        self.assertEqual("ime_exact_candidate", keyboard_candidate.meaning)
+        self.assertEqual("freshsendproof", keyboard_candidate.label)
+
+        split_candidate_rows = json.loads(
+            json.dumps(keyboard_strip_audit, ensure_ascii=False)
+        )
+        split_candidate_rows["ime_preedit_regions"][0]["candidates"][1][
+            "bounds"
+        ] = [350, 650, 610, 690]
+        with self.assertRaisesRegex(VisionAgentError, "同一水平候选行"):
+            _apply_input_structure_audit(
+                base_scene,
+                json.dumps(split_candidate_rows, ensure_ascii=False),
+                fingerprint="frame-split-keyboard-candidate-rows",
+                goal_context=input_context,
+                coarse_input_value="",
+            )
+
         too_far = json.loads(json.dumps(nested_audit, ensure_ascii=False))
         too_far["ime_preedit_regions"][0]["candidates"][0]["bounds"] = [
             20, 760, 200, 810,
@@ -9185,6 +9352,112 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertFalse(current.states["goal_relevant"])
         self.assertEqual("subject_field", current.states["input_field_id"])
 
+    def test_multifield_next_field_key_survives_predecessor_omitted_from_coarse_scene(
+        self,
+    ) -> None:
+        fields = MULTIFIELD_FIELDS
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="f" * 64,
+        )
+        context = multifield_next_context(fields)
+        audit = multifield_next_audit(fields)
+
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="first",
+        )
+
+        target = projected.unique_trusted_goal_element()
+        self.assertIsNotNone(target)
+        self.assertEqual("input_next_field_key", target.meaning)
+        self.assertEqual("subject_field", target.states["source_input_field_id"])
+        self.assertEqual("body_field", target.states["target_input_field_id"])
+
+    def test_multifield_next_field_key_normalizes_unique_committed_cue_slot(
+        self,
+    ) -> None:
+        fields = MULTIFIELD_FIELDS
+        context = multifield_next_context(fields)
+        audit = multifield_next_audit(fields)
+        audited_source = audit["application_inputs"][0]
+        audited_source["text"] = ""
+        audited_source["visible_editable_cues"] = ["first"]
+
+        projected = _apply_input_structure_audit(
+            multifield_next_base(fields),
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="first",
+        )
+
+        target = projected.unique_trusted_goal_element()
+        self.assertIsNotNone(target)
+        self.assertEqual("input_next_field_key", target.meaning)
+        current = projected.get_element("local_audited_input_1")
+        self.assertEqual("first", current.states["value"])
+
+        rejected = _apply_input_structure_audit(
+            _parse_scene(
+                json.dumps(scene_payload(), ensure_ascii=False),
+                fingerprint="f" * 64,
+            ),
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="first",
+        )
+        self.assertFalse(
+            any(item.meaning == "input_next_field_key" for item in rejected.elements)
+        )
+
+    def test_multifield_next_field_key_uses_locally_snapped_qwerty_geometry(
+        self,
+    ) -> None:
+        fields = MULTIFIELD_FIELDS
+        base = multifield_next_base(fields)
+        context = multifield_next_context(fields)
+        audit = multifield_next_audit(fields)
+        snapped = {
+            "q": [122, 709], "p": [881, 709],
+            "a": [164, 781], "l": [839, 781],
+            "z": [249, 853], "m": [755, 853],
+            "backspace": [881, 853],
+        }
+
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="first",
+            qwerty_row_snapper=lambda _frames, _anchors: snapped,
+            qwerty_row_frames=stable_frames()[-3:],
+        )
+
+        target = projected.unique_trusted_goal_element()
+        self.assertIsNotNone(target)
+        self.assertEqual("input_next_field_key", target.meaning)
+        self.assertEqual("next", target.states["key_action"])
+
+        audit["keyboard"]["enter_key"]["label"] = "发送"
+        rejected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context=context,
+            coarse_input_value="first",
+            qwerty_row_snapper=lambda _frames, _anchors: snapped,
+            qwerty_row_frames=stable_frames()[-3:],
+        )
+        self.assertFalse(
+            any(item.meaning == "input_next_field_key" for item in rejected.elements)
+        )
+
     def test_multifield_next_field_key_follows_typed_identity_not_array_order(self) -> None:
         cases = (
             (
@@ -9229,7 +9502,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             ("not next", True, False, "done", True, 0.98),
             ("not fully visible", True, False, "next", False, 0.98),
             ("low confidence", True, False, "next", True, 0.71),
-            ("duplicate current field", True, True, "next", True, 0.98),
+            ("duplicate dedicated audit", True, False, "next", True, 0.98),
         )
         for name, dependency, duplicate, action, visible, confidence in cases:
             with self.subTest(name=name):
@@ -9240,6 +9513,7 @@ class GenericSceneObserverTests(unittest.TestCase):
                 audit = multifield_next_audit(
                     MULTIFIELD_FIELDS, action=action,
                     fully_visible=visible, confidence=confidence,
+                    duplicate=name == "duplicate dedicated audit",
                 )
                 projected = _apply_input_structure_audit(
                     base,
@@ -10079,6 +10353,146 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("qwerty", field.states["keyboard_geometry"]["type"])
         self.assertEqual([110, 690], field.states["keyboard_geometry"]["anchors"]["q"])
 
+    def test_typed_field_recovers_authorized_committed_prefix_without_screen_lineage(
+        self,
+    ) -> None:
+        base_payload = scene_payload()
+        base_payload["screen_id"] = "chat_input"
+        base_payload["elements"] = []
+        base = _parse_scene(
+            json.dumps(base_payload, ensure_ascii=False),
+            fingerprint="authorized-prefix-frame",
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_exact_text",
+                    "objective": "输入两行文字",
+                    "constraints": ["不要提交"],
+                    "completion_conditions": ["输入框逐字等于授权文字"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "input_text": "first\nsecond",
+                        "active_input_transaction_text": "first\nsecond",
+                        "active_input_field_id": "input_field_1",
+                        "active_input_multiline": True,
+                    },
+                }
+            }
+        }
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="message-field",
+                    bounds=[140, 540, 720, 630],
+                    text="",
+                    placeholder="",
+                )
+            ],
+            ime_preedit_regions=[],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 660, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "mode_switch": None,
+                "enter_key": {
+                    "label": "↵",
+                    "bounds": [840, 880, 960, 960],
+                    "confidence": 1.0,
+                    "fully_visible": True,
+                    "key_action": "newline",
+                },
+            },
+        )
+        audit["application_inputs"][0]["visible_editable_cues"] = ["first"]
+
+        projected = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="authorized-prefix-frame",
+            goal_context=context,
+            coarse_input_value="",
+        )
+
+        field = projected.get_element("local_audited_input_1")
+        self.assertEqual("first", field.states["value"])
+        self.assertEqual("input_field_1", field.states["input_field_id"])
+        enter = projected.get_element("local_audited_enter_key_1")
+        self.assertEqual("first\n", enter.states["expected_input_value"])
+        self.assertTrue(
+            any("授权payload前缀" in item for item in field.evidence)
+        )
+
+        candidate_less_direct_region = json.loads(json.dumps(audit))
+        candidate_less_direct_region["ime_preedit_regions"] = [
+            {
+                "region_id": "misclassified-direct-region",
+                "bounds": [140, 540, 300, 600],
+                "text": "first",
+                "confidence": 1.0,
+                "candidates": [],
+            }
+        ]
+        recovered_candidate_less_direct_region = _apply_input_structure_audit(
+            base,
+            json.dumps(candidate_less_direct_region, ensure_ascii=False),
+            fingerprint="authorized-prefix-direct-region",
+            goal_context=context,
+            coarse_input_value="",
+        )
+        self.assertEqual(
+            "first",
+            recovered_candidate_less_direct_region.get_element(
+                "local_audited_input_1"
+            ).states["value"],
+        )
+
+        variations = []
+        wrong_cue = json.loads(json.dumps(audit))
+        wrong_cue["application_inputs"][0]["visible_editable_cues"] = ["firstly"]
+        variations.append(("wrong_cue", context, wrong_cue))
+        placeholder = json.loads(json.dumps(audit))
+        placeholder["application_inputs"][0]["placeholder"] = "first"
+        variations.append(("placeholder", context, placeholder))
+        preedit = json.loads(json.dumps(audit))
+        preedit["ime_preedit_regions"] = [
+            {
+                "region_id": "preedit-1",
+                "bounds": [140, 540, 300, 600],
+                "text": "first",
+                "confidence": 1.0,
+                "candidates": [
+                    {
+                        "text": "first",
+                        "bounds": [140, 630, 260, 660],
+                        "confidence": 1.0,
+                        "fully_visible": True,
+                    }
+                ],
+            }
+        ]
+        variations.append(("preedit", context, preedit))
+        missing_field = json.loads(json.dumps(context))
+        missing_field["entities"]["active_subgoal_visual_context"][
+            "goal_entities"
+        ].pop("active_input_field_id")
+        variations.append(("missing_field", missing_field, audit))
+        for name, candidate_context, candidate_audit in variations:
+            with self.subTest(name=name):
+                rejected = _apply_input_structure_audit(
+                    base,
+                    json.dumps(candidate_audit, ensure_ascii=False),
+                    fingerprint=f"authorized-prefix-rejected-{name}",
+                    goal_context=candidate_context,
+                    coarse_input_value="",
+                )
+                self.assertNotEqual(
+                    "first",
+                    rejected.get_element("local_audited_input_1").states["value"],
+                )
+
     def test_newline_locator_can_recover_tall_multiline_field_without_action_identity(
         self,
     ) -> None:
@@ -10830,6 +11244,182 @@ class GenericSceneObserverTests(unittest.TestCase):
             self.assertIn("meaning=page_title", prompt)
             self.assertIn("普通正文", prompt)
             self.assertIn("screen_id", prompt)
+
+    def test_clear_goal_recovers_unique_committed_cue_and_visual_row_unit(self) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="c" * 64,
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[140, 570, 720, 650],
+                    text="",
+                    placeholder="",
+                    visible_editable_cues=["first", "|"],
+                    caret_line_index=1,
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 650, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "mode_switch": None,
+            },
+        )
+        cleared = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="c" * 64,
+            goal_context={
+                "objective": "清空当前唯一已聚焦输入框中的全部应用文字，不要发送"
+            },
+            coarse_input_value=None,
+        )
+        target = cleared.get_element("local_audited_input_1")
+        self.assertEqual("first", target.states["value"])
+        self.assertEqual(1, target.states["clear_extra_delete_units"])
+        self.assertTrue(target.states["goal_relevant"])
+        self.assertTrue(any("保守退格单位" in item for item in target.evidence))
+
+        read_only = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="d" * 64,
+            goal_context={"objective": "读取当前输入框"},
+            coarse_input_value=None,
+        )
+        ordinary = read_only.get_element("local_audited_input_1")
+        self.assertEqual("", ordinary.states["value"])
+        self.assertNotIn("clear_extra_delete_units", ordinary.states)
+
+    def test_clear_goal_audits_aligned_frames_across_caret_blink_phase(self) -> None:
+        compact = scene_payload()
+        compact["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[140, 570, 720, 650],
+                    text="",
+                    placeholder="",
+                    visible_editable_cues=["first", "|"],
+                    caret_line_index=1,
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 650, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "mode_switch": None,
+            },
+        )
+        provider = SequenceProvider([compact, compact, audit])
+        scene = GenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "清空当前唯一已聚焦输入框中的全部应用文字，不要发送"
+            },
+        )
+        target = scene.get_element("local_audited_input_1")
+        self.assertEqual(1, target.states["clear_extra_delete_units"])
+        audit_content = provider.messages_seen[-1][1]["content"]
+        self.assertEqual(4, len(audit_content))
+        self.assertIn("different times", audit_content[0]["text"])
+        self.assertIn("caret_line_index", audit_content[0]["text"])
+
+    def test_local_pixels_locate_model_attested_caret_row_from_qwerty_anchor(self) -> None:
+        base = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="e" * 64,
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[140, 570, 720, 650],
+                    text="",
+                    placeholder="",
+                    visible_editable_cues=["first", "vertical text caret"],
+                    caret_line_index=None,
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 650, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "mode_switch": None,
+            },
+        )
+        frame = Image.new("RGB", (540, 960), (198, 203, 198))
+        draw = ImageDraw.Draw(frame)
+        draw.rectangle((100, 495, 180, 515), fill=(25, 25, 25))
+        draw.rectangle((103, 528, 105, 570), fill=(20, 145, 80))
+        frames = tuple(frame.copy() for _ in range(3))
+        scene = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="e" * 64,
+            goal_context={
+                "objective": "清空当前唯一已聚焦输入框中的全部应用文字，不要发送"
+            },
+            coarse_input_value=None,
+            qwerty_row_snapper=lambda _frames, anchors: anchors,
+            qwerty_row_frames=frames,
+        )
+        target = scene.get_element("local_audited_input_1")
+        self.assertEqual(1, target.states["local_caret_line_index"])
+        self.assertEqual(1, target.states["clear_extra_delete_units"])
+        self.assertTrue(any("本地校准像素" in item for item in target.evidence))
+
+        raw_search_only = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="a" * 64,
+            goal_context={
+                "objective": "清空当前唯一已聚焦输入框中的全部应用文字，不要发送"
+            },
+            coarse_input_value=None,
+            qwerty_row_snapper=lambda _frames, _anchors: None,
+            qwerty_row_frames=frames,
+        )
+        raw_target = raw_search_only.get_element("local_audited_input_1")
+        self.assertEqual(1, raw_target.states["local_caret_line_index"])
+        self.assertEqual(1, raw_target.states["clear_extra_delete_units"])
+        self.assertNotIn("qwerty_row_snap", raw_target.evidence)
+
+        audit["application_inputs"][0]["visible_editable_cues"] = ["first"]
+        goal_bound_local = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="f" * 64,
+            goal_context={
+                "objective": "清空当前唯一已聚焦输入框中的全部应用文字，不要发送"
+            },
+            coarse_input_value=None,
+            qwerty_row_snapper=lambda _frames, anchors: anchors,
+            qwerty_row_frames=frames,
+        )
+        goal_bound_target = goal_bound_local.get_element("local_audited_input_1")
+        self.assertEqual(1, goal_bound_target.states["local_caret_line_index"])
+        self.assertEqual(1, goal_bound_target.states["clear_extra_delete_units"])
+
+        without_attestation = _apply_input_structure_audit(
+            base,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="b" * 64,
+            goal_context={"objective": "观察当前输入框，不修改内容"},
+            coarse_input_value=None,
+            qwerty_row_snapper=lambda _frames, anchors: anchors,
+            qwerty_row_frames=frames,
+        )
+        ordinary = without_attestation.get_element("local_audited_input_1")
+        self.assertNotIn("local_caret_line_index", ordinary.states)
+        self.assertNotIn("clear_extra_delete_units", ordinary.states)
 
 
 if __name__ == "__main__":

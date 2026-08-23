@@ -1494,6 +1494,7 @@ class DeepSeekTaskGraphPlanner:
             payload = _parse_json_object(raw)
         except GenericIntentError as exc:
             raise TaskGraphError(str(exc)) from exc
+        payload = _normalize_single_effect_result_string(payload)
         payload = _normalize_unique_planner_transport_aliases(payload)
         payload = _normalize_explicit_ui_label_payload(payload, raw_user_goal)
         payload = _normalize_local_input_execution_class(payload)
@@ -1552,7 +1553,8 @@ Shell、ADB、keycode、main.exe 指令或其他可直接驱动设备的控制�
 5. 每个子目标只用 execution_class 标为 observe、navigate、effect 或 unknown；不得输出内部运行态名称
    read_only、navigation_only 或 external_state；模型不得输出风险等级、
    confirmation_required、external_impact 或 risk_actions。真正产生外部结果的子目标必须声明 typed
-   effect_intents，并让 expected_results 逐字引用该子目标的正向完成条件。禁止、未发生、保持不变、
+   effect_intents，并让 expected_results 逐字引用该子目标的正向完成条件；若整个任务只有一个
+   effect_intent，也可逐字引用唯一的最终正向完成条件。禁止、未发生、保持不变、
    按钮可见但未触发等约束或状态不得声明为 effect。纯粹的“不要发送、未提交、未保存、未登录”等
    效果禁令只保留在 constraints，不得再重复建立 completion_conditions；completion_conditions 只写
    最终需要由当前画面或正式效果回执证明的正向结果。确认只由 EffectIntent.kind 与本地版本化策略决定。
@@ -2142,7 +2144,7 @@ def _schema_prompt() -> str:
     "target_entity_roles":["goal.entities 中作为效果对象的键"],
     "payload_entity_roles":["goal.entities 中作为效果正文或值的键"],
     "source_subgoal_ids":["实际产生该效果的子目标ID"],
-    "expected_results":["逐字复制绑定子目标中的正向完成条件"]
+    "expected_results":["逐字复制绑定子目标中的正向完成条件；单一效果任务也可复制唯一最终正向完成条件"]
   }],
   "subgoals":[{
     "subgoal_id":"小写稳定ID",
@@ -2220,9 +2222,26 @@ def _graph_from_payload(
         raise TaskGraphError("子目标 ID 重复。")
     for subgoal in raw_subgoals:
         subgoal.validate()
+    completion_conditions = tuple(
+        _condition_from_payload(item)
+        for item in _expect_list(
+            payload.get("completion_conditions"), "completion_conditions"
+        )
+    )
+    raw_effects = tuple(
+        _expect_list(payload.get("effect_intents"), "effect_intents")
+    )
     effects = tuple(
-        _effect_from_payload(item, subgoals=subgoals_by_id, entities=entities)
-        for item in _expect_list(payload.get("effect_intents"), "effect_intents")
+        _effect_from_payload(
+            item,
+            subgoals=subgoals_by_id,
+            entities=entities,
+            goal_completion_results=tuple(
+                condition.description for condition in completion_conditions
+            ),
+            effect_count=len(raw_effects),
+        )
+        for item in raw_effects
     )
     effects_by_id = {item.risk_id: item for item in effects}
     if len(effects_by_id) != len(effects):
@@ -2251,12 +2270,7 @@ def _graph_from_payload(
         status=str(payload.get("status") or "").strip().lower(),
         goal=goal,
         constraints=_text_tuple(payload.get("constraints"), "constraints"),
-        completion_conditions=tuple(
-            _condition_from_payload(item)
-            for item in _expect_list(
-                payload.get("completion_conditions"), "completion_conditions"
-            )
-        ),
+        completion_conditions=completion_conditions,
         risk_actions=effects,
         subgoals=raw_subgoals,
         active_subgoal_id=active_subgoal_id,
@@ -2340,6 +2354,8 @@ def _effect_from_payload(
     *,
     subgoals: dict[str, Subgoal],
     entities: dict[str, Any],
+    goal_completion_results: tuple[str, ...],
+    effect_count: int,
 ) -> RiskAction:
     item = _expect_dict(value, "effect_intents[]")
     _expect_keys(
@@ -2410,19 +2426,35 @@ def _effect_from_payload(
         raise TaskGraphError("禁止或未发生状态不能声明为 effect_intent。")
     if any(result not in allowed_results for result in expected_results):
         # expected_results is a redundant textual reference to the bound
-        # source subgoal's completion condition.  Repair only the uniquely
-        # determined reference: one source condition in total, and that sole
-        # condition must itself describe a positive effect.  Multiple source
-        # conditions, cross-subgoal alternatives, missing results and
-        # prohibited/non-effect states remain fail-closed.
-        if len(source_results) != 1 or (
-            DIRECT_PROHIBITION_CLAUSE_PATTERN.search(source_results[0])
-            or NON_EFFECT_RESULT_PATTERN.search(source_results[0])
-        ):
+        # result.  A single-effect graph has only one possible effect owner, so
+        # its sole final goal condition is an equally authoritative reference
+        # when copied exactly.  Otherwise repair only the uniquely determined
+        # source reference.  Multiple effects, duplicate final conditions,
+        # cross-subgoal alternatives, missing results and prohibited/non-effect
+        # states remain fail-closed.
+        exact_unique_goal_result = (
+            effect_count == 1
+            and len(source_subgoal_ids) == 1
+            and len(expected_results) == 1
+            and sum(
+                result == expected_results[0]
+                for result in goal_completion_results
+            )
+            == 1
+        )
+        exact_unique_source_result = (
+            len(source_results) == 1
+            and not DIRECT_PROHIBITION_CLAUSE_PATTERN.search(source_results[0])
+            and not NON_EFFECT_RESULT_PATTERN.search(source_results[0])
+        )
+        if exact_unique_goal_result:
+            pass
+        elif exact_unique_source_result:
+            expected_results = source_results
+        else:
             raise TaskGraphError(
                 "effect_intents.expected_results 必须逐字来自绑定子目标的正向完成条件。"
             )
-        expected_results = source_results
     required_type = _RUNTIME_RISK_TYPE_BY_EFFECT_KIND[kind]
     return RiskAction(
         risk_id=effect_id,
@@ -3707,6 +3739,38 @@ def _normalize_unique_planner_transport_aliases(
                 item["execution_class"] = normalized
                 changed = True
     return value if changed else payload
+
+
+def _normalize_single_effect_result_string(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Wrap one non-empty result string without changing its meaning.
+
+    ``expected_results`` is formally an array, but a provider can serialize
+    the same single result as a scalar string. This one-step normalization is
+    unique and syntax-only; every value still passes the ordinary exact
+    source/final-condition binding checks. Empty or non-string shapes remain
+    rejected.
+    """
+
+    effects = payload.get("effect_intents")
+    if not isinstance(effects, list):
+        return payload
+    normalized_effects: list[Any] = []
+    changed = False
+    for effect in effects:
+        if not isinstance(effect, dict):
+            normalized_effects.append(effect)
+            continue
+        result = effect.get("expected_results")
+        if isinstance(result, str) and result.strip():
+            normalized_effects.append({**effect, "expected_results": [result]})
+            changed = True
+        else:
+            normalized_effects.append(effect)
+    if not changed:
+        return payload
+    return {**payload, "effect_intents": normalized_effects}
 
 
 def _reject_control_fields(value: Any, path: str) -> None:

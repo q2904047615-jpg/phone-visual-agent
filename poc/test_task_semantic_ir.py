@@ -693,6 +693,77 @@ class TaskSemanticIRTests(unittest.TestCase):
         self.assertEqual("文件传输助手", graph.goal.entities["recipient"])
         self.assertEqual("freshsendproof", graph.goal.entities["input_text"])
 
+        semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+        input_field = semantic_ir.input_fields[0]
+        self.assertNotIn(
+            "verify_sent_message", input_field.source_subgoal_ids
+        )
+        verify = next(
+            item
+            for item in semantic_ir.subgoals
+            if item.subgoal_id == "verify_sent_message"
+        )
+        desired = {
+            item.state_id: item for item in semantic_ir.desired_states
+        }
+        self.assertFalse(
+            any(
+                desired[state_id].predicate == "input.value_equals"
+                for state_id in verify.desired_state_refs
+            )
+        )
+
+    def test_effect_result_literal_is_not_rebound_as_input_across_wording(self):
+        payload = current_send_failure_payload()
+        payload["goal"]["entities"] = {
+            "recipient": "当前目标",
+            "input_text": "release candidate",
+        }
+        payload["subgoals"][1]["objective"] = (
+            "提交编辑器内现有正文 release candidate"
+        )
+        payload["subgoals"][1]["completion_conditions"] = ["提交动作已执行"]
+        payload["subgoals"].append(
+            {
+                "subgoal_id": "verify_result",
+                "objective": "核对提交结果与编辑器状态",
+                "status": "pending",
+                "depends_on": ["send_message"],
+                "constraints": ["只读核对"],
+                "completion_conditions": [
+                    "保存结果预览逐字显示 release candidate",
+                    "编辑器为空",
+                ],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "observe",
+            }
+        )
+        graph = _graph_from_payload(
+            payload,
+            task_id="generic-effect-result-literal",
+            device_id="device-local-01",
+            revision=1,
+            raw_user_goal=payload["goal"]["objective"],
+        )
+
+        semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+        self.assertNotIn(
+            "verify_result", semantic_ir.input_fields[0].source_subgoal_ids
+        )
+        desired = {
+            item.state_id: item for item in semantic_ir.desired_states
+        }
+        verify = next(
+            item
+            for item in semantic_ir.subgoals
+            if item.subgoal_id == "verify_result"
+        )
+        self.assertEqual(
+            {"observation.matches_description"},
+            {desired[state_id].predicate for state_id in verify.desired_state_refs},
+        )
+
     def test_unique_bound_result_projection_is_effect_kind_and_wording_agnostic(self):
         payload = current_send_failure_payload()
         payload["effect_intents"][0].update(

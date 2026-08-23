@@ -18,6 +18,7 @@ from input_value_lineage import (
     TypedInputLineage,
     TypedInputLineageStore,
     _surface_descriptor,
+    build_pending_ime_candidate_lineage,
     build_pending_input_state_lineage,
     build_pending_literal_lineage,
     build_pending_text_lineage,
@@ -239,6 +240,60 @@ def state_switch_case(
     return before, resolved_state
 
 
+def ime_candidate_case() -> tuple[dict, dict]:
+    expected = "loopok"
+    before = scene("", "before-ime-candidate-fp")
+    before_input = before["elements"][0]
+    before_input["states"].update(
+        {
+            "input_field_id": "input_field_1",
+            "input_multiline": False,
+            "keyboard_layout": "qwerty",
+            "keyboard_input_mode": "chinese_pinyin",
+            "keyboard_case_mode": "lower",
+            "ime_preedit_text": expected,
+            "ime_exact_candidate_text": expected,
+        }
+    )
+    before["elements"].append(
+        {
+            "element_id": "candidate-loopok",
+            "role": "button",
+            "meaning": "ime_exact_candidate",
+            "bounds": [0.08, 0.62, 0.22, 0.65],
+            "confidence": 1.0,
+            "label": expected,
+            "states": {
+                "goal_relevant": True,
+                "fully_visible": True,
+                "ime_candidate": True,
+                "input_element_id": "input-1",
+                "prior_input_value": "",
+                "expected_input_value": expected,
+                "pinyin": expected,
+                "independent_geometry_verified": True,
+                "geometry_audit_source": "element_geometry_audit",
+            },
+            "evidence": ["唯一完整精确候选"],
+        }
+    )
+    action = {
+        **resolved(),
+        "node_id": "candidate-node",
+        "prior_input_value": "",
+        "expected_input_value": expected,
+        "target_element_id": "candidate-loopok",
+        "before_fingerprint": "before-ime-candidate-fp",
+        "expected_effect": {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {"value": expected},
+            }
+        },
+    }
+    return before, action
+
+
 def resolved_text(*, prior: str = "", fragment: str = "longinput") -> dict:
     expected = prior + fragment
     return {
@@ -373,6 +428,52 @@ def state_switch_audit_raw(*, cue: str = PRIOR, literal: str = "2") -> str:
                         "target_layout": "symbol",
                     }
                 ],
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def ime_commit_audit_raw(*, cue: str = "loopok") -> str:
+    """Replay an exact candidate committed after the placeholder disappeared."""
+
+    return json.dumps(
+        {
+            "protocol_version": INPUT_STRUCTURE_AUDIT_VERSION,
+            "application_inputs": [
+                {
+                    "structure_id": "app-input-1",
+                    "bounds": [140, 540, 700, 610],
+                    "fully_visible": True,
+                    "text": "",
+                    "placeholder": "",
+                    "visible_editable_cues": ([] if not cue else [cue]),
+                    "confidence": 1.0,
+                    "right_button": None,
+                }
+            ],
+            "ime_preedit_regions": [],
+            "keyboard": {
+                "visible": True,
+                "bounds": [0, 660, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [122, 710],
+                    "p": [880, 710],
+                    "a": [164, 782],
+                    "l": [838, 782],
+                    "z": [248, 853],
+                    "m": [754, 853],
+                    "backspace": [880, 853],
+                },
+                "mode_switch": None,
+                "backspace_key": None,
+                "enter_key": None,
+                "case_switch": None,
+                "literal_keys": [],
+                "layout_switches": [],
             },
         },
         ensure_ascii=False,
@@ -783,6 +884,108 @@ class TypedInputLineageTests(unittest.TestCase):
                         input_bounds=(0.13, 0.54, 0.69, 0.61),
                         now_epoch=1000.0,
                     )
+                )
+
+    def test_pending_ime_candidate_lineage_recovers_exact_committed_cue(self) -> None:
+        before, action = ime_candidate_case()
+        record = build_pending_ime_candidate_lineage(
+            device_id=DEVICE,
+            resolved_action=action,
+            before_scene=before,
+            hardware_receipt=receipt(),
+        )
+        self.assertEqual("pending_verified_ime_candidate_action", record.source)
+        self.assertEqual("loopok", record.exact_value)
+        self.assertTrue(
+            record.matches_pending_input_state_surface(
+                device_id=DEVICE,
+                app_id="sample.app",
+                screen_id="editor",
+                input_bounds=(0.14, 0.54, 0.70, 0.61),
+                now_epoch=record.recorded_at_epoch,
+            )
+        )
+
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_exact_text",
+                    "objective": "提交唯一完整候选到当前输入框",
+                    "constraints": ["不得发送"],
+                    "completion_conditions": ["输入框逐字等于 loopok"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "input_text": "loopok",
+                        "active_input_transaction_text": "loopok",
+                        "active_input_field_id": "input_field_1",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+        projected = _apply_input_structure_audit(
+            UIScene.from_dict(before),
+            ime_commit_audit_raw(),
+            fingerprint="after-ime-candidate-fp",
+            goal_context=context,
+            coarse_input_value="loopok",
+            verified_input_lineage=record,
+            device_id=DEVICE,
+            lineage_frame=surface_frame(),
+        )
+        field = projected.get_element("local_audited_input_1")
+        self.assertEqual("loopok", field.states["value"])
+        self.assertEqual("input_field_1", field.states["input_field_id"])
+        self.assertTrue(
+            any("应用输入框当前文字：loopok" in item for item in field.evidence)
+        )
+
+        for cue in ("", "loopo", "loopokx"):
+            with self.subTest(cue=cue):
+                rejected = _apply_input_structure_audit(
+                    UIScene.from_dict(before),
+                    ime_commit_audit_raw(cue=cue),
+                    fingerprint="after-ime-candidate-rejected",
+                    goal_context=context,
+                    coarse_input_value="loopok",
+                    verified_input_lineage=record,
+                    device_id=DEVICE,
+                    lineage_frame=surface_frame(),
+                )
+                self.assertFalse(
+                    any(
+                        element.meaning == "application_text_input"
+                        and element.states.get("value") == "loopok"
+                        for element in rejected.elements
+                    )
+                )
+
+    def test_pending_ime_candidate_lineage_rejects_identity_and_candidate_drift(self) -> None:
+        before, action = ime_candidate_case()
+        mutations = []
+        missing_field = json.loads(json.dumps(before))
+        missing_field["elements"][0]["states"].pop("input_field_id")
+        mutations.append((missing_field, action))
+        wrong_label = json.loads(json.dumps(before))
+        wrong_label["elements"][1]["label"] = "different"
+        mutations.append((wrong_label, action))
+        duplicate = json.loads(json.dumps(before))
+        duplicate_candidate = json.loads(json.dumps(duplicate["elements"][1]))
+        duplicate_candidate["element_id"] = "candidate-duplicate"
+        duplicate["elements"].append(duplicate_candidate)
+        mutations.append((duplicate, action))
+        wrong_expected = json.loads(json.dumps(action))
+        wrong_expected["expected_input_value"] = "loopokx"
+        mutations.append((before, wrong_expected))
+        for candidate_before, candidate_action in mutations:
+            with self.subTest(action=candidate_action), self.assertRaises(
+                InputValueLineageError
+            ):
+                build_pending_ime_candidate_lineage(
+                    device_id=DEVICE,
+                    resolved_action=candidate_action,
+                    before_scene=candidate_before,
+                    hardware_receipt=receipt(),
                 )
 
     def test_pending_input_state_lineage_rejects_wrong_surface_value_and_expiry(self) -> None:

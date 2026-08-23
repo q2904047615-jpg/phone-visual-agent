@@ -1148,6 +1148,7 @@ class QwenVisualDecision:
             if (
                 local_semantic_target is not None
                 and action.action in SINGLE_ELEMENT_ACTIONS
+                and not _formal_action_applies_effect(action)
                 and str(action.params.get("element_id") or "")
                 != local_semantic_target.element_id
             ):
@@ -1838,6 +1839,31 @@ def _deterministic_exact_selection_payload(
         "reason": "结构化直推目录只有一个合法 canonical candidate。",
         "completion_evidence_element_ids": [],
     }
+
+
+def _formal_action_applies_effect(action: SemanticAction) -> bool:
+    """Recognize only a locally hydrated canonical effect transition.
+
+    Qwen selects a ``choice_id`` and cannot author ``formal_transition``.
+    Therefore an exact ``effect.applied = true`` expectation identifies the
+    canonical effect control without letting the observer's generic
+    ``goal_relevant`` flag establish a second action owner.  Non-effect and
+    legacy actions keep the existing unique semantic-target check.
+    """
+
+    transition = action.params.get("formal_transition")
+    if not isinstance(transition, Mapping):
+        return False
+    expectations = transition.get("expectations")
+    if not isinstance(expectations, list):
+        return False
+    return any(
+        isinstance(item, Mapping)
+        and item.get("predicate") == "effect.applied"
+        and item.get("operator") == "equals"
+        and item.get("value") is True
+        for item in expectations
+    )
 
 
 def _parse_model_decision(

@@ -706,6 +706,12 @@ class ObservationBridge:
                         "active_input_predecessor_text": predecessor["text"],
                     })
             else:
+                # The task root retains the immutable payload for effects and
+                # later nodes.  It is not current observation authority once
+                # the active node no longer owns an input transaction; copying
+                # it here would reopen a completed write while verifying a
+                # rendered result such as a message bubble or saved preview.
+                active_goal_entities.pop("input_text", None)
                 active_goal_entities.update(
                     self._active_input_verification_projection(graph, active)
                 )

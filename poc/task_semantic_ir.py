@@ -85,6 +85,23 @@ SUBGOAL_IMPACTS = frozenset(
 _ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,95}$")
 _EXTERNAL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
+# A typed payload can also appear after an effect as ordinary rendered content
+# (for example, a sent message bubble or a saved preview). Literal equality
+# alone therefore cannot make that surface an input field. Keep the binding
+# generic and structural: the same clause must identify an editable control.
+_EDITABLE_CONTROL_PATTERN = re.compile(
+    r"(?:输入框|文本框|编辑框|输入栏|文本栏|输入区域|编辑区域|"
+    r"字段|表单项|搜索框|地址栏|正文框|"
+    r"\binput\s+(?:field|box|area|control)\b|"
+    r"\btext\s*(?:field|box|area)\b|\btextarea\b|"
+    r"\b(?:editor|composer|form\s+field|search\s+box|address\s+bar)\b)",
+    re.I,
+)
+_STATE_CLAUSE_SPLIT_PATTERN = re.compile(
+    r"[，。；;,.!?！？\n\r]|(?:且|并且|同时)|\b(?:and|while)\b",
+    re.I,
+)
+
 _RUNTIME_RISK_EFFECT_KIND = {
     "message_or_communication": "send_message",
     "content_publication": "publish_content",
@@ -1728,18 +1745,63 @@ def compile_runtime_graph_semantics(
         input_entities = tuple(entity_by_role.get("input_text", ()))
         effect_refs = effect_refs_by_subgoal.get(source_subgoal_id, [])
         compact_description = description.casefold()
+
+        def explicitly_targets_editable_control(entity: SemanticEntity) -> bool:
+            """Bind a literal to input state only in its editable-control clause."""
+
+            if not isinstance(entity.value, str) or not entity.value:
+                return False
+            literal = entity.value.casefold()
+            matching_clauses: list[str] = []
+            cursor = 0
+            boundaries = tuple(
+                _STATE_CLAUSE_SPLIT_PATTERN.finditer(compact_description)
+            )
+            while True:
+                start = compact_description.find(literal, cursor)
+                if start < 0:
+                    break
+                end = start + len(literal)
+                left = max(
+                    (
+                        boundary.end()
+                        for boundary in boundaries
+                        if boundary.end() <= start
+                    ),
+                    default=0,
+                )
+                right = min(
+                    (
+                        boundary.start()
+                        for boundary in boundaries
+                        if boundary.start() >= end
+                    ),
+                    default=len(compact_description),
+                )
+                matching_clauses.append(compact_description[left:right])
+                cursor = end
+            if not any(
+                _EDITABLE_CONTROL_PATTERN.search(clause)
+                for clause in matching_clauses
+            ):
+                return False
+            if len(input_entities) == 1:
+                return True
+            field_label = input_field_label_by_entity.get(
+                entity.entity_id, ""
+            ).strip().casefold()
+            return bool(
+                field_label
+                and any(field_label in clause for clause in matching_clauses)
+            )
+
         matching_input_entities = tuple(
             entity
             for entity in input_entities
             if isinstance(entity.value, str)
             and entity.value
             and entity.value.casefold() in compact_description
-            and (
-                len(input_entities) == 1
-                or bool(input_field_label_by_entity.get(entity.entity_id, ""))
-                and input_field_label_by_entity[entity.entity_id].casefold()
-                in compact_description
-            )
+            and explicitly_targets_editable_control(entity)
         )
         if len(effect_refs) == 1:
             receipt_only = any(
@@ -1959,7 +2021,10 @@ def compile_runtime_graph_semantics(
             semantic_subgoal.subgoal_id
             for semantic_subgoal in semantic_subgoals
             if (
-                payload.entity_id in semantic_subgoal.entity_refs
+                (
+                    payload.entity_id in semantic_subgoal.entity_refs
+                    and semantic_subgoal.external_impact != "read_only"
+                )
                 or (
                     len(input_entities) == 1
                     and semantic_subgoal.subgoal_id in input_action_subgoal_ids

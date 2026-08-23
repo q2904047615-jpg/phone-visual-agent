@@ -2387,3 +2387,268 @@ class RawSequenceProvider(FakeProvider):
 
         self.assertGreaterEqual(observation.selected_frame_index, 1)
         self.assertEqual(_local_frame_fingerprint(base), observation.fingerprint)
+
+
+class CanonicalEffectSelectionRegressionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        frame = Image.new("RGB", (240, 480), "black")
+        draw = ImageDraw.Draw(frame)
+        for y in range(0, 480, 12):
+            for x in range(0, 240, 12):
+                if (x // 12 + y // 12) % 2:
+                    draw.rectangle((x, y, x + 5, y + 5), fill="white")
+        self.frames = [frame.copy() for _ in range(4)]
+        fingerprint = _local_frame_fingerprint(frame)
+        self.scene = UIScene(
+            app_id="chat",
+            screen_id="conversation",
+            summary="会话标题、现有正文和发送按钮可见",
+            elements=(
+                UIElement(
+                    element_id="send-control",
+                    role="button",
+                    meaning="send_message",
+                    label="发送",
+                    bounds=(0.78, 0.54, 0.96, 0.60),
+                    confidence=1.0,
+                    states={"goal_relevant": False, "fully_visible": True},
+                ),
+                UIElement(
+                    element_id="conversation-title",
+                    role="text",
+                    meaning="page_title",
+                    label="文件传输助手",
+                    bounds=(0.34, 0.02, 0.66, 0.06),
+                    confidence=1.0,
+                    states={"goal_relevant": False, "fully_visible": True},
+                ),
+                UIElement(
+                    element_id="draft-input",
+                    role="input",
+                    meaning="application_text_input",
+                    label="freshsendproof",
+                    bounds=(0.14, 0.57, 0.70, 0.63),
+                    confidence=1.0,
+                    states={
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "focused": True,
+                        "value": "freshsendproof",
+                    },
+                ),
+                UIElement(
+                    element_id="mode-switch",
+                    role="button",
+                    meaning="switch_keyboard_input_mode",
+                    label="英",
+                    bounds=(0.73, 0.92, 0.81, 0.98),
+                    confidence=1.0,
+                    states={
+                        "goal_relevant": False,
+                        "fully_visible": True,
+                        "keyboard_input_mode_switch": True,
+                        "current_mode": "direct_latin",
+                        "target_mode": "chinese_pinyin",
+                        "prior_input_value": "freshsendproof",
+                        "next_input_value": "",
+                        "input_element_id": "draft-input",
+                    },
+                ),
+                UIElement(
+                    element_id="other-control",
+                    role="button",
+                    meaning="open_other",
+                    label="其他",
+                    bounds=(0.05, 0.12, 0.22, 0.18),
+                    confidence=1.0,
+                    states={"goal_relevant": False, "fully_visible": True},
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint=fingerprint,
+        )
+        self.observation = TrustedObservation.from_scene(
+            frames=self.frames,
+            device_id="device-local-01",
+            scene=self.scene,
+            observation_id="obs_effectbinding000000000000000000",
+        )
+        raw_goal = "文件传输助手 freshsendproof 其他"
+        recipient_start = raw_goal.index("文件传输助手")
+        input_start = raw_goal.index("freshsendproof")
+        other_start = raw_goal.index("其他")
+        semantic_ir = TaskSemanticIR(
+            task_id="task_effect_binding",
+            device_id="device-local-01",
+            revision=1,
+            raw_goal=raw_goal,
+            surfaces=(SurfaceRef("surface_current", "current_surface"),),
+            entities=(
+                SemanticEntity(
+                    entity_id="entity_recipient",
+                    entity_type="party",
+                    role="recipient",
+                    value="文件传输助手",
+                    source_span=SourceSpan(
+                        recipient_start,
+                        recipient_start + len("文件传输助手"),
+                    ),
+                    authority="user_literal",
+                ),
+                SemanticEntity(
+                    entity_id="entity_input_text",
+                    entity_type="text",
+                    role="input_text",
+                    value="freshsendproof",
+                    source_span=SourceSpan(
+                        input_start,
+                        input_start + len("freshsendproof"),
+                    ),
+                    authority="user_literal",
+                ),
+                SemanticEntity(
+                    entity_id="entity_other_label",
+                    entity_type="ui_label",
+                    role="target_ui_label",
+                    value="其他",
+                    source_span=SourceSpan(
+                        other_start,
+                        other_start + len("其他"),
+                    ),
+                    authority="user_literal",
+                ),
+            ),
+            effects=(
+                EffectIntent(
+                    effect_id="effect_send",
+                    kind="send_message",
+                    target_refs=("entity_recipient",),
+                    payload_refs=("entity_input_text",),
+                    source_subgoal_ids=("send_existing_text",),
+                    expected_result_texts=(
+                        "最新消息气泡逐字为 freshsendproof 且输入框为空",
+                    ),
+                ),
+            ),
+            subgoals=(
+                SemanticSubgoal(
+                    subgoal_id="send_existing_text",
+                    surface_ref="surface_current",
+                    status="active",
+                    external_impact="external_state",
+                    entity_refs=("entity_other_label",),
+                    effect_refs=("effect_send",),
+                ),
+            ),
+        )
+        self.context = QwenTaskContext(
+            protocol_version="2026-08-20-deepseek-typed-task-graph-v4",
+            task_id="task_effect_binding",
+            device_id="device-local-01",
+            revision=1,
+            task_status="running",
+            goal={
+                "understood": True,
+                "objective": "只发送一次当前已有正文",
+                "entities": {
+                    "recipient": "文件传输助手",
+                    "input_text": "freshsendproof",
+                    "target_ui_label": "其他",
+                },
+            },
+            global_constraints=("只发送一次",),
+            goal_completion_conditions=(
+                {
+                    "condition_id": "sent",
+                    "description": "最新消息气泡逐字为 freshsendproof 且输入框为空",
+                    "evidence_required": ["最新消息气泡和空输入框可见"],
+                    "satisfied": False,
+                },
+            ),
+            current_subgoal={
+                "subgoal_id": "send_existing_text",
+                "objective": "只发送一次输入框内现有正文 freshsendproof",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["只发送一次"],
+                "completion_conditions": ["已发送一次现有正文 freshsendproof"],
+                "completion_evidence": [],
+                "effect_ids": ["effect_send"],
+                "execution_class": "effect",
+            },
+            current_execution_class="effect",
+            effect_intents=(
+                {
+                    "effect_id": "effect_send",
+                    "kind": "send_message",
+                    "target_entity_roles": ["recipient"],
+                    "payload_entity_roles": ["input_text"],
+                    "source_subgoal_ids": ["send_existing_text"],
+                    "expected_results": [
+                        "最新消息气泡逐字为 freshsendproof 且输入框为空"
+                    ],
+                    "local_policy": {
+                        "effect_id": "effect_send",
+                        "confirmation_required": False,
+                        "policy_level": "low",
+                    },
+                },
+            ),
+            effect_gate={
+                "required": False,
+                "state": "not_required",
+                "effect_ids": [],
+                "effect_action_allowed": True,
+                "scope": {
+                    "task_id": "task_effect_binding",
+                    "device_id": "device-local-01",
+                    "revision": 1,
+                    "subgoal_id": "send_existing_text",
+                },
+            },
+            semantic_ir=semantic_ir,
+        )
+        self.context.validate()
+        self.available = frozenset({"tap_semantic", "clear_verified_text"})
+
+    def _decide_for_element(self, element_id: str):
+        choices = _selection_choices(
+            self.context,
+            self.observation,
+            self.available,
+        )
+        choice = next(
+            item for item in choices if item.get("element_id") == element_id
+        )
+        provider = FakeProvider(
+            {
+                "status": "action",
+                "choice_id": choice["choice_id"],
+                "completes_current_subgoal_on_success": False,
+                "confidence": 1.0,
+                "reason": "选择正式 canonical candidate",
+                "completion_evidence_element_ids": [],
+            }
+        )
+        return QwenVisualDecisionObserver(provider).decide(
+            frames=self.frames,
+            task_context=self.context,
+            trusted_observation=self.observation,
+            available_action_kinds=self.available,
+        )
+
+    def test_effect_bound_canonical_control_outranks_generic_goal_element(self) -> None:
+        decision = self._decide_for_element("send-control")
+
+        self.assertEqual("action", decision.proposal.status)
+        self.assertEqual(
+            "send-control",
+            decision.proposal.action.params["element_id"],
+        )
+
+    def test_non_effect_control_still_cannot_override_generic_goal_element(self) -> None:
+        decision = self._decide_for_element("other-control")
+
+        self.assertEqual("blocked", decision.proposal.status)
+        self.assertIn("唯一的语义目标候选", decision.reason)

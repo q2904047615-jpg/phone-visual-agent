@@ -1302,6 +1302,63 @@ class ObservationBridgeTests(unittest.TestCase):
             "active_input_transaction_text",
             unrelated_focus["goal_entities"],
         )
+        self.assertNotIn("input_text", unrelated_focus["goal_entities"])
+
+    def test_post_effect_rendered_payload_does_not_reopen_input_transaction(self) -> None:
+        graph = DynamicTaskGraph(
+            task_id="task-post-effect-rendered-payload",
+            device_id="device-1",
+            revision=4,
+            status="ready",
+            goal=GraphGoal(
+                objective="确认提交结果与编辑器状态",
+                target_apps=(
+                    TargetApp(
+                        app_id="current_foreground",
+                        app_name="当前前台应用",
+                    ),
+                ),
+                entities={"input_text": "release candidate"},
+            ),
+            constraints=(),
+            completion_conditions=(
+                CompletionCondition(
+                    condition_id="result-visible",
+                    description=(
+                        "结果预览显示 release candidate 且编辑器为空"
+                    ),
+                    evidence_required=("结果预览和空编辑器可见",),
+                ),
+            ),
+            risk_actions=(),
+            subgoals=(
+                Subgoal(
+                    subgoal_id="verify-result",
+                    objective="核对结果预览与编辑器状态",
+                    status="active",
+                    depends_on=(),
+                    constraints=("只读核对",),
+                    completion_conditions=(
+                        "结果预览逐字显示 release candidate",
+                        "编辑器为空",
+                    ),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="read_only",
+                ),
+            ),
+            active_subgoal_id="verify-result",
+            raw_user_goal="提交后核对结果预览和编辑器",
+        )
+        graph.validate()
+
+        focus = self.bridge.goal_draft(graph).entities[
+            "active_subgoal_visual_context"
+        ]["goal_entities"]
+
+        self.assertNotIn("active_input_transaction_text", focus)
+        self.assertNotIn("active_input_field_id", focus)
+        self.assertNotIn("input_text", focus)
 
     def test_multifield_live_context_projects_only_current_typed_field(self) -> None:
         graph = _multifield_graph()

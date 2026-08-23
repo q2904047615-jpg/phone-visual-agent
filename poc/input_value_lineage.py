@@ -22,6 +22,7 @@ PENDING_INPUT_LINEAGE_SOURCES = frozenset(
         "pending_verified_literal_action",
         "pending_verified_text_action",
         "pending_verified_input_state_action",
+        "pending_verified_ime_candidate_action",
     }
 )
 
@@ -447,13 +448,16 @@ class TypedInputLineage:
         now_epoch: float | None = None,
         ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
     ) -> bool:
-        """Authorize only a later exact visual-cue check on the same surface."""
+        """Authorize an immediate exact visual-cue check on the same input."""
 
         now = time.time() if now_epoch is None else float(now_epoch)
         current_screen = str(screen_id or "").strip().casefold()
         recorded_screen = self.screen_id.strip().casefold()
         return bool(
-            self.source == "pending_verified_input_state_action"
+            self.source in {
+                "pending_verified_input_state_action",
+                "pending_verified_ime_candidate_action",
+            }
             and device_id == self.device_id
             and now >= self.recorded_at_epoch
             and now - self.recorded_at_epoch <= ttl_seconds
@@ -894,6 +898,136 @@ def build_pending_input_state_lineage(
             time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
         ),
         source="pending_verified_input_state_action",
+    )
+    record.validate()
+    return record
+
+
+def build_pending_ime_candidate_lineage(
+    *,
+    device_id: str,
+    resolved_action: dict[str, Any],
+    before_scene: dict[str, Any],
+    hardware_receipt: dict[str, Any],
+    recorded_at_epoch: float | None = None,
+) -> TypedInputLineage:
+    """Bind one exact IME candidate commit to its typed application field."""
+
+    if (
+        not isinstance(resolved_action, dict)
+        or resolved_action.get("kind") != "tap_semantic"
+        or not isinstance(hardware_receipt, dict)
+        or hardware_receipt.get("seller_event_barrier_confirmed") is not True
+        or hardware_receipt.get("round_trip_position_confirmed") is not True
+        or hardware_receipt.get("mechanical_contact_ack") is not False
+    ):
+        raise InputValueLineageError(
+            "临时候选提交连续性缺少有效单击事件栅栏。"
+        )
+    prior = resolved_action.get("prior_input_value")
+    expected = resolved_action.get("expected_input_value")
+    target_id = resolved_action.get("target_element_id")
+    expected_effect = resolved_action.get("expected_effect")
+    expected_state = (
+        expected_effect.get("element_state")
+        if isinstance(expected_effect, dict)
+        else None
+    )
+    expected_states = (
+        expected_state.get("states")
+        if isinstance(expected_state, dict)
+        else None
+    )
+    if (
+        not isinstance(prior, str)
+        or not isinstance(expected, str)
+        or not expected
+        or expected == prior
+        or not expected.startswith(prior)
+        or "\r" in prior
+        or "\n" in prior
+        or "\r" in expected
+        or "\n" in expected
+        or not isinstance(target_id, str)
+        or not target_id
+        or not isinstance(expected_state, dict)
+        or expected_state.get("meaning") != "application_text_input"
+        or expected_states != {"value": expected}
+        or not str(resolved_action.get("formal_candidate_id") or "").strip()
+    ):
+        raise InputValueLineageError(
+            "临时候选提交连续性的 prior/expected 合同无效。"
+        )
+    before_input = _single_input(before_scene, expected_value=prior)
+    input_states = before_input.get("states")
+    field_id = (
+        str(input_states.get("input_field_id") or "").strip()
+        if isinstance(input_states, dict)
+        else ""
+    )
+    if field_id in {"", "unknown"}:
+        raise InputValueLineageError(
+            "临时候选提交连续性缺少 typed input_field_id。"
+        )
+    elements = before_scene.get("elements")
+    candidates = [
+        item
+        for item in elements or []
+        if isinstance(item, dict)
+        and item.get("role") == "button"
+        and item.get("meaning") == "ime_exact_candidate"
+        and item.get("label") == expected
+        and isinstance(item.get("states"), dict)
+        and item["states"].get("ime_candidate") is True
+        and item["states"].get("input_element_id")
+        == before_input.get("element_id")
+        and item["states"].get("prior_input_value") == prior
+        and item["states"].get("expected_input_value") == expected
+        and item["states"].get("goal_relevant") is True
+        and item["states"].get("fully_visible") is True
+        and item["states"].get("independent_geometry_verified") is True
+    ]
+    if len(candidates) != 1 or candidates[0].get("element_id") != target_id:
+        raise InputValueLineageError(
+            "临时候选提交连续性缺少唯一绑定当前输入框的精确候选。"
+        )
+    preedit = input_states.get("ime_preedit_text")
+    candidate_states = candidates[0]["states"]
+    if (
+        not isinstance(preedit, str)
+        or not preedit
+        or candidate_states.get("pinyin") != preedit
+    ):
+        raise InputValueLineageError(
+            "临时候选提交连续性没有绑定同一输入法预编辑串。"
+        )
+    app_id = before_scene.get("app_id")
+    screen_id = before_scene.get("screen_id")
+    before_fingerprint = before_scene.get("fingerprint")
+    if any(
+        not isinstance(value, str) or not value.strip() or value == "unknown"
+        for value in (app_id, screen_id, before_fingerprint)
+    ):
+        raise InputValueLineageError(
+            "临时候选提交连续性缺少明确输入表面。"
+        )
+    record = TypedInputLineage(
+        version=TYPED_INPUT_LINEAGE_VERSION,
+        device_id=device_id,
+        exact_value=expected,
+        app_id=app_id,
+        screen_id=screen_id,
+        input_meaning="application_text_input",
+        input_bounds=_valid_bounds(before_input["bounds"]),
+        before_fingerprint=before_fingerprint,
+        after_fingerprint="pending-visual-verification",
+        action_digest=_canonical_digest(resolved_action),
+        receipt_digest=_canonical_digest(hardware_receipt),
+        surface_descriptors=(),
+        recorded_at_epoch=(
+            time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
+        ),
+        source="pending_verified_ime_candidate_action",
     )
     record.validate()
     return record

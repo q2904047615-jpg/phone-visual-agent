@@ -902,6 +902,191 @@ class TypedPlannerTransportTests(unittest.TestCase):
         self.assertFalse(graph.risk_actions[0].confirmation_required)
         self.assertEqual("ready", graph.status)
 
+    def test_single_effect_can_reference_unique_final_goal_result(self):
+        cases = (
+            (
+                "发送当前已有正文 alpha",
+                "alpha",
+                "最新我方消息气泡逐字为 alpha 且输入框为空",
+                ("发送动作已执行一次", "输入框已清空"),
+            ),
+            (
+                "Send the existing draft beta",
+                "beta",
+                "The newest outgoing message is beta and the composer is empty",
+                ("The send action ran once", "The composer is empty"),
+            ),
+        )
+        for objective, input_text, final_result, source_results in cases:
+            with self.subTest(objective=objective):
+                effect = {
+                    "effect_id": "send_existing_message",
+                    "kind": "send_message",
+                    "target_entity_roles": ["recipient"],
+                    "payload_entity_roles": ["input_text"],
+                    "source_subgoal_ids": ["step"],
+                    "expected_results": [final_result],
+                }
+                raw = payload(objective=objective, effects=(effect,))
+                raw["goal"]["entities"] = {
+                    "recipient": "current recipient",
+                    "input_text": input_text,
+                }
+                raw["completion_conditions"][0].update(
+                    description=final_result,
+                    evidence_required=[final_result],
+                )
+                raw["subgoals"][0]["completion_conditions"] = list(
+                    source_results
+                )
+
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                    raw["goal"]["objective"],
+                    device_id="phone-1",
+                )
+
+                self.assertEqual(
+                    (final_result,),
+                    graph.risk_actions[0].expected_result_texts,
+                )
+
+    def test_single_effect_result_string_normalizes_without_semantic_change(self):
+        final_result = "The newest saved preview is alpha and the editor is empty"
+        effect = {
+            "effect_id": "save_existing_value",
+            "kind": "data_mutation",
+            "target_entity_roles": ["target_ui_label"],
+            "payload_entity_roles": ["input_text"],
+            "source_subgoal_ids": ["step"],
+            "expected_results": final_result,
+        }
+        raw = payload(
+            objective="Save the existing value alpha once",
+            effects=(effect,),
+        )
+        raw["goal"]["entities"] = {
+            "target_ui_label": "Save",
+            "input_text": "alpha",
+        }
+        raw["completion_conditions"][0].update(
+            description=final_result,
+            evidence_required=[final_result],
+        )
+        raw["subgoals"][0]["completion_conditions"] = [
+            "The save action ran once"
+        ]
+
+        graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+            raw["goal"]["objective"],
+            device_id="phone-1",
+        )
+
+        self.assertEqual(
+            (final_result,), graph.risk_actions[0].expected_result_texts
+        )
+
+    def test_effect_result_normalization_keeps_ambiguous_shapes_rejected(self):
+        for malformed in ("", "   ", None, 1, {"result": "saved"}):
+            with self.subTest(malformed=malformed):
+                effect = {
+                    "effect_id": "save_setting",
+                    "kind": "data_mutation",
+                    "target_entity_roles": ["target_ui_label"],
+                    "payload_entity_roles": [],
+                    "source_subgoal_ids": ["step"],
+                    "expected_results": malformed,
+                }
+                raw = payload(objective="保存设置", effects=(effect,))
+                raw["goal"]["entities"] = {"target_ui_label": "保存"}
+                raw["subgoals"][0]["completion_conditions"] = ["设置已保存"]
+                with self.assertRaisesRegex(
+                    TaskGraphError, "expected_results"
+                ):
+                    DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                        raw["goal"]["objective"],
+                        device_id="phone-1",
+                    )
+
+    def test_final_goal_result_does_not_cross_bind_multiple_effects(self):
+        final_result = "最新我方消息气泡逐字为 alpha 且输入框为空"
+        send_effect = {
+            "effect_id": "send_existing_message",
+            "kind": "send_message",
+            "target_entity_roles": ["recipient"],
+            "payload_entity_roles": ["input_text"],
+            "source_subgoal_ids": ["step"],
+            "expected_results": [final_result],
+        }
+        other_effect = {
+            "effect_id": "save_setting",
+            "kind": "data_mutation",
+            "target_entity_roles": ["target_ui_label"],
+            "payload_entity_roles": [],
+            "source_subgoal_ids": ["save_step"],
+            "expected_results": ["设置已保存"],
+        }
+        raw = payload(
+            objective="发送现有正文并保存设置",
+            effects=(send_effect, other_effect),
+        )
+        raw["goal"]["entities"] = {
+            "recipient": "current recipient",
+            "input_text": "alpha",
+            "target_ui_label": "设置",
+        }
+        raw["completion_conditions"][0].update(
+            description=final_result,
+            evidence_required=[final_result],
+        )
+        raw["subgoals"][0]["completion_conditions"] = [
+            "发送动作已执行一次",
+            "输入框已清空",
+        ]
+        raw["subgoals"].append(
+            {
+                "subgoal_id": "save_step",
+                "objective": "保存设置",
+                "status": "pending",
+                "depends_on": ["step"],
+                "constraints": [],
+                "completion_conditions": ["设置已保存"],
+                "completion_evidence": [],
+                "effect_ids": ["save_setting"],
+                "execution_class": "effect",
+            }
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "正向完成条件"):
+            DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                raw["goal"]["objective"],
+                device_id="phone-1",
+            )
+
+    def test_nonfinal_result_still_cannot_replace_multiple_source_results(self):
+        effect = {
+            "effect_id": "send_existing_message",
+            "kind": "send_message",
+            "target_entity_roles": ["recipient"],
+            "payload_entity_roles": ["input_text"],
+            "source_subgoal_ids": ["step"],
+            "expected_results": ["模型自行补写的发送结果"],
+        }
+        raw = payload(objective="发送当前已有正文 alpha", effects=(effect,))
+        raw["goal"]["entities"] = {
+            "recipient": "current recipient",
+            "input_text": "alpha",
+        }
+        raw["subgoals"][0]["completion_conditions"] = [
+            "发送动作已执行一次",
+            "输入框已清空",
+        ]
+
+        with self.assertRaisesRegex(TaskGraphError, "正向完成条件"):
+            DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                raw["goal"]["objective"],
+                device_id="phone-1",
+            )
+
     def test_financial_effect_uses_local_confirmation_policy(self):
         raw = payload(
             objective="向商户付款20元",

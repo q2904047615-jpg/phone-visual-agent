@@ -9876,12 +9876,16 @@ def _validated_keyboard_literal_keys(
         ):
             raise UISceneError("literal_key 内容无效。")
         if key_kind == "character" and (key_value == " " or label != key_value):
-            raise UISceneError("字符键 label 必须逐字等于其输入值。")
+            # A schema-valid optional key with a mismatched visible glyph is
+            # not executable (for example ASCII "?" claimed as full-width
+            # "？"). Revoke only this candidate so the independently audited
+            # input value and a valid layout switch can still be consumed.
+            continue
         if key_kind == "space" and (
             key_value != " "
             or label.strip().casefold() not in {"", "space", "空格"}
         ):
-            raise UISceneError("空格键缺少明确的空格语义。")
+            continue
         bounds = tuple(float(part) for part in item["bounds"])
         confidence = _audit_confidence(item.get("confidence"), "literal_key")
         if (

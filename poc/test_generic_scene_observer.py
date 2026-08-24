@@ -8072,7 +8072,16 @@ class GenericSceneObserverTests(unittest.TestCase):
                 "backspace_key": None,
                 "enter_key": None,
                 "case_switch": None,
-                "literal_keys": [],
+                "literal_keys": [
+                    {
+                        "value": "？",
+                        "label": "?",
+                        "key_kind": "character",
+                        "bounds": [820, 820, 880, 860],
+                        "confidence": 0.9,
+                        "fully_visible": True,
+                    }
+                ],
                 "layout_switches": [
                     {
                         "label": "123",
@@ -8442,7 +8451,8 @@ class GenericSceneObserverTests(unittest.TestCase):
 
     def test_literal_key_and_layout_switch_validation_fail_closed(self) -> None:
         keyboard_bounds = (0.0, 480.0, 1000.0, 1000.0)
-        with self.assertRaisesRegex(UISceneError, "label"):
+        self.assertEqual(
+            [],
             _validated_keyboard_literal_keys(
                 [{
                     "value": "8", "label": "9", "key_kind": "character",
@@ -8450,7 +8460,8 @@ class GenericSceneObserverTests(unittest.TestCase):
                     "fully_visible": True,
                 }],
                 keyboard_bounds=keyboard_bounds,
-            )
+            ),
+        )
         self.assertEqual(
             [],
             _validated_keyboard_literal_keys(

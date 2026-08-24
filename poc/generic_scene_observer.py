@@ -8734,12 +8734,11 @@ def _apply_input_structure_audit(
                 input_step.kind in {"direct_latin", "chinese_pinyin"}
                 and keyboard_layout != "qwerty"
             ):
-                exact_switches = [
-                    item for item in layout_switches
-                    if item["target_layout"] == "qwerty"
-                ]
-                if len(exact_switches) == 1:
-                    exact_layout_switch = exact_switches[0]
+                exact_layout_switch = _select_keyboard_layout_switch_for_target(
+                    layout_switches,
+                    current_layout=keyboard_layout,
+                    target_layout="qwerty",
+                )
             elif (
                 input_step.kind == "literal_key"
                 and input_step.segment == "\n"
@@ -8761,15 +8760,14 @@ def _apply_input_structure_audit(
                     desired_layout = _preferred_keyboard_layout(
                         input_step.segment
                     )
-                    exact_switches = [
-                        item for item in layout_switches
-                        if item["target_layout"] == desired_layout
-                    ]
-                    if (
-                        desired_layout != keyboard_layout
-                        and len(exact_switches) == 1
-                    ):
-                        exact_layout_switch = exact_switches[0]
+                    if desired_layout != keyboard_layout:
+                        exact_layout_switch = (
+                            _select_keyboard_layout_switch_for_target(
+                                layout_switches,
+                                current_layout=keyboard_layout,
+                                target_layout=desired_layout,
+                            )
+                        )
             elif (
                 input_step.kind == "direct_latin"
                 and bool(input_step.required_case_mode)
@@ -9802,6 +9800,52 @@ def _preferred_keyboard_layout(character: str) -> str:
     if character == " " or character.isalpha():
         return "qwerty"
     return "symbol"
+
+
+def _select_keyboard_layout_switch_for_target(
+    layout_switches: list[dict[str, Any]],
+    *,
+    current_layout: str,
+    target_layout: str,
+) -> dict[str, Any] | None:
+    """Select one explicit switch that monotonically approaches a layout.
+
+    The local layout graph is a three-state line: qwerty <-> numeric <->
+    symbol.  A visible direct edge wins.  When no direct edge is visible, only
+    the unique adjacent edge on the shortest path may be used.  Every edge was
+    already read from the current image and validated for its literal label,
+    source layout, geometry and confidence; this helper never invents a key.
+    """
+
+    layout_path = ("qwerty", "numeric", "symbol")
+    if (
+        current_layout not in layout_path
+        or target_layout not in layout_path
+        or current_layout == target_layout
+    ):
+        return None
+    direct = [
+        item
+        for item in layout_switches
+        if item.get("current_layout") == current_layout
+        and item.get("target_layout") == target_layout
+    ]
+    if len(direct) == 1:
+        return direct[0]
+    if direct:
+        return None
+    current_index = layout_path.index(current_layout)
+    target_index = layout_path.index(target_layout)
+    next_layout = layout_path[
+        current_index + (1 if target_index > current_index else -1)
+    ]
+    next_hop = [
+        item
+        for item in layout_switches
+        if item.get("current_layout") == current_layout
+        and item.get("target_layout") == next_layout
+    ]
+    return next_hop[0] if len(next_hop) == 1 else None
 
 
 def _validated_keyboard_literal_keys(

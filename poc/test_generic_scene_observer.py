@@ -46,6 +46,7 @@ from generic_scene_observer import (
     _parse_scene,
     _scene_enum_values,
     _safe_goal_context,
+    _select_keyboard_layout_switch_for_target,
     _single_json_structural_edits,
     _snap_reload_audit_to_local_glyph,
     _strict_icon_cluster_audit_payload,
@@ -7994,6 +7995,119 @@ class GenericSceneObserverTests(unittest.TestCase):
                 for item in projected.elements
             )
         )
+
+    def test_keyboard_layout_switch_uses_only_unique_monotonic_next_hop(
+        self,
+    ) -> None:
+        qwerty_to_numeric = {
+            "label": "123",
+            "bounds": [100, 900, 200, 980],
+            "confidence": 1.0,
+            "current_layout": "qwerty",
+            "target_layout": "numeric",
+        }
+        qwerty_to_symbol = {
+            "label": "符",
+            "bounds": [220, 900, 320, 980],
+            "confidence": 1.0,
+            "current_layout": "qwerty",
+            "target_layout": "symbol",
+        }
+
+        intermediate = _select_keyboard_layout_switch_for_target(
+            [qwerty_to_numeric],
+            current_layout="qwerty",
+            target_layout="symbol",
+        )
+        self.assertEqual("numeric", intermediate["target_layout"])
+
+        direct = _select_keyboard_layout_switch_for_target(
+            [qwerty_to_numeric, qwerty_to_symbol],
+            current_layout="qwerty",
+            target_layout="symbol",
+        )
+        self.assertEqual("symbol", direct["target_layout"])
+
+        self.assertIsNone(
+            _select_keyboard_layout_switch_for_target(
+                [qwerty_to_numeric, {**qwerty_to_numeric, "label": "数字"}],
+                current_layout="qwerty",
+                target_layout="symbol",
+            )
+        )
+
+    def test_fullwidth_symbol_input_projects_numeric_intermediate_layout_hop(
+        self,
+    ) -> None:
+        current_value = "aaazjie"
+        payload = scene_payload()
+        payload["elements"] = []
+        base_scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-symbol-intermediate-hop",
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="app-input-1",
+                    bounds=[130, 570, 720, 630],
+                    text=current_value,
+                    visible_editable_cues=[current_value, "|"],
+                    caret_line_index=0,
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 640, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [80, 730], "p": [920, 730],
+                    "a": [130, 820], "l": [870, 820],
+                    "z": [230, 900], "m": [770, 900],
+                    "backspace": [920, 900],
+                },
+                "mode_switch": None,
+                "backspace_key": None,
+                "enter_key": None,
+                "case_switch": None,
+                "literal_keys": [],
+                "layout_switches": [
+                    {
+                        "label": "123",
+                        "bounds": [180, 940, 280, 980],
+                        "confidence": 1.0,
+                        "current_layout": "qwerty",
+                        "target_layout": "numeric",
+                    }
+                ],
+            },
+        )
+
+        projected = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="frame-symbol-intermediate-hop",
+            goal_context={
+                "objective": "输入框逐字等于授权文字且不发送",
+                "entities": {
+                    "input_text": current_value + "？你好",
+                    "active_input_transaction_text": current_value + "？你好",
+                    "active_input_field_id": "input_field_1",
+                },
+            },
+            ledger_input_value=current_value,
+        )
+
+        target = projected.unique_trusted_goal_element()
+        self.assertEqual(
+            "local_audited_keyboard_layout_switch_1",
+            target.element_id,
+        )
+        self.assertEqual("qwerty", target.states["current_layout"])
+        self.assertEqual("numeric", target.states["target_layout"])
+        self.assertEqual(current_value, target.states["prior_input_value"])
 
     def test_input_audit_rejects_compact_direct_latin_value_shadow(
         self,

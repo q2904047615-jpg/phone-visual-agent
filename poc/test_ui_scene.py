@@ -10,6 +10,7 @@ from ui_scene import (
     UISceneError,
 )
 from universal_action_controller import (
+    ResolvedSemanticAction,
     UniversalActionController,
     UniversalActionError,
 )
@@ -1474,6 +1475,7 @@ class UISceneTests(unittest.TestCase):
         self.assertEqual(mode_switch.center, resolved.normalized_point)
         self.assertEqual("draft", resolved.prior_input_value)
         self.assertEqual("draft", resolved.expected_input_value)
+        self.assertEqual("field", resolved.input_element_id)
         for bad_effect in (
             {
                 "element_state": {
@@ -1538,6 +1540,106 @@ class UISceneTests(unittest.TestCase):
             reverse_action,
             scene(mismatched_field, reverse_switch),
         )
+
+        formal_action = replace(
+            action,
+            params={
+                **action.params,
+                "formal_candidate_id": "candidate_mode_switch",
+                "formal_transition": {
+                    "expectations": [
+                        {
+                            "subject_ref": "element_input",
+                            "predicate": "element.state.value",
+                            "operator": "equals",
+                            "value": "draft",
+                        },
+                        {
+                            "subject_ref": "element_input",
+                            "predicate": "element.state.keyboard_input_mode",
+                            "operator": "equals",
+                            "value": "chinese_pinyin",
+                        },
+                    ]
+                },
+            },
+        )
+        formal_resolved = UniversalActionController().resolve_one(
+            formal_action,
+            scene(field, mode_switch, fingerprint="before"),
+        )
+        switched_field = replace(
+            field,
+            states={**field.states, "keyboard_input_mode": "chinese_pinyin"},
+        )
+        UniversalActionController().verify_after_action(
+            formal_resolved,
+            scene(field, mode_switch, fingerprint="before"),
+            scene(switched_field, fingerprint="after"),
+        )
+        with self.assertRaisesRegex(
+            UniversalActionError,
+            "keyboard_input_mode 后置状态未满足",
+        ):
+            UniversalActionController().verify_after_action(
+                formal_resolved,
+                scene(field, mode_switch, fingerprint="before"),
+                scene(field, fingerprint="after"),
+            )
+
+    def test_formal_keyboard_state_expectations_share_one_bound_field_rule(
+        self,
+    ) -> None:
+        for predicate, state_key, value in (
+            ("element.state.keyboard_layout", "keyboard_layout", "numeric"),
+            (
+                "element.state.keyboard_input_mode",
+                "keyboard_input_mode",
+                "direct_latin",
+            ),
+            ("element.state.keyboard_case_mode", "keyboard_case_mode", "upper"),
+        ):
+            with self.subTest(predicate=predicate):
+                action = ResolvedSemanticAction(
+                    node_id="switch",
+                    kind="tap_semantic",
+                    target_element_id="switch",
+                    input_element_id="field",
+                    prior_input_value="draft",
+                    expected_input_value="draft",
+                    before_fingerprint="before",
+                    expected_effect={
+                        "element_state": {
+                            "meaning": "application_text_input",
+                            "states": {"value": "draft", state_key: value},
+                        }
+                    },
+                    formal_candidate_id="candidate_switch",
+                    formal_transition={
+                        "expectations": [
+                            {
+                                "subject_ref": "element_input",
+                                "predicate": predicate,
+                                "operator": "equals",
+                                "value": value,
+                            }
+                        ]
+                    },
+                )
+                after_field = element(
+                    "field",
+                    "application_text_input",
+                    role="input",
+                    states={"value": "draft", state_key: value},
+                )
+                UniversalActionController().verify_after_action(
+                    action,
+                    scene(
+                        element("switch", "switch_keyboard_state"),
+                        fingerprint="before",
+                    ),
+                    scene(after_field, fingerprint="after"),
+                )
 
     def test_long_press_requires_safe_bounds_and_visual_postcondition(self) -> None:
         edge = UIElement(

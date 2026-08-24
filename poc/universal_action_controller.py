@@ -427,6 +427,7 @@ class UniversalActionController:
                     resolved,
                     prior_input_value=element.states.get("prior_input_value"),
                     expected_input_value=expected_value,
+                    input_element_id=element.states.get("input_element_id"),
                 )
             return resolved
         if action.action == "press_enter":
@@ -1405,6 +1406,47 @@ class UniversalActionController:
                 ):
                     raise UniversalActionError(
                         "typed 中文候选状态与已验证中文事务不一致。"
+                    )
+            elif predicate in {
+                "element.state.keyboard_layout",
+                "element.state.keyboard_input_mode",
+                "element.state.keyboard_case_mode",
+            } and operator == "equals":
+                state_key = predicate.removeprefix("element.state.")
+                expected_element = resolved.expected_effect.get("element_state")
+                expected_states = (
+                    expected_element.get("states")
+                    if isinstance(expected_element, dict)
+                    else None
+                )
+                input_element_id = str(resolved.input_element_id or "").strip()
+                if (
+                    resolved.kind != "tap_semantic"
+                    or not input_element_id
+                    or not isinstance(value, str)
+                    or not value
+                    or not isinstance(expected_states, dict)
+                    or expected_states.get(state_key) != value
+                    or expected_states.get("value")
+                    != resolved.expected_input_value
+                ):
+                    raise UniversalActionError(
+                        f"typed {state_key} 与已验证输入辅助动作不一致。"
+                    )
+                matches = tuple(
+                    item
+                    for item in after.elements
+                    if item.element_id == input_element_id
+                    and item.role == "input"
+                    and item.states.get(state_key) == value
+                    and item.states.get("value")
+                    == resolved.expected_input_value
+                    and float(item.confidence) >= MIN_TARGET_CONFIDENCE
+                    and item.states.get("visible") is not False
+                )
+                if len(matches) != 1:
+                    raise UniversalActionError(
+                        f"typed {state_key} 后置状态未满足。"
                     )
             elif predicate == "effect.applied" and operator == "equals":
                 if value is not True or before.fingerprint == after.fingerprint:

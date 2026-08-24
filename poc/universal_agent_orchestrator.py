@@ -21,6 +21,7 @@ from deepseek_task_graph import (
     ObservedState,
     VerifiedActionTransition,
     VisualClaimEvidenceRef,
+    _named_visual_identity_anchor,
     build_exact_action_task_graph,
     build_exact_input_task_graph,
     named_visual_identity_is_grounded,
@@ -2466,7 +2467,43 @@ class UniversalAgentOrchestrator:
                 else presence_terms.intersection(unique_candidate_terms)
             )
         )
-        if not (
+        completion_identity_texts = tuple(
+            str(item or "").strip()
+            for item in tuple(current.completion_conditions or ())
+            if str(item or "").strip()
+        )
+        required_surfaces = self._presence_surface_classes(
+            *completion_identity_texts
+        )
+        destination_surface_claim = bool(
+            current.external_impact == "navigation_only"
+            and required_surfaces
+            and required_surfaces.issubset(
+                {"page", "destination", "foreground_app"}
+            )
+            and required_surfaces.intersection(
+                {"page", "destination", "foreground_app"}
+            )
+        )
+        named_destination_grounded = bool(
+            _named_visual_identity_anchor(completion_identity_texts)
+            and self._scene_named_presence_is_grounded(
+                scene=scene,
+                texts=completion_identity_texts,
+            )
+        )
+        if destination_surface_claim:
+            # A link, button, or list item naming a destination proves that the
+            # destination can be entered; it never proves that the destination
+            # is the current page.  Zero-action idempotence is allowed only
+            # when the completion condition itself is grounded by the current
+            # structured page identity (or by an exact target-App foreground).
+            if not (
+                foreground_matches_referenced_app
+                or named_destination_grounded
+            ):
+                return None
+        elif not (
             foreground_matches_referenced_app
             or self._scene_named_presence_is_grounded(
                 scene=scene,
@@ -2480,21 +2517,12 @@ class UniversalAgentOrchestrator:
             return None
         if referenced_app_pages and not foreground_matches_referenced_app:
             return None
-        required_surfaces = self._presence_surface_classes(
-            *tuple(current.completion_conditions or ())
-        )
         scene_identity_facts: tuple[str, ...] = ()
-        scene_only_app_page = bool(
-            referenced_app_pages
-            and required_surfaces
-            and required_surfaces.issubset({"page", "foreground_app"})
-        )
-        if scene_only_app_page:
+        if destination_surface_claim:
             # The named App/page container has already been grounded by the
-            # foreground identity and page-title/container-only facts above.
-            # A business control that happens to repeat the App name (for
-            # example, a search input) is not page-identity evidence and must
-            # neither grant nor veto this container-level presence claim.
+            # foreground identity or page-title/container-only facts above. A
+            # business control or navigation affordance that repeats the
+            # destination name must neither grant nor veto this page claim.
             candidates = ()
             scene_identity_facts = self._scene_page_identity_facts(scene)
         elif self._is_explicit_multi_presence_text(presence_text):

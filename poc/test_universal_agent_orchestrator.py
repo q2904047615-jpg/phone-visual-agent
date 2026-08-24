@@ -5285,6 +5285,164 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
                     )
                 )
 
+    def test_destination_link_cannot_prove_current_page_but_page_identity_can(self) -> None:
+        base = _graph()
+        completion_condition = "验收模式选择页面可见"
+        graph = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective=(
+                    "点击当前页面唯一完整可见的返回验收模式选择链接，"
+                    "并进入验收模式选择页"
+                ),
+                target_apps=(
+                    TargetApp(
+                        app_id="current_foreground",
+                        app_name="当前前台应用",
+                    ),
+                ),
+                entities={"target_ui_label": "返回验收模式选择"},
+            ),
+            constraints=("不得输入、发送或提交",),
+            completion_conditions=(
+                CompletionCondition(
+                    condition_id="selection-page-visible",
+                    description="进入验收模式选择页面",
+                    evidence_required=(completion_condition,),
+                ),
+            ),
+            subgoals=(
+                replace(
+                    base.subgoals[0],
+                    subgoal_id="click-return-link",
+                    objective=(
+                        "点击当前页面唯一完整可见的返回验收模式选择链接，"
+                        "并进入验收模式选择页"
+                    ),
+                    constraints=("不得输入、发送或提交",),
+                    completion_conditions=(completion_condition,),
+                    external_impact="navigation_only",
+                ),
+                Subgoal(
+                    subgoal_id="followup-read",
+                    objective="读取模式说明文字",
+                    status="pending",
+                    depends_on=("click-return-link",),
+                    constraints=("不得输入、发送或提交",),
+                    completion_conditions=("模式说明文字已逐字读取",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="read_only",
+                ),
+            ),
+            active_subgoal_id="click-return-link",
+            raw_user_goal=(
+                "点击当前页面唯一完整可见的返回验收模式选择链接，"
+                "进入验收模式选择页；不要输入、发送或提交"
+            ),
+        )
+        graph.validate()
+        link_scene = replace(
+            _scene(
+                meaning="return_to_acceptance_mode_selection",
+                label="返回验收模式选择",
+                role="button",
+                app_id="unknown",
+            ),
+            screen_id="通用动作真机验收页",
+            summary=(
+                "当前为通用动作真机验收页，页面包含返回验收模式选择链接。"
+            ),
+        )
+        link_planner = FakeDeepSeekPlanner(graph)
+        link_qwen = FakeQwenObserver()
+
+        with tempfile.TemporaryDirectory() as temp:
+            link_session = self._orchestrator(
+                link_planner,
+                link_qwen,
+                FakeAdapter(link_scene),
+            ).start(
+                session_id="session-destination-link-not-page",
+                raw_goal=graph.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("awaiting_confirmation", link_session.status)
+        self.assertEqual([], link_planner.replan_calls)
+        self.assertEqual(1, len(link_qwen.calls))
+        self.assertEqual(
+            "tap_semantic",
+            link_session.qwen_decision.proposal.action.action,
+        )
+        self.assertEqual(0, link_session.physical_actions)
+
+        destination_scene = replace(
+            link_scene,
+            fingerprint="selection-page",
+            screen_id="验收模式选择页",
+            summary="当前显示验收模式选择页面。",
+            elements=(
+                replace(
+                    link_scene.elements[0],
+                    element_id="selection-page-title",
+                    role="text",
+                    meaning="page_title",
+                    label="验收模式选择",
+                    states={
+                        "goal_relevant": False,
+                        "fully_visible": True,
+                    },
+                ),
+            ),
+        )
+        destination_evidence = destination_scene.summary
+        completed = replace(
+            graph,
+            revision=graph.revision + 1,
+            subgoals=(
+                replace(
+                    graph.subgoals[0],
+                    status="completed",
+                    completion_evidence=(destination_evidence,),
+                ),
+                replace(graph.subgoals[1], status="active"),
+            ),
+            active_subgoal_id="followup-read",
+        )
+        completed.validate()
+        destination_planner = FakeDeepSeekPlanner(
+            graph,
+            replan_result=completed,
+        )
+        destination_qwen = FakeQwenObserver()
+
+        with tempfile.TemporaryDirectory() as temp:
+            destination_session = self._orchestrator(
+                destination_planner,
+                destination_qwen,
+                FakeAdapter(destination_scene),
+            ).start(
+                session_id="session-destination-page-already-visible",
+                raw_goal=graph.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("needs_reobservation", destination_session.status)
+        self.assertEqual(
+            "followup-read",
+            destination_session.task_graph.active_subgoal_id,
+        )
+        self.assertEqual(
+            ["subgoal_completed"],
+            [call[2] for call in destination_planner.replan_calls],
+        )
+        self.assertEqual(0, len(destination_qwen.calls))
+        self.assertEqual(0, destination_session.physical_actions)
+
     def test_absence_or_dismissal_is_not_zero_action_presence_completion(self) -> None:
         cases = (
             ("当前可见软键盘被收起且不可见", "当前画面中无软键盘"),

@@ -227,6 +227,17 @@ function capabilityTrial({ failed = false, completed = false, promoted = false }
   };
 }
 
+function readOnlyRecoveredCapabilityTrial() {
+  const trial = capabilityTrial();
+  trial.trial_id = "capability-history-browser";
+  trial.session.session_id = "capability-history-session-browser";
+  trial.session.status = "failed";
+  trial.session.confirmation_ready = false;
+  trial.action_confirmation_scope = null;
+  trial.read_only_recovered = true;
+  return trial;
+}
+
 function json(response, status, body) {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
@@ -247,7 +258,12 @@ function readBody(request) {
   });
 }
 
-function createServer({ devices = null, activeSessions = [], restoredSessions = {} } = {}) {
+function createServer({
+  devices = null,
+  activeSessions = [],
+  restoredSessions = {},
+  restoredCapabilityTrials = [],
+} = {}) {
   let currentCapabilityTrial = null;
   let capabilityShouldFail = false;
   return http.createServer(async (request, response) => {
@@ -321,7 +337,7 @@ function createServer({ devices = null, activeSessions = [], restoredSessions = 
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/capability-acceptance") {
-      json(response, 200, { trials: [] });
+      json(response, 200, { trials: restoredCapabilityTrials });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/capability-acceptance/capability-trial-browser") {
@@ -460,6 +476,45 @@ test("multi-device console restores only the selected device session", { timeout
     assert.equal(await page.locator("#deviceId").inputValue(), "phone-02");
     assert.match(await page.locator("#goalSummary").innerText(), /phone-02/);
     assert.equal(requests.previewDevices.at(-1), "phone-02");
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("read-only recovered capability history does not block the ordinary agent", { timeout: 30000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const server = createServer({
+    restoredCapabilityTrials: [readOnlyRecoveredCapabilityTrial()],
+  });
+  const { browser, page } = await launchFixturePage(server);
+  try {
+    await page.locator("#capabilityBadge").getByText("只读恢复").waitFor({ timeout: 5000 });
+    assert.equal(await page.locator("#startSupervisedAgent").isEnabled(), true);
+    assert.equal(await page.locator("#deviceId").isEnabled(), true);
+
+    await page.locator("#agentText").fill("执行一个普通通用目标");
+    await page.locator("#startSupervisedAgent").click();
+    await page.waitForFunction(() => document.querySelector("#goalSummary")?.textContent.includes("任务"));
+    assert.equal(requests.start.length, 1);
+    assert.equal(requests.capabilityCancel.length, 0);
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("an active capability trial still blocks the ordinary agent", { timeout: 30000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const server = createServer({
+    restoredCapabilityTrials: [capabilityTrial()],
+  });
+  const { browser, page } = await launchFixturePage(server);
+  try {
+    await page.locator("#capabilityBadge").getByText("等待单步确认").waitFor({ timeout: 5000 });
+    assert.equal(await page.locator("#startSupervisedAgent").isDisabled(), true);
+    assert.equal(await page.locator("#deviceId").isDisabled(), true);
+    assert.equal(requests.start.length, 0);
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));

@@ -572,10 +572,13 @@ function render() {
   }
   deviceSelect.value = state.deviceId;
   const acceptance = capabilityView();
-  deviceSelect.disabled = state.busy || Boolean(acceptance && !acceptance.report);
+  const acceptanceBlocksOrdinaryAgent = Boolean(
+    acceptance && !acceptance.report && !acceptance.readOnlyRecovered
+  );
+  deviceSelect.disabled = state.busy || acceptanceBlocksOrdinaryAgent;
   document.querySelector("#startSupervisedAgent").disabled = state.busy
     || state.paused
-    || Boolean(acceptance && !acceptance.report);
+    || acceptanceBlocksOrdinaryAgent;
   document.querySelector("#agentText").disabled = state.busy;
   document.querySelector("#pauseButton").textContent = state.paused ? "▶ 继续推进" : "Ⅱ 暂停推进";
   document.querySelector("#pauseButton").classList.toggle("active", state.paused);

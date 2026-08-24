@@ -6,7 +6,7 @@ import re
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from difflib import SequenceMatcher
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from generic_goal import GenericIntentError, _parse_json_object
 from task_semantic_ir import (
@@ -1307,6 +1307,14 @@ class DeepSeekTaskGraphPlanner:
             revision=graph.revision + 1,
             raw_user_goal=graph.raw_user_goal or graph.goal.objective,
             validate=False,
+            payload_normalizer=lambda payload: (
+                _normalize_terminal_single_navigation_payload(
+                    graph,
+                    observation,
+                    trigger=trigger,
+                    payload=payload,
+                )
+            ),
         )
         candidate = _normalize_redundant_prohibited_effect_conditions(candidate)
         candidate = _restore_completed_history_evidence(graph, candidate)
@@ -1314,6 +1322,12 @@ class DeepSeekTaskGraphPlanner:
             graph,
             candidate,
             observation,
+        )
+        candidate = _project_terminal_single_navigation_candidate(
+            graph,
+            candidate,
+            observation,
+            trigger=trigger,
         )
         candidate = _apply_verified_navigation_completion(
             graph,
@@ -1484,6 +1498,10 @@ class DeepSeekTaskGraphPlanner:
         revision: int,
         raw_user_goal: str,
         validate: bool = True,
+        payload_normalizer: Callable[
+            [dict[str, Any]], dict[str, Any]
+        ]
+        | None = None,
     ) -> DynamicTaskGraph:
         raw = self.provider.chat_json(
             [{"role": "user", "content": prompt}],
@@ -1499,6 +1517,8 @@ class DeepSeekTaskGraphPlanner:
         payload = _normalize_explicit_ui_label_payload(payload, raw_user_goal)
         payload = _normalize_local_input_execution_class(payload)
         payload = _normalize_local_refresh_execution_class(payload)
+        if payload_normalizer is not None:
+            payload = payload_normalizer(payload)
         graph = _graph_from_payload(
             payload,
             task_id=task_id,
@@ -2901,7 +2921,7 @@ def _apply_verified_navigation_completion(
         # evidence to the exact bound receipt before named-surface validation.
         # Immutable semantics were checked above, so this does not repair a
         # different node, action or goal.
-        return replace(
+        completed_candidate = replace(
             candidate,
             subgoals=tuple(
                 replace(item, completion_evidence=ref_ids)
@@ -2909,6 +2929,9 @@ def _apply_verified_navigation_completion(
                 else item
                 for item in candidate.subgoals
             ),
+        )
+        return _finalize_terminal_graph_from_exact_subgoal_conditions(
+            completed_candidate
         )
 
     completed_subgoals = tuple(
@@ -2929,10 +2952,340 @@ def _apply_verified_navigation_completion(
     active_subgoal_id = (
         remaining_active[0] if len(remaining_active) == 1 else None
     )
-    return replace(
+    completed_candidate = replace(
         candidate,
         subgoals=completed_subgoals,
         active_subgoal_id=active_subgoal_id,
+    )
+    return _finalize_terminal_graph_from_exact_subgoal_conditions(
+        completed_candidate
+    )
+
+
+def _normalize_terminal_single_navigation_payload(
+    previous: DynamicTaskGraph,
+    observation: ObservedState,
+    *,
+    trigger: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Project a proven terminal one-node response before referential parsing.
+
+    This early projection is necessary when an otherwise terminal response also
+    invents a malformed unrelated effect.  The invented node must not gain
+    enough authority to veto completion of the original, already-proven goal.
+    """
+
+    transition = observation.verified_action_transition
+    previous_current = previous.active_subgoal()
+    if (
+        trigger != "action_result_matched"
+        or transition is None
+        or transition.outcome != "matched"
+        or previous_current is None
+        or len(previous.subgoals) != 1
+        or previous_current.external_impact != "navigation_only"
+        or previous.risk_actions
+        or previous.clarification_questions
+        or transition.task_id != previous.task_id
+        or transition.device_id != previous.device_id
+        or transition.prior_revision != previous.revision
+        or transition.subgoal_id != previous_current.subgoal_id
+        or transition.after_observation_id != observation.scene_id
+        or not isinstance(payload, dict)
+    ):
+        return payload
+    expected_goal = {
+        "objective": previous.goal.objective,
+        "target_apps": [
+            {"app_id": item.app_id, "app_name": item.app_name}
+            for item in previous.goal.target_apps
+        ],
+        "entities": dict(previous.goal.entities),
+    }
+    if payload.get("goal") != expected_goal:
+        return payload
+    raw_subgoals = payload.get("subgoals")
+    if not isinstance(raw_subgoals, list):
+        return payload
+    raw_current = next(
+        (
+            item
+            for item in raw_subgoals
+            if isinstance(item, dict)
+            and item.get("subgoal_id") == previous_current.subgoal_id
+        ),
+        None,
+    )
+    if raw_current is None:
+        return payload
+    try:
+        candidate_current = _subgoal_from_payload(raw_current)
+    except TaskGraphError:
+        return payload
+    if (
+        candidate_current.status != "completed"
+        or candidate_current.objective != previous_current.objective
+        or candidate_current.depends_on != previous_current.depends_on
+        or candidate_current.constraints != previous_current.constraints
+        or candidate_current.completion_conditions
+        != previous_current.completion_conditions
+        or candidate_current.risk_action_ids != previous_current.risk_action_ids
+        or candidate_current.external_impact != previous_current.external_impact
+        or not candidate_current.completion_evidence
+    ):
+        return payload
+    valid_refs = {
+        item.ref_id for item in observation.controller_transition_evidence_refs
+    }.union(item.ref_id for item in observation.visual_claim_evidence_refs)
+    if not valid_refs or any(
+        item not in valid_refs for item in candidate_current.completion_evidence
+    ):
+        return payload
+
+    raw_conditions = payload.get("completion_conditions")
+    if not isinstance(raw_conditions, list):
+        return payload
+    try:
+        candidate_conditions = tuple(
+            _condition_from_payload(item) for item in raw_conditions
+        )
+    except TaskGraphError:
+        return payload
+    if len(candidate_conditions) != len(previous.completion_conditions) or any(
+        new.condition_id != old.condition_id
+        or new.description != old.description
+        or new.evidence_required != old.evidence_required
+        for old, new in zip(previous.completion_conditions, candidate_conditions)
+    ):
+        return payload
+
+    def key(value: str) -> str:
+        return re.sub(r"[\W_]+", "", str(value or ""), flags=re.UNICODE).casefold()
+
+    subgoal_conditions = {
+        key(value) for value in previous_current.completion_conditions if key(value)
+    }
+    normalized_conditions: list[dict[str, Any]] = []
+    for condition in previous.completion_conditions:
+        condition_keys = {
+            key(condition.description),
+            *(key(value) for value in condition.evidence_required),
+        }
+        condition_keys.discard("")
+        if not subgoal_conditions.intersection(condition_keys):
+            return payload
+        normalized_conditions.append(
+            {
+                "condition_id": condition.condition_id,
+                "description": condition.description,
+                "evidence_required": list(condition.evidence_required),
+                "satisfied": True,
+                "evidence": list(candidate_current.completion_evidence),
+            }
+        )
+
+    return {
+        "status": "completed",
+        "goal": expected_goal,
+        "constraints": list(previous.constraints),
+        "completion_conditions": normalized_conditions,
+        "effect_intents": [],
+        "subgoals": [
+            {
+                "subgoal_id": previous_current.subgoal_id,
+                "objective": previous_current.objective,
+                "status": "completed",
+                "depends_on": list(previous_current.depends_on),
+                "constraints": list(previous_current.constraints),
+                "completion_conditions": list(
+                    previous_current.completion_conditions
+                ),
+                "completion_evidence": list(
+                    candidate_current.completion_evidence
+                ),
+                "effect_ids": [],
+                "execution_class": "navigate",
+            }
+        ],
+        "active_subgoal_id": None,
+        "clarification_questions": [],
+    }
+
+
+def _project_terminal_single_navigation_candidate(
+    previous: DynamicTaskGraph,
+    candidate: DynamicTaskGraph,
+    observation: ObservedState,
+    *,
+    trigger: str,
+) -> DynamicTaskGraph:
+    """Discard model-invented work after a proven one-node navigation goal.
+
+    A post-action screen can contain unrelated controls that tempt the planner
+    to append new work.  If the original graph contains exactly one ordinary
+    navigation node and the matched action observation grounds that node's
+    completion, the user goal is terminal.  Project back to the original typed
+    graph instead of accepting any newly invented subgoal or EffectIntent.
+    """
+
+    transition = observation.verified_action_transition
+    previous_current = previous.active_subgoal()
+    if (
+        trigger != "action_result_matched"
+        or transition is None
+        or transition.outcome != "matched"
+        or previous_current is None
+        or len(previous.subgoals) != 1
+        or previous_current.external_impact != "navigation_only"
+        or previous.risk_actions
+        or previous.clarification_questions
+        or transition.task_id != previous.task_id
+        or transition.device_id != previous.device_id
+        or transition.prior_revision != previous.revision
+        or transition.subgoal_id != previous_current.subgoal_id
+        or transition.after_observation_id != observation.scene_id
+    ):
+        return candidate
+    candidate_current = next(
+        (
+            item
+            for item in candidate.subgoals
+            if item.subgoal_id == previous_current.subgoal_id
+        ),
+        None,
+    )
+    if (
+        candidate_current is None
+        or candidate_current.status != "completed"
+        or candidate_current.objective != previous_current.objective
+        or candidate_current.depends_on != previous_current.depends_on
+        or candidate_current.constraints != previous_current.constraints
+        or candidate_current.completion_conditions
+        != previous_current.completion_conditions
+        or candidate_current.risk_action_ids != previous_current.risk_action_ids
+        or candidate_current.external_impact != previous_current.external_impact
+        or not candidate_current.completion_evidence
+    ):
+        return candidate
+    valid_refs = {
+        item.ref_id for item in observation.controller_transition_evidence_refs
+    }.union(item.ref_id for item in observation.visual_claim_evidence_refs)
+    if not valid_refs or any(
+        item not in valid_refs for item in candidate_current.completion_evidence
+    ):
+        return candidate
+
+    def key(value: str) -> str:
+        return re.sub(r"[\W_]+", "", str(value or ""), flags=re.UNICODE).casefold()
+
+    subgoal_conditions = {
+        key(value) for value in previous_current.completion_conditions if key(value)
+    }
+    completed_conditions: list[CompletionCondition] = []
+    for condition in previous.completion_conditions:
+        condition_keys = {
+            key(condition.description),
+            *(key(value) for value in condition.evidence_required),
+        }
+        condition_keys.discard("")
+        if not subgoal_conditions.intersection(condition_keys):
+            return candidate
+        completed_conditions.append(
+            replace(
+                condition,
+                satisfied=True,
+                evidence=candidate_current.completion_evidence,
+            )
+        )
+
+    return replace(
+        candidate,
+        status="completed",
+        goal=previous.goal,
+        constraints=previous.constraints,
+        completion_conditions=tuple(completed_conditions),
+        risk_actions=previous.risk_actions,
+        subgoals=(
+            replace(
+                previous_current,
+                status="completed",
+                completion_evidence=candidate_current.completion_evidence,
+            ),
+        ),
+        active_subgoal_id=None,
+        clarification_questions=(),
+    )
+
+
+def _finalize_terminal_graph_from_exact_subgoal_conditions(
+    graph: DynamicTaskGraph,
+) -> DynamicTaskGraph:
+    """Complete a terminal graph only from exact typed condition coverage.
+
+    DeepSeek can mark the final subgoal completed yet leave the identical global
+    condition unsatisfied.  When every node is terminal, copy already-bound
+    completion evidence only across an exact normalized condition string.  No
+    fuzzy similarity, App name, screen text, or new evidence is introduced.
+    """
+
+    if (
+        graph.active_subgoal_id is not None
+        or not graph.subgoals
+        or graph.clarification_questions
+        or any(item.status not in {"completed", "skipped"} for item in graph.subgoals)
+    ):
+        return graph
+
+    def key(value: str) -> str:
+        return re.sub(r"[\W_]+", "", str(value or ""), flags=re.UNICODE).casefold()
+
+    evidence_by_condition: dict[str, tuple[str, ...]] = {}
+    for subgoal in graph.subgoals:
+        if subgoal.status != "completed" or not subgoal.completion_evidence:
+            continue
+        for text in subgoal.completion_conditions:
+            normalized = key(text)
+            if normalized:
+                evidence_by_condition.setdefault(
+                    normalized,
+                    subgoal.completion_evidence,
+                )
+
+    normalized_conditions: list[CompletionCondition] = []
+    for condition in graph.completion_conditions:
+        if condition.satisfied and condition.evidence:
+            normalized_conditions.append(condition)
+            continue
+        candidate_keys = tuple(
+            item
+            for item in (
+                key(condition.description),
+                *(key(value) for value in condition.evidence_required),
+            )
+            if item
+        )
+        evidence = next(
+            (
+                evidence_by_condition[item]
+                for item in candidate_keys
+                if item in evidence_by_condition
+            ),
+            (),
+        )
+        if not evidence:
+            return graph
+        normalized_conditions.append(
+            replace(condition, satisfied=True, evidence=evidence)
+        )
+
+    if not normalized_conditions:
+        return graph
+    return replace(
+        graph,
+        status="completed",
+        completion_conditions=tuple(normalized_conditions),
+        active_subgoal_id=None,
     )
 
 

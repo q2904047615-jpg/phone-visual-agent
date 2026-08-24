@@ -789,6 +789,120 @@ class GenericSceneObserverTests(unittest.TestCase):
             ["single_step_observation"],
         )
 
+    def test_single_step_non_input_keeps_scene_but_discards_overflow_batch(self) -> None:
+        scene = scene_payload()
+        scene.update(
+            {
+                "foreground_app_id": "com.vendor.runtime",
+                "screen_id": "sample_app_conversation",
+                "summary": "示例应用当前页面可见",
+                "elements": [
+                    {
+                        "element_id": "title",
+                        "role": "text",
+                        "meaning": "page_title",
+                        "label": "当前会话",
+                        "bounds": [300, 20, 700, 80],
+                        "confidence": 1.0,
+                        "states": {"goal_relevant": True, "fully_visible": True},
+                        "evidence": ["顶部标题"],
+                    },
+                    {
+                        "element_id": "unusable-bottom-control",
+                        "role": "button",
+                        "meaning": "unrelated_action",
+                        "label": "其他操作",
+                        "bounds": [780, 950, 960, 1040],
+                        "confidence": 1.0,
+                        "states": {"goal_relevant": True, "fully_visible": True},
+                        "evidence": ["底部控件"],
+                    },
+                ],
+            }
+        )
+        provider = SequenceProvider(
+            [
+                {
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "scene": scene,
+                    "input_structure": None,
+                }
+            ]
+        )
+
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context={
+                "app_id": "sample_app",
+                "app_name": "示例应用",
+                "entities": {
+                    "active_subgoal_visual_context": {
+                        "subgoal_id": "launch_sample_app",
+                        "objective": "打开示例应用",
+                        "constraints": [],
+                        "completion_conditions": ["示例应用已打开"],
+                        "execution_class": "navigate",
+                        "goal_entities": {},
+                    }
+                },
+            },
+            device_id="device-local-01",
+        )
+
+        self.assertEqual("com.vendor.runtime", observed.foreground_app_id)
+        self.assertEqual("sample_app_conversation", observed.screen_id)
+        self.assertEqual((), observed.elements)
+        self.assertEqual(1, provider.calls)
+
+    def test_single_step_input_keeps_overflow_geometry_fail_closed(self) -> None:
+        scene = scene_payload()
+        scene["elements"] = [
+            {
+                "element_id": "input-overflow",
+                "role": "input",
+                "meaning": "message_input",
+                "label": "",
+                "bounds": [80, 960, 720, 1030],
+                "confidence": 1.0,
+                "states": {"goal_relevant": True, "fully_visible": True},
+                "evidence": ["输入框"],
+            }
+        ]
+        provider = SequenceProvider(
+            [
+                {
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "scene": scene,
+                    "input_structure": input_audit_payload(application_inputs=[]),
+                }
+            ]
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_message",
+                    "objective": "在输入框输入abc",
+                    "constraints": [],
+                    "completion_conditions": ["输入框内容为abc"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "abc",
+                        "active_input_field_id": "message_field",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+
+        with self.assertRaises(VisionAgentError):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(),
+                goal_context=context,
+                device_id="device-local-01",
+            )
+
+        self.assertEqual(1, provider.calls)
+
     def test_exact_device_fingerprint_and_goal_context_reuse_observation(self) -> None:
         class PlainSequenceProvider:
             configured = True

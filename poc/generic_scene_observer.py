@@ -1944,6 +1944,20 @@ class SingleStepGenericSceneObserver(GenericSceneObserver):
                 input_structure_required=input_structure_required,
             )
             scene_payload = dict(envelope["scene"])
+            if not input_structure_required:
+                # The retired multi-call observer already treated an
+                # out-of-range goal-marked batch as unusable geometry while
+                # preserving the independently typed top-level App/screen
+                # observation.  Carry that same deterministic rule into the
+                # one-call observer: discard the whole element batch instead of
+                # clipping coordinates or rejecting an otherwise useful fresh
+                # post-action scene.  With no elements this observation cannot
+                # authorize another semantic tap; it can only support local
+                # transition verification or a coordinate-free action.
+                _discard_compact_elements_for_targeted_geometry_recovery(
+                    scene_payload,
+                    context,
+                )
             fused_input_attestation = (
                 _fused_preliminary_input_attestation(
                     scene_payload,

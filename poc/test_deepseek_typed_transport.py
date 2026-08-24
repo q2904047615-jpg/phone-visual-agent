@@ -6,9 +6,11 @@ from unittest.mock import patch
 import deepseek_task_graph as task_graph_module
 
 from deepseek_task_graph import (
+    ControllerTransitionEvidenceRef,
     DeepSeekTaskGraphPlanner,
     ObservedState,
     TaskGraphError,
+    VerifiedActionTransition,
     VisualClaimEvidenceRef,
     _named_visual_identity_anchor,
     build_exact_action_task_graph,
@@ -70,6 +72,136 @@ def payload(*, objective="进入普通会话并聚焦空输入框", effects=()):
 
 
 class TypedPlannerTransportTests(unittest.TestCase):
+    @staticmethod
+    def _matched_navigation_observation(graph, *, scene_id="obs-after"):
+        receipt = VerifiedActionTransition(
+            receipt_id="receipt-open-target",
+            session_id="session-open-target",
+            task_id=graph.task_id,
+            device_id=graph.device_id,
+            prior_revision=graph.revision,
+            subgoal_id=graph.active_subgoal_id,
+            decision_node_id="decision-open-target",
+            action_digest="a" * 64,
+            rebound_action_digest="b" * 64,
+            resolved_action_digest="c" * 64,
+            action_kind="tap_semantic",
+            before_observation_id="obs-before",
+            before_fingerprint="before-fingerprint",
+            after_observation_id=scene_id,
+            after_fingerprint="after-fingerprint",
+            physical_actions=1,
+            outcome="matched",
+            controller_completion_evidence=("目标状态可见",),
+        )
+        ref = ControllerTransitionEvidenceRef(
+            ref_id=f"controller_transition:{receipt.receipt_id}:1",
+            receipt_id=receipt.receipt_id,
+            subgoal_id=receipt.subgoal_id,
+            text="目标状态可见",
+        )
+        return ObservedState(
+            scene_id=scene_id,
+            summary="目标状态可见",
+            visible_evidence=(ref.ref_id,),
+            last_action_outcome="matched",
+            verified_action_transition=receipt,
+            controller_transition_evidence_refs=(ref,),
+        )
+
+    def test_final_navigation_receipt_completes_exact_global_condition(self):
+        initial = payload(objective="打开目标应用")
+        candidate = copy.deepcopy(initial)
+        candidate["status"] = "running"
+        candidate["subgoals"][0]["status"] = "completed"
+        candidate["subgoals"][0]["completion_evidence"] = [
+            "visual_claim:obs-after:" + "d" * 64
+        ]
+        candidate["active_subgoal_id"] = None
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(copy.deepcopy(initial), candidate)
+        )
+        graph = planner.plan(initial["goal"]["objective"], device_id="phone-1")
+
+        revised = planner.replan(
+            graph,
+            self._matched_navigation_observation(graph),
+            trigger="action_result_matched",
+            reason="目标应用已经打开",
+        )
+
+        self.assertEqual("completed", revised.status)
+        self.assertIsNone(revised.active_subgoal_id)
+        self.assertTrue(revised.completion_conditions[0].satisfied)
+        self.assertEqual(
+            revised.subgoals[0].completion_evidence,
+            revised.completion_conditions[0].evidence,
+        )
+
+    def test_terminal_graph_does_not_fuzzily_complete_uncovered_global_condition(self):
+        initial = payload(objective="打开目标应用")
+        initial["completion_conditions"][0]["description"] = "额外结果已经出现"
+        initial["completion_conditions"][0]["evidence_required"] = [
+            "额外结果已经出现"
+        ]
+        candidate = copy.deepcopy(initial)
+        candidate["status"] = "running"
+        candidate["subgoals"][0]["status"] = "completed"
+        candidate["subgoals"][0]["completion_evidence"] = [
+            "visual_claim:obs-after:" + "e" * 64
+        ]
+        candidate["active_subgoal_id"] = None
+        planner = DeepSeekTaskGraphPlanner(
+            FakeProvider(copy.deepcopy(initial), candidate)
+        )
+        graph = planner.plan(initial["goal"]["objective"], device_id="phone-1")
+
+        with self.assertRaisesRegex(TaskGraphError, "活动子目标"):
+            planner.replan(
+                graph,
+                self._matched_navigation_observation(graph),
+                trigger="action_result_matched",
+                reason="目标应用已经打开",
+            )
+
+    def test_matched_single_navigation_discards_invented_visible_page_work(self):
+        initial = payload(objective="打开目标应用")
+        planner = DeepSeekTaskGraphPlanner(FakeProvider(copy.deepcopy(initial)))
+        graph = planner.plan(initial["goal"]["objective"], device_id="phone-1")
+        observation = self._matched_navigation_observation(graph)
+        ref_id = observation.controller_transition_evidence_refs[0].ref_id
+        candidate = copy.deepcopy(initial)
+        candidate["status"] = "running"
+        candidate["subgoals"][0]["status"] = "completed"
+        candidate["subgoals"][0]["completion_evidence"] = [ref_id]
+        candidate["subgoals"].append(
+            {
+                "subgoal_id": "invented_send",
+                "objective": "发送画面中已有的草稿",
+                "status": "active",
+                "depends_on": ["step"],
+                "constraints": [],
+                "completion_conditions": ["草稿已发送"],
+                "completion_evidence": [],
+                "effect_ids": ["missing_effect"],
+                "execution_class": "effect",
+            }
+        )
+        candidate["active_subgoal_id"] = "invented_send"
+        planner.provider.payloads.append(candidate)
+
+        revised = planner.replan(
+            graph,
+            observation,
+            trigger="action_result_matched",
+            reason="目标应用已经打开",
+        )
+
+        self.assertEqual("completed", revised.status)
+        self.assertEqual(("step",), tuple(item.subgoal_id for item in revised.subgoals))
+        self.assertFalse(revised.risk_actions)
+        self.assertIsNone(revised.active_subgoal_id)
+
     def test_structured_navigation_action_builds_requested_canonical_step(self):
         for action_kind, target_label in (
             ("back", ""),

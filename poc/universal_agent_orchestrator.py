@@ -3355,12 +3355,14 @@ class UniversalAgentOrchestrator:
             or receipt.before_fingerprint == receipt.after_fingerprint
         ):
             return False
-        if not any(
-            ref.receipt_id == receipt.receipt_id
-            and ref.subgoal_id == receipt.subgoal_id
-            for ref in controller_transition_evidence_refs
-        ):
-            return False
+        # The current single-step visual contract records the verified outcome
+        # directly on the transition receipt.  It intentionally no longer emits
+        # a second controller-completion sentence for ordinary navigation.  Do
+        # not restore that retired duplicate proof as a hidden veto: the exact
+        # session/task/revision/action digests, fresh before/after observation
+        # identities, one physical action, matched outcome and launcher exit are
+        # already checked above and below.  If optional controller refs exist,
+        # they were validated above, but their absence is not a failure.
         if (
             str(getattr(before_scene, "foreground_app_id", "")).casefold()
             != "launcher"

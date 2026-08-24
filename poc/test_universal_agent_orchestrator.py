@@ -3452,6 +3452,21 @@ class UniversalAgentStartTests(unittest.TestCase):
                     **kwargs,
                 )
 
+    def test_matched_launcher_transition_does_not_require_retired_duplicate_ref(
+        self,
+    ) -> None:
+        _previous, revised, kwargs = self._named_app_launch_transition_proof(
+            app_id="sample_app",
+            app_name="示例应用",
+            after_app_id="com.vendor.runtime",
+        )
+        kwargs["controller_transition_evidence_refs"] = ()
+
+        UniversalAgentOrchestrator._validate_graph_identity(
+            revised,
+            **kwargs,
+        )
+
     def test_named_app_launch_transition_requires_complete_exact_binding(self) -> None:
         _previous, revised, base = self._named_app_launch_transition_proof(
             app_id="browser",
@@ -3459,7 +3474,6 @@ class UniversalAgentStartTests(unittest.TestCase):
             after_app_id="news_aggregator",
         )
         cases: list[tuple[str, dict]] = []
-        cases.append(("missing_controller_ref", {**base, "controller_transition_evidence_refs": ()}))
         cases.append(("wrong_session", {**base, "session_id": "session-other"}))
         cases.append(
             (

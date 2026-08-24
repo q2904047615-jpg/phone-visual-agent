@@ -20,7 +20,7 @@ from PIL import Image, ImageDraw
 import robot_gui_poc
 import web_app
 from device_exclusivity import InterProcessLease
-from generic_step_planner import GenericStepProposal
+from canonical_action_protocol import GenericStepProposal
 from robot_core import (
     DEFAULT_CONTROLLER_CONFIG,
     MockRobotController as _MockRobotController,
@@ -1110,6 +1110,11 @@ class DeviceControllerRegistryTests(unittest.TestCase):
 class ApiEndToEndTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.no_browser_patcher = patch.dict(
+            "os.environ",
+            {"ROBOT_WEB_NO_BROWSER": "1"},
+        )
+        cls.no_browser_patcher.start()
         cls.temp_dir = tempfile.TemporaryDirectory()
         cls.original_web_output_dir = web_app.WEB_OUTPUT_DIR
         web_app.WEB_OUTPUT_DIR = Path(cls.temp_dir.name) / "web_output"
@@ -1124,6 +1129,7 @@ class ApiEndToEndTests(unittest.TestCase):
         cls.client_context.__exit__(None, None, None)
         web_app.WEB_OUTPUT_DIR = cls.original_web_output_dir
         cls.temp_dir.cleanup()
+        cls.no_browser_patcher.stop()
 
     def setUp(self) -> None:
         from universal_agent_orchestrator import DeviceTaskRegistry

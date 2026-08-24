@@ -329,9 +329,7 @@ function createServer({
         ? externalSession()
         : body.text.includes("blocked")
           ? safeActionSession("blocked")
-          : body.text.includes("finished")
-            ? safeActionSession("finished")
-            : safeActionSession();
+          : safeActionSession();
       json(response, 200, { session });
       return;
     }
@@ -791,24 +789,19 @@ test("browser never offers one-confirmation multi-action execution", { timeout: 
   }
 });
 
-test("Qwen blocked and finished states render without executable controls", { timeout: 30000 }, async () => {
-  for (const status of ["blocked", "finished"]) {
-    Object.values(requests).forEach(items => { items.length = 0; });
-    const server = createServer();
-    const { browser, page } = await launchFixturePage(server);
-    try {
-      await page.locator("#agentText").fill(`Qwen ${status}`);
-      await page.locator("#startSupervisedAgent").click();
-      await page.locator("#actionContent").getByText("已阻止").waitFor({ timeout: 5000 });
-      assert.match(
-        await page.locator("#actionContent").innerText(),
-        status === "blocked" ? /没有可靠且唯一/ : /当前可见证据已满足目标/,
-      );
-      assert.equal(await page.locator("#actionControls button").count(), 0);
-    } finally {
-      await browser.close();
-      await new Promise(resolve => server.close(resolve));
-    }
+test("Qwen blocked state renders without executable controls", { timeout: 30000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const server = createServer();
+  const { browser, page } = await launchFixturePage(server);
+  try {
+    await page.locator("#agentText").fill("Qwen blocked");
+    await page.locator("#startSupervisedAgent").click();
+    await page.locator("#actionContent").getByText("已阻止").waitFor({ timeout: 5000 });
+    assert.match(await page.locator("#actionContent").innerText(), /没有可靠且唯一/);
+    assert.equal(await page.locator("#actionControls button").count(), 0);
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
   }
 });
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 from dataclasses import asdict, dataclass
@@ -182,6 +183,77 @@ def _surface_descriptor_matches(
         if mean_distance <= SURFACE_DESCRIPTOR_MAX_MEAN_DISTANCE:
             return True
     return False
+
+
+def input_app_identity_is_concrete_package(value: str) -> bool:
+    """Return whether a visual App identity is a concrete package name."""
+
+    normalized = str(value or "").strip().casefold()
+    return bool(
+        re.fullmatch(
+            r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+",
+            normalized,
+        )
+    )
+
+
+def input_app_identity_compatible(before: str, after: str) -> bool:
+    """Canonical cross-observation App identity rule for typed input."""
+
+    left = str(before or "").strip().casefold()
+    right = str(after or "").strip().casefold()
+    if left == right:
+        return True
+    placeholders = {
+        "",
+        "unknown",
+        "current_foreground",
+        "foreground_app",
+    }
+    return left in placeholders or right in placeholders
+
+
+def input_screen_identity_family(value: str) -> str:
+    """Canonical generic editable-surface family across model languages."""
+
+    normalized = str(value or "").strip().casefold()
+    if not normalized or normalized in {"unknown", "current_screen"}:
+        return ""
+    family_markers = (
+        ("chat", ("chat", "conversation", "聊天", "会话")),
+        ("search", ("search", "搜索")),
+        ("compose", ("compose", "draft", "撰写", "草稿")),
+        ("editor", ("editor", "edit", "编辑")),
+        ("form", ("form", "表单")),
+        ("input", ("input", "输入")),
+    )
+    tokens = {
+        token
+        for token in re.split(r"[_\-\s/]+", normalized)
+        if token
+    }
+    for family, markers in family_markers:
+        if any(
+            marker in tokens
+            or (not marker.isascii() and marker in normalized)
+            for marker in markers
+        ):
+            return family
+    return ""
+
+
+def input_screen_identity_compatible(before: str, after: str) -> bool:
+    """Canonical cross-observation screen identity rule for typed input."""
+
+    left = str(before or "").strip().casefold()
+    right = str(after or "").strip().casefold()
+    if left == right:
+        return True
+    placeholders = {"", "unknown", "current_screen"}
+    if left in placeholders or right in placeholders:
+        return True
+    left_family = input_screen_identity_family(left)
+    return bool(left_family and left_family == input_screen_identity_family(right))
 
 
 def _surface_identity_compatible(

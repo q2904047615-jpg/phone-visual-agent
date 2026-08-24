@@ -18,7 +18,7 @@ from generic_scene_observer import SingleStepGenericSceneObserver
 from qwen_runtime_errors import classify_qwen_error, failure_diagnostics
 from qwen_visual_decision import (
     QwenTaskContext,
-    SingleStepQwenVisualDecisionObserver,
+    QwenVisualDecisionObserver,
     TrustedObservation,
 )
 from vision_agent import DashScopeVisionProvider, VisionAgentError
@@ -119,7 +119,7 @@ def _evaluate_case(
     path = Path(manifest_path)
     provider = provider_factory()
     scene_observer = SingleStepGenericSceneObserver(provider)
-    decision_observer = SingleStepQwenVisualDecisionObserver(provider)
+    decision_observer = QwenVisualDecisionObserver(provider)
     frames: list[Image.Image] = []
     frame_paths: list[str] = []
     context: QwenTaskContext | None = None
@@ -596,7 +596,6 @@ def _build_report(
         "failed": sum(not bool((item.get("score") or {}).get("passed")) for item in results),
         "case_outcome_rates": {
             "action_rate": _rate(statuses.count("action"), len(statuses)),
-            "finished_rate": _rate(statuses.count("finished"), len(statuses)),
             "final_blocked_rate": _rate(statuses.count("blocked"), len(statuses)),
         },
         "format_metrics": _format_metrics(results),

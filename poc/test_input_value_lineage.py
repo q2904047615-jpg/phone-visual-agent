@@ -155,7 +155,7 @@ def before_scene() -> dict:
                 "expected_input_value": EXPECTED,
                 "input_element_id": "input-1",
                 "independent_geometry_verified": True,
-                "geometry_audit_source": "element_geometry_audit",
+                "geometry_audit_source": "input_structure_audit",
             },
             "evidence": ["唯一完整可见键位"],
         }
@@ -347,7 +347,7 @@ def ime_candidate_case(
                 "expected_input_value": expected,
                 "pinyin": preedit,
                 "independent_geometry_verified": True,
-                "geometry_audit_source": "element_geometry_audit",
+                "geometry_audit_source": "input_structure_audit",
             },
             "evidence": ["唯一完整精确候选"],
         }
@@ -998,7 +998,7 @@ class TypedInputLineageTests(unittest.TestCase):
                         "expected_input_value": next_expected,
                         "input_element_id": "input-1",
                         "independent_geometry_verified": True,
-                        "geometry_audit_source": "element_geometry_audit",
+                        "geometry_audit_source": "input_structure_audit",
                     },
                     "evidence": ["唯一完整可见键位"],
                 }

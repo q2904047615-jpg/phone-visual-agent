@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 import math
-import re
 from typing import Any
 
 from semantic_action import SemanticAction
@@ -12,6 +11,12 @@ from verified_text_transaction import (
     VerifiedTextTransactionError,
     is_direct_latin_segment,
     plan_from_input_states,
+)
+from input_value_lineage import (
+    input_app_identity_compatible,
+    input_app_identity_is_concrete_package,
+    input_screen_identity_compatible,
+    input_screen_identity_family,
 )
 from ui_scene import (
     MIN_TARGET_CONFIDENCE,
@@ -40,243 +45,6 @@ MIN_DRAG_RESULT_DISPLACEMENT = 0.04
 
 class UniversalActionError(RuntimeError):
     pass
-
-
-ACCOUNT_EFFECT_MARKERS = frozenset(
-    {
-        "send",
-        "send_message",
-        "publish",
-        "like",
-        "heart",
-        "comment",
-        "follow",
-        "unfollow",
-        "favorite",
-        "subscribe",
-        "pay",
-        "payment",
-        "purchase",
-        "buy",
-        "order",
-        "delete",
-        "remove",
-        "submit",
-        "save",
-        "invite",
-        "join",
-        "confirm",
-        "approve",
-        "accept",
-        "agree",
-        "authorize",
-        "发送",
-        "发布",
-        "点赞",
-        "爱心",
-        "评论",
-        "关注",
-        "取关",
-        "收藏",
-        "订阅",
-        "支付",
-        "购买",
-        "下单",
-        "删除",
-        "移除",
-        "提交",
-        "保存",
-        "邀请",
-        "加入",
-        "确认",
-        "确定",
-        "同意",
-        "批准",
-        "授权",
-    }
-)
-ACCOUNT_EFFECT_STATE_KEYS = frozenset(
-    {
-        "is_liked",
-        "liked",
-        "is_following",
-        "following",
-        "message_sent",
-        "sent",
-        "published",
-        "deleted",
-    }
-)
-
-FORBIDDEN_SEMANTIC_ENGLISH = frozenset(
-    {
-        "send",
-        "publish",
-        "post",
-        "comment",
-        "follow",
-        "unfollow",
-        "like",
-        "favorite",
-        "subscribe",
-        "pay",
-        "purchase",
-        "buy",
-        "order",
-        "delete",
-        "remove",
-        "submit",
-        "save",
-        "invite",
-        "join",
-        "input",
-        "type",
-        "drag",
-        "longpress",
-        "confirm",
-        "approve",
-        "accept",
-        "agree",
-        "authorize",
-    }
-)
-FORBIDDEN_SEMANTIC_CHINESE = (
-    "发送",
-    "发布",
-    "评论",
-    "关注",
-    "取关",
-    "点赞",
-    "收藏",
-    "订阅",
-    "支付",
-    "购买",
-    "下单",
-    "删除",
-    "移除",
-    "提交",
-    "保存",
-    "邀请",
-    "加入",
-    "输入",
-    "长按",
-    "拖动",
-    "确认",
-    "确定",
-    "同意",
-    "批准",
-    "授权",
-)
-NAVIGATION_SEMANTIC_CLASSES = (
-    ("back", frozenset({"back", "return", "previous"}), ("返回", "后退", "上一页")),
-    ("forward", frozenset({"forward", "next"}), ("前进", "下一页")),
-    ("refresh", frozenset({"refresh", "reload"}), ("刷新", "重新加载")),
-    ("close", frozenset({"close", "cancel", "dismiss"}), ("关闭", "取消", "收起")),
-    ("tab", frozenset({"tab", "switch"}), ("标签", "切换")),
-    ("menu", frozenset({"menu", "more"}), ("菜单", "更多")),
-    ("list", frozenset({"list", "item"}), ("列表", "条目")),
-    ("search", frozenset({"search"}), ("搜索",)),
-    (
-        "open",
-        frozenset({"open", "enter", "navigate", "entry", "launcher", "launch", "start"}),
-        ("打开", "进入", "入口", "启动"),
-    ),
-    ("view", frozenset({"view", "details", "detail"}), ("查看", "详情")),
-)
-
-
-def navigation_semantic_class(*values: str) -> str:
-    """Classify only locally known navigation semantics, failing risky text closed."""
-
-    combined = " ".join(str(value or "").strip() for value in values)
-    tokens = {
-        token
-        for token in re.split(r"[^a-z0-9]+", combined.casefold())
-        if token
-    }
-    if tokens.intersection(FORBIDDEN_SEMANTIC_ENGLISH) or any(
-        marker in combined for marker in FORBIDDEN_SEMANTIC_CHINESE
-    ):
-        return "forbidden"
-    for canonical, english, chinese in NAVIGATION_SEMANTIC_CLASSES:
-        if tokens.intersection(english) or any(marker in combined for marker in chinese):
-            return canonical
-    return ""
-
-
-def action_account_effect_marker(action: SemanticAction) -> str:
-    """Return the concrete marker proving that an action may change an account.
-
-    Semantic targets are allowed to be natural labels such as ``点赞按钮`` or
-    identifiers such as ``like_button``.  Exact string matching is therefore
-    unsafe: it can silently treat a real account-changing action as navigation.
-    """
-
-    params = action.params
-    text_values = (
-        params.get("target"),
-        params.get("label"),
-        params.get("meaning"),
-        params.get("element_meaning"),
-    )
-    for raw_value in text_values:
-        value = str(raw_value or "").strip().casefold()
-        if not value:
-            continue
-        english_tokens = {
-            token for token in re.split(r"[^a-z0-9]+", value) if token
-        }
-        for marker in ACCOUNT_EFFECT_MARKERS:
-            normalized = marker.casefold()
-            if any("\u4e00" <= char <= "\u9fff" for char in normalized):
-                if normalized in value:
-                    return marker
-            elif normalized in english_tokens or value == normalized:
-                return marker
-
-    expected_effect = params.get("expected_effect") or {}
-    if isinstance(expected_effect, dict):
-        element_state = expected_effect.get("element_state") or {}
-        if isinstance(element_state, dict):
-            states = element_state.get("states") or {}
-            if isinstance(states, dict):
-                for key in states:
-                    normalized_key = str(key).strip().casefold()
-                    if normalized_key in ACCOUNT_EFFECT_STATE_KEYS:
-                        return normalized_key
-    return ""
-
-
-def action_has_account_effect(action: SemanticAction) -> bool:
-    return bool(action_account_effect_marker(action))
-
-
-@dataclass(frozen=True)
-class ActionSafetyPolicy:
-    """Safety policy is data, not App-specific orchestration code."""
-
-    account_changing_meanings: frozenset[str] = frozenset(
-        {"send", "publish", "like", "follow", "pay", "delete", "confirm_purchase"}
-    )
-    blocked_meanings: frozenset[str] = frozenset({"pay", "confirm_purchase"})
-
-    def check(
-        self,
-        action: SemanticAction,
-        *,
-        confirmed: bool,
-    ) -> None:
-        if str(action.params.get("formal_candidate_id") or "").strip():
-            # Production authority is already bound to a typed EffectIntent and
-            # local policy.  Re-reading labels such as "send" or "pay" here
-            # would create a second, wording-dependent business planner.
-            return
-        meaning = str(action.params.get("target") or "").strip().lower()
-        if meaning in self.blocked_meanings:
-            raise UniversalActionError(f"当前安全策略禁止动作：{meaning}")
-        marker = action_account_effect_marker(action)
-        if marker and not confirmed:
-            raise UniversalActionError(f"账号变更动作尚未确认：{marker}")
 
 
 @dataclass(frozen=True)
@@ -321,10 +89,8 @@ class UniversalActionController:
         self,
         *,
         min_confidence: float = MIN_TARGET_CONFIDENCE,
-        safety_policy: ActionSafetyPolicy | None = None,
     ) -> None:
         self.min_confidence = float(min_confidence)
-        self.safety_policy = safety_policy or ActionSafetyPolicy()
 
     def resolve_one(
         self,
@@ -357,7 +123,6 @@ class UniversalActionController:
                 raise UniversalActionError(
                     "页面整体置信度不足，且没有唯一可信的目标局部证据。"
                 )
-        self.safety_policy.check(action, confirmed=confirmed)
         formal_candidate_id = str(
             action.params.get("formal_candidate_id") or ""
         ).strip()
@@ -1756,7 +1521,7 @@ class UniversalActionController:
         ):
             return True
 
-        app_identity_compatible = cls._input_app_identity_is_compatible(
+        app_identity_compatible = input_app_identity_compatible(
             before.foreground_app_id,
             after.foreground_app_id,
         )
@@ -1786,7 +1551,7 @@ class UniversalActionController:
                 and before_field_label != after_field_label
             )
         )
-        screen_identity_compatible = cls._input_screen_identity_is_compatible(
+        screen_identity_compatible = input_screen_identity_compatible(
             before.screen_id,
             after.screen_id,
         )
@@ -1794,16 +1559,16 @@ class UniversalActionController:
             return False
         if not app_identity_compatible:
             if (
-                cls._input_app_identity_is_concrete_package(
+                input_app_identity_is_concrete_package(
                     before.foreground_app_id
                 )
-                or cls._input_app_identity_is_concrete_package(
+                or input_app_identity_is_concrete_package(
                     after.foreground_app_id
                 )
             ):
                 return False
-            before_family = cls._input_screen_identity_family(before.screen_id)
-            after_family = cls._input_screen_identity_family(after.screen_id)
+            before_family = input_screen_identity_family(before.screen_id)
+            after_family = input_screen_identity_family(after.screen_id)
             if (
                 (not before_family or before_family != after_family)
                 and not typed_field_identity
@@ -1863,82 +1628,6 @@ class UniversalActionController:
             and before.camera_alignment.phone_content_rotation
             == after.camera_alignment.phone_content_rotation
         )
-
-    @staticmethod
-    def _input_app_identity_is_compatible(before: str, after: str) -> bool:
-        left = str(before or "").strip().casefold()
-        right = str(after or "").strip().casefold()
-        if left == right:
-            return True
-        placeholders = {
-            "",
-            "unknown",
-            "current_foreground",
-            "foreground_app",
-        }
-        return left in placeholders or right in placeholders
-
-    @staticmethod
-    def _input_app_identity_is_concrete_package(value: str) -> bool:
-        normalized = str(value or "").strip().casefold()
-        return bool(
-            re.fullmatch(
-                r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+",
-                normalized,
-            )
-        )
-
-    @staticmethod
-    def _input_screen_identity_is_compatible(before: str, after: str) -> bool:
-        left = str(before or "").strip().casefold()
-        right = str(after or "").strip().casefold()
-        if left == right:
-            return True
-        placeholders = {"", "unknown", "current_screen"}
-        if left in placeholders or right in placeholders:
-            return True
-
-        left_family = UniversalActionController._input_screen_identity_family(left)
-        return bool(
-            left_family
-            and left_family
-            == UniversalActionController._input_screen_identity_family(right)
-        )
-
-    @staticmethod
-    def _input_screen_identity_family(value: str) -> str:
-        """Normalize generic editable-surface names across model languages.
-
-        Scene ``screen_id`` is model-described evidence and may alternate
-        between a UI family name and its localized wording.  These families
-        describe reusable input surfaces only; they do not name an App,
-        account, recipient, or control.
-        """
-
-        normalized = str(value or "").strip().casefold()
-        if not normalized or normalized in {"unknown", "current_screen"}:
-            return ""
-        family_markers = (
-            ("chat", ("chat", "conversation", "聊天", "会话")),
-            ("search", ("search", "搜索")),
-            ("compose", ("compose", "draft", "撰写", "草稿")),
-            ("editor", ("editor", "edit", "编辑")),
-            ("form", ("form", "表单")),
-            ("input", ("input", "输入")),
-        )
-        tokens = {
-            token
-            for token in re.split(r"[_\-\s/]+", normalized)
-            if token
-        }
-        for family, markers in family_markers:
-            if any(
-                marker in tokens
-                or (not marker.isascii() and marker in normalized)
-                for marker in markers
-            ):
-                return family
-        return ""
 
     @staticmethod
     def _input_regions_stably_overlap(
@@ -2006,24 +1695,20 @@ class UniversalActionController:
         after.validate()
         return signature(before) == signature(after)
 
-    def completion_evidence_after_action(
+    def transition_evidence_after_action(
         self,
         resolved: ResolvedSemanticAction,
         before: UIScene,
         after: UIScene,
     ) -> tuple[str, ...]:
-        """Return controller-owned proof that this action completed its subgoal.
+        """Return concrete controller facts proven by the action transition.
 
-        Qwen may declare that one action is terminal for the current DeepSeek
-        subgoal, but that declaration is never sufficient by itself.  At least
-        one concrete expected effect must also be proven from the before/after
-        scenes; DeepSeek remains responsible for advancing the task graph.
+        These facts describe only the verified transition. DeepSeek remains
+        the sole author of task completion and may use or ignore them when it
+        advances the task graph.
         """
 
         expected = resolved.expected_effect
-        if expected.get("goal_complete_on_success") is not True:
-            return ()
-
         # Reuse the same safety checks that accepted the physical action result.
         self.verify_after_action(resolved, before, after)
         evidence: list[str] = []
@@ -2073,7 +1758,6 @@ class UniversalActionController:
                 f"{element.meaning} {element.states}"
             )
 
-        # A terminal flag with only free-form text is not machine-verifiable.
         return tuple(evidence)
 
     def _resolve_target(

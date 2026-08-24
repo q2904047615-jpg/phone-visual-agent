@@ -11,8 +11,8 @@ from PIL import Image, ImageDraw
 from canonical_action_protocol import compile_canonical_action_catalog
 from deepseek_task_graph import TargetApp
 from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
-from generic_step_planner import GenericStepProposal
-from orientation_safety import _claim_audit_seal, _mint_audited_credential
+from canonical_action_protocol import GenericStepProposal
+from orientation_safety import _claim_audit_seal
 from semantic_action import SemanticAction
 from ui_scene import CameraAlignmentFacts, UIElement, UIScene
 from universal_agent_orchestrator import UniversalAgentOrchestrator
@@ -119,23 +119,6 @@ class ScriptedObserver:
         self.calls += 1
         pixel = frames[-1].getpixel((0, 0))
         return self.after_scene if pixel == (220, 238, 255) else self.before_scene
-
-    def audit_camera_alignment(self, *, frames, device_id, scene_fingerprint):
-        return _mint_audited_credential(
-            device_id=device_id,
-            scene_fingerprint=scene_fingerprint,
-            frame=frames[-1],
-            phone_content_rotation="upright",
-            confidence=0.98,
-            evidence=("合成手机界面轴线",),
-        )
-
-    def audit_element_geometry(self, *, frames, scene, element_ids):
-        del frames
-        for element_id in element_ids:
-            scene.get_element(element_id)
-        return scene
-
 
 class ScriptedCapture:
     def __init__(self, *, unstable_after: bool = False) -> None:
@@ -409,7 +392,6 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
                     "trusted_observation_step_1.json",
                     "trusted_observation_step_2.json",
                     "qwen_decision_step_1.json",
-                    "qwen_decision_step_2.json",
                     "controller_decision_step_1.json",
                     "verification_step_1.json",
                     "session.json",
@@ -420,7 +402,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(["tap"], [item[0] for item in robot.calls])
         self.assertEqual(2, session.task_graph.revision)
-        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual(1, len(qwen.calls))
         self.assertEqual("synthetic.catalog", session.goal_draft.app_id)
 
     def test_rephrased_back_goal_executes_one_back_and_replans(self):
@@ -437,7 +419,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual([("back", ())], robot.calls)
         self.assertEqual(2, session.task_graph.revision)
-        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual(1, len(qwen.calls))
         self.assertEqual("synthetic.reader", session.goal_draft.app_id)
 
     def test_third_unseen_app_combines_generic_swipe_without_code_branch(self):
@@ -454,7 +436,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual([("swipe_up", ())], robot.calls)
         self.assertEqual(2, session.task_graph.revision)
-        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual(1, len(qwen.calls))
         self.assertEqual("synthetic.timeline", session.goal_draft.app_id)
 
     def test_two_phrasings_use_the_same_generic_action_contract(self):

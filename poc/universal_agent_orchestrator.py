@@ -33,11 +33,14 @@ from generic_action_adapter import (
     GenericActionAdapterError,
 )
 from generic_goal import GenericIntentDraft
-from generic_step_planner import GenericStepProposal
+from canonical_action_protocol import (
+    CanonicalActionProtocolError,
+    GenericStepProposal,
+    scene_matches_target_app_surface,
+)
 from qwen_visual_decision import (
     QwenTaskContext,
     TrustedObservation,
-    _scene_matches_target_app_surface,
 )
 from ui_scene import (
     MIN_TARGET_CONFIDENCE,
@@ -1081,6 +1084,34 @@ class VerifiedAppSurfaceLineage:
         }
 
 
+@dataclass(frozen=True)
+class TaskGraphTransitionReport:
+    """Non-action progress/completion report from the validated task graph."""
+
+    status: str
+    reason: str
+    completion_evidence: tuple[str, ...]
+    action: None = field(default=None, init=False)
+    authority: str = field(default="deepseek_task_graph", init=False)
+
+    def __post_init__(self) -> None:
+        if self.status not in {"progressed", "completed"}:
+            raise UniversalAgentOrchestratorError("任务图报告状态无效。")
+        if not self.reason.strip():
+            raise UniversalAgentOrchestratorError("任务图报告缺少原因。")
+        if not self.completion_evidence:
+            raise UniversalAgentOrchestratorError("任务图报告缺少可见证据。")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "action": None,
+            "reason": self.reason,
+            "completion_evidence": list(self.completion_evidence),
+            "authority": self.authority,
+        }
+
+
 @dataclass
 class UniversalAgentSessionState:
     session_id: str
@@ -1653,7 +1684,6 @@ class UniversalAgentOrchestrator:
                 expected_result={},
                 confidence=1.0,
                 reason=reason,
-                completion_evidence_element_ids=(),
             )
             decision.to_dict = lambda: {
                 "task_id": decision.task_id,
@@ -2239,7 +2269,7 @@ class UniversalAgentOrchestrator:
         # exact contract for zero-action task progress so DeepSeek/Qwen cannot
         # disagree about whether the current structured surface is the target.
         return any(
-            _scene_matches_target_app_surface(scene, target_app)
+            scene_matches_target_app_surface(scene, target_app)
             for target_app in target_apps
         )
 
@@ -3108,91 +3138,6 @@ class UniversalAgentOrchestrator:
             session.evidence_store.write_effect_policy_snapshot(revised),
         )
 
-    def _review_completion_candidate(
-        self,
-        session: UniversalAgentSessionState,
-        *,
-        graph: DynamicTaskGraph,
-        trusted_observation: Any,
-        decision: Any,
-        reason: str,
-    ) -> DynamicTaskGraph:
-        """Require DeepSeek to approve a Qwen-only visible completion claim."""
-
-        proposal = decision.proposal
-        if proposal.status != "finished":
-            raise UniversalAgentOrchestratorError(
-                "只有 Qwen finished 决策可以进入完成复核。"
-            )
-        observed = self.bridge.observed_state(
-            graph=graph,
-            trusted_observation=trusted_observation,
-            action_outcome="not_applicable",
-            verification={
-                "completion_evidence": list(proposal.completion_evidence),
-                "visible_evidence": list(proposal.completion_evidence),
-            },
-        )
-        revised = self.deepseek_planner.replan(
-            graph,
-            observed,
-            trigger="subgoal_completed",
-            reason=reason,
-        )
-        self._validate_graph_identity(
-            revised,
-            device_id=session.device_id,
-            previous=graph,
-            trusted_observation=trusted_observation,
-            session_id=session.session_id,
-            verified_app_surface_lineage=session.verified_app_surface_lineage,
-            physical_actions=session.physical_actions,
-        )
-        self._store_revised_graph(session, revised)
-        if revised.status == "completed":
-            session.status = "succeeded"
-            session.failed_reason = ""
-            return revised
-
-        prior_subgoal_id = str(graph.active_subgoal_id or "")
-        prior_in_revised = next(
-            (
-                item
-                for item in revised.subgoals
-                if item.subgoal_id == prior_subgoal_id
-            ),
-            None,
-        )
-        current = revised.active_subgoal()
-        if (
-            prior_subgoal_id
-            and prior_in_revised is not None
-            and prior_in_revised.status == "completed"
-            and current is not None
-            and current.subgoal_id != prior_subgoal_id
-        ):
-            session.controller_decision = None
-            session.failed_reason = ""
-            if _requires_effect_confirmation(revised, current):
-                session.status = "awaiting_effect_confirmation"
-                self._bind_effect_confirmation(session)
-            else:
-                # Do not let one visual completion claim also select or execute
-                # the next graph node.  A new observation creates a fresh Qwen
-                # decision and authority scope for that newly active subgoal.
-                session.status = "needs_reobservation"
-            return revised
-
-        session.status = "blocked"
-        session.failed_reason = (
-            "Qwen 的完成候选没有被 DeepSeek 新 revision 确认为完成。"
-        )
-        session.controller_decision = NavigationPolicyDecision(
-            allowed=False,
-            reason=session.failed_reason,
-        )
-        return revised
-
     @staticmethod
     def _policy_payload(decision: NavigationPolicyDecision) -> dict[str, Any]:
         return {
@@ -3827,7 +3772,12 @@ class UniversalAgentOrchestrator:
         proposal = getattr(decision, "proposal", None)
         if proposal is None:
             raise UniversalAgentOrchestratorError("Qwen 决策缺少 proposal。")
-        proposal.validate(observation.scene)
+        try:
+            proposal.validate(observation.scene)
+        except (CanonicalActionProtocolError, AttributeError, TypeError) as exc:
+            raise UniversalAgentOrchestratorError(
+                f"Qwen 决策 proposal 不符合 canonical 合同：{exc}"
+            ) from exc
 
     @staticmethod
     def _remember(session: UniversalAgentSessionState, *paths: Any) -> None:
@@ -3920,7 +3870,7 @@ class UniversalAgentOrchestrator:
         self._validate_decision_binding(graph, observation, decision)
         if decision.proposal.status != "action":
             raise UniversalAgentOrchestratorError(
-                "blocked/finished 决策没有可确认动作。"
+                "非 action 决策没有可确认动作。"
             )
         current = graph.active_subgoal()
         if current is None:
@@ -4982,10 +4932,10 @@ class UniversalAgentOrchestrator:
                 physical_actions=int(result.physical_actions),
                 outcome=action_outcome,
                 errors=verification_errors,
-                controller_completion_evidence=tuple(
+                controller_transition_evidence=tuple(
                     str(item)
                     for item in getattr(
-                        result, "controller_completion_evidence", ()
+                        result, "controller_transition_evidence", ()
                     )
                     if str(item).strip()
                 ),
@@ -5005,7 +4955,7 @@ class UniversalAgentOrchestrator:
                         text=text,
                     )
                     for index, text in enumerate(
-                        receipt.controller_completion_evidence,
+                        receipt.controller_transition_evidence,
                         start=1,
                     )
                 )
@@ -5019,8 +4969,8 @@ class UniversalAgentOrchestrator:
             "visible_evidence": [result.after_scene.summary],
             "blocked_reasons": list(verification_errors),
             "after_frame_paths": list(result.after_frame_paths),
-            "controller_completion_evidence": list(
-                receipt.controller_completion_evidence if receipt is not None else ()
+            "controller_transition_evidence": list(
+                receipt.controller_transition_evidence if receipt is not None else ()
             ),
             "verified_action_transition": (
                 receipt.to_dict() if receipt is not None else None
@@ -5433,49 +5383,12 @@ class UniversalAgentOrchestrator:
                 decision,
             ),
         )
-        if decision.proposal.status == "finished":
-            try:
-                self._review_completion_candidate(
-                    session,
-                    graph=revised,
-                    trusted_observation=new_observation,
-                    decision=decision,
-                    reason=(
-                        "Qwen 在动作后的当前可信画面中提出完成候选，"
-                        "要求 DeepSeek 复核整个任务。"
-                    ),
-                )
-                transition_record["disposition"] = (
-                    "task_completed_after_qwen_review"
-                    if session.status == "succeeded"
-                    else "advanced_after_qwen_completion_review"
-                    if session.status in {
-                        "needs_reobservation",
-                        "awaiting_effect_confirmation",
-                    }
-                    else "blocked_completion_review"
-                )
-                if session.failed_reason:
-                    transition_record["diagnostic"] = session.failed_reason
-                persist_transition()
-            except Exception as exc:
-                session.status = "blocked"
-                session.failed_reason = f"完成候选复核失败：{exc}"
-                session.controller_decision = NavigationPolicyDecision(
-                    allowed=False,
-                    reason=session.failed_reason,
-                )
-                transition_record["disposition"] = "blocked_completion_review"
-                transition_record["diagnostic"] = session.failed_reason
-                persist_transition()
-                return
-            return
         if decision.proposal.status != "action":
             session.status = "blocked"
             session.failed_reason = (
                 decision.proposal.reason
                 if decision.proposal.status == "blocked"
-                else "Qwen 完成候选未被当前 DeepSeek revision 确认为完成。"
+                else f"本地动作选择器返回了不支持的状态：{decision.proposal.status}"
             )
             session.controller_decision = NavigationPolicyDecision(
                 allowed=False,
@@ -5659,8 +5572,8 @@ class UniversalAgentOrchestrator:
         if visual_result_proven:
             session.status = "succeeded"
             session.failed_reason = ""
-            proposal = GenericStepProposal(
-                status="finished",
+            proposal = TaskGraphTransitionReport(
+                status="completed",
                 reason="新的可信画面已证明一次性外部效果结果。",
                 completion_evidence=tuple(final["visual_claim_refs"][:3]),
             )
@@ -5811,6 +5724,58 @@ class UniversalAgentOrchestrator:
                 )
 
             current = graph.active_subgoal()
+            if current is not None and current.external_impact in {
+                "read_only",
+                "navigation_only",
+            }:
+                visible_revised, visible_advances = (
+                    self._advance_visible_presence_prefix(
+                        session,
+                        graph=graph,
+                        trusted_observation=observation,
+                    )
+                )
+                if visible_advances:
+                    graph = visible_revised
+                    if visible_revised.status == "completed":
+                        session.status = "succeeded"
+                        session.failed_reason = ""
+                    else:
+                        next_subgoal = visible_revised.active_subgoal()
+                        if next_subgoal is None:
+                            session.status = "blocked"
+                            session.failed_reason = (
+                                "可见状态证据推进后没有活动子目标。"
+                            )
+                        elif _requires_effect_confirmation(
+                            visible_revised,
+                            next_subgoal,
+                        ):
+                            session.status = "awaiting_effect_confirmation"
+                            session.failed_reason = ""
+                            self._bind_effect_confirmation(session)
+                        else:
+                            session.status = "needs_reobservation"
+                            session.failed_reason = ""
+                    decision = SimpleNamespace(
+                        proposal=TaskGraphTransitionReport(
+                            status=(
+                                "completed"
+                                if visible_revised.status == "completed"
+                                else "progressed"
+                            ),
+                            reason=(
+                                "当前可见状态已由 DeepSeek 任务图和本地"
+                                "完成条件共同复核。"
+                            ),
+                            completion_evidence=(scene.summary,),
+                        )
+                    )
+                    session.qwen_decision = None
+                    session.controller_decision = None
+                    self._write_terminal_snapshot(session)
+                    return decision
+
             if current is not None and current.external_impact == "read_only":
                 text_revised = self._try_advance_visible_text_read_subgoal(
                     session,
@@ -5834,12 +5799,18 @@ class UniversalAgentOrchestrator:
                             session.status = "needs_reobservation"
                             session.failed_reason = ""
                     decision = SimpleNamespace(
-                        proposal=GenericStepProposal(
-                            status="finished",
+                        proposal=TaskGraphTransitionReport(
+                            status=(
+                                "completed"
+                                if text_revised.status == "completed"
+                                else "progressed"
+                            ),
                             reason="唯一可信可见文字已由 DeepSeek 复核。",
                             completion_evidence=(scene.summary,),
                         )
                     )
+                    session.qwen_decision = None
+                    session.controller_decision = None
                     self._write_terminal_snapshot(session)
                     return decision
 
@@ -5912,8 +5883,8 @@ class UniversalAgentOrchestrator:
                     session.status = "succeeded"
                     session.failed_reason = ""
                     terminal_decision = SimpleNamespace(
-                        proposal=GenericStepProposal(
-                            status="finished",
+                        proposal=TaskGraphTransitionReport(
+                            status="completed",
                             reason="DeepSeek 已依据新的可信画面确认任务完成。",
                             completion_evidence=observed.visible_evidence[:3],
                         )
@@ -6001,17 +5972,6 @@ class UniversalAgentOrchestrator:
                 else:
                     session.status = "blocked"
                     session.failed_reason = policy_decision.reason
-            elif decision.proposal.status == "finished":
-                self._review_completion_candidate(
-                    session,
-                    graph=graph,
-                    trusted_observation=observation,
-                    decision=decision,
-                    reason=(
-                        "Qwen 在重新观察后的当前可信画面中提出完成候选，"
-                        "要求 DeepSeek 复核整个任务。"
-                    ),
-                )
             else:
                 session.status = "blocked"
                 session.failed_reason = (
@@ -6387,18 +6347,6 @@ class UniversalAgentOrchestrator:
             session.status = "failed"
             session.failed_reason = (
                 "执行结果没有严格绑定 confirmed/requested/rebound/resolved 动作链。"
-            )
-            raise UniversalAgentOrchestratorError(session.failed_reason)
-        if (
-            getattr(result, "controller_completion_evidence", ())
-            and result.resolved_action.expected_effect.get(
-                "goal_complete_on_success"
-            )
-            is not True
-        ):
-            session.status = "failed"
-            session.failed_reason = (
-                "控制器完成证据缺少 resolved expected_effect 的一次性完成声明。"
             )
             raise UniversalAgentOrchestratorError(session.failed_reason)
         session.status = "verifying"
@@ -7523,14 +7471,6 @@ class UniversalAgentOrchestrator:
                 session.controller_decision = NavigationPolicyDecision(
                     allowed=False,
                     reason=proposal.reason,
-                )
-            elif proposal.status == "finished":
-                self._review_completion_candidate(
-                    session,
-                    graph=graph,
-                    trusted_observation=observation,
-                    decision=decision,
-                    reason="Qwen 在当前可信画面中提出完成候选，要求 DeepSeek 复核。",
                 )
             else:
                 raise UniversalAgentOrchestratorError(

@@ -266,27 +266,29 @@ class UISceneTests(unittest.TestCase):
         with self.assertRaisesRegex(UniversalActionError, "不唯一"):
             UniversalActionController().resolve_one(action, current)
 
-    def test_account_action_requires_confirmation(self) -> None:
+    def test_ordinary_send_does_not_require_controller_confirmation(self) -> None:
         current = scene(element("send", "send"))
         action = SemanticAction(
             node_id="send",
             action="tap_semantic",
             params={"target": "send"},
         )
-        with self.assertRaisesRegex(UniversalActionError, "尚未确认"):
-            UniversalActionController().resolve_one(action, current)
+        resolved = UniversalActionController().resolve_one(action, current)
+        self.assertEqual("tap_semantic", resolved.kind)
+        self.assertEqual("send", resolved.target_element_id)
 
-    def test_natural_language_like_button_requires_confirmation(self) -> None:
+    def test_natural_language_like_button_does_not_require_confirmation(self) -> None:
         current = scene(element("heart", "点赞按钮", role="button"))
         action = SemanticAction(
             node_id="like",
             action="tap_semantic",
             params={"target": "点赞按钮", "element_id": "heart"},
         )
-        with self.assertRaisesRegex(UniversalActionError, "尚未确认"):
-            UniversalActionController().resolve_one(action, current)
+        resolved = UniversalActionController().resolve_one(action, current)
+        self.assertEqual("tap_semantic", resolved.kind)
+        self.assertEqual("heart", resolved.target_element_id)
 
-    def test_expected_liked_state_requires_confirmation(self) -> None:
+    def test_expected_liked_state_does_not_require_confirmation(self) -> None:
         current = scene(element("heart", "reaction_button", role="button"))
         action = SemanticAction(
             node_id="like",
@@ -302,8 +304,9 @@ class UISceneTests(unittest.TestCase):
                 },
             },
         )
-        with self.assertRaisesRegex(UniversalActionError, "尚未确认"):
-            UniversalActionController().resolve_one(action, current)
+        resolved = UniversalActionController().resolve_one(action, current)
+        self.assertEqual("tap_semantic", resolved.kind)
+        self.assertEqual("heart", resolved.target_element_id)
 
     def test_action_requires_fresh_verified_scene(self) -> None:
         controller = UniversalActionController()

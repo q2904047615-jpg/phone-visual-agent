@@ -8,7 +8,7 @@ import statistics
 import time
 import re
 import uuid
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -16,10 +16,10 @@ from PIL import Image, ImageChops, ImageStat
 
 from generic_goal import GenericIntentDraft
 from generic_scene_observer import (
-    GenericSceneObserver,
     POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS,
     POST_NAVIGATION_RESULT_OBJECTIVE,
     POST_NAVIGATION_RESULT_OBSERVATION_PHASE,
+    SingleStepGenericSceneObserver,
 )
 from input_value_lineage import (
     InputValueLineageError,
@@ -31,6 +31,8 @@ from input_value_lineage import (
     build_pending_literal_lineage,
     build_pending_newline_lineage,
     build_pending_text_lineage,
+    input_app_identity_compatible,
+    input_screen_identity_compatible,
 )
 from ocr_runtime import recognize as recognize_ocr
 from observation_images import (
@@ -54,7 +56,6 @@ from universal_action_controller import (
     ResolvedSemanticAction,
     UniversalActionController,
     UniversalActionError,
-    navigation_semantic_class,
 )
 from robot_core import WorkflowNotReady, qwerty_keyboard_config_from_anchors
 
@@ -94,7 +95,6 @@ _POST_NAVIGATION_ALLOWED_EFFECT_KEYS = frozenset(
         "scene_changed",
         "content_changed",
         "current_video_changed",
-        "goal_complete_on_success",
         "description",
         "app_id",
         "screen_id",
@@ -247,22 +247,13 @@ def _post_action_observation_context(
             or expected.get("content_changed") is True
         )
     )
-    completed_navigation = (
-        isinstance(expected, dict)
-        and expected.get("scene_changed") is True
-        and expected.get("goal_complete_on_success") is True
-    )
-    exact_result_action = (
-        resolved.kind in {"back", "swipe"}
-        and changed_result
-    )
     if (
         not physical_action_executed
         or focus is None
         or str(focus.get("execution_class") or "").strip() != "navigate"
         or resolved.kind not in _POST_NAVIGATION_RESULT_KINDS
         or not isinstance(expected, dict)
-        or not (completed_navigation or exact_result_action)
+        or not changed_result
         or "element_state" in expected
         or set(expected) - _POST_NAVIGATION_ALLOWED_EFFECT_KEYS
     ):
@@ -286,37 +277,6 @@ def _post_action_observation_context(
     result_context["entities"] = dict(entities)
     result_context["entities"]["active_subgoal_visual_context"] = result_focus
     return result_context
-
-
-def _typed_exact_tap_target_label(
-    goal: GenericIntentDraft,
-    requested: SemanticAction,
-) -> str:
-    """Return the adapter-owned typed exact target, never a model alias."""
-
-    if requested.action != "tap_semantic":
-        return ""
-    entities = goal.entities
-    if not isinstance(entities, dict):
-        return ""
-    focus = entities.get("active_subgoal_visual_context")
-    if not isinstance(focus, dict):
-        return ""
-    goal_entities = focus.get("goal_entities")
-    if (
-        str(focus.get("subgoal_id") or "").strip() != "exact_tap_semantic"
-        or str(focus.get("execution_class") or "").strip() != "navigate"
-        or not isinstance(goal_entities, dict)
-    ):
-        return ""
-    target_label = str(goal_entities.get("target_ui_label") or "").strip()
-    if (
-        not target_label
-        or str(entities.get("target_ui_label") or "").strip() != target_label
-        or str(requested.params.get("label") or "").strip() != target_label
-    ):
-        return ""
-    return target_label
 
 
 def stable_qwerty_ocr_anchors(
@@ -796,7 +756,7 @@ class GenericActionExecutionResult:
     )
     after_frame_paths: tuple[str, ...] = ()
     observation_errors: tuple[str, ...] = ()
-    controller_completion_evidence: tuple[str, ...] = ()
+    controller_transition_evidence: tuple[str, ...] = ()
     before_frames: tuple[Image.Image, ...] = field(
         default_factory=tuple,
         repr=False,
@@ -816,8 +776,8 @@ class GenericActionExecutionResult:
         object.__setattr__(self, "before_frames", tuple(self.before_frames))
         object.__setattr__(
             self,
-            "controller_completion_evidence",
-            tuple(self.controller_completion_evidence),
+            "controller_transition_evidence",
+            tuple(self.controller_transition_evidence),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -848,8 +808,8 @@ class GenericActionExecutionResult:
             "after_frame_count": len(self.after_frames),
             "after_frame_paths": list(self.after_frame_paths),
             "observation_errors": list(self.observation_errors),
-            "controller_completion_evidence": list(
-                self.controller_completion_evidence
+            "controller_transition_evidence": list(
+                self.controller_transition_evidence
             ),
             "before_frame_count": len(self.before_frames),
             "before_frame_paths": list(self.before_frame_paths),
@@ -1047,29 +1007,6 @@ class GenericSingleActionAdapter:
             phone_content_rotation=alignment.phone_content_rotation,
             confidence=float(alignment.confidence),
             evidence=tuple(alignment.evidence),
-        )
-
-    @staticmethod
-    def _has_local_independent_geometry_attestation(
-        scene: UIScene,
-        element_ids: tuple[str, ...],
-    ) -> bool:
-        try:
-            elements = tuple(scene.get_element(element_id) for element_id in element_ids)
-        except UISceneError:
-            return False
-        return bool(
-            elements
-            and all(
-                element.states.get("independent_geometry_verified") is True
-                and element.states.get("geometry_audit_source")
-                in {
-                    "icon_cluster_localization",
-                    "element_geometry_audit",
-                }
-                and any(item.strip() for item in element.evidence)
-                for element in elements
-            )
         )
 
     def supported_action_kinds(self) -> frozenset[str]:
@@ -1495,7 +1432,7 @@ class GenericSingleActionAdapter:
         self,
         *,
         capture: Callable[[], Image.Image],
-        observer: GenericSceneObserver,
+        observer: SingleStepGenericSceneObserver,
         robot: Any,
         controller: UniversalActionController | None = None,
         frame_interval: float = 0.37,
@@ -2196,11 +2133,11 @@ class GenericSingleActionAdapter:
             or len(visible_prior_suffix) < required_overlap
             or not prior.endswith(visible_prior_suffix)
             or not any(observed in str(item) for item in candidate.evidence)
-            or not UniversalActionController._input_app_identity_is_compatible(
+            or not input_app_identity_compatible(
                 before.foreground_app_id,
                 after.foreground_app_id,
             )
-            or not UniversalActionController._input_screen_identity_is_compatible(
+            or not input_screen_identity_compatible(
                 before.screen_id,
                 after.screen_id,
             )
@@ -2256,14 +2193,9 @@ class GenericSingleActionAdapter:
     ) -> GenericActionExecutionResult:
         if confirmed is not True:
             raise GenericActionAdapterError("必须明确确认当前这一个语义动作。")
-        typed_exact_target_label = _typed_exact_tap_target_label(
-            goal,
-            requested_action,
-        )
         safe_node = re.sub(r"[^a-zA-Z0-9_-]+", "_", requested_action.node_id)[:48]
         evidence_prefix = f"{safe_node or 'action'}_{uuid.uuid4().hex}"
         local_frame_identity_verified = False
-        local_input_consensus_applied = False
         primary_input_confirmation_reused = False
         confirmation_frame_delta: float | None = None
         if planned_frames:
@@ -2301,19 +2233,10 @@ class GenericSingleActionAdapter:
             # formerly spent up to three extra calls (scene + two crops).
             # Rebind the immutable canonical candidate against that same scene;
             # bounds, uniqueness and controller reachability remain local gates.
-            consensus_scene = self._apply_local_input_geometry_consensus(
-                requested_action,
-                rebind_planned_scene,
-                before,
-                local_frame_identity_verified=local_frame_identity_verified,
-            )
-            local_input_consensus_applied = consensus_scene is not before
-            before = consensus_scene
             rebound = self._rebind_action(
                 requested_action,
                 rebind_planned_scene,
                 before,
-                typed_exact_target_label=typed_exact_target_label,
                 local_frame_identity_verified=local_frame_identity_verified,
                 # A verified text-input action never executes at the input
                 # element's model-drawn center.  Once the original and fresh
@@ -2348,49 +2271,6 @@ class GenericSingleActionAdapter:
                 f"确认前控制器拒绝动作：{exc}",
                 evidence=before_paths,
             ) from exc
-
-        if local_input_consensus_applied and resolved.kind == "tap_semantic":
-            resolver = getattr(
-                self.robot,
-                "resolve_calibrated_target_grid_point",
-                None,
-            )
-            if callable(resolver):
-                try:
-                    target = before.get_element(
-                        str(resolved.target_element_id or ""),
-                        min_confidence=self.controller.min_confidence,
-                    )
-                    if resolved.normalized_point is None:
-                        raise GenericActionAdapterError("局部输入目标缺少共识落点。")
-                    preferred_x = round(resolved.normalized_point[0] * 1000)
-                    preferred_y = round(resolved.normalized_point[1] * 1000)
-                    resolved_x, resolved_y = resolver(
-                        preferred_x,
-                        preferred_y,
-                        target.bounds,
-                        before_frames[-1].size,
-                    )
-                    if (
-                        isinstance(resolved_x, bool)
-                        or isinstance(resolved_y, bool)
-                        or not isinstance(resolved_x, int)
-                        or not isinstance(resolved_y, int)
-                        or not 0 <= resolved_x <= 1000
-                        or not 0 <= resolved_y <= 1000
-                    ):
-                        raise GenericActionAdapterError(
-                            "机械标定没有返回合法的局部目标落点。"
-                        )
-                    resolved = replace(
-                        resolved,
-                        normalized_point=(resolved_x / 1000.0, resolved_y / 1000.0),
-                    )
-                except (UISceneError, RuntimeError, ValueError) as exc:
-                    raise GenericActionAdapterError(
-                        f"局部输入目标与实测标定区域无法形成安全落点：{exc}",
-                        evidence=before_paths,
-                    ) from exc
 
         if resolved.kind not in self.PHYSICAL_KINDS and resolved.kind != "wait_for_change":
             raise GenericActionAdapterError(
@@ -2848,11 +2728,11 @@ class GenericSingleActionAdapter:
                 ),
             ) from exc
 
-        controller_completion_evidence: tuple[str, ...] = ()
+        controller_transition_evidence: tuple[str, ...] = ()
         if not verification_errors:
             try:
-                controller_completion_evidence = (
-                    self.controller.completion_evidence_after_action(
+                controller_transition_evidence = (
+                    self.controller.transition_evidence_after_action(
                         resolved,
                         before,
                         after,
@@ -2860,7 +2740,7 @@ class GenericSingleActionAdapter:
                 )
             except UniversalActionError as exc:
                 verification_errors = verification_errors + (
-                    f"控制器完成证据复核失败：{exc}",
+                    f"控制器转换证据复核失败：{exc}",
                 )
 
         if not verification_errors and self.input_lineage_store is not None:
@@ -2949,119 +2829,12 @@ class GenericSingleActionAdapter:
             after_frames=after_frames,
             after_frame_paths=after_frame_paths,
             observation_errors=observation_errors,
-            controller_completion_evidence=controller_completion_evidence,
+            controller_transition_evidence=controller_transition_evidence,
             before_frames=before_frames,
             before_frame_paths=before_paths,
             orientation_credential=orientation_credential,
             post_action_focus_subgoal_id=post_focus_id,
             post_action_observation_phase=post_phase,
-        )
-
-    def _local_input_geometry_consensus_bounds(
-        self,
-        requested: SemanticAction,
-        original: UIElement,
-        current: UIElement,
-        *,
-        prefix: str = "",
-        local_frame_identity_verified: bool = False,
-    ) -> tuple[float, float, float, float] | None:
-        """Return only the rectangle independently attributed by both audits."""
-
-        def stable_states(element: UIElement) -> dict[str, Any]:
-            return {
-                key: value
-                for key, value in element.states.items()
-                if key not in {"goal_relevant", "keyboard_geometry"}
-            }
-
-        if not (
-            local_frame_identity_verified
-            and requested.action == "tap_semantic"
-            and prefix == ""
-            and original.element_id == current.element_id
-            and original.element_id.startswith("local_audited_")
-            and original.meaning == current.meaning
-            and original.meaning in self.LOCAL_INPUT_AUXILIARY_MEANINGS
-            and original.role == current.role
-            and original.role in {"button", "icon"}
-            and original.label == current.label
-            and bool(original.label.strip())
-            and stable_states(original) == stable_states(current)
-            and original.states.get("independent_geometry_verified") is True
-            and current.states.get("independent_geometry_verified") is True
-            and original.states.get("geometry_audit_source")
-            == "element_geometry_audit"
-            and current.states.get("geometry_audit_source")
-            == "element_geometry_audit"
-        ):
-            return None
-        left = max(original.bounds[0], current.bounds[0])
-        top = max(original.bounds[1], current.bounds[1])
-        right = min(original.bounds[2], current.bounds[2])
-        bottom = min(original.bounds[3], current.bounds[3])
-        if not (left < right and top < bottom):
-            return None
-        intersection = (right - left) * (bottom - top)
-        original_width = original.bounds[2] - original.bounds[0]
-        original_height = original.bounds[3] - original.bounds[1]
-        current_width = current.bounds[2] - current.bounds[0]
-        current_height = current.bounds[3] - current.bounds[1]
-        smaller_area = min(
-            original_width * original_height,
-            current_width * current_height,
-        )
-        smaller_coverage = intersection / smaller_area if smaller_area > 0 else 0.0
-        center_delta_x = abs(original.center[0] - current.center[0])
-        center_delta_y = abs(original.center[1] - current.center[1])
-        narrow_consensus = bool(
-            smaller_coverage >= 0.25
-            and center_delta_x
-            <= max(0.05, 0.30 * max(original_width, current_width))
-            and center_delta_y
-            <= max(0.03, 0.75 * max(original_height, current_height))
-        )
-        wider_consensus = bool(
-            smaller_coverage >= 0.40
-            and center_delta_x
-            <= max(0.10, 0.50 * max(original_width, current_width))
-            and center_delta_y
-            <= max(0.03, 0.75 * max(original_height, current_height))
-        )
-        return (left, top, right, bottom) if narrow_consensus or wider_consensus else None
-
-    def _apply_local_input_geometry_consensus(
-        self,
-        requested: SemanticAction,
-        planned_scene: UIScene,
-        fresh_scene: UIScene,
-        *,
-        local_frame_identity_verified: bool = False,
-    ) -> UIScene:
-        if requested.action != "tap_semantic":
-            return fresh_scene
-        element_id = str(requested.params.get("element_id") or "").strip()
-        try:
-            original = planned_scene.get_element(element_id)
-            current = fresh_scene.get_element(element_id)
-        except UISceneError:
-            return fresh_scene
-        consensus = self._local_input_geometry_consensus_bounds(
-            requested,
-            original,
-            current,
-            local_frame_identity_verified=local_frame_identity_verified,
-        )
-        if consensus is None:
-            return fresh_scene
-        return replace(
-            fresh_scene,
-            elements=tuple(
-                replace(element, bounds=consensus)
-                if element.element_id == element_id
-                else element
-                for element in fresh_scene.elements
-            ),
         )
 
     def _rebind_action(
@@ -3070,7 +2843,6 @@ class GenericSingleActionAdapter:
         planned_scene: UIScene,
         fresh_scene: UIScene,
         *,
-        typed_exact_target_label: str = "",
         local_frame_identity_verified: bool = False,
         require_geometry_overlap: bool = True,
     ) -> SemanticAction:
@@ -3156,11 +2928,9 @@ class GenericSingleActionAdapter:
                 role=original.role,
                 states=stable_rebind_states(dict(original.states)),
             )
-            # Text-styled links are routinely described as either ``button``
-            # or ``text`` across two otherwise identical visual reads.  The
-            # exact visible label, stable states, safe navigation class and
-            # geometry checks below remain authoritative, so this only keeps
-            # a uniquely rebound link from failing on model role wording.
+            # Text-styled controls are routinely described as either ``button``
+            # or ``text`` across two otherwise identical visual reads.  Exact
+            # visible label, stable states and geometry remain authoritative.
             selector_roles = {"button", "tab", "list_item", "text"}
             if (
                 not matches
@@ -3181,8 +2951,7 @@ class GenericSingleActionAdapter:
             # The same unlabeled glyph is commonly described as either an
             # icon or a button across two reads of identical pixels.  Rebind
             # only when its exact meaning and stable states still identify one
-            # unlabeled control; the independent crop geometry audit below
-            # remains mandatory before any physical action.
+            # unlabeled control; fresh-frame overlap remains mandatory.
             if (
                 not matches
                 and requested.action in {"tap_semantic", "dismiss_overlay"}
@@ -3206,203 +2975,9 @@ class GenericSingleActionAdapter:
                     f"{original.meaning}，匹配{len(matches)}个"
                 )
             current = matches[0]
-            if current.meaning.casefold() != original.meaning.casefold():
-                # ``meaning`` is observation wording, not a second formal
-                # candidate identity.  Formal and non-formal candidates use
-                # the same label/role/state/geometry and semantic-class checks
-                # below, so harmless wording drift cannot regain a veto only
-                # because the candidate also carries formal authority.
-                def semantic_class(meaning: str, label: str) -> str:
-                    normalized = str(meaning or "").casefold()
-                    if requested.action == "drag" and prefix in {
-                        "source_",
-                        "destination_",
-                    }:
-                        for marker in (
-                            "draggable",
-                            "drag_source",
-                            "drag_target",
-                            "drop_target",
-                            "drag",
-                            "drop",
-                            "拖动",
-                            "拖拽",
-                        ):
-                            normalized = normalized.replace(marker, " ")
-                    return navigation_semantic_class(normalized, label)
-
-                original_class = semantic_class(
-                    original.meaning,
-                    original.label,
-                )
-                current_class = semantic_class(
-                    current.meaning,
-                    current.label,
-                )
-                labelled_drag_endpoint = bool(
-                    requested.action == "drag"
-                    and prefix in {"source_", "destination_"}
-                    and original.label
-                    and current.label == original.label
-                    and original_class != "forbidden"
-                    and current_class != "forbidden"
-                )
-                def stripped_gesture_semantics(value: str) -> str:
-                    normalized = str(value or "").casefold()
-                    for marker in (
-                        "long_press",
-                        "longpress",
-                        "drag",
-                        "drop",
-                        "长按",
-                        "拖动",
-                        "拖拽",
-                    ):
-                        normalized = normalized.replace(marker, " ")
-                    return normalized
-
-                selector_tokens = {
-                    token
-                    for token in re.split(
-                        r"[^a-z0-9]+",
-                        " ".join(
-                            (
-                                stripped_gesture_semantics(original.meaning),
-                                stripped_gesture_semantics(current.meaning),
-                            )
-                        ),
-                    )
-                    if token
-                }
-                selector_semantics = " ".join(
-                    (
-                        stripped_gesture_semantics(original.meaning),
-                        stripped_gesture_semantics(current.meaning),
-                    )
-                )
-                has_selector_semantics = bool(
-                    selector_tokens.intersection(
-                        {
-                            "select",
-                            "selector",
-                            "mode",
-                            "option",
-                            "entry",
-                            "navigate",
-                            "open",
-                        }
-                    )
-                    or any(
-                        marker in selector_semantics
-                        for marker in (
-                            "选择",
-                            "选项",
-                            "模式",
-                            "入口",
-                            "进入",
-                            "打开",
-                            "导航",
-                        )
-                    )
-                )
-                labelled_local_mode_selector = bool(
-                    requested.action in {"tap_semantic", "dismiss_overlay"}
-                    and prefix == ""
-                    and original.label
-                    and current.label == original.label
-                    and original.role in selector_roles
-                    and current.role in selector_roles
-                    and stable_rebind_states(dict(current.states))
-                    == stable_rebind_states(dict(original.states))
-                    and has_selector_semantics
-                    and navigation_semantic_class(
-                        stripped_gesture_semantics(original.meaning),
-                        stripped_gesture_semantics(original.label),
-                    )
-                    != "forbidden"
-                    and navigation_semantic_class(
-                        stripped_gesture_semantics(current.meaning),
-                        stripped_gesture_semantics(current.label),
-                    )
-                    != "forbidden"
-                )
-                labelled_long_press_target = bool(
-                    requested.action == "long_press"
-                    and prefix == ""
-                    and original.label
-                    and current.label == original.label
-                    and original.role == current.role
-                    and current.role != "container"
-                    and stable_rebind_states(dict(current.states))
-                    == stable_rebind_states(dict(original.states))
-                    and navigation_semantic_class(
-                        stripped_gesture_semantics(original.meaning),
-                        stripped_gesture_semantics(original.label),
-                    )
-                    != "forbidden"
-                    and navigation_semantic_class(
-                        stripped_gesture_semantics(current.meaning),
-                        stripped_gesture_semantics(current.label),
-                    )
-                    != "forbidden"
-                )
-                stable_input_field = bool(
-                    requested.action in {
-                        "tap_semantic", "input_verified_text", "clear_verified_text"
-                    }
-                    and prefix == ""
-                    and original.role == "input"
-                    and current.role == "input"
-                    and current.label == original.label
-                    and compatible_rebind_states(
-                        dict(original.states), dict(current.states)
-                    )[1]
-                    == compatible_rebind_states(
-                        dict(original.states), dict(current.states)
-                    )[0]
-                )
-                typed_exact_label_identity = bool(
-                    requested.action == "tap_semantic"
-                    and prefix == ""
-                    and typed_exact_target_label
-                    and original.label == typed_exact_target_label
-                    and current.label == typed_exact_target_label
-                    and original.role == current.role
-                    and original.states.get("goal_relevant") is True
-                    and current.states.get("goal_relevant") is True
-                    and current.states.get("fully_visible") is True
-                    and len(
-                        tuple(
-                            element
-                            for element in planned_scene.elements
-                            if element.label == typed_exact_target_label
-                        )
-                    )
-                    == 1
-                    and len(
-                        tuple(
-                            element
-                            for element in fresh_scene.elements
-                            if element.label == typed_exact_target_label
-                        )
-                    )
-                    == 1
-                )
-                if not (
-                    labelled_drag_endpoint
-                    or labelled_local_mode_selector
-                    or labelled_long_press_target
-                    or stable_input_field
-                    or typed_exact_label_identity
-                ) and (
-                    not original_class
-                    or original_class == "forbidden"
-                    or current_class != original_class
-                ):
-                    raise GenericActionAdapterError(
-                        "确认时目标语义已经变化，旧确认失效："
-                        f"{original.meaning} -> {current.meaning}。"
-                    )
+            # ``meaning`` is explanatory model wording, not a second action
+            # identity authority.  A uniquely rebound target is identified by
+            # its visible label/role/stable state and fresh-frame geometry.
             (
                 original_stable_states,
                 current_stable_states,
@@ -3461,33 +3036,15 @@ class GenericSingleActionAdapter:
                 and center_delta_y
                 <= max(0.02, 0.50 * max(original_height, current_height))
             )
-            local_input_consensus_bounds = (
-                self._local_input_geometry_consensus_bounds(
-                    requested,
-                    original,
-                    current,
-                    prefix=prefix,
-                    local_frame_identity_verified=local_frame_identity_verified,
-                )
-            )
             if (
                 require_geometry_overlap
                 and overlap < 0.60
                 and not tight_loose_same_target
-                and local_input_consensus_bounds is None
             ):
                 raise GenericActionAdapterError(
                     "确认时目标区域已明显移动，旧确认失效："
                     f"iou={overlap:.3f}, smaller_coverage={smaller_coverage:.3f}, "
                     f"center_delta=({center_delta_x:.3f},{center_delta_y:.3f})。"
-                )
-            if local_input_consensus_bounds is not None:
-                # Neither model crop owns the execution point.  The overlap is
-                # the only region independently attributed to the same exact
-                # local input target by both audits, so execute at its center.
-                return replace(
-                    current,
-                    bounds=local_input_consensus_bounds,
                 )
             return current
 

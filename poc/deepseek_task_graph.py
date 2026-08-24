@@ -566,7 +566,7 @@ class VerifiedActionTransition:
     physical_actions: int
     outcome: str
     errors: tuple[str, ...] = ()
-    controller_completion_evidence: tuple[str, ...] = ()
+    controller_transition_evidence: tuple[str, ...] = ()
     protocol_version: str = VERIFIED_ACTION_TRANSITION_PROTOCOL_VERSION
 
     def validate(self) -> None:
@@ -624,8 +624,8 @@ class VerifiedActionTransition:
             raise TaskGraphError(f"动作转换回执 outcome 无效：{self.outcome}")
         _validate_text_list(self.errors, "action_transition.errors", required=False)
         _validate_text_list(
-            self.controller_completion_evidence,
-            "action_transition.controller_completion_evidence",
+            self.controller_transition_evidence,
+            "action_transition.controller_transition_evidence",
             required=False,
         )
         if self.outcome == "matched" and self.errors:
@@ -657,8 +657,8 @@ class VerifiedActionTransition:
             "physical_actions": self.physical_actions,
             "outcome": self.outcome,
             "errors": list(self.errors),
-            "controller_completion_evidence": list(
-                self.controller_completion_evidence
+            "controller_transition_evidence": list(
+                self.controller_transition_evidence
             ),
         }
 
@@ -790,7 +790,7 @@ class ObservedState:
                 or item.receipt_id != self.verified_action_transition.receipt_id
                 or item.subgoal_id != self.verified_action_transition.subgoal_id
                 or item.text
-                not in self.verified_action_transition.controller_completion_evidence
+                not in self.verified_action_transition.controller_transition_evidence
             ):
                 raise TaskGraphError(
                     "控制器转换证据未绑定当前 verified action transition。"

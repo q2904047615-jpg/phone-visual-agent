@@ -6,19 +6,16 @@ import re
 import time
 import uuid
 from collections.abc import Mapping
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from PIL import Image
 
 from generic_scene_observer import _local_frame_fingerprint, _safe_goal_context
-from constraint_target_filter import constraint_excludes_candidate
-from generic_step_planner import (
-    ALLOWED_STEP_ACTIONS,
-    GenericStepPlanningError,
+from canonical_action_protocol import (
+    SUPPORTED_ACTIONS,
+    CanonicalActionProtocolError as GenericStepPlanningError,
     GenericStepProposal,
-    _reject_raw_control_data,
 )
 from observation_images import (
     LocalFrameStability,
@@ -29,28 +26,18 @@ from message_intent import (
     subgoal_binds_recipient,
     subgoal_targets_recipient_control,
 )
-from qwen_runtime_errors import classify_qwen_error, failure_diagnostics
 from semantic_action import SemanticAction
 from task_semantic_ir import TaskSemanticIR
-from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene, UISceneError
+from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene
 from universal_action_controller import UniversalActionController, UniversalActionError
-from verified_text_transaction import (
-    VerifiedTextTransactionError,
-    plan_next_verified_input,
-)
-from vision_agent import VisionAgentError, _image_data_url
-from system_navigation_privacy import privacy_minimized_system_navigation_view
+from vision_agent import VisionAgentError
 from vision_model_config import public_model_identity
 
 
 QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-14-qwen-visual-decision-v5"
-QWEN_VISUAL_SELECTION_PROTOCOL_VERSION = "2026-08-16-qwen-visual-selection-v2"
 SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-20-deepseek-typed-task-graph-v4"
 SUPPORTED_TASK_CONTEXT_PROTOCOLS = frozenset({SUPPORTED_TASK_CONTEXT_PROTOCOL})
 QWEN_VISUAL_DECISION_MODEL_ROLE = "trusted_observation_single_step_selector"
-DECISION_TIMEOUT_SECONDS = 60.0
-DECISION_OUTPUT_TOKENS = 1800
-DECISION_RETRY_TOKENS = 0
 MIN_DECISION_CONFIDENCE = 0.72
 MIN_TRUSTED_FRAME_SHARPNESS = 4.0
 SINGLE_ELEMENT_ACTIONS = frozenset(
@@ -59,7 +46,7 @@ SINGLE_ELEMENT_ACTIONS = frozenset(
         "clear_verified_text", "long_press",
     }
 )
-QWEN_PROTOCOL_ACTIONS = frozenset(ALLOWED_STEP_ACTIONS)
+QWEN_PROTOCOL_ACTIONS = frozenset(SUPPORTED_ACTIONS)
 
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -73,36 +60,6 @@ ALLOWED_TASK_STATUSES = {
 }
 
 
-def _task_requests_coordinate_free_system_home(
-    context: "QwenTaskContext",
-) -> bool:
-    if context.current_execution_class != "navigate":
-        return False
-    objective = re.sub(
-        r"\s+",
-        "",
-        str(context.current_subgoal.get("objective") or "").strip().casefold(),
-    )
-    conditions = context.current_subgoal.get("completion_conditions")
-    if not objective or not isinstance(conditions, list):
-        return False
-    objective_matches = bool(
-        re.search(
-            r"(?:返回|回到|退回|切回)(?:手机|设备)?(?:的)?(?:桌面|主屏幕)",
-            objective,
-        )
-        or re.search(
-            r"\b(?:return|go|switch)(?:back)?to(?:the)?(?:phone|device)?homescreen\b",
-            objective,
-        )
-    )
-    return objective_matches and any(
-        re.search(
-            r"(?:手机|设备)?(?:的)?(?:桌面|主屏幕)(?:已)?(?:可见|显示|在前台)",
-            re.sub(r"\s+", "", str(item or "").strip().casefold()),
-        )
-        for item in conditions
-    )
 ALLOWED_EXECUTION_CLASSES = {
     "observe",
     "navigate",
@@ -143,80 +100,6 @@ def _structured_system_ui(scene: UIScene) -> dict[str, Any] | None:
         "immersive_or_fullscreen": immersive,
         "navigation_bar_visible": navigation_visible,
     }
-
-TRANSITION_COMPLETION_PATTERNS = tuple(
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in (
-        r"(?:已经|已|完成|成功|重新)(?:刷新|重新加载|加载|更新|同步|导航|跳转|进入|返回|切换|打开|启动|重新获取|重新读取|重新连接)",
-        r"(?:刷新|重新加载|更新|同步|导航|跳转|进入|返回|切换|打开|启动|重新获取|重新读取|重新连接)(?:已经|已|完成|成功)",
-        r"\b(?:has|have|was|were|is)\s+(?:been\s+)?(?:refreshed|reloaded|updated|synchronized|navigated|redirected|entered|returned|switched|opened|launched|retrieved|refetched|reacquired)\b",
-        r"\b(?:refresh|reload|update|sync|navigation|redirect|retrieval|refetch|reacquisition)\s+(?:completed|complete|succeeded|occurred)\b",
-        r"\b(?:re)?fetch(?:ed|es|ing)?\s+(?:the\s+)?latest\b",
-    )
-)
-EXPLICIT_TRANSITION_EVIDENCE_PATTERNS = tuple(
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in (
-        r"动作(?:回执|结果|已执行|执行成功)",
-        r"(?:刷新|重新加载|加载|更新|同步|导航|跳转|进入|返回|切换|打开|启动|重新获取|重新读取|重新连接)(?:已经|已)?(?:成功|完成)",
-        r"(?:页面|内容|画面|fingerprint|observation)(?:已经|已)?(?:发生变化|变化|改变|更新)",
-        r"前后(?:画面|观察|fingerprint|observation)",
-        r"刚刚更新",
-        r"\b(?:action receipt|action result|fingerprint changed|observation changed|scene changed|content changed)\b",
-        r"\b(?:refresh|reload|update|sync|navigation|redirect|retrieval|refetch)\s+(?:completed|complete|succeeded|successful)\b",
-        r"\bupdated just now\b",
-        r"\bbefore\b.{0,80}\bafter\b",
-    )
-)
-
-
-def _current_subgoal_requires_transition_evidence(context: "QwenTaskContext") -> bool:
-    completion_conditions = _text_tuple(
-        context.current_subgoal.get("completion_conditions") or [],
-        "current_subgoal.completion_conditions",
-    )
-    texts = completion_conditions or (
-        str(context.current_subgoal.get("objective") or ""),
-    )
-    return any(
-        pattern.search(text)
-        for text in texts
-        for pattern in TRANSITION_COMPLETION_PATTERNS
-    )
-
-
-def _contains_explicit_transition_evidence(texts: Iterable[str]) -> bool:
-    return any(
-        pattern.search(str(text))
-        for text in texts
-        for pattern in EXPLICIT_TRANSITION_EVIDENCE_PATTERNS
-    )
-
-
-def _finished_has_transition_evidence(
-    context: "QwenTaskContext",
-    observation: "TrustedObservation",
-    evidence_ids: tuple[str, ...],
-) -> bool:
-    prior_evidence = _text_tuple(
-        context.current_subgoal.get("completion_evidence") or [],
-        "current_subgoal.completion_evidence",
-    )
-    if _contains_explicit_transition_evidence(prior_evidence):
-        return True
-    visible_evidence: list[str] = []
-    for evidence_id in evidence_ids:
-        if evidence_id == "scene":
-            visible_evidence.extend(
-                [observation.scene.summary, *observation.scene.overlays]
-            )
-            continue
-        element = observation.get_candidate(evidence_id)
-        visible_evidence.extend(
-            [element.meaning, element.label, *element.evidence]
-        )
-    return _contains_explicit_transition_evidence(visible_evidence)
-
 
 @dataclass(frozen=True)
 class QwenTaskContext(Mapping[str, Any]):
@@ -699,7 +582,7 @@ class TrustedObservation:
                 f"本地多帧稳定性检查未通过：{stability.reason}；不能建立可信观察。"
             )
         sharpness = tuple(measure_frame_sharpness(frame) for frame in frames)
-        # GenericSceneObserver permits one stale leading camera frame and only
+        # The single-step observer permits one stale leading camera frame and only
         # exposes a fingerprint from the converged three-frame tail.  Reusing
         # the leading sample here could make the same read-only capture reject
         # itself merely because a transient overlay looked sharper.
@@ -996,7 +879,6 @@ class QwenVisualDecision:
     expected_result: dict[str, Any]
     confidence: float
     reason: str
-    completion_evidence_element_ids: tuple[str, ...] = ()
     protocol_version: str = QWEN_VISUAL_DECISION_PROTOCOL_VERSION
 
     def validate(self, context: QwenTaskContext) -> None:
@@ -1017,7 +899,6 @@ class QwenVisualDecision:
                 context,
                 self.trusted_observation,
             )
-        identity_candidate_ids: set[str] = set()
         identity_block = _identity_text_candidate_block(
             context,
             self.trusted_observation,
@@ -1027,13 +908,12 @@ class QwenVisualDecision:
                 raise GenericStepPlanningError(
                     "当前收件人身份缺少本地唯一逐字视觉证据，必须 blocked。"
                 )
-        else:
-            identity_candidate_ids = _required_identity_candidate_ids(
-                context,
-                self.trusted_observation,
-            )
         if self.protocol_version != QWEN_VISUAL_DECISION_PROTOCOL_VERSION:
             raise GenericStepPlanningError("Qwen视觉决策协议版本无效。")
+        if self.proposal.status not in {"action", "blocked"}:
+            raise GenericStepPlanningError(
+                "Qwen本地选择器只能返回 action 或 blocked；完成状态由任务图裁决。"
+            )
         if not 0.0 <= float(self.confidence) <= 1.0:
             raise GenericStepPlanningError("Qwen视觉决策置信度必须在0到1之间。")
         if not isinstance(self.expected_result, dict):
@@ -1161,53 +1041,7 @@ class QwenVisualDecision:
                     "存在逐字一致文字约束时，动作必须绑定该唯一候选。"
                 )
         elif self.target_region is not None:
-            raise GenericStepPlanningError("finished/blocked 不能携带动作目标区域。")
-
-        if self.proposal.status == "finished":
-            if not self.completion_evidence_element_ids:
-                raise GenericStepPlanningError("finished 缺少可信完成证据ID。")
-            if (
-                _current_subgoal_requires_transition_evidence(context)
-                and not _finished_has_transition_evidence(
-                    context,
-                    self.trusted_observation,
-                    self.completion_evidence_element_ids,
-                )
-            ):
-                raise GenericStepPlanningError(
-                    "发生型完成条件不能由单帧静态视觉内容单独满足；"
-                    "必须提供前后变化、动作回执或明确动态证据。"
-                )
-            if exact_candidate_ids and not exact_candidate_ids.issubset(
-                set(self.completion_evidence_element_ids)
-            ):
-                raise GenericStepPlanningError(
-                    "finished 未引用本地确认的逐字一致候选。"
-                )
-            if identity_candidate_ids and not identity_candidate_ids.issubset(
-                set(self.completion_evidence_element_ids)
-            ):
-                raise GenericStepPlanningError(
-                    "finished 未引用当前收件人的唯一逐字身份候选。"
-                )
-            _resolve_completion_evidence(
-                self.completion_evidence_element_ids,
-                self.trusted_observation,
-            )
-            if float(self.trusted_observation.scene.confidence) < MIN_TARGET_CONFIDENCE:
-                allowed_evidence = {
-                    item.element_id
-                    for item in self.trusted_observation.scene.trusted_completion_evidence()
-                }
-                if (
-                    "scene" in self.completion_evidence_element_ids
-                    or not set(self.completion_evidence_element_ids).issubset(
-                        allowed_evidence
-                    )
-                ):
-                    raise GenericStepPlanningError(
-                        "低整页置信度的finished只能引用高置信只读目标证据，不能引用scene。"
-                    )
+            raise GenericStepPlanningError("blocked 不能携带动作目标区域。")
 
     def validate_fresh(
         self,
@@ -1254,55 +1088,35 @@ class QwenVisualDecision:
             "expected_result": dict(self.expected_result),
             "confidence": float(self.confidence),
             "reason": self.reason,
-            "completion_evidence_element_ids": list(
-                self.completion_evidence_element_ids
-            ),
-            "completion_evidence": list(self.proposal.completion_evidence),
         }
 
 
 class QwenVisualDecisionObserver:
-    """Select one action from a separately established trusted observation."""
+    """Select one canonical action locally from one trusted observation."""
 
-    def __init__(
-        self,
-        provider: Any,
-        *,
-        allow_online_selection: bool = True,
-    ) -> None:
+    def __init__(self, provider: Any) -> None:
         self.provider = provider
-        self.allow_online_selection = bool(allow_online_selection)
         self.last_raw_response = ""
         self.last_diagnostics: dict[str, Any] = {}
         self._metrics = {
             "decision_count": 0,
-            "model_attempted_count": 0,
-            "first_pass_success_count": 0,
-            "retry_success_count": 0,
+            "deterministic_action_count": 0,
             "final_blocked_count": 0,
         }
 
     def status(self) -> dict[str, Any]:
         value = dict(self.provider.status())
-        attempted = self._metrics["model_attempted_count"]
         decisions = self._metrics["decision_count"]
         value.update(
             {
                 "visual_decision_protocol": QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
-                "visual_selection_protocol": QWEN_VISUAL_SELECTION_PROTOCOL_VERSION,
                 "task_context_protocol": SUPPORTED_TASK_CONTEXT_PROTOCOL,
                 "model_role": QWEN_VISUAL_DECISION_MODEL_ROLE,
                 "hardware_actions_enabled": False,
-                "online_selection_enabled": self.allow_online_selection,
-                "decision_timeout_seconds": DECISION_TIMEOUT_SECONDS,
-                "decision_output_tokens": DECISION_OUTPUT_TOKENS,
-                "decision_retry_tokens": DECISION_RETRY_TOKENS,
+                "selection_authority": "canonical_action_catalog_local",
                 **self._metrics,
-                "first_pass_rate": _ratio(
-                    self._metrics["first_pass_success_count"], attempted
-                ),
-                "repair_retry_rate": _ratio(
-                    self._metrics["retry_success_count"], attempted
+                "deterministic_action_rate": _ratio(
+                    self._metrics["deterministic_action_count"], decisions
                 ),
                 "final_blocked_rate": _ratio(
                     self._metrics["final_blocked_count"], decisions
@@ -1323,7 +1137,6 @@ class QwenVisualDecisionObserver:
         started = time.perf_counter()
         self.last_raw_response = ""
         self.last_diagnostics = {}
-        model_call_elapsed_seconds: list[float] = []
         context = (
             task_context
             if isinstance(task_context, QwenTaskContext)
@@ -1332,9 +1145,6 @@ class QwenVisualDecisionObserver:
         context.validate()
         available_actions = _normalize_available_action_kinds(
             available_action_kinds
-        )
-        privacy_minimized_system_home = (
-            _task_requests_coordinate_free_system_home(context)
         )
         # These are the same read-only frames that established the trusted
         # observation, so apply the observer's one-leading-frame tolerance.
@@ -1366,44 +1176,11 @@ class QwenVisualDecisionObserver:
             "observation_id": trusted_observation.observation_id,
             "fingerprint": trusted_observation.fingerprint,
             "model_calls": 0,
-            "protocol_retry_used": False,
-            "first_output_rejected": False,
-            "candidate_action_from_first_output": False,
-            "first_pass_success": False,
-            "repair_retry_success": False,
             "hardware_actions_enabled": False,
             "available_action_kinds": canonical_action_kinds,
             "device_action_kinds": sorted(available_actions),
-            "model_call_elapsed_seconds": model_call_elapsed_seconds,
         }
         self.last_diagnostics = dict(base_diagnostics)
-
-        def model_chat(messages: list[dict[str, Any]], *, max_tokens: int) -> str:
-            base_diagnostics["model_calls"] = int(base_diagnostics["model_calls"]) + 1
-            self.last_diagnostics = dict(base_diagnostics)
-            call_started = time.perf_counter()
-            try:
-                scope_factory = getattr(self.provider, "call_scope", None)
-                scope = (
-                    scope_factory(
-                        stage="visual_action_selection",
-                        fingerprint=trusted_observation.fingerprint,
-                    )
-                    if callable(scope_factory)
-                    else nullcontext()
-                )
-                with scope:
-                    return self._provider_chat(messages, max_tokens=max_tokens)
-            finally:
-                model_identity.clear()
-                model_identity.update(public_model_identity(self.provider.status()))
-                model_call_elapsed_seconds.append(
-                    round(time.perf_counter() - call_started, 3)
-                )
-                base_diagnostics["model_call_elapsed_seconds"] = list(
-                    model_call_elapsed_seconds
-                )
-                self.last_diagnostics = dict(base_diagnostics)
 
         if (
             context.current_execution_class in {"effect", "unknown"}
@@ -1470,7 +1247,6 @@ class QwenVisualDecisionObserver:
             context,
             canonical_choices,
             observation=trusted_observation,
-            allow_general_single_step=(not self.allow_online_selection),
         )
         if deterministic_selection is not None:
             raw = json.dumps(
@@ -1478,13 +1254,14 @@ class QwenVisualDecisionObserver:
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
-            decision = _parse_model_decision(
-                raw,
+            decision = _hydrate_canonical_selection(
+                deterministic_selection,
                 context=context,
                 observation=trusted_observation,
-                available_action_kinds=available_actions,
+                choices=canonical_choices,
             )
             self.last_raw_response = raw
+            self._metrics["deterministic_action_count"] += 1
             self.last_diagnostics.update(
                 {
                     "local_deterministic_selection": True,
@@ -1494,222 +1271,26 @@ class QwenVisualDecisionObserver:
             )
             return decision
 
-        if not self.allow_online_selection:
-            reason = (
-                "本轮单次Qwen画面没有把canonical目录缩小为唯一候选；"
-                "按每步一次调用合同在本地停止，不再发起动作选择请求。"
-            )
-            decision = _local_blocked_decision(
-                context,
-                trusted_observation,
-                reason=reason,
-            )
-            self._metrics["final_blocked_count"] += 1
-            self.last_diagnostics.update(
-                {
-                    "local_safety_block": "single_step_candidate_not_unique",
-                    "local_deterministic_selection": False,
-                    "online_selection_skipped": True,
-                    "model_calls": 0,
-                    "decision_status": "blocked",
-                    "elapsed_seconds": round(time.perf_counter() - started, 3),
-                }
-            )
-            return decision
-
-        prompt = _selection_decision_prompt(
+        reason = (
+            "本轮单次Qwen画面没有把canonical目录缩小为唯一候选；"
+            "本地确定性选择器停止，不再发起第二次模型请求。"
+        )
+        decision = _local_blocked_decision(
             context,
             trusted_observation,
-            decision_number=max(1, int(decision_number)),
-            available_action_kinds=available_actions,
+            reason=reason,
         )
-        image = frames[trusted_observation.selected_frame_index].convert("RGB")
-        if privacy_minimized_system_home:
-            image = privacy_minimized_system_navigation_view(image)
-        messages = _decision_messages(prompt, image)
-        self._metrics["model_attempted_count"] += 1
-        try:
-            raw = model_chat(messages, max_tokens=DECISION_OUTPUT_TOKENS)
-        except VisionAgentError as service_error:
-            reason = f"Qwen决策服务不可用，本轮安全阻塞：{service_error}"
-            decision = _local_blocked_decision(
-                context,
-                trusted_observation,
-                reason=reason,
-            )
-            self._metrics["final_blocked_count"] += 1
-            self.last_diagnostics.update(
-                failure_diagnostics(
-                    service_error,
-                    stage="requesting_first_decision",
-                    model_calls=int(base_diagnostics["model_calls"]),
-                    elapsed_seconds=time.perf_counter() - started,
-                    safe_stop_reason="决策服务失败，未形成候选动作，控制器与机械臂均未执行。",
-                )
-            )
-            self.last_diagnostics["decision_status"] = "blocked"
-            return decision
-        self.last_raw_response = raw
-        self.last_diagnostics = dict(base_diagnostics)
-        try:
-            decision = _parse_model_decision(
-                raw,
-                context=context,
-                observation=trusted_observation,
-                available_action_kinds=available_actions,
-            )
-            self._metrics["first_pass_success_count"] += 1
-            first_pass = True
-        except VisionAgentError as first_error:
-            reason = (
-                "Qwen单次结构化输出不符合可信选择合同；本轮安全阻塞："
-                f"{first_error}"
-            )
-            decision = _local_blocked_decision(
-                context,
-                trusted_observation,
-                reason=reason,
-            )
-            self._metrics["final_blocked_count"] += 1
-            self.last_diagnostics.update(
-                {
-                    "failed_stage": "parsing_first_decision",
-                    "error": str(first_error),
-                    "error_type": classify_qwen_error(
-                        first_error,
-                        raw_response=self.last_raw_response,
-                    ),
-                    "first_output_rejected": True,
-                    "candidate_action_from_first_output": False,
-                    "protocol_retry_used": False,
-                    "retry_failure_blocked": False,
-                    "decision_status": "blocked",
-                    "elapsed_seconds": round(time.perf_counter() - started, 3),
-                    "safe_stop_reason": (
-                        "单次模型输出非法，输出已丢弃；未发起远程格式重生成，"
-                        "控制器与机械臂均未执行。"
-                    ),
-                    "raw_response_length": len(self.last_raw_response),
-                    "raw_response_excerpt": self.last_raw_response[:1000],
-                }
-            )
-            return decision
-
-        if decision.proposal.status == "blocked":
-            self._metrics["final_blocked_count"] += 1
+        self._metrics["final_blocked_count"] += 1
         self.last_diagnostics.update(
             {
-                "model_calls": int(base_diagnostics["model_calls"]),
-                "protocol_retry_used": False,
-                "first_pass_success": first_pass,
-                "repair_retry_success": False,
-                "decision_status": decision.proposal.status,
-                "decision_confidence": decision.confidence,
+                "local_safety_block": "single_step_candidate_not_unique",
+                "local_deterministic_selection": False,
+                "model_calls": 0,
+                "decision_status": "blocked",
                 "elapsed_seconds": round(time.perf_counter() - started, 3),
             }
         )
         return decision
-
-    def _provider_chat(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        max_tokens: int,
-    ) -> str:
-        try:
-            return self.provider._chat(
-                messages,
-                max_tokens=max_tokens,
-                timeout=DECISION_TIMEOUT_SECONDS,
-                max_attempts=1,
-                response_format={"type": "json_object"},
-            )
-        except TypeError as exc:
-            text = str(exc)
-            if "unexpected keyword" not in text and "keyword argument" not in text:
-                raise
-            return self.provider._chat(messages, max_tokens=max_tokens)
-
-
-class SingleStepQwenVisualDecisionObserver(QwenVisualDecisionObserver):
-    """Production selector that never spends a second Qwen request."""
-
-    def __init__(self, provider: Any) -> None:
-        super().__init__(provider, allow_online_selection=False)
-
-
-def _decision_observation_prompt_dict(
-    context: QwenTaskContext,
-    observation: TrustedObservation,
-) -> dict[str, Any]:
-    """Hide explicitly excluded elements from the model's candidate surface.
-
-    The authoritative observation remains unchanged for fingerprinting, local
-    policy and evidence.  This projection only prevents an excluded element
-    from competing for Qwen's single next-action selection.
-    """
-
-    value = observation.prompt_dict()
-    constraints = (
-        context.global_constraints,
-        context.current_subgoal.get("constraints") or (),
-    )
-    excluded_ids: set[str] = set()
-    filtered_candidates: list[dict[str, Any]] = []
-    for candidate in value.get("candidates", []):
-        candidate = dict(candidate)
-        states = candidate.get("states")
-        if isinstance(states, Mapping) and "keyboard_geometry" in states:
-            # Current-frame keyboard anchors are a local execution credential,
-            # not part of Qwen's semantic choice surface. Qwen selects only the
-            # trusted element_id; local hydration restores authoritative states.
-            candidate["states"] = {
-                key: item
-                for key, item in states.items()
-                if key != "keyboard_geometry"
-            }
-        if constraint_excludes_candidate(
-            constraints,
-            (
-                candidate.get("meaning"),
-                candidate.get("label"),
-                candidate.get("evidence"),
-            ),
-            candidate_role=str(candidate.get("role") or ""),
-        ):
-            element_id = str(candidate.get("element_id") or "").strip()
-            if element_id:
-                excluded_ids.add(element_id)
-            continue
-        filtered_candidates.append(candidate)
-    value["candidates"] = filtered_candidates
-    if excluded_ids:
-        aliases = value.get("candidate_aliases")
-        if isinstance(aliases, dict):
-            value["candidate_aliases"] = {
-                key: target
-                for key, target in aliases.items()
-                if str(key) not in excluded_ids and str(target) not in excluded_ids
-            }
-        conflicts = value.get("candidate_conflicts")
-        if isinstance(conflicts, list):
-            value["candidate_conflicts"] = [
-                conflict
-                for conflict in conflicts
-                if not (
-                    isinstance(conflict, Mapping)
-                    and excluded_ids.intersection(
-                        str(item) for item in conflict.get("element_ids", [])
-                    )
-                )
-            ]
-    return value
-
-
-def _scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> bool:
-    from canonical_action_protocol import scene_matches_target_app_surface
-
-    return scene_matches_target_app_surface(scene, target_surface)
 
 
 def _selection_choices(
@@ -1760,66 +1341,11 @@ def _selection_choices(
     return tuple(choices)
 
 
-def _selection_decision_prompt(
-    context: QwenTaskContext,
-    observation: TrustedObservation,
-    *,
-    decision_number: int,
-    available_action_kinds: frozenset[str],
-) -> str:
-    """Ask Qwen only for semantic selection; local code binds all authority."""
-
-    observation_prompt = _decision_observation_prompt_dict(context, observation)
-    choices = _selection_choices(context, observation, available_action_kinds)
-    return f"""
-你是通用手机视觉操作 Agent 的 Qwen 单步视觉选择层。必须先做完成判定，再考虑动作。
-你只能根据当前 DeepSeek 子目标、本轮可信画面和本地提供的 choices 选择一个下一动作，
-或判断 finished/blocked。禁止规划后续步骤、编造候选、输出坐标、执行机械臂或批准风险。
-
-任务上下文：
-{json.dumps(context.to_dict(), ensure_ascii=False, separators=(',', ':'))}
-
-本轮可信观察：
-{json.dumps(observation_prompt, ensure_ascii=False, separators=(',', ':'))}
-
-本地合法动作候选：
-{json.dumps(choices, ensure_ascii=False, separators=(',', ':'))}
-
-只返回一个短JSON对象，顶层只允许以下字段：
-{{"status":"action|finished|blocked","choice_id":"action时逐字复制一个choice_id，否则null",
-"completes_current_subgoal_on_success":false,"confidence":0.0,"reason":"当前画面依据",
-"completion_evidence_element_ids":[]}}
-
-严格规则：
-1. status=action时choice_id必须逐字来自choices，completion_evidence_element_ids必须为空。
-   即使只有一个choice，也必须由你明确选择；本地不会替你选择。
-   若且仅若该choice的expected_result经动作后验证即可直接满足current_subgoal的全部完成条件，
-   completes_current_subgoal_on_success=true；仍需后续本地控制器验证，不能凭此字段判定完成。
-2. status=finished时choice_id必须为null；完成证据只能引用可信候选ID或"scene"。
-   当前状态已经满足完成条件时禁止再点击或选择入口；
-   completes_current_subgoal_on_success必须为false。
-3. status=blocked时choice_id必须为null、完成证据必须为空，
-   completes_current_subgoal_on_success必须为false。
-4. global_constraints和current_subgoal.constraints是选择前硬过滤；无法安全满足时blocked。
-5. current_execution_class=observe时只能finished/blocked，除非目标明确要求等待异步变化且choices含wait_for_change。
-6. choices中的action、element_id、direction和expected_result都由本地控制器绑定；禁止复制、改写或另行输出。
-   selection_context只用于解释上下文相关原语：当back的contextual_effect为
-   dismiss_visible_soft_keyboard且preserves_current_app_surface=true时，该动作表示收起当前已证明可见的
-   软键盘并保持当前App页面，不得把它误判为离开当前页面。selection_context不会进入机械执行参数。
-7. input_verified_text的文字由DeepSeek结构化目标和本地控制器逐字绑定，你只选择对应choice_id；
-   不得在输出中重复、改写或补全文字。
-8. choices没有合适动作时blocked；不得返回choices之外的动作名称或element_id。
-9. 这是第{decision_number}轮。不要Markdown，不要identity、page_state、next_action、target_region、
-   expected_result、bounds或额外字段。
-"""
-
-
 def _deterministic_exact_selection_payload(
     context: QwenTaskContext,
     choices: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     *,
     observation: TrustedObservation | None = None,
-    allow_general_single_step: bool = False,
 ) -> dict[str, Any] | None:
     """Select one canonical candidate from the sole step observation.
 
@@ -1837,10 +1363,8 @@ def _deterministic_exact_selection_payload(
         return {
             "status": "action",
             "choice_id": choice_id,
-            "completes_current_subgoal_on_success": False,
             "confidence": 1.0,
             "reason": reason,
-            "completion_evidence_element_ids": [],
         }
 
     active_id = str(context.current_subgoal.get("subgoal_id") or "").strip()
@@ -1904,8 +1428,21 @@ def _deterministic_exact_selection_payload(
             "结构化直推目录只有一个合法 canonical candidate。",
         )
 
-    if not allow_general_single_step:
-        return None
+    if (
+        getattr(context, "current_execution_class", "") == "effect"
+        and bool(getattr(context, "effect_action_allowed", False))
+    ):
+        effect_choices = tuple(
+            choice for choice in choices if _choice_applies_effect(choice)
+        )
+        if len(effect_choices) == 1:
+            return action_payload(
+                effect_choices[0],
+                "canonical目录只有一个绑定当前EffectIntent的动作。",
+            )
+        if effect_choices:
+            return None
+
     if observation is None:
         return None
     local_target = observation.target_local_candidate()
@@ -1936,6 +1473,22 @@ def _deterministic_exact_selection_payload(
     return None
 
 
+def _choice_applies_effect(choice: Mapping[str, Any]) -> bool:
+    transition = choice.get("formal_transition")
+    if not isinstance(transition, Mapping):
+        return False
+    expectations = transition.get("expectations")
+    if not isinstance(expectations, list):
+        return False
+    return any(
+        isinstance(item, Mapping)
+        and item.get("predicate") == "effect.applied"
+        and item.get("operator") == "equals"
+        and item.get("value") is True
+        for item in expectations
+    )
+
+
 def _formal_action_applies_effect(action: SemanticAction) -> bool:
     """Recognize only a locally hydrated canonical effect transition.
 
@@ -1961,470 +1514,188 @@ def _formal_action_applies_effect(action: SemanticAction) -> bool:
     )
 
 
-def _parse_model_decision(
-    raw: str,
+def _hydrate_canonical_selection(
+    payload: Mapping[str, Any],
     *,
     context: QwenTaskContext,
     observation: TrustedObservation,
-    available_action_kinds: frozenset[str] | None = None,
+    choices: tuple[dict[str, Any], ...],
 ) -> QwenVisualDecision:
-    """Hydrate the model's minimal selection into the formal decision object."""
+    """Hydrate the already-selected immutable canonical candidate."""
 
-    payload = _extract_qwen_json_object(raw)
-    allowed = {
-        "status",
-        "choice_id",
-        "completes_current_subgoal_on_success",
-        "confidence",
-        "reason",
-        "completion_evidence_element_ids",
-    }
-    unexpected = set(payload) - allowed
-    if unexpected:
-        raise VisionAgentError(
-            "Qwen最小选择包含协议外字段：" + ", ".join(sorted(unexpected))
-        )
-    required = {
-        "status",
-        "choice_id",
-        "completes_current_subgoal_on_success",
-        "confidence",
-        "reason",
-        "completion_evidence_element_ids",
-    }
-    missing = required - set(payload)
-    if missing:
-        raise VisionAgentError(
-            "Qwen最小选择缺少字段：" + ", ".join(sorted(missing))
-        )
-
-    status = str(payload.get("status") or "").strip().lower()
-    if status not in {"action", "finished", "blocked"}:
-        raise VisionAgentError("Qwen最小选择 status 必须是action、finished或blocked。")
-    choices = _selection_choices(
-        context,
-        observation,
-        available_action_kinds or QWEN_PROTOCOL_ACTIONS,
-    )
-    choices_by_id = {str(item["choice_id"]): item for item in choices}
+    allowed = {"status", "choice_id", "confidence", "reason"}
+    if set(payload) != allowed:
+        missing = sorted(allowed - set(payload))
+        extra = sorted(set(payload) - allowed)
+        details = []
+        if missing:
+            details.append("缺少字段：" + ", ".join(missing))
+        if extra:
+            details.append("包含协议外字段：" + ", ".join(extra))
+        raise VisionAgentError("本地 canonical 选择结构无效；" + "；".join(details))
+    if str(payload.get("status") or "").strip().lower() != "action":
+        raise VisionAgentError("本地 canonical 选择结果必须是 action。")
     choice_id = str(payload.get("choice_id") or "").strip()
-    completes_current_subgoal = payload.get(
-        "completes_current_subgoal_on_success"
+    matches = tuple(
+        item for item in choices if str(item.get("choice_id") or "") == choice_id
     )
-    if not isinstance(completes_current_subgoal, bool):
-        raise VisionAgentError(
-            "Qwen最小选择 completes_current_subgoal_on_success 必须是布尔值。"
-        )
-    completion_ids = payload.get("completion_evidence_element_ids")
-    if not isinstance(completion_ids, list) or any(
-        not isinstance(item, str) for item in completion_ids
-    ):
-        raise VisionAgentError(
-            "Qwen最小选择 completion_evidence_element_ids 必须是字符串数组。"
-        )
-    next_action: dict[str, Any] | None = None
-    expected_result: dict[str, Any] = {}
-    if status == "action":
-        if choice_id not in choices_by_id:
-            raise VisionAgentError("Qwen最小选择引用了不存在或不允许的 choice_id。")
-        if completion_ids:
-            raise VisionAgentError("action 不能携带完成证据。")
-        choice = choices_by_id[choice_id]
-        local_expected_result = choice.get("expected_result")
-        if not isinstance(local_expected_result, Mapping) or not local_expected_result:
-            raise VisionAgentError("本地动作选择缺少可验证 expected_result。")
-        expected_result = dict(local_expected_result)
-        if completes_current_subgoal:
-            expected_result["goal_complete_on_success"] = True
-        next_action = {
-            key: value
-            for key, value in choice.items()
-            if key not in {"choice_id", "expected_result", "selection_context"}
-        }
-        next_action["kind"] = next_action.pop("action")
-        if next_action["kind"] == "input_verified_text":
-            next_action["text"] = context.requested_input_text
-        elif next_action["kind"] == "long_press":
-            next_action["duration_ms"] = 800
-    else:
-        if choice_id:
-            raise VisionAgentError("finished/blocked 不能携带 choice_id。")
-        if completes_current_subgoal:
-            raise VisionAgentError(
-                "finished/blocked 不能声明动作后完成当前子目标。"
-            )
-        if status == "blocked" and completion_ids:
-            raise VisionAgentError("blocked 不能携带完成证据。")
-
-    scene = observation.scene
-    hydrated = {
-        "protocol_version": QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
-        "task_id": context.task_id,
-        "device_id": context.device_id,
-        "revision": context.revision,
-        "observation_id": observation.observation_id,
-        "fingerprint": observation.fingerprint,
-        "page_state": {
-            "foreground_app_id": scene.foreground_app_id,
-            "screen_id": scene.screen_id,
-            "summary": scene.summary,
-            "overlays": list(scene.overlays),
-        },
-        "status": status,
-        "next_action": next_action,
-        "target_region": None,
-        "expected_result": expected_result,
-        "confidence": payload.get("confidence"),
-        "reason": payload.get("reason"),
-        "completion_evidence_element_ids": completion_ids,
-    }
-    return _parse_decision(
-        json.dumps(hydrated, ensure_ascii=False, separators=(",", ":")),
-        context=context,
-        observation=observation,
-        available_action_kinds=available_action_kinds,
-    )
-
-
-def _parse_decision(
-    raw: str,
-    *,
-    context: QwenTaskContext,
-    observation: TrustedObservation,
-    available_action_kinds: frozenset[str] | None = None,
-) -> QwenVisualDecision:
-    try:
-        payload = _extract_qwen_json_object(raw)
-        allowed = {
-            "protocol_version",
-            "task_id",
-            "device_id",
-            "revision",
-            "observation_id",
-            "fingerprint",
-            "page_state",
-            "status",
-            "next_action",
-            "target_region",
+    if len(matches) != 1:
+        raise VisionAgentError("本地选择引用了不存在或不唯一的 choice_id。")
+    choice = matches[0]
+    kind = str(choice.get("action") or "").strip()
+    if kind not in SUPPORTED_ACTIONS:
+        raise VisionAgentError("canonical candidate 包含未知动作。")
+    raw_expected = choice.get("expected_result")
+    if not isinstance(raw_expected, Mapping) or not raw_expected:
+        raise VisionAgentError("canonical candidate 缺少可验证 expected_result。")
+    expected_result = dict(raw_expected)
+    params = {
+        key: value
+        for key, value in choice.items()
+        if key
+        not in {
+            "choice_id",
+            "action",
             "expected_result",
-            "confidence",
-            "reason",
-            "completion_evidence_element_ids",
+            "selection_context",
         }
-        unexpected = set(payload) - allowed
-        if unexpected:
-            raise GenericStepPlanningError(
-                "Qwen视觉决策包含协议外字段：" + ", ".join(sorted(unexpected))
-            )
-        expected_identity = {
-            "protocol_version": QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
-            "task_id": context.task_id,
-            "device_id": context.device_id,
-            "revision": context.revision,
-            "observation_id": observation.observation_id,
-            "fingerprint": observation.fingerprint,
-        }
-        for key, expected in expected_identity.items():
-            if payload.get(key) != expected:
-                raise GenericStepPlanningError(f"Qwen返回的{key}不匹配或已过期。")
-
-        page_state = ModelPageState.from_dict(payload.get("page_state"))
-        status = str(payload.get("status") or "").strip().lower()
-        raw_action = payload.get("next_action")
-        raw_action_kind = ""
-        if isinstance(raw_action, dict):
-            for kind_field in ("kind", "action", "action_type", "type"):
-                if raw_action.get(kind_field):
-                    raw_action_kind = str(raw_action[kind_field]).strip().lower()
-                    break
-        expected_result = _normalize_expected_result(
-            payload.get("expected_result") or {},
-            action_kind=raw_action_kind,
+    }
+    if kind in SINGLE_ELEMENT_ACTIONS:
+        element_id = str(params.get("element_id") or "").strip()
+        element = observation.get_candidate(element_id)
+        params.update(
+            {
+                "element_id": element.element_id,
+                "target": element.meaning,
+                "role": element.role,
+                "label": element.label,
+                "states": dict(element.states),
+            }
         )
-        nested_target_region = None
-        nested_expected_result = None
-        if isinstance(raw_action, dict):
-            raw_action = dict(raw_action)
-            nested_target_region = raw_action.pop("target_region", None)
-            nested_expected_result = raw_action.pop("expected_result", None)
-        top_level_target_region = payload.get("target_region")
-        if nested_target_region not in (None, {}):
-            if (
-                top_level_target_region not in (None, {})
-                and top_level_target_region != nested_target_region
-            ):
-                raise GenericStepPlanningError(
-                    "next_action.target_region 与顶层 target_region 冲突。"
-                )
-            top_level_target_region = nested_target_region
-        if nested_expected_result not in (None, {}):
-            if not isinstance(nested_expected_result, dict):
-                raise GenericStepPlanningError(
-                    "next_action.expected_result 必须是JSON对象。"
-                )
-            normalized_nested = _normalize_expected_result(
-                nested_expected_result,
-                action_kind=raw_action_kind,
-            )
-            if expected_result and expected_result != normalized_nested:
-                raise GenericStepPlanningError(
-                    "next_action.expected_result 与顶层 expected_result 冲突。"
-                )
-            expected_result = normalized_nested
-        action = _parse_action(
-            raw_action,
-            status=status,
-            expected_result=expected_result,
-            observation=observation,
-            revision=context.revision,
-        )
-        if (
-            context.current_execution_class == "observe"
-            and action is not None
-            and action.action != "wait_for_change"
-        ):
-            raise GenericStepPlanningError(
-                "observe 子目标禁止点击、滑动、系统导航、返回、输入、长按或拖动；"
-                "当前画面已证明结果时必须 finished，否则 blocked。"
-            )
-        if (
-            action is not None
-            and available_action_kinds is not None
-            and action.action not in available_action_kinds
-        ):
-            raise GenericStepPlanningError(
-                f"当前设备没有本地验证动作能力：{action.action}"
-            )
-        evidence_ids = (
-            _text_tuple(
-                payload.get("completion_evidence_element_ids") or [],
-                "completion_evidence_element_ids",
-            )
-            if status == "finished"
-            else ()
-        )
-        completion_evidence = (
-            _resolve_completion_evidence(evidence_ids, observation)
-            if status == "finished"
-            else ()
-        )
-        proposal = GenericStepProposal(
-            status=status,
-            action=action,
-            reason=str(payload.get("reason") or "").strip()[:500],
-            completion_evidence=completion_evidence,
-        )
-        target_region = _parse_target_region(
-            top_level_target_region,
-            action=action,
-            observation=observation,
-        )
-        raw_confidence = payload.get("confidence", 0.0)
-        if isinstance(raw_confidence, bool):
-            raise GenericStepPlanningError("confidence 不能是布尔值。")
-        confidence = min(float(raw_confidence), float(observation.scene.confidence))
-        if action and action.action in SINGLE_ELEMENT_ACTIONS:
+        if kind == "input_verified_text":
+            params["text"] = context.requested_input_text
+        elif kind == "long_press":
+            params["duration_ms"] = 800
+    elif kind == "drag":
+        for prefix in ("source_", "destination_"):
             element = observation.get_candidate(
-                str(action.params.get("element_id") or "")
+                str(params.get(f"{prefix}element_id") or "").strip()
             )
-            local_candidate = observation.target_local_candidate()
-            confidence_ceiling = (
-                float(element.confidence)
-                if local_candidate is not None
-                and local_candidate.element_id == element.element_id
-                else min(
-                    float(observation.scene.confidence),
-                    float(element.confidence),
-                )
+            params.update(
+                {
+                    f"{prefix}element_id": element.element_id,
+                    f"{prefix}target": element.meaning,
+                    f"{prefix}role": element.role,
+                    f"{prefix}label": element.label,
+                    f"{prefix}states": dict(element.states),
+                }
             )
-            confidence = min(
-                float(raw_confidence),
-                confidence_ceiling,
-            )
-        elif action and action.action == "drag":
-            confidence = min(
-                confidence,
-                *(
-                    float(
-                        observation.get_candidate(
-                            str(action.params.get(f"{prefix}element_id") or "")
-                        ).confidence
-                    )
-                    for prefix in ("source_", "destination_")
-                ),
-            )
-        decision = QwenVisualDecision(
-            task_id=context.task_id,
-            device_id=context.device_id,
-            revision=context.revision,
-            observation_id=observation.observation_id,
-            fingerprint=observation.fingerprint,
-            page_state=page_state,
-            trusted_observation=observation,
-            proposal=proposal,
-            target_region=target_region,
-            expected_result=dict(expected_result),
-            confidence=confidence,
-            reason=str(payload.get("reason") or "").strip()[:500],
-            completion_evidence_element_ids=evidence_ids,
-        )
-        decision.validate(context)
-        return decision
-    except (UISceneError, GenericStepPlanningError, ValueError, TypeError) as exc:
-        raise VisionAgentError(f"Qwen视觉单步决策不符合协议：{exc}") from exc
-
-
-def _extract_qwen_json_object(raw: str) -> dict[str, Any]:
-    """Accept one JSON object, or exact duplicate copies of that object only."""
-
-    text = raw.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-        text = re.sub(r"\s*```$", "", text).strip()
-    decoder = json.JSONDecoder()
-    values: list[Any] = []
-    index = 0
-    while index < len(text):
-        while index < len(text) and text[index].isspace():
-            index += 1
-        if index >= len(text):
-            break
-        try:
-            value, end = decoder.raw_decode(text, index)
-        except json.JSONDecodeError as exc:
-            raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
-        values.append(value)
-        index = end
-    if not values:
-        raise VisionAgentError("模型没有返回 JSON 对象。")
-    if any(not isinstance(value, dict) for value in values):
-        raise VisionAgentError("模型返回值必须是 JSON 对象。")
-    first = values[0]
-    if any(value != first for value in values[1:]):
-        raise VisionAgentError("模型返回了多个互相冲突的 JSON 对象。")
-    return dict(first)
-
-
-def _normalize_expected_result(
-    value: Any,
-    *,
-    action_kind: str = "",
-) -> dict[str, Any]:
-    """Normalize model wording into the controller's verifiable effect schema."""
-
-    if not isinstance(value, dict):
-        raise GenericStepPlanningError("expected_result 必须是JSON对象。")
-    _reject_raw_control_data(value)
-    aliases = {
-        "foreground_app_id": "app_id",
-        "new_foreground_app_id": "app_id",
-        "new_app_id": "app_id",
-        "new_screen_id": "screen_id",
-        "screen_change": "scene_changed",
-        "page_changed": "scene_changed",
-        "list_content_changed": "content_changed",
-        "scroll_occurred": "content_changed",
-        "new_items_visible": "content_changed",
-    }
-    allowed = {
-        "scene_changed",
-        "content_changed",
-        "current_video_changed",
-        "app_id",
-        "screen_id",
-        "element_state",
-        "system_ui",
-        "allow_unchanged",
-        "goal_complete_on_success",
-    }
-    normalized: dict[str, Any] = {}
-    for raw_key, item in value.items():
-        key = aliases.get(str(raw_key), str(raw_key))
-        if (
-            key == "system_ui"
-            and item in (
-                {"overlays": []},
-                {"soft_keyboard_visible": False},
-            )
-            and action_kind in {"back", "home", "dismiss_overlay"}
-        ):
-            # Model-authored overlay/keyboard absence is not itself a
-            # controller-owned system_ui fact.  For dismissal actions retain
-            # only the weaker, independently verifiable scene transition; the
-            # object must match one exact absence shape, and every other nested
-            # field/value still fails closed below.
-            key = "scene_changed"
-            item = True
-        if key not in allowed:
-            raise GenericStepPlanningError(
-                f"expected_result 包含协议外字段：{raw_key}"
-            )
-        if key in normalized and normalized[key] != item:
-            raise GenericStepPlanningError(
-                f"expected_result.{raw_key} 与 {key} 冲突。"
-            )
-        normalized[key] = item
-
-    for key in (
-        "scene_changed",
-        "content_changed",
-        "current_video_changed",
-        "allow_unchanged",
-        "goal_complete_on_success",
+    params["expected_effect"] = expected_result
+    action = SemanticAction(
+        node_id=f"qwen_visual_revision_{context.revision}",
+        action=kind,
+        params=params,
+    )
+    raw_confidence = payload.get("confidence")
+    if isinstance(raw_confidence, bool) or not isinstance(
+        raw_confidence, (int, float)
     ):
-        if key in normalized and not isinstance(normalized[key], bool):
-            raise GenericStepPlanningError(f"expected_result.{key} 必须是布尔值。")
-    for key in ("app_id", "screen_id"):
-        if key in normalized:
-            if not isinstance(normalized[key], str) or not normalized[key].strip():
-                raise GenericStepPlanningError(
-                    f"expected_result.{key} 必须是非空字符串。"
+        raise VisionAgentError("本地 canonical 选择 confidence 无效。")
+    confidence = min(
+        float(raw_confidence),
+        float(observation.scene.confidence),
+    )
+    if kind in SINGLE_ELEMENT_ACTIONS:
+        confidence = min(
+            confidence,
+            float(
+                observation.get_candidate(
+                    str(params.get("element_id") or "")
+                ).confidence
+            ),
+        )
+    elif kind == "drag":
+        confidence = min(
+            confidence,
+            *(
+                float(
+                    observation.get_candidate(
+                        str(params.get(f"{prefix}element_id") or "")
+                    ).confidence
                 )
-            normalized[key] = normalized[key].strip()
-    if "element_state" in normalized:
-        element_state = normalized["element_state"]
-        if not isinstance(element_state, dict):
-            raise GenericStepPlanningError(
-                "expected_result.element_state 必须是JSON对象。"
-            )
-        unexpected = set(element_state) - {"meaning", "states"}
-        if unexpected:
-            raise GenericStepPlanningError(
-                "expected_result.element_state 包含协议外字段："
-                + ", ".join(sorted(unexpected))
-            )
-        meaning = element_state.get("meaning")
-        states = element_state.get("states")
-        if not isinstance(meaning, str) or not meaning.strip():
-            raise GenericStepPlanningError(
-                "expected_result.element_state.meaning 必须是非空字符串。"
-            )
-        if not isinstance(states, dict) or not states:
-            raise GenericStepPlanningError(
-                "expected_result.element_state.states 必须是非空对象。"
-            )
-        normalized["element_state"] = {
-            "meaning": meaning.strip(),
-            "states": dict(states),
-        }
-    if "system_ui" in normalized:
-        system_ui = normalized["system_ui"]
-        if not isinstance(system_ui, dict):
-            raise GenericStepPlanningError(
-                "expected_result.system_ui 必须是JSON对象。"
-            )
-        unexpected = set(system_ui) - {"navigation_bar_visible"}
-        if unexpected:
-            raise GenericStepPlanningError(
-                "expected_result.system_ui 包含协议外字段："
-                + ", ".join(sorted(unexpected))
-            )
-        if system_ui.get("navigation_bar_visible") is not True:
-            raise GenericStepPlanningError(
-                "expected_result.system_ui.navigation_bar_visible 必须为true。"
-            )
-        normalized["system_ui"] = {"navigation_bar_visible": True}
-    return normalized
+                for prefix in ("source_", "destination_")
+            ),
+        )
+    reason = str(payload.get("reason") or "").strip()[:500]
+    decision = QwenVisualDecision(
+        task_id=context.task_id,
+        device_id=context.device_id,
+        revision=context.revision,
+        observation_id=observation.observation_id,
+        fingerprint=observation.fingerprint,
+        page_state=ModelPageState.from_trusted_scene(observation.scene),
+        trusted_observation=observation,
+        proposal=GenericStepProposal(
+            status="action",
+            action=action,
+            reason=reason,
+        ),
+        target_region=_canonical_target_region(action, observation),
+        expected_result=expected_result,
+        confidence=confidence,
+        reason=reason,
+    )
+    decision.validate(context)
+    return decision
+
+
+def _canonical_target_region(
+    action: SemanticAction,
+    observation: TrustedObservation,
+) -> VisualTargetRegion:
+    if action.action in SINGLE_ELEMENT_ACTIONS:
+        element = observation.get_candidate(
+            str(action.params.get("element_id") or "").strip()
+        )
+        return VisualTargetRegion(
+            kind="element",
+            element_id=element.element_id,
+            bounds=element.bounds,
+            description=element.label or element.meaning,
+        )
+    if action.action == "drag":
+        source = observation.get_candidate(
+            str(action.params.get("source_element_id") or "").strip()
+        )
+        destination = observation.get_candidate(
+            str(action.params.get("destination_element_id") or "").strip()
+        )
+        return VisualTargetRegion(
+            kind="element_path",
+            element_id=source.element_id,
+            bounds=source.bounds,
+            destination_element_id=destination.element_id,
+            destination_bounds=destination.bounds,
+            description=(
+                f"{source.label or source.meaning} 到 "
+                f"{destination.label or destination.meaning}"
+            ),
+        )
+    is_system = action.action in {
+        "back",
+        "home",
+        "reveal_system_navigation",
+    }
+    description = {
+        "back": "系统返回区域",
+        "home": "Android系统Home键",
+        "reveal_system_navigation": "Android系统导航栏",
+    }.get(action.action, "当前屏幕")
+    return VisualTargetRegion(
+        kind="system_navigation" if is_system else "screen",
+        bounds=(0.0, 0.0, 1.0, 1.0),
+        description=description,
+    )
 
 
 def _normalize_available_action_kinds(
@@ -2444,7 +1715,7 @@ def _normalize_available_action_kinds(
             "设备动作能力包含协议外动作：" + ", ".join(sorted(unexpected))
         )
     if not normalized:
-        raise VisionAgentError("设备没有任何可供 Qwen 选择的通用动作。")
+        raise VisionAgentError("设备没有任何可供本地选择的 canonical 动作。")
     return normalized
 
 
@@ -2470,351 +1741,6 @@ def _typed_required_action_kinds(context: QwenTaskContext) -> frozenset[str]:
         if constraint_ref in constraints
         and constraints[constraint_ref].kind == "required_action"
     )
-
-
-def _parse_action(
-    value: Any,
-    *,
-    status: str,
-    expected_result: dict[str, Any],
-    observation: TrustedObservation,
-    revision: int,
-) -> SemanticAction | None:
-    if status != "action":
-        if value not in (None, {}):
-            raise GenericStepPlanningError("finished/blocked 不能携带 next_action。")
-        return None
-    if not isinstance(value, dict):
-        raise GenericStepPlanningError("action 状态缺少唯一 next_action 对象。")
-    value = dict(value)
-    nested_params = value.pop("params", None)
-    if nested_params is not None:
-        if not isinstance(nested_params, dict):
-            raise GenericStepPlanningError("next_action.params 必须是JSON对象。")
-        _reject_raw_control_data(nested_params)
-        for field, nested_value in nested_params.items():
-            if field in value and value[field] != nested_value:
-                raise GenericStepPlanningError(
-                    f"next_action.params.{field} 与顶层字段冲突。"
-                )
-            value[field] = nested_value
-    # Qwen occasionally uses two conventional JSON aliases even after a
-    # format-only retry.  Normalize names only; candidate identity and every
-    # semantic field are still checked against the trusted observation below.
-    for alias, canonical in {
-        "action": "kind",
-        "action_type": "kind",
-        "type": "kind",
-        "target_element_id": "element_id",
-    }.items():
-        if alias not in value:
-            continue
-        if canonical in value and value[canonical] != value[alias]:
-            raise GenericStepPlanningError(
-                f"next_action.{alias} 与 {canonical} 冲突。"
-            )
-        value[canonical] = value.pop(alias)
-    kind = str(value.get("kind") or "").strip().lower()
-    redundant_bounds = value.pop("bounds", None)
-    if redundant_bounds is not None and kind not in SINGLE_ELEMENT_ACTIONS:
-        raise GenericStepPlanningError(
-            "next_action.bounds 只允许逐项复用单元素可信候选区域。"
-        )
-    if "distance" in value:
-        value.pop("distance")
-        if kind != "swipe":
-            raise GenericStepPlanningError(
-                "next_action.distance 只允许作为swipe的非权威提示。"
-            )
-        # The device exposes only a calibrated fixed swipe.  Model-authored
-        # distance never reaches the controller or hardware. Discard numeric
-        # or descriptive hints instead of treating display-only data
-        # as an executable protocol failure.
-    allowed = {
-        "kind", "element_id", "target", "role", "label", "states", "direction",
-        "text", "duration_ms",
-        "formal_candidate_id", "formal_report_digest", "formal_transition",
-        "source_element_id", "source_target", "source_role", "source_label",
-        "source_states", "destination_element_id", "destination_target",
-        "destination_role", "destination_label", "destination_states",
-    }
-    unexpected = set(value) - allowed
-    if unexpected:
-        raise GenericStepPlanningError(
-            "next_action 包含协议外字段：" + ", ".join(sorted(unexpected))
-        )
-    if kind not in ALLOWED_STEP_ACTIONS:
-        raise GenericStepPlanningError(f"唯一下一动作不在通用白名单：{kind}")
-    parameter_fields_by_kind = {
-        "tap_semantic": {"element_id", "target", "role", "label", "states"},
-        "dismiss_overlay": {"element_id", "target", "role", "label", "states"},
-        "input_verified_text": {
-            "element_id", "target", "role", "label", "states", "text",
-        },
-        "press_enter": {
-            "element_id", "target", "role", "label", "states",
-        },
-        "clear_verified_text": {
-            "element_id", "target", "role", "label", "states",
-        },
-        "long_press": {
-            "element_id", "target", "role", "label", "states", "duration_ms",
-        },
-        "drag": {
-            "source_element_id", "source_target", "source_role", "source_label",
-            "source_states", "destination_element_id", "destination_target",
-            "destination_role", "destination_label", "destination_states",
-        },
-        "swipe": {"direction"},
-        "reveal_system_navigation": set(),
-        "back": set(),
-        "home": set(),
-        "wait_for_change": set(),
-    }
-    formal_fields = {
-        "formal_candidate_id",
-        "formal_report_digest",
-        "formal_transition",
-    }
-    effective_fields = parameter_fields_by_kind[kind] | formal_fields
-    params = {
-        key: value[key]
-        for key in effective_fields
-        if key in value and value[key] not in (None, "", {}, [])
-    }
-    params["expected_effect"] = dict(expected_result)
-    if kind == "reveal_system_navigation":
-        if expected_result != {"system_ui": {"navigation_bar_visible": True}}:
-            raise GenericStepPlanningError(
-                "reveal_system_navigation 必须精确声明结构化导航栏可见后置条件。"
-            )
-    elif "system_ui" in expected_result:
-        raise GenericStepPlanningError(
-            "结构化 system_ui 后置条件只允许用于 reveal_system_navigation。"
-        )
-    for field in ("states", "source_states", "destination_states"):
-        if not isinstance(params.get(field, {}), dict):
-            raise GenericStepPlanningError(f"next_action.{field} 必须是对象。")
-    _reject_raw_control_data(params)
-    if kind in SINGLE_ELEMENT_ACTIONS:
-        element_id = str(params.get("element_id") or "").strip()
-        if not element_id:
-            raise GenericStepPlanningError("元素动作缺少可信候选 element_id。")
-        element = observation.get_candidate(element_id)
-        if element.role == "keyboard_key":
-            raise GenericStepPlanningError(
-                "keyboard_key 不能作为通用元素动作目标。"
-            )
-        if redundant_bounds is not None:
-            if (
-                not isinstance(redundant_bounds, (list, tuple))
-                or len(redundant_bounds) != 4
-                or any(
-                    isinstance(item, bool) or not isinstance(item, (int, float))
-                    for item in redundant_bounds
-                )
-            ):
-                raise GenericStepPlanningError(
-                    "next_action.bounds 必须包含4个0到1000数值。"
-                )
-            normalized_bounds = tuple(
-                float(item) / 1000.0 for item in redundant_bounds
-            )
-            if any(
-                abs(actual - trusted) > 0.0001
-                for actual, trusted in zip(normalized_bounds, element.bounds)
-            ):
-                raise GenericStepPlanningError(
-                    "next_action.bounds 没有逐项复用可信候选区域。"
-                )
-        # element_id is Qwen's only semantic selection.  All descriptive
-        # fields are authoritative local data and must never depend on the
-        # model repeating strings exactly (or on model-authored synonyms).
-        params.update(
-            {
-                "target": element.meaning,
-                "role": element.role,
-                "label": element.label,
-                "states": dict(element.states),
-            }
-        )
-    elif kind == "drag":
-        source_id = str(params.get("source_element_id") or "").strip()
-        destination_id = str(params.get("destination_element_id") or "").strip()
-        if not source_id or not destination_id or source_id == destination_id:
-            raise GenericStepPlanningError("拖动必须绑定两个不同的可信候选。")
-        source = observation.get_candidate(source_id)
-        destination = observation.get_candidate(destination_id)
-        for prefix, element in (
-            ("source_", source),
-            ("destination_", destination),
-        ):
-            params.update(
-                {
-                    f"{prefix}target": element.meaning,
-                    f"{prefix}role": element.role,
-                    f"{prefix}label": element.label,
-                    f"{prefix}states": dict(element.states),
-                }
-            )
-    return SemanticAction(
-        node_id=f"qwen_visual_revision_{revision}",
-        action=kind,
-        params=params,
-    )
-
-
-def _parse_target_region(
-    value: Any,
-    *,
-    action: SemanticAction | None = None,
-    observation: TrustedObservation | None = None,
-) -> VisualTargetRegion | None:
-    if value in (None, {}) and action is None:
-        return None
-    if value in (None, {}):
-        value = {}
-    elif not isinstance(value, dict):
-        raise GenericStepPlanningError("target_region 必须是对象或null。")
-    value = dict(value)
-    for alias, canonical in {
-        "type": "kind",
-        "region_type": "kind",
-        "target_element_id": "element_id",
-        "target_bounds": "bounds",
-    }.items():
-        if alias not in value:
-            continue
-        if canonical in value and value[canonical] != value[alias]:
-            raise GenericStepPlanningError(
-                f"target_region.{alias} 与 {canonical} 冲突。"
-            )
-        value[canonical] = value.pop(alias)
-    if action is not None:
-        if observation is None:
-            raise GenericStepPlanningError("本地构造目标区域缺少可信观察。")
-        if action.action in SINGLE_ELEMENT_ACTIONS:
-            element_id = str(action.params.get("element_id") or "").strip()
-            element = observation.get_candidate(element_id)
-            defaults = {
-                "kind": "element",
-                "element_id": element.element_id,
-                "bounds": [item * 1000.0 for item in element.bounds],
-                "description": element.label or element.meaning,
-            }
-        elif action.action == "drag":
-            source = observation.get_candidate(
-                str(action.params.get("source_element_id") or "").strip()
-            )
-            destination = observation.get_candidate(
-                str(action.params.get("destination_element_id") or "").strip()
-            )
-            defaults = {
-                "kind": "element_path",
-                "element_id": source.element_id,
-                "bounds": [item * 1000.0 for item in source.bounds],
-                "destination_element_id": destination.element_id,
-                "destination_bounds": [
-                    item * 1000.0 for item in destination.bounds
-                ],
-                "description": (
-                    f"{source.label or source.meaning} 到 "
-                    f"{destination.label or destination.meaning}"
-                ),
-            }
-        elif action.action in {"back", "home", "reveal_system_navigation"}:
-            defaults = {
-                "kind": "system_navigation",
-                "bounds": [0.0, 0.0, 1000.0, 1000.0],
-                "description": (
-                    "Android系统Home键"
-                    if action.action == "home"
-                    else "Android系统导航栏"
-                    if action.action == "reveal_system_navigation"
-                    else "系统返回区域"
-                ),
-            }
-        else:
-            defaults = {
-                "kind": "screen",
-                "bounds": [0.0, 0.0, 1000.0, 1000.0],
-                "description": "当前屏幕",
-            }
-        if action.action in SINGLE_ELEMENT_ACTIONS or action.action == "drag":
-            for key, default in defaults.items():
-                if value.get(key) in (None, "", []):
-                    value[key] = default
-        else:
-            # Screen/system actions have no model-authoritative region.  The
-            # local controller always records the actual full-screen region;
-            # model-authored container bounds or element IDs are ignored.
-            value = {
-                **defaults,
-                "description": str(value.get("description") or "").strip()
-                or defaults["description"],
-            }
-    allowed = {
-        "kind",
-        "element_id",
-        "bounds",
-        "destination_element_id",
-        "destination_bounds",
-        "description",
-    }
-    unexpected = set(value) - allowed
-    if unexpected:
-        raise GenericStepPlanningError(
-            "target_region 包含协议外字段：" + ", ".join(sorted(unexpected))
-        )
-    raw_bounds = value.get("bounds")
-    if not isinstance(raw_bounds, (list, tuple)) or len(raw_bounds) != 4:
-        raise GenericStepPlanningError("target_region.bounds 必须包含4个数值。")
-    try:
-        bounds = tuple(float(item) / 1000.0 for item in raw_bounds)
-    except (TypeError, ValueError) as exc:
-        raise GenericStepPlanningError("target_region.bounds 含有非数值。") from exc
-    destination_bounds = None
-    raw_destination = value.get("destination_bounds")
-    if raw_destination is not None:
-        if not isinstance(raw_destination, (list, tuple)) or len(raw_destination) != 4:
-            raise GenericStepPlanningError(
-                "target_region.destination_bounds 必须包含4个数值。"
-            )
-        try:
-            destination_bounds = tuple(
-                float(item) / 1000.0 for item in raw_destination
-            )
-        except (TypeError, ValueError) as exc:
-            raise GenericStepPlanningError(
-                "target_region.destination_bounds 含有非数值。"
-            ) from exc
-    return VisualTargetRegion(
-        kind=str(value.get("kind") or "").strip().lower(),
-        element_id=str(value.get("element_id") or "").strip(),
-        bounds=bounds,  # type: ignore[arg-type]
-        destination_element_id=str(
-            value.get("destination_element_id") or ""
-        ).strip(),
-        destination_bounds=destination_bounds,  # type: ignore[arg-type]
-        description=str(value.get("description") or "").strip()[:200],
-    )
-
-
-def _resolve_completion_evidence(
-    evidence_ids: tuple[str, ...],
-    observation: TrustedObservation,
-) -> tuple[str, ...]:
-    evidence: list[str] = []
-    for evidence_id in evidence_ids:
-        if evidence_id == "scene":
-            if not observation.scene.summary.strip():
-                raise GenericStepPlanningError("可信scene没有可引用的完成摘要。")
-            evidence.append(f"scene:{observation.scene.summary}")
-            continue
-        element = observation.get_candidate(evidence_id)
-        visible = element.label or (element.evidence[0] if element.evidence else element.meaning)
-        evidence.append(f"{element.element_id}:{visible}")
-    return tuple(evidence)
 
 
 def _canonicalize_trusted_scene(
@@ -3138,21 +2064,6 @@ def _identity_text_candidate_block(
     return None
 
 
-def _required_identity_candidate_ids(
-    context: QwenTaskContext,
-    observation: TrustedObservation,
-) -> set[str]:
-    if _launcher_app_entry_candidate_ids(context, observation):
-        return set()
-    result: set[str] = set()
-    for required_text in context.identity_text_requirements:
-        matches = _matching_identity_text_candidates(observation, required_text)
-        if len(matches) != 1:
-            raise GenericStepPlanningError("收件人身份缺少本地唯一逐字候选。")
-        result.add(matches[0])
-    return result
-
-
 def _matching_identity_text_candidates(
     observation: TrustedObservation,
     required_text: str,
@@ -3448,30 +2359,6 @@ def _local_blocked_decision(
     )
     decision.validate(context)
     return decision
-
-
-def _vision_message(prompt: str, image: Image.Image) -> dict[str, Any]:
-    return {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": _image_data_url(image)}},
-        ],
-    }
-
-
-def _decision_messages(prompt: str, image: Image.Image) -> list[dict[str, Any]]:
-    return [
-        {
-            "role": "system",
-            "content": (
-                "你是受本地协议约束的单步视觉选择器。只输出一个语法完整的JSON对象；"
-                "禁止Markdown、解释、思考过程、reasoning、analysis、额外字段、代码围栏"
-                "或JSON对象前后的任何文字。"
-            ),
-        },
-        _vision_message(prompt, image),
-    ]
 
 
 def _require_dict(value: Any, name: str) -> dict[str, Any]:

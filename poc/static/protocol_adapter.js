@@ -178,7 +178,7 @@
       params.label,
       params.target,
       elementId,
-      status === "finished" ? "目标完成" : status === "blocked" ? "当前步骤已阻止" : "未提供语义目标",
+      status === "blocked" ? "当前步骤已阻止" : "未提供语义目标",
     ));
     const isExecutable = status === "action" && Boolean(actionType);
     const protocolVersion = String(firstDefined(decision.protocol_version, ""));

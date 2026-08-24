@@ -34,9 +34,8 @@ from generic_action_adapter import (
 )
 from generic_scene_observer import SingleStepGenericSceneObserver
 from input_value_lineage import TypedInputLineageStore
-from generic_step_planner import GenericStepPlanner, GenericStepPlanningError
 from deepseek_task_graph import DeepSeekTaskGraphPlanner, TaskGraphError
-from qwen_visual_decision import SingleStepQwenVisualDecisionObserver
+from qwen_visual_decision import QwenVisualDecisionObserver
 from device_exclusivity import InterProcessLease, SHARED_DEVICE_LEASE_DIR
 from universal_agent_orchestrator import (
     DeviceTaskRegistry,
@@ -61,7 +60,6 @@ from canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
 from robot_core import (
     MockRobotController,
     RobotController,
-    RobotWorkflowError,
     WEB_OUTPUT_DIR,
 )
 from vision_agent import (
@@ -373,11 +371,10 @@ class Runtime:
             input_lineage_store=self.input_lineage_store,
             qwerty_row_snapper=stable_qwerty_ocr_anchors,
         )
-        self.generic_step_planner = GenericStepPlanner(self.intent_provider)
         self.deepseek_task_graph_planner = DeepSeekTaskGraphPlanner(
             self.intent_provider,
         )
-        self.qwen_visual_decision_observer = SingleStepQwenVisualDecisionObserver(
+        self.qwen_visual_decision_observer = QwenVisualDecisionObserver(
             self.vision_provider
         )
         self.device_task_registry = DeviceTaskRegistry(

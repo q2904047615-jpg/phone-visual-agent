@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Mapping
 
 from task_semantic_ir import EffectIntent, SemanticEntity, TaskSemanticIR
+from semantic_action import SemanticAction
 from ui_scene import UIElement, UIScene
 from verified_text_transaction import (
     VerifiedTextTransactionError,
@@ -153,6 +154,199 @@ _SAFE_STATE_KEYS = frozenset(
 
 class CanonicalActionProtocolError(ValueError):
     pass
+
+
+_FORMAL_AUTHORITY_PARAMS = frozenset(
+    {"formal_candidate_id", "formal_report_digest", "formal_transition"}
+)
+
+
+@dataclass(frozen=True)
+class GenericStepProposal:
+    """Selected canonical action or a local blocked state.
+
+    This is a transport value only.  The canonical catalog remains the sole
+    action-candidate authority. Task completion is not representable here.
+    """
+
+    status: str
+    action: SemanticAction | None = None
+    reason: str = ""
+
+    def validate(self, scene: UIScene) -> None:
+        scene.validate()
+        if self.status not in {"action", "blocked"}:
+            raise CanonicalActionProtocolError(
+                f"不支持的单步状态：{self.status}"
+            )
+        if self.status == "action":
+            if self.action is None:
+                raise CanonicalActionProtocolError("action 状态缺少唯一动作。")
+            if self.action.action not in SUPPORTED_ACTIONS:
+                raise CanonicalActionProtocolError(
+                    f"单步动作不在 canonical 动作集合：{self.action.action}"
+                )
+            if self.action.action in {
+                "tap_semantic",
+                "dismiss_overlay",
+                "input_verified_text",
+                "press_enter",
+                "clear_verified_text",
+                "long_press",
+            }:
+                element_id = str(
+                    self.action.params.get("element_id") or ""
+                ).strip()
+                if not element_id:
+                    raise CanonicalActionProtocolError(
+                        "元素动作必须引用当前场景 element_id。"
+                    )
+                scene.get_element(element_id)
+            if self.action.action == "input_verified_text":
+                text = self.action.params.get("text")
+                if (
+                    not isinstance(text, str)
+                    or not text
+                    or len(text) > 4000
+                    or "\r" in text
+                ):
+                    raise CanonicalActionProtocolError(
+                        "输入动作 text 必须为1～4000字符；换行由可见 Enter 键分段执行。"
+                    )
+                if (
+                    scene.get_element(str(self.action.params["element_id"])).role
+                    != "input"
+                ):
+                    raise CanonicalActionProtocolError(
+                        "输入动作必须绑定 input 元素。"
+                    )
+            if self.action.action == "clear_verified_text":
+                unexpected = set(self.action.params) - {
+                    "element_id",
+                    "target",
+                    "role",
+                    "label",
+                    "states",
+                    "expected_effect",
+                } - _FORMAL_AUTHORITY_PARAMS
+                if unexpected:
+                    raise CanonicalActionProtocolError(
+                        "清空动作包含协议外参数：" + ", ".join(sorted(unexpected))
+                    )
+                if (
+                    scene.get_element(str(self.action.params["element_id"])).role
+                    != "input"
+                ):
+                    raise CanonicalActionProtocolError(
+                        "清空动作必须绑定 input 元素。"
+                    )
+            if self.action.action == "long_press":
+                duration_ms = self.action.params.get("duration_ms", 800)
+                if (
+                    isinstance(duration_ms, bool)
+                    or not isinstance(duration_ms, (int, float))
+                    or not 500 <= float(duration_ms) <= 2000
+                ):
+                    raise CanonicalActionProtocolError(
+                        "长按 duration_ms 必须在500～2000之间。"
+                    )
+            if self.action.action == "drag":
+                source_id = str(
+                    self.action.params.get("source_element_id") or ""
+                ).strip()
+                destination_id = str(
+                    self.action.params.get("destination_element_id") or ""
+                ).strip()
+                if not source_id or not destination_id or source_id == destination_id:
+                    raise CanonicalActionProtocolError(
+                        "拖动必须绑定两个不同的可信元素。"
+                    )
+                scene.get_element(source_id)
+                scene.get_element(destination_id)
+            if self.action.action == "swipe":
+                direction = str(
+                    self.action.params.get("direction") or ""
+                ).strip()
+                if direction not in {"up", "down", "left", "right"}:
+                    raise CanonicalActionProtocolError("滑动动作方向无效。")
+            if self.action.action == "reveal_system_navigation":
+                unexpected = (
+                    set(self.action.params)
+                    - {"expected_effect"}
+                    - _FORMAL_AUTHORITY_PARAMS
+                )
+                if unexpected:
+                    raise CanonicalActionProtocolError(
+                        "系统导航栏唤出动作不能携带坐标、方向、距离或其他参数。"
+                    )
+                system_ui = getattr(scene, "system_ui", None)
+                if system_ui is None:
+                    raise CanonicalActionProtocolError(
+                        "系统导航栏唤出动作缺少结构化 scene.system_ui。"
+                    )
+                immersive = getattr(system_ui, "immersive_or_fullscreen", None)
+                navigation_visible = getattr(
+                    system_ui,
+                    "navigation_bar_visible",
+                    None,
+                )
+                if isinstance(system_ui, Mapping):
+                    if immersive is None:
+                        immersive = system_ui.get("immersive_or_fullscreen")
+                    if navigation_visible is None:
+                        navigation_visible = system_ui.get(
+                            "navigation_bar_visible"
+                        )
+                if immersive is not True or navigation_visible is not False:
+                    raise CanonicalActionProtocolError(
+                        "系统导航栏唤出动作要求当前画面明确处于沉浸态且导航栏隐藏。"
+                    )
+                if self.action.params.get("expected_effect") != {
+                    "system_ui": {"navigation_bar_visible": True}
+                }:
+                    raise CanonicalActionProtocolError(
+                        "系统导航栏唤出动作必须精确声明结构化导航栏可见后置条件。"
+                    )
+        elif self.action is not None:
+            raise CanonicalActionProtocolError(
+                "blocked 状态不能携带动作。"
+            )
+        if self.status == "blocked" and not self.reason.strip():
+            raise CanonicalActionProtocolError("阻塞报告必须说明原因。")
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["action"] = self.action.to_dict() if self.action else None
+        return value
+
+
+def reject_raw_control_data(value: Any) -> None:
+    """Reject model-authored coordinates or multi-action payloads."""
+
+    forbidden = {
+        "actions",
+        "steps",
+        "plan",
+        "coordinate",
+        "coordinates",
+        "tap_point",
+        "x",
+        "y",
+        "shell",
+        "command",
+    }
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).strip().lower() in forbidden:
+                raise CanonicalActionProtocolError(
+                    f"单步动作包含禁止字段：{key}"
+                )
+            reject_raw_control_data(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            reject_raw_control_data(item)
+    elif not isinstance(value, (str, int, float, bool, type(None))):
+        raise CanonicalActionProtocolError("单步动作参数类型无效。")
 
 
 def _json_value(value: Any, field_name: str) -> Any:

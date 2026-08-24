@@ -23,20 +23,50 @@ class VisionAgentError(RuntimeError):
     """The configured visual model or its response cannot be used."""
 
 
-def _extract_json_object(raw: str) -> dict[str, Any]:
+class _DuplicateJSONKeyError(ValueError):
+    pass
+
+
+def _reject_duplicate_json_pairs(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJSONKeyError(key)
+        value[key] = item
+    return value
+
+
+def _extract_json_object(
+    raw: str,
+    *,
+    reject_duplicate_keys: bool = False,
+) -> dict[str, Any]:
     text = raw.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\s*```$", "", text)
+    load_options = (
+        {"object_pairs_hook": _reject_duplicate_json_pairs}
+        if reject_duplicate_keys
+        else {}
+    )
     try:
-        value = json.loads(text)
+        value = json.loads(text, **load_options)
+    except _DuplicateJSONKeyError as exc:
+        raise VisionAgentError(f"模型返回的 JSON 包含重复字段：{exc}") from exc
     except json.JSONDecodeError:
         start = text.find("{")
         end = text.rfind("}")
         if start < 0 or end <= start:
             raise VisionAgentError("模型没有返回 JSON 对象。")
         try:
-            value = json.loads(text[start : end + 1])
+            value = json.loads(text[start : end + 1], **load_options)
+        except _DuplicateJSONKeyError as exc:
+            raise VisionAgentError(
+                f"模型返回的 JSON 包含重复字段：{exc}"
+            ) from exc
         except json.JSONDecodeError as exc:
             raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
     if not isinstance(value, dict):

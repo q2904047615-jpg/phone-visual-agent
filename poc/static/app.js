@@ -52,7 +52,6 @@ const statusNames = {
 
 const decisionStatusNames = {
   action: "唯一下一动作",
-  finished: "Qwen 判断已完成",
   blocked: "Qwen 已阻止",
   unknown: "等待视觉决策",
 };
@@ -558,11 +557,7 @@ function renderAction() {
   content.className = "action-content";
   content.innerHTML = view.isTerminal
     ? `<h3>${escapeHtml(statusNames[view.status] || view.status)}</h3><p>${escapeHtml(view.failedReason || action.reason || "会话已经结束。")}</p>`
-    : (action.status === "finished"
-      ? `<div class="next-action-title"><span>${escapeHtml(decisionStatusNames.finished)}</span><b class="safe-tag">不可执行</b></div>
-         <h3>${escapeHtml(view.currentSubgoal.label)}</h3>
-         <p>${escapeHtml(action.reason)}</p>${actionMetadata}`
-      : action.status === "blocked"
+    : (action.status === "blocked"
         ? `<div class="next-action-title"><span>${escapeHtml(decisionStatusNames.blocked)}</span><b class="risk-tag">不可执行</b></div>
            <h3>${escapeHtml(view.currentSubgoal.label)}</h3>
            <p>${escapeHtml(action.reason)}</p>${actionMetadata}`
@@ -583,7 +578,7 @@ function renderAction() {
           <small>${staleScope ? `当前作用域不可执行：${escapeHtml(view.scopeState.reason || "任务或画面已变化")}；必须重新观察。` : "后端 scope 与当前权威任务、观察和动作字段一致；本次只允许一个动作，之后必须重新观察。"}</small>`);
 
   const disabled = state.busy || state.paused ? "disabled" : "";
-  if (view.isTerminal || ["finished", "blocked"].includes(action.status)) {
+  if (view.isTerminal || action.status === "blocked") {
     controls.innerHTML = "";
   } else if (staleScope) {
     controls.innerHTML = `

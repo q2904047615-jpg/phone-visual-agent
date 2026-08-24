@@ -35,7 +35,7 @@ class DeterministicExactSelectionTests(unittest.TestCase):
         )
         observation = SimpleNamespace(
             target_local_candidate=lambda: SimpleNamespace(
-                element_id="local_audited_reload_control_1"
+                element_id="canonical-local-target-1"
             )
         )
 
@@ -50,7 +50,7 @@ class DeterministicExactSelectionTests(unittest.TestCase):
                 {
                     "choice_id": "choice_reload",
                     "action": "tap_semantic",
-                    "element_id": "local_audited_reload_control_1",
+                    "element_id": "canonical-local-target-1",
                 },
             ),
             observation=observation,
@@ -124,7 +124,6 @@ class DeterministicExactSelectionTests(unittest.TestCase):
                 },
             ),
             observation=observation,
-            allow_general_single_step=True,
         )
 
         self.assertEqual(payload["choice_id"], "choice_target")
@@ -150,7 +149,6 @@ class DeterministicExactSelectionTests(unittest.TestCase):
                 },
             ),
             observation=observation,
-            allow_general_single_step=True,
         )
 
         self.assertIsNone(payload)
@@ -163,7 +161,6 @@ class DeterministicExactSelectionTests(unittest.TestCase):
             regular,
             ({"choice_id": "choice_home", "action": "home"},),
             observation=observation,
-            allow_general_single_step=True,
         )
 
         self.assertEqual(payload["choice_id"], "choice_home")

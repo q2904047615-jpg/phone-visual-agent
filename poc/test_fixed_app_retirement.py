@@ -208,6 +208,7 @@ class FixedAppRetirementTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=20,
+            cwd=ROOT,
         )
         self.assertEqual([], json.loads(completed.stdout.strip()))
 

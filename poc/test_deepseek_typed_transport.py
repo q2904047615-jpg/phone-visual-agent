@@ -92,7 +92,7 @@ class TypedPlannerTransportTests(unittest.TestCase):
             after_fingerprint="after-fingerprint",
             physical_actions=1,
             outcome="matched",
-            controller_completion_evidence=("目标状态可见",),
+            controller_transition_evidence=("目标状态可见",),
         )
         ref = ControllerTransitionEvidenceRef(
             ref_id=f"controller_transition:{receipt.receipt_id}:1",

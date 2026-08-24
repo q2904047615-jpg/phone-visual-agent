@@ -20,6 +20,7 @@ MAX_ORIENTATION_MEAN_BRIGHTNESS_DELTA = 18.0
 MAX_ORIENTATION_CENTERED_MAE = 6.0
 ORIENTATION_AUDIT_SOURCE = "independent_orientation_audit"
 LOCAL_QWERTY_ORIENTATION_SOURCE = "stable_local_qwerty_orientation_audit"
+SINGLE_STEP_SCENE_ORIENTATION_SOURCE = "single_step_scene_orientation"
 _PLACEHOLDER_DEVICE_IDS = frozenset({"", "unbound", "unknown", "none", "null"})
 _AUDIT_SEAL_LOCK = threading.Lock()
 _LIVE_AUDIT_SEALS: dict[object, "_FrameVisualBinding"] = {}
@@ -144,6 +145,7 @@ class OrientationCredential:
         if self.source not in {
             ORIENTATION_AUDIT_SOURCE,
             LOCAL_QWERTY_ORIENTATION_SOURCE,
+            SINGLE_STEP_SCENE_ORIENTATION_SOURCE,
         }:
             raise OrientationSafetyError("方向凭据不是正式独立审计产生。")
         for label, value in (
@@ -378,6 +380,55 @@ def _mint_locally_verified_qwerty_credential(
     item.validate()
     with _AUDIT_SEAL_LOCK:
         _LIVE_AUDIT_SEALS[seal] = _frame_visual_binding(frame)
+    return item
+
+
+def _mint_single_step_scene_credential(
+    *,
+    device_id: str,
+    scene_fingerprint: str,
+    frame: Image.Image,
+    camera_layout_orientation_value: str,
+    phone_content_rotation: str,
+    confidence: float,
+    evidence: tuple[str, ...],
+) -> OrientationCredential:
+    """Bind the sole step observation's direction facts to fresh local pixels.
+
+    The model fact is already part of the parsed, fingerprint-bound UIScene.
+    This function performs no model call.  It only validates that fact against
+    the actual frame size and mints the same one-shot live seal used by the
+    physical execution gate.
+    """
+
+    local_layout = camera_layout_orientation(tuple(frame.size))
+    if camera_layout_orientation_value != local_layout:
+        raise OrientationSafetyError(
+            "单步画面方向与本地稳定帧尺寸不一致。"
+        )
+    seal = object()
+    item = OrientationCredential(
+        version=ORIENTATION_CREDENTIAL_VERSION,
+        credential_id=uuid.uuid4().hex,
+        source=SINGLE_STEP_SCENE_ORIENTATION_SOURCE,
+        device_id=validate_device_id(device_id),
+        scene_fingerprint=str(scene_fingerprint or "").strip(),
+        frame_fingerprint=frame_fingerprint(frame),
+        evidence_frame_fingerprint="",
+        frame_size=tuple(frame.size),
+        camera_layout_orientation=local_layout,
+        phone_content_rotation=str(phone_content_rotation or "").strip(),
+        confidence=float(confidence),
+        evidence=tuple(evidence),
+        _audit_seal=seal,
+    )
+    item.validate()
+    if (
+        item.phone_content_rotation == "upright"
+        and float(item.confidence) >= MIN_ORIENTATION_CONFIDENCE
+    ):
+        with _AUDIT_SEAL_LOCK:
+            _LIVE_AUDIT_SEALS[seal] = _frame_visual_binding(frame)
     return item
 
 

@@ -12,6 +12,8 @@ from generic_scene_observer import (
     AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE,
     FOREGROUND_APP_IDENTITY_AUDIT_VERSION,
     GenericSceneObserver,
+    SingleStepGenericSceneObserver,
+    SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
     ICON_CLUSTER_AUDIT_VERSION,
     INPUT_STRUCTURE_AUDIT_VERSION,
     SYSTEM_UI_AUDIT_VERSION,
@@ -517,6 +519,94 @@ def multifield_next_audit(
 
 
 class GenericSceneObserverTests(unittest.TestCase):
+    def test_single_step_observer_uses_one_request_for_scene_and_input(self) -> None:
+        scene = scene_payload()
+        scene.update(
+            {
+                "foreground_app_id": "wechat",
+                "screen_id": "chat",
+                "summary": "聊天页输入框可见",
+                "elements": [],
+            }
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="message",
+                    bounds=[100, 720, 900, 820],
+                    text="",
+                    placeholder="消息",
+                    field_labels=["消息"],
+                    visible_editable_cues=["消息输入框完整边框", "插入光标"],
+                    caret_line_index=0,
+                )
+            ]
+        )
+        provider = SequenceProvider(
+            [
+                {
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "scene": scene,
+                    "input_structure": audit,
+                }
+            ]
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_message",
+                    "objective": "在消息输入框输入abc",
+                    "constraints": [],
+                    "completion_conditions": ["消息输入框内容为abc"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "abc",
+                        "active_input_field_id": "message_field",
+                        "active_input_field_label": "消息",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context=context,
+            device_id="device-local-01",
+        )
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(provider.call_options["max_attempts"], 1)
+        self.assertEqual(
+            observed.unique_trusted_goal_element().element_id,
+            "local_audited_input_1",
+        )
+
+    def test_single_step_observer_does_not_retry_malformed_response(self) -> None:
+        provider = SequenceProvider(["{not-json"])
+        observer = SingleStepGenericSceneObserver(provider)
+
+        with self.assertRaises(VisionAgentError):
+            observer.observe(frames=stable_frames())
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(observer.last_diagnostics["model_calls"], 1)
+        self.assertFalse(observer.last_diagnostics["remote_retry_used"])
+
+    def test_single_step_observer_accepts_flat_non_input_scene_in_one_call(self) -> None:
+        provider = SequenceProvider([scene_payload()])
+        observer = SingleStepGenericSceneObserver(provider)
+
+        observed = observer.observe(frames=stable_frames())
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(observed.foreground_app_id, "calculator")
+        self.assertEqual(observer.last_diagnostics["model_calls"], 1)
+        self.assertEqual(
+            observer.last_diagnostics["online_stages"],
+            ["single_step_observation"],
+        )
+
     def test_exact_device_fingerprint_and_goal_context_reuse_observation(self) -> None:
         class PlainSequenceProvider:
             configured = True
@@ -3288,7 +3378,7 @@ class GenericSceneObserverTests(unittest.TestCase):
             )
 
         self.assertEqual(2, provider.calls)
-        self.assertEqual(provider.call_options["max_attempts"], 2)
+        self.assertEqual(provider.call_options["max_attempts"], 1)
 
     def test_low_scene_confidence_accepts_one_strong_goal_element_only(self) -> None:
         payload = scene_payload()

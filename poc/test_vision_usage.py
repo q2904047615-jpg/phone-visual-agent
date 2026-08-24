@@ -9,22 +9,21 @@ from vision_usage import (
     VisionModelBudgetExceeded,
     VisionModelIdentityMismatch,
     VisionSessionUsageLedger,
+    VisionStepContractViolation,
 )
 
 
 class VisionSessionUsageLedgerTests(unittest.TestCase):
-    def test_six_action_input_topology_targets_ten_qwen_plus_requests(self) -> None:
-        # Covered component paths are: two-call initial input observation,
-        # one local-frame-confirmed orientation audit, two-call post-focus
-        # observation, then five one-call typed-lineage continuations.
-        planned_calls = 2 + 1 + 2 + 5
-        self.assertEqual(10, planned_calls)
+    def test_six_action_topology_targets_initial_plus_one_call_per_action(self) -> None:
+        planned_actions = 6
+        planned_calls = 1 + planned_actions
+        self.assertEqual(7, planned_calls)
 
         ledger = VisionSessionUsageLedger(session_id="six-action-topology")
         for index in range(planned_calls):
             local_id = ledger.reserve_request(
                 model="qwen3.7-plus",
-                stage=f"topology-{index + 1}",
+                stage="single_step_observation",
                 fingerprint=f"frame-{index + 1}",
                 max_completion_tokens=2600,
             )
@@ -44,10 +43,18 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         payload = ledger.to_dict()
         self.assertEqual(16, payload["budget"]["max_model_requests"])
         self.assertEqual(50_000, payload["budget"]["max_total_tokens"])
-        self.assertEqual(10, payload["budget"]["target_model_requests"])
+        self.assertEqual(7, payload["budget"]["target_model_requests"])
         self.assertEqual(30_000, payload["budget"]["target_total_tokens"])
-        self.assertEqual(10, payload["totals"]["model_requests"])
-        self.assertEqual(28_000, payload["totals"]["total_tokens"])
+        self.assertEqual(7, payload["totals"]["model_requests"])
+        self.assertEqual(19_600, payload["totals"]["total_tokens"])
+        self.assertEqual(
+            {"single_step_observation"},
+            {
+                event["stage"]
+                for event in payload["events"]
+                if event.get("event") == "model_request"
+            },
+        )
         self.assertFalse(payload["totals"]["target_request_count_exceeded"])
         self.assertFalse(payload["totals"]["target_token_count_exceeded"])
         self.assertFalse(payload["totals"]["budget_exhausted"])
@@ -58,7 +65,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         ledger = VisionSessionUsageLedger(session_id="session-usage")
         local_id = ledger.reserve_request(
             model="qwen3.7-plus",
-            stage="input_structure_audit",
+            stage="single_step_observation",
             fingerprint="frame-a",
             max_completion_tokens=2600,
         )
@@ -90,7 +97,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
             payload["totals"]["estimated_promotional_cost_cny"],
         )
         request = payload["events"][0]
-        self.assertEqual("input_structure_audit", request["stage"])
+        self.assertEqual("single_step_observation", request["stage"])
         self.assertEqual("provider-1", request["provider_request_id"])
         self.assertEqual(250, request["cached_prompt_tokens"])
 
@@ -103,7 +110,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         for index in range(2):
             local_id = request_limited.reserve_request(
                 model="qwen3.7-plus",
-                stage=f"stage-{index}",
+                stage="single_step_observation",
                 fingerprint="same",
                 max_completion_tokens=100,
             )
@@ -118,7 +125,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         ):
             request_limited.reserve_request(
                 model="qwen3.7-plus",
-                stage="stage-3",
+                stage="single_step_observation",
                 fingerprint="same",
                 max_completion_tokens=100,
             )
@@ -134,7 +141,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         )
         local_id = token_limited.reserve_request(
             model="qwen3.7-plus",
-            stage="compact",
+            stage="single_step_observation",
             fingerprint="frame",
             max_completion_tokens=5,
         )
@@ -152,7 +159,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         ):
             token_limited.reserve_request(
                 model="qwen3.7-plus",
-                stage="next",
+                stage="single_step_observation",
                 fingerprint="frame-b",
                 max_completion_tokens=5,
             )
@@ -173,6 +180,25 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         self.assertEqual(0, payload["totals"]["model_requests"])
         self.assertEqual(1, payload["totals"]["budget_rejections"])
 
+    def test_legacy_online_stage_is_rejected_before_any_model_request(self) -> None:
+        ledger = VisionSessionUsageLedger(session_id="single-step-only")
+
+        with self.assertRaisesRegex(
+            VisionStepContractViolation,
+            "vision_step_contract_violation",
+        ):
+            ledger.reserve_request(
+                model="qwen3.7-plus",
+                stage="visual_action_selection",
+                fingerprint="frame-one",
+                max_completion_tokens=100,
+            )
+
+        payload = ledger.to_dict()
+        self.assertEqual(0, payload["totals"]["model_requests"])
+        self.assertEqual(0, payload["totals"]["network_attempts"])
+        self.assertEqual(1, payload["totals"]["contract_rejections"])
+
     def test_runtime_error_classifier_keeps_budget_separate_from_policy(self) -> None:
         self.assertEqual(
             "model_budget_exhausted",
@@ -181,6 +207,12 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         self.assertEqual(
             "vision_model_identity_mismatch",
             classify_qwen_error("vision_model_identity_mismatch: fixed plus"),
+        )
+        self.assertEqual(
+            "vision_step_contract_violation",
+            classify_qwen_error(
+                "vision_step_contract_violation: legacy stage rejected"
+            ),
         )
 
 
@@ -211,7 +243,7 @@ class DashScopeUsageIntegrationTests(unittest.TestCase):
         with patch("vision_agent.httpx.post", return_value=response) as post:
             with provider.session_usage_scope(ledger):
                 with provider.call_scope(
-                    stage="compact_observation",
+                    stage="single_step_observation",
                     fingerprint="frame-provider",
                 ):
                     raw = provider._chat(
@@ -222,7 +254,7 @@ class DashScopeUsageIntegrationTests(unittest.TestCase):
         self.assertEqual('{"ok":true}', raw)
         self.assertEqual(1, post.call_count)
         event = ledger.to_dict()["events"][0]
-        self.assertEqual("compact_observation", event["stage"])
+        self.assertEqual("single_step_observation", event["stage"])
         self.assertEqual("frame-provider", event["fingerprint"])
         self.assertEqual("dashscope-request-1", event["provider_request_id"])
         self.assertEqual(220, event["total_tokens"])

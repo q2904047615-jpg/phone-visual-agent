@@ -103,6 +103,71 @@ class DeterministicExactSelectionTests(unittest.TestCase):
             )
         )
 
+    def test_single_step_general_goal_selects_unique_scene_bound_candidate(self) -> None:
+        regular = SimpleNamespace(current_subgoal={"subgoal_id": "navigate"})
+        observation = SimpleNamespace(
+            target_local_candidate=lambda: SimpleNamespace(element_id="target")
+        )
+
+        payload = _deterministic_exact_selection_payload(
+            regular,
+            (
+                {
+                    "choice_id": "choice_target",
+                    "action": "tap_semantic",
+                    "element_id": "target",
+                },
+                {
+                    "choice_id": "choice_other",
+                    "action": "tap_semantic",
+                    "element_id": "other",
+                },
+            ),
+            observation=observation,
+            allow_general_single_step=True,
+        )
+
+        self.assertEqual(payload["choice_id"], "choice_target")
+
+    def test_single_step_general_goal_does_not_choose_ambiguous_same_target(self) -> None:
+        regular = SimpleNamespace(current_subgoal={"subgoal_id": "navigate"})
+        observation = SimpleNamespace(
+            target_local_candidate=lambda: SimpleNamespace(element_id="target")
+        )
+
+        payload = _deterministic_exact_selection_payload(
+            regular,
+            (
+                {
+                    "choice_id": "choice_tap",
+                    "action": "tap_semantic",
+                    "element_id": "target",
+                },
+                {
+                    "choice_id": "choice_long",
+                    "action": "long_press",
+                    "element_id": "target",
+                },
+            ),
+            observation=observation,
+            allow_general_single_step=True,
+        )
+
+        self.assertIsNone(payload)
+
+    def test_single_step_general_goal_selects_sole_coordinate_free_candidate(self) -> None:
+        regular = SimpleNamespace(current_subgoal={"subgoal_id": "navigate"})
+        observation = SimpleNamespace(target_local_candidate=lambda: None)
+
+        payload = _deterministic_exact_selection_payload(
+            regular,
+            ({"choice_id": "choice_home", "action": "home"},),
+            observation=observation,
+            allow_general_single_step=True,
+        )
+
+        self.assertEqual(payload["choice_id"], "choice_home")
+
     def test_exact_input_selects_only_current_local_target_candidate(self) -> None:
         context = SimpleNamespace(
             current_subgoal={"subgoal_id": "input_exact_text"}

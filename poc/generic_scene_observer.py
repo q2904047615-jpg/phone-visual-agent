@@ -72,6 +72,10 @@ from system_navigation_privacy import (
 
 
 GENERIC_SCENE_OBSERVER_VERSION = "2026-08-24-generic-scene-observer-v70"
+SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-08-24-single-step-scene-observer-v1"
+SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = (
+    "2026-08-24-single-step-qwen-observation-v1"
+)
 POST_NAVIGATION_RESULT_OBSERVATION_PHASE = "verified_navigation_result_v1"
 POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
 POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被重新观察"]
@@ -95,6 +99,7 @@ SYSTEM_UI_AUDIT_TOKENS = 600
 ICON_CLUSTER_AUDIT_TOKENS = 700
 ELEMENT_GEOMETRY_AUDIT_TOKENS = 500
 ORIENTATION_AUDIT_TOKENS = 500
+SINGLE_STEP_OUTPUT_TOKENS = 5200
 MIN_SYSTEM_UI_AUDIT_CONFIDENCE = 0.80
 OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 12
@@ -103,6 +108,8 @@ AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE = "输入结构只读审计确认软键盘
 STAGE_LABELS = {
     "idle": "空闲",
     "checking_stability": "检查画面稳定性",
+    "waiting_single_step_observation": "等待千问单步完整观察",
+    "parsing_single_step_observation": "解析单步完整观察",
     "waiting_compact_observation": "等待千问快速观察",
     "parsing_compact_observation": "解析快速观察结果",
     "waiting_compact_retry": "等待千问修正观察格式",
@@ -1724,7 +1731,10 @@ class GenericSceneObserver:
         try:
             options: dict[str, Any] = {
                 "timeout": OBSERVATION_TIMEOUT_SECONDS,
-                "max_attempts": 2,
+                # One closed-loop observation owns one network attempt.  A
+                # malformed response is rejected locally and can never spend
+                # a second Qwen request inside the same step.
+                "max_attempts": 1,
             }
             options["response_format"] = response_format or {"type": "json_object"}
             return self.provider._chat(
@@ -1754,6 +1764,377 @@ class GenericSceneObserver:
                 ):
                     raise
                 return self.provider._chat(messages, max_tokens=max_tokens)
+
+
+class SingleStepGenericSceneObserver(GenericSceneObserver):
+    """Production observer backed by at most one Qwen request per fresh scene.
+
+    The response carries the ordinary scene and, only for an input-related
+    subgoal, the complete input/IME/keyboard structure in one envelope.  All
+    former targeted, App-identity, system-UI and input follow-up audits remain
+    available above for isolated historical replay, but this production class
+    never enters them.
+    """
+
+    def status(self) -> dict[str, Any]:
+        value = super().status()
+        value.update(
+            {
+                "observer_version": SINGLE_STEP_SCENE_OBSERVER_VERSION,
+                "single_step_observation_protocol": (
+                    SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
+                ),
+                "model_role": "single_step_fused_observation",
+                "max_online_calls_per_observation": 1,
+                "single_step_output_tokens": SINGLE_STEP_OUTPUT_TOKENS,
+            }
+        )
+        return value
+
+    def observe(
+        self,
+        *,
+        frames: list[Image.Image],
+        goal_context: dict[str, Any] | None = None,
+        device_id: str | None = None,
+        input_lineage_override: TypedInputLineage | None = None,
+        prior_scene: UIScene | None = None,
+    ) -> UIScene:
+        del prior_scene  # Fresh pixels and typed lineage are the only inputs.
+        self.last_raw_response = ""
+        model_identity = public_model_identity(self.provider.status())
+        self.last_diagnostics = {"vision_model": model_identity}
+        self._set_stage("checking_stability")
+        started = time.perf_counter()
+        model_calls = 0
+        fingerprint = ""
+        selected_frame_index = 0
+        stable_tail_start = 0
+        input_structure_required = False
+        try:
+            if len(frames) < 4:
+                raise VisionAgentError("通用页面观察至少需要4帧。")
+            stability = measure_local_stability(
+                frames,
+                allow_leading_outlier=True,
+            )
+            if not stability.stable:
+                raise VisionAgentError(
+                    f"本地多帧稳定性检查未通过：{stability.reason}；不调用模型。"
+                )
+
+            sharpness_scores = [measure_frame_sharpness(item) for item in frames]
+            stable_tail_start = max(0, len(frames) - min(3, len(frames)))
+            selected_frame_index = max(
+                range(stable_tail_start, len(frames)),
+                key=sharpness_scores.__getitem__,
+            )
+            frame = frames[selected_frame_index].convert("RGB")
+            fingerprint = _local_frame_fingerprint(frame)
+            context = _safe_goal_context(goal_context or {})
+            cache_key = _observation_cache_key(
+                device_id=device_id,
+                fingerprint=fingerprint,
+                goal_context=context,
+                input_lineage=input_lineage_override,
+            )
+            if cache_key is not None:
+                with self._observation_cache_lock:
+                    cached = self._observation_cache.get(cache_key)
+                    if cached is not None:
+                        self._observation_cache.move_to_end(cache_key)
+                if cached is not None:
+                    recorder = getattr(
+                        self.provider,
+                        "record_observation_cache_hit",
+                        None,
+                    )
+                    if callable(recorder):
+                        recorder(
+                            stage="same_fingerprint_single_step_observation",
+                            fingerprint=fingerprint,
+                        )
+                    self.last_diagnostics = {
+                        "observer_version": SINGLE_STEP_SCENE_OBSERVER_VERSION,
+                        "vision_model": model_identity,
+                        "strategy": "single_step_exact_fingerprint_cache",
+                        "model_calls": 0,
+                        "observation_cache_hit": True,
+                        "fingerprint": fingerprint,
+                        "element_count": len(cached.elements),
+                        "elapsed_seconds": round(time.perf_counter() - started, 3),
+                    }
+                    self._set_stage("completed")
+                    return cached
+
+            input_structure_required = _goal_requests_input(context)
+            active_field_id = _goal_active_input_field(context)[0]
+            verified_lineage: TypedInputLineage | None = None
+            if input_lineage_override is not None:
+                verified_lineage = input_lineage_override
+            ledger_value_hint = (
+                verified_lineage.exact_value
+                if verified_lineage is not None
+                else None
+            )
+            privacy_minimized_system_home = (
+                _goal_requests_coordinate_free_system_home(context)
+            )
+            model_frames = (
+                tuple(frames[stable_tail_start:])
+                if input_structure_required
+                else (frame,)
+            )
+            if privacy_minimized_system_home:
+                model_frames = tuple(
+                    privacy_minimized_system_navigation_view(item.convert("RGB"))
+                    for item in model_frames
+                )
+
+            prompt = _single_step_observation_prompt(
+                context,
+                include_input_structure=input_structure_required,
+                current_input_text=ledger_value_hint,
+                image_count=len(model_frames),
+            )
+            content: list[dict[str, Any]] = [
+                {"type": "text", "text": prompt}
+            ]
+            for index, item in enumerate(model_frames, start=1):
+                content.extend(
+                    (
+                        {
+                            "type": "text",
+                            "text": f"IMAGE {index} - SAME STABLE PHONE SURFACE",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": _image_data_url(item.convert("RGB"))
+                            },
+                        },
+                    )
+                )
+            self._set_stage("waiting_single_step_observation")
+            scope_factory = getattr(self.provider, "call_scope", None)
+            scope = (
+                scope_factory(
+                    stage="single_step_observation",
+                    fingerprint=fingerprint,
+                )
+                if callable(scope_factory)
+                else nullcontext()
+            )
+            call_started = time.perf_counter()
+            model_calls = 1
+            with scope:
+                raw = self._provider_chat(
+                    [
+                        _json_only_system_message(),
+                        {"role": "user", "content": content},
+                    ],
+                    max_tokens=SINGLE_STEP_OUTPUT_TOKENS,
+                    response_format={"type": "json_object"},
+                )
+            call_elapsed = round(time.perf_counter() - call_started, 3)
+            self.last_raw_response = raw
+            self._set_stage("parsing_single_step_observation")
+            envelope = _parse_single_step_observation_envelope(
+                raw,
+                input_structure_required=input_structure_required,
+            )
+            scene_payload = dict(envelope["scene"])
+            if input_structure_required:
+                _strip_preliminary_input_geometry_for_dedicated_audit(
+                    scene_payload,
+                    context,
+                )
+                _strip_preliminary_keyboard_containers_for_dedicated_audit(
+                    scene_payload,
+                    context,
+                )
+            obstructions = consensus_top_edge_obstructions(
+                frames[stable_tail_start:]
+            )
+            scene = _suppress_obscured_input_evidence(
+                _parse_scene(
+                    json.dumps(
+                        scene_payload,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    fingerprint=fingerprint,
+                    goal_context=context,
+                    allow_invalid_system_ui_unknown=True,
+                    camera_layout_orientation=_camera_layout_orientation(frame),
+                ),
+                obstructions,
+                fingerprint=fingerprint,
+            )
+
+            if privacy_minimized_system_home:
+                scene = replace(
+                    scene,
+                    app_id="unknown",
+                    screen_id="unknown",
+                    summary="中央App内容未披露；仅建立系统Home前稳定画布观察。",
+                    elements=(),
+                    overlays=(),
+                )
+                scene.validate()
+
+            if input_structure_required:
+                # The lineage can be trusted only after the same response has
+                # established the actual foreground App and screen identity.
+                if verified_lineage is not None and not (
+                    isinstance(device_id, str)
+                    and verified_lineage.matches_typed_context(
+                        device_id=device_id,
+                        app_id=scene.app_id,
+                        screen_id=scene.screen_id,
+                        input_field_id=active_field_id,
+                    )
+                ):
+                    verified_lineage = None
+                if (
+                    verified_lineage is None
+                    and self.input_lineage_store is not None
+                    and isinstance(device_id, str)
+                    and device_id.strip()
+                ):
+                    stored = self.input_lineage_store.load(device_id)
+                    if (
+                        stored is not None
+                        and stored.matches_typed_context(
+                            device_id=device_id,
+                            app_id=scene.app_id,
+                            screen_id=scene.screen_id,
+                            input_field_id=active_field_id,
+                            now_epoch=float(self.input_lineage_store.clock()),
+                            ttl_seconds=self.input_lineage_store.ttl_seconds,
+                        )
+                    ):
+                        verified_lineage = stored
+                ledger_value_hint = (
+                    verified_lineage.exact_value
+                    if verified_lineage is not None
+                    else None
+                )
+                input_payload = envelope["input_structure"]
+                assert isinstance(input_payload, dict)
+                scene = _suppress_obscured_input_evidence(
+                    _apply_input_structure_audit(
+                        scene,
+                        json.dumps(
+                            input_payload,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        fingerprint=fingerprint,
+                        goal_context=context,
+                        ledger_input_value=ledger_value_hint,
+                        verified_input_lineage=verified_lineage,
+                        device_id=device_id,
+                        lineage_frame=frame,
+                        qwerty_row_snapper=self.qwerty_row_snapper,
+                        qwerty_row_frames=frames[stable_tail_start:],
+                    ),
+                    obstructions,
+                    fingerprint=fingerprint,
+                )
+                if (
+                    _goal_active_input_transaction_text(context)
+                    and not _input_audit_established_local_target(scene)
+                ):
+                    raise VisionAgentError(
+                        "单步完整观察没有建立当前输入事务的唯一本地目标。"
+                    )
+
+            missing_evidence = [
+                item.element_id
+                for item in scene.elements
+                if item.states.get("goal_relevant") is True
+                and not any(value.strip() for value in item.evidence)
+            ]
+            if missing_evidence:
+                raise VisionAgentError(
+                    "目标相关元素缺少原始可见证据，不能建立可信候选："
+                    + ",".join(missing_evidence)
+                )
+            target = scene.unique_trusted_goal_element()
+            completion = scene.trusted_completion_evidence()
+            if not scene.stable or (
+                float(scene.confidence) < MIN_TARGET_CONFIDENCE
+                and target is None
+                and not completion
+            ):
+                raise VisionAgentError(
+                    "页面不稳定或整体置信度不足，不能建立可信候选。"
+                )
+
+            self.last_diagnostics = {
+                "observer_version": SINGLE_STEP_SCENE_OBSERVER_VERSION,
+                "vision_model": public_model_identity(self.provider.status()),
+                "strategy": "single_step_fused_observation",
+                "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                "model_calls": 1,
+                "online_stages": ["single_step_observation"],
+                "input_structure_in_same_response": input_structure_required,
+                "remote_retry_used": False,
+                "observation_cache_hit": False,
+                "selected_frame_index": selected_frame_index,
+                "stable_tail_start_index": stable_tail_start,
+                "local_stability": stability.to_dict(),
+                "frame_sharpness_scores": [
+                    round(value, 3) for value in sharpness_scores
+                ],
+                "frame_size": list(frame.size),
+                "fingerprint": fingerprint,
+                "element_count": len(scene.elements),
+                "model_call_elapsed_seconds": [call_elapsed],
+                "model_call_token_budgets": [SINGLE_STEP_OUTPUT_TOKENS],
+                "elapsed_seconds": round(time.perf_counter() - started, 3),
+            }
+            if cache_key is not None:
+                with self._observation_cache_lock:
+                    self._observation_cache[cache_key] = scene
+                    self._observation_cache.move_to_end(cache_key)
+                    while len(self._observation_cache) > self._observation_cache_limit:
+                        self._observation_cache.popitem(last=False)
+            self._set_stage("completed")
+            return scene
+        except Exception as exc:
+            failed_stage = self.status()["last_stage"]
+            self._set_stage("failed")
+            self.last_diagnostics = {
+                "observer_version": SINGLE_STEP_SCENE_OBSERVER_VERSION,
+                "vision_model": public_model_identity(self.provider.status()),
+                "strategy": "single_step_fused_observation",
+                "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                "model_calls": model_calls,
+                "online_stages": (
+                    ["single_step_observation"] if model_calls else []
+                ),
+                "input_structure_in_same_response": input_structure_required,
+                "remote_retry_used": False,
+                "failed_stage": failed_stage,
+                "fingerprint": fingerprint,
+                "error": str(exc),
+                "error_type": classify_qwen_error(
+                    exc,
+                    raw_response=self.last_raw_response,
+                ),
+                "safe_stop_reason": (
+                    "单次模型输出未建立完整可信观察；没有发起第二次Qwen请求，"
+                    "控制器与机械臂均未执行。"
+                ),
+                "raw_response_length": len(self.last_raw_response),
+                "raw_response_excerpt": self.last_raw_response[:1000],
+                "elapsed_seconds": round(time.perf_counter() - started, 3),
+            }
+            raise
+        finally:
+            self._set_stage("idle")
 
 
 def _horizontal_overlap_ratio(
@@ -2310,6 +2691,106 @@ Return exactly one JSON object with no Markdown, duplicate keys, or extra fields
 "foreground_app_id":"unknown","confidence":0.0,
 "evidence":["short visible App identity cue"]}}
 """
+
+
+def _single_step_observation_prompt(
+    context: dict[str, Any],
+    *,
+    include_input_structure: bool,
+    current_input_text: str | None,
+    image_count: int,
+) -> str:
+    """Build the sole online prompt for one closed-loop observation step."""
+
+    scene_contract = _compact_prompt(context)
+    if include_input_structure:
+        input_contract = _input_structure_audit_prompt(
+            context,
+            roi_bounds=None,
+            current_input_text=current_input_text,
+        )
+        input_rule = (
+            "input_structure必须是完整输入结构对象，使用下面INPUT CONTRACT的"
+            "字段和值规则；不得为null。"
+        )
+    else:
+        input_contract = "本轮子目标与文字输入无关。"
+        input_rule = "input_structure必须为null，不得额外枚举键盘或输入结构。"
+    temporal_rule = (
+        f"共有{image_count}张同一稳定手机画面的时间对齐帧。只把它们合并为"
+        "一个当前状态；闪烁光标可从任一帧读取，其他瞬态不得合并。"
+        if image_count > 1
+        else "只有一张当前稳定手机画面。"
+    )
+    return f"""
+这是本闭环步骤唯一一次Qwen视觉调用。你必须在同一个JSON响应中完成当前
+画面理解、目标相关事实标记以及必要的输入/IME/键盘结构报告。不得要求第二次
+精查、App身份审计、几何审计、方向审计或动作选择调用；不确定时保留unknown、
+省略候选或降低confidence。你只报告事实，不输出动作、计划或坐标点击建议。
+{temporal_rule}
+
+下面的SCENE CONTRACT和INPUT CONTRACT沿用既有字段语义。它们各自末尾的
+“只返回/Return exactly”示例仅说明对应内层对象，不是本轮顶层输出格式。
+
+--- SCENE CONTRACT ---
+{scene_contract}
+
+--- INPUT CONTRACT ---
+{input_contract}
+
+最终且唯一有效的顶层格式如下，禁止Markdown、重复键和任何额外字段：
+{{"protocol_version":"{SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION}",
+"scene":{{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}",
+"foreground_app_id":"unknown","screen_id":"unknown","summary":"",
+"system_ui":{{"immersive_or_fullscreen":"unknown","navigation_bar_visible":"unknown"}},
+"camera_alignment":{{"camera_layout_orientation":"portrait",
+"phone_content_rotation":"unknown","confidence":0.0,"evidence":[]}},
+"elements":[],"overlays":[],"stable":true,"confidence":0.0,"fingerprint":""}},
+"input_structure":null}}
+{input_rule}
+scene.states.goal_relevant是本次单步响应对目标相关可见事实的唯一标记；本地只会
+从由它和canonical目录共同证明的唯一候选中确定下一动作，绝不再请求Qwen选择。
+"""
+
+
+def _parse_single_step_observation_envelope(
+    raw: str,
+    *,
+    input_structure_required: bool,
+) -> dict[str, Any]:
+    """Parse one fused response without any remote repair or resampling."""
+
+    try:
+        payload = _extract_json_object(raw)
+        # Flat scene JSON remains a valid one-call response for non-input
+        # observations.  This is a shape normalization only; it never enables
+        # a second request or restores any former audit authority.
+        if payload.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION:
+            if input_structure_required:
+                raise UISceneError("输入子目标的单次响应缺少input_structure。")
+            return {"scene": payload, "input_structure": None}
+        required = {"protocol_version", "scene", "input_structure"}
+        if set(payload) != required:
+            missing = sorted(required - set(payload))
+            extra = sorted(set(payload) - required)
+            details = []
+            if missing:
+                details.append("缺少字段：" + ", ".join(missing))
+            if extra:
+                details.append("包含协议外字段：" + ", ".join(extra))
+            raise UISceneError("单步观察封装结构无效；" + "；".join(details))
+        if payload["protocol_version"] != SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION:
+            raise UISceneError("单步观察协议版本不匹配。")
+        if not isinstance(payload["scene"], dict):
+            raise UISceneError("单步观察scene必须是对象。")
+        input_payload = payload["input_structure"]
+        if input_structure_required and not isinstance(input_payload, dict):
+            raise UISceneError("输入子目标必须在同一响应返回input_structure对象。")
+        if not input_structure_required and input_payload is not None:
+            raise UISceneError("非输入子目标的input_structure必须为null。")
+        return payload
+    except (UISceneError, ValueError, TypeError) as exc:
+        raise VisionAgentError(f"单步完整观察结果不符合协议：{exc}") from exc
 
 
 def _compact_prompt(context: dict[str, Any]) -> str:

@@ -1264,8 +1264,14 @@ class QwenVisualDecision:
 class QwenVisualDecisionObserver:
     """Select one action from a separately established trusted observation."""
 
-    def __init__(self, provider: Any) -> None:
+    def __init__(
+        self,
+        provider: Any,
+        *,
+        allow_online_selection: bool = True,
+    ) -> None:
         self.provider = provider
+        self.allow_online_selection = bool(allow_online_selection)
         self.last_raw_response = ""
         self.last_diagnostics: dict[str, Any] = {}
         self._metrics = {
@@ -1287,6 +1293,7 @@ class QwenVisualDecisionObserver:
                 "task_context_protocol": SUPPORTED_TASK_CONTEXT_PROTOCOL,
                 "model_role": QWEN_VISUAL_DECISION_MODEL_ROLE,
                 "hardware_actions_enabled": False,
+                "online_selection_enabled": self.allow_online_selection,
                 "decision_timeout_seconds": DECISION_TIMEOUT_SECONDS,
                 "decision_output_tokens": DECISION_OUTPUT_TOKENS,
                 "decision_retry_tokens": DECISION_RETRY_TOKENS,
@@ -1463,6 +1470,7 @@ class QwenVisualDecisionObserver:
             context,
             canonical_choices,
             observation=trusted_observation,
+            allow_general_single_step=(not self.allow_online_selection),
         )
         if deterministic_selection is not None:
             raw = json.dumps(
@@ -1481,6 +1489,29 @@ class QwenVisualDecisionObserver:
                 {
                     "local_deterministic_selection": True,
                     "decision_status": decision.proposal.status,
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                }
+            )
+            return decision
+
+        if not self.allow_online_selection:
+            reason = (
+                "本轮单次Qwen画面没有把canonical目录缩小为唯一候选；"
+                "按每步一次调用合同在本地停止，不再发起动作选择请求。"
+            )
+            decision = _local_blocked_decision(
+                context,
+                trusted_observation,
+                reason=reason,
+            )
+            self._metrics["final_blocked_count"] += 1
+            self.last_diagnostics.update(
+                {
+                    "local_safety_block": "single_step_candidate_not_unique",
+                    "local_deterministic_selection": False,
+                    "online_selection_skipped": True,
+                    "model_calls": 0,
+                    "decision_status": "blocked",
                     "elapsed_seconds": round(time.perf_counter() - started, 3),
                 }
             )
@@ -1590,7 +1621,7 @@ class QwenVisualDecisionObserver:
                 messages,
                 max_tokens=max_tokens,
                 timeout=DECISION_TIMEOUT_SECONDS,
-                max_attempts=2,
+                max_attempts=1,
                 response_format={"type": "json_object"},
             )
         except TypeError as exc:
@@ -1598,6 +1629,13 @@ class QwenVisualDecisionObserver:
             if "unexpected keyword" not in text and "keyword argument" not in text:
                 raise
             return self.provider._chat(messages, max_tokens=max_tokens)
+
+
+class SingleStepQwenVisualDecisionObserver(QwenVisualDecisionObserver):
+    """Production selector that never spends a second Qwen request."""
+
+    def __init__(self, provider: Any) -> None:
+        super().__init__(provider, allow_online_selection=False)
 
 
 def _decision_observation_prompt_dict(
@@ -1781,8 +1819,29 @@ def _deterministic_exact_selection_payload(
     choices: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     *,
     observation: TrustedObservation | None = None,
+    allow_general_single_step: bool = False,
 ) -> dict[str, Any] | None:
-    """Select the sole matching candidate for a structured exact action."""
+    """Select one canonical candidate from the sole step observation.
+
+    Exact wrappers retain their stronger typed filters.  General goals may
+    select only when the scene's unique ``goal_relevant`` element and the
+    canonical catalog identify exactly one same candidate, or when the catalog
+    itself contains one coordinate-free primitive.  No wording heuristic or
+    second action owner is introduced here.
+    """
+
+    def action_payload(choice: Mapping[str, Any], reason: str) -> dict[str, Any] | None:
+        choice_id = str(choice.get("choice_id") or "").strip()
+        if not choice_id:
+            return None
+        return {
+            "status": "action",
+            "choice_id": choice_id,
+            "completes_current_subgoal_on_success": False,
+            "confidence": 1.0,
+            "reason": reason,
+            "completion_evidence_element_ids": [],
+        }
 
     active_id = str(context.current_subgoal.get("subgoal_id") or "").strip()
     if active_id == "input_exact_text":
@@ -1821,12 +1880,14 @@ def _deterministic_exact_selection_payload(
             "exact_home": "home",
             "exact_tap_semantic": "tap_semantic",
         }.get(active_id)
-        if expected_action is None:
-            return None
-        matching_choices = tuple(
-            choice
-            for choice in choices
-            if str(choice.get("action") or "").strip() == expected_action
+        matching_choices = (
+            tuple(
+                choice
+                for choice in choices
+                if str(choice.get("action") or "").strip() == expected_action
+            )
+            if expected_action is not None
+            else ()
         )
         if active_id == "exact_tap_semantic" and observation is not None:
             local_target = observation.target_local_candidate()
@@ -1837,19 +1898,42 @@ def _deterministic_exact_selection_payload(
                     if str(choice.get("element_id") or "").strip()
                     == local_target.element_id
                 )
-    if len(matching_choices) != 1:
+    if len(matching_choices) == 1:
+        return action_payload(
+            matching_choices[0],
+            "结构化直推目录只有一个合法 canonical candidate。",
+        )
+
+    if not allow_general_single_step:
         return None
-    choice_id = str(matching_choices[0].get("choice_id") or "").strip()
-    if not choice_id:
+    if observation is None:
         return None
-    return {
-        "status": "action",
-        "choice_id": choice_id,
-        "completes_current_subgoal_on_success": False,
-        "confidence": 1.0,
-        "reason": "结构化直推目录只有一个合法 canonical candidate。",
-        "completion_evidence_element_ids": [],
-    }
+    local_target = observation.target_local_candidate()
+    if local_target is not None:
+        same_target = tuple(
+            choice
+            for choice in choices
+            if str(choice.get("element_id") or "").strip()
+            == local_target.element_id
+        )
+        if len(same_target) == 1:
+            return action_payload(
+                same_target[0],
+                "单次Qwen画面的唯一目标与canonical目录唯一候选一致。",
+            )
+
+    if len(choices) == 1 and str(choices[0].get("action") or "") in {
+        "back",
+        "home",
+        "reveal_system_navigation",
+        "swipe",
+        "wait_for_change",
+    }:
+        return action_payload(
+            choices[0],
+            "canonical目录只有一个坐标无关或容器级合法动作。",
+        )
+    return None
 
 
 def _formal_action_applies_effect(action: SemanticAction) -> bool:

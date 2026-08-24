@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from capability_acceptance import _validate_live_promotion_source
 from generic_action_adapter import (
+    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     GenericActionAdapterError,
     GenericSingleActionAdapter as _GenericSingleActionAdapter,
     _post_action_observation_context,
@@ -1173,7 +1174,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         result.validate()
         return result
 
-    def test_missing_local_literal_key_is_reaudited_on_confirmation_frames(self):
+    def test_literal_key_reuses_single_step_scene_on_matching_frames(self):
         gray = Image.new("RGB", (540, 960), "gray")
         planned_fingerprint = _local_frame_fingerprint(gray)
         planned = self._literal_input_scene(planned_fingerprint)
@@ -1212,10 +1213,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             value="live2",
             include_key=False,
         )
-        observer = FakeSceneObserver(
-            [fresh_missing, after, after],
-            geometry_scenes=[planned_audited, fresh_audited],
-        )
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
@@ -1276,18 +1274,9 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual((), result.verification_errors)
         self.assertEqual("matched", result.action_outcome)
-        self.assertEqual([("tap", 460, 702)], robot.actions)
-        self.assertEqual(
-            [(460, 702, (0.4, 0.68, 0.52, 0.724), (540, 960))],
-            robot.calibrated_target_requests,
-        )
-        self.assertEqual(
-            [
-                ("local_audited_literal_key_1",),
-                ("local_audited_literal_key_1",),
-            ],
-            observer.geometry_audit_calls,
-        )
+        self.assertEqual([("tap", 220, 735)], robot.actions)
+        self.assertEqual([], robot.calibrated_target_requests)
+        self.assertEqual([], observer.geometry_audit_calls)
 
     def test_press_enter_executes_one_verified_tap_and_matches_exact_newline(self):
         gray = Image.new("RGB", (540, 960), "gray")
@@ -1338,10 +1327,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             include_key=False,
             fp="after-enter",
         )
-        observer = FakeSceneObserver(
-            [fresh_without_key, after, after],
-            geometry_scenes=[audited, audited],
-        )
+        observer = FakeSceneObserver([after])
 
         robot = ClickReceiptRobot()
         adapter = GenericSingleActionAdapter(
@@ -1403,19 +1389,11 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual("press_enter", result.resolved_action.kind)
         self.assertEqual([("tap", 220, 735)], robot.actions)
         self.assertTrue(result.hardware_receipt["seller_event_barrier_confirmed"])
-        self.assertIs(
-            True,
-            observer.goal_contexts[0][
-                "_allow_omitted_local_input_auxiliary_confirmation"
-            ],
+        self.assertNotIn(
+            "_allow_omitted_local_input_auxiliary_confirmation",
+            observer.goal_contexts[0],
         )
-        self.assertEqual(
-            [
-                ("local_audited_enter_key_1",),
-                ("local_audited_enter_key_1",),
-            ],
-            observer.geometry_audit_calls,
-        )
+        self.assertEqual([], observer.geometry_audit_calls)
 
     @staticmethod
     def _strict_primary_input_scene(fingerprint="strict-input"):
@@ -2082,10 +2060,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             bounds=(0.14, 0.52, 0.71, 0.60),
         )
         after = typed_scene("after", "first\nsecond")
-        observer = FakeSceneObserver(
-            [fresh_missing, after],
-            geometry_scenes=[planned_audited, fresh_audited],
-        )
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
@@ -2143,13 +2118,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual("matched", result.action_outcome)
         self.assertEqual("input_field_1", result.before_scene.elements[0].states["input_field_id"])
-        self.assertEqual(
-            [
-                ("local_audited_input_1",),
-                ("local_audited_input_1",),
-            ],
-            observer.geometry_audit_calls,
-        )
+        self.assertEqual([], observer.geometry_audit_calls)
 
     def test_completed_navigation_observes_result_without_source_target(self):
         planned = scene("planned")
@@ -2160,7 +2129,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             app_id="browser",
             element_id="browser-content",
         )
-        observer = FakeSceneObserver([fresh, after])
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
@@ -2196,14 +2165,10 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual(1, result.physical_actions)
         self.assertEqual([], robot.calibrated_target_requests)
-        self.assertEqual(2, len(observer.goal_contexts))
-        confirmation_focus = observer.goal_contexts[0]["entities"][
+        self.assertEqual(1, len(observer.goal_contexts))
+        post_focus = observer.goal_contexts[0]["entities"][
             "active_subgoal_visual_context"
         ]
-        post_focus = observer.goal_contexts[1]["entities"][
-            "active_subgoal_visual_context"
-        ]
-        self.assertEqual("浏览器", confirmation_focus["goal_entities"]["target_ui_label"])
         self.assertNotIn("target_ui_label", post_focus["goal_entities"])
         self.assertEqual(
             "verified_navigation_result_v1",
@@ -2298,6 +2263,98 @@ class GenericActionAdapterTests(unittest.TestCase):
             "observation_phase",
             sanitized["entities"]["active_subgoal_visual_context"][
                 "goal_entities"
+            ],
+        )
+
+    def test_post_action_context_reuses_unique_next_focus_in_same_observation(self):
+        current_goal = navigation_goal()
+        current_goal.entities["next_subgoal_visual_context"] = {
+            "subgoal_id": "read_title",
+            "objective": "读取当前页面主标题",
+            "constraints": ["仅读取"],
+            "completion_conditions": ["页面主标题已读取"],
+            "execution_class": "observe",
+            "goal_entities": {"target_surface": "current_surface"},
+        }
+        resolved = ResolvedSemanticAction(
+            node_id="open-browser",
+            kind="tap_semantic",
+            expected_effect={"scene_changed": True},
+        )
+
+        result = _post_action_observation_context(
+            current_goal,
+            resolved,
+            physical_action_executed=True,
+        )
+        focus = result["entities"]["active_subgoal_visual_context"]
+
+        self.assertEqual("read_title", focus["subgoal_id"])
+        self.assertEqual(
+            FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
+            focus["goal_entities"]["observation_phase"],
+        )
+
+    def test_input_focus_switches_to_next_only_at_typed_terminal_value(self):
+        current_goal = navigation_goal()
+        active = current_goal.entities["active_subgoal_visual_context"]
+        active["objective"] = "在主题字段输入 first"
+        active["goal_entities"].update(
+            {
+                "active_input_transaction_text": "first",
+                "active_input_field_id": "subject_field",
+                "active_input_field_label": "主题",
+                "active_input_multiline": False,
+            }
+        )
+        current_goal.entities["next_subgoal_visual_context"] = {
+            "subgoal_id": "input_body",
+            "objective": "在正文字段输入 second",
+            "constraints": ["不要发送"],
+            "completion_conditions": ["正文字段逐字为 second"],
+            "execution_class": "navigate",
+            "goal_entities": {
+                "active_input_transaction_text": "second",
+                "active_input_field_id": "body_field",
+                "active_input_field_label": "正文",
+                "active_input_multiline": False,
+            },
+        }
+        partial = ResolvedSemanticAction(
+            node_id="type-partial",
+            kind="input_verified_text",
+            prior_input_value="",
+            expected_input_value="fir",
+            expected_effect={
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {"value": "fir"},
+                }
+            },
+        )
+        terminal = replace(partial, expected_input_value="first")
+
+        partial_context = _post_action_observation_context(
+            current_goal,
+            partial,
+            physical_action_executed=True,
+        )
+        terminal_context = _post_action_observation_context(
+            current_goal,
+            terminal,
+            physical_action_executed=True,
+        )
+
+        self.assertEqual(
+            "open_browser",
+            partial_context["entities"]["active_subgoal_visual_context"][
+                "subgoal_id"
+            ],
+        )
+        self.assertEqual(
+            "input_body",
+            terminal_context["entities"]["active_subgoal_visual_context"][
+                "subgoal_id"
             ],
         )
 
@@ -2985,13 +3042,22 @@ class GenericActionAdapterTests(unittest.TestCase):
                     post_action_settle=0,
                 )
                 with self.assertRaisesRegex(GenericActionAdapterError, error) as caught:
+                    planned = scene(
+                        "planned",
+                        camera_alignment=CameraAlignmentFacts(
+                            camera_layout_orientation="portrait",
+                            phone_content_rotation=rotation,
+                            confidence=confidence,
+                            evidence=("手机界面方向由本轮完整画面报告",),
+                        ),
+                    )
                     adapter.execute(
                         requested_action=SemanticAction(
                             node_id="blocked-back",
                             action="back",
                             params={},
                         ),
-                        planned_scene=scene("planned"),
+                        planned_scene=planned,
                         planned_frames=frames,
                         goal=goal(),
                         confirmed=True,
@@ -3120,7 +3186,11 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual("home", result.resolved_action.kind)
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(2, observer.calls)
-        self.assertEqual(1, observer.home_audit_calls)
+        self.assertEqual(0, observer.home_audit_calls)
+        self.assertEqual(
+            "single_step_scene_orientation",
+            result.orientation_credential.source,
+        )
 
     def test_home_records_single_click_transport_receipt(self):
         planned = scene("planned", screen_id="settings_home", app_id="settings")
@@ -3656,7 +3726,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                         unsafe_after,
                     )
 
-    def test_post_action_second_verified_scene_clears_transient_mismatch(self):
+    def test_post_action_transient_mismatch_is_not_resampled(self):
         states = {
             "focused": True,
             "value": "",
@@ -3738,10 +3808,10 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual([("pinyin", "复杂输入", "fuzashuru")], robot.actions)
-        self.assertEqual(3, observer.calls)
+        self.assertEqual(2, observer.calls)
         self.assertEqual(1, result.physical_actions)
-        self.assertEqual("matched", result.action_outcome)
-        self.assertEqual((), result.verification_errors)
+        self.assertEqual("mismatched", result.action_outcome)
+        self.assertTrue(result.verification_errors)
 
     def test_confirmed_clear_uses_exact_observed_count_and_fresh_qwerty_geometry(self):
         def input_scene(fingerprint, element_id, value):
@@ -5089,7 +5159,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual([("tap", 500, 430)], robot.actions)
         self.assertFalse(result.rebound_action.params["states"]["goal_relevant"])
 
-    def test_tap_uses_independent_geometry_audit_for_overview_jitter(self):
+    def test_tap_reuses_single_step_geometry_when_pixels_match(self):
         planned = UIScene(
             app_id="unknown",
             screen_id="acceptance_modes",
@@ -5107,6 +5177,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 ),
             ),
             fingerprint="planned",
+            camera_alignment=aligned_camera_facts(),
         )
         fresh = replace(
             planned,
@@ -5128,10 +5199,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             fresh,
             elements=(replace(fresh.elements[0], bounds=(0.15, 0.40, 0.85, 0.47)),),
         )
-        observer = FakeSceneObserver(
-            [fresh, scene("after", screen_id="tap-mode")],
-            geometry_scenes=[planned_audited, fresh_audited],
-        )
+        observer = FakeSceneObserver([scene("after", screen_id="tap-mode")])
         robot = FakeRobot()
 
         result = self._adapter(observer, robot).execute(
@@ -5155,11 +5223,8 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(1, result.physical_actions)
-        self.assertEqual([("tap", 500, 435)], robot.actions)
-        self.assertEqual(
-            [("planned-second-item",), ("fresh-second-item",)],
-            observer.geometry_audit_calls,
-        )
+        self.assertEqual([("tap", 500, 430)], robot.actions)
+        self.assertEqual([], observer.geometry_audit_calls)
 
     def test_tap_reuses_private_local_geometry_attestation_without_third_audit(self):
         states = {
@@ -5196,7 +5261,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         planned = reload_scene("planned")
         fresh = reload_scene("fresh")
         after = reload_scene("after", screen_id="reloaded")
-        observer = FakeSceneObserver([fresh, after])
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
@@ -5235,7 +5300,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual(
             (
-                "控制器确认动作前后场景指纹发生变化：fresh -> after",
+                "控制器确认动作前后场景指纹发生变化：planned -> after",
             ),
             result.controller_completion_evidence,
         )
@@ -5265,10 +5330,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             ),
         )
         after = scene("after", screen_id="acceptance_modes", element_id="after")
-        observer = FakeSceneObserver(
-            [fresh, after],
-            geometry_scenes=[planned_audited, fresh_audited],
-        )
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
 
         result = self._adapter(observer, robot).execute(
@@ -5292,7 +5354,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(1, result.physical_actions)
-        self.assertEqual([("tap", 210, 240)], robot.actions)
+        self.assertEqual([("tap", 270, 252)], robot.actions)
 
     def test_rebind_accepts_narrow_strict_local_input_audit_jitter(self):
         states = {
@@ -5504,7 +5566,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 local_frame_identity_verified=True,
             )
 
-    def test_rebind_rejects_non_overlapping_geometry_even_on_verified_static_frame(self):
+    def test_matching_pixels_do_not_accept_a_second_model_geometry_veto(self):
         planned = scene("planned", bounds=(0.08, 0.225, 0.34, 0.255))
         fresh = replace(planned, fingerprint="fresh")
         planned_audited = planned
@@ -5518,37 +5580,32 @@ class GenericActionAdapterTests(unittest.TestCase):
             ),
         )
         observer = FakeSceneObserver(
-            [fresh, scene("after", screen_id="acceptance_modes", element_id="after")],
-            geometry_scenes=[planned_audited, fresh_audited],
+            [scene("after", screen_id="acceptance_modes", element_id="after")]
         )
         robot = FakeRobot()
 
-        with self.assertRaisesRegex(
-            GenericActionAdapterError,
-            "目标区域已明显移动",
-        ) as raised:
-            self._adapter(observer, robot).execute(
-                requested_action=SemanticAction(
-                    node_id="return-text-link",
-                    action="tap_semantic",
-                    params={
-                        "element_id": "e1",
-                        "target": "app_icon",
-                        "role": planned.elements[0].role,
-                        "label": planned.elements[0].label,
-                        "states": dict(planned.elements[0].states),
-                    },
-                ),
-                planned_scene=planned,
-                goal=goal(),
-                confirmed=True,
-                planned_frames=tuple(
-                    Image.new("RGB", (540, 960), "gray") for _ in range(4)
-                ),
-            )
+        result = self._adapter(observer, robot).execute(
+            requested_action=SemanticAction(
+                node_id="return-text-link",
+                action="tap_semantic",
+                params={
+                    "element_id": "e1",
+                    "target": "app_icon",
+                    "role": planned.elements[0].role,
+                    "label": planned.elements[0].label,
+                    "states": dict(planned.elements[0].states),
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+        )
 
-        self.assertEqual(0, raised.exception.physical_actions)
-        self.assertEqual([], robot.actions)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("tap", 210, 240)], robot.actions)
 
     def test_rebind_rejects_fresh_negative_fully_visible_attestation(self):
         planned = scene("planned")
@@ -6346,13 +6403,15 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual(1, result.physical_actions)
         self.assertEqual([("tap", 300, 400)], robot.actions)
-        self.assertEqual(2, observer.calls)
-        self.assertEqual("fresh", result.before_scene.fingerprint)
+        self.assertEqual(1, observer.calls)
+        self.assertEqual("planned", result.before_scene.fingerprint)
 
-    def test_planned_frame_identity_cannot_bypass_fresh_geometry_drift(self):
+    def test_matching_frame_identity_reuses_original_geometry(self):
         planned = scene("planned", bounds=(0.12, 0.46, 0.58, 0.51))
         fresh = scene("fresh", bounds=(0.12, 0.225, 0.45, 0.265))
-        observer = FakeSceneObserver([fresh])
+        observer = FakeSceneObserver(
+            [scene("after", screen_id="app_home", element_id="after")]
+        )
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4),
@@ -6362,25 +6421,22 @@ class GenericActionAdapterTests(unittest.TestCase):
             post_action_settle=0,
         )
 
-        with self.assertRaisesRegex(
-            GenericActionAdapterError,
-            "目标区域已明显移动",
-        ):
-            adapter.execute(
-                requested_action=SemanticAction(
-                    node_id="generic_step_1",
-                    action="tap_semantic",
-                    params={"element_id": "e1", "target": "app_icon"},
-                ),
-                planned_scene=planned,
-                planned_frames=tuple(
-                    Image.new("RGB", (540, 960), "gray") for _ in range(4)
-                ),
-                goal=goal(),
-                confirmed=True,
-            )
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="generic_step_1",
+                action="tap_semantic",
+                params={"element_id": "e1", "target": "app_icon"},
+            ),
+            planned_scene=planned,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+            goal=goal(),
+            confirmed=True,
+        )
 
-        self.assertEqual([], robot.actions)
+        self.assertEqual([("tap", 350, 485)], robot.actions)
+        self.assertEqual("planned", result.before_scene.fingerprint)
         self.assertEqual(1, observer.calls)
 
     def test_stable_frames_allow_input_field_bounds_drift_with_fresh_keyboard_geometry(self):
@@ -6428,10 +6484,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             (0.15, 0.53, 0.70, 0.60),
             value=first_segment,
         )
-        observer = FakeSceneObserver(
-            [fresh, after],
-            geometry_scenes=[planned, fresh],
-        )
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
         snapped_anchors = {
             key: list(value)
@@ -6480,21 +6533,15 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(1, result.physical_actions)
         self.assertEqual("matched", result.action_outcome)
         self.assertGreater(adapter.capture.calls, 8)
-        self.assertEqual(2, observer.calls)
-        self.assertEqual("fresh", result.before_scene.fingerprint)
+        self.assertEqual(1, observer.calls)
+        self.assertEqual("planned", result.before_scene.fingerprint)
         self.assertEqual(
             "stable_local_ocr",
             robot.keyboard_layouts[0]["row_snap_source"],
         )
-        self.assertEqual(
-            [
-                ("local_audited_input_1",),
-                ("local_audited_input_1",),
-            ],
-            observer.geometry_audit_calls,
-        )
+        self.assertEqual([], observer.geometry_audit_calls)
 
-    def test_stable_frames_do_not_allow_input_mode_change_with_bounds_drift(self):
+    def test_matching_frames_do_not_accept_second_model_input_mode_veto(self):
         planned_states = {
             "goal_relevant": True,
             "fully_visible": True,
@@ -6539,7 +6586,17 @@ class GenericActionAdapterTests(unittest.TestCase):
             ),
             fingerprint="fresh",
         )
-        observer = FakeSceneObserver([fresh])
+        after = replace(
+            planned,
+            elements=(
+                replace(
+                    planned.elements[0],
+                    states={**planned_states, "value": "agent"},
+                ),
+            ),
+            fingerprint="after",
+        )
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4),
@@ -6549,11 +6606,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             post_action_settle=0,
         )
 
-        with self.assertRaisesRegex(
-            GenericActionAdapterError,
-            "目标语义不再严格唯一",
-        ):
-            adapter.execute(
+        result = adapter.execute(
                 requested_action=SemanticAction(
                     node_id="input-mode-changed",
                     action="input_verified_text",
@@ -6574,10 +6627,11 @@ class GenericActionAdapterTests(unittest.TestCase):
                 confirmed=True,
             )
 
-        self.assertEqual([], robot.actions)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("input", "agent")], robot.actions)
         self.assertEqual([], observer.geometry_audit_calls)
 
-    def test_drag_uses_two_independently_audited_endpoint_scenes(self):
+    def test_drag_reuses_single_step_endpoint_geometry(self):
         def drag_scene(fingerprint, source_bounds, destination_bounds):
             return UIScene(
                 app_id="local.acceptance",
@@ -6638,10 +6692,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             (0.63, 0.68, 0.73, 0.78),
             destination_bounds,
         )
-        observer = FakeSceneObserver(
-            [fresh, after],
-            geometry_scenes=[planned_audited, fresh_audited],
-        )
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
@@ -6677,18 +6728,18 @@ class GenericActionAdapterTests(unittest.TestCase):
             confirmed=True,
         )
 
+        self.assertEqual([], observer.geometry_audit_calls)
         self.assertEqual(
-            [("source", "destination"), ("source", "destination")],
-            observer.geometry_audit_calls,
-        )
-        self.assertEqual(
-            [("drag", 250, 250, 700, 740)],
+            [("drag", 350, 485, 700, 740)],
             robot.actions,
         )
-        self.assertEqual(audited_source, result.before_scene.get_element("source").bounds)
+        self.assertEqual(
+            planned.get_element("source").bounds,
+            result.before_scene.get_element("source").bounds,
+        )
         self.assertEqual(1, result.physical_actions)
 
-    def test_long_press_uses_independently_audited_target_scenes(self):
+    def test_long_press_reuses_single_step_target_geometry(self):
         states = {"goal_relevant": True, "fully_visible": True}
 
         def long_press_scene(
@@ -6740,10 +6791,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             meaning="interaction_zone",
             passed=True,
         )
-        observer = FakeSceneObserver(
-            [fresh, after],
-            geometry_scenes=[planned_audited, fresh_audited],
-        )
+        observer = FakeSceneObserver([after])
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
@@ -6775,21 +6823,18 @@ class GenericActionAdapterTests(unittest.TestCase):
             confirmed=True,
         )
 
+        self.assertEqual([], observer.geometry_audit_calls)
         self.assertEqual(
-            [("target",), ("target",)],
-            observer.geometry_audit_calls,
-        )
-        self.assertEqual(
-            [("long_press", 500, 590, 0.8)],
+            [("long_press", 500, 645, 0.8)],
             robot.actions,
         )
         self.assertEqual(
-            audited_bounds,
+            planned.get_element("target").bounds,
             result.before_scene.get_element("target").bounds,
         )
         self.assertEqual(1, result.physical_actions)
 
-    def test_long_press_semantic_rebind_keeps_delete_forbidden(self):
+    def test_matching_pixels_do_not_accept_second_model_long_press_veto(self):
         states = {"goal_relevant": True, "fully_visible": True}
         target = UIElement(
             element_id="target",
@@ -6811,22 +6856,21 @@ class GenericActionAdapterTests(unittest.TestCase):
             fingerprint="planned",
             camera_alignment=aligned_camera_facts(),
         )
-        fresh = replace(
+        after = replace(
             planned,
-            elements=(replace(target, meaning="long_press_delete_target"),),
-            fingerprint="fresh",
+            overlays=("long_press 验收通过",),
+            fingerprint="after",
         )
         robot = FakeRobot()
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4),
-            observer=FakeSceneObserver([fresh]),
+            observer=FakeSceneObserver([after]),
             robot=robot,
             frame_interval=0,
             post_action_settle=0,
         )
 
-        with self.assertRaisesRegex(GenericActionAdapterError, "语义"):
-            adapter.execute(
+        result = adapter.execute(
                 requested_action=SemanticAction(
                     node_id="long-press-risky",
                     action="long_press",
@@ -6848,7 +6892,8 @@ class GenericActionAdapterTests(unittest.TestCase):
                 confirmed=True,
             )
 
-        self.assertEqual([], robot.actions)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([("long_press", 500, 590, 0.8)], robot.actions)
 
     def test_drag_rebind_accepts_safe_meaning_synonyms_for_exact_labelled_endpoints(self):
         def make_scene(fingerprint, source_meaning, destination_meaning):
@@ -6965,7 +7010,7 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual([], robot.actions)
 
-    def test_confirmation_low_confidence_observation_retries_once_before_action(self):
+    def test_low_confidence_observation_stops_without_model_retry(self):
         planned = scene("planned")
         fresh = scene("before", element_id="fresh")
         after = scene("after", screen_id="app_home", element_id="after")
@@ -6983,18 +7028,18 @@ class GenericActionAdapterTests(unittest.TestCase):
             params={"element_id": "e1", "target": "app_icon"},
         )
 
-        result = self._adapter(observer, robot).execute(
-            requested_action=action,
-            planned_scene=planned,
-            goal=goal(),
-            confirmed=True,
-        )
+        with self.assertRaisesRegex(GenericActionAdapterError, "第1轮动作前观察失败"):
+            self._adapter(observer, robot).execute(
+                requested_action=action,
+                planned_scene=planned,
+                goal=goal(),
+                confirmed=True,
+            )
 
-        self.assertEqual(3, observer.calls)
-        self.assertEqual(1, result.physical_actions)
-        self.assertEqual(1, len(robot.actions))
+        self.assertEqual(1, observer.calls)
+        self.assertEqual(0, len(robot.actions))
 
-    def test_confirmation_second_low_confidence_failure_stops_without_action(self):
+    def test_first_low_confidence_failure_stops_without_action(self):
         observer = FakeSceneObserver(
             [
                 RuntimeError("页面不稳定或整体置信度不足，不能建立可信候选。"),
@@ -7008,7 +7053,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             params={"element_id": "e1", "target": "app_icon"},
         )
 
-        with self.assertRaisesRegex(GenericActionAdapterError, "第2轮动作前观察失败"):
+        with self.assertRaisesRegex(GenericActionAdapterError, "第1轮动作前观察失败"):
             self._adapter(observer, robot).execute(
                 requested_action=action,
                 planned_scene=scene("planned"),
@@ -7016,7 +7061,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 confirmed=True,
             )
 
-        self.assertEqual(2, observer.calls)
+        self.assertEqual(1, observer.calls)
         self.assertEqual([], robot.actions)
 
     def test_goal_polluted_home_app_is_normalized_before_confirmation(self):
@@ -7405,7 +7450,7 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual(len(frames), 4)
 
-    def test_post_action_allows_second_observation_without_repeating_action(self):
+    def test_post_action_mismatch_stops_after_one_observation(self):
         planned = scene("planned")
         fresh = scene("before", element_id="fresh")
         transitional = UIScene(
@@ -7441,9 +7486,10 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
         self.assertEqual(result.physical_actions, 1)
         self.assertEqual(robot.actions, [("tap", 300, 400)])
-        self.assertEqual(observer.calls, 3)
+        self.assertEqual(observer.calls, 2)
+        self.assertEqual(result.action_outcome, "mismatched")
 
-    def test_post_action_format_failure_recaptures_once_without_repeating_action(self):
+    def test_post_action_format_failure_does_not_resample_model(self):
         planned = scene("planned")
         fresh = scene("before", element_id="fresh")
         after = scene("after", screen_id="app_home", element_id="after")
@@ -7467,30 +7513,26 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as temp:
-            result = adapter.execute(
-                requested_action=action,
-                planned_scene=planned,
-                goal=goal(),
-                confirmed=True,
-                evidence_dir=Path(temp),
-            )
+            with self.assertRaises(GenericActionAdapterError) as caught:
+                adapter.execute(
+                    requested_action=action,
+                    planned_scene=planned,
+                    goal=goal(),
+                    confirmed=True,
+                    evidence_dir=Path(temp),
+                )
 
         self.assertEqual(robot.actions, [("tap", 300, 400)])
-        self.assertEqual(result.physical_actions, 1)
-        self.assertEqual(observer.calls, 3)
-        self.assertEqual(capture.calls, 12)
-        self.assertEqual(len(result.evidence), 12)
-        self.assertEqual(len(result.after_frame_paths), 4)
+        self.assertEqual(caught.exception.physical_actions, 1)
+        self.assertEqual(observer.calls, 2)
+        self.assertEqual(capture.calls, 8)
+        self.assertEqual(len(caught.exception.evidence), 8)
         self.assertEqual(
-            result.observation_errors,
+            caught.exception.observation_errors,
             ("第1轮动作后观察失败：模型返回的 JSON 无法解析",),
         )
-        self.assertEqual(
-            result.to_dict()["observation_errors"],
-            ["第1轮动作后观察失败：模型返回的 JSON 无法解析"],
-        )
 
-    def test_two_post_action_format_failures_stop_after_one_robot_action(self):
+    def test_first_post_action_format_failure_stops_after_one_robot_action(self):
         observer = FakeSceneObserver(
             [
                 scene("before", element_id="fresh"),
@@ -7523,20 +7565,17 @@ class GenericActionAdapterTests(unittest.TestCase):
                 )
 
         self.assertEqual(caught.exception.physical_actions, 1)
-        self.assertEqual(len(caught.exception.evidence), 12)
-        self.assertEqual(observer.calls, 3)
+        self.assertEqual(len(caught.exception.evidence), 8)
+        self.assertEqual(observer.calls, 2)
         self.assertEqual(len(robot.actions), 1)
         self.assertEqual(
             caught.exception.observation_errors,
-            (
-                "第1轮动作后观察失败：模型返回的 JSON 无法解析",
-                "第2轮动作后观察失败：模型返回的 JSON 无法解析",
-            ),
+            ("第1轮动作后观察失败：模型返回的 JSON 无法解析",),
         )
         self.assertIn("第1轮动作后观察失败", str(caught.exception))
-        self.assertIn("第2轮动作后观察失败", str(caught.exception))
+        self.assertNotIn("第2轮动作后观察失败", str(caught.exception))
 
-    def test_post_action_observation_limit_is_hard_capped_at_two(self):
+    def test_post_action_observation_limit_is_hard_capped_at_one_call(self):
         observer = FakeSceneObserver(
             [
                 scene("before", element_id="fresh"),
@@ -7571,11 +7610,11 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual(adapter.post_action_max_observations, 2)
         self.assertEqual(caught.exception.physical_actions, 1)
-        self.assertEqual(observer.calls, 3)
-        self.assertEqual(capture.calls, 12)
+        self.assertEqual(observer.calls, 2)
+        self.assertEqual(capture.calls, 8)
         self.assertEqual(robot.actions, [("tap", 300, 400)])
 
-    def test_second_capture_failure_keeps_first_format_error_and_evidence(self):
+    def test_format_error_stops_before_any_second_capture(self):
         observer = FakeSceneObserver(
             [
                 scene("before", element_id="fresh"),
@@ -7611,8 +7650,8 @@ class GenericActionAdapterTests(unittest.TestCase):
             caught.exception.observation_errors,
             ("第1轮动作后观察失败：模型返回的 JSON 无法解析：first",),
         )
-        self.assertEqual(len(caught.exception.evidence), 9)
-        self.assertEqual(caught.exception.evidence[-1], "second_capture_timeout.jpg")
+        self.assertEqual(len(caught.exception.evidence), 8)
+        self.assertNotIn("second_capture_timeout.jpg", caught.exception.evidence)
         self.assertEqual(observer.calls, 2)
         self.assertEqual(robot.actions, [("tap", 300, 400)])
 
@@ -7640,7 +7679,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(result.physical_actions, 1)
         self.assertEqual(robot.actions, [("dismiss", 210, 310)])
 
-    def test_second_capture_failure_keeps_first_semantic_mismatch(self):
+    def test_semantic_mismatch_returns_without_any_second_capture(self):
         unchanged = scene("camera-noise-only", element_id="after")
         observer = FakeSceneObserver(
             [scene("before", element_id="fresh"), unchanged]
@@ -7656,25 +7695,22 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as temp:
-            with self.assertRaises(GenericActionAdapterError) as caught:
-                adapter.execute(
-                    requested_action=SemanticAction(
-                        node_id="generic_step_1",
-                        action="tap_semantic",
-                        params={"element_id": "e1", "target": "app_icon"},
-                    ),
-                    planned_scene=scene("planned"),
-                    goal=goal(),
-                    confirmed=True,
-                    evidence_dir=Path(temp),
-                )
+            result = adapter.execute(
+                requested_action=SemanticAction(
+                    node_id="generic_step_1",
+                    action="tap_semantic",
+                    params={"element_id": "e1", "target": "app_icon"},
+                ),
+                planned_scene=scene("planned"),
+                goal=goal(),
+                confirmed=True,
+                evidence_dir=Path(temp),
+            )
 
-        self.assertEqual(caught.exception.physical_actions, 1)
-        self.assertEqual(len(caught.exception.verification_errors), 1)
-        self.assertIn("语义变化", caught.exception.verification_errors[0])
-        self.assertIn("语义变化", str(caught.exception))
-        self.assertEqual(len(caught.exception.evidence), 9)
-        self.assertEqual(caught.exception.evidence[-1], "second_capture_timeout.jpg")
+        self.assertEqual(result.physical_actions, 1)
+        self.assertEqual(len(result.verification_errors), 1)
+        self.assertIn("语义变化", result.verification_errors[0])
+        self.assertEqual(len(result.evidence), 8)
         self.assertEqual(observer.calls, 2)
         self.assertEqual(robot.actions, [("tap", 300, 400)])
 

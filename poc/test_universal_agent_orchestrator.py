@@ -25,6 +25,7 @@ from deepseek_task_graph import (
 from generic_step_planner import GenericStepProposal
 from generic_scene_observer import _safe_goal_context
 from generic_action_adapter import (
+    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     GenericActionAdapterError,
     GenericActionExecutionResult,
 )
@@ -687,6 +688,8 @@ class FakeExecutingAdapter(FakeAdapter):
         action_outcome: str = "matched",
         verification_errors: tuple[str, ...] = (),
         controller_completion_evidence: tuple[str, ...] = (),
+        post_action_focus_subgoal_id: str = "",
+        post_action_observation_phase: str = "",
     ) -> None:
         super().__init__(scene)
         self.after_scene = after_scene
@@ -694,6 +697,8 @@ class FakeExecutingAdapter(FakeAdapter):
         self.action_outcome = action_outcome
         self.verification_errors = verification_errors
         self.controller_completion_evidence = controller_completion_evidence
+        self.post_action_focus_subgoal_id = post_action_focus_subgoal_id
+        self.post_action_observation_phase = post_action_observation_phase
 
     def execute(
         self,
@@ -743,6 +748,12 @@ class FakeExecutingAdapter(FakeAdapter):
                 "after-2.jpg",
                 "after-3.jpg",
                 "after-4.jpg",
+            ),
+            post_action_focus_subgoal_id=(
+                self.post_action_focus_subgoal_id
+            ),
+            post_action_observation_phase=(
+                self.post_action_observation_phase
             ),
         )
 
@@ -1407,6 +1418,54 @@ class ObservationBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(VisionAgentError, "目标上下文嵌套过深"):
             _safe_goal_context(historical_context)
 
+    def test_projects_one_unique_direct_successor_for_fused_post_action_observation(
+        self,
+    ) -> None:
+        graph = _multifield_graph(active_subgoal_id="input_subject")
+
+        goal = self.bridge.goal_draft(graph)
+        next_focus = goal.entities["next_subgoal_visual_context"]
+
+        self.assertEqual("input_body", next_focus["subgoal_id"])
+        self.assertEqual(
+            "body_field",
+            next_focus["goal_entities"]["active_input_field_id"],
+        )
+        self.assertEqual(
+            "subject_field",
+            next_focus["goal_entities"][
+                "active_input_predecessor_field_id"
+            ],
+        )
+
+    def test_does_not_project_next_focus_when_successor_is_ambiguous(self) -> None:
+        base = _graph()
+        active = base.subgoals[0]
+        successors = tuple(
+            Subgoal(
+                subgoal_id=f"successor-{index}",
+                objective=f"读取候选结果{index}",
+                status="pending",
+                depends_on=(active.subgoal_id,),
+                constraints=("仅读取",),
+                completion_conditions=(f"候选结果{index}已读取",),
+                completion_evidence=(),
+                risk_action_ids=(),
+                external_impact="read_only",
+            )
+            for index in (1, 2)
+        )
+        graph = replace(
+            base,
+            subgoals=(active,) + successors,
+            active_subgoal_id=active.subgoal_id,
+        )
+        graph.validate()
+
+        goal = self.bridge.goal_draft(graph)
+
+        self.assertNotIn("next_subgoal_visual_context", goal.entities)
+
     def test_multifield_projection_tracks_field_identity_across_order_and_labels(self) -> None:
         cases = (
             (
@@ -1663,7 +1722,7 @@ class AgentEvidenceStoreTests(unittest.TestCase):
             ledger = VisionSessionUsageLedger(session_id="session-usage")
             local_id = ledger.reserve_request(
                 model="qwen3.7-plus",
-                stage="compact_observation",
+                stage="single_step_observation",
                 fingerprint="frame-usage",
                 max_completion_tokens=2600,
             )
@@ -4236,7 +4295,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         self.assertEqual(3, session.task_graph.revision)
         self.assertEqual("unseen.reference.workspace", session.goal_draft.app_id)
 
-    def test_new_active_subgoal_gets_goal_conditioned_reobservation(self) -> None:
+    def test_unique_next_subgoal_reuses_fused_post_action_observation(self) -> None:
         base = self._unknown_app_graph()
         first = replace(
             base.subgoals[0],
@@ -4291,14 +4350,6 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         )
         completed.validate()
 
-        after_scene = replace(
-            _scene(
-                fingerprint="frame-b",
-                app_id="unseen.reference.workspace",
-            ),
-            elements=(),
-            summary="动作后页面稳定，但旧目标观察没有标题候选",
-        )
         title_scene = _scene(
             fingerprint="frame-b",
             app_id="unseen.reference.workspace",
@@ -4312,7 +4363,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
             def __init__(self):
                 super().__init__(
                     _scene(app_id="unseen.reference.workspace"),
-                    (after_scene, "matched", ()),
+                    (title_scene, "matched", ()),
                 )
                 self.captured_subgoals = []
 
@@ -4327,30 +4378,30 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
                     prefix=prefix,
                 )
 
+            def execute(self, **kwargs):
+                return replace(
+                    super().execute(**kwargs),
+                    post_action_focus_subgoal_id="read_title",
+                    post_action_observation_phase=(
+                        FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
+                    ),
+                )
+
         planner = SequenceDeepSeekPlanner(initial, revised, completed)
         qwen = SequenceQwenObserver("action")
         adapter = GoalConditionedAdapter()
         with tempfile.TemporaryDirectory() as temp:
             orchestrator = self._orchestrator(planner, qwen, adapter)
             session = orchestrator.start(
-                session_id="session-goal-conditioned-reobservation",
+                session_id="session-fused-next-subgoal-observation",
                 raw_goal=initial.raw_user_goal,
                 device_id="device-1",
                 run_dir=Path(temp),
             )
 
             orchestrator.confirm_one(session, _confirmation(session))
-            self.assertEqual("needs_reobservation", session.status)
-            self.assertEqual(1, len(qwen.calls))
-            self.assertEqual((), session.trusted_observation.scene.elements)
-            self.assertEqual(
-                "advanced_to_goal_conditioned_reobservation",
-                session.last_post_action_transition["disposition"],
-            )
 
-            orchestrator.refresh_decision(session)
-
-        self.assertEqual(["return_home", "read_title"], adapter.captured_subgoals)
+        self.assertEqual(["return_home"], adapter.captured_subgoals)
         self.assertEqual(1, adapter.execute_calls)
         self.assertEqual(1, session.physical_actions)
         self.assertEqual(1, len(qwen.calls))
@@ -4359,6 +4410,88 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
             session.trusted_observation.scene.elements[0].label,
         )
         self.assertEqual("succeeded", session.status)
+        self.assertTrue(
+            session.last_post_action_transition[
+                "fused_post_action_observation_reused"
+            ]
+        )
+        self.assertEqual(
+            "task_completed_after_read_only_review",
+            session.last_post_action_transition["disposition"],
+        )
+
+    def test_fused_next_focus_is_not_reused_when_replan_keeps_current_node(
+        self,
+    ) -> None:
+        base = self._unknown_app_graph()
+        first = replace(
+            base.subgoals[0],
+            subgoal_id="return_home",
+            objective="返回手机桌面",
+            completion_conditions=("手机桌面可见",),
+        )
+        second = Subgoal(
+            subgoal_id="read_title",
+            objective="读取当前页面主标题",
+            status="pending",
+            depends_on=(first.subgoal_id,),
+            constraints=("仅读取",),
+            completion_conditions=("页面主标题已读取",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="read_only",
+        )
+        initial = replace(
+            base,
+            subgoals=(first, second),
+            active_subgoal_id=first.subgoal_id,
+        )
+        initial.validate()
+        unchanged_plan = replace(initial, revision=2)
+        unchanged_plan.validate()
+        planner = SequenceDeepSeekPlanner(initial, unchanged_plan)
+        qwen = SequenceQwenObserver("action")
+
+        class PrematureFusedAdapter(SequenceExecutingAdapter):
+            def execute(self, **kwargs):
+                return replace(
+                    super().execute(**kwargs),
+                    post_action_focus_subgoal_id="read_title",
+                    post_action_observation_phase=(
+                        FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
+                    ),
+                )
+
+        adapter = PrematureFusedAdapter(
+            _scene(app_id="unseen.reference.workspace"),
+            (
+                _scene(
+                    fingerprint="frame-b",
+                    app_id="unseen.reference.workspace",
+                ),
+                "matched",
+                (),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = self._orchestrator(planner, qwen, adapter)
+            session = orchestrator.start(
+                session_id="session-replan-outside-fused-focus",
+                raw_goal=initial.raw_user_goal,
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+            orchestrator.confirm_one(session, _confirmation(session))
+
+        self.assertEqual("needs_reobservation", session.status)
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual(1, session.physical_actions)
+        self.assertEqual(1, len(qwen.calls))
+        self.assertEqual(
+            "replanned_outside_fused_post_action_focus",
+            session.last_post_action_transition["disposition"],
+        )
 
     def test_unchanged_screen_is_mismatch_evidence_and_replans_once(self) -> None:
         initial = self._unknown_app_graph()
@@ -7185,7 +7318,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertEqual("automatic", session.effect_previews[0]["policy"])
         self.assertIsNone(session.effect_verification)
 
-    def test_ordinary_send_uses_one_zero_action_result_refresh_without_resending(
+    def test_ordinary_send_reuses_same_post_action_observation_without_resending(
         self,
     ) -> None:
         initial = _ordinary_send_graph()
@@ -7227,15 +7360,8 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 run_dir=Path(temp),
             )
             result = orchestrator.confirm_one(session, _confirmation(session))
-            self.assertEqual("needs_effect_verification", session.status)
-            self.assertEqual(1, session.physical_actions)
-            self.assertIsNone(session.snapshot()["confirmation_scope"])
-
-            adapter.scene = after
-            refresh = orchestrator.refresh_decision(session)
 
         self.assertEqual(1, result.physical_actions)
-        self.assertEqual("finished", refresh.proposal.status)
         self.assertEqual("succeeded", session.status)
         self.assertEqual(1, adapter.execute_calls)
         self.assertEqual(1, session.physical_actions)
@@ -7249,6 +7375,10 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertEqual(
             "frame-send-result",
             session.effect_verification["verification_fingerprint"],
+        )
+        self.assertEqual(
+            "effect_verified_from_same_post_action_observation",
+            session.last_post_action_transition["disposition"],
         )
 
     def test_wait_for_change_is_zero_action_observation_transition(self) -> None:

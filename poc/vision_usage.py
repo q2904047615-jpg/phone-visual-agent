@@ -7,11 +7,15 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 
-VISION_USAGE_LEDGER_VERSION = "2026-08-24-qwen-session-usage-v1"
+VISION_USAGE_LEDGER_VERSION = "2026-08-24-single-step-qwen-usage-v2"
 QWEN_PLUS_MODEL = "qwen3.7-plus"
+SINGLE_STEP_ALLOWED_REQUEST_STAGES = frozenset({"single_step_observation"})
 DEFAULT_MAX_MODEL_REQUESTS = 16
 DEFAULT_MAX_TOTAL_TOKENS = 50_000
-CHINESE_ACCEPTANCE_TARGET_REQUESTS = 10
+# Six-action acceptance normally needs one initial observation plus exactly one
+# post-action observation per action.  The hard ceiling remains a fail-safe for
+# genuine replans; it is not the expected production topology.
+CHINESE_ACCEPTANCE_TARGET_REQUESTS = 7
 CHINESE_ACCEPTANCE_TARGET_TOKENS = 30_000
 
 # Official Model Studio pricing page, verified 2026-08-24 for China (Beijing),
@@ -38,6 +42,10 @@ class VisionModelBudgetExceeded(VisionUsageError):
 
 class VisionModelIdentityMismatch(VisionUsageError):
     error_code = "vision_model_identity_mismatch"
+
+
+class VisionStepContractViolation(VisionUsageError):
+    error_code = "vision_step_contract_violation"
 
 
 def _cost_cny(
@@ -86,6 +94,7 @@ class VisionSessionUsageLedger:
     _total_tokens: int = field(default=0, repr=False)
     _cache_hits: int = field(default=0, repr=False)
     _budget_rejections: int = field(default=0, repr=False)
+    _contract_rejections: int = field(default=0, repr=False)
     _lock: threading.RLock = field(
         default_factory=threading.RLock,
         repr=False,
@@ -150,6 +159,24 @@ class VisionSessionUsageLedger:
                 raise VisionModelIdentityMismatch(
                     "vision_model_identity_mismatch: 正式会话固定使用 "
                     f"{self.expected_model}，拒绝自动切换为 {model or 'unknown'}。"
+                )
+            if stage not in SINGLE_STEP_ALLOWED_REQUEST_STAGES:
+                self._contract_rejections += 1
+                self._events.append(
+                    {
+                        "event": "request_rejected",
+                        "outcome": "vision_step_contract_violation",
+                        "timestamp": self._timestamp(),
+                        "stage": stage,
+                        "fingerprint": fingerprint,
+                        "model": model,
+                        "network_attempts": 0,
+                    }
+                )
+                raise VisionStepContractViolation(
+                    "vision_step_contract_violation: 正式会话每个闭环步骤"
+                    "只允许 single_step_observation；旧视觉审计或动作选择"
+                    f"阶段 {stage} 已在联网前拒绝。"
                 )
             if (
                 self._request_count >= self.max_model_requests
@@ -333,6 +360,7 @@ class VisionSessionUsageLedger:
                     "total_tokens": self._total_tokens,
                     "observation_cache_hits": self._cache_hits,
                     "budget_rejections": self._budget_rejections,
+                    "contract_rejections": self._contract_rejections,
                     "remaining_model_requests": max(
                         0, self.max_model_requests - self._request_count
                     ),

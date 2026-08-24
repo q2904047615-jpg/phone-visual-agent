@@ -32,11 +32,11 @@ from generic_action_adapter import (
     persist_observer_failure_diagnostic,
     stable_qwerty_ocr_anchors,
 )
-from generic_scene_observer import GenericSceneObserver
+from generic_scene_observer import SingleStepGenericSceneObserver
 from input_value_lineage import TypedInputLineageStore
 from generic_step_planner import GenericStepPlanner, GenericStepPlanningError
 from deepseek_task_graph import DeepSeekTaskGraphPlanner, TaskGraphError
-from qwen_visual_decision import QwenVisualDecisionObserver
+from qwen_visual_decision import SingleStepQwenVisualDecisionObserver
 from device_exclusivity import InterProcessLease, SHARED_DEVICE_LEASE_DIR
 from universal_agent_orchestrator import (
     DeviceTaskRegistry,
@@ -368,7 +368,7 @@ class Runtime:
         self.input_lineage_store = TypedInputLineageStore(
             WEB_OUTPUT_DIR / "state"
         )
-        self.generic_scene_observer = GenericSceneObserver(
+        self.generic_scene_observer = SingleStepGenericSceneObserver(
             self.vision_provider,
             input_lineage_store=self.input_lineage_store,
             qwerty_row_snapper=stable_qwerty_ocr_anchors,
@@ -377,7 +377,7 @@ class Runtime:
         self.deepseek_task_graph_planner = DeepSeekTaskGraphPlanner(
             self.intent_provider,
         )
-        self.qwen_visual_decision_observer = QwenVisualDecisionObserver(
+        self.qwen_visual_decision_observer = SingleStepQwenVisualDecisionObserver(
             self.vision_provider
         )
         self.device_task_registry = DeviceTaskRegistry(

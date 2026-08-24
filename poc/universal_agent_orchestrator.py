@@ -28,7 +28,10 @@ from deepseek_task_graph import (
 )
 from deepseek_failure_diagnostics import persist_deepseek_failure_diagnostic
 from device_exclusivity import InterProcessLease
-from generic_action_adapter import GenericActionAdapterError
+from generic_action_adapter import (
+    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
+    GenericActionAdapterError,
+)
 from generic_goal import GenericIntentDraft
 from generic_step_planner import GenericStepProposal
 from qwen_visual_decision import (
@@ -634,6 +637,101 @@ class ObservationBridge:
             result["desired_input_labels"] = labels
         return result
 
+    @classmethod
+    def _subgoal_visual_context(
+        cls,
+        graph: DynamicTaskGraph,
+        subgoal: Any,
+    ) -> dict[str, Any]:
+        """Project one typed subgoal into the bounded visual prompt shape."""
+
+        goal_entities = {
+            key: value
+            for key, value in graph.goal.entities.items()
+            if key != "input_fields"
+        }
+        for local_marker in (
+            "active_input_transaction_text",
+            "active_input_field_id",
+            "active_input_field_label",
+            "active_input_multiline",
+        ):
+            goal_entities.pop(local_marker, None)
+        active_app_label = cls._active_app_entry_target_label(graph, subgoal)
+        if active_app_label:
+            goal_entities["target_ui_label"] = active_app_label
+        active_input = cls._active_input_transaction(graph, subgoal)
+        active_input_text = active_input.get("text")
+        if isinstance(active_input_text, str) and active_input_text:
+            goal_entities["active_input_transaction_text"] = active_input_text
+            goal_entities["active_input_field_id"] = active_input["field_id"]
+            if active_input.get("field_label"):
+                goal_entities["active_input_field_label"] = active_input[
+                    "field_label"
+                ]
+            goal_entities["active_input_multiline"] = bool(
+                active_input.get("multiline")
+            )
+            predecessor = cls._active_input_predecessor_transaction(
+                graph,
+                subgoal,
+            )
+            if predecessor:
+                goal_entities.update(
+                    {
+                        "active_input_predecessor_field_id": predecessor[
+                            "field_id"
+                        ],
+                        "active_input_predecessor_field_label": predecessor[
+                            "field_label"
+                        ],
+                        "active_input_predecessor_text": predecessor["text"],
+                    }
+                )
+        else:
+            goal_entities.pop("input_text", None)
+            goal_entities.update(
+                cls._active_input_verification_projection(graph, subgoal)
+            )
+        return {
+            "subgoal_id": subgoal.subgoal_id,
+            "objective": subgoal.objective,
+            "constraints": list(subgoal.constraints),
+            "completion_conditions": list(subgoal.completion_conditions),
+            "execution_class": {
+                "read_only": "observe",
+                "navigation_only": "navigate",
+                "external_state": "effect",
+                "unknown": "unknown",
+            }.get(subgoal.external_impact, "unknown"),
+            "goal_entities": goal_entities,
+        }
+
+    @staticmethod
+    def _unique_next_subgoal_after_current(
+        graph: DynamicTaskGraph,
+        active: Any,
+    ) -> Any | None:
+        """Return only one statically knowable successor of the active node."""
+
+        completed = {
+            item.subgoal_id
+            for item in graph.subgoals
+            if item.status == "completed"
+        }
+        candidates = tuple(
+            item
+            for item in graph.subgoals
+            if item.subgoal_id != active.subgoal_id
+            and item.status == "pending"
+            and active.subgoal_id in item.depends_on
+            and all(
+                dependency == active.subgoal_id or dependency in completed
+                for dependency in item.depends_on
+            )
+        )
+        return candidates[0] if len(candidates) == 1 else None
+
     def goal_draft(self, graph: DynamicTaskGraph) -> GenericIntentDraft:
         graph.validate()
         target_surface = str(
@@ -664,72 +762,17 @@ class ObservationBridge:
         if graph.raw_user_goal.strip():
             entities["original_goal_visual_context"] = graph.raw_user_goal.strip()
         if active is not None:
-            # The complete typed graph remains at the root.  The observation
-            # focus contains only current-step authority and shallow,
-            # non-input visual hints; it must not repeat the whole field list.
-            active_goal_entities = {
-                key: value
-                for key, value in graph.goal.entities.items()
-                if key != "input_fields"
-            }
-            for local_marker in (
-                "active_input_transaction_text",
-                "active_input_field_id",
-                "active_input_field_label",
-                "active_input_multiline",
-            ):
-                active_goal_entities.pop(local_marker, None)
-            active_app_label = self._active_app_entry_target_label(graph, active)
-            if active_app_label:
-                active_goal_entities["target_ui_label"] = active_app_label
-            active_input = self._active_input_transaction(graph, active)
-            active_input_text = active_input.get("text")
-            if isinstance(active_input_text, str) and active_input_text:
-                active_goal_entities["active_input_transaction_text"] = (
-                    active_input_text
+            # The complete typed graph remains at the root.  The active focus
+            # and at most one statically knowable successor stay shallow and
+            # exclude the full input-field array.
+            entities["active_subgoal_visual_context"] = (
+                self._subgoal_visual_context(graph, active)
+            )
+            next_subgoal = self._unique_next_subgoal_after_current(graph, active)
+            if next_subgoal is not None:
+                entities["next_subgoal_visual_context"] = (
+                    self._subgoal_visual_context(graph, next_subgoal)
                 )
-                active_goal_entities["active_input_field_id"] = active_input[
-                    "field_id"
-                ]
-                if active_input.get("field_label"):
-                    active_goal_entities["active_input_field_label"] = active_input[
-                        "field_label"
-                    ]
-                active_goal_entities["active_input_multiline"] = bool(
-                    active_input.get("multiline")
-                )
-                predecessor = self._active_input_predecessor_transaction(
-                    graph, active
-                )
-                if predecessor:
-                    active_goal_entities.update({
-                        "active_input_predecessor_field_id": predecessor["field_id"],
-                        "active_input_predecessor_field_label": predecessor["field_label"],
-                        "active_input_predecessor_text": predecessor["text"],
-                    })
-            else:
-                # The task root retains the immutable payload for effects and
-                # later nodes.  It is not current observation authority once
-                # the active node no longer owns an input transaction; copying
-                # it here would reopen a completed write while verifying a
-                # rendered result such as a message bubble or saved preview.
-                active_goal_entities.pop("input_text", None)
-                active_goal_entities.update(
-                    self._active_input_verification_projection(graph, active)
-                )
-            entities["active_subgoal_visual_context"] = {
-                "subgoal_id": active.subgoal_id,
-                "objective": active.objective,
-                "constraints": list(active.constraints),
-                "completion_conditions": list(active.completion_conditions),
-                "execution_class": {
-                    "read_only": "observe",
-                    "navigation_only": "navigate",
-                    "external_state": "effect",
-                    "unknown": "unknown",
-                }.get(active.external_impact, "unknown"),
-                "goal_entities": active_goal_entities,
-            }
         entities["target_apps"] = [
             {"app_id": item.app_id, "app_name": item.app_name}
             for item in graph.goal.target_apps
@@ -4486,6 +4529,32 @@ class UniversalAgentOrchestrator:
             raise UniversalAgentOrchestratorError(
                 "动作后重规划缺少上一子目标、决策或确认权威。"
             )
+        prior_goal_entities = (
+            session.goal_draft.entities
+            if session.goal_draft is not None
+            and isinstance(session.goal_draft.entities, dict)
+            else {}
+        )
+        anticipated_focus = prior_goal_entities.get(
+            "next_subgoal_visual_context"
+        )
+        anticipated_next_subgoal_id = (
+            str(anticipated_focus.get("subgoal_id") or "").strip()
+            if isinstance(anticipated_focus, dict)
+            else ""
+        )
+        post_action_focus_subgoal_id = str(
+            getattr(result, "post_action_focus_subgoal_id", "") or ""
+        ).strip()
+        post_action_observation_phase = str(
+            getattr(result, "post_action_observation_phase", "") or ""
+        ).strip()
+        fused_next_observation = bool(
+            anticipated_next_subgoal_id
+            and post_action_focus_subgoal_id == anticipated_next_subgoal_id
+            and post_action_observation_phase
+            == FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
+        )
         input_transaction_microstep = self._verified_input_transaction_microstep(
             graph=previous_graph,
             previous_decision=previous_decision,
@@ -4597,6 +4666,12 @@ class UniversalAgentOrchestrator:
             "prior_subgoal_signature": previous_signature,
             "prior_action_equivalence_digest": _action_equivalence_digest(
                 previous_decision.proposal.action
+            ),
+            "post_action_focus_subgoal_id": (
+                post_action_focus_subgoal_id or None
+            ),
+            "post_action_observation_phase": (
+                post_action_observation_phase or None
             ),
             "disposition": "replanning",
         }
@@ -4751,6 +4826,33 @@ class UniversalAgentOrchestrator:
                 session.effect_verification
             )
             persist_transition()
+            self._complete_pending_effect_verification(
+                session,
+                graph=revised,
+                observation=new_observation,
+                before_actions=session.physical_actions,
+            )
+            transition_record["disposition"] = (
+                "effect_verified_from_same_post_action_observation"
+                if session.status == "succeeded"
+                else "blocked_same_post_action_effect_verification"
+            )
+            transition_record["effect_verification"] = dict(
+                session.effect_verification or {}
+            )
+            if session.task_graph is not None:
+                verified_current = session.task_graph.active_subgoal()
+                transition_record["effect_verification_revision"] = (
+                    session.task_graph.revision
+                )
+                transition_record["effect_verification_subgoal_id"] = (
+                    verified_current.subgoal_id
+                    if verified_current is not None
+                    else None
+                )
+            if session.failed_reason:
+                transition_record["diagnostic"] = session.failed_reason
+            persist_transition()
             return
         if controller_refs:
             prior_in_revised = next(
@@ -4789,22 +4891,39 @@ class UniversalAgentOrchestrator:
             self._bind_effect_confirmation(session)
             persist_transition()
             return
-        if current.subgoal_id != previous_current.subgoal_id:
-            # Scene elements are goal-conditioned.  The action-after scene was
-            # observed for ``previous_current`` and can prove that transition,
-            # but it is not a complete candidate inventory for a different
-            # active node.  Reuse the existing zero-action refresh path so the
-            # new node gets its own four-frame observation and one-shot scope.
+        fused_focus_matches_current = bool(
+            matched
+            and fused_next_observation
+            and current.subgoal_id == anticipated_next_subgoal_id
+        )
+        if (
+            fused_next_observation and not fused_focus_matches_current
+        ) or (
+            current.subgoal_id != previous_current.subgoal_id
+            and not fused_focus_matches_current
+        ):
+            # A sole post-action response can be reused only when its locally
+            # attested focus is exactly the successor selected by the revised
+            # graph.  If DeepSeek keeps the old node or creates a different
+            # plan, the goal-conditioned candidate set is stale and the next
+            # cycle must obtain one fresh observation.
             session.status = "needs_reobservation"
             session.failed_reason = ""
             session.controller_decision = None
             session.confirmation_authority = None
             transition_record["disposition"] = (
-                "advanced_to_goal_conditioned_reobservation"
+                "replanned_outside_fused_post_action_focus"
+                if fused_next_observation
+                else "advanced_to_goal_conditioned_reobservation"
             )
             transition_record["reobservation_subgoal_id"] = current.subgoal_id
             persist_transition()
             return
+        if fused_focus_matches_current:
+            transition_record["fused_post_action_observation_reused"] = True
+            transition_record["disposition"] = (
+                "reused_fused_post_action_observation_for_next_subgoal"
+            )
         if impact == "read_only":
             try:
                 reviewed = self.deepseek_planner.replan(

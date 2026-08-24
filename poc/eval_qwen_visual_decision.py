@@ -14,11 +14,11 @@ from typing import Any
 
 from PIL import Image
 
-from generic_scene_observer import GenericSceneObserver
+from generic_scene_observer import SingleStepGenericSceneObserver
 from qwen_runtime_errors import classify_qwen_error, failure_diagnostics
 from qwen_visual_decision import (
     QwenTaskContext,
-    QwenVisualDecisionObserver,
+    SingleStepQwenVisualDecisionObserver,
     TrustedObservation,
 )
 from vision_agent import DashScopeVisionProvider, VisionAgentError
@@ -118,8 +118,8 @@ def _evaluate_case(
     started = time.perf_counter()
     path = Path(manifest_path)
     provider = provider_factory()
-    scene_observer = GenericSceneObserver(provider)
-    decision_observer = QwenVisualDecisionObserver(provider)
+    scene_observer = SingleStepGenericSceneObserver(provider)
+    decision_observer = SingleStepQwenVisualDecisionObserver(provider)
     frames: list[Image.Image] = []
     frame_paths: list[str] = []
     context: QwenTaskContext | None = None

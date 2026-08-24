@@ -43,6 +43,7 @@ from orientation_safety import (
     OrientationFrameMismatchError,
     OrientationSafetyError,
     _mint_locally_verified_qwerty_credential,
+    _mint_single_step_scene_credential,
     frame_fingerprint,
     validate_device_id,
 )
@@ -99,6 +100,70 @@ _POST_NAVIGATION_ALLOWED_EFFECT_KEYS = frozenset(
         "screen_id",
     }
 )
+FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE = (
+    "2026-08-24-verified-previous-and-plan-next-v1"
+)
+_VISUAL_FOCUS_KEYS = frozenset(
+    {
+        "subgoal_id",
+        "objective",
+        "constraints",
+        "completion_conditions",
+        "execution_class",
+        "goal_entities",
+    }
+)
+
+
+def _sanitized_visual_focus(value: Any) -> dict[str, Any] | None:
+    """Accept only the bridge-owned shallow visual-focus shape."""
+
+    if not isinstance(value, dict) or set(value) != _VISUAL_FOCUS_KEYS:
+        return None
+    if (
+        not str(value.get("subgoal_id") or "").strip()
+        or not str(value.get("objective") or "").strip()
+        or not isinstance(value.get("constraints"), list)
+        or not isinstance(value.get("completion_conditions"), list)
+        or not isinstance(value.get("goal_entities"), dict)
+    ):
+        return None
+    focus = dict(value)
+    goal_entities = dict(focus["goal_entities"])
+    # This marker is minted only after a physical action by this module.  A
+    # model, user payload or stale goal draft cannot pre-authorize the fused
+    # post-action observation path.
+    goal_entities.pop("observation_phase", None)
+    focus["goal_entities"] = goal_entities
+    return focus
+
+
+def _resolved_completes_active_input_focus(
+    focus: dict[str, Any],
+    resolved: ResolvedSemanticAction,
+) -> bool:
+    """Prove locally that one input microstep reaches its typed final value."""
+
+    goal_entities = focus.get("goal_entities")
+    if not isinstance(goal_entities, dict):
+        return False
+    target_text = goal_entities.get("active_input_transaction_text")
+    if not isinstance(target_text, str) or not target_text:
+        return False
+    expectations = resolved.formal_transition.get("expectations")
+    if isinstance(expectations, list) and any(
+        isinstance(item, dict)
+        and str(item.get("predicate") or "").strip()
+        in {
+            "input_field.focused",
+            "element.state.keyboard_layout",
+            "element.state.keyboard_case_mode",
+            "element.state.keyboard_input_mode",
+        }
+        for item in expectations
+    ):
+        return False
+    return resolved.expected_input_value == target_text
 
 
 def _post_action_observation_context(
@@ -107,31 +172,73 @@ def _post_action_observation_context(
     *,
     physical_action_executed: bool = False,
 ) -> dict[str, Any]:
-    """Return a result-focused context only for a proven navigation boundary."""
+    """Fuse previous-step verification and the unique next visual focus.
+
+    The scene itself remains the evidence for the action that just ran.  When
+    the typed graph already exposes exactly one direct successor, the same
+    response may also mark that successor's visible candidate.  DeepSeek still
+    decides whether the graph actually advances; a different revision forces a
+    later fresh observation instead of reusing this focus.
+    """
 
     context = goal.to_dict()
     entities = context.get("entities")
-    focus = (
+    if not isinstance(entities, dict):
+        return context
+    focus = _sanitized_visual_focus(
         entities.get("active_subgoal_visual_context")
-        if isinstance(entities, dict)
-        else None
     )
-    if isinstance(entities, dict) and isinstance(focus, dict):
-        supplied_goal_entities = focus.get("goal_entities")
-        if isinstance(supplied_goal_entities, dict):
-            # ``observation_phase`` is a reserved local attestation.  Strip any
-            # model/user supplied value before deciding whether this resolved
-            # action is allowed to mint it.
-            sanitized_goal_entities = dict(supplied_goal_entities)
-            sanitized_goal_entities.pop("observation_phase", None)
-            sanitized_focus = dict(focus)
-            sanitized_focus["goal_entities"] = sanitized_goal_entities
-            sanitized_entities = dict(entities)
-            sanitized_entities["active_subgoal_visual_context"] = sanitized_focus
-            context = dict(context)
-            context["entities"] = sanitized_entities
-            entities = sanitized_entities
-            focus = sanitized_focus
+    next_focus = _sanitized_visual_focus(
+        entities.get("next_subgoal_visual_context")
+    )
+    sanitized_entities = dict(entities)
+    if focus is not None:
+        sanitized_entities["active_subgoal_visual_context"] = focus
+    if next_focus is not None:
+        sanitized_entities["next_subgoal_visual_context"] = next_focus
+    context = dict(context)
+    context["entities"] = sanitized_entities
+    entities = sanitized_entities
+
+    active_goal_entities = focus.get("goal_entities") if focus else None
+    active_is_input = bool(
+        isinstance(active_goal_entities, dict)
+        and active_goal_entities.get("active_input_transaction_text")
+    )
+    input_boundary = bool(
+        active_is_input
+        and focus is not None
+        and _resolved_completes_active_input_focus(focus, resolved)
+    )
+    ordinary_physical_boundary = bool(
+        not active_is_input
+        and resolved.kind
+        in {
+            "tap_semantic",
+            "dismiss_overlay",
+            "swipe",
+            "back",
+            "home",
+            "long_press",
+            "drag",
+        }
+    )
+    if (
+        physical_action_executed
+        and focus is not None
+        and next_focus is not None
+        and (input_boundary or ordinary_physical_boundary)
+    ):
+        next_entities = dict(next_focus["goal_entities"])
+        next_entities["observation_phase"] = (
+            FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
+        )
+        fused_focus = dict(next_focus)
+        fused_focus["goal_entities"] = next_entities
+        result_context = dict(context)
+        result_context["entities"] = dict(entities)
+        result_context["entities"]["active_subgoal_visual_context"] = fused_focus
+        return result_context
     expected = resolved.expected_effect
     changed_result = (
         isinstance(expected, dict)
@@ -151,7 +258,7 @@ def _post_action_observation_context(
     )
     if (
         not physical_action_executed
-        or not isinstance(focus, dict)
+        or focus is None
         or str(focus.get("execution_class") or "").strip() != "navigate"
         or resolved.kind not in _POST_NAVIGATION_RESULT_KINDS
         or not isinstance(expected, dict)
@@ -697,6 +804,8 @@ class GenericActionExecutionResult:
     )
     before_frame_paths: tuple[str, ...] = ()
     orientation_credential: OrientationCredential | None = None
+    post_action_focus_subgoal_id: str = ""
+    post_action_observation_phase: str = ""
 
     def __post_init__(self) -> None:
         # Capture helpers intentionally build mutable lists while sampling.  The
@@ -749,6 +858,8 @@ class GenericActionExecutionResult:
                 if self.orientation_credential is not None
                 else None
             ),
+            "post_action_focus_subgoal_id": self.post_action_focus_subgoal_id,
+            "post_action_observation_phase": self.post_action_observation_phase,
         }
 
 
@@ -914,6 +1025,29 @@ class GenericSingleActionAdapter:
             )
         except (OrientationSafetyError, WorkflowNotReady, TypeError, ValueError):
             return None
+
+    def _single_step_scene_orientation_credential(
+        self,
+        *,
+        scene: UIScene,
+        frames: list[Image.Image],
+    ) -> OrientationCredential:
+        """Mint locally from the direction facts in the sole step response."""
+
+        if not frames:
+            raise OrientationSafetyError("单步方向绑定缺少当前稳定帧。")
+        alignment = scene.camera_alignment
+        return _mint_single_step_scene_credential(
+            device_id=self.device_id,
+            scene_fingerprint=scene.fingerprint,
+            frame=frames[-1].convert("RGB"),
+            camera_layout_orientation_value=(
+                alignment.camera_layout_orientation
+            ),
+            phone_content_rotation=alignment.phone_content_rotation,
+            confidence=float(alignment.confidence),
+            evidence=tuple(alignment.evidence),
+        )
 
     @staticmethod
     def _has_local_independent_geometry_attestation(
@@ -1544,26 +1678,22 @@ class GenericSingleActionAdapter:
         evidence_dir: Path | None,
         prefix: str,
     ) -> tuple[UIScene, list[Image.Image], tuple[str, ...]]:
-        all_paths: tuple[str, ...] = ()
-        errors: list[str] = []
-        for attempt in range(1, 3):
-            try:
-                scene, frames, paths = self._capture_scene_once(
-                    goal,
-                    evidence_dir=evidence_dir,
-                    prefix=f"{prefix}_attempt_{attempt}",
-                )
-                return scene, frames, all_paths + paths
-            except GenericActionAdapterError as exc:
-                all_paths += tuple(exc.evidence)
-                errors.append(f"第{attempt}轮动作前观察失败：{exc}")
-                if attempt >= 2 or not self._pre_action_observation_retryable(exc):
-                    raise GenericActionAdapterError(
-                        "动作前通用页面观察失败：" + "；".join(errors),
-                        evidence=all_paths,
-                        observation_errors=tuple(errors),
-                    ) from exc
-        raise AssertionError("unreachable")
+        # One fresh closed-loop step may make at most one Qwen request.  Local
+        # frame collection can wait for stability, but an invalid observation
+        # is returned immediately instead of resampling the model.
+        try:
+            return self._capture_scene_once(
+                goal,
+                evidence_dir=evidence_dir,
+                prefix=f"{prefix}_attempt_1",
+            )
+        except GenericActionAdapterError as exc:
+            error = f"第1轮动作前观察失败：{exc}"
+            raise GenericActionAdapterError(
+                "动作前通用页面观察失败：" + error,
+                evidence=tuple(exc.evidence),
+                observation_errors=(error,),
+            ) from exc
 
     def _pre_action_observation_retryable(self, error: Exception) -> bool:
         text = str(error)
@@ -1785,7 +1915,10 @@ class GenericSingleActionAdapter:
             resolved,
             physical_action_executed=True,
         )
-        for attempt in range(1, self.post_action_max_observations + 1):
+        # This observation is the next closed-loop step: capture locally until
+        # stable, then consume exactly one fused Qwen response.  A mismatch is
+        # evidence for replanning, never permission for another model sample.
+        for attempt in range(1, 2):
             attempt_deadline = time.monotonic() + action_timeout
             try:
                 frames, paths = self._capture_stable_post_action_frames(
@@ -1833,18 +1966,13 @@ class GenericSingleActionAdapter:
                 observation_errors.append(
                     f"第{attempt}轮动作后观察失败：{exc}"
                 )
-                if (
-                    attempt >= self.post_action_max_observations
-                    or not self._post_observation_retryable(exc)
-                ):
-                    raise GenericActionAdapterError(
-                        "通用页面观察失败："
-                        + "；".join(verification_errors + observation_errors),
-                        evidence=all_paths,
-                        observation_errors=tuple(observation_errors),
-                        verification_errors=tuple(verification_errors),
-                    ) from exc
-                continue
+                raise GenericActionAdapterError(
+                    "通用页面观察失败："
+                    + "；".join(verification_errors + observation_errors),
+                    evidence=all_paths,
+                    observation_errors=tuple(observation_errors),
+                    verification_errors=tuple(verification_errors),
+                ) from exc
 
             after = self._reconcile_literal_key_visual_wrap(
                 resolved,
@@ -1876,10 +2004,7 @@ class GenericSingleActionAdapter:
                 # an expected destination that is still loading can all be a
                 # legitimate intermediate state.  Re-observe at most once,
                 # with a fresh bounded capture, without repeating the action.
-                if attempt >= self.post_action_max_observations:
-                    break
-                if self.frame_interval:
-                    time.sleep(self.frame_interval)
+                break
 
         assert last_error is not None
         return (
@@ -2156,38 +2281,12 @@ class GenericSingleActionAdapter:
                 )
             local_frame_identity_verified = True
             before = planned_scene
-            if requested_action.action in self.GEOMETRY_BOUND_KINDS:
-                primary_input_confirmation_reused = (
-                    self._primary_input_confirmation_reusable(
-                        requested_action,
-                        planned_scene,
-                    )
+            primary_input_confirmation_reused = (
+                self._primary_input_confirmation_reusable(
+                    requested_action,
+                    planned_scene,
                 )
-                if not primary_input_confirmation_reused:
-                    try:
-                        confirmation_context = goal.to_dict()
-                        if self._confirmation_allows_omitted_local_input_auxiliary(
-                            requested_action,
-                            planned_scene,
-                        ):
-                            confirmation_context[
-                                "_allow_omitted_local_input_auxiliary_confirmation"
-                            ] = True
-                        before = self._observe_scene(
-                            before_frames,
-                            confirmation_context,
-                        )
-                    except RuntimeError as exc:
-                        diagnostic_paths = persist_observer_failure_diagnostic(
-                            self.observer,
-                            evidence_dir=evidence_dir,
-                            prefix=f"{evidence_prefix}_confirmation",
-                            error=exc,
-                        )
-                        raise GenericActionAdapterError(
-                            f"确认前目标几何复核失败：{exc}",
-                            evidence=before_paths + diagnostic_paths,
-                        ) from exc
+            )
         else:
             before, before_frames, before_paths = self.capture_scene(
                 goal,
@@ -2196,136 +2295,12 @@ class GenericSingleActionAdapter:
             )
         try:
             rebind_planned_scene = planned_scene
-            if (
-                planned_frames
-                and requested_action.action in self.INDEPENDENT_GEOMETRY_AUDIT_KINDS
-                and not primary_input_confirmation_reused
-            ):
-                audit_geometry = getattr(
-                    self.observer,
-                    "audit_element_geometry",
-                    None,
-                )
-                if not callable(audit_geometry):
-                    raise GenericActionAdapterError(
-                        "当前观察器没有独立目标几何审计，拒绝几何绑定动作。"
-                    )
-                recovered_input_scene = self._recover_omitted_verified_input_scene(
-                    requested_action,
-                    planned_scene,
-                    before,
-                )
-                if recovered_input_scene is None:
-                    recovered_input_scene = (
-                        self._recover_conflicting_clear_input_scene(
-                            requested_action,
-                            planned_scene,
-                            before,
-                        )
-                    )
-                if recovered_input_scene is not None:
-                    before = recovered_input_scene
-                local_input_recovery = (
-                    self._local_input_auxiliary_recovery_target(
-                        requested_action,
-                        planned_scene,
-                        before,
-                    )
-                )
-                if local_input_recovery is not None:
-                    planned_ids = (local_input_recovery.element_id,)
-                    # The full-scene confirmation pass omitted a model-generated
-                    # ordinary keyboard control.  Keep only the old descriptor,
-                    # bind it to a fingerprint from the actual fresh stable
-                    # frames, and require two independent crop audits before
-                    # semantic rebinding.  No old geometry survives this path.
-                    fresh_seed_scene = replace(
-                        planned_scene,
-                        fingerprint=frame_fingerprint(before_frames[-1]),
-                    )
-                    rebind_planned_scene = audit_geometry(
-                        frames=tuple(planned_frames),
-                        scene=planned_scene,
-                        element_ids=planned_ids,
-                    )
-                    before = audit_geometry(
-                        frames=before_frames,
-                        scene=fresh_seed_scene,
-                        element_ids=planned_ids,
-                    )
-                else:
-                    semantic_rebound = self._rebind_action(
-                        requested_action,
-                        planned_scene,
-                        before,
-                        typed_exact_target_label=typed_exact_target_label,
-                        local_frame_identity_verified=(
-                            local_frame_identity_verified
-                        ),
-                        require_geometry_overlap=False,
-                    )
-                    if requested_action.action == "drag":
-                        planned_ids = (
-                            str(
-                                requested_action.params.get(
-                                    "source_element_id"
-                                )
-                                or ""
-                            ),
-                            str(
-                                requested_action.params.get(
-                                    "destination_element_id"
-                                )
-                                or ""
-                            ),
-                        )
-                        fresh_ids = (
-                            str(
-                                semantic_rebound.params.get(
-                                    "source_element_id"
-                                )
-                                or ""
-                            ),
-                            str(
-                                semantic_rebound.params.get(
-                                    "destination_element_id"
-                                )
-                                or ""
-                            ),
-                        )
-                    else:
-                        planned_ids = (
-                            str(
-                                requested_action.params.get("element_id")
-                                or ""
-                            ),
-                        )
-                        fresh_ids = (
-                            str(
-                                semantic_rebound.params.get("element_id")
-                                or ""
-                            ),
-                        )
-                    if not (
-                        self._has_local_independent_geometry_attestation(
-                            planned_scene,
-                            planned_ids,
-                        )
-                        and self._has_local_independent_geometry_attestation(
-                            before,
-                            fresh_ids,
-                        )
-                    ):
-                        rebind_planned_scene = audit_geometry(
-                            frames=tuple(planned_frames),
-                            scene=planned_scene,
-                            element_ids=planned_ids,
-                        )
-                        before = audit_geometry(
-                            frames=before_frames,
-                            scene=before,
-                            element_ids=fresh_ids,
-                        )
+            # The fresh four-frame window has already proved the pixels are the
+            # same as the fingerprint-bound planning scene.  Re-reading those
+            # identical pixels with Qwen cannot add independent authority and
+            # formerly spent up to three extra calls (scene + two crops).
+            # Rebind the immutable canonical candidate against that same scene;
+            # bounds, uniqueness and controller reachability remain local gates.
             consensus_scene = self._apply_local_input_geometry_consensus(
                 requested_action,
                 rebind_planned_scene,
@@ -2537,17 +2512,6 @@ class GenericSingleActionAdapter:
         )
         if resolved.kind in self.PHYSICAL_KINDS:
             arm = getattr(self.robot, "arm_physical_execution", None)
-            audit = (
-                getattr(
-                    self.observer,
-                    "audit_coordinate_free_system_navigation_alignment",
-                    None,
-                )
-                if resolved.kind == "home"
-                else getattr(self.observer, "audit_camera_alignment", None)
-            )
-            if resolved.kind == "home" and not callable(audit):
-                audit = getattr(self.observer, "audit_camera_alignment", None)
             if not callable(arm) or not callable(clear_authorization):
                 raise GenericActionAdapterError(
                     "机械臂控制器未提供共享物理执行门禁，拒绝动作。",
@@ -2574,26 +2538,23 @@ class GenericSingleActionAdapter:
                     except Exception:
                         pass
                 else:
-                    if not callable(audit):
-                        raise GenericActionAdapterError(
-                            "观察器未提供独立方向审计，拒绝动作。",
-                            evidence=before_paths,
+                    orientation_credential = (
+                        self._single_step_scene_orientation_credential(
+                            scene=before,
+                            frames=before_frames,
                         )
-                    orientation_credential = audit(
-                        frames=before_frames,
-                        device_id=self.device_id,
-                        scene_fingerprint=before.fingerprint,
                     )
-                    audit_diagnostics = getattr(
-                        self.observer,
-                        "last_orientation_audit_diagnostics",
-                        {},
-                    )
-                    selected_index = (
-                        audit_diagnostics.get("selected_frame_index")
-                        if isinstance(audit_diagnostics, dict)
-                        else None
-                    )
+                    selected_index = len(before_frames) - 1
+                    try:
+                        self.observer.last_orientation_audit_diagnostics = {
+                            "audit_source": orientation_credential.source,
+                            "model_calls": 0,
+                            "single_step_scene_reused": True,
+                            "selected_frame_index": selected_index,
+                            "scene_fingerprint": before.fingerprint,
+                        }
+                    except Exception:
+                        pass
                 if (
                     isinstance(selected_index, int)
                     and 0 <= selected_index < len(before_paths)
@@ -2625,7 +2586,7 @@ class GenericSingleActionAdapter:
             except (OrientationSafetyError, RuntimeError, ValueError) as exc:
                 clear_authorization()
                 raise GenericActionAdapterError(
-                    f"动作前独立方向凭据校验失败：{exc}",
+                    f"动作前单步画面方向凭据校验失败：{exc}",
                     evidence=before_paths,
                 ) from exc
 
@@ -2938,6 +2899,33 @@ class GenericSingleActionAdapter:
                 # physical action, and it never grants action authority.
                 pass
 
+        post_action_context = _post_action_observation_context(
+            goal,
+            resolved,
+            physical_action_executed=physical_actions > 0,
+        )
+        post_entities = post_action_context.get("entities")
+        post_focus = (
+            post_entities.get("active_subgoal_visual_context")
+            if isinstance(post_entities, dict)
+            else None
+        )
+        post_goal_entities = (
+            post_focus.get("goal_entities")
+            if isinstance(post_focus, dict)
+            else None
+        )
+        post_focus_id = (
+            str(post_focus.get("subgoal_id") or "").strip()
+            if isinstance(post_focus, dict)
+            else ""
+        )
+        post_phase = (
+            str(post_goal_entities.get("observation_phase") or "").strip()
+            if isinstance(post_goal_entities, dict)
+            else ""
+        )
+
         return GenericActionExecutionResult(
             requested_action=requested_action,
             rebound_action=rebound,
@@ -2965,6 +2953,8 @@ class GenericSingleActionAdapter:
             before_frames=before_frames,
             before_frame_paths=before_paths,
             orientation_credential=orientation_credential,
+            post_action_focus_subgoal_id=post_focus_id,
+            post_action_observation_phase=post_phase,
         )
 
     def _local_input_geometry_consensus_bounds(

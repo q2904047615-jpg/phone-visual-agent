@@ -22,6 +22,8 @@ def classify_qwen_error(
         return "model_budget_exhausted"
     if "vision_model_identity_mismatch" in lowered:
         return "vision_model_identity_mismatch"
+    if "vision_step_contract_violation" in lowered:
+        return "vision_step_contract_violation"
     if "suite_timeout" in lowered or "整套" in text and "超时" in text:
         return "suite_timeout"
     if "case_timeout" in lowered or "单用例" in text and "超时" in text:

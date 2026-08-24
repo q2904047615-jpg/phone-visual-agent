@@ -58,6 +58,21 @@ POST_ACTION_TRANSITION_PROTOCOL_VERSION = (
     "2026-08-16-universal-post-action-transition-v1"
 )
 POST_ACTION_OUTCOMES = frozenset({"matched", "mismatched"})
+CORRECTIVE_RETRY_PROTOCOL_VERSION = (
+    "2026-08-24-fresh-observation-corrective-retry-v1"
+)
+CORRECTIVE_RETRY_IMPACTS = frozenset({"read_only", "navigation_only"})
+CORRECTIVE_RETRY_ACTION_KINDS = frozenset(
+    {
+        "back",
+        "dismiss_overlay",
+        "drag",
+        "home",
+        "long_press",
+        "swipe",
+        "tap_semantic",
+    }
+)
 MAX_VISIBLE_PRESENCE_ADVANCES_PER_OBSERVATION = 4
 _TRANSIENT_ACTION_KEYS = frozenset(
     {
@@ -75,6 +90,19 @@ _TRANSIENT_ACTION_KEYS = frozenset(
         "fingerprint",
     }
 )
+
+
+def _allows_fresh_observation_corrective_retry(
+    *,
+    impact: str,
+    action_kind: str,
+) -> bool:
+    """Return whether one freshly replanned physical correction is allowed."""
+
+    return (
+        str(impact or "").strip() in CORRECTIVE_RETRY_IMPACTS
+        and str(action_kind or "").strip() in CORRECTIVE_RETRY_ACTION_KINDS
+    )
 
 
 def _validate_visible_completion_condition_progress(
@@ -1080,6 +1108,7 @@ class UniversalAgentSessionState:
     local_exact_input_authority: bool = field(default=False, repr=False)
     automatic_loop_enabled: bool = False
     auto_pause_reason: str = ""
+    corrective_retry_history: list[dict[str, Any]] = field(default_factory=list)
     history: list[dict[str, Any]] = field(default_factory=list)
     evidence_paths: list[str] = field(default_factory=list)
     last_post_action_transition: dict[str, Any] | None = None
@@ -1159,6 +1188,10 @@ class UniversalAgentSessionState:
             "evidence": list(dict.fromkeys(self.evidence_paths)),
             "automatic_loop_enabled": self.automatic_loop_enabled,
             "auto_pause_reason": self.auto_pause_reason,
+            "corrective_retry_protocol": CORRECTIVE_RETRY_PROTOCOL_VERSION,
+            "corrective_retry_history": [
+                dict(item) for item in self.corrective_retry_history
+            ],
             "post_action_transition_protocol": (
                 POST_ACTION_TRANSITION_PROTOCOL_VERSION
             ),
@@ -6273,13 +6306,15 @@ class UniversalAgentOrchestrator:
         max_physical_actions: int = 12,
         max_iterations: int = 24,
     ) -> dict[str, Any]:
-        """Advance only read-only/navigation work with fresh one-shot scopes.
+        """Advance read-only/navigation work with fresh one-shot scopes.
 
         Every iteration consumes the exact authority already bound to the
         latest revision/observation/decision, executes at most one physical
         action, then re-observes and replans through ``_confirm_one_locked``.
-        External/unknown work, mismatch, failure and exhausted budgets stop the
-        loop; a physical action is never retried automatically.
+        External/unknown work and exhausted budgets stop the loop.  A semantic
+        mismatch may schedule exactly one corrective physical action, but only
+        after a new observation, new canonical candidate, new geometry and new
+        one-shot scope; the consumed action/coordinate is never replayed.
         """
 
         if self.device_registry.active_session(session.device_id) != session.session_id:
@@ -6301,6 +6336,7 @@ class UniversalAgentOrchestrator:
 
         start_actions = session.physical_actions
         iterations = 0
+        pending_corrective_retry: dict[str, Any] | None = None
         session.automatic_loop_enabled = True
         session.auto_pause_reason = ""
         try:
@@ -6320,13 +6356,122 @@ class UniversalAgentOrchestrator:
                     current = graph.active_subgoal() if graph is not None else None
                     impact = current.external_impact if current is not None else "unknown"
                     if impact not in {"read_only", "navigation_only"}:
+                        if pending_corrective_retry is not None:
+                            pending_corrective_retry["status"] = (
+                                "stopped_before_corrective_action"
+                            )
+                            pending_corrective_retry["stop_reason"] = (
+                                "重新规划后的子目标不再属于普通只读或导航动作。"
+                            )
+                            pending_corrective_retry = None
                         session.auto_pause_reason = (
                             "下一子目标可能产生外部影响或仍未知，已在物理动作前停止。"
                         )
                         break
                     if session.status == "needs_reobservation":
+                        prior_observation_id = str(
+                            getattr(session.trusted_observation, "observation_id", "")
+                            or ""
+                        )
                         self._refresh_decision_locked(session)
                         iterations += 1
+                        if pending_corrective_retry is not None:
+                            refreshed_observation_id = str(
+                                getattr(
+                                    session.trusted_observation,
+                                    "observation_id",
+                                    "",
+                                )
+                                or ""
+                            )
+                            refreshed_fingerprint = str(
+                                getattr(
+                                    session.trusted_observation,
+                                    "fingerprint",
+                                    "",
+                                )
+                                or ""
+                            )
+                            pending_corrective_retry.update(
+                                {
+                                    "refresh_observation_id": (
+                                        refreshed_observation_id
+                                    ),
+                                    "refresh_fingerprint": refreshed_fingerprint,
+                                }
+                            )
+                            if (
+                                not refreshed_observation_id
+                                or refreshed_observation_id == prior_observation_id
+                            ):
+                                pending_corrective_retry["status"] = (
+                                    "stopped_before_corrective_action"
+                                )
+                                pending_corrective_retry["stop_reason"] = (
+                                    "纠正重观察没有形成新的 observation。"
+                                )
+                                session.status = "failed"
+                                session.failed_reason = (
+                                    pending_corrective_retry["stop_reason"]
+                                )
+                                session.auto_pause_reason = session.failed_reason
+                                pending_corrective_retry = None
+                                break
+                            refreshed_graph = session.task_graph
+                            refreshed_current = (
+                                refreshed_graph.active_subgoal()
+                                if refreshed_graph is not None
+                                else None
+                            )
+                            refreshed_subgoal_id = str(
+                                getattr(refreshed_current, "subgoal_id", "") or ""
+                            )
+                            if session.status == "succeeded":
+                                pending_corrective_retry["status"] = (
+                                    "resolved_by_reobservation"
+                                )
+                                pending_corrective_retry = None
+                            elif (
+                                refreshed_subgoal_id
+                                and refreshed_subgoal_id
+                                != pending_corrective_retry.get(
+                                    "source_subgoal_id"
+                                )
+                            ):
+                                pending_corrective_retry["status"] = (
+                                    "resolved_by_replan"
+                                )
+                                pending_corrective_retry[
+                                    "replanned_subgoal_id"
+                                ] = refreshed_subgoal_id
+                                pending_corrective_retry = None
+                            elif session.status == "awaiting_confirmation":
+                                pending_corrective_retry["status"] = (
+                                    "ready_for_corrective_action"
+                                )
+                            elif session.status == "needs_reobservation":
+                                pending_corrective_retry["status"] = (
+                                    "stopped_before_corrective_action"
+                                )
+                                pending_corrective_retry["stop_reason"] = (
+                                    "一次新观察仍未形成唯一可执行动作。"
+                                )
+                                session.status = "failed"
+                                session.failed_reason = (
+                                    pending_corrective_retry["stop_reason"]
+                                )
+                                session.auto_pause_reason = session.failed_reason
+                                pending_corrective_retry = None
+                                break
+                            else:
+                                pending_corrective_retry["status"] = (
+                                    "stopped_before_corrective_action"
+                                )
+                                pending_corrective_retry["stop_reason"] = (
+                                    session.failed_reason
+                                    or f"重新观察后状态为 {session.status}。"
+                                )
+                                pending_corrective_retry = None
                         continue
                     if session.status != "awaiting_confirmation":
                         session.auto_pause_reason = (
@@ -6339,6 +6484,62 @@ class UniversalAgentOrchestrator:
                             "安全自动推进缺少当前一次性动作作用域。"
                         )
                     before = session.physical_actions
+                    action_kind = str(
+                        getattr(
+                            getattr(
+                                getattr(session.qwen_decision, "proposal", None),
+                                "action",
+                                None,
+                            ),
+                            "action",
+                            "",
+                        )
+                        or ""
+                    )
+                    is_corrective_action = bool(
+                        pending_corrective_retry is not None
+                        and pending_corrective_retry.get("status")
+                        == "ready_for_corrective_action"
+                    )
+                    if is_corrective_action and not _allows_fresh_observation_corrective_retry(
+                        impact=impact,
+                        action_kind=action_kind,
+                    ):
+                        assert pending_corrective_retry is not None
+                        pending_corrective_retry["status"] = (
+                            "stopped_before_corrective_action"
+                        )
+                        pending_corrective_retry["stop_reason"] = (
+                            "新计划不再是允许自动纠正的普通导航动作。"
+                        )
+                        session.auto_pause_reason = pending_corrective_retry[
+                            "stop_reason"
+                        ]
+                        pending_corrective_retry = None
+                        break
+                    if is_corrective_action:
+                        assert pending_corrective_retry is not None
+                        pending_corrective_retry.update(
+                            {
+                                "corrective_action_kind": action_kind,
+                                "corrective_observation_id": str(
+                                    getattr(
+                                        session.trusted_observation,
+                                        "observation_id",
+                                        "",
+                                    )
+                                    or ""
+                                ),
+                                "corrective_fingerprint": str(
+                                    getattr(
+                                        session.trusted_observation,
+                                        "fingerprint",
+                                        "",
+                                    )
+                                    or ""
+                                ),
+                            }
+                        )
                     result = self._confirm_one_locked(session, authority.scope())
                     iterations += 1
                     delta = session.physical_actions - before
@@ -6346,14 +6547,114 @@ class UniversalAgentOrchestrator:
                         raise UniversalAgentOrchestratorError(
                             "单轮安全自动推进产生了超过一个物理动作。"
                         )
+                    if getattr(result, "action_outcome", "matched") != "matched":
+                        if is_corrective_action:
+                            assert pending_corrective_retry is not None
+                            pending_corrective_retry["status"] = "exhausted"
+                            pending_corrective_retry["corrective_outcome"] = (
+                                "mismatched"
+                            )
+                            pending_corrective_retry["stop_reason"] = (
+                                "新观察重新规划后的唯一纠正动作仍未产生预期语义变化。"
+                            )
+                            session.status = "failed"
+                            session.failed_reason = pending_corrective_retry[
+                                "stop_reason"
+                            ]
+                            session.qwen_decision = None
+                            session.controller_decision = None
+                            session.confirmation_authority = None
+                            session.auto_pause_reason = session.failed_reason
+                            pending_corrective_retry = None
+                            break
+                        if not (
+                            session.status
+                            in {"needs_reobservation", "awaiting_confirmation"}
+                            and _allows_fresh_observation_corrective_retry(
+                                impact=impact,
+                                action_kind=action_kind,
+                            )
+                        ):
+                            session.auto_pause_reason = (
+                                "当前动作不属于一次新观察纠正范围，已按具体结果停止。"
+                            )
+                            break
+                        if (
+                            session.physical_actions - start_actions
+                            >= max_physical_actions
+                        ):
+                            session.status = "failed"
+                            session.failed_reason = (
+                                "动作未产生预期变化，但本次物理动作预算不足以执行一次纠正。"
+                            )
+                            session.auto_pause_reason = session.failed_reason
+                            break
+                        # A mismatched action may already have produced a
+                        # provisional next decision from the same post-action
+                        # response.  It is not fresh enough to authorize the
+                        # corrective action: invalidate it and force one new
+                        # observation/candidate/scope.
+                        session.status = "needs_reobservation"
+                        session.qwen_decision = None
+                        session.controller_decision = None
+                        session.confirmation_authority = None
+                        transition = dict(
+                            session.last_post_action_transition or {}
+                        )
+                        receipt = dict(transition.get("receipt") or {})
+                        pending_corrective_retry = {
+                            "protocol_version": (
+                                CORRECTIVE_RETRY_PROTOCOL_VERSION
+                            ),
+                            "correction_id": f"correction_{uuid.uuid4().hex}",
+                            "status": "needs_reobservation",
+                            "source_receipt_id": str(
+                                receipt.get("receipt_id") or ""
+                            ),
+                            "source_subgoal_id": str(
+                                receipt.get("subgoal_id")
+                                or getattr(current, "subgoal_id", "")
+                                or ""
+                            ),
+                            "source_action_kind": str(
+                                receipt.get("action_kind") or action_kind
+                            ),
+                            "source_before_observation_id": str(
+                                receipt.get("before_observation_id") or ""
+                            ),
+                            "source_after_observation_id": str(
+                                receipt.get("after_observation_id") or ""
+                            ),
+                            "source_action_digest": str(
+                                receipt.get("action_digest") or ""
+                            ),
+                            "scheduled_after_physical_action": (
+                                session.physical_actions
+                            ),
+                        }
+                        session.corrective_retry_history.append(
+                            pending_corrective_retry
+                        )
+                        session.auto_pause_reason = ""
+                        continue
+                    if is_corrective_action:
+                        assert pending_corrective_retry is not None
+                        pending_corrective_retry["status"] = "matched"
+                        pending_corrective_retry["corrective_outcome"] = "matched"
+                        pending_corrective_retry = None
                     if session.physical_actions - start_actions >= max_physical_actions:
                         session.auto_pause_reason = "已达到本次安全物理动作预算。"
                         break
-                    if getattr(result, "action_outcome", "matched") != "matched":
-                        session.auto_pause_reason = (
-                            "动作后没有匹配预期变化；已停止且不会自动重试。"
-                        )
-                        break
+                if pending_corrective_retry is not None:
+                    pending_corrective_retry["status"] = (
+                        "stopped_before_corrective_action"
+                    )
+                    pending_corrective_retry["stop_reason"] = (
+                        "自动循环迭代预算耗尽，纠正动作未执行。"
+                    )
+                    session.status = "failed"
+                    session.failed_reason = pending_corrective_retry["stop_reason"]
+                    session.auto_pause_reason = session.failed_reason
                 if not session.auto_pause_reason:
                     session.auto_pause_reason = {
                         "awaiting_effect_confirmation": "下一子目标需要一次效果确认。",

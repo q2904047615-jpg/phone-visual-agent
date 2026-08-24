@@ -49,6 +49,7 @@ from universal_agent_orchestrator import (
     VerifiedAppSurfaceLineage,
     _action_digest,
     _action_equivalence_digest,
+    _allows_fresh_observation_corrective_retry,
     _validate_visible_completion_condition_progress,
 )
 
@@ -8104,6 +8105,168 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertIn("预期语义变化", result["pause_reason"])
         self.assertEqual(1, adapter.execute_calls)
         self.assertEqual(1, session.physical_actions)
+
+    def test_autonomous_loop_reobserves_then_corrects_one_navigation_noop(self) -> None:
+        initial = _graph()
+        retained = replace(initial, revision=2)
+        completed = _completed_graph(retained)
+
+        class FusedSequenceAdapter(SequenceExecutingAdapter):
+            def execute(self, **kwargs):
+                result = super().execute(**kwargs)
+                return replace(
+                    result,
+                    post_action_focus_subgoal_id="anticipated-next-subgoal",
+                    post_action_observation_phase=(
+                        FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
+                    ),
+                )
+
+        planner = SequenceDeepSeekPlanner(initial, retained, completed)
+        qwen = SequenceQwenObserver("action", "action")
+        adapter = FusedSequenceAdapter(
+            _scene(),
+            (
+                _scene(fingerprint="camera-noise-only"),
+                "mismatched",
+                ("动作后页面没有可验证的语义变化。",),
+            ),
+            (
+                _scene(
+                    fingerprint="opened-details",
+                    meaning="open_more",
+                    label="查看更多",
+                ),
+                "matched",
+                (),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, _adapter = self._started(
+                temp,
+                planner=planner,
+                qwen=qwen,
+                adapter=adapter,
+            )
+            session.goal_draft = replace(
+                session.goal_draft,
+                entities={
+                    **session.goal_draft.entities,
+                    "next_subgoal_visual_context": {
+                        "subgoal_id": "anticipated-next-subgoal"
+                    },
+                },
+            )
+
+            result = orchestrator.run_autonomous_safe_loop(
+                session,
+                max_physical_actions=3,
+                max_iterations=6,
+            )
+            report = json.loads(
+                (Path(temp) / "report.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("succeeded", result["status"])
+        self.assertEqual(2, result["physical_actions"])
+        self.assertEqual(3, result["iterations"])
+        self.assertEqual(2, adapter.execute_calls)
+        self.assertEqual(2, session.physical_actions)
+        self.assertEqual(2, len(qwen.calls))
+        self.assertEqual("matched", session.corrective_retry_history[0]["status"])
+        self.assertNotEqual(
+            session.corrective_retry_history[0]["source_after_observation_id"],
+            session.corrective_retry_history[0]["corrective_observation_id"],
+        )
+        self.assertEqual(
+            session.corrective_retry_history,
+            report["session"]["corrective_retry_history"],
+        )
+
+    def test_autonomous_loop_stops_after_one_fresh_corrective_noop(self) -> None:
+        initial = _graph()
+        retained = replace(initial, revision=2)
+        retained_again = replace(initial, revision=3)
+
+        class FusedSequenceAdapter(SequenceExecutingAdapter):
+            def execute(self, **kwargs):
+                result = super().execute(**kwargs)
+                return replace(
+                    result,
+                    post_action_focus_subgoal_id="anticipated-next-subgoal",
+                    post_action_observation_phase=(
+                        FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
+                    ),
+                )
+
+        planner = SequenceDeepSeekPlanner(initial, retained, retained_again)
+        qwen = SequenceQwenObserver("action", "action", "action")
+        adapter = FusedSequenceAdapter(
+            _scene(),
+            (
+                _scene(fingerprint="first-noop"),
+                "mismatched",
+                ("第一次点击没有产生语义变化。",),
+            ),
+            (
+                _scene(fingerprint="second-noop"),
+                "mismatched",
+                ("纠正点击仍没有产生语义变化。",),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator, session, _planner, _qwen, _adapter = self._started(
+                temp,
+                planner=planner,
+                qwen=qwen,
+                adapter=adapter,
+            )
+            session.goal_draft = replace(
+                session.goal_draft,
+                entities={
+                    **session.goal_draft.entities,
+                    "next_subgoal_visual_context": {
+                        "subgoal_id": "anticipated-next-subgoal"
+                    },
+                },
+            )
+
+            result = orchestrator.run_autonomous_safe_loop(
+                session,
+                max_physical_actions=4,
+                max_iterations=8,
+            )
+
+        self.assertEqual("failed", result["status"])
+        self.assertEqual(2, result["physical_actions"])
+        self.assertEqual(2, adapter.execute_calls)
+        self.assertEqual(3, len(qwen.calls))
+        self.assertEqual(
+            "exhausted",
+            session.corrective_retry_history[0]["status"],
+        )
+        self.assertIn("纠正动作仍未产生", session.failed_reason)
+        self.assertIsNone(session.confirmation_authority)
+
+    def test_fresh_corrective_retry_excludes_input_and_external_effects(self) -> None:
+        self.assertTrue(
+            _allows_fresh_observation_corrective_retry(
+                impact="navigation_only",
+                action_kind="tap_semantic",
+            )
+        )
+        self.assertFalse(
+            _allows_fresh_observation_corrective_retry(
+                impact="navigation_only",
+                action_kind="input_verified_text",
+            )
+        )
+        self.assertFalse(
+            _allows_fresh_observation_corrective_retry(
+                impact="external_state",
+                action_kind="tap_semantic",
+            )
+        )
 
 
 class DeviceTaskRegistryTests(unittest.TestCase):

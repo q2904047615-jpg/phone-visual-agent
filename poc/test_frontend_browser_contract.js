@@ -482,14 +482,15 @@ test("multi-device console restores only the selected device session", { timeout
   }
 });
 
-test("read-only recovered capability history does not block the ordinary agent", { timeout: 30000 }, async () => {
+test("read-only recovered capability history is not restored into the current panel", { timeout: 30000 }, async () => {
   Object.values(requests).forEach(items => { items.length = 0; });
   const server = createServer({
     restoredCapabilityTrials: [readOnlyRecoveredCapabilityTrial()],
   });
   const { browser, page } = await launchFixturePage(server);
   try {
-    await page.locator("#capabilityBadge").getByText("只读恢复").waitFor({ timeout: 5000 });
+    await page.locator("#capabilityBadge").getByText("未开始").waitFor({ timeout: 5000 });
+    assert.equal(await page.locator("#resetCapabilityTrial").count(), 0);
     assert.equal(await page.locator("#startSupervisedAgent").isEnabled(), true);
     assert.equal(await page.locator("#deviceId").isEnabled(), true);
 
@@ -507,7 +508,7 @@ test("read-only recovered capability history does not block the ordinary agent",
 test("an active capability trial still blocks the ordinary agent", { timeout: 30000 }, async () => {
   Object.values(requests).forEach(items => { items.length = 0; });
   const server = createServer({
-    restoredCapabilityTrials: [capabilityTrial()],
+    restoredCapabilityTrials: [capabilityTrial(), readOnlyRecoveredCapabilityTrial()],
   });
   const { browser, page } = await launchFixturePage(server);
   try {

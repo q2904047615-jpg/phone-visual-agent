@@ -1056,7 +1056,10 @@ async function restoreCapabilityTrial() {
   try {
     const response = await api("/api/capability-acceptance");
     const trials = Array.isArray(response.trials) ? response.trials : [];
-    const matching = trials.filter(item => String(item.device_id || "") === state.deviceId);
+    const matching = trials.filter(item => {
+      const view = Protocol.adaptCapabilityTrial(item);
+      return view.deviceId === state.deviceId && !view.readOnlyRecovered;
+    });
     if (!matching.length) return;
     state.capabilityTrial = matching[matching.length - 1];
     state.capabilityDeviceId = state.deviceId;

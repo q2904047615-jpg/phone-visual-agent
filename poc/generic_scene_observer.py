@@ -2183,6 +2183,8 @@ def _needs_foreground_app_identity_audit(
 ) -> bool:
     """Audit unresolved identity only when structured page facts support it."""
 
+    if _current_surface_input_does_not_require_app_identity(context):
+        return False
     foreground = str(scene.foreground_app_id or "").strip().casefold()
     if _is_foreground_app_identity_placeholder(foreground):
         return True
@@ -2202,6 +2204,35 @@ def _needs_foreground_app_identity_audit(
         scene,
         target_app_id=target_app,
         target_app_name=str(context.get("app_name") or "").strip(),
+    )
+
+
+def _current_surface_input_does_not_require_app_identity(
+    context: dict[str, Any],
+) -> bool:
+    """Keep App-brand discovery out of an exact typed current-surface task."""
+
+    if not _goal_requests_input(context):
+        return False
+    if str(context.get("app_id") or "").strip().casefold() != "current_surface":
+        return False
+    entities = context.get("entities")
+    if not isinstance(entities, dict):
+        return False
+    target_apps = entities.get("target_apps", [])
+    if not isinstance(target_apps, list) or any(
+        isinstance(item, str) and item.strip() for item in target_apps
+    ):
+        return False
+    focused = _active_subgoal_visual_context(context)
+    goal_entities = (
+        focused.get("goal_entities")
+        if focused is not context and isinstance(focused, dict)
+        else entities
+    )
+    return bool(
+        isinstance(goal_entities, dict)
+        and goal_entities.get("target_surface") == "current_surface"
     )
 
 

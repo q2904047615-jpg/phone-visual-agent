@@ -18,6 +18,7 @@ from input_value_lineage import (
     TypedInputLineage,
     TypedInputLineageStore,
     _surface_descriptor,
+    build_pending_chinese_preedit_lineage,
     build_pending_ime_candidate_lineage,
     build_pending_input_state_lineage,
     build_pending_literal_lineage,
@@ -398,6 +399,35 @@ def resolved_text(*, prior: str = "", fragment: str = "longinput") -> dict:
         "formal_candidate_id": "candidate-text-1",
         "formal_transition": {},
     }
+
+
+def resolved_chinese_preedit(
+    *,
+    prior: str = "",
+    fragment: str = "你好",
+    pinyin: str = "nihao",
+    target_text: str | None = None,
+) -> dict:
+    expected = prior + fragment
+    action = resolved_text(prior=prior, fragment=fragment)
+    action.update(
+        {
+            "text": target_text if target_text is not None else expected,
+            "input_method": "chinese_pinyin",
+            "input_pinyin": pinyin,
+            "expected_effect": {
+                "element_state": {
+                    "meaning": "application_text_input",
+                    "states": {
+                        "value": prior,
+                        "ime_preedit_text": pinyin,
+                        "ime_exact_candidate_text": fragment,
+                    },
+                }
+            },
+        }
+    )
+    return action
 
 
 def input_audit_raw(value: str, literal: str | None = "x") -> str:
@@ -1708,6 +1738,82 @@ class TypedInputLineageTests(unittest.TestCase):
                 resolved_action=action,
                 before_scene=unknown_untyped,
             )
+
+    def test_pending_chinese_preedit_lineage_keeps_typed_prefix_across_newline(
+        self,
+    ) -> None:
+        cases = (
+            ("", "你好", "nihao", "你好\n世界"),
+            ("你好\n", "世界", "shijie", "你好\n世界"),
+        )
+        for prior, fragment, pinyin, target_text in cases:
+            with self.subTest(prior=prior, fragment=fragment):
+                before = scene(prior, "before-chinese-preedit")
+                before["foreground_app_id"] = "unknown"
+                before["app_id"] = "unknown"
+                before["elements"][0]["states"].update(
+                    {
+                        "input_field_id": "input_field_1",
+                        "input_multiline": True,
+                        "keyboard_layout": "qwerty",
+                        "keyboard_input_mode": "chinese_pinyin",
+                        "keyboard_geometry": {"anchors": {"q": [0.1, 0.8]}},
+                    }
+                )
+                pending = build_pending_chinese_preedit_lineage(
+                    device_id=DEVICE,
+                    resolved_action=resolved_chinese_preedit(
+                        prior=prior,
+                        fragment=fragment,
+                        pinyin=pinyin,
+                        target_text=target_text,
+                    ),
+                    before_scene=before,
+                    recorded_at_epoch=1000.0,
+                )
+                self.assertEqual(
+                    "pending_verified_chinese_preedit_action",
+                    pending.source,
+                )
+                self.assertEqual(prior + fragment, pending.exact_value)
+                self.assertEqual("input_field_1", pending.input_field_id)
+                self.assertTrue(
+                    pending.matches_typed_context(
+                        device_id=DEVICE,
+                        app_id="unknown",
+                        screen_id="editor",
+                        input_field_id="input_field_1",
+                        now_epoch=1000.0,
+                    )
+                )
+
+    def test_pending_chinese_preedit_lineage_rejects_wrong_authority_or_mode(
+        self,
+    ) -> None:
+        before = scene("", "before-chinese-preedit")
+        before["elements"][0]["states"].update(
+            {
+                "input_field_id": "input_field_1",
+                "keyboard_layout": "qwerty",
+                "keyboard_input_mode": "chinese_pinyin",
+                "keyboard_geometry": {"anchors": {"q": [0.1, 0.8]}},
+            }
+        )
+        wrong_pinyin = resolved_chinese_preedit(pinyin="shijie")
+        wrong_effect = resolved_chinese_preedit()
+        wrong_effect["expected_effect"]["element_state"]["states"][
+            "ime_exact_candidate_text"
+        ] = "您好"
+        direct = resolved_chinese_preedit()
+        direct["input_method"] = "direct_latin"
+        for action in (wrong_pinyin, wrong_effect, direct):
+            with self.subTest(action=action):
+                with self.assertRaises(InputValueLineageError):
+                    build_pending_chinese_preedit_lineage(
+                        device_id=DEVICE,
+                        resolved_action=action,
+                        before_scene=before,
+                    )
 
     def test_pending_text_preedit_preserves_same_typed_multiline_prefix(self) -> None:
         prior = "first\n"

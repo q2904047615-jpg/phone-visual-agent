@@ -11,8 +11,10 @@ from typing import Any
 
 from PIL import Image, ImageOps
 
+from verified_text_transaction import VerifiedTextTransactionError, local_pinyin
 
-TYPED_INPUT_LINEAGE_VERSION = "2026-08-24-typed-input-lineage-v5"
+
+TYPED_INPUT_LINEAGE_VERSION = "2026-08-24-typed-input-lineage-v6"
 DEFAULT_LINEAGE_TTL_SECONDS = 6 * 60 * 60
 SURFACE_DESCRIPTOR_WIDTH = 32
 SURFACE_DESCRIPTOR_HEIGHT = 16
@@ -21,6 +23,7 @@ PENDING_INPUT_LINEAGE_SOURCES = frozenset(
     {
         "pending_verified_literal_action",
         "pending_verified_text_action",
+        "pending_verified_chinese_preedit_action",
         "pending_verified_input_state_action",
         "pending_verified_ime_candidate_action",
         "pending_verified_newline_action",
@@ -30,6 +33,7 @@ NEWLINE_INPUT_LINEAGE_SOURCES = frozenset(
     {
         "pending_verified_newline_action",
         "pending_verified_text_action",
+        "pending_verified_chinese_preedit_action",
         "pending_verified_ime_candidate_action",
         "verified_live_newline_action",
         "verified_live_text_action",
@@ -1052,6 +1056,69 @@ def build_pending_text_lineage(
     return record
 
 
+def build_pending_chinese_preedit_lineage(
+    *,
+    device_id: str,
+    resolved_action: dict[str, Any],
+    before_scene: dict[str, Any],
+    recorded_at_epoch: float | None = None,
+) -> TypedInputLineage:
+    """Bind returned deterministic pinyin keys to the same typed input field."""
+
+    before_input, _prior, expected, _fragment, pinyin = (
+        _validated_chinese_preedit_action_chain(resolved_action, before_scene)
+    )
+    app_id = before_scene.get("app_id")
+    screen_id = before_scene.get("screen_id")
+    before_fingerprint = before_scene.get("fingerprint")
+    input_field_id = _typed_input_field_id(before_input)
+    if (
+        not isinstance(app_id, str)
+        or not app_id.strip()
+        or not isinstance(screen_id, str)
+        or not screen_id.strip()
+        or screen_id == "unknown"
+        or not isinstance(before_fingerprint, str)
+        or not before_fingerprint.strip()
+        or before_fingerprint == "unknown"
+        or (app_id == "unknown" and input_field_id == "unknown")
+    ):
+        raise InputValueLineageError("临时中文预编辑连续性缺少明确输入表面。")
+    action_digest = _canonical_digest(resolved_action)
+    receipt_digest = _canonical_digest(
+        {
+            "protocol_version": "2026-08-24-verified-chinese-preedit-v1",
+            "stage": "controller_call_returned",
+            "device_id": device_id,
+            "action_digest": action_digest,
+            "before_fingerprint": before_fingerprint,
+            "expected_value": expected,
+            "input_pinyin": pinyin,
+        }
+    )
+    record = TypedInputLineage(
+        version=TYPED_INPUT_LINEAGE_VERSION,
+        device_id=device_id,
+        exact_value=expected,
+        app_id=app_id,
+        screen_id=screen_id,
+        input_meaning="application_text_input",
+        input_field_id=input_field_id,
+        input_bounds=_valid_bounds(before_input["bounds"]),
+        before_fingerprint=before_fingerprint,
+        after_fingerprint="pending-visual-verification",
+        action_digest=action_digest,
+        receipt_digest=receipt_digest,
+        surface_descriptors=(),
+        recorded_at_epoch=(
+            time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
+        ),
+        source="pending_verified_chinese_preedit_action",
+    )
+    record.validate()
+    return record
+
+
 def _validated_newline_action_chain(
     resolved: Any,
     before_scene: Any,
@@ -1594,6 +1661,87 @@ def _validated_text_action_chain(
     ):
         raise InputValueLineageError("文字输入分段的 prior/fragment/expected 链无效。")
     return _single_input(before_scene, expected_value=prior), prior, expected, fragment
+
+
+def _validated_chinese_preedit_action_chain(
+    resolved: Any,
+    before_scene: Any,
+) -> tuple[dict[str, Any], str, str, str, str]:
+    if (
+        not isinstance(resolved, dict)
+        or resolved.get("kind") != "input_verified_text"
+        or resolved.get("input_method") != "chinese_pinyin"
+        or not isinstance(before_scene, dict)
+    ):
+        raise InputValueLineageError(
+            "中文预编辑连续性只接受已解析的确定性拼音分段。"
+        )
+    prior = resolved.get("prior_input_value")
+    expected = resolved.get("expected_input_value")
+    fragment = resolved.get("input_fragment")
+    pinyin = resolved.get("input_pinyin")
+    authorized_text = resolved.get("text")
+    target_id = resolved.get("target_element_id")
+    expected_effect = resolved.get("expected_effect")
+    expected_state = (
+        expected_effect.get("element_state")
+        if isinstance(expected_effect, dict)
+        else None
+    )
+    expected_states = (
+        expected_state.get("states")
+        if isinstance(expected_state, dict)
+        else None
+    )
+    if (
+        not isinstance(prior, str)
+        or not isinstance(expected, str)
+        or not isinstance(fragment, str)
+        or not fragment
+        or not isinstance(pinyin, str)
+        or not pinyin
+        or not isinstance(authorized_text, str)
+        or not authorized_text.startswith(expected)
+        or not isinstance(target_id, str)
+        or not target_id
+        or "\r" in prior
+        or "\r" in expected
+        or "\r" in fragment
+        or "\n" in fragment
+        or expected != prior + fragment
+        or expected_state is None
+        or expected_state.get("meaning") != "application_text_input"
+        or expected_states
+        != {
+            "value": prior,
+            "ime_preedit_text": pinyin,
+            "ime_exact_candidate_text": fragment,
+        }
+    ):
+        raise InputValueLineageError(
+            "中文预编辑分段的授权前缀、拼音或 expected 链无效。"
+        )
+    try:
+        deterministic_pinyin = local_pinyin(fragment)
+    except VerifiedTextTransactionError as exc:
+        raise InputValueLineageError("中文预编辑分段不是确定性中文拼音。") from exc
+    if pinyin != deterministic_pinyin:
+        raise InputValueLineageError("中文预编辑分段的拼音与中文片段不一致。")
+    before_input = _single_input(before_scene, expected_value=prior)
+    input_states = before_input.get("states")
+    if (
+        before_input.get("element_id") != target_id
+        or _typed_input_field_id(before_input) == "unknown"
+        or not isinstance(input_states, dict)
+        or input_states.get("keyboard_layout") != "qwerty"
+        or input_states.get("keyboard_input_mode") != "chinese_pinyin"
+        or not isinstance(input_states.get("keyboard_geometry"), dict)
+        or input_states.get("ime_preedit_text") not in (None, "")
+    ):
+        raise InputValueLineageError(
+            "中文预编辑分段没有绑定同一 typed 中文 QWERTY 输入框。"
+        )
+    return before_input, prior, expected, fragment, pinyin
 
 
 def _record_from_text_execution(

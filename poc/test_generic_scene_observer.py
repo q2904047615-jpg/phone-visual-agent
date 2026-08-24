@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw, ImageFilter
@@ -640,7 +641,9 @@ class GenericSceneObserverTests(unittest.TestCase):
                 }
             }
         }
-        provider = SequenceProvider([first_compact, first_audit, second_audit])
+        provider = SequenceProvider(
+            [first_compact, first_audit, second_audit, second_audit]
+        )
         observer = GenericSceneObserver(provider)
         first = observer.observe(
             frames=stable_frames((30, 40, 50)),
@@ -682,6 +685,33 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
         self.assertEqual(1, observer.last_diagnostics["model_calls"])
         self.assertEqual("ab", continued.get_element("local_audited_input_1").states["value"])
+
+        chinese_preedit_lineage = replace(
+            lineage,
+            source="pending_verified_chinese_preedit_action",
+            action_digest="c" * 64,
+            receipt_digest="d" * 64,
+        )
+        chinese_preedit_lineage.validate()
+        continued_after_preedit = observer.observe(
+            frames=stable_frames((70, 80, 90)),
+            goal_context=context,
+            device_id="device-continuation",
+            input_lineage_override=chinese_preedit_lineage,
+            prior_scene=first,
+        )
+
+        self.assertEqual(4, provider.calls)
+        self.assertTrue(
+            observer.last_diagnostics["compact_reused_from_typed_lineage"]
+        )
+        self.assertEqual(1, observer.last_diagnostics["model_calls"])
+        self.assertEqual(
+            "ab",
+            continued_after_preedit.get_element("local_audited_input_1").states[
+                "value"
+            ],
+        )
 
     def test_goal_context_still_rejects_genuinely_excessive_nesting(self) -> None:
         context = {
@@ -11325,6 +11355,120 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual(
             2,
             len(audit_messages[1]["content"]),
+        )
+
+    def test_exact_current_surface_input_skips_unneeded_app_identity_call(self) -> None:
+        compact = scene_payload()
+        compact["foreground_app_id"] = "current_foreground"
+        compact["screen_id"] = "input_page"
+        compact["summary"] = "当前唯一正文输入框和中文QWERTY键盘可见"
+        compact["elements"] = [
+            {
+                "element_id": "model-input",
+                "role": "input",
+                "meaning": "text_input_field",
+                "label": "",
+                "bounds": [140, 270, 860, 450],
+                "confidence": 0.98,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "focused": True,
+                    "value": "",
+                },
+                "evidence": ["正文输入框和光标可见"],
+            }
+        ]
+        input_audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="body",
+                    bounds=[140, 270, 860, 450],
+                    text="",
+                    field_labels=["正文"],
+                    caret_line_index=0,
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [80, 570, 920, 1000],
+                "layout": "qwerty",
+                "input_mode": "chinese_pinyin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [115, 704],
+                    "p": [875, 704],
+                    "a": [157, 773],
+                    "l": [832, 773],
+                    "z": [241, 844],
+                    "m": [747, 844],
+                    "backspace": [875, 844],
+                },
+                "mode_switch": None,
+            },
+        )
+        context = {
+            "app_id": "current_surface",
+            "app_name": "当前界面",
+            "objective": "使当前唯一输入框内容精确等于授权文字",
+            "entities": {
+                "target_surface": "current_surface",
+                "input_text": "你好\n世界",
+                "target_apps": [],
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_exact_text",
+                    "objective": "在当前唯一输入框中逐字输入授权文字",
+                    "constraints": ["不要发送或提交"],
+                    "completion_conditions": ["输入框逐字等于授权文字"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "target_surface": "current_surface",
+                        "input_text": "你好\n世界",
+                        "active_input_transaction_text": "你好\n世界",
+                        "active_input_field_id": "input_field_1",
+                        "active_input_multiline": True,
+                    },
+                },
+            },
+        }
+        provider = SequenceProvider([compact, input_audit])
+        observer = GenericSceneObserver(provider)
+
+        scene = observer.observe(
+            frames=stable_frames(),
+            goal_context=context,
+            device_id="device-current-surface-input",
+        )
+
+        self.assertEqual(2, provider.calls)
+        self.assertEqual("current_foreground", scene.foreground_app_id)
+        self.assertFalse(
+            observer.last_diagnostics["foreground_app_identity_audit_used"]
+        )
+        self.assertTrue(observer.last_diagnostics["input_structure_audit_used"])
+
+        named_context = {
+            **context,
+            "app_id": "chat_app",
+            "app_name": "聊天应用",
+            "entities": {**context["entities"], "target_apps": ["chat_app"]},
+        }
+        named_provider = SequenceProvider(
+            [compact, app_identity_audit_payload("chat_app"), input_audit]
+        )
+        named_observer = GenericSceneObserver(named_provider)
+        named_scene = named_observer.observe(
+            frames=stable_frames((40, 50, 60)),
+            goal_context=named_context,
+            device_id="device-named-input",
+        )
+
+        self.assertEqual(3, named_provider.calls)
+        self.assertEqual("chat_app", named_scene.foreground_app_id)
+        self.assertTrue(
+            named_observer.last_diagnostics[
+                "foreground_app_identity_audit_used"
+            ]
         )
 
     def test_unknown_foreground_for_named_app_gets_goal_independent_identity_audit(self) -> None:

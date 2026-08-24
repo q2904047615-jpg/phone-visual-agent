@@ -3314,10 +3314,34 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual(2, observer.calls)
 
     def test_confirmed_chinese_input_types_pinyin_then_requires_exact_candidate(self):
+        class ContinuationObserver(FakeSceneObserver):
+            input_lineage_store = object()
+            supports_typed_input_continuation = True
+
+            def __init__(self, scenes):
+                super().__init__(scenes)
+                self.lineage_overrides = []
+                self.prior_scenes = []
+
+            def observe(
+                self,
+                *,
+                frames,
+                goal_context=None,
+                device_id=None,
+                input_lineage_override=None,
+                prior_scene=None,
+            ):
+                self.lineage_overrides.append(input_lineage_override)
+                self.prior_scenes.append(prior_scene)
+                return super().observe(frames=frames, goal_context=goal_context)
+
         def input_scene(fingerprint, *, ime=False):
             states = {
                 "focused": True,
+                "fully_visible": True,
                 "value": "",
+                "input_field_id": "input_field_1",
                 "keyboard_layout": "qwerty",
                 "keyboard_input_mode": "chinese_pinyin",
                 "keyboard_geometry": TEST_QWERTY_GEOMETRY,
@@ -3377,7 +3401,8 @@ class GenericActionAdapterTests(unittest.TestCase):
             },
         )
 
-        result = self._adapter(FakeSceneObserver([before, after]), robot).execute(
+        observer = ContinuationObserver([before, after])
+        result = self._adapter(observer, robot).execute(
             requested_action=action,
             planned_scene=before,
             goal=goal(),
@@ -3387,6 +3412,18 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual([("pinyin", "你好", "nihao")], robot.actions)
         self.assertEqual("matched", result.action_outcome)
         self.assertEqual(1, result.physical_actions)
+        self.assertEqual(
+            [None, "pending_verified_chinese_preedit_action"],
+            [
+                getattr(item, "source", None)
+                for item in observer.lineage_overrides
+            ],
+        )
+        self.assertEqual("before", observer.prior_scenes[-1].fingerprint)
+        self.assertEqual(
+            "input_field_1",
+            observer.prior_scenes[-1].elements[0].states["input_field_id"],
+        )
 
     def test_confirmed_chinese_input_accepts_localized_same_surface_identity(self):
         before_states = {

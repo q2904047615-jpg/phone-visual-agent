@@ -25,6 +25,7 @@ from input_value_lineage import (
     InputValueLineageError,
     TypedInputLineage,
     TypedInputLineageStore,
+    build_pending_chinese_preedit_lineage,
     build_pending_ime_candidate_lineage,
     build_pending_input_state_lineage,
     build_pending_literal_lineage,
@@ -2846,7 +2847,14 @@ class GenericSingleActionAdapter:
                     before_scene=before.to_dict(),
                 )
             except (InputValueLineageError, TypeError, ValueError):
-                pending_input_lineage = None
+                try:
+                    pending_input_lineage = build_pending_chinese_preedit_lineage(
+                        device_id=self.device_id,
+                        resolved_action=resolved.to_dict(),
+                        before_scene=before.to_dict(),
+                    )
+                except (InputValueLineageError, TypeError, ValueError):
+                    pending_input_lineage = None
 
         try:
             (

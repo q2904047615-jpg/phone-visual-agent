@@ -148,11 +148,11 @@ async function launchOfflinePage(session, options = {}) {
     path: path.join(staticRoot, "protocol_adapter.js"),
     contentType: "text/javascript",
   }));
-  await page.route("**/assets/app.js", route => route.fulfill({
+  await page.route("**/assets/app.js?*", route => route.fulfill({
     path: path.join(staticRoot, "app.js"),
     contentType: "text/javascript",
   }));
-  await page.route("**/assets/styles.css", route => route.fulfill({
+  await page.route("**/assets/styles.css?*", route => route.fulfill({
     path: path.join(staticRoot, "styles.css"),
     contentType: "text/css",
   }));

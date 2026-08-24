@@ -1275,6 +1275,16 @@ def start_generic_supervised_session(
     session = None
     try:
         with _supervised_hardware_lock(body.device_id):
+            active_session_id = (
+                runtime.universal_agent_orchestrator.device_registry.active_session(
+                    body.device_id
+                )
+            )
+            if active_session_id is not None:
+                raise UniversalAgentOrchestratorError(
+                    f"设备 {body.device_id} 已有活动任务：{active_session_id}。"
+                )
+            runtime.controller_for_device(body.device_id).begin_new_task()
             session = runtime.universal_agent_orchestrator.start(
                 session_id=session_id,
                 raw_goal=body.text,

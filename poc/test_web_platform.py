@@ -153,6 +153,39 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         grab.assert_not_called()
         activate.assert_not_called()
 
+    def test_agent_capture_holds_cursor_lease_only_during_the_capture(self):
+        controller = RobotController(title="test")
+        frame = Image.new("RGB", (540, 1038), "white")
+        events = []
+
+        class CursorLease:
+            def __enter__(self):
+                events.append("cursor_lease_enter")
+
+            def __exit__(self, *_args):
+                events.append("cursor_lease_exit")
+
+        def capture(_hwnd):
+            events.append("capture")
+            return frame
+
+        with (
+            patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
+            patch(
+                "robot_core.seller_gui.temporarily_park_cursor_outside_camera",
+                return_value=CursorLease(),
+            ) as cursor_lease,
+            patch.object(controller, "_capture_phone", side_effect=capture),
+        ):
+            result = controller.vision_capture()
+
+        self.assertIs(frame, result)
+        cursor_lease.assert_called_once_with(123)
+        self.assertEqual(
+            ["cursor_lease_enter", "capture", "cursor_lease_exit"],
+            events,
+        )
+
     def test_controller_client_rejects_small_landscape_error_dialog(self):
         self.assertFalse(controller_client_has_camera(379, 169))
         self.assertFalse(controller_client_has_camera(540, 400))
@@ -182,7 +215,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
                 "robot_core.seller_gui.click_client_point",
                 return_value=self._click_barrier_receipt(),
             ) as click,
-            patch("robot_core.seller_gui.move_cursor_outside_camera"),
+            patch("robot_core.seller_gui.clear_seller_camera_overlay"),
             patch(
                 "robot_core.load_controller_config",
                 return_value={"tap_hold": 0.35},
@@ -452,7 +485,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
                 },
             ) as long_press,
             patch("robot_core.seller_gui.click_client_point") as click,
-            patch("robot_core.seller_gui.move_cursor_outside_camera"),
+            patch("robot_core.seller_gui.clear_seller_camera_overlay"),
         ):
             point = controller.vision_long_press_relative(500, 500, 0.8)
 
@@ -716,13 +749,13 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
                 side_effect=[(100.0, 200.0), (700.0, 800.0)],
             ),
             patch("robot_core.seller_gui.drag_client_path") as drag,
-            patch("robot_core.seller_gui.move_cursor_outside_camera") as move_out,
+            patch("robot_core.seller_gui.clear_seller_camera_overlay") as clear_overlay,
         ):
             result = controller.vision_drag_relative(100, 200, 700, 800)
 
         self.assertEqual(result, ((54, 192), (377, 767)))
         drag.assert_called_once_with(123, (54, 192), (377, 767))
-        move_out.assert_called_once_with(123)
+        clear_overlay.assert_called_once_with(123)
 
     def test_system_navigation_reveal_is_independent_and_default_disabled(self):
         controller = RobotController(title="test")
@@ -765,13 +798,13 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
                 return_value=derived,
             ) as derive,
             patch("robot_core.seller_gui.drag_client_path") as drag,
-            patch("robot_core.seller_gui.move_cursor_outside_camera") as move_out,
+            patch("robot_core.seller_gui.clear_seller_camera_overlay") as clear_overlay,
         ):
             result = controller.vision_reveal_system_navigation()
 
         derive.assert_called_once_with((810, 1440), controller.calibration_path)
         drag.assert_called_once_with(123, (74, 712), (269, 712))
-        move_out.assert_called_once_with(123)
+        clear_overlay.assert_called_once_with(123)
         self.assertEqual([[74, 712], [269, 712]], result["client_path"])
         self.assertEqual(derived["dom_path"], result["dom_path"])
 
@@ -2003,6 +2036,102 @@ class ApiEndToEndTests(unittest.TestCase):
             len(web_app.runtime.controller.executions),
             before_executions,
         )
+
+    def test_new_generic_session_clears_stop_from_an_earlier_task(self) -> None:
+        orchestrator, _planner, _qwen, _adapter = self._universal_api_orchestrator()
+        controller = web_app.runtime.controller
+        original_start = orchestrator.start
+        stop_state_at_task_boundary = []
+
+        def start_after_boundary(**kwargs):
+            stop_state_at_task_boundary.append(controller.stop_event.is_set())
+            return original_start(**kwargs)
+
+        try:
+            stopped = self.client.post(
+                "/api/stop",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+            self.assertEqual(200, stopped.status_code, stopped.text)
+            self.assertTrue(controller.stop_event.is_set())
+
+            with (
+                patch.object(web_app, "_require_supervised_device_ready"),
+                patch.object(
+                    web_app.runtime,
+                    "universal_agent_orchestrator",
+                    orchestrator,
+                ),
+                patch.object(orchestrator, "start", side_effect=start_after_boundary),
+            ):
+                started = self.client.post(
+                    "/api/agent/generic-supervised/start",
+                    headers=self.headers,
+                    json={
+                        "text": "查看当前页面的详情",
+                        "device_id": "phone-01",
+                        "auto_advance": False,
+                    },
+                )
+
+            self.assertEqual(200, started.status_code, started.text)
+            self.assertEqual([False], stop_state_at_task_boundary)
+            self.assertFalse(controller.stop_event.is_set())
+            session_id = started.json()["session"]["session_id"]
+            self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/cancel",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+        finally:
+            controller.stop_event.clear()
+
+    def test_stop_requested_after_new_task_boundary_is_not_cleared(self) -> None:
+        orchestrator, _planner, _qwen, _adapter = self._universal_api_orchestrator()
+        controller = web_app.runtime.controller
+        original_start = orchestrator.start
+        controller.stop_event.clear()
+
+        def start_then_request_stop(**kwargs):
+            self.assertFalse(controller.stop_event.is_set())
+            controller.request_stop()
+            return original_start(**kwargs)
+
+        try:
+            with (
+                patch.object(web_app, "_require_supervised_device_ready"),
+                patch.object(
+                    web_app.runtime,
+                    "universal_agent_orchestrator",
+                    orchestrator,
+                ),
+                patch.object(
+                    orchestrator,
+                    "start",
+                    side_effect=start_then_request_stop,
+                ),
+            ):
+                started = self.client.post(
+                    "/api/agent/generic-supervised/start",
+                    headers=self.headers,
+                    json={
+                        "text": "查看当前页面的详情",
+                        "device_id": "phone-01",
+                        "auto_advance": False,
+                    },
+                )
+
+            self.assertEqual(200, started.status_code, started.text)
+            self.assertTrue(controller.stop_event.is_set())
+            session_id = started.json()["session"]["session_id"]
+            self.client.post(
+                f"/api/agent/generic-supervised/{session_id}/cancel",
+                headers=self.headers,
+                json={"device_id": "phone-01"},
+            )
+        finally:
+            controller.stop_event.clear()
 
     def test_generic_supervised_api_can_start_in_explicit_single_step_mode(self) -> None:
         orchestrator, planner, qwen, adapter = self._universal_api_orchestrator()

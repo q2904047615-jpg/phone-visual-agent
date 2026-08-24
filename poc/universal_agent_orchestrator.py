@@ -1491,12 +1491,6 @@ class UniversalAgentOrchestrator:
             source is None
             or source.status != "completed"
             or current is None
-            or not any(
-                str(value).startswith(
-                    f"controller_transition:{lineage.source_receipt_id}:"
-                )
-                for value in source.completion_evidence
-            )
         ):
             return context
         pending = list(current.depends_on)
@@ -3485,12 +3479,6 @@ class UniversalAgentOrchestrator:
         if (
             source is None
             or source.status != "completed"
-            or not any(
-                str(ref).startswith(
-                    f"controller_transition:{lineage.source_receipt_id}:"
-                )
-                for ref in source.completion_evidence
-            )
         ):
             return False
         pending = list(getattr(completed_subgoal, "depends_on", ()) or ())
@@ -3578,6 +3566,181 @@ class UniversalAgentOrchestrator:
                 ),
                 physical_actions=session.physical_actions,
             )
+        return None
+
+    @classmethod
+    def _carry_verified_app_surface_lineage(
+        cls,
+        *,
+        session: UniversalAgentSessionState,
+        previous: DynamicTaskGraph,
+        revised: DynamicTaskGraph,
+        trusted_observation: Any,
+        prior_lineage: VerifiedAppSurfaceLineage | None,
+        prior_physical_actions: int,
+        execution_result: Any,
+    ) -> VerifiedAppSurfaceLineage | None:
+        """Advance one internally minted App identity across a verified step.
+
+        The launcher-to-App receipt establishes the only alias between the
+        task's typed App identity and the runtime foreground package.  A later
+        action makes the old physical-action scope stale, but it must not erase
+        that alias when fresh post-action evidence proves that execution stayed
+        inside the same App and the current subgoal is still a descendant of
+        the receipt-proven entry node.
+        """
+
+        lineage = prior_lineage
+        scene = getattr(trusted_observation, "scene", None)
+        physical_delta = int(getattr(execution_result, "physical_actions", 0))
+        resolved_kind = str(
+            getattr(getattr(execution_result, "resolved_action", None), "kind", "")
+        )
+        valid_delta = physical_delta == 1 or (
+            physical_delta == 0 and resolved_kind == "wait_for_change"
+        )
+        if (
+            lineage is None
+            or scene is None
+            or str(getattr(execution_result, "action_outcome", ""))
+            not in POST_ACTION_OUTCOMES
+            or not valid_delta
+            or lineage.session_id != session.session_id
+            or lineage.task_id != previous.task_id
+            or lineage.task_id != revised.task_id
+            or lineage.device_id != session.device_id
+            or lineage.device_id != previous.device_id
+            or lineage.device_id != revised.device_id
+            or lineage.physical_actions != prior_physical_actions
+            or session.physical_actions != prior_physical_actions + physical_delta
+            or not cls._lineage_matches_observed_foreground(
+                lineage,
+                str(getattr(scene, "foreground_app_id", "")),
+            )
+        ):
+            return None
+
+        revised_by_id = {item.subgoal_id: item for item in revised.subgoals}
+        source = revised_by_id.get(lineage.source_subgoal_id)
+        if source is None or source.status != "completed":
+            return None
+        current = revised.active_subgoal()
+        if current is None:
+            return (
+                replace(lineage, physical_actions=session.physical_actions)
+                if revised.status == "completed"
+                else None
+            )
+
+        pending = list(current.depends_on)
+        visited: set[str] = set()
+        while pending:
+            dependency_id = pending.pop()
+            if dependency_id == lineage.source_subgoal_id:
+                return replace(
+                    lineage,
+                    physical_actions=session.physical_actions,
+                )
+            if dependency_id in visited:
+                continue
+            visited.add(dependency_id)
+            dependency = revised_by_id.get(dependency_id)
+            if dependency is not None:
+                pending.extend(dependency.depends_on)
+        return None
+
+    @classmethod
+    def _refresh_verified_app_surface_lineage(
+        cls,
+        *,
+        session: UniversalAgentSessionState,
+        graph: DynamicTaskGraph,
+        prior_observation: Any,
+        new_observation: Any,
+    ) -> VerifiedAppSurfaceLineage | None:
+        """Upgrade one App alias across a read-only observer identity change.
+
+        A post-action model scene may name the foreground by the typed App ID,
+        while the next local audit reports the runtime package.  With no
+        intervening physical action, a unique shared page title proves surface
+        continuity strongly enough to replace only the runtime identity.  It
+        does not grant a new App entry or action authority.
+        """
+
+        lineage = session.verified_app_surface_lineage
+        prior_scene = getattr(prior_observation, "scene", None)
+        new_scene = getattr(new_observation, "scene", None)
+        if (
+            lineage is None
+            or prior_scene is None
+            or new_scene is None
+            or lineage.session_id != session.session_id
+            or lineage.task_id != graph.task_id
+            or lineage.device_id != session.device_id
+            or lineage.device_id != graph.device_id
+            or lineage.physical_actions != session.physical_actions
+            or not cls._lineage_matches_observed_foreground(
+                lineage,
+                str(getattr(prior_scene, "foreground_app_id", "")),
+            )
+            or str(getattr(new_scene, "foreground_app_id", "")).casefold()
+            == "launcher"
+            or not bool(getattr(prior_scene, "stable", False))
+            or not bool(getattr(new_scene, "stable", False))
+        ):
+            return None
+        if cls._lineage_matches_observed_foreground(
+            lineage,
+            str(getattr(new_scene, "foreground_app_id", "")),
+        ):
+            return lineage
+
+        def page_titles(scene: Any) -> frozenset[str]:
+            values = []
+            for element in tuple(getattr(scene, "elements", ()) or ()):
+                meaning = str(getattr(element, "meaning", "") or "").casefold()
+                label = str(getattr(element, "label", "") or "").strip()
+                states = getattr(element, "states", {}) or {}
+                if (
+                    label
+                    and (
+                        meaning == "page_title"
+                        or meaning.endswith("_page_title")
+                        or meaning.endswith("_screen_title")
+                    )
+                    and states.get("fully_visible") is not False
+                    and float(getattr(element, "confidence", 0.0))
+                    >= MIN_TARGET_CONFIDENCE
+                ):
+                    values.append(label.casefold())
+            return frozenset(values)
+
+        shared_titles = page_titles(prior_scene) & page_titles(new_scene)
+        if len(shared_titles) != 1:
+            return None
+
+        by_id = {item.subgoal_id: item for item in graph.subgoals}
+        source = by_id.get(lineage.source_subgoal_id)
+        current = graph.active_subgoal()
+        if source is None or source.status != "completed" or current is None:
+            return None
+        pending = list(current.depends_on)
+        visited: set[str] = set()
+        while pending:
+            dependency_id = pending.pop()
+            if dependency_id == lineage.source_subgoal_id:
+                return replace(
+                    lineage,
+                    functional_foreground_app_id=str(
+                        getattr(new_scene, "foreground_app_id", "")
+                    ),
+                )
+            if dependency_id in visited:
+                continue
+            visited.add(dependency_id)
+            dependency = by_id.get(dependency_id)
+            if dependency is not None:
+                pending.extend(dependency.depends_on)
         return None
 
     @classmethod
@@ -3926,6 +4089,97 @@ class UniversalAgentOrchestrator:
             raise UniversalAgentOrchestratorError(
                 "确认作用域与当前 task/device/revision/subgoal/risk/observation 不一致。"
             )
+
+    @staticmethod
+    def _verified_target_app_home_reset_microstep(
+        *,
+        graph: DynamicTaskGraph,
+        previous_decision: Any,
+        result: Any,
+        before_observation: Any,
+        new_observation: Any,
+    ) -> bool:
+        """Keep the active App goal after a verified reset to Launcher.
+
+        Home is an intermediate, coordinate-free reset when the active typed
+        surface is an App but the stable foreground is a different App.  The
+        reset cannot complete the App-opening subgoal, so it must retain the
+        same task revision and obtain a fresh Launcher decision instead of
+        asking DeepSeek to reinterpret the high-level graph.
+        """
+
+        current = graph.active_subgoal()
+        action = getattr(
+            getattr(previous_decision, "proposal", None),
+            "action",
+            None,
+        )
+        resolved = getattr(result, "resolved_action", None)
+        before_scene = getattr(result, "before_scene", None)
+        after_scene = getattr(result, "after_scene", None)
+        if (
+            current is None
+            or current.external_impact != "navigation_only"
+            or action is None
+            or str(getattr(action, "action", "")) != "home"
+            or resolved is None
+            or str(getattr(resolved, "kind", "")) != "home"
+            or before_scene is None
+            or after_scene is None
+            or str(getattr(result, "action_outcome", "")) != "matched"
+            or int(getattr(result, "physical_actions", 0)) != 1
+            or tuple(getattr(result, "verification_errors", ()))
+            or str(getattr(before_scene, "foreground_app_id", "")).casefold()
+            == "launcher"
+            or str(getattr(after_scene, "foreground_app_id", "")).casefold()
+            != "launcher"
+            or str(getattr(new_observation, "fingerprint", ""))
+            != str(getattr(after_scene, "fingerprint", ""))
+            or str(getattr(before_observation, "fingerprint", ""))
+            != str(getattr(before_scene, "fingerprint", ""))
+        ):
+            return False
+        try:
+            semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+        except TaskSemanticIRError:
+            return False
+        active = next(
+            (
+                item
+                for item in semantic_ir.subgoals
+                if item.subgoal_id == current.subgoal_id
+            ),
+            None,
+        )
+        surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
+        target_surface = (
+            surfaces.get(active.surface_ref) if active is not None else None
+        )
+        if target_surface is None or target_surface.kind != "app":
+            return False
+        params = getattr(action, "params", None)
+        transition = (
+            params.get("formal_transition")
+            if isinstance(params, Mapping)
+            else None
+        )
+        expectations = (
+            transition.get("expectations")
+            if isinstance(transition, Mapping)
+            else None
+        )
+        return bool(
+            transition.get("exploratory") is False
+            and isinstance(expectations, list)
+            and len(expectations) == 1
+            and expectations[0]
+            == {
+                "subject_ref": "surface_current",
+                "predicate": "surface.kind",
+                "operator": "equals",
+                "value": "launcher",
+            }
+        )
 
     @staticmethod
     def _verified_input_transaction_microstep(
@@ -4618,6 +4872,8 @@ class UniversalAgentOrchestrator:
         result: Any,
         before_observation: Any,
         new_observation: Any,
+        prior_verified_app_surface_lineage: VerifiedAppSurfaceLineage | None = None,
+        prior_physical_actions: int | None = None,
     ) -> None:
         previous_graph = session.task_graph
         assert previous_graph is not None
@@ -4690,6 +4946,15 @@ class UniversalAgentOrchestrator:
             input_transaction_microstep
             and session.local_exact_input_authority
             and self._input_transaction_reached_canonical(previous_graph, result)
+        )
+        target_app_home_reset_microstep = (
+            self._verified_target_app_home_reset_microstep(
+                graph=previous_graph,
+                previous_decision=previous_decision,
+                result=result,
+                before_observation=before_observation,
+                new_observation=new_observation,
+            )
         )
         wait_transition = (
             result.resolved_action.kind == "wait_for_change"
@@ -4802,6 +5067,8 @@ class UniversalAgentOrchestrator:
             transition_record["input_transaction_completed"] = True
         elif input_transaction_microstep:
             transition_record["input_transaction_progress"] = True
+        if target_app_home_reset_microstep:
+            transition_record["target_app_home_reset_progress"] = True
 
         def persist_transition() -> None:
             session.last_post_action_transition = dict(transition_record)
@@ -4822,7 +5089,9 @@ class UniversalAgentOrchestrator:
         session.effect_confirmation_authority = None
         session.confirmed_effect_ids = ()
         try:
-            if input_transaction_microstep:
+            if target_app_home_reset_microstep:
+                revised = previous_graph
+            elif input_transaction_microstep:
                 revised = (
                     self._complete_local_exact_input_graph(
                         previous_graph,
@@ -4850,7 +5119,30 @@ class UniversalAgentOrchestrator:
                         else "动作已执行，但新画面没有证明预期语义变化，必须重规划。"
                     ),
                 )
-            if not input_transaction_microstep:
+            next_lineage = None
+            if not input_transaction_microstep and not target_app_home_reset_microstep:
+                next_lineage = self._build_verified_app_surface_lineage(
+                    session=session,
+                    previous=previous_graph,
+                    revised=revised,
+                    trusted_observation=new_observation,
+                    receipt=receipt,
+                    controller_refs=controller_refs,
+                    before_observation=before_observation,
+                    previous_decision=previous_decision,
+                    execution_result=result,
+                )
+            if next_lineage is None and prior_physical_actions is not None:
+                next_lineage = self._carry_verified_app_surface_lineage(
+                    session=session,
+                    previous=previous_graph,
+                    revised=revised,
+                    trusted_observation=new_observation,
+                    prior_lineage=prior_verified_app_surface_lineage,
+                    prior_physical_actions=prior_physical_actions,
+                    execution_result=result,
+                )
+            if not input_transaction_microstep and not target_app_home_reset_microstep:
                 self._validate_graph_identity(
                     revised,
                     device_id=session.device_id,
@@ -4862,20 +5154,10 @@ class UniversalAgentOrchestrator:
                     before_observation=before_observation,
                     previous_decision=previous_decision,
                     execution_result=result,
+                    verified_app_surface_lineage=next_lineage,
+                    physical_actions=session.physical_actions,
                 )
-                session.verified_app_surface_lineage = (
-                    self._build_verified_app_surface_lineage(
-                        session=session,
-                        previous=previous_graph,
-                        revised=revised,
-                        trusted_observation=new_observation,
-                        receipt=receipt,
-                        controller_refs=controller_refs,
-                        before_observation=before_observation,
-                        previous_decision=previous_decision,
-                        execution_result=result,
-                    )
-                )
+            session.verified_app_surface_lineage = next_lineage
         except Exception as exc:
             session.status = "blocked"
             session.failed_reason = f"DeepSeek 重规划失败：{exc}"
@@ -4902,7 +5184,10 @@ class UniversalAgentOrchestrator:
         )
         if receipt is not None:
             transition_record["receipt_consumed_revision"] = revised.revision
-        if not input_transaction_microstep or input_transaction_terminal:
+        if (
+            not input_transaction_microstep
+            and not target_app_home_reset_microstep
+        ) or input_transaction_terminal:
             self._remember(
                 session,
                 session.evidence_store.write_task_graph(revised),
@@ -5501,7 +5786,14 @@ class UniversalAgentOrchestrator:
                     str(scene.foreground_app_id),
                 )
             ):
-                session.verified_app_surface_lineage = None
+                session.verified_app_surface_lineage = (
+                    self._refresh_verified_app_surface_lineage(
+                        session=session,
+                        graph=graph,
+                        prior_observation=prior_observation,
+                        new_observation=observation,
+                    )
+                )
             self._remember(
                 session,
                 session.evidence_store.write_trusted_observation(
@@ -5997,6 +6289,10 @@ class UniversalAgentOrchestrator:
 
         session.status = "executing_one_action"
         session.confirm_stage = "executing"
+        prior_verified_app_surface_lineage = (
+            session.verified_app_surface_lineage
+        )
+        prior_physical_actions = session.physical_actions
         if decision.proposal.action.action != "wait_for_change":
             session.verified_app_surface_lineage = None
         try:
@@ -6221,6 +6517,10 @@ class UniversalAgentOrchestrator:
                 result=result,
                 before_observation=observation,
                 new_observation=new_observation,
+                prior_verified_app_surface_lineage=(
+                    prior_verified_app_surface_lineage
+                ),
+                prior_physical_actions=prior_physical_actions,
             )
             session.confirm_stage = "completed"
             self._write_terminal_snapshot(session)

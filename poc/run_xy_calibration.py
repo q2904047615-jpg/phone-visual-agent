@@ -119,7 +119,7 @@ def click_raw_pixel(robot: RobotController, frame: Image.Image, point: tuple[int
         countdown=0,
         hold_seconds=float(load_controller_config()["tap_hold"]),
     )
-    seller_gui.move_cursor_outside_camera(hwnd)
+    seller_gui.clear_seller_camera_overlay(hwnd)
 
 
 def wait_for_new_sample(base_url: str, previous_count: int, timeout: float = 8.0) -> dict:

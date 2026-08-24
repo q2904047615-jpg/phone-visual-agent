@@ -10,6 +10,7 @@ import ctypes
 import math
 import sys
 import time
+from contextlib import contextmanager
 from ctypes import wintypes
 from pathlib import Path
 
@@ -976,18 +977,30 @@ def cursor_parking_screen_point(
     )
 
 
-def move_cursor_outside_camera(hwnd: int) -> None:
-    """Move the pointer outside the seller preview without clicking anything.
+@contextmanager
+def temporarily_park_cursor_outside_camera(hwnd: int):
+    """Keep the pointer away from the camera only for one scoped operation.
 
-    The old title-bar parking point is still interpreted by seller v1.0.1018
-    as a preview coordinate near y=30, leaving its opaque PX/MM tooltip over
-    the top of the phone.  Prefer a point outside the whole seller window so a
-    real mouse-leave event clears a tooltip left by physical key taps.  The
-    documented bottom control strip remains a fallback when the seller window
-    covers the complete virtual desktop.
+    Seller v1.0.1018 shows an opaque PX/MM tooltip while the system pointer is
+    over its camera preview.  The previous implementation always moved the
+    pointer to a desktop corner and left it there after every capture/action.
+    This lease moves only when the user's pointer is actually over the camera,
+    restores it when the lease ends, and does not overwrite a position the
+    user selected while the lease was active.
     """
 
+    original = POINT()
+    if not user32.GetCursorPos(ctypes.byref(original)):
+        raise ctypes.WinError()
     left, top, width, height = client_geometry(hwnd)
+    camera_height = seller_camera_height(width, height, DEFAULT_CAMERA_HEIGHT)
+    if not (
+        left <= original.x < left + width
+        and top <= original.y < top + camera_height
+    ):
+        yield False
+        return
+
     window = RECT()
     if not user32.GetWindowRect(hwnd, ctypes.byref(window)):
         raise ctypes.WinError()
@@ -1011,8 +1024,23 @@ def move_cursor_outside_camera(hwnd: int) -> None:
     if screen_point is None:
         client_x, client_y = cursor_parking_client_point(width, height)
         screen_point = (left + client_x, top + client_y)
-    user32.SetCursorPos(*screen_point)
-    time.sleep(0.25)
+    if not user32.SetCursorPos(*screen_point):
+        raise ctypes.WinError()
+    try:
+        time.sleep(0.25)
+        yield True
+    finally:
+        current = POINT()
+        cursor_read = user32.GetCursorPos(ctypes.byref(current))
+        if not cursor_read or (current.x, current.y) == screen_point:
+            user32.SetCursorPos(original.x, original.y)
+
+
+def clear_seller_camera_overlay(hwnd: int) -> None:
+    """Generate a transient mouse-leave without taking the user's cursor."""
+
+    with temporarily_park_cursor_outside_camera(hwnd):
+        pass
 
 
 def configure_swipe(hwnd: int, direction: str) -> None:

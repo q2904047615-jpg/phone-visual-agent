@@ -17,7 +17,11 @@ const state = {
   capabilityDeviceId: "",
   pendingPromotionGrant: null,
   capabilityEvidenceUrls: [],
+  taskAttemptStatus: null,
+  lastTaskOutcome: null,
 };
+
+const taskOutcomeStoragePrefix = "visual-agent-task-outcome:";
 
 const promotableCapabilityActions = [
   "tap_semantic",
@@ -79,7 +83,9 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const detail = data.detail;
     const message = typeof detail === "string" ? detail : (detail?.error || JSON.stringify(detail || {}));
-    throw new Error(message || `请求失败（${response.status}）`);
+    const error = new Error(message || `请求失败（${response.status}）`);
+    error.detail = detail;
+    throw error;
   }
   return data;
 }
@@ -111,6 +117,157 @@ function sessionView() {
   return Protocol.adaptSession(state.supervisedSession, {
     fallbackDeviceId: state.sessionDeviceId || state.deviceId,
   });
+}
+
+function taskOutcomeStorageKey(deviceId) {
+  return `${taskOutcomeStoragePrefix}${String(deviceId || "unknown")}`;
+}
+
+function readLastTaskOutcome(deviceId) {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(taskOutcomeStorageKey(deviceId)) || "null");
+    if (!parsed || !["success", "failure"].includes(parsed.state)) return null;
+    return {
+      state: parsed.state,
+      detail: String(parsed.detail || ""),
+      sessionId: String(parsed.sessionId || ""),
+      updatedAt: String(parsed.updatedAt || ""),
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function saveLastTaskOutcome(outcome) {
+  const normalized = {
+    state: outcome.state,
+    detail: String(outcome.detail || ""),
+    sessionId: String(outcome.sessionId || ""),
+    updatedAt: String(outcome.updatedAt || new Date().toISOString()),
+  };
+  state.lastTaskOutcome = normalized;
+  try {
+    sessionStorage.setItem(taskOutcomeStorageKey(state.deviceId), JSON.stringify(normalized));
+  } catch (_error) {
+    // The live page still keeps the result in memory when browser storage is unavailable.
+  }
+  return normalized;
+}
+
+function clearLastTaskOutcome() {
+  state.lastTaskOutcome = null;
+  try {
+    sessionStorage.removeItem(taskOutcomeStorageKey(state.deviceId));
+  } catch (_error) {
+    // Browser storage is optional; current in-memory status remains authoritative.
+  }
+}
+
+function rememberTerminalTaskOutcome(view, stateName, detail) {
+  const existing = state.lastTaskOutcome;
+  if (
+    existing
+    && existing.state === stateName
+    && existing.sessionId === view.sessionId
+    && existing.detail === detail
+  ) return existing;
+  return saveLastTaskOutcome({
+    state: stateName,
+    detail,
+    sessionId: view.sessionId,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function formatTaskStatusTime(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function taskRunPresentation() {
+  if (state.taskAttemptStatus?.state === "running") {
+    return {
+      state: "running",
+      label: "进行中",
+      detail: state.visionStage || state.taskAttemptStatus.detail || "正在理解目标并观察当前画面。",
+      sessionId: "",
+      updatedAt: state.taskAttemptStatus.updatedAt,
+    };
+  }
+  if (state.taskAttemptStatus?.state === "failure") {
+    return {
+      state: "failure",
+      label: "失败",
+      detail: state.taskAttemptStatus.detail || "任务未能启动。",
+      sessionId: "",
+      updatedAt: state.taskAttemptStatus.updatedAt,
+    };
+  }
+
+  const view = sessionView();
+  if (view) {
+    if (["succeeded", "completed"].includes(view.status)) {
+      const detail = `目标已完成；共执行 ${view.physicalActions} 个物理动作。`;
+      const outcome = rememberTerminalTaskOutcome(view, "success", detail);
+      return { ...outcome, label: "成功" };
+    }
+    if (view.isTerminal) {
+      const detail = view.failedReason
+        || view.stopState?.reason
+        || view.visualAction?.reason
+        || "任务已经结束，但没有完成目标。";
+      const outcome = rememberTerminalTaskOutcome(view, "failure", detail);
+      return { ...outcome, label: "失败" };
+    }
+    const step = view.currentSubgoal?.label;
+    return {
+      state: "running",
+      label: "进行中",
+      detail: step
+        ? `当前步骤：${step}（${statusNames[view.status] || view.status}）`
+        : (statusNames[view.status] || "任务正在处理。"),
+      sessionId: view.sessionId,
+      updatedAt: String(view.raw?.created_at || ""),
+    };
+  }
+
+  if (state.lastTaskOutcome) {
+    return {
+      ...state.lastTaskOutcome,
+      label: state.lastTaskOutcome.state === "success" ? "成功" : "失败",
+      detail: `最近一次任务：${state.lastTaskOutcome.detail}`,
+    };
+  }
+  return {
+    state: "not-started",
+    label: "未开始",
+    detail: "还没有提交普通 Agent 任务。输入目标后点击“生成动态计划”。",
+    sessionId: "",
+    updatedAt: "",
+  };
+}
+
+function renderTaskRunStatus() {
+  const presentation = taskRunPresentation();
+  const container = document.querySelector("#taskRunStatus");
+  if (!container) return;
+  container.dataset.taskState = presentation.state;
+  document.querySelector("#taskRunStatusLabel").textContent = presentation.label;
+  document.querySelector("#taskRunStatusDetail").textContent = presentation.detail;
+  document.querySelector("#taskRunSessionId").textContent = presentation.sessionId || "未创建";
+  document.querySelector("#taskRunUpdatedAt").textContent = formatTaskStatusTime(presentation.updatedAt);
+}
+
+function restoreSupervisedSessionFromError(error) {
+  const failedSession = error?.detail?.session;
+  if (!failedSession || typeof failedSession !== "object") return false;
+  state.supervisedSession = failedSession;
+  state.taskAttemptStatus = null;
+  const restored = Protocol.adaptSession(failedSession, { fallbackDeviceId: state.deviceId });
+  state.sessionDeviceId = restored.deviceId || state.deviceId;
+  return true;
 }
 
 function lockedSessionDeviceId() {
@@ -171,16 +328,21 @@ function planState(subgoal, view) {
 function renderStatus() {
   const device = state.device || {};
   const view = sessionView();
+  const taskStatus = taskRunPresentation();
   setDot("#controllerDot", device.controller_online ? (device.busy ? "warn" : "online") : "offline");
   setDot("#cameraDot", device.camera_online ? "online" : "offline");
-  setDot("#agentDot", state.busy ? "warn" : (view && !view.isTerminal ? "online" : "neutral"));
+  setDot("#agentDot", taskStatus.state === "running"
+    ? "warn"
+    : taskStatus.state === "success"
+      ? "online"
+      : taskStatus.state === "failure"
+        ? "offline"
+        : "neutral");
   document.querySelector("#controllerText").textContent = device.controller_online
     ? (device.busy ? "当前动作执行中" : "在线且空闲")
     : "离线";
   document.querySelector("#cameraText").textContent = device.camera_online ? "实时画面可用" : "画面不可用";
-  document.querySelector("#agentTextStatus").textContent = state.paused
-    ? "人工暂停"
-    : (state.busy ? currentVisionStageLabel() : (view ? (statusNames[view.status] || view.status) : "等待目标"));
+  document.querySelector("#agentTextStatus").textContent = state.paused ? "人工暂停" : taskStatus.label;
   const effectPhase = view?.status === "awaiting_effect_confirmation";
   const actionPhase = view?.status === "awaiting_confirmation";
   const highAttention = Boolean(view?.effectPolicy.requiresConfirmation);
@@ -582,6 +744,7 @@ function render() {
   document.querySelector("#agentText").disabled = state.busy;
   document.querySelector("#pauseButton").textContent = state.paused ? "▶ 继续推进" : "Ⅱ 暂停推进";
   document.querySelector("#pauseButton").classList.toggle("active", state.paused);
+  renderTaskRunStatus();
   renderStatus();
   renderGoalAndPlan();
   renderTrace();
@@ -592,6 +755,7 @@ function render() {
 
 async function refreshDevice() {
   state.device = await api("/api/device");
+  renderTaskRunStatus();
   renderStatus();
 }
 
@@ -609,6 +773,7 @@ async function pollVisionStage() {
     if (observer.current_stage && observer.current_stage !== "idle") {
       state.visionStage = observer.current_stage_label || observer.current_stage;
     }
+    renderTaskRunStatus();
     renderStatus();
     renderScene();
   } catch (_error) {
@@ -639,6 +804,13 @@ async function startSupervisedAgent() {
   if (current && !current.isTerminal) return toast("已有进行中的会话，请继续或停止后再创建新目标。", true);
   state.sessionDeviceId = state.deviceId;
   state.pendingConfirmationGrant = null;
+  state.supervisedSession = null;
+  clearLastTaskOutcome();
+  state.taskAttemptStatus = {
+    state: "running",
+    detail: "正在理解目标并观察当前画面。",
+    updatedAt: new Date().toISOString(),
+  };
   try {
     const payload = Protocol.buildRequestPayload(state.sessionDeviceId, { text });
     const response = await withVisionProgress("理解目标并观察当前画面", () =>
@@ -647,6 +819,7 @@ async function startSupervisedAgent() {
         body: JSON.stringify(payload),
       })
     );
+    state.taskAttemptStatus = null;
     state.supervisedSession = response.session;
     await finalizeStopIfRequested();
     const actions = Number(response.physical_actions || 0);
@@ -655,6 +828,16 @@ async function startSupervisedAgent() {
       : "计划与只读观察已完成；当前没有可自动执行的安全动作。");
     render();
   } catch (error) {
+    if (!restoreSupervisedSessionFromError(error)) {
+      const failure = saveLastTaskOutcome({
+        state: "failure",
+        detail: error.message || "任务未能启动。",
+        sessionId: "",
+        updatedAt: new Date().toISOString(),
+      });
+      state.taskAttemptStatus = failure;
+    }
+    render();
     toast(error.message, true);
   }
 }
@@ -945,6 +1128,7 @@ async function advanceSupervisedAgent(grant) {
       : "当前一步已处理，并已重新观察画面。");
     render();
   } catch (error) {
+    if (restoreSupervisedSessionFromError(error)) render();
     toast(error.message, true);
   }
 }
@@ -965,6 +1149,7 @@ async function nextSupervisedAgent() {
     await finalizeStopIfRequested();
     render();
   } catch (error) {
+    if (restoreSupervisedSessionFromError(error)) render();
     toast(error.message, true);
   }
 }
@@ -984,6 +1169,7 @@ async function cancelSupervisedAgent({ quiet = false } = {}) {
     if (!quiet) toast("会话已取消，不会再发起动作。");
     render();
   } catch (error) {
+    if (restoreSupervisedSessionFromError(error)) render();
     if (!quiet) toast(error.message, true);
   }
 }
@@ -1018,7 +1204,7 @@ function togglePause() {
 
 async function stopTasks() {
   const requestWasRunning = state.busy;
-  state.paused = true;
+  state.paused = false;
   state.stopRequested = true;
   state.pendingConfirmationGrant = null;
   render();
@@ -1044,6 +1230,7 @@ async function restoreActiveSession() {
   try {
     const response = await api(`/api/agent/generic-supervised/${active.session_id}`);
     state.supervisedSession = response.session;
+    state.taskAttemptStatus = null;
     const restored = Protocol.adaptSession(response.session, { fallbackDeviceId: state.deviceId });
     state.sessionDeviceId = restored.deviceId || state.deviceId;
     state.pendingConfirmationGrant = null;
@@ -1071,6 +1258,7 @@ async function restoreCapabilityTrial() {
 
 async function init() {
   try {
+    state.lastTaskOutcome = readLastTaskOutcome(state.deviceId);
     const session = await api("/api/session");
     state.token = session.token;
     state.mock = session.mock;
@@ -1108,6 +1296,8 @@ document.querySelector("#deviceId").addEventListener("change", async event => {
   state.supervisedSession = null;
   state.sessionDeviceId = "";
   state.pendingConfirmationGrant = null;
+  state.taskAttemptStatus = null;
+  state.lastTaskOutcome = readLastTaskOutcome(state.deviceId);
   state.capabilityTrial = null;
   state.capabilityDeviceId = "";
   state.capabilityEvidence = [];

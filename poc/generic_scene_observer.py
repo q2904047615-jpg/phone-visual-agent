@@ -3725,6 +3725,52 @@ def _snap_qwerty_bottom_row_switches_from_local_rows(
             snap(item)
 
 
+def _snap_bottom_row_layout_switches_above_system_navigation(
+    payload: dict[str, Any],
+    *,
+    navigation_bar_visible: bool,
+) -> None:
+    """Keep audited bottom-row layout controls above system navigation.
+
+    The input audit uses a portrait-normalized 0..1000 grid.  When Android's
+    navigation area is visible, the last 5.5 percent is not a reliable input
+    target.  Preserve an already audited switch's horizontal bounds and height,
+    but translate only a bottom-row box that crosses that reserved area.
+    """
+
+    if not navigation_bar_visible:
+        return
+    keyboard = payload.get("keyboard")
+    if not isinstance(keyboard, dict):
+        return
+    safe_bottom = 945.0
+    for item in keyboard.get("layout_switches") or []:
+        if (
+            not isinstance(item, dict)
+            or not _valid_1000_bounds(item.get("bounds"))
+        ):
+            continue
+        left, top, right, bottom = (
+            float(part) for part in item["bounds"]
+        )
+        height = bottom - top
+        if not (
+            top >= 850.0
+            and bottom > safe_bottom
+            and 25.0 <= height <= 120.0
+        ):
+            continue
+        snapped_top = safe_bottom - height
+        if snapped_top < 0:
+            continue
+        item["bounds"] = [
+            round(left),
+            round(snapped_top),
+            round(right),
+            round(safe_bottom),
+        ]
+
+
 def _reattach_input_audit_to_unique_scene_field(
     scene: UIScene,
     application_inputs: Any,
@@ -7796,6 +7842,12 @@ def _apply_input_structure_audit(
                     application_inputs,
                     goal_context=goal_context,
                 )
+        _snap_bottom_row_layout_switches_above_system_navigation(
+            payload,
+            navigation_bar_visible=(
+                scene.system_ui.navigation_bar_visible is True
+            ),
+        )
         keyboard_bounds: tuple[float, float, float, float] | None = None
         boundsless_keyboard_dismissal = False
         typed_prefix_verification_only = False
@@ -8779,6 +8831,10 @@ def _apply_input_structure_audit(
                 item
                 for item in literal_keys
                 if not _literal_key_overlaps_qwerty_letter_cell(
+                    item,
+                    qwerty_geometry=qwerty_geometry,
+                )
+                and not _literal_key_overlaps_qwerty_backspace(
                     item,
                     qwerty_geometry=qwerty_geometry,
                 )
@@ -10048,6 +10104,42 @@ def _literal_key_overlaps_qwerty_letter_cell(
         ):
             return True
     return False
+
+
+def _literal_key_overlaps_qwerty_backspace(
+    item: dict[str, Any],
+    *,
+    qwerty_geometry: dict[str, Any],
+) -> bool:
+    """Reject a claimed literal key whose box owns the audited backspace.
+
+    QWERTY anchors independently identify the current frame's backspace key.
+    A model-authored punctuation box containing that anchor is therefore a
+    conflicting identity claim, even when its printed label matches the next
+    requested character.  The candidate is removed so the existing generic
+    layout-switch path can expose the character on its real keyboard layer.
+    """
+
+    bounds = item.get("bounds")
+    anchors = qwerty_geometry.get("anchors")
+    if (
+        not isinstance(bounds, list)
+        or len(bounds) != 4
+        or not isinstance(anchors, dict)
+    ):
+        return True
+    backspace = anchors.get("backspace")
+    if not isinstance(backspace, (list, tuple)) or len(backspace) != 2:
+        return True
+    try:
+        left, top, right, bottom = (float(part) for part in bounds)
+        backspace_x, backspace_y = (float(part) for part in backspace)
+    except (TypeError, ValueError):
+        return True
+    return bool(
+        left <= backspace_x <= right
+        and top <= backspace_y <= bottom
+    )
 
 
 def _layout_switch_label_matches(label: str, target_layout: str) -> bool:

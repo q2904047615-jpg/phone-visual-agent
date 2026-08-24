@@ -285,6 +285,7 @@ class RobotController:
             else Path(__file__).with_name("tap_calibration.json")
         )
         self.stop_event = threading.Event()
+        self._stop_state_lock = threading.Lock()
         self.operation_lock = threading.Lock()
         # The browser MJPEG preview and the vision worker can otherwise call
         # the seller window capture routine at the same time. On Windows that
@@ -444,10 +445,14 @@ class RobotController:
         )
 
     def request_stop(self) -> None:
-        self.stop_event.set()
+        with self._stop_state_lock:
+            self.stop_event.set()
 
-    def clear_stop(self) -> None:
-        self.stop_event.clear()
+    def begin_new_task(self) -> None:
+        """Acknowledge stop requests that predate this new task boundary."""
+
+        with self._stop_state_lock:
+            self.stop_event.clear()
 
     def _checkpoint(self) -> None:
         if self.stop_event.is_set():
@@ -521,8 +526,8 @@ class RobotController:
     def vision_capture(self) -> Image.Image:
         """Capture exactly the phone region seen by the visual agent."""
         hwnd, _title = seller_gui.find_window(self.title)
-        seller_gui.move_cursor_outside_camera(hwnd)
-        return self._capture_phone(hwnd)
+        with seller_gui.temporarily_park_cursor_outside_camera(hwnd):
+            return self._capture_phone(hwnd)
 
     def vision_tap_relative(self, x: int, y: int) -> tuple[int, int]:
         """Tap a Qwen3-VL coordinate expressed on a 1000×1000 grid."""
@@ -609,7 +614,7 @@ class RobotController:
         if not isinstance(receipt, dict):
             raise RuntimeError("控制端没有返回长按事件栅栏凭据。")
         self._last_long_press_receipt = dict(receipt)
-        seller_gui.move_cursor_outside_camera(hwnd)
+        seller_gui.clear_seller_camera_overlay(hwnd)
         return point
 
     def vision_drag_relative(
@@ -663,7 +668,7 @@ class RobotController:
             raise ValueError("标定后的拖动起点和终点重合。")
         self._checkpoint()
         seller_gui.drag_client_path(hwnd, start, end)
-        seller_gui.move_cursor_outside_camera(hwnd)
+        seller_gui.clear_seller_camera_overlay(hwnd)
         return start, end
 
     def vision_reveal_system_navigation(self) -> dict[str, Any]:
@@ -697,7 +702,7 @@ class RobotController:
             raise ValueError("系统边缘轨迹纠偏后起终点重合。")
         self._checkpoint()
         seller_gui.drag_client_path(hwnd, start, end)
-        seller_gui.move_cursor_outside_camera(hwnd)
+        seller_gui.clear_seller_camera_overlay(hwnd)
         return {
             **evidence,
             "client_path": [list(start), list(end)],
@@ -749,7 +754,7 @@ class RobotController:
         if not isinstance(receipt, dict):
             raise RuntimeError("控制端没有返回单击事件栅栏凭据。")
         self._last_click_receipt = dict(receipt)
-        seller_gui.move_cursor_outside_camera(hwnd)
+        seller_gui.clear_seller_camera_overlay(hwnd)
         return point
 
     def _vision_nav_tap(
@@ -787,7 +792,7 @@ class RobotController:
         if not isinstance(receipt, dict):
             raise RuntimeError("控制端没有返回单击事件栅栏凭据。")
         self._last_click_receipt = dict(receipt)
-        seller_gui.move_cursor_outside_camera(hwnd)
+        seller_gui.clear_seller_camera_overlay(hwnd)
         return point
 
     def vision_android_home(self) -> tuple[int, int]:
@@ -819,7 +824,7 @@ class RobotController:
         self._checkpoint()
         seller_gui.configure_swipe(hwnd, direction)
         seller_gui.trigger_selected_action(hwnd)
-        seller_gui.move_cursor_outside_camera(hwnd)
+        seller_gui.clear_seller_camera_overlay(hwnd)
 
     def vision_swipe_up(self) -> None:
         self._vision_swipe("up")
@@ -922,7 +927,7 @@ class RobotController:
         # immediately after that UI edit caused an intermittent duplicated
         # first letter on real hardware.  Move away from the camera and give
         # the controller/actuator a short deterministic settling window.
-        seller_gui.move_cursor_outside_camera(hwnd)
+        seller_gui.clear_seller_camera_overlay(hwnd)
         self._sleep(float(configured_keyboard.get("pre_key_wait", 0.45)))
         for index, key in enumerate(pinyin):
             self._checkpoint()
@@ -941,7 +946,7 @@ class RobotController:
                     float(configured_keyboard.get("first_key_settle", 0.35)),
                 )
             self._sleep(wait_seconds)
-        seller_gui.move_cursor_outside_camera(hwnd)
+        seller_gui.clear_seller_camera_overlay(hwnd)
 
     def vision_clear_text(
         self,
@@ -1034,7 +1039,7 @@ class RobotController:
                 hold_seconds=0.18,
             )
             self._sleep(0.08)
-        seller_gui.move_cursor_outside_camera(hwnd)
+        seller_gui.clear_seller_camera_overlay(hwnd)
 
 class MockRobotController(RobotController):
     """No-hardware controller for API tests and UI demonstrations."""

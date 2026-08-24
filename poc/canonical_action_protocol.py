@@ -1644,11 +1644,6 @@ def compile_canonical_action_catalog(
                     if deterministic_input_step.kind == "chinese_pinyin"
                     else {"value": deterministic_input_step.expected_value}
                 )
-                payload_effects = sorted(
-                    effect.effect_id
-                    for effect in semantic_ir.effects
-                    if payload.entity_id in effect.payload_refs
-                )
                 candidates.append(
                     _candidate(
                         action_kind="input_verified_text",
@@ -1665,7 +1660,6 @@ def compile_canonical_action_catalog(
                             )
                             for state_name, state_value in expected_input_states.items()
                         ),
-                        effect_ref=payload_effects[0] if len(payload_effects) == 1 else "",
                         parameters={"element_id": element.element_id},
                     )
                 )
@@ -1909,15 +1903,18 @@ def compile_canonical_action_catalog(
         if not isinstance(current_value, str) or not isinstance(authorized_value, str):
             return False
         if isinstance(current_preedit, str) and current_preedit:
-            useful_preedit_prefix = authorized_value.startswith(
-                current_value + current_preedit
-            )
             useful_exact_candidate = bool(
                 isinstance(exact_candidate, str)
                 and exact_candidate
                 and authorized_value.startswith(current_value + exact_candidate)
             )
-            return not (useful_preedit_prefix or useful_exact_candidate)
+            # A raw IME preedit is not committed application text.  Its glyphs
+            # merely forming a prefix of the authorized payload cannot make it
+            # reusable, because the current IME mode may assign different
+            # semantics to that composition.  Preserve it only when the same
+            # scene binds an exact, verifiable candidate that can commit the
+            # authorized next value; otherwise clearing is the sole recovery.
+            return not useful_exact_candidate
         return bool(current_value and not authorized_value.startswith(current_value))
 
     def clears_useful_active_preedit(candidate: CanonicalActionCandidate) -> bool:
@@ -1930,13 +1927,16 @@ def compile_canonical_action_catalog(
             return False
         current_value = element.states.get("value")
         current_preedit = element.states.get("ime_preedit_text")
+        exact_candidate = element.states.get("ime_exact_candidate_text")
         authorized_value = active_input_payload_entities[0].value
         return bool(
             isinstance(current_value, str)
             and isinstance(current_preedit, str)
             and current_preedit
             and isinstance(authorized_value, str)
-            and authorized_value.startswith(current_value + current_preedit)
+            and isinstance(exact_candidate, str)
+            and exact_candidate
+            and authorized_value.startswith(current_value + exact_candidate)
         )
 
     def belongs_to_active_subgoal(candidate: CanonicalActionCandidate) -> bool:
@@ -2054,6 +2054,13 @@ def compile_canonical_action_catalog(
                     return False
                 return bool(active_input_payload_refs)
             if element.role == "input":
+                if element.states.get("focused") is True:
+                    # A focused field already satisfies the navigation
+                    # affordance.  Advertising another tap beside the typed
+                    # input transaction creates two candidates for the same
+                    # target and may move the caret away from the verified end
+                    # position.  Only the deterministic input action remains.
+                    return False
                 if len(active_input_fields) == 1:
                     active_field = active_input_fields[0]
                     return bool(
@@ -2119,6 +2126,17 @@ def compile_canonical_action_catalog(
         if action_kind == "wait_for_change":
             if active_input_fields:
                 return action_kind in active_required_actions
+            surfaces = {
+                item.surface_id: item for item in semantic_ir.surfaces
+            }
+            target = surfaces.get(active_subgoal.surface_ref)
+            if (
+                target is not None
+                and target.kind == "app"
+                and _surface_kind(scene) != "launcher"
+                and not scene_matches_target_app_surface(scene, target)
+            ):
+                return False
             return active_subgoal.external_impact in {
                 "read_only",
                 "navigation_only",
@@ -2126,6 +2144,20 @@ def compile_canonical_action_catalog(
         if action_kind in {"back", "swipe", "reveal_system_navigation"}:
             if active_input_fields:
                 return action_kind in active_required_actions
+            surfaces = {
+                item.surface_id: item for item in semantic_ir.surfaces
+            }
+            target = surfaces.get(active_subgoal.surface_ref)
+            if (
+                target is not None
+                and target.kind == "app"
+                and _surface_kind(scene) != "launcher"
+                and not scene_matches_target_app_surface(scene, target)
+            ):
+                # A stable non-target App must use the canonical Home reset.
+                # Back, scroll or passive waiting cannot establish the unique
+                # launcher checkpoint required before choosing the target App.
+                return False
             return active_subgoal.external_impact == "navigation_only"
         return False
 

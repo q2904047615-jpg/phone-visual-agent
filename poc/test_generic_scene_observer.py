@@ -48,6 +48,7 @@ from generic_scene_observer import (
     _safe_goal_context,
     _select_keyboard_layout_switch_for_target,
     _single_json_structural_edits,
+    _snap_bottom_row_layout_switches_above_system_navigation,
     _snap_reload_audit_to_local_glyph,
     _strict_icon_cluster_audit_payload,
     _strict_foreground_app_identity_audit,
@@ -8232,6 +8233,87 @@ class GenericSceneObserverTests(unittest.TestCase):
         self.assertEqual("numeric", target.states["target_layout"])
         self.assertEqual(current_value, target.states["prior_input_value"])
 
+    def test_qwerty_literal_claim_over_backspace_projects_layout_switch(
+        self,
+    ) -> None:
+        current_value = "aaazjie"
+        payload = scene_payload()
+        payload["elements"] = []
+        base_scene = _parse_scene(
+            json.dumps(payload, ensure_ascii=False),
+            fingerprint="frame-qwerty-backspace-conflict",
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="app-input-1",
+                    bounds=[130, 570, 720, 630],
+                    text=current_value,
+                    visible_editable_cues=[current_value, "|"],
+                    caret_line_index=0,
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 640, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [122, 709], "p": [881, 709],
+                    "a": [164, 781], "l": [839, 781],
+                    "z": [248, 853], "m": [754, 853],
+                    "backspace": [881, 853],
+                },
+                "mode_switch": None,
+                "backspace_key": None,
+                "enter_key": None,
+                "case_switch": None,
+                "literal_keys": [
+                    {
+                        "value": "？",
+                        "label": "？",
+                        "key_kind": "character",
+                        "bounds": [840, 820, 900, 860],
+                        "confidence": 0.9,
+                        "fully_visible": True,
+                    }
+                ],
+                "layout_switches": [
+                    {
+                        "label": "123",
+                        "bounds": [180, 940, 280, 980],
+                        "confidence": 1.0,
+                        "current_layout": "qwerty",
+                        "target_layout": "numeric",
+                    }
+                ],
+            },
+        )
+
+        projected = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="frame-qwerty-backspace-conflict",
+            goal_context={
+                "objective": "输入框逐字等于授权文字且不发送",
+                "entities": {
+                    "input_text": current_value + "？你好",
+                    "active_input_transaction_text": current_value + "？你好",
+                    "active_input_field_id": "input_field_1",
+                },
+            },
+            ledger_input_value=current_value,
+        )
+
+        target = projected.unique_trusted_goal_element()
+        self.assertIsNotNone(target)
+        self.assertEqual(
+            "local_audited_keyboard_layout_switch_1",
+            target.element_id,
+        )
+        self.assertEqual("numeric", target.states["target_layout"])
+
     def test_input_audit_rejects_compact_direct_latin_value_shadow(
         self,
     ) -> None:
@@ -8627,6 +8709,44 @@ class GenericSceneObserverTests(unittest.TestCase):
         target = projected.unique_trusted_goal_element()
         self.assertEqual("local_audited_keyboard_layout_switch_1", target.element_id)
         self.assertEqual((0.22, 0.905, 0.32, 0.945), target.bounds)
+
+    def test_numeric_layout_switch_is_kept_above_navigation_bar(self) -> None:
+        payload = {
+            "keyboard": {
+                "layout": "numeric",
+                "layout_switches": [
+                    {
+                        "label": "!?#",
+                        "bounds": [50, 940, 200, 990],
+                        "confidence": 1.0,
+                        "current_layout": "numeric",
+                        "target_layout": "symbol",
+                    }
+                ],
+            }
+        }
+
+        _snap_bottom_row_layout_switches_above_system_navigation(
+            payload,
+            navigation_bar_visible=True,
+        )
+
+        self.assertEqual(
+            [50, 895, 200, 945],
+            payload["keyboard"]["layout_switches"][0]["bounds"],
+        )
+        unchanged = json.loads(json.dumps(payload))
+        unchanged["keyboard"]["layout_switches"][0]["bounds"] = [
+            50, 940, 200, 990,
+        ]
+        _snap_bottom_row_layout_switches_above_system_navigation(
+            unchanged,
+            navigation_bar_visible=False,
+        )
+        self.assertEqual(
+            [50, 940, 200, 990],
+            unchanged["keyboard"]["layout_switches"][0]["bounds"],
+        )
 
     def test_literal_key_and_layout_switch_validation_fail_closed(self) -> None:
         keyboard_bounds = (0.0, 480.0, 1000.0, 1000.0)

@@ -1,10 +1,36 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
 import robot_gui_poc as seller
+
+
+class _FakeCursorUser32:
+    def __init__(self, cursor: tuple[int, int]):
+        self.cursor = cursor
+        self.positions: list[tuple[int, int]] = []
+
+    def GetCursorPos(self, point):
+        point._obj.x, point._obj.y = self.cursor
+        return 1
+
+    def SetCursorPos(self, x, y):
+        self.cursor = (int(x), int(y))
+        self.positions.append(self.cursor)
+        return 1
+
+    def GetWindowRect(self, _hwnd, rect):
+        rect._obj.left = 0
+        rect._obj.top = 0
+        rect._obj.right = 830
+        rect._obj.bottom = 1600
+        return 1
+
+    def GetSystemMetrics(self, metric):
+        return {76: 0, 77: 0, 78: 2560, 79: 1600}[metric]
 
 
 class SellerDpiScalingTests(unittest.TestCase):
@@ -40,6 +66,76 @@ class SellerDpiScalingTests(unittest.TestCase):
                 (0, 0, 1920, 1080),
             )
         )
+
+    def test_cursor_lease_restores_original_position_after_capture(self) -> None:
+        fake = _FakeCursorUser32((400, 400))
+        with (
+            patch.object(seller, "user32", fake),
+            patch.object(
+                seller,
+                "client_geometry",
+                return_value=(0, 0, 810, 1515),
+            ),
+            patch.object(seller.time, "sleep"),
+        ):
+            with seller.temporarily_park_cursor_outside_camera(123) as moved:
+                self.assertTrue(moved)
+                self.assertEqual((2557, 2), fake.cursor)
+
+        self.assertEqual((400, 400), fake.cursor)
+        self.assertEqual([(2557, 2), (400, 400)], fake.positions)
+
+    def test_cursor_lease_does_not_move_pointer_already_outside_preview(self) -> None:
+        fake = _FakeCursorUser32((1200, 400))
+        with (
+            patch.object(seller, "user32", fake),
+            patch.object(
+                seller,
+                "client_geometry",
+                return_value=(0, 0, 810, 1515),
+            ),
+            patch.object(seller.time, "sleep") as sleep,
+        ):
+            with seller.temporarily_park_cursor_outside_camera(123) as moved:
+                self.assertFalse(moved)
+
+        self.assertEqual((1200, 400), fake.cursor)
+        self.assertEqual([], fake.positions)
+        sleep.assert_not_called()
+
+    def test_cursor_lease_preserves_position_selected_by_user(self) -> None:
+        fake = _FakeCursorUser32((400, 400))
+        with (
+            patch.object(seller, "user32", fake),
+            patch.object(
+                seller,
+                "client_geometry",
+                return_value=(0, 0, 810, 1515),
+            ),
+            patch.object(seller.time, "sleep"),
+        ):
+            with seller.temporarily_park_cursor_outside_camera(123):
+                fake.cursor = (1200, 700)
+
+        self.assertEqual((1200, 700), fake.cursor)
+        self.assertEqual([(2557, 2)], fake.positions)
+
+    def test_cursor_lease_restores_original_position_after_exception(self) -> None:
+        fake = _FakeCursorUser32((400, 400))
+        with (
+            patch.object(seller, "user32", fake),
+            patch.object(
+                seller,
+                "client_geometry",
+                return_value=(0, 0, 810, 1515),
+            ),
+            patch.object(seller.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "capture failed"):
+                with seller.temporarily_park_cursor_outside_camera(123):
+                    raise RuntimeError("capture failed")
+
+        self.assertEqual((400, 400), fake.cursor)
 
     def test_150_percent_landscape_uses_height_for_vertical_scale(self) -> None:
         self.assertEqual(seller.seller_layout_scale(1440, 810), 1.5)

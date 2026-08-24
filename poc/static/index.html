@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#0b1020">
   <title>Phone Visual Agent</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260824-task-status-v3">
 </head>
 <body>
   <div class="app-shell">
@@ -84,6 +84,23 @@
             <span id="commandHint">开始后先理解目标并观察当前画面，不会立即执行物理动作。</span>
             <button id="startSupervisedAgent" class="primary-button" type="button">生成动态计划</button>
           </div>
+        </div>
+      </section>
+
+      <section id="taskRunStatus" class="task-run-status" data-task-state="not-started"
+        aria-labelledby="taskRunStatusTitle" aria-live="polite">
+        <div class="task-run-status-heading">
+          <span class="task-run-status-dot" aria-hidden="true"></span>
+          <div>
+            <p class="eyebrow">ORDINARY AGENT TASK</p>
+            <h2 id="taskRunStatusTitle">普通 Agent 任务状态</h2>
+          </div>
+        </div>
+        <strong id="taskRunStatusLabel" class="task-run-status-label">未开始</strong>
+        <p id="taskRunStatusDetail" class="task-run-status-detail">还没有提交普通 Agent 任务。</p>
+        <div class="task-run-status-meta">
+          <span>会话 <code id="taskRunSessionId">未创建</code></span>
+          <span>更新时间 <time id="taskRunUpdatedAt">—</time></span>
         </div>
       </section>
 
@@ -211,6 +228,6 @@
   </dialog>
 
   <script src="/assets/protocol_adapter.js"></script>
-  <script src="/assets/app.js"></script>
+  <script src="/assets/app.js?v=20260824-one-shot-stop-v1"></script>
 </body>
 </html>

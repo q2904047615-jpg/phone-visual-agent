@@ -287,6 +287,45 @@ def input_scene() -> UIScene:
 
 
 class CanonicalActionProtocolTests(unittest.TestCase):
+    def test_wrong_foreground_app_exposes_only_home_reset(self) -> None:
+        semantic_ir = TaskSemanticIR(
+            task_id="task-open-target",
+            device_id="device-1",
+            revision=1,
+            raw_goal="打开目标应用",
+            surfaces=(
+                SurfaceRef(
+                    "surface_target",
+                    "app",
+                    app_id="target.app",
+                    app_name="目标应用",
+                ),
+            ),
+            entities=(),
+            effects=(),
+            constraints=(),
+            subgoals=(
+                SemanticSubgoal(
+                    subgoal_id="open_target",
+                    surface_ref="surface_target",
+                    status="active",
+                    external_impact="navigation_only",
+                ),
+            ),
+        )
+        current_scene = scene(app_id="com.example.other")
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            semantic_ir,
+            {"home", "back", "swipe", "wait_for_change"},
+        )
+
+        self.assertEqual(
+            ["home"],
+            [item.action_kind for item in report.candidates],
+        )
+
     def test_swipe_preserves_fully_visible_cross_app_viewport(self) -> None:
         current_scene = scene(
             element(
@@ -697,7 +736,7 @@ class CanonicalActionProtocolTests(unittest.TestCase):
             [item.action_kind for item in report.candidates],
         )
 
-    def test_active_exact_input_never_clears_useful_preedit_prefix(self) -> None:
+    def test_active_exact_input_clears_uncommitted_preedit_prefix(self) -> None:
         semantic_ir = input_ir(active="type_last_char")
         current_scene = scene(
             element(
@@ -722,9 +761,62 @@ class CanonicalActionProtocolTests(unittest.TestCase):
             {"input_verified_text", "clear_verified_text"},
         )
 
+        self.assertEqual(
+            ["clear_verified_text"],
+            [item.action_kind for item in report.candidates],
+        )
+
+    def test_active_exact_input_preserves_bound_exact_ime_candidate(self) -> None:
+        semantic_ir = input_ir(active="type_last_char")
+        current_scene = scene(
+            element(
+                "input",
+                label="",
+                meaning="application_text_input",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "longinputvalidation2026:1",
+                    "ime_preedit_text": "2",
+                    "ime_exact_candidate_text": "2",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "chinese_pinyin",
+                    "keyboard_case_mode": "lower",
+                },
+            ),
+            element(
+                "candidate-2",
+                label="2",
+                meaning="ime_exact_candidate",
+                states={
+                    "goal_relevant": True,
+                    "ime_candidate": True,
+                    "input_element_id": "input",
+                    "prior_input_value": "longinputvalidation2026:1",
+                    "expected_input_value": "longinputvalidation2026:12",
+                    "pinyin": "2",
+                },
+                bounds=(0.1, 0.6, 0.2, 0.66),
+            ),
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            semantic_ir,
+            {"tap_semantic", "input_verified_text", "clear_verified_text"},
+        )
+
         self.assertNotIn(
             "clear_verified_text",
             [item.action_kind for item in report.candidates],
+        )
+        self.assertIn(
+            "candidate-2",
+            [
+                item.parameters.get("element_id")
+                for item in report.candidates
+                if item.action_kind == "tap_semantic"
+            ],
         )
 
     def test_clear_only_goal_does_not_require_a_new_input_payload(self) -> None:
@@ -879,6 +971,10 @@ class CanonicalActionProtocolTests(unittest.TestCase):
         self.assertEqual(
             "draftmore",
             matches[0].transition.expectations[0].value,
+        )
+        self.assertEqual(
+            ["input_verified_text"],
+            [candidate.action_kind for candidate in report.candidates],
         )
 
     def test_chinese_input_first_commits_preedit_then_unique_candidate(self) -> None:
@@ -1497,6 +1593,86 @@ class CanonicalActionProtocolTests(unittest.TestCase):
             {"tap_semantic"},
         )
         self.assertEqual(["effect_send"], [item.effect_ref for item in send.candidates])
+
+    def test_input_payload_for_pending_send_effect_remains_navigation_action(
+        self,
+    ) -> None:
+        payload = SemanticEntity(
+            "entity_payload", "text", "input_text", "aaazjie？你好"
+        )
+        recipient = SemanticEntity(
+            "entity_recipient", "party", "recipient", "文件传输助手"
+        )
+        effect = EffectIntent(
+            effect_id="effect_send",
+            kind="send_message",
+            target_refs=(recipient.entity_id,),
+            payload_refs=(payload.entity_id,),
+            source_subgoal_ids=("send_message",),
+        )
+        semantic_ir = TaskSemanticIR(
+            task_id="task-input-then-send",
+            device_id="device-1",
+            revision=1,
+            raw_goal="输入消息后发送",
+            surfaces=(SurfaceRef("surface_current", "current_surface"),),
+            entities=(payload, recipient),
+            effects=(effect,),
+            subgoals=(
+                SemanticSubgoal(
+                    "input_text",
+                    "surface_current",
+                    "active",
+                    "navigation_only",
+                    entity_refs=(payload.entity_id,),
+                ),
+                SemanticSubgoal(
+                    "send_message",
+                    "surface_current",
+                    "pending",
+                    "external_state",
+                    depends_on=("input_text",),
+                    entity_refs=(payload.entity_id, recipient.entity_id),
+                    effect_refs=(effect.effect_id,),
+                ),
+            ),
+            input_fields=(
+                InputFieldIntent(
+                    "input_field_1",
+                    payload.entity_id,
+                    recipient_refs=(recipient.entity_id,),
+                    source_subgoal_ids=("input_text", "send_message"),
+                ),
+            ),
+        )
+        current_scene = scene(
+            element(
+                "input",
+                label="",
+                meaning="application_text_input",
+                role="input",
+                states={
+                    "focused": True,
+                    "value": "",
+                    "input_field_id": "input_field_1",
+                    "keyboard_layout": "qwerty",
+                    "keyboard_input_mode": "direct_latin",
+                    "keyboard_case_mode": "lower",
+                },
+            )
+        )
+
+        report = compile_canonical_action_catalog(
+            current_scene,
+            semantic_ir,
+            {"tap_semantic", "input_verified_text"},
+        )
+
+        self.assertEqual(
+            ["input_verified_text"],
+            [candidate.action_kind for candidate in report.candidates],
+        )
+        self.assertEqual([""], [candidate.effect_ref for candidate in report.candidates])
 
     def test_required_long_press_and_drag_are_scoped_by_active_subgoal(self) -> None:
         source = SemanticEntity("entity_source", "text", "drag_source", "起点")

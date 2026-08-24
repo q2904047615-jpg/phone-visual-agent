@@ -3744,6 +3744,256 @@ class UniversalAgentStartTests(unittest.TestCase):
         )
         self.assertEqual("wechat", original.app_id)
 
+    def test_verified_app_lineage_carries_across_matched_descendant_action(self) -> None:
+        graph = self._advance_named_app_page_graph(
+            self._named_app_page_graph(app_id="wechat", app_name="微信")
+        )
+        # Planner-authored completion evidence may be a visual claim; the
+        # lineage itself was already minted from the exact launcher receipt.
+        source = replace(
+            graph.subgoals[0],
+            completion_evidence=("visual_claim:obs-entry:" + "a" * 64,),
+        )
+        graph = replace(graph, subgoals=(source, *graph.subgoals[1:]))
+        graph.validate()
+        revised = replace(graph, revision=graph.revision + 1)
+        lineage = VerifiedAppSurfaceLineage(
+            session_id="session-wechat",
+            task_id=graph.task_id,
+            device_id=graph.device_id,
+            app_id="wechat",
+            app_name="微信",
+            surface_id="surface_wechat",
+            source_receipt_id="receipt-wechat",
+            source_subgoal_id=source.subgoal_id,
+            functional_foreground_app_id="com.tencent.mm",
+            physical_actions=1,
+        )
+        session = SimpleNamespace(
+            session_id="session-wechat",
+            device_id=graph.device_id,
+            physical_actions=2,
+        )
+        result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            resolved_action=SimpleNamespace(kind="tap_semantic"),
+        )
+        observation = SimpleNamespace(
+            scene=replace(_scene(), app_id="com.tencent.mm")
+        )
+
+        carried = UniversalAgentOrchestrator._carry_verified_app_surface_lineage(
+            session=session,
+            previous=graph,
+            revised=revised,
+            trusted_observation=observation,
+            prior_lineage=lineage,
+            prior_physical_actions=1,
+            execution_result=result,
+        )
+
+        self.assertIsNotNone(carried)
+        self.assertEqual(2, carried.physical_actions)
+        mismatched_result = SimpleNamespace(
+            **{
+                **vars(result),
+                "action_outcome": "mismatched",
+            }
+        )
+        self.assertIsNotNone(
+            UniversalAgentOrchestrator._carry_verified_app_surface_lineage(
+                session=session,
+                previous=graph,
+                revised=revised,
+                trusted_observation=observation,
+                prior_lineage=lineage,
+                prior_physical_actions=1,
+                execution_result=mismatched_result,
+            )
+        )
+        semantic_ir = compile_formal_semantic_authority(revised).semantic_ir
+        context = replace(
+            QwenTaskContext.from_dict(revised.to_qwen_context()),
+            semantic_ir=semantic_ir,
+        )
+        rebound = UniversalAgentOrchestrator._bind_verified_lineage_to_qwen_context(
+            SimpleNamespace(
+                session_id=session.session_id,
+                device_id=session.device_id,
+                task_graph=revised,
+                physical_actions=2,
+                verified_app_surface_lineage=carried,
+            ),
+            context,
+            observation,
+        )
+        target = next(
+            item for item in rebound.semantic_ir.surfaces
+            if item.surface_id == "surface_wechat"
+        )
+        self.assertEqual("com.tencent.mm", target.app_id)
+
+        wrong_app = SimpleNamespace(
+            scene=replace(_scene(), app_id="com.example.other")
+        )
+        self.assertIsNone(
+            UniversalAgentOrchestrator._carry_verified_app_surface_lineage(
+                session=session,
+                previous=graph,
+                revised=revised,
+                trusted_observation=wrong_app,
+                prior_lineage=lineage,
+                prior_physical_actions=1,
+                execution_result=result,
+            )
+        )
+
+    def test_verified_home_reset_retains_active_target_app_graph(self) -> None:
+        graph = self._named_app_page_graph(app_id="target", app_name="目标应用")
+        before = replace(
+            _scene(fingerprint="wrong-app"),
+            app_id="com.example.other",
+        )
+        after = replace(
+            _scene(fingerprint="launcher-after"),
+            app_id="launcher",
+            screen_id="home_screen",
+        )
+        action = SemanticAction(
+            node_id="home-reset",
+            action="home",
+            params={
+                "formal_transition": {
+                    "transition_id": "transition_home_reset",
+                    "precondition_claim_ids": ["claim_home_reset"],
+                    "expectations": [
+                        {
+                            "subject_ref": "surface_current",
+                            "predicate": "surface.kind",
+                            "operator": "equals",
+                            "value": "launcher",
+                        }
+                    ],
+                    "exploratory": False,
+                },
+                "expected_effect": {"scene_changed": True},
+            },
+        )
+        result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=before,
+            after_scene=after,
+            resolved_action=SimpleNamespace(kind="home"),
+        )
+        decision = SimpleNamespace(
+            proposal=GenericStepProposal(status="action", action=action)
+        )
+
+        self.assertTrue(
+            UniversalAgentOrchestrator._verified_target_app_home_reset_microstep(
+                graph=graph,
+                previous_decision=decision,
+                result=result,
+                before_observation=SimpleNamespace(
+                    fingerprint=before.fingerprint
+                ),
+                new_observation=SimpleNamespace(
+                    fingerprint=after.fingerprint
+                ),
+            )
+        )
+        self.assertFalse(
+            UniversalAgentOrchestrator._verified_target_app_home_reset_microstep(
+                graph=graph,
+                previous_decision=decision,
+                result=SimpleNamespace(
+                    **{
+                        **vars(result),
+                        "action_outcome": "mismatched",
+                    }
+                ),
+                before_observation=SimpleNamespace(
+                    fingerprint=before.fingerprint
+                ),
+                new_observation=SimpleNamespace(
+                    fingerprint=after.fingerprint
+                ),
+            )
+        )
+
+    def test_read_only_refresh_upgrades_typed_app_id_to_runtime_package(self) -> None:
+        graph = self._advance_named_app_page_graph(
+            self._named_app_page_graph(app_id="wechat", app_name="微信")
+        )
+        source = replace(
+            graph.subgoals[0],
+            completion_evidence=("visual_claim:obs-entry:" + "b" * 64,),
+        )
+        graph = replace(graph, subgoals=(source, *graph.subgoals[1:]))
+        graph.validate()
+        title = UIElement(
+            element_id="title",
+            role="text",
+            meaning="page_title",
+            label="文件传输助手",
+            bounds=(0.2, 0.03, 0.8, 0.1),
+            confidence=0.99,
+            states={"fully_visible": True},
+        )
+        prior_scene = replace(
+            _scene(),
+            app_id="wechat",
+            elements=(title,),
+        )
+        package_scene = replace(
+            prior_scene,
+            app_id="com.tencent.mm",
+            fingerprint="package-refresh",
+        )
+        lineage = VerifiedAppSurfaceLineage(
+            session_id="session-wechat-refresh",
+            task_id=graph.task_id,
+            device_id=graph.device_id,
+            app_id="wechat",
+            app_name="微信",
+            surface_id="surface_wechat",
+            source_receipt_id="receipt-wechat",
+            source_subgoal_id=source.subgoal_id,
+            functional_foreground_app_id="wechat",
+            physical_actions=1,
+        )
+        session = SimpleNamespace(
+            session_id=lineage.session_id,
+            device_id=graph.device_id,
+            physical_actions=1,
+            verified_app_surface_lineage=lineage,
+        )
+
+        upgraded = UniversalAgentOrchestrator._refresh_verified_app_surface_lineage(
+            session=session,
+            graph=graph,
+            prior_observation=SimpleNamespace(scene=prior_scene),
+            new_observation=SimpleNamespace(scene=package_scene),
+        )
+
+        self.assertIsNotNone(upgraded)
+        self.assertEqual("com.tencent.mm", upgraded.functional_foreground_app_id)
+        wrong_title_scene = replace(
+            package_scene,
+            elements=(replace(title, label="其他页面"),),
+        )
+        self.assertIsNone(
+            UniversalAgentOrchestrator._refresh_verified_app_surface_lineage(
+                session=session,
+                graph=graph,
+                prior_observation=SimpleNamespace(scene=prior_scene),
+                new_observation=SimpleNamespace(scene=wrong_title_scene),
+            )
+        )
+
     def test_verified_lineage_survives_exact_display_name_observation(self) -> None:
         lineage = VerifiedAppSurfaceLineage(
             session_id="session-wechat",

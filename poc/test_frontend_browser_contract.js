@@ -11,7 +11,7 @@ const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v
 const requests = {
   start: [], approveEffect: [], confirm: [], next: [], auto: [], pause: [], cancel: [], stop: [],
   capabilityStart: [], capabilityConfirm: [], capabilityPromote: [], capabilityCancel: [],
-  restore: [], previewDevices: [],
+  restore: [], previewDevices: [], assets: [],
 };
 
 function clone(value) {
@@ -274,6 +274,7 @@ function createServer({
       return;
     }
     if (url.pathname.startsWith("/assets/")) {
+      requests.assets.push(`${url.pathname}${url.search}`);
       const filename = path.basename(url.pathname);
       const mime = filename.endsWith(".js") ? "text/javascript" : "text/css";
       response.writeHead(200, { "Content-Type": `${mime}; charset=utf-8` });
@@ -309,7 +310,22 @@ function createServer({
     if (request.method === "POST" && url.pathname === "/api/agent/generic-supervised/start") {
       const body = await readBody(request);
       requests.start.push(body);
-      const session = body.text.includes("本地确认")
+      if (body.text.includes("slow")) {
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+      if (body.text.includes("start failure")) {
+        json(response, 409, {
+          detail: {
+            error: "规划服务暂时不可用",
+            physical_actions: 0,
+            session: null,
+          },
+        });
+        return;
+      }
+      const session = body.text.includes("succeeded")
+        ? externalExecutedSession()
+        : body.text.includes("本地确认")
         ? externalSession()
         : body.text.includes("blocked")
           ? safeActionSession("blocked")
@@ -434,6 +450,21 @@ async function launchFixturePage(server, { deviceId = "phone-01" } = {}) {
   return { browser, page };
 }
 
+test("browser requests versioned task-status assets instead of stale cached URLs", { timeout: 30000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const server = createServer();
+  const { browser } = await launchFixturePage(server);
+  try {
+    assert.ok(requests.assets.includes("/assets/app.js?v=20260824-one-shot-stop-v1"));
+    assert.ok(requests.assets.includes("/assets/styles.css?v=20260824-task-status-v3"));
+    assert.equal(requests.assets.includes("/assets/app.js"), false);
+    assert.equal(requests.assets.includes("/assets/styles.css"), false);
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
 test("multi-device console restores only the selected device session", { timeout: 30000 }, async () => {
   Object.values(requests).forEach(items => { items.length = 0; });
   const phoneA = safeActionSessionForDevice("phone-01", "session-phone-01");
@@ -455,6 +486,8 @@ test("multi-device console restores only the selected device session", { timeout
   const { browser, page } = await launchFixturePage(server);
   try {
     await page.locator("#goalSummary").getByText("会话 · session-phone-01", { exact: true }).waitFor({ timeout: 5000 });
+    await page.locator("#taskRunStatusLabel").getByText("进行中", { exact: true }).waitFor({ timeout: 5000 });
+    assert.equal(await page.locator("#taskRunStatus").getAttribute("data-task-state"), "running");
     assert.deepEqual(requests.restore, ["session-phone-01"]);
     await page.waitForFunction(() => document.querySelector("#phonePreview")?.complete);
     assert.equal(requests.previewDevices.at(-1), "phone-01");
@@ -476,6 +509,39 @@ test("multi-device console restores only the selected device session", { timeout
     assert.equal(await page.locator("#deviceId").inputValue(), "phone-02");
     assert.match(await page.locator("#goalSummary").innerText(), /phone-02/);
     assert.equal(requests.previewDevices.at(-1), "phone-02");
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("ordinary task status stays explicit through running success failure and refresh", { timeout: 30000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const server = createServer();
+  const { browser, page } = await launchFixturePage(server);
+  try {
+    await page.locator("#taskRunStatusLabel").getByText("未开始", { exact: true }).waitFor({ timeout: 5000 });
+    assert.equal(await page.locator("#taskRunStatus").getAttribute("data-task-state"), "not-started");
+
+    await page.locator("#agentText").fill("slow succeeded");
+    await page.locator("#startSupervisedAgent").click();
+    await page.locator("#taskRunStatusLabel").getByText("进行中", { exact: true }).waitFor({ timeout: 5000 });
+    assert.equal(await page.locator("#taskRunStatus").getAttribute("data-task-state"), "running");
+    await page.locator("#taskRunStatusLabel").getByText("成功", { exact: true }).waitFor({ timeout: 5000 });
+    assert.equal(await page.locator("#taskRunStatus").getAttribute("data-task-state"), "success");
+    assert.match(await page.locator("#taskRunStatusDetail").innerText(), /目标已完成/);
+
+    await page.locator("#agentText").fill("start failure");
+    await page.locator("#startSupervisedAgent").click();
+    await page.locator("#taskRunStatusLabel").getByText("失败", { exact: true }).waitFor({ timeout: 5000 });
+    assert.equal(await page.locator("#taskRunStatus").getAttribute("data-task-state"), "failure");
+    assert.match(await page.locator("#taskRunStatusDetail").innerText(), /规划服务暂时不可用/);
+    await page.waitForTimeout(3800);
+    assert.equal(await page.locator("#taskRunStatusLabel").innerText(), "失败");
+
+    await page.reload();
+    await page.locator("#taskRunStatusLabel").getByText("失败", { exact: true }).waitFor({ timeout: 5000 });
+    assert.match(await page.locator("#taskRunStatusDetail").innerText(), /最近一次任务.*规划服务暂时不可用/);
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));
@@ -641,6 +707,8 @@ test("browser renders controller evidence and confirms one exact observation", {
     await page.locator("#stopButton").click();
     await page.waitForTimeout(50);
     assert.equal(requests.stop[0].device_id, "phone-01");
+    assert.equal(await page.locator("#pauseNotice").isVisible(), false);
+    assert.equal(await page.locator("#startSupervisedAgent").isDisabled(), false);
     assert.deepEqual(pageErrors, []);
   } finally {
     await browser.close();

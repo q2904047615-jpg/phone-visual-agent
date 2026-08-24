@@ -1204,9 +1204,17 @@ def build_pending_newline_lineage(
     app_id = before_scene.get("app_id")
     screen_id = before_scene.get("screen_id")
     before_fingerprint = before_scene.get("fingerprint")
-    if any(
-        not isinstance(value, str) or not value.strip() or value == "unknown"
-        for value in (app_id, screen_id, before_fingerprint)
+    input_field_id = _typed_input_field_id(before_input)
+    if (
+        not isinstance(app_id, str)
+        or not app_id.strip()
+        or not isinstance(screen_id, str)
+        or not screen_id.strip()
+        or screen_id == "unknown"
+        or not isinstance(before_fingerprint, str)
+        or not before_fingerprint.strip()
+        or before_fingerprint == "unknown"
+        or (app_id == "unknown" and input_field_id == "unknown")
     ):
         raise InputValueLineageError("临时换行连续性缺少明确输入表面。")
     record = TypedInputLineage(
@@ -1216,7 +1224,7 @@ def build_pending_newline_lineage(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
-        input_field_id=_typed_input_field_id(before_input),
+        input_field_id=input_field_id,
         input_bounds=_valid_bounds(before_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint="pending-visual-verification",
@@ -1321,9 +1329,17 @@ def build_pending_input_state_lineage(
     app_id = before_scene.get("app_id")
     screen_id = before_scene.get("screen_id")
     before_fingerprint = before_scene.get("fingerprint")
-    if any(
-        not isinstance(value, str) or not value.strip() or value == "unknown"
-        for value in (app_id, screen_id, before_fingerprint)
+    input_field_id = _typed_input_field_id(before_input)
+    if (
+        not isinstance(app_id, str)
+        or not app_id.strip()
+        or not isinstance(screen_id, str)
+        or not screen_id.strip()
+        or screen_id == "unknown"
+        or not isinstance(before_fingerprint, str)
+        or not before_fingerprint.strip()
+        or before_fingerprint == "unknown"
+        or (app_id == "unknown" and input_field_id == "unknown")
     ):
         raise InputValueLineageError(
             "临时输入状态连续性缺少明确输入表面。"
@@ -1335,7 +1351,7 @@ def build_pending_input_state_lineage(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
-        input_field_id=_typed_input_field_id(before_input),
+        input_field_id=input_field_id,
         input_bounds=_valid_bounds(before_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint="pending-visual-verification",
@@ -1556,9 +1572,17 @@ def build_pending_literal_lineage(
     app_id = before_scene.get("app_id")
     screen_id = before_scene.get("screen_id")
     before_fingerprint = before_scene.get("fingerprint")
-    if any(
-        not isinstance(value, str) or not value.strip() or value == "unknown"
-        for value in (app_id, screen_id, before_fingerprint)
+    input_field_id = _typed_input_field_id(before_input)
+    if (
+        not isinstance(app_id, str)
+        or not app_id.strip()
+        or not isinstance(screen_id, str)
+        or not screen_id.strip()
+        or screen_id == "unknown"
+        or not isinstance(before_fingerprint, str)
+        or not before_fingerprint.strip()
+        or before_fingerprint == "unknown"
+        or (app_id == "unknown" and input_field_id == "unknown")
     ):
         raise InputValueLineageError("临时输入连续性缺少明确输入表面。")
     record = TypedInputLineage(
@@ -1568,7 +1592,7 @@ def build_pending_literal_lineage(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
-        input_field_id=_typed_input_field_id(before_input),
+        input_field_id=input_field_id,
         input_bounds=_valid_bounds(before_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint="pending-visual-verification",
@@ -1801,7 +1825,16 @@ def _record_from_text_execution(
     if fallback_compatible:
         app_id = surface_fallback.app_id
         screen_id = surface_fallback.screen_id
-    if not isinstance(app_id, str) or not app_id.strip() or app_id == "unknown":
+    input_field_id = _typed_input_field_id(after_input)
+    typed_field_stable = bool(
+        input_field_id != "unknown"
+        and _typed_input_field_id(before_input) == input_field_id
+    )
+    if (
+        not isinstance(app_id, str)
+        or not app_id.strip()
+        or (app_id == "unknown" and not typed_field_stable)
+    ):
         raise InputValueLineageError("文字连续性缺少明确 app_id。")
     if not isinstance(screen_id, str) or not screen_id.strip() or screen_id == "unknown":
         raise InputValueLineageError("文字连续性缺少明确 screen_id。")
@@ -1824,7 +1857,7 @@ def _record_from_text_execution(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
-        input_field_id=_typed_input_field_id(after_input),
+        input_field_id=input_field_id,
         input_bounds=_valid_bounds(after_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint=after_fingerprint,
@@ -1905,7 +1938,16 @@ def _record_from_newline_execution(
     if fallback_compatible:
         app_id = surface_fallback.app_id
         screen_id = surface_fallback.screen_id
-    if not isinstance(app_id, str) or not app_id.strip() or app_id == "unknown":
+    input_field_id = _typed_input_field_id(after_input)
+    typed_field_stable = bool(
+        input_field_id != "unknown"
+        and _typed_input_field_id(before_input) == input_field_id
+    )
+    if (
+        not isinstance(app_id, str)
+        or not app_id.strip()
+        or (app_id == "unknown" and not typed_field_stable)
+    ):
         raise InputValueLineageError("换行连续性缺少明确 app_id。")
     if not isinstance(screen_id, str) or not screen_id.strip() or screen_id == "unknown":
         raise InputValueLineageError("换行连续性缺少明确 screen_id。")
@@ -1916,7 +1958,7 @@ def _record_from_newline_execution(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
-        input_field_id=_typed_input_field_id(after_input),
+        input_field_id=input_field_id,
         input_bounds=_valid_bounds(after_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint=after_fingerprint,
@@ -2031,7 +2073,16 @@ def _record_from_execution(
     if fallback_compatible:
         app_id = surface_fallback.app_id
         screen_id = surface_fallback.screen_id
-    if not isinstance(app_id, str) or not app_id.strip() or app_id == "unknown":
+    input_field_id = _typed_input_field_id(after_input)
+    typed_field_stable = bool(
+        input_field_id != "unknown"
+        and _typed_input_field_id(before_input) == input_field_id
+    )
+    if (
+        not isinstance(app_id, str)
+        or not app_id.strip()
+        or (app_id == "unknown" and not typed_field_stable)
+    ):
         raise InputValueLineageError("输入值连续性缺少明确 app_id。")
     if not isinstance(screen_id, str) or not screen_id.strip() or screen_id == "unknown":
         raise InputValueLineageError("输入值连续性缺少明确 screen_id。")
@@ -2042,7 +2093,7 @@ def _record_from_execution(
         app_id=app_id,
         screen_id=screen_id,
         input_meaning="application_text_input",
-        input_field_id=_typed_input_field_id(after_input),
+        input_field_id=input_field_id,
         input_bounds=_valid_bounds(after_input["bounds"]),
         before_fingerprint=before_fingerprint,
         after_fingerprint=after_fingerprint,

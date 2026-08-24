@@ -172,9 +172,8 @@ def receipt() -> dict:
     }
 
 
-def newline_case() -> tuple[dict, dict, dict]:
-    prior = "first"
-    expected = "first\n"
+def newline_case(prior: str = "first") -> tuple[dict, dict, dict]:
+    expected = prior + "\n"
     before = scene(prior, "newline-before")
     before_input = before["elements"][0]
     before_input["states"].update(
@@ -1101,6 +1100,123 @@ class TypedInputLineageTests(unittest.TestCase):
                         input_bounds=(0.13, 0.54, 0.69, 0.61),
                         now_epoch=1000.0,
                     )
+                )
+
+    def test_pending_typed_auxiliary_actions_accept_unknown_app(self) -> None:
+        literal_before = before_scene()
+        literal_before["foreground_app_id"] = "unknown"
+        literal_before["app_id"] = "unknown"
+        literal_before["elements"][0]["states"][
+            "input_field_id"
+        ] = "input_field_1"
+        literal = build_pending_literal_lineage(
+            device_id=DEVICE,
+            resolved_action=resolved(),
+            before_scene=literal_before,
+            hardware_receipt=receipt(),
+            recorded_at_epoch=1000.0,
+        )
+        self.assertEqual("input_field_1", literal.input_field_id)
+        self.assertTrue(
+            literal.matches_typed_context(
+                device_id=DEVICE,
+                app_id="unknown",
+                screen_id="editor",
+                input_field_id="input_field_1",
+                now_epoch=1000.0,
+            )
+        )
+
+        state_before, state_action = state_switch_case()
+        state_before["foreground_app_id"] = "unknown"
+        state_before["app_id"] = "unknown"
+        state_before["elements"][0]["states"][
+            "input_field_id"
+        ] = "input_field_1"
+        state = build_pending_input_state_lineage(
+            device_id=DEVICE,
+            resolved_action=state_action,
+            before_scene=state_before,
+            hardware_receipt=receipt(),
+            recorded_at_epoch=1000.0,
+        )
+        self.assertEqual("input_field_1", state.input_field_id)
+        self.assertTrue(
+            state.matches_typed_context(
+                device_id=DEVICE,
+                app_id="unknown",
+                screen_id="editor",
+                input_field_id="input_field_1",
+                now_epoch=1000.0,
+            )
+        )
+
+    def test_verified_text_and_literal_require_same_typed_unknown_app_field(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as text_temp:
+            text_before = scene(
+                "",
+                "before-fp",
+                app_id="unknown",
+            )
+            text_after = scene(
+                "longinput",
+                "after-fp",
+                app_id="unknown",
+            )
+            for candidate in (text_before, text_after):
+                candidate["elements"][0]["states"][
+                    "input_field_id"
+                ] = "input_field_1"
+            text_store = TypedInputLineageStore(Path(text_temp))
+            text_record = text_store.record_verified_text_action(
+                device_id=DEVICE,
+                resolved_action=resolved_text(),
+                before_scene=text_before,
+                after_scene=text_after,
+                after_frames=surface_frames(),
+            )
+            self.assertEqual("unknown", text_record.app_id)
+            self.assertEqual("input_field_1", text_record.input_field_id)
+
+        with tempfile.TemporaryDirectory() as literal_temp:
+            literal_before = before_scene()
+            literal_after = scene(
+                RAW_AFTER,
+                "after-fp",
+                app_id="unknown",
+            )
+            literal_before["foreground_app_id"] = "unknown"
+            literal_before["app_id"] = "unknown"
+            for candidate in (literal_before, literal_after):
+                candidate["elements"][0]["states"][
+                    "input_field_id"
+                ] = "input_field_1"
+            literal_store = TypedInputLineageStore(Path(literal_temp))
+            literal_record = literal_store.record_verified_literal_action(
+                device_id=DEVICE,
+                resolved_action=resolved(),
+                before_scene=literal_before,
+                after_scene=literal_after,
+                hardware_receipt=receipt(),
+                after_frames=surface_frames(),
+            )
+            self.assertEqual("unknown", literal_record.app_id)
+            self.assertEqual("input_field_1", literal_record.input_field_id)
+
+            wrong_after = json.loads(json.dumps(literal_after))
+            wrong_after["elements"][0]["states"][
+                "input_field_id"
+            ] = "input_field_2"
+            with self.assertRaises(InputValueLineageError):
+                TypedInputLineageStore(Path(literal_temp) / "wrong").record_verified_literal_action(
+                    device_id=DEVICE,
+                    resolved_action=resolved(),
+                    before_scene=literal_before,
+                    after_scene=wrong_after,
+                    hardware_receipt=receipt(),
+                    after_frames=surface_frames(),
                 )
 
     def test_pending_ime_candidate_lineage_recovers_exact_committed_cue(self) -> None:
@@ -2232,6 +2348,75 @@ class TypedInputLineageTests(unittest.TestCase):
                         **{**matching, **changed}
                     )
                 )
+
+    def test_pending_and_verified_newline_accept_typed_unknown_app(self) -> None:
+        for prior in ("first", "你好"):
+            with self.subTest(prior=prior), tempfile.TemporaryDirectory() as temp:
+                action, before, after = newline_case(prior)
+                for candidate in (before, after):
+                    candidate["foreground_app_id"] = "unknown"
+                    candidate["app_id"] = "unknown"
+
+                pending = build_pending_newline_lineage(
+                    device_id=DEVICE,
+                    resolved_action=action,
+                    before_scene=before,
+                    hardware_receipt=receipt(),
+                    recorded_at_epoch=1000.0,
+                )
+                self.assertEqual(prior + "\n", pending.exact_value)
+                self.assertEqual("unknown", pending.app_id)
+                self.assertEqual("input_field_1", pending.input_field_id)
+                self.assertTrue(
+                    pending.matches_trailing_newline_cue(
+                        device_id=DEVICE,
+                        app_id="unknown",
+                        screen_id="editor",
+                        raw_value="",
+                        visible_editable_cues=(prior, "caret"),
+                        caret_line_index=1,
+                        input_bounds=(0.13, 0.54, 0.69, 0.61),
+                        input_field_id="input_field_1",
+                        now_epoch=1000.0,
+                    )
+                )
+
+                store = TypedInputLineageStore(
+                    Path(temp),
+                    clock=lambda: 1000.0,
+                )
+                verified = store.record_verified_newline_action(
+                    device_id=DEVICE,
+                    resolved_action=action,
+                    before_scene=before,
+                    after_scene=after,
+                    hardware_receipt=receipt(),
+                    after_frames=surface_frames(),
+                )
+                self.assertEqual("unknown", verified.app_id)
+                self.assertTrue(
+                    verified.matches_typed_context(
+                        device_id=DEVICE,
+                        app_id="unknown",
+                        screen_id="editor",
+                        input_field_id="input_field_1",
+                        now_epoch=1000.0,
+                    )
+                )
+
+    def test_pending_newline_rejects_unknown_app_without_typed_field(self) -> None:
+        action, before, _after = newline_case()
+        before["foreground_app_id"] = "unknown"
+        before["app_id"] = "unknown"
+        before["elements"][0]["states"].pop("input_field_id")
+        before["elements"][1]["states"]["input_field_id"] = "unknown"
+        with self.assertRaises(InputValueLineageError):
+            build_pending_newline_lineage(
+                device_id=DEVICE,
+                resolved_action=action,
+                before_scene=before,
+                hardware_receipt=receipt(),
+            )
 
     def test_pending_newline_projects_exact_value_into_same_typed_field(self) -> None:
         action, before, _after = newline_case()

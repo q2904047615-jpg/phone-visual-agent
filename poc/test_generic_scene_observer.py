@@ -1078,6 +1078,21 @@ class GenericSceneObserverTests(unittest.TestCase):
             prompt,
         )
         self.assertIn("Never omit confidence or target_mode", prompt)
+        self.assertIn(
+            "A complete blank surface does not need placeholder text, a caret, "
+            "or focus highlight",
+            prompt,
+        )
+        self.assertIn(
+            "Never infer a field from the goal, an unexplained gap, or adjacent "
+            "icons alone",
+            prompt,
+        )
+        self.assertNotIn(
+            "Include an empty field only when a complete border plus a visible "
+            "placeholder",
+            prompt,
+        )
         self.assertIn("compact minified", prompt)
         self.assertIn("single line", prompt)
         self.assertIn("the local, goal-derived whitelist is []", prompt)

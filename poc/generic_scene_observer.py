@@ -10114,12 +10114,21 @@ def _can_discard_separate_right_button(
 ) -> bool:
     """Discard a schema-valid control proven outside the input bounds."""
 
-    required = {"label", "bounds", "confidence"}
+    # This object is optional, read-only structural context and never grants
+    # action authority.  Providers commonly include the ordinary visibility
+    # fact on an otherwise schema-valid adjacent control.  Once geometry proves
+    # the control is separate from the input, discard the whole object instead
+    # of allowing that harmless optional fact to veto the input observation.
+    allowed = {"label", "bounds", "confidence", "fully_visible"}
     if (
         not isinstance(input_item, dict)
         or not isinstance(value, dict)
-        or not set(value).issubset(required)
+        or not set(value).issubset(allowed)
         or "bounds" not in value
+        or (
+            "fully_visible" in value
+            and not isinstance(value.get("fully_visible"), bool)
+        )
         or not _valid_1000_bounds(input_item.get("bounds"))
         or not _valid_1000_bounds(value.get("bounds"))
     ):

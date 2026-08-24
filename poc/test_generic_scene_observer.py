@@ -10040,6 +10040,41 @@ class GenericSceneObserverTests(unittest.TestCase):
             any(item.element_id == "local_audited_adjacent_button_1" for item in scene.elements)
         )
 
+    def test_disjoint_right_button_with_visibility_fact_is_discarded(self) -> None:
+        empty = scene_payload()
+        empty["elements"] = []
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[290, 570, 680, 610],
+                    text="aaazjie",
+                    right_button={
+                        "label": "发送",
+                        "bounds": [690, 570, 760, 610],
+                        "confidence": 1.0,
+                        "fully_visible": True,
+                    },
+                )
+            ]
+        )
+
+        scene = GenericSceneObserver(
+            SequenceProvider([empty, empty, audit])
+        ).observe(
+            frames=stable_frames(),
+            goal_context={
+                "objective": "确认当前输入内容",
+                "entities": {"input_text": "aaazjie"},
+            },
+        )
+
+        candidate = scene.unique_trusted_goal_element()
+        self.assertEqual("local_audited_input_1", candidate.element_id)
+        self.assertEqual("aaazjie", candidate.states["value"])
+        self.assertFalse(
+            any(item.element_id == "local_audited_adjacent_button_1" for item in scene.elements)
+        )
+
     def test_incomplete_right_button_inside_combined_bounds_remains_invalid(self) -> None:
         empty = scene_payload()
         empty["elements"] = []

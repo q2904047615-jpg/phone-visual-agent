@@ -1527,7 +1527,13 @@ class UniversalAgentOrchestrator:
         if len(matching_surfaces) != 1:
             return context
         target_surface = matching_surfaces[0]
-        if _scene_matches_target_app_surface(scene, target_surface):
+        # A receipt-proven runtime package is stronger than a structured
+        # screen-ID alias.  Keep the precise lineage upgrade unless the typed
+        # surface already carries that exact foreground identity.
+        if (
+            str(getattr(scene, "foreground_app_id", "") or "").strip().casefold()
+            == str(target_surface.app_id or "").strip().casefold()
+        ):
             return context
         rebound_surface = replace(
             target_surface,
@@ -2088,6 +2094,88 @@ class UniversalAgentOrchestrator:
         )
 
     @staticmethod
+    def _compact_app_surface_phrase(value: Any) -> str:
+        return "".join(
+            re.findall(
+                r"[a-z0-9]+|[\u4e00-\u9fff]+",
+                str(value or "").casefold(),
+            )
+        )
+
+    @classmethod
+    def _presence_names_only_target_app_surface(
+        cls,
+        presence_text: str,
+        target_app: Any,
+    ) -> bool:
+        """Bind App foreground only when no named child surface remains.
+
+        Full App names/IDs may be followed by generic state words such as
+        ``main screen`` or ``visible``.  If removing those identities leaves a
+        recipient, order, settings section or any other named qualifier, App
+        foreground cannot prove that more specific destination page.
+        """
+
+        compact = cls._compact_app_surface_phrase(presence_text)
+        identities = tuple(
+            dict.fromkeys(
+                identity
+                for identity in (
+                    cls._compact_app_surface_phrase(
+                        getattr(target_app, "app_id", "")
+                    ),
+                    cls._compact_app_surface_phrase(
+                        getattr(target_app, "app_name", "")
+                    ),
+                )
+                if identity
+                and identity not in {"app", "application", "应用", "程序"}
+            )
+        )
+        if not compact or not identities or not any(
+            identity in compact for identity in identities
+        ):
+            return False
+        residual = compact
+        for identity in sorted(identities, key=len, reverse=True):
+            residual = residual.replace(identity, "")
+        generic_state_tokens = (
+            "处于前台", "已经打开", "已经启动", "应用程序", "主界面", "主页面",
+            "当前", "目标", "应用", "程序", "主页", "首页", "页面", "界面",
+            "屏幕", "视图", "打开", "启动", "进入", "前台", "可见", "显示",
+            "已经", "已", "在", "的", "并", "and", "application", "foreground",
+            "launched", "opened", "visible", "current", "target", "screen",
+            "interface", "page", "view", "home", "main", "launch", "open",
+            "app", "is", "in", "the",
+        )
+        for token in sorted(generic_state_tokens, key=len, reverse=True):
+            residual = residual.replace(token, "")
+        return not residual
+
+    @classmethod
+    def _presence_references_target_app_identity(
+        cls,
+        presence_text: str,
+        target_app: Any,
+    ) -> bool:
+        """Return whether the text contains one complete target-App identity."""
+
+        compact = cls._compact_app_surface_phrase(presence_text)
+        identities = (
+            cls._compact_app_surface_phrase(getattr(target_app, "app_id", "")),
+            cls._compact_app_surface_phrase(getattr(target_app, "app_name", "")),
+        )
+        return bool(
+            compact
+            and any(
+                identity in compact
+                for identity in identities
+                if identity
+                and identity not in {"app", "application", "应用", "程序"}
+            )
+        )
+
+    @staticmethod
     def _subgoal_targets_launcher_surface(
         graph: DynamicTaskGraph,
         subgoal_id: str,
@@ -2135,16 +2223,14 @@ class UniversalAgentOrchestrator:
         required_surfaces = cls._presence_surface_classes(presence_text)
         if not required_surfaces.intersection({"page", "foreground_app"}):
             return ()
-        presence_terms = cls._presence_binding_terms(presence_text)
         referenced = []
         for target_app in graph.goal.target_apps:
             if str(target_app.app_id or "").strip().casefold() == "current_foreground":
                 continue
-            app_terms = cls._target_app_identity_terms(
-                target_app.app_id,
-                target_app.app_name,
-            )
-            if app_terms and app_terms.intersection(presence_terms):
+            if cls._presence_references_target_app_identity(
+                presence_text,
+                target_app,
+            ):
                 referenced.append(target_app)
         return tuple(referenced)
 
@@ -2155,39 +2241,13 @@ class UniversalAgentOrchestrator:
         scene: Any,
         target_apps: tuple[Any, ...],
     ) -> bool:
-        foreground = str(getattr(scene, "foreground_app_id", "") or "").strip()
-        if not foreground or foreground.casefold() == "unknown":
-            return False
-        # Android package names and the user's semantic App identity need not
-        # share tokens (for example a vendor package versus a product name).
-        # A structured screen_id is part of the current foreground scene, not
-        # a launcher affordance, so it may provide the missing generic binding.
-        # Do not inspect summaries or child elements here: an App icon on the
-        # launcher must never prove that App is already foreground.
-        structured_identities = tuple(
-            dict.fromkeys(
-                value
-                for value in (
-                    foreground,
-                    str(getattr(scene, "app_id", "") or "").strip(),
-                    str(getattr(scene, "screen_id", "") or "").strip(),
-                )
-                if value and value.casefold() != "unknown"
-            )
+        # The canonical action protocol owns App-surface identity.  Reuse that
+        # exact contract for zero-action task progress so DeepSeek/Qwen cannot
+        # disagree about whether the current structured surface is the target.
+        return any(
+            _scene_matches_target_app_surface(scene, target_app)
+            for target_app in target_apps
         )
-        for target_app in target_apps:
-            app_id = str(target_app.app_id or "").strip()
-            app_terms = cls._target_app_identity_terms(
-                target_app.app_id,
-                target_app.app_name,
-            )
-            for identity in structured_identities:
-                if app_id and identity.casefold() == app_id.casefold():
-                    return True
-                identity_terms = cls._target_app_identity_terms(identity)
-                if identity_terms and identity_terms.intersection(app_terms):
-                    return True
-        return False
 
     @staticmethod
     def _scene_page_identity_facts(scene: Any) -> tuple[str, ...]:
@@ -2592,8 +2652,18 @@ class UniversalAgentOrchestrator:
             # is the current page.  Zero-action idempotence is allowed only
             # when the completion condition itself is grounded by the current
             # structured page identity (or by an exact target-App foreground).
-            if not (
+            app_foreground_is_complete_destination = bool(
                 foreground_matches_referenced_app
+                and any(
+                    self._presence_names_only_target_app_surface(
+                        presence_text,
+                        target_app,
+                    )
+                    for target_app in referenced_app_pages
+                )
+            )
+            if not (
+                app_foreground_is_complete_destination
                 or named_destination_grounded
             ):
                 return None

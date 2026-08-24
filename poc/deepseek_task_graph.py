@@ -2635,6 +2635,12 @@ _VISUAL_IDENTITY_SEMANTIC_ALIASES = {
     ),
 }
 
+_VISUAL_IDENTITY_SEMANTIC_COMPACT_MARKERS = {
+    "conversation": frozenset({"聊天", "会话", "chat", "conversation"}),
+    "browser": frozenset({"浏览器", "browser"}),
+    "launcher": frozenset({"launcher", "homescreen", "桌面", "主屏", "主屏幕"}),
+}
+
 _SYSTEM_HOME_SURFACE_PATTERN = re.compile(
     r"(?:手机|系统|android)?(?:主)?桌面(?!版)|(?:手机|系统)?主屏(?:幕)?|"
     r"(?<![a-z0-9])(?:launcher|home[ _-]?screen)(?![a-z0-9])",
@@ -2652,6 +2658,28 @@ def _visual_identity_semantic_keys(value: str) -> frozenset[str]:
         key
         for key, patterns in _VISUAL_IDENTITY_SEMANTIC_ALIASES.items()
         if any(pattern.search(text) for pattern in patterns)
+    )
+
+
+def _is_semantic_only_visual_identity(
+    value: str,
+    semantic_keys: frozenset[str] | None = None,
+) -> bool:
+    """Return whether an identity contains only a generic container category.
+
+    A semantic alias such as ``chat`` may prove that the current surface is a
+    conversation surface.  It must not erase an additional named qualifier:
+    ``Alice chat`` still requires evidence for Alice, not merely any chat page.
+    """
+
+    compact = _compact_identity_text(value)
+    keys = semantic_keys or _visual_identity_semantic_keys(value)
+    return bool(
+        compact
+        and any(
+            compact in _VISUAL_IDENTITY_SEMANTIC_COMPACT_MARKERS.get(key, ())
+            for key in keys
+        )
     )
 
 
@@ -2715,13 +2743,20 @@ def _named_visual_identity_anchor(texts: tuple[str, ...]) -> str:
 
 def _identity_anchor_is_grounded(anchor: str, facts: tuple[str, ...]) -> bool:
     anchor_semantics = _visual_identity_semantic_keys(anchor)
+    semantic_only_anchor = _is_semantic_only_visual_identity(
+        anchor,
+        anchor_semantics,
+    )
     for fact in facts:
         compact = _compact_identity_text(fact)
         if not compact:
             continue
         if anchor in compact:
             return True
-        if anchor_semantics.intersection(_visual_identity_semantic_keys(fact)):
+        if (
+            semantic_only_anchor
+            and anchor_semantics.intersection(_visual_identity_semantic_keys(fact))
+        ):
             return True
         longest = SequenceMatcher(
             None,
@@ -2729,7 +2764,14 @@ def _identity_anchor_is_grounded(anchor: str, facts: tuple[str, ...]) -> bool:
             compact,
             autojunk=False,
         ).find_longest_match()
-        if longest.size / len(anchor) >= 0.5:
+        matched_anchor_part = anchor[longest.a : longest.a + longest.size]
+        match_is_only_generic_semantics = _is_semantic_only_visual_identity(
+            matched_anchor_part
+        )
+        if (
+            longest.size / len(anchor) >= 0.5
+            and not match_is_only_generic_semantics
+        ):
             return True
     return False
 

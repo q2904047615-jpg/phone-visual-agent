@@ -1944,6 +1944,14 @@ class SingleStepGenericSceneObserver(GenericSceneObserver):
                 input_structure_required=input_structure_required,
             )
             scene_payload = dict(envelope["scene"])
+            fused_input_attestation = (
+                _fused_preliminary_input_attestation(
+                    scene_payload,
+                    goal_context=context,
+                )
+                if input_structure_required
+                else None
+            )
             if input_structure_required:
                 _strip_preliminary_input_geometry_for_dedicated_audit(
                     scene_payload,
@@ -2038,6 +2046,7 @@ class SingleStepGenericSceneObserver(GenericSceneObserver):
                         lineage_frame=frame,
                         qwerty_row_snapper=self.qwerty_row_snapper,
                         qwerty_row_frames=frames[stable_tail_start:],
+                        fused_input_attestation=fused_input_attestation,
                     ),
                     obstructions,
                     fingerprint=fingerprint,
@@ -5470,6 +5479,72 @@ def _strip_preliminary_input_geometry_for_dedicated_audit(
     return isolated
 
 
+def _fused_preliminary_input_attestation(
+    payload: dict[str, Any],
+    *,
+    goal_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Keep one non-authoritative empty-field fact from the fused scene.
+
+    The dedicated input structure remains the sole value and geometry owner.
+    This record only proves that the same envelope described one visible,
+    goal-bound input region with non-empty visual evidence.  It can rescue an
+    empty field with no placeholder or caret text only when the input audit
+    later reports the same value and strongly overlapping bounds.
+    """
+
+    if not _goal_active_input_transaction_text(goal_context):
+        return None
+    elements = payload.get("elements")
+    if not isinstance(elements, list):
+        return None
+    exact_fields = {
+        "element_id",
+        "role",
+        "meaning",
+        "label",
+        "bounds",
+        "confidence",
+        "states",
+        "evidence",
+    }
+    candidates: list[dict[str, Any]] = []
+    for item in elements:
+        if not isinstance(item, dict) or set(item) != exact_fields:
+            continue
+        states = item.get("states")
+        evidence = item.get("evidence")
+        confidence = item.get("confidence")
+        raw_bounds = item.get("bounds")
+        if (
+            str(item.get("role") or "").strip() != "input"
+            or not isinstance(states, dict)
+            or states.get("goal_relevant") is not True
+            or states.get("fully_visible") is not True
+            or not isinstance(states.get("value"), str)
+            or isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or float(confidence) < 0.9
+            or not isinstance(evidence, list)
+            or not evidence
+            or any(not isinstance(value, str) or not value.strip() for value in evidence)
+            or not _valid_1000_bounds(raw_bounds)
+        ):
+            continue
+        bounds = [float(value) for value in raw_bounds]
+        if max(bounds) <= 1.0:
+            bounds = [value * 1000.0 for value in bounds]
+        candidates.append(
+            {
+                "value": states["value"],
+                "bounds": bounds,
+                "confidence": float(confidence),
+                "evidence": tuple(str(value).strip()[:200] for value in evidence),
+            }
+        )
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _strip_preliminary_keyboard_containers_for_dedicated_audit(
     payload: dict[str, Any],
     goal_context: dict[str, Any],
@@ -7540,6 +7615,7 @@ def _apply_input_structure_audit(
     ]
     | None = None,
     qwerty_row_frames: list[Image.Image] | tuple[Image.Image, ...] | None = None,
+    fused_input_attestation: dict[str, Any] | None = None,
 ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
@@ -7988,6 +8064,37 @@ def _apply_input_structure_audit(
             # the value itself must never be trimmed.
             text = raw_text
             placeholder = str(item.get("placeholder") or "").strip()
+            fused_empty_field_evidence: tuple[str, ...] = ()
+            if (
+                len(application_inputs) == 1
+                and text == ""
+                and isinstance(fused_input_attestation, dict)
+                and fused_input_attestation.get("value") == text
+            ):
+                attested_bounds = fused_input_attestation.get("bounds")
+                attested_evidence = fused_input_attestation.get("evidence")
+                if (
+                    isinstance(attested_bounds, (list, tuple))
+                    and len(attested_bounds) == 4
+                    and all(
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        for value in attested_bounds
+                    )
+                    and isinstance(attested_evidence, (list, tuple))
+                    and attested_evidence
+                ):
+                    audit_bounds = tuple(float(value) for value in item["bounds"])
+                    scene_bounds = tuple(float(value) for value in attested_bounds)
+                    if (
+                        _bounds_overlap_ratio(audit_bounds, scene_bounds) >= 0.85
+                        and _bounds_overlap_ratio(scene_bounds, audit_bounds) >= 0.85
+                    ):
+                        fused_empty_field_evidence = tuple(
+                            str(value).strip()[:200]
+                            for value in attested_evidence
+                            if str(value).strip()
+                        )
             pending_candidate_shell = bool(
                 verified_input_lineage is not None
                 and verified_input_lineage.source
@@ -7999,6 +8106,7 @@ def _apply_input_structure_audit(
                 and not placeholder
                 and not cues
                 and not pending_candidate_shell
+                and not fused_empty_field_evidence
             ):
                 continue
             bounds = tuple(float(value) for value in item["bounds"])
@@ -8116,6 +8224,7 @@ def _apply_input_structure_audit(
                     "input_bounds": input_bounds,
                     "right_button": button_match,
                     "pending_ime_candidate_state": pending_ime_candidate_state,
+                    "fused_empty_field_evidence": fused_empty_field_evidence,
                     "confidence": min(
                         confidence,
                         float(button_match["confidence"])
@@ -8835,6 +8944,7 @@ def _apply_input_structure_audit(
                     (
                         *rendered_input["field_labels"],
                         *rendered_input["visible_editable_cues"],
+                        *rendered_input.get("fused_empty_field_evidence", ()),
                     )
                 )
             )
@@ -8906,6 +9016,12 @@ def _apply_input_structure_audit(
                     )
             elif rendered_input["placeholder"]:
                 input_evidence.insert(0, f"应用输入框为空，占位提示：{rendered_input['placeholder']}")
+            elif rendered_input.get("fused_empty_field_evidence"):
+                input_evidence.insert(
+                    0,
+                    "同一单步响应的场景输入事实与输入结构审计唯一重合；"
+                    "当前输入框为空",
+                )
             if clearable_ime_preedit:
                 input_evidence.append(
                     "唯一相邻输入法预编辑串已绑定当前typed输入框，"

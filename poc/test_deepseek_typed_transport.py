@@ -733,6 +733,34 @@ class TypedPlannerTransportTests(unittest.TestCase):
                     named_visual_identity_is_grounded((text,), unrelated_facts)
                 )
 
+    def test_named_conversation_destination_requires_named_qualifier(self):
+        generic_chat_list = (
+            '{"app_id":"com.vendor.chat","screen_id":"chat_main_list"}',
+        )
+        named_page_title = (
+            '{"role":"text","meaning":"page_title",'
+            '"label":"文件传输助手"}',
+        )
+
+        self.assertTrue(
+            named_visual_identity_is_grounded(
+                ("聊天页面可见",),
+                generic_chat_list,
+            )
+        )
+        self.assertFalse(
+            named_visual_identity_is_grounded(
+                ("文件传输助手的聊天页面可见",),
+                generic_chat_list,
+            )
+        )
+        self.assertTrue(
+            named_visual_identity_is_grounded(
+                ("文件传输助手的聊天页面可见",),
+                named_page_title,
+            )
+        )
+
     def test_forbidden_effect_words_do_not_create_or_block_navigation(self):
         raw = payload()
         graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(

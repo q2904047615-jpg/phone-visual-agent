@@ -22,6 +22,7 @@ from qwen_visual_decision import (
     _launcher_app_entry_candidate_ids,
     _required_exact_candidate_ids,
     _scene_matches_target_app_surface,
+    _deterministic_exact_selection_payload,
     _selection_decision_prompt,
     _selection_choices,
 )
@@ -2387,6 +2388,157 @@ class RawSequenceProvider(FakeProvider):
 
         self.assertGreaterEqual(observation.selected_frame_index, 1)
         self.assertEqual(_local_frame_fingerprint(base), observation.fingerprint)
+
+
+class StructuredAppSurfaceSelectionRegressionTests(unittest.TestCase):
+    def test_runtime_package_and_structured_screen_select_named_child_entry(self) -> None:
+        target = SimpleNamespace(app_id="sample_chat", app_name="示例聊天")
+        unrelated_scene = UIScene(
+            app_id="com.vendor.runtime",
+            screen_id="generic_main_list",
+            summary="普通列表",
+            elements=(),
+            stable=True,
+            confidence=0.99,
+        )
+        launcher_scene = UIScene(
+            app_id="launcher",
+            screen_id="home_screen",
+            summary="系统桌面",
+            elements=(),
+            stable=True,
+            confidence=0.99,
+        )
+        self.assertFalse(_scene_matches_target_app_surface(unrelated_scene, target))
+        self.assertFalse(_scene_matches_target_app_surface(launcher_scene, target))
+
+        task_id = "task_structured_app_surface"
+        device_id = "device-local-01"
+        revision = 1
+        semantic_ir = TaskSemanticIR(
+            task_id=task_id,
+            device_id=device_id,
+            revision=revision,
+            raw_goal="进入示例聊天中的文件传输助手",
+            surfaces=(
+                SurfaceRef(
+                    surface_id="surface_sample_chat",
+                    kind="app",
+                    app_id="sample_chat",
+                    app_name="示例聊天",
+                ),
+            ),
+            entities=(
+                SemanticEntity(
+                    entity_id="entity_recipient",
+                    entity_type="party",
+                    role="recipient",
+                    value="文件传输助手",
+                    source_span=SourceSpan(8, 14),
+                    authority="user_literal",
+                ),
+            ),
+            effects=(),
+            subgoals=(
+                SemanticSubgoal(
+                    subgoal_id="find_recipient",
+                    surface_ref="surface_sample_chat",
+                    status="active",
+                    external_impact="navigation_only",
+                    entity_refs=("entity_recipient",),
+                ),
+            ),
+        )
+        parsed = QwenTaskContext(
+            protocol_version="2026-08-20-deepseek-typed-task-graph-v4",
+            task_id=task_id,
+            device_id=device_id,
+            revision=revision,
+            task_status="running",
+            goal={
+                "objective": "进入示例聊天中的文件传输助手",
+                "target_apps": [
+                    {"app_id": "sample_chat", "app_name": "示例聊天"}
+                ],
+                "entities": {"recipient": "文件传输助手"},
+            },
+            global_constraints=(),
+            goal_completion_conditions=(),
+            current_subgoal={
+                "subgoal_id": "find_recipient",
+                "objective": "进入文件传输助手页面",
+                "status": "active",
+                "depends_on": (),
+                "constraints": (),
+                "completion_conditions": ("文件传输助手页面可见",),
+                "completion_evidence": (),
+                "effect_ids": (),
+                "execution_class": "navigate",
+            },
+            current_execution_class="navigate",
+            effect_intents=(),
+            effect_gate={
+                "required": False,
+                "state": "not_required",
+                "effect_ids": [],
+                "effect_action_allowed": False,
+                "scope": {
+                    "task_id": task_id,
+                    "device_id": device_id,
+                    "revision": revision,
+                    "subgoal_id": "find_recipient",
+                },
+            },
+            semantic_ir=semantic_ir,
+        )
+        parsed.validate()
+        current_scene = UIScene(
+            app_id="com.vendor.runtime",
+            screen_id="sample_chat_main_list",
+            summary="示例聊天列表中可见文件传输助手。",
+            elements=(
+                UIElement(
+                    element_id="file-transfer",
+                    role="list_item",
+                    meaning="chat_entry_file_transfer",
+                    label="文件传输助手",
+                    bounds=(0.08, 0.22, 0.93, 0.32),
+                    confidence=0.99,
+                    states={
+                        "goal_relevant": True,
+                        "visible": True,
+                        "fully_visible": True,
+                    },
+                ),
+            ),
+            stable=True,
+            confidence=0.98,
+        )
+        self.assertTrue(_scene_matches_target_app_surface(current_scene, target))
+        observation = SimpleNamespace(
+            scene=current_scene,
+            target_local_candidate=current_scene.unique_trusted_goal_element,
+        )
+        choices = _selection_choices(
+            parsed,
+            observation,
+            frozenset({"back", "home", "tap_semantic", "wait_for_change"}),
+        )
+
+        selected = _deterministic_exact_selection_payload(
+            parsed,
+            choices,
+            observation=observation,
+            allow_general_single_step=True,
+        )
+
+        self.assertIsNotNone(selected)
+        self.assertEqual("action", selected["status"])
+        selected_choice = next(
+            item for item in choices if item["choice_id"] == selected["choice_id"]
+        )
+        self.assertEqual("tap_semantic", selected_choice["action"])
+        self.assertEqual("file-transfer", selected_choice["element_id"])
 
 
 class CanonicalEffectSelectionRegressionTests(unittest.TestCase):

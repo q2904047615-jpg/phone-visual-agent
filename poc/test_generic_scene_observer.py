@@ -29,6 +29,7 @@ from generic_scene_observer import (
     _can_use_stable_ocr_literal_bounds,
     _compact_prompt,
     _foreground_app_identity_audit_prompt,
+    _fused_preliminary_input_attestation,
     _goal_requests_input,
     _goal_requests_keyboard_mode_switch,
     _input_audit_literal_key_targets,
@@ -581,6 +582,82 @@ class GenericSceneObserverTests(unittest.TestCase):
             observed.unique_trusted_goal_element().element_id,
             "local_audited_input_1",
         )
+
+    def test_single_step_observer_accepts_one_fused_blank_input_without_placeholder(
+        self,
+    ) -> None:
+        scene = scene_payload()
+        scene.update(
+            {
+                "foreground_app_id": "com.example.messaging",
+                "screen_id": "named_conversation",
+                "summary": "指定会话页底部有一个空输入框",
+                "elements": [
+                    {
+                        "element_id": "e1",
+                        "role": "input",
+                        "meaning": "message_input_field",
+                        "label": "",
+                        "bounds": [120, 910, 780, 960],
+                        "confidence": 1.0,
+                        "states": {
+                            "goal_relevant": True,
+                            "fully_visible": True,
+                            "value": "",
+                        },
+                        "evidence": ["底部工具栏中唯一完整白色文本输入区域"],
+                    }
+                ],
+            }
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="message",
+                    bounds=[120, 910, 780, 960],
+                    text="",
+                    placeholder="",
+                    visible_editable_cues=[],
+                )
+            ]
+        )
+        provider = SequenceProvider(
+            [
+                {
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "scene": scene,
+                    "input_structure": audit,
+                }
+            ]
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_message",
+                    "objective": "在输入框中输入消息",
+                    "constraints": [],
+                    "completion_conditions": ["输入框显示指定消息"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "aaazjie？你好",
+                        "active_input_field_id": "message_field",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+
+        observed = SingleStepGenericSceneObserver(provider).observe(
+            frames=stable_frames(),
+            goal_context=context,
+            device_id="device-local-01",
+        )
+
+        self.assertEqual(provider.calls, 1)
+        field = observed.unique_trusted_goal_element()
+        self.assertEqual("local_audited_input_1", field.element_id)
+        self.assertEqual("", field.states["value"])
+        self.assertIn("当前输入框为空", " ".join(field.evidence))
 
     def test_single_step_observer_restores_only_missing_nested_audit_version(self) -> None:
         scene = scene_payload()
@@ -10979,6 +11056,99 @@ class GenericSceneObserverTests(unittest.TestCase):
                 goal_context=multifield_next_context(MULTIFIELD_FIELDS),
                 ledger_input_value="",
             )
+
+    def test_fused_unique_empty_input_needs_same_value_and_overlapping_geometry(
+        self,
+    ) -> None:
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_message",
+                    "objective": "在输入框中输入消息",
+                    "constraints": [],
+                    "completion_conditions": ["输入框显示指定消息"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "input_text": "aaazjie？你好",
+                        "active_input_transaction_text": "aaazjie？你好",
+                        "active_input_field_id": "input_field_1",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+        preliminary = scene_payload()
+        preliminary["elements"] = [
+            {
+                "element_id": "e2",
+                "role": "input",
+                "meaning": "message_input_field",
+                "label": "",
+                "bounds": [120, 910, 780, 960],
+                "confidence": 1.0,
+                "states": {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "value": "",
+                },
+                "evidence": ["底部工具栏中唯一完整白色文本输入区域"],
+            }
+        ]
+        attestation = _fused_preliminary_input_attestation(
+            preliminary,
+            goal_context=context,
+        )
+        self.assertIsNotNone(attestation)
+
+        base_payload = scene_payload()
+        base_payload["elements"] = []
+        base = _parse_scene(
+            json.dumps(base_payload, ensure_ascii=False),
+            fingerprint="f" * 64,
+        )
+        audit_input = audited_application_input(
+            bounds=[120, 910, 780, 960],
+            text="",
+            placeholder="",
+            visible_editable_cues=[],
+        )
+        raw = json.dumps(
+            input_audit_payload(application_inputs=[audit_input]),
+            ensure_ascii=False,
+        )
+
+        projected = _apply_input_structure_audit(
+            base,
+            raw,
+            fingerprint="f" * 64,
+            goal_context=context,
+            ledger_input_value="",
+            fused_input_attestation=attestation,
+        )
+
+        field = projected.get_element("local_audited_input_1")
+        self.assertEqual("", field.states["value"])
+        self.assertTrue(field.states["goal_relevant"])
+        self.assertIn("当前输入框为空", " ".join(field.evidence))
+
+        for invalid_attestation in (
+            None,
+            {**attestation, "value": "旧值"},
+            {**attestation, "bounds": [120, 700, 780, 750]},
+        ):
+            with self.subTest(attestation=invalid_attestation):
+                rejected = _apply_input_structure_audit(
+                    base,
+                    raw,
+                    fingerprint="f" * 64,
+                    goal_context=context,
+                    ledger_input_value="",
+                    fused_input_attestation=invalid_attestation,
+                )
+                self.assertFalse(any(
+                    item.element_id == "local_audited_input_1"
+                    for item in rejected.elements
+                ))
 
     def test_typed_multiline_prefix_survives_placeholder_loss_and_pixel_coordinates(
         self,

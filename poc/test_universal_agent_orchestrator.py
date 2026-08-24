@@ -1962,6 +1962,119 @@ class UniversalAgentStartTests(unittest.TestCase):
         self.assertIsNone(wrong_app)
         self.assertEqual(1, len(planner.replan_calls))
 
+    def test_named_entry_on_generic_list_cannot_complete_destination_page(self) -> None:
+        base = _graph()
+        destination = replace(
+            base.subgoals[0],
+            subgoal_id="enter_named_conversation",
+            objective="找到并进入文件传输助手的聊天页面",
+            completion_conditions=("文件传输助手的聊天页面可见",),
+            constraints=(),
+            external_impact="navigation_only",
+        )
+        graph = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="进入具名会话页面",
+                target_apps=(
+                    TargetApp(app_id="sample_chat", app_name="示例聊天"),
+                ),
+                entities={"recipient": "文件传输助手"},
+            ),
+            subgoals=(destination,),
+            active_subgoal_id=destination.subgoal_id,
+            raw_user_goal="进入文件传输助手的聊天页面",
+        )
+        graph.validate()
+        scene = replace(
+            _scene(
+                meaning="chat_session_file_transfer",
+                label="文件传输助手",
+                role="list_item",
+                states={"goal_relevant": True, "fully_visible": True},
+                app_id="com.vendor.chat",
+            ),
+            screen_id="sample_chat_main_list",
+            summary="聊天列表页，文件传输助手入口可见。",
+        )
+        planner = FakeDeepSeekPlanner(graph)
+        adapter = FakeAdapter(scene)
+        orchestrator = self._orchestrator(
+            planner,
+            FakeQwenObserver(),
+            adapter,
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = UniversalAgentSessionState(
+                session_id="session-named-entry-is-not-destination",
+                raw_goal=graph.raw_user_goal,
+                device_id=graph.device_id,
+                run_dir=Path(temp),
+                adapter=adapter,
+                evidence_store=AgentEvidenceStore(Path(temp)),
+                task_graph=graph,
+            )
+            result = orchestrator._try_advance_visible_presence_subgoal(
+                session,
+                graph=graph,
+                trusted_observation=FakeTrustedObservation(
+                    device_id=graph.device_id,
+                    scene=scene,
+                ),
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual([], planner.replan_calls)
+
+    def test_app_surface_binding_rejects_named_child_qualifiers(self) -> None:
+        cases = (
+            (
+                TargetApp(app_id="sample_chat", app_name="示例聊天"),
+                "打开示例聊天应用 示例聊天主界面可见",
+                True,
+            ),
+            (
+                TargetApp(app_id="sample_chat", app_name="示例聊天"),
+                "找到并进入文件传输助手的聊天页面",
+                False,
+            ),
+            (
+                TargetApp(app_id="chat", app_name="聊天"),
+                "张三的聊天页面可见",
+                False,
+            ),
+            (
+                TargetApp(app_id="settings", app_name="设置"),
+                "网络设置页面可见",
+                False,
+            ),
+        )
+        for target_app, text, expected in cases:
+            with self.subTest(app_id=target_app.app_id, text=text):
+                self.assertEqual(
+                    expected,
+                    UniversalAgentOrchestrator._presence_names_only_target_app_surface(
+                        text,
+                        target_app,
+                    ),
+                )
+
+        browser = TargetApp(app_id="browser", app_name="浏览器")
+        self.assertTrue(
+            UniversalAgentOrchestrator._presence_references_target_app_identity(
+                "读取浏览器打开后页面的主标题或错误提示",
+                browser,
+            )
+        )
+        self.assertFalse(
+            UniversalAgentOrchestrator._presence_names_only_target_app_surface(
+                "读取浏览器打开后页面的主标题或错误提示",
+                browser,
+            )
+        )
+
     def test_app_foreground_presence_phrase_is_narrow(self) -> None:
         self.assertTrue(
             UniversalAgentOrchestrator._is_idempotent_app_foreground_completion(

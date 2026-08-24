@@ -2786,6 +2786,22 @@ def _parse_single_step_observation_envelope(
         input_payload = payload["input_structure"]
         if input_structure_required and not isinstance(input_payload, dict):
             raise UISceneError("输入子目标必须在同一响应返回input_structure对象。")
+        if (
+            input_structure_required
+            and isinstance(input_payload, dict)
+            and set(input_payload)
+            == {"application_inputs", "ime_preedit_regions", "keyboard"}
+        ):
+            # The outer single-step envelope already fixes the sole valid
+            # nested audit protocol.  Restoring that one omitted constant is a
+            # deterministic shape normalization; no visual fact, geometry or
+            # action meaning is inferred.  Every other missing/extra/wrong
+            # nested field still fails in the strict audit parser below.
+            input_payload = {
+                "protocol_version": INPUT_STRUCTURE_AUDIT_VERSION,
+                **input_payload,
+            }
+            payload = {**payload, "input_structure": input_payload}
         if not input_structure_required and input_payload is not None:
             raise UISceneError("非输入子目标的input_structure必须为null。")
         return payload
@@ -10083,6 +10099,7 @@ def _normalize_exact_target_ui_label_relevance(
         for item in elements
         if isinstance(item, dict)
         and str(item.get("label") or "").strip() == target_label
+        and _valid_1000_bounds(item.get("bounds"))
     ]
     if len(matches) != 1:
         return

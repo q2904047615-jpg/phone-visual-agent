@@ -3744,6 +3744,42 @@ class UniversalAgentStartTests(unittest.TestCase):
             trusted_observation=SimpleNamespace(scene=launcher_scene),
         )
 
+    def test_structured_screen_identity_binds_runtime_package_generically(self) -> None:
+        target_apps = (TargetApp(app_id="sample_chat", app_name="示例聊天"),)
+        runtime_scene = replace(
+            _scene(),
+            app_id="com.vendor.runtime",
+            screen_id="sample_chat_main_list",
+        )
+        unrelated_scene = replace(
+            runtime_scene,
+            screen_id="generic_main_list",
+        )
+        launcher_scene = replace(
+            _scene(meaning="open_sample_chat", label="示例聊天"),
+            app_id="launcher",
+            screen_id="home_screen",
+        )
+
+        self.assertTrue(
+            UniversalAgentOrchestrator._scene_foreground_matches_target_app_page(
+                scene=runtime_scene,
+                target_apps=target_apps,
+            )
+        )
+        self.assertFalse(
+            UniversalAgentOrchestrator._scene_foreground_matches_target_app_page(
+                scene=unrelated_scene,
+                target_apps=target_apps,
+            )
+        )
+        self.assertFalse(
+            UniversalAgentOrchestrator._scene_foreground_matches_target_app_page(
+                scene=launcher_scene,
+                target_apps=target_apps,
+            )
+        )
+
     def test_matching_target_app_can_prove_foreground_wording(self) -> None:
         base = self._named_app_page_graph(
             app_id="local_tool",

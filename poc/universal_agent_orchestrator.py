@@ -2158,17 +2158,35 @@ class UniversalAgentOrchestrator:
         foreground = str(getattr(scene, "foreground_app_id", "") or "").strip()
         if not foreground or foreground.casefold() == "unknown":
             return False
-        foreground_terms = cls._target_app_identity_terms(foreground)
+        # Android package names and the user's semantic App identity need not
+        # share tokens (for example a vendor package versus a product name).
+        # A structured screen_id is part of the current foreground scene, not
+        # a launcher affordance, so it may provide the missing generic binding.
+        # Do not inspect summaries or child elements here: an App icon on the
+        # launcher must never prove that App is already foreground.
+        structured_identities = tuple(
+            dict.fromkeys(
+                value
+                for value in (
+                    foreground,
+                    str(getattr(scene, "app_id", "") or "").strip(),
+                    str(getattr(scene, "screen_id", "") or "").strip(),
+                )
+                if value and value.casefold() != "unknown"
+            )
+        )
         for target_app in target_apps:
             app_id = str(target_app.app_id or "").strip()
-            if app_id and foreground.casefold() == app_id.casefold():
-                return True
             app_terms = cls._target_app_identity_terms(
                 target_app.app_id,
                 target_app.app_name,
             )
-            if foreground_terms and foreground_terms.intersection(app_terms):
-                return True
+            for identity in structured_identities:
+                if app_id and identity.casefold() == app_id.casefold():
+                    return True
+                identity_terms = cls._target_app_identity_terms(identity)
+                if identity_terms and identity_terms.intersection(app_terms):
+                    return True
         return False
 
     @staticmethod

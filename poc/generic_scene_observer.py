@@ -3644,6 +3644,73 @@ def _normalize_input_audit_portrait_grid_from_local_rows(
         owner[key] = value
 
 
+def _snap_qwerty_bottom_row_switches_from_local_rows(
+    payload: dict[str, Any],
+    *,
+    locally_snapped_anchors: dict[str, list[int]],
+) -> None:
+    """Anchor bottom-row switches to the independently observed QWERTY grid.
+
+    A model can place a compact bottom-row switch too close to Android's
+    navigation bar. Preserve its audited horizontal bounds and height, but move
+    only a switch already reported below the third letter row to the implied
+    fourth-row center. This is generic keyboard geometry, not an App patch.
+    """
+
+    keyboard = payload.get("keyboard")
+    if not isinstance(keyboard, dict) or keyboard.get("layout") != "qwerty":
+        return
+    try:
+        top_y = statistics.mean(
+            float(locally_snapped_anchors[key][1]) for key in ("q", "p")
+        )
+        middle_y = statistics.mean(
+            float(locally_snapped_anchors[key][1]) for key in ("a", "l")
+        )
+        bottom_y = statistics.mean(
+            float(locally_snapped_anchors[key][1])
+            for key in ("z", "m", "backspace")
+        )
+    except (KeyError, TypeError, ValueError):
+        return
+    pitches = (middle_y - top_y, bottom_y - middle_y)
+    if (
+        min(pitches) < 25
+        or max(pitches) > 140
+        or max(pitches) / min(pitches) > 1.35
+    ):
+        return
+    pitch = statistics.mean(pitches)
+    target_center_y = bottom_y + pitch
+
+    def snap(owner: Any) -> None:
+        if not isinstance(owner, dict) or not _valid_1000_bounds(owner.get("bounds")):
+            return
+        left, top, right, bottom = (float(part) for part in owner["bounds"])
+        center_y = (top + bottom) / 2.0
+        height = bottom - top
+        if not (
+            bottom_y + 0.2 * pitch <= center_y <= bottom_y + 2.0 * pitch
+            and 0.3 * pitch <= height <= 1.5 * pitch
+        ):
+            return
+        snapped_top = target_center_y - height / 2.0
+        snapped_bottom = target_center_y + height / 2.0
+        if not 0 <= snapped_top < snapped_bottom <= 1000:
+            return
+        owner["bounds"] = [
+            round(left),
+            round(snapped_top),
+            round(right),
+            round(snapped_bottom),
+        ]
+
+    snap(keyboard.get("mode_switch"))
+    for item in keyboard.get("layout_switches") or []:
+        if isinstance(item, dict) and item.get("current_layout") == "qwerty":
+            snap(item)
+
+
 def _reattach_input_audit_to_unique_scene_field(
     scene: UIScene,
     application_inputs: Any,
@@ -7703,6 +7770,10 @@ def _apply_input_structure_audit(
             )
             if locally_snapped_qwerty_anchors is not None:
                 _normalize_input_audit_portrait_grid_from_local_rows(
+                    payload,
+                    locally_snapped_anchors=locally_snapped_qwerty_anchors,
+                )
+                _snap_qwerty_bottom_row_switches_from_local_rows(
                     payload,
                     locally_snapped_anchors=locally_snapped_qwerty_anchors,
                 )

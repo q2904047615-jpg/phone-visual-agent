@@ -8449,6 +8449,71 @@ class GenericSceneObserverTests(unittest.TestCase):
             numeric_scene.unique_trusted_goal_element().element_id,
         )
 
+    def test_qwerty_layout_switch_y_is_snapped_above_navigation_bar(self) -> None:
+        base_scene = _parse_scene(
+            json.dumps(scene_payload(), ensure_ascii=False),
+            fingerprint="frame-switch-row-snap",
+        )
+        current_value = "aaazjie"
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    bounds=[120, 570, 720, 630],
+                    text=current_value,
+                )
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 640, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "qwerty_anchors": {
+                    "q": [122, 709], "p": [881, 709],
+                    "a": [164, 781], "l": [839, 781],
+                    "z": [249, 853], "m": [755, 853],
+                    "backspace": [881, 853],
+                },
+                "mode_switch": None,
+                "backspace_key": None,
+                "enter_key": None,
+                "case_switch": None,
+                "literal_keys": [],
+                "layout_switches": [
+                    {
+                        "label": "123",
+                        "bounds": [220, 950, 320, 990],
+                        "confidence": 1.0,
+                        "current_layout": "qwerty",
+                        "target_layout": "numeric",
+                    }
+                ],
+            },
+        )
+        snapped = {
+            "q": [122, 709], "p": [881, 709],
+            "a": [164, 781], "l": [839, 781],
+            "z": [249, 853], "m": [755, 853],
+            "backspace": [881, 853],
+        }
+
+        projected = _apply_input_structure_audit(
+            base_scene,
+            json.dumps(audit, ensure_ascii=False),
+            fingerprint="frame-switch-row-snap",
+            goal_context={
+                "objective": "输入完整文本",
+                "entities": {"input_text": current_value + "？"},
+            },
+            ledger_input_value=current_value,
+            qwerty_row_snapper=lambda _frames, _anchors: snapped,
+            qwerty_row_frames=stable_frames()[-3:],
+        )
+
+        target = projected.unique_trusted_goal_element()
+        self.assertEqual("local_audited_keyboard_layout_switch_1", target.element_id)
+        self.assertEqual((0.22, 0.905, 0.32, 0.945), target.bounds)
+
     def test_literal_key_and_layout_switch_validation_fail_closed(self) -> None:
         keyboard_bounds = (0.0, 480.0, 1000.0, 1000.0)
         self.assertEqual(

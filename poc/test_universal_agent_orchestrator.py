@@ -7208,7 +7208,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             )
         )
 
-    def test_verified_multihop_layout_switch_keeps_input_transaction(self) -> None:
+    def test_verified_symbol_layout_switch_keeps_input_transaction(self) -> None:
         base = self._input_graph()
         graph = replace(
             base,
@@ -7224,7 +7224,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             element_id="layout-switch",
             role="button",
             meaning="switch_keyboard_layout",
-            label="123",
+            label="！？#",
             bounds=(0.18, 0.78, 0.28, 0.85),
             confidence=1.0,
             states={
@@ -7232,7 +7232,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 "fully_visible": True,
                 "keyboard_layout_switch": True,
                 "current_layout": "qwerty",
-                "target_layout": "numeric",
+                "target_layout": "symbol",
                 "prior_input_value": "aaazjie",
                 "next_input_value": "？",
                 "input_element_id": "input-1",
@@ -7255,7 +7255,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                     after_base.elements[0],
                     states={
                         **after_base.elements[0].states,
-                        "keyboard_layout": "numeric",
+                        "keyboard_layout": "symbol",
                     },
                 ),
             ),
@@ -7265,7 +7265,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 "meaning": "application_text_input",
                 "states": {
                     "value": "aaazjie",
-                    "keyboard_layout": "numeric",
+                    "keyboard_layout": "symbol",
                 },
             }
         }
@@ -7309,7 +7309,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                     layout_switch,
                     states={
                         **layout_switch.states,
-                        "target_layout": "qwerty",
+                        "target_layout": "numeric",
                     },
                 ),
                 before_base.elements[0],

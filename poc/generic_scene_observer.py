@@ -46,6 +46,7 @@ from verified_text_transaction import (
     next_keyboard_layout_towards,
     plan_next_verified_input,
     preferred_keyboard_layout,
+    required_keyboard_input_mode_for_step,
 )
 from input_value_lineage import (
     TypedInputLineage,
@@ -66,7 +67,7 @@ FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE = (
 )
 POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
 POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被重新观察"]
-INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-23-input-structure-audit-v9"
+INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-25-input-structure-audit-v10"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
 OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 12
@@ -1385,8 +1386,9 @@ Distinguish three different visual structures; never merge them:
 5. keyboard.backspace_key: for any complete visible keyboard layout, report the one complete backspace/delete key as label, bounds, confidence and fully_visible. Use null when absent, clipped, ambiguous, or confused with an App delete control. This is read-only geometry and never authorizes clearing by itself.
 6. keyboard.literal_keys: the local, goal-derived whitelist is {json.dumps(literal_key_targets, ensure_ascii=False, separators=(',', ':'))}. Report only complete visible keys whose inserted value occurs in that exact whitelist, at most once per distinct value and at most eight total. Every literal-key object MUST contain exactly these six fields and never omit any of them: value, label, key_kind, bounds, confidence, fully_visible. When the whitelist is empty, literal_keys MUST be []. QWERTY alphabet letters and Chinese characters MUST NEVER be enumerated here, even when they occur in input_text, because qwerty_anchors and the verified pinyin transaction already represent them. Never enumerate a keyboard row. For a whitelisted space use value=" " and key_kind="space". For every other whitelisted key use key_kind="character" and require label to equal value literally. The large central PRIMARY glyph of the whole directly tappable key MUST equal value. A small corner glyph, superscript digit, alternate symbol, swipe hint or long-press hint printed on an alphabet key is NOT a literal key and MUST NEVER be reported here. If the whitelisted value exists only as such a secondary hint, leave literal_keys empty and report a separately visible direction-explicit numeric/symbol layout switch instead. Bounds must enclose the whole direct key, never only the secondary glyph. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
 7. keyboard.enter_key: report at most one complete visible keyboard action key using exactly label, bounds, confidence, fully_visible and key_action. key_action must be one of newline, send, search, done, next, unknown and must describe the key's current visible behavior, never the requested goal. A plain multiline Return/Enter key may be newline. A key visibly labelled or iconographically acting as Send/Search/Done/Next must use that action and can never authorize a newline. The current transaction needs a newline={str(enter_required).lower()} and multiline={str(active_multiline).lower()}, but those facts do not change the visual classification.
-8. keyboard.layout_switches: enumerate only compact visible keys with an explicit destination layout: qwerty, numeric, or symbol. Copy the literal label and report current_layout and target_layout; never infer a destination from the goal alone.
+8. keyboard.layout_switches: enumerate every compact visible key with an explicit destination layout: qwerty, numeric, or symbol. Copy the literal label and report current_layout and target_layout; never infer a destination from the goal alone. In particular, on QWERTY report both a visible 123 key targeting numeric and a separately visible ！？# / !?# / symbol key targeting symbol. Never substitute 123 for a symbol-layout key.
 7. keyboard.case_mode and keyboard.case_switch apply only to direct_latin QWERTY. case_mode is lower, upper, or unknown from the visible letter glyphs. case_switch is null unless a complete visible shift/case key and its lower↔upper direction are independently clear.
+The local controller has one deterministic keyboard routing policy: Latin letters require QWERTY plus direct_latin; Chinese requires QWERTY plus chinese_pinyin and then an exact candidate; decimal digits require the visible 123/numeric layout and then the exact digit; every other printable symbol requires direct_latin first and then the separately visible symbol-layout switch such as ！？# before the exact symbol key. This policy does not authorize an action. It tells you which current state and visible controls must be reported completely so local typed code can select exactly one next action after a fresh observation.
 Determine keyboard.input_mode only from the current whole keyboard image, never from the goal, the JSON example, or the mode-switch key label alone. Visible Chinese composition/candidates or pinyin separators prove chinese_pinyin. A plain Latin QWERTY state with no Chinese composition/candidate strip may prove direct_latin only when the whole keyboard provides independent current-mode evidence. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
 When a visible preedit composition itself exactly matches a complete visible candidate, that exact candidate MUST be enumerated with its own bounds. Omitting the exact candidate while reporting the matching preedit is an incomplete audit; never silently turn useful target text into a clear/delete instruction.
 keyboard.mode_switch.current_mode MUST equal keyboard.input_mode whenever input_mode is known, and target_mode MUST be the other supported mode. Across real keyboards the visible key label may name either the current mode or the destination mode: for example, 英/EN can be shown while Chinese pinyin is current and pressing it enters direct Latin, or while direct Latin is current and pressing it enters Chinese. Copy the literal label, but never derive current_mode or target_mode from that label. If the direction is not independently clear from the whole keyboard state, set mode_switch to null.
@@ -1415,7 +1417,7 @@ JSON object on a single line, without Markdown or explanatory whitespace:
 "backspace_key":{{"label":"⌫","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true}},
 "enter_key":{{"label":"↵","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true,"key_action":"newline"}},
 "case_switch":null,"literal_keys":{literal_keys_example_json},
-"layout_switches":[{{"label":"123","bounds":[0,0,1000,1000],"confidence":0.0,"current_layout":"qwerty","target_layout":"numeric"}}]}}}}
+"layout_switches":[{{"label":"123","bounds":[0,0,1000,1000],"confidence":0.0,"current_layout":"qwerty","target_layout":"numeric"}},{{"label":"！？#","bounds":[0,0,1000,1000],"confidence":0.0,"current_layout":"qwerty","target_layout":"symbol"}}]}}}}
 When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","case_mode":"unknown","qwerty_anchors":null,"mode_switch":null,"backspace_key":null,"enter_key":null,"case_switch":null,"literal_keys":[],"layout_switches":[]}}.
 Return empty arrays when their geometry is not visible. Never merge a clipped structure with a complete structure, and never copy an IME pre-edit region into application_inputs.
 """
@@ -5005,16 +5007,21 @@ def _apply_input_structure_audit(
             else None
         )
         raw_mode_switch = keyboard.get("mode_switch")
+        required_input_mode = (
+            required_keyboard_input_mode_for_step(input_step)
+            if input_step is not None
+            else None
+        )
         input_needs_mode_switch = bool(
             not active_clear_goal
             and not clearable_ime_preedit
             and exact_ime_candidate is None
             and input_step is not None
-            and input_step.kind in {"direct_latin", "chinese_pinyin"}
+            and required_input_mode is not None
             and keyboard_visible
             and keyboard_layout == "qwerty"
             and keyboard_input_mode in {"direct_latin", "chinese_pinyin"}
-            and keyboard_input_mode != input_step.required_mode
+            and keyboard_input_mode != required_input_mode
         )
         switch_is_goal = switch_is_goal or input_needs_mode_switch
         discardable_mode_switch_geometry = bool(
@@ -5068,7 +5075,7 @@ def _apply_input_structure_audit(
             raise UISceneError("模式切换键 current_mode 与键盘 input_mode 冲突。")
         if input_needs_mode_switch and (
             mode_switch is None
-            or mode_switch["target_mode"] != input_step.required_mode
+            or mode_switch["target_mode"] != required_input_mode
         ):
             raise UISceneError("模式切换键未绑定下一确定性文字分段所需方向。")
         literal_keys = _validated_keyboard_literal_keys(
@@ -5137,6 +5144,22 @@ def _apply_input_structure_audit(
         exact_case_switch: dict[str, Any] | None = None
         if input_step is not None:
             if (
+                required_input_mode is not None
+                and keyboard_input_mode != required_input_mode
+            ):
+                # Mode switching is available only on the alphabetic surface.
+                # From another layout, first return to QWERTY. On QWERTY the
+                # audited Chinese/English switch is the only legal next action;
+                # do not expose a layout or literal key at the same time.
+                if keyboard_layout != "qwerty":
+                    exact_layout_switch = (
+                        _select_keyboard_layout_switch_for_target(
+                            layout_switches,
+                            current_layout=keyboard_layout,
+                            target_layout="qwerty",
+                        )
+                    )
+            elif (
                 input_step.kind in {"direct_latin", "chinese_pinyin"}
                 and keyboard_layout != "qwerty"
             ):
@@ -5253,6 +5276,10 @@ def _apply_input_structure_audit(
                 and keyboard_visible
                 and (
                     input_step.kind == "literal_key"
+                    or (
+                        required_input_mode is not None
+                        and keyboard_input_mode != required_input_mode
+                    )
                     or (
                         input_step.kind in {"direct_latin", "chinese_pinyin"}
                         and keyboard_layout != "qwerty"
@@ -6045,8 +6072,8 @@ def _select_keyboard_layout_switch_for_target(
 ) -> dict[str, Any] | None:
     """Select one explicit switch that monotonically approaches a layout.
 
-    The local layout graph is a three-state line: qwerty <-> numeric <->
-    symbol.  A visible direct edge wins.  When no direct edge is visible, only
+    The local layout graph is a three-state line: numeric <-> qwerty <->
+    symbol. A visible direct edge wins. When no direct edge is visible, only
     the unique adjacent edge on the shortest path may be used.  Every edge was
     already read from the current image and validated for its literal label,
     source layout, geometry and confidence; this helper never invents a key.

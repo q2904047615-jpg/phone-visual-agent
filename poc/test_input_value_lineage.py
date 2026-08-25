@@ -540,6 +540,81 @@ def state_switch_audit_raw(*, cue: str = PRIOR, literal: str = "2") -> str:
     )
 
 
+def keyboard_routing_audit_raw(
+    *,
+    value: str,
+    layout: str,
+    input_mode: str,
+    literal: str | None = None,
+    mode_switch: dict | None = None,
+    layout_switches: list[dict] | None = None,
+) -> str:
+    qwerty_anchors = (
+        {
+            "q": [122, 710],
+            "p": [880, 710],
+            "a": [164, 782],
+            "l": [838, 782],
+            "z": [248, 853],
+            "m": [754, 853],
+            "backspace": [880, 853],
+        }
+        if layout == "qwerty"
+        else None
+    )
+    return json.dumps(
+        {
+            "protocol_version": INPUT_STRUCTURE_AUDIT_VERSION,
+            "application_inputs": [
+                {
+                    "structure_id": "app-input-1",
+                    "bounds": [130, 540, 690, 610],
+                    "fully_visible": True,
+                    "text": value,
+                    "placeholder": "",
+                    "visible_editable_cues": ["cursor"],
+                    "caret_line_index": None,
+                    "confidence": 1.0,
+                    "right_button": None,
+                }
+            ],
+            "ime_preedit_regions": [],
+            "keyboard": {
+                "visible": True,
+                "bounds": [0, 660, 1000, 1000],
+                "layout": layout,
+                "input_mode": input_mode,
+                "case_mode": (
+                    "lower"
+                    if layout == "qwerty" and input_mode == "direct_latin"
+                    else "unknown"
+                ),
+                "qwerty_anchors": qwerty_anchors,
+                "mode_switch": mode_switch,
+                "backspace_key": None,
+                "enter_key": None,
+                "case_switch": None,
+                "literal_keys": (
+                    []
+                    if literal is None
+                    else [
+                        {
+                            "value": literal,
+                            "label": literal,
+                            "key_kind": "character",
+                            "bounds": [420, 710, 580, 780],
+                            "confidence": 1.0,
+                            "fully_visible": True,
+                        }
+                    ]
+                ),
+                "layout_switches": list(layout_switches or []),
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
 def ime_commit_audit_raw(*, cue: str = "loopok") -> str:
     """Replay an exact candidate committed after the placeholder disappeared."""
 
@@ -1695,6 +1770,169 @@ class TypedInputLineageTests(unittest.TestCase):
                 before_scene=before,
                 hardware_receipt=bad_receipt,
             )
+
+    def test_symbol_routing_switches_to_english_before_symbol_layout(self) -> None:
+        current = "aaazjie"
+        target = current + "？"
+        goal = {
+            "objective": f"让输入框逐字显示 {target}",
+            "entities": {"input_text": target},
+        }
+        mode_switch = {
+            "label": "中/英",
+            "bounds": [820, 900, 960, 960],
+            "confidence": 1.0,
+            "current_mode": "chinese_pinyin",
+            "target_mode": "direct_latin",
+        }
+        switches = [
+            {
+                "label": "123",
+                "bounds": [20, 900, 160, 960],
+                "confidence": 1.0,
+                "current_layout": "qwerty",
+                "target_layout": "numeric",
+            },
+            {
+                "label": "！？#",
+                "bounds": [180, 900, 340, 960],
+                "confidence": 1.0,
+                "current_layout": "qwerty",
+                "target_layout": "symbol",
+            },
+        ]
+
+        audited = _apply_input_structure_audit(
+            UIScene.from_dict(scene(current, "symbol-mode-before")),
+            keyboard_routing_audit_raw(
+                value=current,
+                layout="qwerty",
+                input_mode="chinese_pinyin",
+                mode_switch=mode_switch,
+                layout_switches=switches,
+            ),
+            fingerprint="symbol-mode-before",
+            goal_context=goal,
+            ledger_input_value=current,
+        )
+        goal_elements = [
+            element for element in audited.elements
+            if element.states.get("goal_relevant") is True
+        ]
+        self.assertEqual(
+            ["switch_keyboard_input_mode"],
+            [element.meaning for element in goal_elements],
+        )
+        self.assertEqual(
+            "direct_latin",
+            goal_elements[0].states["target_mode"],
+        )
+
+    def test_symbol_and_digit_use_distinct_visible_layout_switches(self) -> None:
+        current = "aaazjie"
+        switches = [
+            {
+                "label": "123",
+                "bounds": [20, 900, 160, 960],
+                "confidence": 1.0,
+                "current_layout": "qwerty",
+                "target_layout": "numeric",
+            },
+            {
+                "label": "！？#",
+                "bounds": [180, 900, 340, 960],
+                "confidence": 1.0,
+                "current_layout": "qwerty",
+                "target_layout": "symbol",
+            },
+        ]
+        cases = (
+            ("？", "symbol", "！？#"),
+            ("1", "numeric", "123"),
+        )
+        for suffix, expected_layout, expected_label in cases:
+            with self.subTest(suffix=suffix):
+                target = current + suffix
+                audited = _apply_input_structure_audit(
+                    UIScene.from_dict(scene(current, f"layout-{expected_layout}")),
+                    keyboard_routing_audit_raw(
+                        value=current,
+                        layout="qwerty",
+                        input_mode="direct_latin",
+                        layout_switches=switches,
+                    ),
+                    fingerprint=f"layout-{expected_layout}",
+                    goal_context={
+                        "objective": f"让输入框逐字显示 {target}",
+                        "entities": {"input_text": target},
+                    },
+                    ledger_input_value=current,
+                )
+                layout_element = audited.get_element(
+                    "local_audited_keyboard_layout_switch_1"
+                )
+                self.assertEqual(expected_label, layout_element.label)
+                self.assertEqual(
+                    expected_layout,
+                    layout_element.states["target_layout"],
+                )
+
+    def test_symbol_routing_never_uses_123_as_an_implicit_hop(self) -> None:
+        current = "aaazjie"
+        target = current + "？"
+        audited = _apply_input_structure_audit(
+            UIScene.from_dict(scene(current, "symbol-no-switch")),
+            keyboard_routing_audit_raw(
+                value=current,
+                layout="qwerty",
+                input_mode="direct_latin",
+                layout_switches=[
+                    {
+                        "label": "123",
+                        "bounds": [20, 900, 160, 960],
+                        "confidence": 1.0,
+                        "current_layout": "qwerty",
+                        "target_layout": "numeric",
+                    }
+                ],
+            ),
+            fingerprint="symbol-no-switch",
+            goal_context={
+                "objective": f"让输入框逐字显示 {target}",
+                "entities": {"input_text": target},
+            },
+            ledger_input_value=current,
+        )
+        self.assertFalse(
+            any(
+                element.meaning == "switch_keyboard_layout"
+                and element.states.get("goal_relevant") is True
+                for element in audited.elements
+            )
+        )
+
+    def test_symbol_layout_exposes_only_the_exact_requested_character(self) -> None:
+        current = "aaazjie"
+        target = current + "？"
+        audited = _apply_input_structure_audit(
+            UIScene.from_dict(scene(current, "symbol-exact-key")),
+            keyboard_routing_audit_raw(
+                value=current,
+                layout="symbol",
+                input_mode="direct_latin",
+                literal="？",
+            ),
+            fingerprint="symbol-exact-key",
+            goal_context={
+                "objective": f"让输入框逐字显示 {target}",
+                "entities": {"input_text": target},
+            },
+            ledger_input_value=current,
+        )
+        literal = audited.get_element("local_audited_literal_key_1")
+        self.assertEqual("？", literal.label)
+        self.assertEqual("？", literal.states["key_value"])
+        self.assertEqual(target, literal.states["expected_input_value"])
 
     def test_state_switch_live_audit_replay_preserves_exact_value_and_next_key(self) -> None:
         before, action = state_switch_case()

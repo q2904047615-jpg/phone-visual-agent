@@ -56,6 +56,7 @@ from verified_text_transaction import (
     keyboard_layout_switch_advances,
     plan_next_verified_input,
     preferred_keyboard_layout,
+    required_keyboard_input_mode_for_step,
 )
 from vision_usage import VisionSessionUsageLedger
 
@@ -4475,12 +4476,16 @@ class UniversalAgentOrchestrator:
                 ):
                     return False
             elif auxiliary.meaning == "switch_keyboard_input_mode":
+                required_input_mode = required_keyboard_input_mode_for_step(
+                    input_step
+                )
                 if (
-                    states.get("target_mode") != input_step.required_mode
+                    required_input_mode is None
+                    or states.get("target_mode") != required_input_mode
                     or expected_states
                     != {
                         "value": prior_value,
-                        "keyboard_input_mode": input_step.required_mode,
+                        "keyboard_input_mode": required_input_mode,
                     }
                 ):
                     return False

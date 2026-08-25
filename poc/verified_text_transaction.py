@@ -14,7 +14,10 @@ class VerifiedTextTransactionError(ValueError):
 _CHINESE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+\Z")
 MAX_DIRECT_LATIN_SEGMENT_CHARS = 20
 DIRECT_LATIN_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz")
-KEYBOARD_LAYOUT_PATH = ("qwerty", "numeric", "symbol")
+# The real keyboard exposes numeric and symbol layouts from the alphabetic
+# surface. QWERTY is therefore the hub: a symbol must never be approached by
+# treating the numeric ``123`` key as an implicit first hop.
+KEYBOARD_LAYOUT_PATH = ("numeric", "qwerty", "symbol")
 
 
 def is_direct_latin_segment(value: Any) -> bool:
@@ -143,6 +146,27 @@ class VerifiedInputStep:
             or len(self.segment) != 1
         ):
             raise VerifiedTextTransactionError("逐键分段合同无效。")
+
+
+def required_keyboard_input_mode_for_step(
+    step: VerifiedInputStep,
+) -> str | None:
+    """Return the one input mode required before executing ``step``.
+
+    Letters use direct Latin, Chinese uses pinyin, and complex symbols first
+    return to direct Latin before entering the symbol layout. Digits, spaces
+    and newline keys do not require a Chinese/English mode transition.
+    """
+
+    if step.kind in {"direct_latin", "chinese_pinyin"}:
+        return step.required_mode
+    if (
+        step.kind == "literal_key"
+        and step.segment.isprintable()
+        and preferred_keyboard_layout(step.segment) == "symbol"
+    ):
+        return "direct_latin"
+    return None
 
 
 def plan_next_verified_input(

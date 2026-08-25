@@ -8,6 +8,7 @@ from verified_text_transaction import (
     next_keyboard_layout_towards,
     plan_next_verified_input,
     preferred_keyboard_layout,
+    required_keyboard_input_mode_for_step,
 )
 
 
@@ -80,14 +81,14 @@ class VerifiedTextTransactionTests(unittest.TestCase):
         self.assertEqual("qwerty", preferred_keyboard_layout("你"))
         self.assertEqual("symbol", preferred_keyboard_layout("？"))
         self.assertEqual(
-            "numeric",
+            "symbol",
             next_keyboard_layout_towards("qwerty", "symbol"),
         )
         self.assertEqual(
-            "numeric",
+            "qwerty",
             next_keyboard_layout_towards("symbol", "qwerty"),
         )
-        self.assertTrue(
+        self.assertFalse(
             keyboard_layout_switch_advances(
                 current_layout="qwerty",
                 target_layout="numeric",
@@ -108,6 +109,30 @@ class VerifiedTextTransactionTests(unittest.TestCase):
                 desired_layout="qwerty",
             )
         )
+
+    def test_keyboard_input_mode_policy_matches_user_routing(self) -> None:
+        latin = plan_next_verified_input("abc", "")
+        chinese = plan_next_verified_input("你好", "")
+        symbol = plan_next_verified_input("？", "")
+        digit = plan_next_verified_input("1", "")
+        space = plan_next_verified_input(" ", "")
+        newline = plan_next_verified_input("\n", "")
+
+        self.assertEqual(
+            "direct_latin",
+            required_keyboard_input_mode_for_step(latin),
+        )
+        self.assertEqual(
+            "chinese_pinyin",
+            required_keyboard_input_mode_for_step(chinese),
+        )
+        self.assertEqual(
+            "direct_latin",
+            required_keyboard_input_mode_for_step(symbol),
+        )
+        self.assertIsNone(required_keyboard_input_mode_for_step(digit))
+        self.assertIsNone(required_keyboard_input_mode_for_step(space))
+        self.assertIsNone(required_keyboard_input_mode_for_step(newline))
 
     def test_direct_latin_charset_has_one_authoritative_validator(self) -> None:
         for value in ("first", "line", "a" * 20):

@@ -7,16 +7,9 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 
-VISION_USAGE_LEDGER_VERSION = "2026-08-25-single-step-qwen-usage-v3"
+VISION_USAGE_LEDGER_VERSION = "2026-08-25-single-step-qwen-usage-v4"
 QWEN_PLUS_MODEL = "qwen3.7-plus"
 SINGLE_STEP_ALLOWED_REQUEST_STAGES = frozenset({"single_step_observation"})
-DEFAULT_MAX_MODEL_REQUESTS = 16
-DEFAULT_MAX_TOTAL_TOKENS = 50_000
-# Six-action acceptance normally needs one initial observation plus exactly one
-# post-action observation per action.  The hard ceiling remains a fail-safe for
-# genuine replans; it is not the expected production topology.
-CHINESE_ACCEPTANCE_TARGET_REQUESTS = 7
-CHINESE_ACCEPTANCE_TARGET_TOKENS = 30_000
 
 # Official Model Studio pricing page, verified 2026-08-24 for China (Beijing),
 # non-thinking qwen3.7-plus requests with <=256K input tokens.  The promotion
@@ -34,10 +27,6 @@ QWEN_PLUS_PROMO_OUTPUT_CNY_PER_MILLION = 6.4
 
 class VisionUsageError(RuntimeError):
     error_code = "vision_usage_error"
-
-
-class VisionModelBudgetExceeded(VisionUsageError):
-    error_code = "model_budget_exhausted"
 
 
 class VisionModelIdentityMismatch(VisionUsageError):
@@ -76,10 +65,6 @@ class VisionSessionUsageLedger:
 
     session_id: str
     expected_model: str = QWEN_PLUS_MODEL
-    max_model_requests: int = DEFAULT_MAX_MODEL_REQUESTS
-    max_total_tokens: int = DEFAULT_MAX_TOTAL_TOKENS
-    target_model_requests: int = CHINESE_ACCEPTANCE_TARGET_REQUESTS
-    target_total_tokens: int = CHINESE_ACCEPTANCE_TARGET_TOKENS
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(
             timespec="seconds"
@@ -93,7 +78,7 @@ class VisionSessionUsageLedger:
     _completion_tokens: int = field(default=0, repr=False)
     _total_tokens: int = field(default=0, repr=False)
     _cache_hits: int = field(default=0, repr=False)
-    _budget_rejections: int = field(default=0, repr=False)
+    _identity_rejections: int = field(default=0, repr=False)
     _contract_rejections: int = field(default=0, repr=False)
     _timed_request_count: int = field(default=0, repr=False)
     _total_elapsed_seconds: float = field(default=0.0, repr=False)
@@ -111,19 +96,6 @@ class VisionSessionUsageLedger:
             raise ValueError("Qwen 用量账本必须绑定 session_id。")
         if self.expected_model != QWEN_PLUS_MODEL:
             raise ValueError("正式 Qwen 用量账本只允许 qwen3.7-plus。")
-        for name in (
-            "max_model_requests",
-            "max_total_tokens",
-            "target_model_requests",
-            "target_total_tokens",
-        ):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"Qwen 用量账本 {name} 必须是正整数。")
-        if self.target_model_requests > self.max_model_requests:
-            raise ValueError("Qwen 目标请求数不能超过硬上限。")
-        if self.target_total_tokens > self.max_total_tokens:
-            raise ValueError("Qwen 目标 Token 不能超过硬上限。")
 
     @staticmethod
     def _timestamp() -> str:
@@ -147,7 +119,7 @@ class VisionSessionUsageLedger:
         model = str(model or "").strip()
         with self._lock:
             if model != self.expected_model:
-                self._budget_rejections += 1
+                self._identity_rejections += 1
                 self._events.append(
                     {
                         "event": "request_rejected",
@@ -180,28 +152,6 @@ class VisionSessionUsageLedger:
                     "vision_step_contract_violation: 正式会话每个闭环步骤"
                     "只允许 single_step_observation；旧视觉审计或动作选择"
                     f"阶段 {stage} 已在联网前拒绝。"
-                )
-            if (
-                self._request_count >= self.max_model_requests
-                or self._total_tokens >= self.max_total_tokens
-            ):
-                self._budget_rejections += 1
-                self._events.append(
-                    {
-                        "event": "request_rejected",
-                        "outcome": "model_budget_exhausted",
-                        "timestamp": self._timestamp(),
-                        "stage": stage,
-                        "fingerprint": fingerprint,
-                        "model": model,
-                        "network_attempts": 0,
-                        "request_count": self._request_count,
-                        "total_tokens": self._total_tokens,
-                    }
-                )
-                raise VisionModelBudgetExceeded(
-                    "model_budget_exhausted: 当前会话 Qwen 请求或 Token 预算已耗尽，"
-                    "禁止发起下一次网络请求。"
                 )
             local_request_id = f"qwen_local_{uuid.uuid4().hex}"
             self._request_count += 1
@@ -376,12 +326,7 @@ class VisionSessionUsageLedger:
                 "created_at": self.created_at,
                 "model": self.expected_model,
                 "downgrade_allowed": False,
-                "budget": {
-                    "max_model_requests": self.max_model_requests,
-                    "max_total_tokens": self.max_total_tokens,
-                    "target_model_requests": self.target_model_requests,
-                    "target_total_tokens": self.target_total_tokens,
-                },
+                "session_limits_enforced": False,
                 "totals": {
                     "model_requests": self._request_count,
                     "successful_requests": self._successful_count,
@@ -390,24 +335,8 @@ class VisionSessionUsageLedger:
                     "completion_tokens": self._completion_tokens,
                     "total_tokens": self._total_tokens,
                     "observation_cache_hits": self._cache_hits,
-                    "budget_rejections": self._budget_rejections,
+                    "identity_rejections": self._identity_rejections,
                     "contract_rejections": self._contract_rejections,
-                    "remaining_model_requests": max(
-                        0, self.max_model_requests - self._request_count
-                    ),
-                    "remaining_tokens": max(
-                        0, self.max_total_tokens - self._total_tokens
-                    ),
-                    "target_request_count_exceeded": (
-                        self._request_count > self.target_model_requests
-                    ),
-                    "target_token_count_exceeded": (
-                        self._total_tokens > self.target_total_tokens
-                    ),
-                    "budget_exhausted": (
-                        self._request_count >= self.max_model_requests
-                        or self._total_tokens >= self.max_total_tokens
-                    ),
                     "estimated_list_cost_cny": list_cost,
                     "estimated_promotional_cost_cny": promotional_cost,
                     "timed_requests": self._timed_request_count,

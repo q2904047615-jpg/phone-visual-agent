@@ -18,8 +18,6 @@ def classify_qwen_error(
 
     text = str(error).strip()
     lowered = text.casefold()
-    if "model_budget_exhausted" in lowered:
-        return "model_budget_exhausted"
     if "vision_model_identity_mismatch" in lowered:
         return "vision_model_identity_mismatch"
     if "vision_step_contract_violation" in lowered:

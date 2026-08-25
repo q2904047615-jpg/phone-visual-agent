@@ -7132,6 +7132,136 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             )
         )
 
+    def test_verified_multihop_layout_switch_keeps_input_transaction(self) -> None:
+        base = self._input_graph()
+        graph = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="当前输入框逐字显示 aaazjie？你好且尚未提交",
+                entities={"input_text": "aaazjie？你好"},
+            ),
+            raw_user_goal="输入 aaazjie？你好，但不要提交",
+        )
+        graph.validate()
+        layout_switch = UIElement(
+            element_id="layout-switch",
+            role="button",
+            meaning="switch_keyboard_layout",
+            label="123",
+            bounds=(0.18, 0.78, 0.28, 0.85),
+            confidence=1.0,
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "keyboard_layout_switch": True,
+                "current_layout": "qwerty",
+                "target_layout": "numeric",
+                "prior_input_value": "aaazjie",
+                "next_input_value": "？",
+                "input_element_id": "input-1",
+            },
+            evidence=("方向明确的键盘布局切换键",),
+        )
+        before_base = self._input_scene(
+            "aaazjie",
+            fingerprint="layout-before",
+            auxiliary=layout_switch,
+        )
+        after_base = self._input_scene(
+            "aaazjie",
+            fingerprint="layout-after",
+        )
+        after = replace(
+            after_base,
+            elements=(
+                replace(
+                    after_base.elements[0],
+                    states={
+                        **after_base.elements[0].states,
+                        "keyboard_layout": "numeric",
+                    },
+                ),
+            ),
+        )
+        expected_effect = {
+            "element_state": {
+                "meaning": "application_text_input",
+                "states": {
+                    "value": "aaazjie",
+                    "keyboard_layout": "numeric",
+                },
+            }
+        }
+        action = SemanticAction(
+            node_id="layout-step",
+            action="tap_semantic",
+            params={"expected_effect": expected_effect},
+        )
+        result = SimpleNamespace(
+            action_outcome="matched",
+            physical_actions=1,
+            verification_errors=(),
+            before_scene=before_base,
+            after_scene=after,
+            resolved_action=ResolvedSemanticAction(
+                node_id="layout-step",
+                kind="tap_semantic",
+                target_element_id=layout_switch.element_id,
+                before_fingerprint=before_base.fingerprint,
+                expected_effect=expected_effect,
+            ),
+        )
+
+        self.assertTrue(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=SimpleNamespace(
+                    proposal=GenericStepProposal(status="action", action=action)
+                ),
+                result=result,
+                before_observation=SimpleNamespace(
+                    fingerprint=before_base.fingerprint
+                ),
+                new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+            )
+        )
+        wrong_target = replace(
+            before_base,
+            elements=(
+                replace(
+                    layout_switch,
+                    states={
+                        **layout_switch.states,
+                        "target_layout": "qwerty",
+                    },
+                ),
+                before_base.elements[0],
+            ),
+        )
+        self.assertFalse(
+            UniversalAgentOrchestrator._verified_input_transaction_microstep(
+                graph=graph,
+                previous_decision=SimpleNamespace(
+                    proposal=GenericStepProposal(status="action", action=action)
+                ),
+                result=SimpleNamespace(
+                    **{
+                        **vars(result),
+                        "before_scene": wrong_target,
+                        "resolved_action": replace(
+                            result.resolved_action,
+                            before_fingerprint=wrong_target.fingerprint,
+                        ),
+                    }
+                ),
+                before_observation=SimpleNamespace(
+                    fingerprint=wrong_target.fingerprint
+                ),
+                new_observation=SimpleNamespace(fingerprint=after.fingerprint),
+            )
+        )
+
     def test_multifield_direct_latin_preedit_stays_on_active_field_candidate(self) -> None:
         graph = _multifield_graph(active_subgoal_id="input_subject")
         before = self._input_scene("", fingerprint="multifield-preedit-before")

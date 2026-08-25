@@ -14,6 +14,7 @@ class VerifiedTextTransactionError(ValueError):
 _CHINESE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+\Z")
 MAX_DIRECT_LATIN_SEGMENT_CHARS = 20
 DIRECT_LATIN_CHARACTERS = frozenset("abcdefghijklmnopqrstuvwxyz")
+KEYBOARD_LAYOUT_PATH = ("qwerty", "numeric", "symbol")
 
 
 def is_direct_latin_segment(value: Any) -> bool:
@@ -23,6 +24,59 @@ def is_direct_latin_segment(value: Any) -> bool:
         isinstance(value, str)
         and 1 <= len(value) <= MAX_DIRECT_LATIN_SEGMENT_CHARS
         and all(char in DIRECT_LATIN_CHARACTERS for char in value)
+    )
+
+
+def preferred_keyboard_layout(character: Any) -> str:
+    """Return the canonical visible-key layout for one next character."""
+
+    if not isinstance(character, str) or len(character) != 1:
+        raise VerifiedTextTransactionError("下一逐键字符必须恰好一个字符。")
+    if character.isdecimal():
+        return "numeric"
+    if character == " " or character.isalpha():
+        return "qwerty"
+    return "symbol"
+
+
+def next_keyboard_layout_towards(
+    current_layout: Any,
+    desired_layout: Any,
+) -> str | None:
+    """Return the sole adjacent layout that shortens the canonical path."""
+
+    if (
+        current_layout not in KEYBOARD_LAYOUT_PATH
+        or desired_layout not in KEYBOARD_LAYOUT_PATH
+        or current_layout == desired_layout
+    ):
+        return None
+    current_index = KEYBOARD_LAYOUT_PATH.index(current_layout)
+    desired_index = KEYBOARD_LAYOUT_PATH.index(desired_layout)
+    return KEYBOARD_LAYOUT_PATH[
+        current_index + (1 if desired_index > current_index else -1)
+    ]
+
+
+def keyboard_layout_switch_advances(
+    *,
+    current_layout: Any,
+    target_layout: Any,
+    desired_layout: Any,
+) -> bool:
+    """Accept a visible direct edge or the sole shortest-path next hop."""
+
+    if (
+        current_layout not in KEYBOARD_LAYOUT_PATH
+        or target_layout not in KEYBOARD_LAYOUT_PATH
+        or desired_layout not in KEYBOARD_LAYOUT_PATH
+        or current_layout == target_layout
+    ):
+        return False
+    return bool(
+        target_layout == desired_layout
+        or target_layout
+        == next_keyboard_layout_towards(current_layout, desired_layout)
     )
 
 

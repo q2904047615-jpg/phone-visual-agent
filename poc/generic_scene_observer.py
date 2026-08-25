@@ -43,7 +43,9 @@ from vision_agent import (
 from vision_model_config import public_model_identity
 from verified_text_transaction import (
     VerifiedTextTransactionError,
+    next_keyboard_layout_towards,
     plan_next_verified_input,
+    preferred_keyboard_layout,
 )
 from input_value_lineage import (
     TypedInputLineage,
@@ -6029,13 +6031,10 @@ def _locally_snapped_keyboard_enter_key(
 
 
 def _preferred_keyboard_layout(character: str) -> str:
-    if len(character) != 1:
-        raise UISceneError("下一逐键字符必须恰好一个字符。")
-    if character.isdecimal():
-        return "numeric"
-    if character == " " or character.isalpha():
-        return "qwerty"
-    return "symbol"
+    try:
+        return preferred_keyboard_layout(character)
+    except VerifiedTextTransactionError as exc:
+        raise UISceneError(str(exc)) from exc
 
 
 def _select_keyboard_layout_switch_for_target(
@@ -6053,11 +6052,8 @@ def _select_keyboard_layout_switch_for_target(
     source layout, geometry and confidence; this helper never invents a key.
     """
 
-    layout_path = ("qwerty", "numeric", "symbol")
     if (
-        current_layout not in layout_path
-        or target_layout not in layout_path
-        or current_layout == target_layout
+        next_keyboard_layout_towards(current_layout, target_layout) is None
     ):
         return None
     direct = [
@@ -6070,11 +6066,10 @@ def _select_keyboard_layout_switch_for_target(
         return direct[0]
     if direct:
         return None
-    current_index = layout_path.index(current_layout)
-    target_index = layout_path.index(target_layout)
-    next_layout = layout_path[
-        current_index + (1 if target_index > current_index else -1)
-    ]
+    next_layout = next_keyboard_layout_towards(
+        current_layout,
+        target_layout,
+    )
     next_hop = [
         item
         for item in layout_switches

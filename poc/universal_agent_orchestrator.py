@@ -53,7 +53,9 @@ from task_semantic_ir import (
 )
 from verified_text_transaction import (
     VerifiedTextTransactionError,
+    keyboard_layout_switch_advances,
     plan_next_verified_input,
+    preferred_keyboard_layout,
 )
 from vision_usage import VisionSessionUsageLedger
 
@@ -4444,21 +4446,23 @@ class UniversalAgentOrchestrator:
                 ):
                     return False
             elif auxiliary.meaning == "switch_keyboard_layout":
-                desired_layout = (
-                    "numeric"
-                    if input_step.segment.isdecimal()
-                    else "qwerty"
-                    if (
-                        input_step.kind in {"direct_latin", "chinese_pinyin"}
-                        or input_step.segment == " "
-                        or input_step.segment.isalpha()
-                    )
-                    else "symbol"
+                desired_layout = preferred_keyboard_layout(
+                    input_step.segment[0]
                 )
-                if expected_states != {
-                    "value": prior_value,
-                    "keyboard_layout": desired_layout,
-                }:
+                current_layout = states.get("current_layout")
+                target_layout = states.get("target_layout")
+                if (
+                    not keyboard_layout_switch_advances(
+                        current_layout=current_layout,
+                        target_layout=target_layout,
+                        desired_layout=desired_layout,
+                    )
+                    or expected_states
+                    != {
+                        "value": prior_value,
+                        "keyboard_layout": target_layout,
+                    }
+                ):
                     return False
             elif auxiliary.meaning == "switch_keyboard_case":
                 if (

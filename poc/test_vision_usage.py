@@ -81,6 +81,7 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
                 "prompt_tokens_details": {"cached_tokens": 250},
             },
             finish_reason="stop",
+            elapsed_seconds=1.25,
         )
         ledger.record_cache_hit(stage="same_fingerprint", fingerprint="frame-a")
 
@@ -100,6 +101,10 @@ class VisionSessionUsageLedgerTests(unittest.TestCase):
         self.assertEqual("single_step_observation", request["stage"])
         self.assertEqual("provider-1", request["provider_request_id"])
         self.assertEqual(250, request["cached_prompt_tokens"])
+        self.assertEqual(1.25, request["elapsed_seconds"])
+        self.assertEqual(1, payload["totals"]["timed_requests"])
+        self.assertEqual(1.25, payload["totals"]["average_elapsed_seconds"])
+        self.assertEqual(1.25, payload["totals"]["max_elapsed_seconds"])
 
     def test_request_and_token_budget_stop_before_network(self) -> None:
         request_limited = VisionSessionUsageLedger(

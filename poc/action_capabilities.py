@@ -168,7 +168,7 @@ def build_device_capability_snapshot(
     if not isinstance(raw_actions, Mapping):
         raw_actions = {}
     default_gap = {
-        "double_tap": "vendor_multi_click_not_safely_integrated",
+        "double_tap": "requires_double_tap_live_acceptance",
         "press_enter": "requires_fresh_visible_enter_key",
         "pinch": "multi_touch_not_supported_by_single_contact_robot",
         "hardware_key": "hardware_key_transport_not_verified",

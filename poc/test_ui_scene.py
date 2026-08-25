@@ -1070,6 +1070,33 @@ class UISceneTests(unittest.TestCase):
         self.assertEqual("long_press", resolved.kind)
         self.assertEqual(0.9, resolved.hold_seconds)
 
+    def test_double_tap_resolves_one_target_and_requires_visual_result(self) -> None:
+        current = scene(element("preview", "预览图", role="list_item"))
+        action = SemanticAction(
+            node_id="double",
+            action="double_tap",
+            params={
+                "element_id": "preview",
+                "target": "预览图",
+                "expected_effect": {"scene_changed": True},
+            },
+        )
+
+        resolved = UniversalActionController().resolve_one(action, current)
+
+        self.assertEqual("double_tap", resolved.kind)
+        self.assertAlmostEqual(0.3, resolved.normalized_point[0])
+        self.assertAlmostEqual(0.4, resolved.normalized_point[1])
+        with self.assertRaisesRegex(UniversalActionError, "结构化预期"):
+            UniversalActionController().resolve_one(
+                SemanticAction(
+                    node_id="double",
+                    action="double_tap",
+                    params={"element_id": "preview", "target": "预览图"},
+                ),
+                current,
+            )
+
     def test_drag_resolves_two_distinct_semantic_elements(self) -> None:
         source = element("source", "待移动项目", role="list_item")
         destination = UIElement(

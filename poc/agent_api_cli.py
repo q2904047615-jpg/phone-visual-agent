@@ -48,6 +48,51 @@ def _device_projection(response: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _doctor_projection(response: Mapping[str, Any]) -> dict[str, Any]:
+    device = response.get("device") if isinstance(response.get("device"), dict) else {}
+    controller = (
+        response.get("controller")
+        if isinstance(response.get("controller"), dict)
+        else {}
+    )
+    camera = response.get("camera") if isinstance(response.get("camera"), dict) else {}
+    providers = (
+        response.get("providers")
+        if isinstance(response.get("providers"), dict)
+        else {}
+    )
+    qwen = providers.get("qwen") if isinstance(providers.get("qwen"), dict) else {}
+    deepseek = (
+        providers.get("deepseek")
+        if isinstance(providers.get("deepseek"), dict)
+        else {}
+    )
+    capabilities = (
+        response.get("capabilities")
+        if isinstance(response.get("capabilities"), dict)
+        else {}
+    )
+    return {
+        "ok": True,
+        "ready": response.get("ready"),
+        "physical_actions": response.get("physical_actions"),
+        "device_id": device.get("device_id"),
+        "exclusive_available": device.get("exclusive_available"),
+        "controller_online": controller.get("controller_online"),
+        "camera_online": controller.get("camera_online"),
+        "camera_stable": (
+            camera.get("stability", {}).get("stable")
+            if isinstance(camera.get("stability"), dict)
+            else None
+        ),
+        "deepseek_configured": deepseek.get("configured"),
+        "qwen_configured": qwen.get("configured"),
+        "qwen_model": qwen.get("model"),
+        "supported_actions": capabilities.get("supported_actions"),
+        "blockers": response.get("blockers"),
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="类型化本地 Agent API 网关")
     parser.add_argument("--base-url", default="http://127.0.0.1:8765")
@@ -56,6 +101,8 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("bootstrap")
     subparsers.add_parser("status")
+    doctor = subparsers.add_parser("doctor")
+    doctor.add_argument("--device-id", default="device-local-01")
     start = subparsers.add_parser("start")
     start.add_argument("--device-id", default="device-local-01")
     start.add_argument("--text", required=True)
@@ -81,6 +128,9 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "status":
                 raw = client.device_status()
                 result = raw if args.full else _device_projection(raw)
+            elif args.command == "doctor":
+                raw = client.doctor(args.device_id)
+                result = raw if args.full else _doctor_projection(raw)
             elif args.command == "start":
                 raw = client.start_session(
                     text=args.text,

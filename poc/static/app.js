@@ -31,6 +31,7 @@ const promotableCapabilityActions = [
   "home",
   "reveal_system_navigation",
   "input_verified_text",
+  "double_tap",
   "long_press",
   "drag",
 ];
@@ -65,6 +66,7 @@ const semanticActionNames = {
   back: "返回上一页",
   home: "返回系统桌面",
   reveal_system_navigation: "唤出系统导航栏",
+  double_tap: "双击目标控件",
   long_press: "长按目标控件",
   drag: "拖动目标控件",
   input_verified_text: "输入并核对文字",

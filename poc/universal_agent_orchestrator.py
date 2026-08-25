@@ -34,6 +34,7 @@ from generic_action_adapter import (
 )
 from generic_goal import GenericIntentDraft
 from canonical_action_protocol import (
+    SUPPORTED_ACTIONS,
     CanonicalActionProtocolError,
     GenericStepProposal,
     scene_matches_target_app_surface,
@@ -69,6 +70,7 @@ CORRECTIVE_RETRY_ACTION_KINDS = frozenset(
     {
         "back",
         "dismiss_overlay",
+        "double_tap",
         "drag",
         "home",
         "long_press",
@@ -1182,7 +1184,7 @@ class UniversalAgentSessionState:
                 "allowed": self.controller_decision.allowed,
                 "reason": self.controller_decision.reason,
                 "canonical_class": self.controller_decision.canonical_class,
-                "policy_version": PhaseOneNavigationPolicy.VERSION,
+                "policy_version": CanonicalActionPolicy.VERSION,
             }
             if self.controller_decision is not None
             else None
@@ -1239,7 +1241,7 @@ class UniversalAgentSessionState:
             "available_action_kinds": sorted(
                 self.adapter.supported_action_kinds()
                 if callable(getattr(self.adapter, "supported_action_kinds", None))
-                else PhaseOneNavigationPolicy.ALLOWED_ACTIONS
+                else CanonicalActionPolicy.ALLOWED_ACTIONS
             ),
             "confirmation_scope": (
                 self.confirmation_authority.scope()
@@ -1420,7 +1422,7 @@ class UniversalAgentOrchestrator:
         adapter_factory: Callable[[str], Any],
         trusted_observation_factory: Callable[..., Any] | None = None,
         evidence_store_factory: Callable[[Path], AgentEvidenceStore] | None = None,
-        policy: PhaseOneNavigationPolicy | None = None,
+        policy: CanonicalActionPolicy | None = None,
         bridge: ObservationBridge | None = None,
         device_registry: DeviceTaskRegistry | None = None,
     ) -> None:
@@ -1431,7 +1433,7 @@ class UniversalAgentOrchestrator:
             trusted_observation_factory or TrustedObservation.from_scene
         )
         self.evidence_store_factory = evidence_store_factory or AgentEvidenceStore
-        self.policy = policy or PhaseOneNavigationPolicy()
+        self.policy = policy or CanonicalActionPolicy()
         self.bridge = bridge or ObservationBridge()
         self.device_registry = device_registry or DeviceTaskRegistry()
 
@@ -1453,13 +1455,13 @@ class UniversalAgentOrchestrator:
     ) -> frozenset[str]:
         provider = getattr(session.adapter, "supported_action_kinds", None)
         if not callable(provider):
-            return PhaseOneNavigationPolicy.ALLOWED_ACTIONS
+            return CanonicalActionPolicy.ALLOWED_ACTIONS
         actions = frozenset(str(item or "").strip() for item in provider())
         if not actions or "" in actions:
             raise UniversalAgentOrchestratorError(
                 "设备动作能力为空或包含无效动作。"
             )
-        unexpected = actions - PhaseOneNavigationPolicy.ALLOWED_ACTIONS
+        unexpected = actions - CanonicalActionPolicy.ALLOWED_ACTIONS
         if unexpected:
             raise UniversalAgentOrchestratorError(
                 "设备报告了协议外动作：" + ", ".join(sorted(unexpected))
@@ -3144,7 +3146,7 @@ class UniversalAgentOrchestrator:
             "allowed": decision.allowed,
             "reason": decision.reason,
             "canonical_class": decision.canonical_class,
-            "policy_version": PhaseOneNavigationPolicy.VERSION,
+            "policy_version": CanonicalActionPolicy.VERSION,
         }
 
     @classmethod
@@ -3827,7 +3829,7 @@ class UniversalAgentOrchestrator:
         report_path = session.evidence_store.write_report(
             {
                 "mode": "universal_agent_safe_live_loop",
-                "policy_version": PhaseOneNavigationPolicy.VERSION,
+                "policy_version": CanonicalActionPolicy.VERSION,
                 "session": session.snapshot(),
             }
         )
@@ -7570,30 +7572,15 @@ class NavigationPolicyDecision:
     canonical_class: str = ""
 
 
-class PhaseOneNavigationPolicy:
-    """Fail-closed gate for one generic visual action.
+class CanonicalActionPolicy:
+    """Revalidate one selected canonical action against its current scope.
 
     This class classifies one already proposed visual action.  It never plans
     a task, chooses an App, invents an element, or changes coordinates.
     """
 
     VERSION = "2026-08-20-canonical-action-policy-v1"
-    ALLOWED_ACTIONS = frozenset(
-        {
-            "swipe",
-            "reveal_system_navigation",
-            "back",
-            "home",
-            "wait_for_change",
-            "tap_semantic",
-            "dismiss_overlay",
-            "input_verified_text",
-            "press_enter",
-            "clear_verified_text",
-            "long_press",
-            "drag",
-        }
-    )
+    ALLOWED_ACTIONS = SUPPORTED_ACTIONS
     def __init__(self, *, min_confidence: float = MIN_TARGET_CONFIDENCE) -> None:
         self.min_confidence = float(min_confidence)
 
@@ -7666,6 +7653,7 @@ class PhaseOneNavigationPolicy:
             "dismiss_overlay",
             "input_verified_text",
             "clear_verified_text",
+            "double_tap",
             "long_press",
         }:
             element_ids = (str(action.params.get("element_id") or ""),)
@@ -7777,6 +7765,7 @@ class PhaseOneNavigationPolicy:
                     "dismiss_overlay",
                     "input_verified_text",
                     "press_enter",
+                    "double_tap",
                     "long_press",
                 }
                 or local_candidate is None

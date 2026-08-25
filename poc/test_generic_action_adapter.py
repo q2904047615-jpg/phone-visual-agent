@@ -120,6 +120,17 @@ class FakeRobot:
         self.device_id = "test-device"
         self._armed = None
         self._long_press_receipt = None
+        self._click_receipt = None
+
+    def _record_click_receipt(self, click_count=1):
+        self._click_receipt = {
+            "version": "2026-08-19-seller-gui-click-barrier-v1",
+            "channel": "left_button_atomic_click",
+            "seller_event_barrier_confirmed": True,
+            "round_trip_position_confirmed": True,
+            "mechanical_contact_ack": False,
+            "click_count": click_count,
+        }
 
     def arm_physical_execution(self, credential, *, action, scene_fingerprint):
         credential.assert_authorizes(
@@ -141,6 +152,7 @@ class FakeRobot:
     def vision_tap_relative(self, x, y):
         self._consume("tap_semantic")
         self.actions.append(("tap", x, y))
+        self._record_click_receipt()
         return (x, y)
 
     def resolve_calibrated_target_grid_point(
@@ -154,6 +166,13 @@ class FakeRobot:
     def vision_dismiss_overlay_relative(self, x, y):
         self._consume("dismiss_overlay")
         self.actions.append(("dismiss", x, y))
+        self._record_click_receipt()
+        return (x, y)
+
+    def vision_double_tap_relative(self, x, y):
+        self._consume("double_tap")
+        self.actions.append(("double_tap", x, y))
+        self._record_click_receipt(2)
         return (x, y)
 
     def vision_swipe_up(self):
@@ -168,12 +187,19 @@ class FakeRobot:
     def vision_android_back(self):
         self._consume("back")
         self.actions.append(("back",))
+        self._record_click_receipt()
         return (500, 950)
 
     def vision_android_home(self):
         self._consume("home")
         self.actions.append(("home",))
+        self._record_click_receipt()
         return (500, 950)
+
+    def consume_last_click_receipt(self):
+        receipt = self._click_receipt
+        self._click_receipt = None
+        return receipt
 
     def vision_type_text_with_layout(self, text, keyboard_layout):
         self._consume("input_verified_text")
@@ -6424,6 +6450,66 @@ class GenericActionAdapterTests(unittest.TestCase):
 
         self.assertEqual(1, result.physical_actions)
         self.assertEqual([("long_press", 500, 590, 0.8)], robot.actions)
+
+    def test_double_tap_crosses_adapter_as_one_canonical_action(self):
+        states = {"goal_relevant": True, "fully_visible": True}
+        target = UIElement(
+            element_id="target",
+            role="list_item",
+            meaning="image_preview",
+            label="预览图",
+            bounds=(0.20, 0.30, 0.80, 0.70),
+            confidence=1.0,
+            states=states,
+            evidence=("预览图完整可见",),
+        )
+        planned = UIScene(
+            app_id="sample.app",
+            screen_id="preview-list",
+            summary="预览列表",
+            elements=(target,),
+            stable=True,
+            confidence=1.0,
+            fingerprint="planned",
+            camera_alignment=aligned_camera_facts(),
+        )
+        after = replace(
+            planned,
+            screen_id="preview-detail",
+            overlays=("预览已打开",),
+            fingerprint="after",
+        )
+        robot = FakeRobot()
+        result = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 4),
+            observer=FakeSceneObserver([after]),
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        ).execute(
+            requested_action=SemanticAction(
+                node_id="double-preview",
+                action="double_tap",
+                params={
+                    "element_id": "target",
+                    "target": "image_preview",
+                    "role": "list_item",
+                    "label": "预览图",
+                    "states": states,
+                    "expected_effect": {"scene_changed": True},
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("double_tap", 500, 500)], robot.actions)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(2, result.hardware_receipt["click_count"])
 
     def test_drag_rebind_accepts_safe_meaning_synonyms_for_exact_labelled_endpoints(self):
         def make_scene(fingerprint, source_meaning, destination_meaning):

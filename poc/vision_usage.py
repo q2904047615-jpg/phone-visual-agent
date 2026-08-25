@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 
-VISION_USAGE_LEDGER_VERSION = "2026-08-24-single-step-qwen-usage-v2"
+VISION_USAGE_LEDGER_VERSION = "2026-08-25-single-step-qwen-usage-v3"
 QWEN_PLUS_MODEL = "qwen3.7-plus"
 SINGLE_STEP_ALLOWED_REQUEST_STAGES = frozenset({"single_step_observation"})
 DEFAULT_MAX_MODEL_REQUESTS = 16
@@ -95,6 +95,9 @@ class VisionSessionUsageLedger:
     _cache_hits: int = field(default=0, repr=False)
     _budget_rejections: int = field(default=0, repr=False)
     _contract_rejections: int = field(default=0, repr=False)
+    _timed_request_count: int = field(default=0, repr=False)
+    _total_elapsed_seconds: float = field(default=0.0, repr=False)
+    _max_elapsed_seconds: float = field(default=0.0, repr=False)
     _lock: threading.RLock = field(
         default_factory=threading.RLock,
         repr=False,
@@ -236,6 +239,7 @@ class VisionSessionUsageLedger:
         network_attempts: int,
         usage: Mapping[str, Any] | None,
         finish_reason: str,
+        elapsed_seconds: float | None = None,
     ) -> None:
         raw = usage if isinstance(usage, Mapping) else {}
         prompt = _non_negative_int(raw.get("prompt_tokens"))
@@ -246,6 +250,12 @@ class VisionSessionUsageLedger:
             _non_negative_int(prompt_details.get("cached_tokens"))
             if isinstance(prompt_details, Mapping)
             else 0
+        )
+        elapsed = (
+            max(0.0, float(elapsed_seconds))
+            if isinstance(elapsed_seconds, (int, float))
+            and not isinstance(elapsed_seconds, bool)
+            else None
         )
         with self._lock:
             event = self._request_event(local_request_id)
@@ -263,6 +273,9 @@ class VisionSessionUsageLedger:
                     "total_tokens": total,
                     "cached_prompt_tokens": cached,
                     "finish_reason": str(finish_reason or "")[:120],
+                    "elapsed_seconds": (
+                        round(elapsed, 6) if elapsed is not None else None
+                    ),
                     "estimated_list_cost_cny": _cost_cny(
                         prompt_tokens=prompt,
                         completion_tokens=completion,
@@ -282,6 +295,10 @@ class VisionSessionUsageLedger:
             self._prompt_tokens += prompt
             self._completion_tokens += completion
             self._total_tokens += total
+            if elapsed is not None:
+                self._timed_request_count += 1
+                self._total_elapsed_seconds += elapsed
+                self._max_elapsed_seconds = max(self._max_elapsed_seconds, elapsed)
 
     def record_failure(
         self,
@@ -289,7 +306,14 @@ class VisionSessionUsageLedger:
         *,
         network_attempts: int,
         error: BaseException | str,
+        elapsed_seconds: float | None = None,
     ) -> None:
+        elapsed = (
+            max(0.0, float(elapsed_seconds))
+            if isinstance(elapsed_seconds, (int, float))
+            and not isinstance(elapsed_seconds, bool)
+            else None
+        )
         with self._lock:
             event = self._request_event(local_request_id)
             if event.get("outcome") != "started":
@@ -305,9 +329,16 @@ class VisionSessionUsageLedger:
                         else "error"
                     ),
                     "error": str(error)[:500],
+                    "elapsed_seconds": (
+                        round(elapsed, 6) if elapsed is not None else None
+                    ),
                 }
             )
             self._network_attempts += max(0, int(network_attempts))
+            if elapsed is not None:
+                self._timed_request_count += 1
+                self._total_elapsed_seconds += elapsed
+                self._max_elapsed_seconds = max(self._max_elapsed_seconds, elapsed)
 
     def record_cache_hit(self, *, stage: str, fingerprint: str) -> None:
         stage, fingerprint = self._metadata(stage, fingerprint)
@@ -379,6 +410,24 @@ class VisionSessionUsageLedger:
                     ),
                     "estimated_list_cost_cny": list_cost,
                     "estimated_promotional_cost_cny": promotional_cost,
+                    "timed_requests": self._timed_request_count,
+                    "total_elapsed_seconds": round(
+                        self._total_elapsed_seconds,
+                        6,
+                    ),
+                    "average_elapsed_seconds": (
+                        round(
+                            self._total_elapsed_seconds / self._timed_request_count,
+                            6,
+                        )
+                        if self._timed_request_count
+                        else None
+                    ),
+                    "max_elapsed_seconds": (
+                        round(self._max_elapsed_seconds, 6)
+                        if self._timed_request_count
+                        else None
+                    ),
                 },
                 "pricing": {
                     "version": QWEN_PLUS_PRICING_VERSION,

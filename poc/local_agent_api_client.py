@@ -50,6 +50,7 @@ class LocalAgentApiClient:
     """OpenAPI-checked client for the current universal-agent HTTP surface."""
 
     DEVICE_ROUTE = "/api/device"
+    DOCTOR_ROUTE = "/api/doctor/{device_id}"
     START_ROUTE = "/api/agent/generic-supervised/start"
     SESSION_ROUTE = "/api/agent/generic-supervised/{session_id}"
     CONFIRM_ROUTE = SESSION_ROUTE + "/confirm"
@@ -137,6 +138,14 @@ class LocalAgentApiClient:
 
     def device_status(self) -> JsonObject:
         return self._request("GET", self.DEVICE_ROUTE, read_only=True)
+
+    def doctor(self, device_id: str) -> JsonObject:
+        return self._request(
+            "GET",
+            self.DOCTOR_ROUTE,
+            path_params={"device_id": self._resource_id(device_id)},
+            read_only=True,
+        )
 
     def start_session(
         self,

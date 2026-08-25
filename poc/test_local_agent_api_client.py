@@ -95,6 +95,7 @@ def _openapi(*, version="0.2.0", include_start=True):
     session_path = "/api/agent/generic-supervised/{session_id}"
     paths = {
         "/api/device": {"get": {}},
+        "/api/doctor/{device_id}": {"get": {}},
         session_path: {"get": {}},
         session_path + "/confirm": {
             "post": body("#/components/schemas/Confirm")
@@ -162,6 +163,26 @@ class LocalAgentApiClientTests(unittest.TestCase):
             result = client.device_status()
         self.assertTrue(result["controller_online"])
         self.assertEqual(calls[-1], ("GET", "/api/device", "secret"))
+
+    def test_doctor_uses_verified_path_and_never_posts(self):
+        calls = []
+
+        def handler(request):
+            calls.append((request.method, request.url.path))
+            if request.url.path == "/api/session":
+                return httpx.Response(200, json={"token": "secret", "version": "0.2.0"})
+            if request.url.path == "/openapi.json":
+                return httpx.Response(200, json=_openapi())
+            return httpx.Response(
+                200,
+                json={"ready": True, "physical_actions": 0},
+            )
+
+        with self._client(handler) as client:
+            result = client.doctor("device-local-01")
+        self.assertTrue(result["ready"])
+        self.assertEqual(("GET", "/api/doctor/device-local-01"), calls[-1])
+        self.assertNotIn("POST", {method for method, _path in calls})
 
     def test_missing_openapi_route_blocks_before_target_request(self):
         target_calls = 0

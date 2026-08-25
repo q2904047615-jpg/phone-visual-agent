@@ -43,7 +43,7 @@ from universal_agent_orchestrator import (
     EvidenceStoreError,
     DeviceTaskRegistry,
     ObservationBridge,
-    PhaseOneNavigationPolicy,
+    CanonicalActionPolicy,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
     UniversalAgentSessionState,
@@ -1089,9 +1089,9 @@ class VisibleCompletionConditionProgressTests(unittest.TestCase):
                     )
 
 
-class PhaseOneNavigationPolicyTests(unittest.TestCase):
+class CanonicalActionPolicyTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.policy = PhaseOneNavigationPolicy()
+        self.policy = CanonicalActionPolicy()
 
     def test_missing_canonical_protocol_is_rejected(self) -> None:
         current_scene = _scene()
@@ -8272,7 +8272,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 self.report_writes += 1
                 return super().write_report(report)
 
-        class FlipPolicy(PhaseOneNavigationPolicy):
+        class FlipPolicy(CanonicalActionPolicy):
             def __init__(self):
                 super().__init__()
                 self.calls = 0

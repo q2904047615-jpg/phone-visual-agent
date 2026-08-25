@@ -306,6 +306,7 @@ class RobotController:
         )
         allowed_actions = default_actions | {
             "input_verified_text",
+            "double_tap",
             "long_press",
             "drag",
             "reveal_system_navigation",
@@ -327,6 +328,7 @@ class RobotController:
                 "home",
                 "wait_for_change",
                 "input_verified_text",
+                "double_tap",
                 "long_press",
                 "drag",
                 "reveal_system_navigation",
@@ -350,6 +352,7 @@ class RobotController:
                     "dismiss_overlay",
                     "back",
                     "home",
+                    "double_tap",
                     "long_press",
                 }
                 else "local_call_return",
@@ -374,12 +377,20 @@ class RobotController:
             "layouts": ["qwerty", "numeric", "symbol", "generic_visible_backspace"],
             "verified_delete_count": {"min": 1, "max": 100},
         }
-        actions["double_tap"] = {
-            "enabled": False,
-            "vendor_transport_observed": "middle_button_multi_click",
-            "gap_reason": "vendor_multi_click_not_safely_integrated",
-            "mechanical_contact_ack": False,
-        }
+        actions["double_tap"].update(
+            {
+                "enabled": bool(enabled.get("double_tap")),
+                "transport": "seller_click_count_two_atomic_request",
+                "canonical_action_count": 1,
+                "contact_count": 2,
+                "restores_click_count_to": 1,
+                "gap_reason": (
+                    None
+                    if enabled.get("double_tap")
+                    else "requires_double_tap_live_acceptance"
+                ),
+            }
+        )
         actions["press_enter"] = {
             "enabled": bool(enabled.get("tap_semantic")),
             "primitive": "vision_tap_relative",
@@ -569,6 +580,18 @@ class RobotController:
             hold_seconds=float(load_controller_config()["tap_hold"]),
         )
 
+    def vision_double_tap_relative(self, x: int, y: int) -> tuple[int, int]:
+        """Execute one canonical double-tap through seller click-count two."""
+
+        self._require_verified_action("double_tap", "双击")
+        return self._vision_press_relative(
+            x,
+            y,
+            action="double_tap",
+            hold_seconds=float(load_controller_config()["tap_hold"]),
+            click_count=2,
+        )
+
     def vision_long_press_relative(
         self,
         x: int,
@@ -715,6 +738,7 @@ class RobotController:
         *,
         action: str,
         hold_seconds: float,
+        click_count: int = 1,
     ) -> tuple[int, int]:
         if not (0 <= x <= 1000 and 0 <= y <= 1000):
             raise ValueError("视觉 Agent 坐标必须在0～1000之间。")
@@ -738,23 +762,30 @@ class RobotController:
             min(frame.height - 1, max(0, int(round(y * (frame.height - 1) / 1000)))),
         )
         self._checkpoint()
-        # The seller control keeps the previous 连点次数 value. A stale value
-        # of 2 can focus a text box with the first physical tap and then click
-        # the old screen coordinate again after the keyboard moves the layout.
-        # Every visual-agent tap is one atomic action, so force single-click.
-        seller_gui.configure_single_click_count(hwnd)
-        receipt = seller_gui.click_client_point(
-            hwnd,
-            point[0],
-            point[1],
-            countdown=0,
-            hold_seconds=hold_seconds,
-            require_event_barrier=True,
-        )
+        # Seller click-count is persistent global UI state.  Bind it to this
+        # one canonical request and always restore one afterwards so a later
+        # ordinary tap can never inherit double-tap behavior.
+        receipt = None
+        try:
+            seller_gui.configure_click_count(hwnd, click_count)
+            receipt = seller_gui.click_client_point(
+                hwnd,
+                point[0],
+                point[1],
+                countdown=0,
+                hold_seconds=hold_seconds,
+                require_event_barrier=True,
+                click_count=click_count,
+            )
+        finally:
+            if click_count != 1:
+                seller_gui.configure_single_click_count(hwnd)
+            seller_gui.clear_seller_camera_overlay(hwnd)
         if not isinstance(receipt, dict):
-            raise RuntimeError("控制端没有返回单击事件栅栏凭据。")
+            raise RuntimeError("控制端没有返回点击事件栅栏凭据。")
+        if click_count != 1:
+            receipt["click_count_restored_to"] = 1
         self._last_click_receipt = dict(receipt)
-        seller_gui.clear_seller_camera_overlay(hwnd)
         return point
 
     def _vision_nav_tap(
@@ -1058,6 +1089,7 @@ class MockRobotController(RobotController):
             "home",
             "wait_for_change",
             "input_verified_text",
+            "double_tap",
             "long_press",
             "drag",
             "reveal_system_navigation",
@@ -1101,14 +1133,32 @@ class MockRobotController(RobotController):
     def _consume_mock_execution(self, action: str) -> None:
         self._consume_physical_execution(action, self.vision_capture())
 
+    def _record_mock_click_receipt(self, click_count: int = 1) -> None:
+        self._last_click_receipt = {
+            "version": "2026-08-25-mock-click-barrier-v1",
+            "channel": "mock_atomic_click",
+            "seller_event_barrier_confirmed": True,
+            "round_trip_position_confirmed": True,
+            "mechanical_contact_ack": False,
+            "click_count": click_count,
+        }
+
     def vision_tap_relative(self, x: int, y: int) -> tuple[int, int]:
         self._consume_mock_execution("tap_semantic")
         self.executions.append({"action": "tap", "coordinate": [x, y]})
+        self._record_mock_click_receipt()
         return x, y
 
     def vision_dismiss_overlay_relative(self, x: int, y: int) -> tuple[int, int]:
         self._consume_mock_execution("dismiss_overlay")
         self.executions.append({"action": "dismiss_overlay", "coordinate": [x, y]})
+        self._record_mock_click_receipt()
+        return x, y
+
+    def vision_double_tap_relative(self, x: int, y: int) -> tuple[int, int]:
+        self._consume_mock_execution("double_tap")
+        self.executions.append({"action": "double_tap", "coordinate": [x, y]})
+        self._record_mock_click_receipt(2)
         return x, y
 
     def vision_long_press_relative(
@@ -1125,6 +1175,10 @@ class MockRobotController(RobotController):
                 "hold_seconds": hold_seconds,
             }
         )
+        self._last_long_press_receipt = {
+            "version": "2026-08-25-mock-long-press-barrier-v1",
+            "hold_started_after_barrier": True,
+        }
         return x, y
 
     def vision_drag_relative(
@@ -1166,11 +1220,13 @@ class MockRobotController(RobotController):
     def vision_android_home(self) -> tuple[int, int]:
         self._consume_mock_execution("home")
         self.executions.append({"action": "android_home"})
+        self._record_mock_click_receipt()
         return 500, 976
 
     def vision_android_back(self) -> tuple[int, int]:
         self._consume_mock_execution("back")
         self.executions.append({"action": "android_back"})
+        self._record_mock_click_receipt()
         return 910, 976
 
     def vision_swipe_up(self) -> None:

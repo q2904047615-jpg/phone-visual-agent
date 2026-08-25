@@ -44,12 +44,13 @@ PROMOTABLE_ACTIONS = frozenset(
         "home",
         "reveal_system_navigation",
         "input_verified_text",
+        "double_tap",
         "long_press",
         "drag",
     }
 )
 CALIBRATION_BOUND_ACTIONS = frozenset(
-    {"long_press", "drag", "reveal_system_navigation"}
+    {"double_tap", "long_press", "drag", "reveal_system_navigation"}
 )
 ACCEPTANCE_REPORT_VERSION = 3
 
@@ -500,6 +501,19 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
             or not 0.4 <= float(settle) <= 0.6
         ):
             return "长按验收的控制端事件栅栏测量值无效。"
+    if action == "double_tap":
+        if not pixel_point(robot_result):
+            return "双击验收缺少机械臂返回的实际像素落点。"
+        receipt = execution.get("hardware_receipt")
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("seller_event_barrier_confirmed") is not True
+            or receipt.get("round_trip_position_confirmed") is not True
+            or receipt.get("mechanical_contact_ack") is not False
+            or receipt.get("click_count") != 2
+            or receipt.get("click_count_restored_to") != 1
+        ):
+            return "双击验收缺少连点次数为2且已恢复单击的事件栅栏凭据。"
     if action == "drag":
         if (
             not isinstance(robot_result, (list, tuple))
@@ -901,7 +915,7 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     if calibration_evidence is not None:
         width, height = before_frame_size
         robot_result = execution.get("robot_result")
-        if action == "long_press":
+        if action in {"double_tap", "long_press"}:
             points = [robot_result]
         elif action == "reveal_system_navigation":
             points = list(robot_result["client_path"])

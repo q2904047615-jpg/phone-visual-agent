@@ -56,6 +56,7 @@ from task_semantic_ir import (
     TASK_SEMANTIC_IR_PROTOCOL,
 )
 from canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
+from runtime_doctor import run_runtime_doctor
 
 from robot_core import (
     MockRobotController,
@@ -633,6 +634,7 @@ def device() -> dict[str, Any]:
                 "input_verified_text",
                 "press_enter",
                 "clear_verified_text",
+                "double_tap",
                 "long_press",
                 "drag",
             ],
@@ -685,6 +687,40 @@ def device() -> dict[str, Any]:
         ],
     }
     return status
+
+
+@app.get("/api/doctor/{device_id}")
+def runtime_doctor(device_id: str) -> dict[str, Any]:
+    """Run the only current zero-action runtime readiness inspection."""
+
+    try:
+        controller = runtime.controller_for_device(device_id)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    active_session = runtime.device_task_registry.active_session(device_id)
+    coordination_lock = runtime.coordination_lock_for_device(device_id)
+    acquired = coordination_lock.acquire(blocking=False)
+    if not acquired and not active_session:
+        active_session = "device-coordination-busy"
+    try:
+        return run_runtime_doctor(
+            device_id=device_id,
+            controller=controller,
+            deepseek_provider=runtime.intent_provider,
+            qwen_provider=runtime.vision_provider,
+            active_session=active_session,
+            protocols={
+                "goal": "2026-08-20-deepseek-typed-task-graph-v4",
+                "scene": UI_SCENE_PROTOCOL_VERSION,
+                "action": CANONICAL_ACTION_PROTOCOL,
+                "controller": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
+                "semantic_ir": TASK_SEMANTIC_IR_PROTOCOL,
+                "risk": RISK_POLICY_PROTOCOL,
+            },
+        )
+    finally:
+        if acquired:
+            coordination_lock.release()
 
 
 

@@ -44,15 +44,15 @@ class ActionCapabilityTests(unittest.TestCase):
             raw_profile={
                 "actions": {
                     "double_tap": {
-                        "vendor_transport_observed": "middle_button_multi_click",
-                        "gap_reason": "vendor_multi_click_not_safely_integrated",
+                        "transport": "seller_click_count_two_atomic_request",
+                        "gap_reason": "requires_double_tap_live_acceptance",
                     }
                 }
             },
         )
         gap = snapshot.gap("double_tap", required_parameters=("interval_ms",))
         self.assertIsNotNone(gap)
-        self.assertEqual("vendor_multi_click_not_safely_integrated", gap.reason_code)
+        self.assertEqual("requires_double_tap_live_acceptance", gap.reason_code)
         self.assertEqual(("interval_ms",), gap.required_parameters)
         self.assertRegex(gap.profile_digest, r"^[0-9a-f]{64}$")
 

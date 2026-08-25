@@ -14,6 +14,12 @@ from typing import Any, Callable
 
 from PIL import Image, ImageChops, ImageStat
 
+from device_executor import (
+    DeviceActionRequest,
+    DeviceExecutionError,
+    DeviceExecutor,
+    RobotDeviceExecutor,
+)
 from generic_goal import GenericIntentDraft
 from generic_scene_observer import (
     POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS,
@@ -88,7 +94,7 @@ _URL_USERINFO_RE = re.compile(r"(https?://)[^/@\s:]+:[^/@\s]+@", re.IGNORECASE)
 _OPENAI_STYLE_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
 
 _POST_NAVIGATION_RESULT_KINDS = frozenset(
-    {"tap_semantic", "swipe", "back", "home"}
+    {"tap_semantic", "double_tap", "swipe", "back", "home"}
 )
 _POST_NAVIGATION_ALLOWED_EFFECT_KEYS = frozenset(
     {
@@ -216,6 +222,7 @@ def _post_action_observation_context(
         in {
             "tap_semantic",
             "dismiss_overlay",
+            "double_tap",
             "swipe",
             "back",
             "home",
@@ -830,6 +837,7 @@ class GenericSingleActionAdapter:
         {
             "tap_semantic",
             "dismiss_overlay",
+            "double_tap",
             "swipe",
             "reveal_system_navigation",
             "back",
@@ -845,6 +853,7 @@ class GenericSingleActionAdapter:
         {
             "tap_semantic",
             "dismiss_overlay",
+            "double_tap",
             "input_verified_text",
             "press_enter",
             "clear_verified_text",
@@ -856,6 +865,7 @@ class GenericSingleActionAdapter:
         {
             "tap_semantic",
             "dismiss_overlay",
+            "double_tap",
             "input_verified_text",
             "press_enter",
             "clear_verified_text",
@@ -1031,6 +1041,8 @@ class GenericSingleActionAdapter:
             supported.add("tap_semantic")
         if available("dismiss_overlay", "vision_dismiss_overlay_relative"):
             supported.add("dismiss_overlay")
+        if available("double_tap", "vision_double_tap_relative"):
+            supported.add("double_tap")
         if bool(declared.get("swipe", True)) and any(
             callable(getattr(self.robot, f"vision_swipe_{direction}", None))
             for direction in ("up", "down", "left", "right")
@@ -1434,6 +1446,7 @@ class GenericSingleActionAdapter:
         capture: Callable[[], Image.Image],
         observer: SingleStepGenericSceneObserver,
         robot: Any,
+        device_executor: DeviceExecutor | None = None,
         controller: UniversalActionController | None = None,
         frame_interval: float = 0.37,
         post_action_settle: float = 1.5,
@@ -1456,6 +1469,7 @@ class GenericSingleActionAdapter:
         self.capture = capture
         self.observer = observer
         self.robot = robot
+        self.device_executor = device_executor or RobotDeviceExecutor(robot)
         self.controller = controller or UniversalActionController()
         self.frame_interval = max(0.0, float(frame_interval))
         self.post_action_settle = max(0.0, float(post_action_settle))
@@ -1671,6 +1685,7 @@ class GenericSingleActionAdapter:
     ) -> bool:
         return resolved.kind in {
             "clear_verified_text",
+            "double_tap",
             "drag",
             "input_verified_text",
             "long_press",
@@ -2278,25 +2293,10 @@ class GenericSingleActionAdapter:
                 evidence=before_paths,
             )
 
-        prepared_input_method: Callable[..., Any] | None = None
         prepared_keyboard_geometry: dict[str, Any] | None = None
         if resolved.kind in {"input_verified_text", "clear_verified_text"}:
             if resolved.kind == "input_verified_text" and not resolved.text:
                 raise GenericActionAdapterError("输入动作缺少已校验文字。")
-            method_name = (
-                (
-                    "vision_type_pinyin"
-                    if resolved.input_method == "chinese_pinyin"
-                    else "vision_type_text_with_layout"
-                )
-                if resolved.kind == "input_verified_text"
-                else "vision_clear_text"
-            )
-            method = getattr(self.robot, method_name, None)
-            if not callable(method):
-                raise GenericActionAdapterError(
-                    "机械臂不支持绑定本轮键盘几何的文字输入或清空。"
-                )
             try:
                 input_element = before.get_element(
                     str(resolved.target_element_id or ""),
@@ -2383,7 +2383,6 @@ class GenericSingleActionAdapter:
                     ) from exc
             if resolved.kind == "clear_verified_text" and resolved.delete_count is None:
                 raise GenericActionAdapterError("清空动作缺少已验证退格次数。")
-            prepared_input_method = method
             prepared_keyboard_geometry = execution_keyboard_geometry
 
         orientation_credential: OrientationCredential | None = None
@@ -2473,155 +2472,45 @@ class GenericSingleActionAdapter:
         physical_actions = 0
         robot_result: Any = None
         hardware_receipt: dict[str, Any] | None = None
+
+        def executor_point(
+            point: tuple[float, float] | None,
+        ) -> tuple[int, int] | None:
+            if point is None:
+                return None
+            return (
+                max(0, min(1000, round(point[0] * 1000))),
+                max(0, min(1000, round(point[1] * 1000))),
+            )
+
+        execution_request = DeviceActionRequest(
+            kind=resolved.kind,
+            point=executor_point(resolved.normalized_point),
+            end_point=executor_point(resolved.normalized_end_point),
+            direction=resolved.direction,
+            hold_seconds=resolved.hold_seconds,
+            input_fragment=resolved.input_fragment,
+            input_method=resolved.input_method,
+            input_pinyin=resolved.input_pinyin,
+            keyboard_geometry=prepared_keyboard_geometry,
+            delete_count=resolved.delete_count,
+            wait_seconds=(
+                max(0.5, self.post_action_settle)
+                if resolved.kind == "wait_for_change"
+                else None
+            ),
+        )
         try:
-            if resolved.kind in {
-                "tap_semantic",
-                "press_enter",
-                "dismiss_overlay",
-            }:
-                if resolved.normalized_point is None:
-                    raise GenericActionAdapterError("点击动作缺少已校验落点。")
-                x = max(0, min(1000, round(resolved.normalized_point[0] * 1000)))
-                y = max(0, min(1000, round(resolved.normalized_point[1] * 1000)))
-                physical_actions = 1
-                if resolved.kind == "dismiss_overlay":
-                    robot_result = self.robot.vision_dismiss_overlay_relative(x, y)
-                else:
-                    robot_result = self.robot.vision_tap_relative(x, y)
-            elif resolved.kind == "reveal_system_navigation":
-                method = getattr(
-                    self.robot,
-                    "vision_reveal_system_navigation",
-                    None,
-                )
-                if not callable(method):
-                    raise GenericActionAdapterError(
-                        "机械臂不支持经过验证的系统导航栏唤出动作。"
-                    )
-                physical_actions = 1
-                robot_result = method()
-            elif resolved.kind == "swipe":
-                method = getattr(self.robot, f"vision_swipe_{resolved.direction}", None)
-                if not callable(method):
-                    raise GenericActionAdapterError(
-                        f"机械臂不支持滑动方向：{resolved.direction}"
-                    )
-                physical_actions = 1
-                robot_result = method()
-            elif resolved.kind == "back":
-                physical_actions = 1
-                robot_result = self.robot.vision_android_back()
-            elif resolved.kind == "home":
-                physical_actions = 1
-                robot_result = self.robot.vision_android_home()
-            elif resolved.kind in {"input_verified_text", "clear_verified_text"}:
-                if (
-                    prepared_input_method is None
-                    or prepared_keyboard_geometry is None
-                ):
-                    raise GenericActionAdapterError("文字动作的本地预检结果缺失。")
-                physical_actions = 1
-                if resolved.kind == "input_verified_text":
-                    if resolved.input_method == "chinese_pinyin":
-                        robot_result = prepared_input_method(
-                            resolved.input_fragment,
-                            resolved.input_pinyin,
-                            prepared_keyboard_geometry,
-                        )
-                    else:
-                        robot_result = prepared_input_method(
-                            resolved.input_fragment,
-                            prepared_keyboard_geometry,
-                        )
-                else:
-                    robot_result = prepared_input_method(
-                        prepared_keyboard_geometry,
-                        resolved.delete_count,
-                    )
-            elif resolved.kind == "long_press":
-                if resolved.normalized_point is None or resolved.hold_seconds is None:
-                    raise GenericActionAdapterError("长按动作缺少已校验落点或时长。")
-                method = getattr(self.robot, "vision_long_press_relative", None)
-                if not callable(method):
-                    raise GenericActionAdapterError("机械臂不支持通用长按。")
-                x = max(0, min(1000, round(resolved.normalized_point[0] * 1000)))
-                y = max(0, min(1000, round(resolved.normalized_point[1] * 1000)))
-                physical_actions = 1
-                robot_result = method(x, y, resolved.hold_seconds)
-                receipt_consumer = getattr(
-                    self.robot,
-                    "consume_last_long_press_receipt",
-                    None,
-                )
-                if not callable(receipt_consumer):
-                    raise GenericActionAdapterError(
-                        "机械臂没有提供长按事件栅栏凭据。",
-                        physical_actions=physical_actions,
-                        evidence=before_paths,
-                    )
-                raw_receipt = receipt_consumer()
-                if not isinstance(raw_receipt, dict):
-                    raise GenericActionAdapterError(
-                        "机械臂没有返回长按事件栅栏凭据。",
-                        physical_actions=physical_actions,
-                        evidence=before_paths,
-                    )
-                hardware_receipt = dict(raw_receipt)
-            elif resolved.kind == "drag":
-                if (
-                    resolved.normalized_point is None
-                    or resolved.normalized_end_point is None
-                ):
-                    raise GenericActionAdapterError("拖动动作缺少已校验起点或终点。")
-                method = getattr(self.robot, "vision_drag_relative", None)
-                if not callable(method):
-                    raise GenericActionAdapterError(
-                        "当前机械臂控制端没有经过验收的任意拖动能力。"
-                    )
-                start_x = max(
-                    0, min(1000, round(resolved.normalized_point[0] * 1000))
-                )
-                start_y = max(
-                    0, min(1000, round(resolved.normalized_point[1] * 1000))
-                )
-                end_x = max(
-                    0, min(1000, round(resolved.normalized_end_point[0] * 1000))
-                )
-                end_y = max(
-                    0, min(1000, round(resolved.normalized_end_point[1] * 1000))
-                )
-                physical_actions = 1
-                robot_result = method(start_x, start_y, end_x, end_y)
-            elif resolved.kind == "wait_for_change":
-                time.sleep(max(0.5, self.post_action_settle))
-            if resolved.kind in {
-                "tap_semantic",
-                "press_enter",
-                "dismiss_overlay",
-                "back",
-                "home",
-            }:
-                receipt_consumer = getattr(
-                    self.robot,
-                    "consume_last_click_receipt",
-                    None,
-                )
-                if callable(receipt_consumer):
-                    raw_receipt = receipt_consumer()
-                    if (
-                        not isinstance(raw_receipt, dict)
-                        or raw_receipt.get("seller_event_barrier_confirmed") is not True
-                        or raw_receipt.get("round_trip_position_confirmed") is not True
-                        or raw_receipt.get("mechanical_contact_ack") is not False
-                    ):
-                        raise GenericActionAdapterError(
-                            "机械臂没有返回有效的单击事件栅栏凭据。",
-                            physical_actions=physical_actions,
-                            evidence=before_paths,
-                        )
-                    hardware_receipt = dict(raw_receipt)
-        except GenericActionAdapterError:
-            raise
+            execution_result = self.device_executor.execute(execution_request)
+            physical_actions = execution_result.physical_actions
+            robot_result = execution_result.transport_result
+            hardware_receipt = execution_result.hardware_receipt
+        except DeviceExecutionError as exc:
+            raise GenericActionAdapterError(
+                f"设备执行器拒绝动作：{exc}",
+                physical_actions=exc.physical_actions,
+                evidence=before_paths,
+            ) from exc
         except OrientationSafetyError as exc:
             gate_evidence = before_paths
             if isinstance(exc, OrientationFrameMismatchError):
@@ -2873,6 +2762,7 @@ class GenericSingleActionAdapter:
             "input_verified_text",
             "press_enter",
             "clear_verified_text",
+            "double_tap",
             "long_press",
         }
         if requested.action not in single_element_actions | {"drag"}:
@@ -2934,7 +2824,8 @@ class GenericSingleActionAdapter:
             selector_roles = {"button", "tab", "list_item", "text"}
             if (
                 not matches
-                and requested.action in {"tap_semantic", "dismiss_overlay"}
+                and requested.action
+                in {"tap_semantic", "dismiss_overlay", "double_tap"}
                 and prefix == ""
                 and original.label
                 and original.role in selector_roles
@@ -2954,7 +2845,8 @@ class GenericSingleActionAdapter:
             # unlabeled control; fresh-frame overlap remains mandatory.
             if (
                 not matches
-                and requested.action in {"tap_semantic", "dismiss_overlay"}
+                and requested.action
+                in {"tap_semantic", "dismiss_overlay", "double_tap"}
                 and prefix == ""
                 and not original.label
                 and original.role in {"icon", "button"}

@@ -323,6 +323,41 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         )
         return report
 
+    def _valid_double_tap_report(self) -> dict:
+        report = self._valid_report()
+        report["candidate_action"] = "double_tap"
+        report["execution"].update(
+            {
+                "resolved_action": {
+                    "node_id": "double-tap-001",
+                    "kind": "double_tap",
+                    "normalized_point": [0.15, 0.25],
+                    "target_element_id": "source",
+                    "before_fingerprint": "fingerprint-execution-before",
+                    "expected_effect": {"scene_changed": True},
+                },
+                "after_scene": {
+                    "foreground_app_id": "test-app",
+                    "screen_id": "detail",
+                    "summary": "双击后打开详情",
+                    "elements": [],
+                    "overlays": [],
+                    "stable": True,
+                    "confidence": 0.95,
+                    "fingerprint": "fingerprint-after",
+                },
+                "robot_result": [2, 4],
+                "hardware_receipt": {
+                    "seller_event_barrier_confirmed": True,
+                    "round_trip_position_confirmed": True,
+                    "mechanical_contact_ack": False,
+                    "click_count": 2,
+                    "click_count_restored_to": 1,
+                },
+            }
+        )
+        return report
+
     def _mutate_report(self, mutation) -> None:
         report = json.loads(self.report_path.read_text(encoding="utf-8"))
         mutation(report)
@@ -446,6 +481,26 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
         self.assertEqual(
             "reveal_system_navigation", validated["candidate_action"]
         )
+
+    def test_double_tap_report_requires_count_two_and_single_restore(self) -> None:
+        report = self._valid_double_tap_report()
+        self.report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        validated = validate_acceptance_report(self.report_path)
+        self.assertEqual("double_tap", validated["candidate_action"])
+
+        for field, value in (("click_count", 1), ("click_count_restored_to", 2)):
+            with self.subTest(field=field):
+                report = self._valid_double_tap_report()
+                report["execution"]["hardware_receipt"][field] = value
+                self.report_path.write_text(
+                    json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(CapabilityAcceptanceError, "双击验收"):
+                    validate_acceptance_report(self.report_path)
 
     def test_reveal_system_navigation_rejects_summary_only_success(self) -> None:
         report = self._valid_reveal_system_navigation_report()

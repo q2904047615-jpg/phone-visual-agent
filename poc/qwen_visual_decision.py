@@ -43,7 +43,7 @@ MIN_TRUSTED_FRAME_SHARPNESS = 4.0
 SINGLE_ELEMENT_ACTIONS = frozenset(
     {
         "tap_semantic", "dismiss_overlay", "input_verified_text", "press_enter",
-        "clear_verified_text", "long_press",
+        "clear_verified_text", "double_tap", "long_press",
     }
 )
 QWEN_PROTOCOL_ACTIONS = frozenset(SUPPORTED_ACTIONS)

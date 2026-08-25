@@ -32,6 +32,7 @@ ALL_ACTIONS = frozenset(
         "input_verified_text",
         "press_enter",
         "clear_verified_text",
+        "double_tap",
         "long_press",
         "drag",
         "wait_for_change",
@@ -1741,6 +1742,45 @@ class CanonicalActionProtocolTests(unittest.TestCase):
             current_scene, second_ir, {"long_press", "drag"}
         )
         self.assertEqual({"drag"}, {item.action_kind for item in second.candidates})
+
+    def test_required_double_tap_has_one_canonical_candidate(self) -> None:
+        target = SemanticEntity("entity_target", "text", "item", "预览图")
+        required = ConstraintIntent(
+            "constraint_double_tap",
+            "required_action",
+            value="double_tap",
+            source_text="typed required action",
+            authoritative=True,
+        )
+        ir = TaskSemanticIR(
+            task_id="task-double-tap",
+            device_id="device-1",
+            revision=1,
+            raw_goal="双击预览图",
+            surfaces=(SurfaceRef("surface_current", "current_surface"),),
+            entities=(target,),
+            effects=(),
+            constraints=(required,),
+            subgoals=(
+                SemanticSubgoal(
+                    "double_target",
+                    "surface_current",
+                    "active",
+                    "navigation_only",
+                    constraint_refs=(required.constraint_id,),
+                    entity_refs=(target.entity_id,),
+                ),
+            ),
+        )
+        report = compile_canonical_action_catalog(
+            scene(element("preview", label="预览图", meaning="image_preview")),
+            ir,
+            {"tap_semantic", "double_tap"},
+        )
+
+        self.assertEqual(1, len(report.candidates))
+        self.assertEqual("double_tap", report.candidates[0].action_kind)
+        self.assertEqual("preview", report.candidates[0].parameters["element_id"])
 
     def test_target_app_navigation_exposes_ordinary_controls_without_literal_patch(self) -> None:
         target = SurfaceRef(

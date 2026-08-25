@@ -115,6 +115,7 @@ class UniversalActionController:
                     "input_verified_text",
                     "press_enter",
                     "clear_verified_text",
+                    "double_tap",
                     "long_press",
                 }
                 or target_local_candidate is None
@@ -416,6 +417,20 @@ class UniversalActionController:
                 expected_effect=expected_effect,
                 formal_candidate_id=formal_candidate_id,
                 formal_transition=formal_transition,
+            )
+        if action.action == "double_tap":
+            element = self._resolve_target(action, scene)
+            self._validate_gesture_point(element.center, label="双击落点")
+            self._require_visual_postcondition(
+                "double_tap",
+                expected_effect,
+                scene,
+            )
+            return self._point_action(
+                action,
+                element,
+                expected_effect,
+                scene.fingerprint,
             )
         if action.action == "long_press":
             element = self._resolve_target(action, scene)
@@ -740,7 +755,7 @@ class UniversalActionController:
                 raise UniversalActionError("动作缺少执行前场景 fingerprint。")
             if resolved.before_fingerprint != before.fingerprint:
                 raise UniversalActionError("动作绑定的 fingerprint 已过期。")
-        if resolved.kind in {"long_press", "drag"}:
+        if resolved.kind in {"double_tap", "long_press", "drag"}:
             self._require_visual_postcondition(
                 resolved.kind,
                 resolved.expected_effect,

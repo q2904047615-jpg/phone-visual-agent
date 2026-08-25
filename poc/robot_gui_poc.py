@@ -538,12 +538,15 @@ def click_client_point(
     hold_seconds: float,
     *,
     require_event_barrier: bool = False,
+    click_count: int = 1,
 ) -> dict[str, object] | None:
     _, _, width, height = client_geometry(hwnd)
     if not (0 <= x < width and 0 <= y < height):
         raise ValueError(f"点击位置 ({x}, {y}) 超出窗口客户区 {width}×{height}。")
     if not (0.1 <= hold_seconds <= 2.0):
         raise ValueError("按住时间必须在 0.1～2.0 秒之间。")
+    if click_count not in {1, 2}:
+        raise ValueError("点击次数只允许1或2。")
 
     screen_point = POINT(x, y)
     if not user32.ClientToScreen(hwnd, ctypes.byref(screen_point)):
@@ -620,6 +623,7 @@ def click_client_point(
         "seller_event_barrier_confirmed": True,
         "round_trip_position_confirmed": True,
         "requested_mouse_hold_seconds": float(hold_seconds),
+        "click_count": int(click_count),
         "barrier_offset_pixels": abs(int(offset)),
         "changed_pixels": int(changed_pixels),
         "return_changed_pixels": int(return_changed_pixels),
@@ -913,8 +917,10 @@ def type_unicode_text(text: str) -> None:
     time.sleep(0.08)
 
 
-def configure_single_click_count(hwnd: int) -> None:
-    """Force the seller software's 连点次数 field to one."""
+def configure_click_count(hwnd: int, click_count: int) -> None:
+    """Set the seller software's 连点次数 field to one or two."""
+    if click_count not in {1, 2}:
+        raise ValueError("控制端连点次数只允许1或2。")
     ensure_window_fully_visible(hwnd)
     _, _, width, height = client_geometry(hwnd)
     control_x, control_y = seller_control_point(
@@ -926,9 +932,14 @@ def configure_single_click_count(hwnd: int) -> None:
     user32.keybd_event(VK_CONTROL, 0, 0, 0)
     press_virtual_key(VK_A)
     user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
-    type_unicode_text("1")
+    type_unicode_text(str(click_count))
     press_virtual_key(VK_RETURN)
     time.sleep(0.25)
+
+
+def configure_single_click_count(hwnd: int) -> None:
+    """Force the seller software's 连点次数 field to one."""
+    configure_click_count(hwnd, 1)
 
 
 def cursor_parking_client_point(width: int, height: int) -> tuple[int, int]:

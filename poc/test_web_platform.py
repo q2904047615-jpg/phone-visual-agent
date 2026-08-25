@@ -86,7 +86,7 @@ TEST_QWERTY_LAYOUT = {
 
 class PhysicalNavigationSafetyTests(unittest.TestCase):
     @staticmethod
-    def _click_barrier_receipt():
+    def _click_barrier_receipt(click_count=1):
         return {
             "version": "2026-08-19-seller-gui-click-barrier-v1",
             "channel": "left_button_atomic_click",
@@ -98,6 +98,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             "return_changed_pixels": 235,
             "barrier_elapsed_ms": 35.0,
             "mechanical_contact_ack": False,
+            "click_count": click_count,
         }
 
     def test_live_preview_uses_passive_capture_without_active_capture_path(self):
@@ -240,6 +241,55 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         profile = controller.hardware_capability_profile()["actions"]["back"]
         self.assertEqual("gui_event_barrier", profile["transport_ack"])
         self.assertFalse(profile["mechanical_contact_ack"])
+
+    def test_double_tap_sets_two_then_restores_single_click_count(self):
+        controller = RobotController(
+            title="test",
+            verified_actions={"double_tap"},
+        )
+        frame = Image.new("RGB", (540, 960), "white")
+
+        with (
+            patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
+            patch.object(controller, "_capture_phone", return_value=frame),
+            patch.object(controller, "_consume_physical_execution"),
+            patch.object(controller, "_checkpoint"),
+            patch(
+                "tap_calibration.corrected_grid_point",
+                return_value=(500.0, 500.0),
+            ),
+            patch("robot_core.seller_gui.configure_click_count") as configure,
+            patch(
+                "robot_core.seller_gui.configure_single_click_count"
+            ) as restore,
+            patch(
+                "robot_core.seller_gui.click_client_point",
+                return_value=self._click_barrier_receipt(2),
+            ) as click,
+            patch("robot_core.seller_gui.clear_seller_camera_overlay") as clear,
+            patch(
+                "robot_core.load_controller_config",
+                return_value={"tap_hold": 0.35},
+            ),
+        ):
+            point = controller.vision_double_tap_relative(500, 500)
+
+        self.assertEqual(point, (270, 480))
+        configure.assert_called_once_with(123, 2)
+        restore.assert_called_once_with(123)
+        click.assert_called_once_with(
+            123,
+            270,
+            480,
+            countdown=0,
+            hold_seconds=0.35,
+            require_event_barrier=True,
+            click_count=2,
+        )
+        clear.assert_called_once_with(123)
+        receipt = controller.consume_last_click_receipt()
+        self.assertEqual(receipt["click_count"], 2)
+        self.assertEqual(receipt["click_count_restored_to"], 1)
 
     def test_click_event_barrier_confirms_round_trip_and_restores_cursor(self):
         class FakeUser32:

@@ -67,6 +67,7 @@ SUPPORTED_ACTIONS = frozenset(
         "input_verified_text",
         "press_enter",
         "clear_verified_text",
+        "double_tap",
         "long_press",
         "drag",
         "wait_for_change",
@@ -192,6 +193,7 @@ class GenericStepProposal:
                 "input_verified_text",
                 "press_enter",
                 "clear_verified_text",
+                "double_tap",
                 "long_press",
             }:
                 element_id = str(
@@ -1460,6 +1462,8 @@ def compile_canonical_action_catalog(
         supported: set[str] = set()
         if "tap_semantic" in available:
             supported.add("tap_semantic")
+        if normally_actionable and "double_tap" in available:
+            supported.add("double_tap")
         if normally_actionable and "long_press" in available:
             supported.add("long_press")
         if normally_actionable and "drag" in available:
@@ -1930,6 +1934,27 @@ def compile_canonical_action_catalog(
                 )
             )
 
+        double_tap_affordance = affordance_by_pair.get((element_ref, "double_tap"))
+        if double_tap_affordance is not None:
+            candidates.append(
+                _candidate(
+                    action_kind="double_tap",
+                    subject_refs=(element_ref,),
+                    affordance_ids=(double_tap_affordance.affordance_id,),
+                    relation_ids=tuple(sorted(set(unique_relation_ids))),
+                    precondition_claim_ids=tuple(element_claim_ids[element.element_id]),
+                    expectations=(
+                        StateExpectation(
+                            element_ref,
+                            "element.state.interaction_result",
+                            "changed",
+                        ),
+                    ),
+                    exploratory=True,
+                    parameters={"element_id": element.element_id},
+                )
+            )
+
     source_roles = {"drag_source", "source", "item"}
     destination_roles = {"drag_destination", "destination", "target"}
     unique_entity_elements = {
@@ -2071,13 +2096,14 @@ def compile_canonical_action_catalog(
         "press_enter": 2,
         "clear_verified_text": 3,
         "dismiss_overlay": 4,
-        "long_press": 5,
-        "drag": 6,
-        "home": 7,
-        "reveal_system_navigation": 8,
-        "back": 9,
-        "swipe": 10,
-        "wait_for_change": 11,
+        "double_tap": 5,
+        "long_press": 6,
+        "drag": 7,
+        "home": 8,
+        "reveal_system_navigation": 9,
+        "back": 10,
+        "swipe": 11,
+        "wait_for_change": 12,
     }
     unique_candidates = {item.candidate_id: item for item in candidates}
     element_by_id = {item.element_id: item for item in sorted_elements}
@@ -2302,7 +2328,7 @@ def compile_canonical_action_catalog(
             )
         if action_kind == "dismiss_overlay":
             return active_subgoal.external_impact == "navigation_only"
-        if action_kind in {"long_press", "drag"}:
+        if action_kind in {"double_tap", "long_press", "drag"}:
             return action_kind in active_required_actions
         if action_kind == "home":
             surfaces = {

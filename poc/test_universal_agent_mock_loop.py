@@ -141,6 +141,7 @@ class RecordingRobot:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[int, ...]]] = []
         self._armed = None
+        self._click_receipt = None
 
     def arm_physical_execution(self, credential, *, action, scene_fingerprint):
         credential.assert_authorizes(
@@ -162,11 +163,28 @@ class RecordingRobot:
     def vision_tap_relative(self, x: int, y: int):
         self._consume("tap_semantic")
         self.calls.append(("tap", (x, y)))
+        self._click_receipt = {
+            "seller_event_barrier_confirmed": True,
+            "round_trip_position_confirmed": True,
+            "mechanical_contact_ack": False,
+            "click_count": 1,
+        }
         return {"ok": True, "kind": "tap"}
+
+    def consume_last_click_receipt(self):
+        receipt = self._click_receipt
+        self._click_receipt = None
+        return receipt
 
     def vision_android_back(self):
         self._consume("back")
         self.calls.append(("back", ()))
+        self._click_receipt = {
+            "seller_event_barrier_confirmed": True,
+            "round_trip_position_confirmed": True,
+            "mechanical_contact_ack": False,
+            "click_count": 1,
+        }
         return {"ok": True, "kind": "back"}
 
     def vision_swipe_up(self):

@@ -285,6 +285,7 @@ class DashScopeVisionProvider:
                 fingerprint=fingerprint,
                 max_completion_tokens=max_tokens,
             )
+        request_started = time.perf_counter()
         try:
             content = self._chat_untracked(
                 messages,
@@ -303,12 +304,14 @@ class DashScopeVisionProvider:
                         network_attempts=self.last_network_attempts,
                         usage=self.last_usage,
                         finish_reason=self.last_finish_reason,
+                        elapsed_seconds=time.perf_counter() - request_started,
                     )
                 else:
                     ledger.record_failure(
                         local_request_id,
                         network_attempts=self.last_network_attempts,
                         error=exc,
+                        elapsed_seconds=time.perf_counter() - request_started,
                     )
             raise
         if ledger is not None and local_request_id:
@@ -319,6 +322,7 @@ class DashScopeVisionProvider:
                 network_attempts=self.last_network_attempts,
                 usage=self.last_usage,
                 finish_reason=self.last_finish_reason,
+                elapsed_seconds=time.perf_counter() - request_started,
             )
         return content
 

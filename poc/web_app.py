@@ -31,6 +31,7 @@ from generic_action_adapter import (
     GenericSingleActionAdapter,
     persist_observer_failure_diagnostic,
     stable_qwerty_ocr_anchors,
+    stable_text_ocr_grounding,
 )
 from generic_scene_observer import SingleStepGenericSceneObserver
 from input_value_lineage import TypedInputLineageStore
@@ -390,6 +391,14 @@ class Runtime:
                 robot=self.controller_for_device(device_id),
                 controller=UniversalActionController(),
                 qwerty_row_snapper=stable_qwerty_ocr_anchors,
+                text_point_grounder=(
+                    stable_text_ocr_grounding
+                    if not isinstance(
+                        self.controller_for_device(device_id),
+                        MockRobotController,
+                    )
+                    else None
+                ),
                 require_local_qwerty_row_snap=not isinstance(
                     self.controller_for_device(device_id),
                     MockRobotController,
@@ -451,6 +460,11 @@ class Runtime:
                 robot=provisional_controller,
                 controller=UniversalActionController(),
                 qwerty_row_snapper=stable_qwerty_ocr_anchors,
+                text_point_grounder=(
+                    stable_text_ocr_grounding
+                    if not isinstance(provisional_controller, MockRobotController)
+                    else None
+                ),
                 require_local_qwerty_row_snap=not isinstance(
                     provisional_controller,
                     MockRobotController,
@@ -850,6 +864,11 @@ def _new_generic_action_adapter() -> GenericSingleActionAdapter:
         robot=runtime.controller,
         controller=UniversalActionController(),
         qwerty_row_snapper=stable_qwerty_ocr_anchors,
+        text_point_grounder=(
+            stable_text_ocr_grounding
+            if not isinstance(runtime.controller, MockRobotController)
+            else None
+        ),
         require_local_qwerty_row_snap=not isinstance(
             runtime.controller,
             MockRobotController,

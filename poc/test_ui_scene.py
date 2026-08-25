@@ -10,6 +10,8 @@ from ui_scene import (
     UISceneError,
 )
 from universal_action_controller import (
+    LOCAL_POINT_GROUNDING_SOURCE,
+    LocalPointGrounding,
     ResolvedSemanticAction,
     UniversalActionController,
     UniversalActionError,
@@ -180,6 +182,80 @@ class UISceneTests(unittest.TestCase):
         resolved = UniversalActionController().resolve_one(action, current)
         self.assertEqual(resolved.target_element_id, "five")
         self.assertEqual(resolved.normalized_point, (0.30000000000000004, 0.4))
+
+    def test_stable_local_text_grounding_refines_only_selected_target(self) -> None:
+        target = replace(
+            element("target-row", "open_target", role="list_item"),
+            label="目标条目",
+            bounds=(0.07, 0.29, 0.93, 0.39),
+        )
+        current = scene(target, fingerprint="fresh-frame")
+        action = SemanticAction(
+            node_id="open-target",
+            action="tap_semantic",
+            params={
+                "element_id": target.element_id,
+                "target": target.meaning,
+                "role": target.role,
+                "label": target.label,
+            },
+        )
+        grounding = LocalPointGrounding(
+            source=LOCAL_POINT_GROUNDING_SOURCE,
+            scene_fingerprint=current.fingerprint,
+            element_id=target.element_id,
+            label=target.label,
+            model_bounds=target.bounds,
+            proposed_point=target.center,
+            grounded_bounds=(0.23, 0.245, 0.46, 0.267),
+            grounded_point=(0.345, 0.256),
+            matched_frames=2,
+            inspected_frames=2,
+        )
+
+        resolved = UniversalActionController().resolve_one(
+            action,
+            current,
+            local_point_grounding=grounding,
+        )
+
+        self.assertEqual((0.345, 0.256), resolved.normalized_point)
+        self.assertEqual(target.center, resolved.proposed_normalized_point)
+        self.assertEqual(
+            [0.345, 0.256],
+            resolved.to_dict()["point_grounding"]["grounded_point"],
+        )
+
+    def test_local_text_grounding_rejects_stale_scene_binding(self) -> None:
+        target = replace(
+            element("target-row", "open_target", role="list_item"),
+            label="目标条目",
+            bounds=(0.07, 0.29, 0.93, 0.39),
+        )
+        current = scene(target, fingerprint="fresh-frame")
+        grounding = LocalPointGrounding(
+            source=LOCAL_POINT_GROUNDING_SOURCE,
+            scene_fingerprint="stale-frame",
+            element_id=target.element_id,
+            label=target.label,
+            model_bounds=target.bounds,
+            proposed_point=target.center,
+            grounded_bounds=(0.23, 0.245, 0.46, 0.267),
+            grounded_point=(0.345, 0.256),
+            matched_frames=2,
+            inspected_frames=2,
+        )
+
+        with self.assertRaisesRegex(UniversalActionError, "不属于当前"):
+            UniversalActionController().resolve_one(
+                SemanticAction(
+                    node_id="open-target",
+                    action="tap_semantic",
+                    params={"element_id": target.element_id},
+                ),
+                current,
+                local_point_grounding=grounding,
+            )
 
     def test_low_scene_confidence_allows_exact_unique_goal_element_only(self) -> None:
         target = element(

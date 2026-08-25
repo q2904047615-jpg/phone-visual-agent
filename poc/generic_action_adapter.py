@@ -22,10 +22,12 @@ from device_executor import (
 )
 from generic_goal import GenericIntentDraft
 from generic_scene_observer import (
+    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS,
     POST_NAVIGATION_RESULT_OBJECTIVE,
     POST_NAVIGATION_RESULT_OBSERVATION_PHASE,
     SingleStepGenericSceneObserver,
+    _input_audit_established_local_target,
 )
 from input_value_lineage import (
     InputValueLineageError,
@@ -40,7 +42,7 @@ from input_value_lineage import (
     input_app_identity_compatible,
     input_screen_identity_compatible,
 )
-from ocr_runtime import recognize as recognize_ocr
+from ocr_runtime import find_text, recognize as recognize_ocr
 from observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
@@ -59,6 +61,8 @@ from qwen_runtime_errors import FORMAT_ERROR_TYPES, classify_qwen_error
 from semantic_action import SemanticAction
 from ui_scene import UIElement, UIScene, UISceneError
 from universal_action_controller import (
+    LOCAL_POINT_GROUNDING_SOURCE,
+    LocalPointGrounding,
     ResolvedSemanticAction,
     UniversalActionController,
     UniversalActionError,
@@ -105,9 +109,6 @@ _POST_NAVIGATION_ALLOWED_EFFECT_KEYS = frozenset(
         "app_id",
         "screen_id",
     }
-)
-FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE = (
-    "2026-08-24-verified-previous-and-plan-next-v1"
 )
 _VISUAL_FOCUS_KEYS = frozenset(
     {
@@ -284,6 +285,28 @@ def _post_action_observation_context(
     result_context["entities"] = dict(entities)
     result_context["entities"]["active_subgoal_visual_context"] = result_focus
     return result_context
+
+
+def _requires_fused_next_input_target(context: dict[str, Any]) -> bool:
+    entities = context.get("entities")
+    focus = (
+        entities.get("active_subgoal_visual_context")
+        if isinstance(entities, dict)
+        else None
+    )
+    goal_entities = (
+        focus.get("goal_entities") if isinstance(focus, dict) else None
+    )
+    return bool(
+        isinstance(goal_entities, dict)
+        and goal_entities.get("observation_phase")
+        == FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
+        and isinstance(
+            goal_entities.get("active_input_transaction_text"),
+            str,
+        )
+        and goal_entities.get("active_input_transaction_text")
+    )
 
 
 def stable_qwerty_ocr_anchors(
@@ -626,6 +649,143 @@ def stable_qwerty_ocr_anchors(
             snapped[key][1] = bottom_y
         qwerty_keyboard_config_from_anchors(snapped)
         return snapped
+    except Exception:
+        return None
+
+
+def stable_text_ocr_grounding(
+    frames: tuple[Image.Image, ...] | list[Image.Image],
+    scene: UIScene,
+    action: SemanticAction,
+    *,
+    ocr_recognizer: Any = recognize_ocr,
+) -> LocalPointGrounding | None:
+    """Refine one coarse point with a stable exact-label OCR match.
+
+    The canonical action and its target are already fixed before this helper
+    runs.  OCR may only refine that target's point; it cannot add candidates,
+    change the action, or make an ambiguous label executable.  Any unavailable,
+    duplicate, unstable, or distant OCR result simply keeps the existing model
+    center.
+    """
+
+    if action.action not in {
+        "tap_semantic",
+        "dismiss_overlay",
+        "double_tap",
+        "long_press",
+    }:
+        return None
+    frame_list = list(frames)[-3:]
+    if not frame_list or not scene.fingerprint:
+        return None
+    element_id = str(action.params.get("element_id") or "").strip()
+    try:
+        element = scene.get_element(element_id)
+    except UISceneError:
+        return None
+    if (
+        element.role
+        not in {"button", "icon", "text", "tab", "toggle", "image", "list_item"}
+        or element.element_id.startswith("local_audited_")
+        or element.meaning == "application_text_input"
+        or element.meaning.startswith(("input_", "ime_", "switch_keyboard_"))
+        or str(action.params.get("label") or "") != element.label
+        or str(action.params.get("target") or "") != element.meaning
+        or str(action.params.get("role") or "") != element.role
+    ):
+        return None
+    label = element.label.strip()
+    compact_label = re.sub(r"[\s\u3000]+", "", label)
+    if len(compact_label) < 2 or len(compact_label) > 64:
+        return None
+
+    def unique_match_geometry(
+        frame: Image.Image,
+    ) -> tuple[
+        tuple[float, float, float, float],
+        tuple[float, float],
+    ] | None:
+        payload = ocr_recognizer(
+            frame.convert("RGB"),
+            "zh-Hans-CN",
+            scale=1.5,
+        )
+        matches = find_text(payload, label)
+        if len(matches) != 1 or frame.width <= 0 or frame.height <= 0:
+            return None
+        match = matches[0]
+        bounds = (
+            float(match.left) / frame.width,
+            float(match.top) / frame.height,
+            float(match.left + match.width) / frame.width,
+            float(match.top + match.height) / frame.height,
+        )
+        left, top, right, bottom = bounds
+        if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
+            return None
+        return bounds, ((left + right) / 2.0, (top + bottom) / 2.0)
+
+    try:
+        inspected_frames = 1
+        newest = unique_match_geometry(frame_list[-1])
+        if newest is None:
+            return None
+        proposed_point = element.center
+        # If Qwen's center already agrees with the exact visible label, keep
+        # the original point and avoid spending a second local OCR call.
+        if math.dist(proposed_point, newest[1]) <= 0.025:
+            return None
+
+        stable_matches = [newest]
+        for frame in reversed(frame_list[:-1]):
+            inspected_frames += 1
+            candidate = unique_match_geometry(frame)
+            if candidate is None:
+                continue
+            if math.dist(candidate[1], newest[1]) > 0.015:
+                continue
+            if any(
+                abs(
+                    (candidate[0][index + 2] - candidate[0][index])
+                    - (newest[0][index + 2] - newest[0][index])
+                )
+                > 0.03
+                for index in (0, 1)
+            ):
+                continue
+            stable_matches.append(candidate)
+            if len(stable_matches) >= 2:
+                break
+        if len(stable_matches) < 2:
+            return None
+
+        grounded_bounds = tuple(
+            float(statistics.median(match[0][index] for match in stable_matches))
+            for index in range(4)
+        )
+        grounded_point = (
+            (grounded_bounds[0] + grounded_bounds[2]) / 2.0,
+            (grounded_bounds[1] + grounded_bounds[3]) / 2.0,
+        )
+        if (
+            math.dist(proposed_point, grounded_point) <= 0.025
+        ):
+            return None
+        grounding = LocalPointGrounding(
+            source=LOCAL_POINT_GROUNDING_SOURCE,
+            scene_fingerprint=scene.fingerprint,
+            element_id=element.element_id,
+            label=element.label,
+            model_bounds=tuple(float(value) for value in element.bounds),
+            proposed_point=tuple(float(value) for value in proposed_point),
+            grounded_bounds=grounded_bounds,
+            grounded_point=grounded_point,
+            matched_frames=len(stable_matches),
+            inspected_frames=inspected_frames,
+        )
+        grounding.validate_for(scene, element)
+        return grounding
     except Exception:
         return None
 
@@ -1462,6 +1622,15 @@ class GenericSingleActionAdapter:
             dict[str, Any] | None,
         ]
         | None = None,
+        text_point_grounder: Callable[
+            [
+                tuple[Image.Image, ...] | list[Image.Image],
+                UIScene,
+                SemanticAction,
+            ],
+            LocalPointGrounding | None,
+        ]
+        | None = None,
         require_local_qwerty_row_snap: bool = False,
         device_id: str,
         input_lineage_store: TypedInputLineageStore | None = None,
@@ -1509,6 +1678,7 @@ class GenericSingleActionAdapter:
             float(confirmation_frame_delta_max),
         )
         self.qwerty_row_snapper = qwerty_row_snapper
+        self.text_point_grounder = text_point_grounder
         self.require_local_qwerty_row_snap = bool(require_local_qwerty_row_snap)
         self.input_lineage_store = input_lineage_store
         try:
@@ -1938,6 +2108,14 @@ class GenericSingleActionAdapter:
             )
 
             try:
+                if (
+                    _requires_fused_next_input_target(observation_context)
+                    and not _input_audit_established_local_target(after)
+                ):
+                    raise UniversalActionError(
+                        "动作后页面没有建立预期的下一输入目标；"
+                        "当前导航结果必须按 mismatched 重新观察。"
+                    )
                 self.controller.verify_after_action(resolved, before, after)
                 return (
                     after,
@@ -2275,11 +2453,25 @@ class GenericSingleActionAdapter:
                 f"确认前独立目标几何审计失败：{exc}",
                 evidence=before_paths,
             ) from exc
+        local_point_grounding: LocalPointGrounding | None = None
+        if callable(self.text_point_grounder):
+            try:
+                local_point_grounding = self.text_point_grounder(
+                    before_frames,
+                    before,
+                    rebound,
+                )
+            except Exception:
+                # OCR is a precision aid, not another product boundary.  If it
+                # is unavailable or inconclusive, retain the canonical target's
+                # existing point instead of blocking an otherwise legal action.
+                local_point_grounding = None
         try:
             resolved = self.controller.resolve_one(
                 rebound,
                 before,
                 confirmed=True,
+                local_point_grounding=local_point_grounding,
             )
         except UniversalActionError as exc:
             raise GenericActionAdapterError(

@@ -27,7 +27,10 @@ from ui_scene import (
 )
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-18-universal-action-v14"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-25-universal-action-v15"
+
+LOCAL_POINT_GROUNDING_SOURCE = "2026-08-25-stable-local-ocr-label-v1"
+MAX_LOCAL_GROUNDING_BOX_GAP = 0.06
 
 REVEAL_SYSTEM_NAVIGATION_EFFECT = {
     "system_ui": {"navigation_bar_visible": True}
@@ -45,6 +48,153 @@ MIN_DRAG_RESULT_DISPLACEMENT = 0.04
 
 class UniversalActionError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class LocalPointGrounding:
+    """Stable local evidence refining one already-selected target point."""
+
+    source: str
+    scene_fingerprint: str
+    element_id: str
+    label: str
+    model_bounds: tuple[float, float, float, float]
+    proposed_point: tuple[float, float]
+    grounded_bounds: tuple[float, float, float, float]
+    grounded_point: tuple[float, float]
+    matched_frames: int
+    inspected_frames: int
+
+    @staticmethod
+    def _validate_point(
+        value: tuple[float, float],
+        *,
+        label: str,
+    ) -> tuple[float, float]:
+        if (
+            not isinstance(value, tuple)
+            or len(value) != 2
+            or any(
+                isinstance(part, bool)
+                or not isinstance(part, (int, float))
+                or not math.isfinite(float(part))
+                for part in value
+            )
+        ):
+            raise UniversalActionError(f"{label}格式无效。")
+        point = (float(value[0]), float(value[1]))
+        if not all(0.0 <= part <= 1.0 for part in point):
+            raise UniversalActionError(f"{label}超出归一化画面。")
+        return point
+
+    @staticmethod
+    def _validate_bounds(
+        value: tuple[float, float, float, float],
+        *,
+        label: str,
+    ) -> tuple[float, float, float, float]:
+        if (
+            not isinstance(value, tuple)
+            or len(value) != 4
+            or any(
+                isinstance(part, bool)
+                or not isinstance(part, (int, float))
+                or not math.isfinite(float(part))
+                for part in value
+            )
+        ):
+            raise UniversalActionError(f"{label}格式无效。")
+        bounds = tuple(float(part) for part in value)
+        left, top, right, bottom = bounds
+        if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
+            raise UniversalActionError(f"{label}超出归一化画面。")
+        return bounds
+
+    def validate_for(self, scene: UIScene, element: UIElement) -> None:
+        if self.source != LOCAL_POINT_GROUNDING_SOURCE:
+            raise UniversalActionError("本地落点证据来源无效。")
+        if self.scene_fingerprint != scene.fingerprint:
+            raise UniversalActionError("本地落点证据不属于当前新鲜画面。")
+        if self.element_id != element.element_id or self.label != element.label:
+            raise UniversalActionError("本地落点证据没有绑定当前唯一目标。")
+        if element.role not in {
+            "button",
+            "icon",
+            "text",
+            "tab",
+            "toggle",
+            "image",
+            "list_item",
+        }:
+            raise UniversalActionError("当前目标类型不允许使用文字落点修正。")
+        if (
+            element.element_id.startswith("local_audited_")
+            or element.meaning == "application_text_input"
+            or element.meaning.startswith(("input_", "ime_", "switch_keyboard_"))
+        ):
+            raise UniversalActionError("输入事务目标不允许使用普通文字落点修正。")
+        model_bounds = self._validate_bounds(self.model_bounds, label="模型目标框")
+        grounded_bounds = self._validate_bounds(
+            self.grounded_bounds,
+            label="本地文字框",
+        )
+        proposed = self._validate_point(
+            self.proposed_point,
+            label="模型提议落点",
+        )
+        grounded = self._validate_point(
+            self.grounded_point,
+            label="本地修正落点",
+        )
+        if any(
+            abs(actual - expected) > 1e-9
+            for actual, expected in zip(model_bounds, element.bounds)
+        ) or any(
+            abs(actual - expected) > 1e-9
+            for actual, expected in zip(proposed, element.center)
+        ):
+            raise UniversalActionError("本地落点证据与当前目标几何不一致。")
+        left, top, right, bottom = grounded_bounds
+        if not (left <= grounded[0] <= right and top <= grounded[1] <= bottom):
+            raise UniversalActionError("本地修正落点不在已识别文字框内。")
+        if (
+            isinstance(self.matched_frames, bool)
+            or isinstance(self.inspected_frames, bool)
+            or not isinstance(self.matched_frames, int)
+            or not isinstance(self.inspected_frames, int)
+            or not (2 <= self.matched_frames <= self.inspected_frames <= 4)
+        ):
+            raise UniversalActionError("本地落点证据缺少至少两帧稳定匹配。")
+        model_left, model_top, model_right, model_bottom = model_bounds
+        grounded_left, grounded_top, grounded_right, grounded_bottom = (
+            grounded_bounds
+        )
+        horizontal_gap = max(
+            0.0,
+            grounded_left - model_right,
+            model_left - grounded_right,
+        )
+        vertical_gap = max(
+            0.0,
+            grounded_top - model_bottom,
+            model_top - grounded_bottom,
+        )
+        if math.hypot(horizontal_gap, vertical_gap) > MAX_LOCAL_GROUNDING_BOX_GAP:
+            raise UniversalActionError("本地文字框与模型目标框不属于同一邻近区域。")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "scene_fingerprint": self.scene_fingerprint,
+            "element_id": self.element_id,
+            "label": self.label,
+            "model_bounds": list(self.model_bounds),
+            "proposed_point": list(self.proposed_point),
+            "grounded_bounds": list(self.grounded_bounds),
+            "grounded_point": list(self.grounded_point),
+            "matched_frames": self.matched_frames,
+            "inspected_frames": self.inspected_frames,
+        }
 
 
 @dataclass(frozen=True)
@@ -72,6 +222,8 @@ class ResolvedSemanticAction:
     expected_effect: dict[str, Any] = field(default_factory=dict)
     formal_candidate_id: str = ""
     formal_transition: dict[str, Any] = field(default_factory=dict)
+    proposed_normalized_point: tuple[float, float] | None = None
+    point_grounding: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -79,6 +231,14 @@ class ResolvedSemanticAction:
             value["normalized_point"] = list(self.normalized_point)
         if self.normalized_end_point is not None:
             value["normalized_end_point"] = list(self.normalized_end_point)
+        if self.proposed_normalized_point is not None:
+            value["proposed_normalized_point"] = list(
+                self.proposed_normalized_point
+            )
+        else:
+            value.pop("proposed_normalized_point", None)
+        if self.point_grounding is None:
+            value.pop("point_grounding", None)
         return value
 
 
@@ -98,8 +258,18 @@ class UniversalActionController:
         scene: UIScene,
         *,
         confirmed: bool = False,
+        local_point_grounding: LocalPointGrounding | None = None,
     ) -> ResolvedSemanticAction:
         scene.validate()
+        if local_point_grounding is not None and action.action not in {
+            "tap_semantic",
+            "dismiss_overlay",
+            "double_tap",
+            "long_press",
+        }:
+            raise UniversalActionError(
+                "本地文字落点只能修正当前已选中的普通点按目标。"
+            )
         if not scene.stable:
             raise UniversalActionError("页面仍在变化，不能执行动作。")
         if float(scene.confidence) < self.min_confidence:
@@ -166,6 +336,8 @@ class UniversalActionController:
                 element,
                 expected_effect,
                 scene.fingerprint,
+                scene=scene,
+                local_point_grounding=local_point_grounding,
             )
             if element.meaning in {
                 "ime_exact_candidate",
@@ -233,6 +405,8 @@ class UniversalActionController:
                 element,
                 expected_effect,
                 scene.fingerprint,
+                scene=scene,
+                local_point_grounding=local_point_grounding,
             )
         if action.action == "input_verified_text":
             text = str(action.params.get("text") or "")
@@ -431,6 +605,8 @@ class UniversalActionController:
                 element,
                 expected_effect,
                 scene.fingerprint,
+                scene=scene,
+                local_point_grounding=local_point_grounding,
             )
         if action.action == "long_press":
             element = self._resolve_target(action, scene)
@@ -450,6 +626,8 @@ class UniversalActionController:
                 element,
                 expected_effect,
                 scene.fingerprint,
+                scene=scene,
+                local_point_grounding=local_point_grounding,
             )
             return replace(
                 resolved,
@@ -1838,13 +2016,31 @@ class UniversalActionController:
         element: UIElement,
         expected_effect: dict[str, Any],
         before_fingerprint: str,
+        *,
+        scene: UIScene | None = None,
+        local_point_grounding: LocalPointGrounding | None = None,
     ) -> ResolvedSemanticAction:
         if element.role == "container":
             raise UniversalActionError("页面容器不是可点击控件，禁止执行点击。")
+        normalized_point = element.center
+        proposed_point: tuple[float, float] | None = None
+        grounding_payload: dict[str, Any] | None = None
+        if local_point_grounding is not None:
+            if scene is None:
+                raise UniversalActionError("本地落点证据缺少当前场景绑定。")
+            local_point_grounding.validate_for(scene, element)
+            proposed_point = element.center
+            normalized_point = local_point_grounding.grounded_point
+            grounding_payload = local_point_grounding.to_dict()
+            if action.action in {"double_tap", "long_press"}:
+                UniversalActionController._validate_gesture_point(
+                    normalized_point,
+                    label="本地修正手势落点",
+                )
         return ResolvedSemanticAction(
             node_id=action.node_id,
             kind=action.action,
-            normalized_point=element.center,
+            normalized_point=normalized_point,
             target_element_id=element.element_id,
             before_fingerprint=before_fingerprint,
             expected_effect=expected_effect,
@@ -1852,4 +2048,6 @@ class UniversalActionController:
                 action.params.get("formal_candidate_id") or ""
             ).strip(),
             formal_transition=dict(action.params.get("formal_transition") or {}),
+            proposed_normalized_point=proposed_point,
+            point_grounding=grounding_payload,
         )

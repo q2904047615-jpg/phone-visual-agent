@@ -6,6 +6,7 @@ import unittest
 from PIL import Image, ImageDraw, ImageFilter
 
 from generic_scene_observer import (
+    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     INPUT_STRUCTURE_AUDIT_VERSION,
     SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
     SingleStepGenericSceneObserver,
@@ -534,6 +535,71 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             observed.unique_trusted_goal_element().element_id,
             "local_audited_input_1",
         )
+
+    def test_fused_successor_input_miss_returns_scene_for_navigation_mismatch(self):
+        wrong_scene = scene_payload()
+        wrong_scene.update(
+            {
+                "foreground_app_id": "com.example.messaging",
+                "screen_id": "wrong_named_conversation",
+                "summary": "进入了相邻会话，当前没有消息输入框",
+                "elements": [],
+            }
+        )
+        envelope = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {
+                "kind": "normalized_1000",
+                "width": 1000,
+                "height": 1000,
+            },
+            "scene": wrong_scene,
+            "input_structure": input_audit_payload(),
+        }
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_message",
+                    "objective": "在消息输入框输入abc",
+                    "constraints": [],
+                    "completion_conditions": ["消息输入框内容为abc"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "abc",
+                        "active_input_field_id": "message_field",
+                        "active_input_field_label": "消息",
+                        "active_input_multiline": False,
+                        "observation_phase": (
+                            FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
+                        ),
+                    },
+                }
+            }
+        }
+
+        observed = SingleStepGenericSceneObserver(
+            SequenceProvider([envelope])
+        ).observe(
+            frames=stable_frames(),
+            goal_context=context,
+            device_id="device-local-01",
+        )
+
+        self.assertEqual("wrong_named_conversation", observed.screen_id)
+        self.assertIsNone(observed.unique_trusted_goal_element())
+
+        strict_context = json.loads(json.dumps(context, ensure_ascii=False))
+        del strict_context["entities"]["active_subgoal_visual_context"][
+            "goal_entities"
+        ]["observation_phase"]
+        with self.assertRaisesRegex(VisionAgentError, "唯一本地目标"):
+            SingleStepGenericSceneObserver(
+                SequenceProvider([envelope])
+            ).observe(
+                frames=stable_frames(),
+                goal_context=strict_context,
+                device_id="device-local-01",
+            )
 
     def test_single_step_observer_accepts_one_fused_blank_input_without_placeholder(
         self,

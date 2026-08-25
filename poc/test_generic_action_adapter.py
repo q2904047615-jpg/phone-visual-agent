@@ -20,6 +20,7 @@ from generic_action_adapter import (
     GenericSingleActionAdapter as _GenericSingleActionAdapter,
     _post_action_observation_context,
     stable_qwerty_ocr_anchors,
+    stable_text_ocr_grounding,
 )
 from generic_goal import GenericIntentDraft
 from generic_scene_observer import (
@@ -318,6 +319,31 @@ def textured_phone_frame() -> Image.Image:
     draw.rectangle((80, 240, 460, 350), outline="black", width=5)
     draw.text((100, 280), "generic input surface 2026", fill="black")
     return frame
+
+
+def ocr_text_payload(
+    text: str,
+    *,
+    left: int,
+    top: int,
+    width: int = 180,
+    height: int = 30,
+) -> dict:
+    word = {
+        "text": text,
+        "left": left,
+        "top": top,
+        "width": width,
+        "height": height,
+    }
+    return {
+        "lines": [
+            {
+                **word,
+                "words": [dict(word)],
+            }
+        ]
+    }
 
 
 class SecondPostCaptureFailureAdapter(GenericSingleActionAdapter):
@@ -972,6 +998,119 @@ class GenericActionAdapterTests(unittest.TestCase):
             frame_interval=0,
             post_action_settle=0,
             **kwargs,
+        )
+
+    @staticmethod
+    def _coarse_text_target_scene() -> tuple[UIScene, SemanticAction]:
+        target = UIElement(
+            element_id="target-row",
+            role="list_item",
+            meaning="open_target",
+            label="目标条目",
+            bounds=(0.07, 0.29, 0.93, 0.39),
+            confidence=1.0,
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=("目标文字清晰可见",),
+        )
+        current = UIScene(
+            app_id="generic.app",
+            screen_id="generic_list",
+            summary="通用列表",
+            elements=(target,),
+            stable=True,
+            confidence=1.0,
+            fingerprint="fresh-text-frame",
+        )
+        action = SemanticAction(
+            node_id="open-target",
+            action="tap_semantic",
+            params={
+                "element_id": target.element_id,
+                "target": target.meaning,
+                "role": target.role,
+                "label": target.label,
+                "states": dict(target.states),
+            },
+        )
+        return current, action
+
+    def test_stable_text_ocr_grounding_repairs_coarse_adjacent_row_point(self):
+        current, action = self._coarse_text_target_scene()
+        frames = [Image.new("RGB", (810, 1440), "white") for _ in range(3)]
+        responses = [
+            ocr_text_payload("目标条目", left=192, top=355),
+            ocr_text_payload("目标条目", left=193, top=355),
+        ]
+        calls = []
+
+        def recognize(*args, **kwargs):
+            calls.append((args, kwargs))
+            return responses.pop(0)
+
+        grounding = stable_text_ocr_grounding(
+            frames,
+            current,
+            action,
+            ocr_recognizer=recognize,
+        )
+
+        self.assertIsNotNone(grounding)
+        self.assertEqual(2, len(calls))
+        self.assertEqual(2, grounding.matched_frames)
+        self.assertEqual(2, grounding.inspected_frames)
+        self.assertAlmostEqual(282.5 / 810.0, grounding.grounded_point[0], places=4)
+        self.assertAlmostEqual(370.0 / 1440.0, grounding.grounded_point[1], places=4)
+        self.assertNotEqual(current.elements[0].center, grounding.grounded_point)
+
+    def test_text_ocr_grounding_keeps_aligned_model_point_after_one_probe(self):
+        current, action = self._coarse_text_target_scene()
+        frames = [Image.new("RGB", (810, 1440), "white") for _ in range(3)]
+        calls = []
+
+        def recognize(*args, **kwargs):
+            calls.append((args, kwargs))
+            return ocr_text_payload("目标条目", left=315, top=475)
+
+        grounding = stable_text_ocr_grounding(
+            frames,
+            current,
+            action,
+            ocr_recognizer=recognize,
+        )
+
+        self.assertIsNone(grounding)
+        self.assertEqual(1, len(calls))
+
+    def test_text_ocr_grounding_does_not_guess_duplicate_or_unstable_label(self):
+        current, action = self._coarse_text_target_scene()
+        frames = [Image.new("RGB", (810, 1440), "white") for _ in range(3)]
+        first = ocr_text_payload("目标条目", left=192, top=355)
+        duplicate = ocr_text_payload("目标条目", left=192, top=355)
+        duplicate["lines"].extend(
+            ocr_text_payload("目标条目", left=192, top=700)["lines"]
+        )
+
+        self.assertIsNone(
+            stable_text_ocr_grounding(
+                frames,
+                current,
+                action,
+                ocr_recognizer=lambda *_args, **_kwargs: duplicate,
+            )
+        )
+
+        responses = [
+            first,
+            ocr_text_payload("目标条目", left=192, top=700),
+            ocr_text_payload("目标条目", left=192, top=850),
+        ]
+        self.assertIsNone(
+            stable_text_ocr_grounding(
+                frames,
+                current,
+                action,
+                ocr_recognizer=lambda *_args, **_kwargs: responses.pop(0),
+            )
         )
 
     @staticmethod
@@ -6726,6 +6865,61 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertTrue(result.verification_errors)
         self.assertIn("没有可验证", result.verification_errors[-1])
         self.assertEqual(len(robot.actions), 1)
+
+    def test_wrong_navigation_surface_becomes_mismatch_before_next_input(self):
+        planned = scene("before")
+        wrong_conversation = scene(
+            "wrong-after",
+            screen_id="wrong_named_conversation",
+            app_id="com.example.messaging",
+        )
+        current_goal = navigation_goal()
+        current_goal.entities["next_subgoal_visual_context"] = {
+            "subgoal_id": "input_message",
+            "objective": "在消息输入框输入abc",
+            "constraints": [],
+            "completion_conditions": ["消息输入框内容为abc"],
+            "execution_class": "navigate",
+            "goal_entities": {
+                "active_input_transaction_text": "abc",
+                "active_input_field_id": "message_field",
+                "active_input_field_label": "消息",
+                "active_input_multiline": False,
+            },
+        }
+        robot = FakeRobot()
+        adapter = GenericSingleActionAdapter(
+            capture=SequenceCapture(["gray"] * 8),
+            observer=FakeSceneObserver([wrong_conversation]),
+            robot=robot,
+            frame_interval=0,
+            post_action_settle=0,
+        )
+
+        result = adapter.execute(
+            requested_action=SemanticAction(
+                node_id="open-target",
+                action="tap_semantic",
+                params={
+                    "element_id": "e1",
+                    "target": "app_icon",
+                    "expected_effect": {"scene_changed": True},
+                },
+            ),
+            planned_scene=planned,
+            planned_frames=tuple(
+                Image.new("RGB", (540, 960), "gray") for _ in range(4)
+            ),
+            goal=current_goal,
+            confirmed=True,
+        )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual("mismatched", result.action_outcome)
+        self.assertTrue(
+            any("预期的下一输入目标" in item for item in result.verification_errors)
+        )
+        self.assertEqual(1, len(robot.actions))
 
     def test_post_action_waits_until_four_frame_window_is_locally_stable(self):
         planned = scene("planned")

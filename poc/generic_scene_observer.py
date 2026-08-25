@@ -59,6 +59,9 @@ SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = (
     "2026-08-25-single-step-qwen-observation-v2"
 )
 POST_NAVIGATION_RESULT_OBSERVATION_PHASE = "verified_navigation_result_v1"
+FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE = (
+    "2026-08-24-verified-previous-and-plan-next-v1"
+)
 POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
 POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被重新观察"]
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-23-input-structure-audit-v9"
@@ -494,6 +497,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 if (
                     _goal_active_input_transaction_text(context)
                     and not _input_audit_established_local_target(scene)
+                    and not _goal_is_fused_post_action_next_step(context)
                 ):
                     raise VisionAgentError(
                         "单步完整观察没有建立当前输入事务的唯一本地目标。"
@@ -3214,6 +3218,20 @@ def _goal_active_input_transaction_text(context: dict[str, Any]) -> str:
         return ""
     marker = entities.get("active_input_transaction_text")
     return marker if isinstance(marker, str) and marker else ""
+
+
+def _goal_is_fused_post_action_next_step(context: dict[str, Any]) -> bool:
+    """Return whether this response also previews one typed successor."""
+
+    focused = _active_subgoal_visual_context(context)
+    if focused is context:
+        return False
+    entities = focused.get("goal_entities")
+    return bool(
+        isinstance(entities, dict)
+        and entities.get("observation_phase")
+        == FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
+    )
 
 
 def _goal_active_input_field(context: dict[str, Any]) -> tuple[str, str, bool]:

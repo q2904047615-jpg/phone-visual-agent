@@ -3853,6 +3853,82 @@ class UniversalAgentStartTests(unittest.TestCase):
             )
         )
 
+    def test_verified_home_reset_does_not_mint_subgoal_completion_evidence(
+        self,
+    ) -> None:
+        graph = self._named_app_page_graph(
+            app_id="target",
+            app_name="目标应用",
+        )
+        before = replace(
+            _scene(
+                fingerprint="wrong-app-before-home",
+                meaning="unrelated_page",
+                label="其他应用",
+                role="text",
+            ),
+            app_id="com.example.other",
+            screen_id="other_app_page",
+        )
+        after = replace(
+            _scene(
+                fingerprint="launcher-after-home",
+                meaning="open_target",
+                label="目标应用",
+                states={"goal_relevant": True, "fully_visible": True},
+            ),
+            app_id="launcher",
+            screen_id="home_screen",
+        )
+
+        class HomeThenTargetObserver(FakeQwenObserver):
+            def decide(self, **kwargs):
+                self.action_kind = "home" if not self.calls else "tap_semantic"
+                return super().decide(**kwargs)
+
+        planner = FakeDeepSeekPlanner(graph)
+        qwen = HomeThenTargetObserver()
+        adapter = FakeExecutingAdapter(
+            before,
+            after,
+            controller_transition_evidence=("控制器确认已返回桌面",),
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            orchestrator = UniversalAgentOrchestrator(
+                deepseek_planner=planner,
+                qwen_observer=qwen,
+                adapter_factory=lambda _device_id: adapter,
+                trusted_observation_factory=_trusted_factory,
+            )
+            session = orchestrator.start(
+                session_id="session-home-reset-progress",
+                raw_goal=graph.raw_user_goal,
+                device_id=graph.device_id,
+                run_dir=Path(temp),
+            )
+            result = orchestrator.confirm_one(
+                session,
+                _confirmation(session),
+            )
+            transition = json.loads(
+                (Path(temp) / "post_action_transition_step_1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual([], planner.replan_calls)
+        self.assertEqual(graph.revision, session.task_graph.revision)
+        self.assertEqual(graph.active_subgoal_id, session.task_graph.active_subgoal_id)
+        self.assertEqual("awaiting_confirmation", session.status)
+        self.assertEqual("tap_semantic", session.qwen_decision.proposal.action.action)
+        self.assertTrue(transition["target_app_home_reset_progress"])
+        self.assertEqual("advanced_to_new_confirmation", transition["disposition"])
+        self.assertNotEqual(
+            "blocked_unconsumed_controller_completion",
+            transition["disposition"],
+        )
+
     def test_read_only_refresh_upgrades_typed_app_id_to_runtime_package(self) -> None:
         graph = self._advance_named_app_page_graph(
             self._named_app_page_graph(app_id="wechat", app_name="微信")

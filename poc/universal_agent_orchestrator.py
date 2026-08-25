@@ -4950,6 +4950,7 @@ class UniversalAgentOrchestrator:
             if (
                 previous_current.external_impact == "navigation_only"
                 and not input_transaction_microstep
+                and not target_app_home_reset_microstep
             ):
                 controller_refs = tuple(
                     ControllerTransitionEvidenceRef(

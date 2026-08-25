@@ -21,6 +21,7 @@ import robot_gui_poc
 import web_app
 from device_exclusivity import InterProcessLease
 from canonical_action_protocol import GenericStepProposal
+from generic_scene_observer import SINGLE_STEP_SCENE_OBSERVER_VERSION
 from robot_core import (
     DEFAULT_CONTROLLER_CONFIG,
     MockRobotController as _MockRobotController,
@@ -1359,7 +1360,7 @@ class ApiEndToEndTests(unittest.TestCase):
         observer = universal.pop("observer")
         self.assertEqual(
             observer["observer_version"],
-            "2026-08-24-single-step-scene-observer-v1",
+            SINGLE_STEP_SCENE_OBSERVER_VERSION,
         )
         self.assertEqual(observer["max_online_calls_per_observation"], 1)
         self.assertEqual(observer["model_role"], "single_step_fused_observation")

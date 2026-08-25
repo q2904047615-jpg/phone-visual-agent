@@ -74,13 +74,21 @@ def _extract_json_object(
     return value
 
 
+def _image_request_size(image: Image.Image) -> tuple[int, int]:
+    """Return the exact JPEG dimensions sent to the visual model."""
+
+    if image.width <= 720:
+        return image.width, image.height
+    return 720, int(round(image.height * 720 / image.width))
+
+
 def _image_data_url(image: Image.Image) -> str:
     """Encode a readable, bounded JPEG for visual-model requests."""
 
     result = image.convert("RGB")
-    if result.width > 720:
-        height = int(round(result.height * 720 / result.width))
-        result = result.resize((720, height), Image.Resampling.LANCZOS)
+    request_size = _image_request_size(result)
+    if result.size != request_size:
+        result = result.resize(request_size, Image.Resampling.LANCZOS)
     buffer = BytesIO()
     result.save(buffer, format="JPEG", quality=82, optimize=True)
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")

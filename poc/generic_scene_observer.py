@@ -34,7 +34,12 @@ from ui_scene import (
     UISceneError,
     camera_alignment_evidence_is_safe,
 )
-from vision_agent import VisionAgentError, _extract_json_object, _image_data_url
+from vision_agent import (
+    VisionAgentError,
+    _extract_json_object,
+    _image_data_url,
+    _image_request_size,
+)
 from vision_model_config import public_model_identity
 from verified_text_transaction import (
     VerifiedTextTransactionError,
@@ -49,9 +54,9 @@ from system_navigation_privacy import (
 )
 
 
-SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-08-24-single-step-scene-observer-v1"
+SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-08-25-single-step-scene-observer-v2"
 SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = (
-    "2026-08-24-single-step-qwen-observation-v1"
+    "2026-08-25-single-step-qwen-observation-v2"
 )
 POST_NAVIGATION_RESULT_OBSERVATION_PHASE = "verified_navigation_result_v1"
 POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
@@ -301,11 +306,21 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                     for item in model_frames
                 )
 
+            request_image_sizes = {
+                _image_request_size(item) for item in model_frames
+            }
+            if len(request_image_sizes) != 1:
+                raise VisionAgentError(
+                    "同一步发送给Qwen的稳定帧尺寸不一致，不能建立唯一坐标空间。"
+                )
+            request_image_size = next(iter(request_image_sizes))
+
             prompt = _single_step_observation_prompt(
                 context,
                 include_input_structure=input_structure_required,
                 current_input_text=ledger_value_hint,
                 image_count=len(model_frames),
+                request_image_size=request_image_size,
             )
             content: list[dict[str, Any]] = [
                 {"type": "text", "text": prompt}
@@ -352,6 +367,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             envelope = _parse_single_step_observation_envelope(
                 raw,
                 input_structure_required=input_structure_required,
+                request_image_size=request_image_size,
             )
             scene_payload = dict(envelope["scene"])
             if not input_structure_required:
@@ -522,6 +538,10 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                     round(value, 3) for value in sharpness_scores
                 ],
                 "frame_size": list(frame.size),
+                "request_image_size": list(request_image_size),
+                "coordinate_normalization": envelope.get(
+                    "coordinate_normalization"
+                ),
                 "fingerprint": fingerprint,
                 "element_count": len(scene.elements),
                 "model_call_elapsed_seconds": [call_elapsed],
@@ -751,6 +771,7 @@ def _single_step_observation_prompt(
     include_input_structure: bool,
     current_input_text: str | None,
     image_count: int,
+    request_image_size: tuple[int, int],
 ) -> str:
     """Build the sole online prompt for one closed-loop observation step."""
 
@@ -774,12 +795,25 @@ def _single_step_observation_prompt(
         if image_count > 1
         else "只有一张当前稳定手机画面。"
     )
+    request_width, request_height = request_image_size
     return f"""
 这是本闭环步骤唯一一次Qwen视觉调用。你必须在同一个JSON响应中完成当前
 画面理解、目标相关事实标记以及必要的输入/IME/键盘结构报告。不得要求第二次
 精查、App身份审计、几何审计、方向审计或动作选择调用；不确定时保留unknown、
 省略候选或降低confidence。你只报告事实，不输出动作、计划或坐标点击建议。
 {temporal_rule}
+
+本轮每张实际发送给你的JPEG均为{request_width}×{request_height}。整份响应的
+scene与input_structure必须共用一个coordinate_space，绝不能各用一把尺子：
+1. 正常且首选输出为
+   {{"kind":"normalized_1000","width":1000,"height":1000}}，此时横纵两轴
+   都把各自图像边缘表示为0和1000，任何坐标不得超过1000。
+2. 如果你的视觉系统已经在一个与{request_width}×{request_height}严格等比例的
+   图像网格中测量了全部坐标，且无法在输出前完成归一化，才可声明
+   {{"kind":"image_grid","width":该网格精确宽度,"height":该网格精确高度}}。
+   scene和input_structure的每个边界与锚点都必须属于这一个声明网格；本地会在
+   解析任何视觉事实前一次性换算为0..1000。禁止猜测1920/2000等常见高度，
+   禁止混用normalized、JPEG像素、手机逻辑像素或裁剪坐标。
 
 下面的SCENE CONTRACT和INPUT CONTRACT沿用既有字段语义。它们各自末尾的
 “只返回/Return exactly”示例仅说明对应内层对象，不是本轮顶层输出格式。
@@ -792,6 +826,7 @@ def _single_step_observation_prompt(
 
 最终且唯一有效的顶层格式如下，禁止Markdown、重复键和任何额外字段：
 {{"protocol_version":"{SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION}",
+"coordinate_space":{{"kind":"normalized_1000","width":1000,"height":1000}},
 "scene":{{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}",
 "foreground_app_id":"unknown","screen_id":"unknown","summary":"",
 "system_ui":{{"immersive_or_fullscreen":"unknown","navigation_bar_visible":"unknown"}},
@@ -805,10 +840,228 @@ scene.states.goal_relevant是本次单步响应对目标相关可见事实的唯
 """
 
 
+def _normalize_single_step_wire_coordinates(
+    payload: dict[str, Any],
+    *,
+    request_image_size: tuple[int, int],
+) -> dict[str, Any]:
+    """Atomically normalize one declared wire grid into canonical 0..1000.
+
+    The raw image grid is syntax only.  It never reaches UIScene, canonical
+    candidates, scope, Controller, or the robot.  A non-canonical grid is
+    accepted only when its declared aspect ratio independently agrees with the
+    exact JPEG sent in this request and every coordinate belongs to that one
+    grid.  No conventional phone resolution is guessed.
+    """
+
+    coordinate_space = payload.get("coordinate_space")
+    if not isinstance(coordinate_space, dict) or set(coordinate_space) != {
+        "kind",
+        "width",
+        "height",
+    }:
+        raise UISceneError("单步观察必须声明唯一coordinate_space。")
+    kind = coordinate_space.get("kind")
+    width = coordinate_space.get("width")
+    height = coordinate_space.get("height")
+    if (
+        isinstance(width, bool)
+        or isinstance(height, bool)
+        or not isinstance(width, int)
+        or not isinstance(height, int)
+        or not 64 <= width <= 8192
+        or not 64 <= height <= 8192
+    ):
+        raise UISceneError("coordinate_space宽高必须是64..8192整数。")
+    if kind not in {"normalized_1000", "image_grid"}:
+        raise UISceneError("coordinate_space.kind无效。")
+    if kind == "normalized_1000" and (width, height) != (1000, 1000):
+        raise UISceneError("normalized_1000必须声明1000×1000。")
+
+    bounds_refs: list[tuple[dict[str, Any], str]] = []
+    point_refs: list[tuple[dict[str, Any], str]] = []
+
+    def add_bounds(owner: Any, key: str = "bounds") -> None:
+        if isinstance(owner, dict) and owner.get(key) is not None:
+            bounds_refs.append((owner, key))
+
+    def add_point(owner: Any, key: str) -> None:
+        if isinstance(owner, dict) and owner.get(key) is not None:
+            point_refs.append((owner, key))
+
+    scene = payload.get("scene")
+    if isinstance(scene, dict):
+        for item in scene.get("elements") or []:
+            add_bounds(item)
+    input_payload = payload.get("input_structure")
+    if isinstance(input_payload, dict):
+        for item in input_payload.get("application_inputs") or []:
+            add_bounds(item)
+            if isinstance(item, dict):
+                add_bounds(item.get("right_button"))
+        for region in input_payload.get("ime_preedit_regions") or []:
+            add_bounds(region)
+            if isinstance(region, dict):
+                for candidate in region.get("candidates") or []:
+                    add_bounds(candidate)
+        keyboard = input_payload.get("keyboard")
+        if isinstance(keyboard, dict):
+            add_bounds(keyboard)
+            for key in (
+                "mode_switch",
+                "backspace_key",
+                "enter_key",
+                "case_switch",
+            ):
+                add_bounds(keyboard.get(key))
+            for collection_name in ("literal_keys", "layout_switches"):
+                for item in keyboard.get(collection_name) or []:
+                    add_bounds(item)
+            anchors = keyboard.get("qwerty_anchors")
+            if isinstance(anchors, dict):
+                for key in anchors:
+                    add_point(anchors, key)
+
+    parsed_bounds: list[tuple[dict[str, Any], str, tuple[float, float, float, float]]] = []
+    parsed_points: list[tuple[dict[str, Any], str, tuple[float, float]]] = []
+    all_coordinates: list[float] = []
+    for owner, key in bounds_refs:
+        value = owner.get(key)
+        if (
+            not isinstance(value, (list, tuple))
+            or len(value) != 4
+            or any(
+                isinstance(part, bool) or not isinstance(part, (int, float))
+                for part in value
+            )
+        ):
+            raise UISceneError("coordinate_space内存在无效bounds。")
+        left, top, right, bottom = (float(part) for part in value)
+        parsed_bounds.append((owner, key, (left, top, right, bottom)))
+        all_coordinates.extend((left, top, right, bottom))
+    for owner, key in point_refs:
+        value = owner.get(key)
+        if (
+            not isinstance(value, (list, tuple))
+            or len(value) != 2
+            or any(
+                isinstance(part, bool) or not isinstance(part, (int, float))
+                for part in value
+            )
+        ):
+            raise UISceneError("coordinate_space内存在无效锚点。")
+        x, y = (float(part) for part in value)
+        parsed_points.append((owner, key, (x, y)))
+        all_coordinates.extend((x, y))
+
+    if kind == "normalized_1000":
+        # Keep the existing downstream distinction: an input target with
+        # invalid canonical geometry fails closed, while a non-input scene may
+        # discard its entire unusable element batch and retain only the typed
+        # top-level App/screen facts.  This branch never changes coordinates.
+        payload.pop("coordinate_space", None)
+        return {
+            "wire_kind": kind,
+            "wire_extent": [1000, 1000],
+            "canonical_extent": [1000, 1000],
+            "applied": False,
+        }
+
+    request_width, request_height = request_image_size
+    if request_width <= 0 or request_height <= 0:
+        raise UISceneError("本轮Qwen请求图片尺寸无效。")
+    if not math.isclose(
+        width / height,
+        request_width / request_height,
+        rel_tol=0.01,
+        abs_tol=0.0,
+    ):
+        raise UISceneError("image_grid宽高比与本轮Qwen请求图片不一致。")
+    if not all_coordinates or not any(value > 1000 for value in all_coordinates):
+        raise UISceneError("image_grid没有可证明需要归一化的越界坐标。")
+
+    transformed_bounds: list[tuple[dict[str, Any], str, list[int]]] = []
+    transformed_points: list[tuple[dict[str, Any], str, list[int]]] = []
+    for owner, key, (left, top, right, bottom) in parsed_bounds:
+        if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+            raise UISceneError("bounds超出声明的image_grid。")
+        normalized = [
+            round(left * 1000 / width),
+            round(top * 1000 / height),
+            round(right * 1000 / width),
+            round(bottom * 1000 / height),
+        ]
+        if not (
+            0 <= normalized[0] < normalized[2] <= 1000
+            and 0 <= normalized[1] < normalized[3] <= 1000
+        ):
+            raise UISceneError("image_grid换算后bounds退化。")
+        transformed_bounds.append((owner, key, normalized))
+    for owner, key, (x, y) in parsed_points:
+        if not (0 <= x <= width and 0 <= y <= height):
+            raise UISceneError("锚点超出声明的image_grid。")
+        normalized = [round(x * 1000 / width), round(y * 1000 / height)]
+        if not (0 <= normalized[0] <= 1000 and 0 <= normalized[1] <= 1000):
+            raise UISceneError("image_grid换算后锚点无效。")
+        transformed_points.append((owner, key, normalized))
+
+    for owner, key, value in transformed_bounds:
+        owner[key] = value
+    for owner, key, value in transformed_points:
+        owner[key] = value
+
+    scene_inputs = [
+        item
+        for item in (scene.get("elements") or [])
+        if isinstance(item, dict)
+        and item.get("role") == "input"
+        and isinstance(item.get("states"), dict)
+        and item["states"].get("goal_relevant") is True
+        and isinstance(item.get("bounds"), list)
+    ] if isinstance(scene, dict) else []
+    audited_inputs = [
+        item
+        for item in (input_payload.get("application_inputs") or [])
+        if isinstance(item, dict) and isinstance(item.get("bounds"), list)
+    ] if isinstance(input_payload, dict) else []
+    if scene_inputs and audited_inputs:
+        def overlap_ratio(first: list[Any], second: list[Any]) -> float:
+            left = max(float(first[0]), float(second[0]))
+            top = max(float(first[1]), float(second[1]))
+            right = min(float(first[2]), float(second[2]))
+            bottom = min(float(first[3]), float(second[3]))
+            intersection = max(0.0, right - left) * max(0.0, bottom - top)
+            first_area = (float(first[2]) - float(first[0])) * (
+                float(first[3]) - float(first[1])
+            )
+            second_area = (float(second[2]) - float(second[0])) * (
+                float(second[3]) - float(second[1])
+            )
+            return intersection / max(1.0, min(first_area, second_area))
+
+        if not any(
+            overlap_ratio(scene_item["bounds"], audit_item["bounds"]) >= 0.5
+            for scene_item in scene_inputs
+            for audit_item in audited_inputs
+        ):
+            raise UISceneError(
+                "scene与input_structure没有使用同一个image_grid坐标空间。"
+            )
+    payload.pop("coordinate_space", None)
+    return {
+        "wire_kind": kind,
+        "wire_extent": [width, height],
+        "request_image_size": [request_width, request_height],
+        "canonical_extent": [1000, 1000],
+        "applied": True,
+    }
+
+
 def _parse_single_step_observation_envelope(
     raw: str,
     *,
     input_structure_required: bool,
+    request_image_size: tuple[int, int],
 ) -> dict[str, Any]:
     """Parse one fused response without any remote repair or resampling."""
 
@@ -820,8 +1073,22 @@ def _parse_single_step_observation_envelope(
         if payload.get("protocol_version") == UI_SCENE_PROTOCOL_VERSION:
             if input_structure_required:
                 raise UISceneError("输入子目标的单次响应缺少input_structure。")
-            return {"scene": payload, "input_structure": None}
-        required = {"protocol_version", "scene", "input_structure"}
+            return {
+                "scene": payload,
+                "input_structure": None,
+                "coordinate_normalization": {
+                    "wire_kind": "implicit_normalized_1000",
+                    "wire_extent": [1000, 1000],
+                    "canonical_extent": [1000, 1000],
+                    "applied": False,
+                },
+            }
+        required = {
+            "protocol_version",
+            "coordinate_space",
+            "scene",
+            "input_structure",
+        }
         if set(payload) != required:
             missing = sorted(required - set(payload))
             extra = sorted(set(payload) - required)
@@ -835,6 +1102,10 @@ def _parse_single_step_observation_envelope(
             raise UISceneError("单步观察协议版本不匹配。")
         if not isinstance(payload["scene"], dict):
             raise UISceneError("单步观察scene必须是对象。")
+        coordinate_normalization = _normalize_single_step_wire_coordinates(
+            payload,
+            request_image_size=request_image_size,
+        )
         input_payload = payload["input_structure"]
         if input_structure_required and not isinstance(input_payload, dict):
             raise UISceneError("输入子目标必须在同一响应返回input_structure对象。")
@@ -856,7 +1127,11 @@ def _parse_single_step_observation_envelope(
             payload = {**payload, "input_structure": input_payload}
         if not input_structure_required and input_payload is not None:
             raise UISceneError("非输入子目标的input_structure必须为null。")
-        return payload
+        return {
+            "scene": payload["scene"],
+            "input_structure": payload["input_structure"],
+            "coordinate_normalization": coordinate_normalization,
+        }
     except (UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"单步完整观察结果不符合协议：{exc}") from exc
 
@@ -1151,106 +1426,6 @@ def _input_audit_detail_note(
     )
 
 
-
-
-def _normalize_input_audit_pixel_coordinates(
-    payload: dict[str, Any],
-    *,
-    frame_size: tuple[int, int],
-) -> None:
-    """Normalize a whole-frame audit emitted in source-image pixel space.
-
-    The formal contract is 0..1000 on both axes, but a model can consistently
-    copy the actual source-image coordinates instead. Accept that alternative
-    only when at least one coordinate exceeds 1000 and every declared geometry
-    value fits the current frame exactly; then convert the entire audit as one
-    coordinate system. Mixed or out-of-frame geometry remains invalid.
-    """
-
-    frame_width, frame_height = frame_size
-    if frame_width <= 0 or frame_height <= 0:
-        return
-    bounds_refs: list[tuple[dict[str, Any], str]] = []
-    point_refs: list[tuple[dict[str, Any], str]] = []
-
-    def add_bounds(owner: Any, key: str = "bounds") -> None:
-        if isinstance(owner, dict) and owner.get(key) is not None:
-            bounds_refs.append((owner, key))
-
-    def add_point(owner: Any, key: str) -> None:
-        if isinstance(owner, dict) and owner.get(key) is not None:
-            point_refs.append((owner, key))
-
-    for item in payload.get("application_inputs") or []:
-        add_bounds(item)
-        if isinstance(item, dict):
-            add_bounds(item.get("right_button"))
-    for region in payload.get("ime_preedit_regions") or []:
-        add_bounds(region)
-        if isinstance(region, dict):
-            for candidate in region.get("candidates") or []:
-                add_bounds(candidate)
-    keyboard = payload.get("keyboard")
-    if isinstance(keyboard, dict):
-        add_bounds(keyboard)
-        for key in ("mode_switch", "backspace_key", "enter_key", "case_switch"):
-            add_bounds(keyboard.get(key))
-        for collection_name in ("literal_keys", "layout_switches"):
-            for item in keyboard.get(collection_name) or []:
-                add_bounds(item)
-        anchors = keyboard.get("qwerty_anchors")
-        if isinstance(anchors, dict):
-            for key in anchors:
-                add_point(anchors, key)
-
-    coordinates: list[tuple[float, float]] = []
-    for owner, key in bounds_refs:
-        value = owner.get(key)
-        if (
-            not isinstance(value, (list, tuple))
-            or len(value) != 4
-            or any(
-                isinstance(part, bool) or not isinstance(part, (int, float))
-                for part in value
-            )
-        ):
-            return
-        left, top, right, bottom = (float(part) for part in value)
-        if not (0 <= left < right <= frame_width and 0 <= top < bottom <= frame_height):
-            return
-        coordinates.extend(((left, top), (right, bottom)))
-    for owner, key in point_refs:
-        value = owner.get(key)
-        if (
-            not isinstance(value, (list, tuple))
-            or len(value) != 2
-            or any(
-                isinstance(part, bool) or not isinstance(part, (int, float))
-                for part in value
-            )
-        ):
-            return
-        x, y = (float(part) for part in value)
-        if not (0 <= x <= frame_width and 0 <= y <= frame_height):
-            return
-        coordinates.append((x, y))
-    if not coordinates or not any(x > 1000 or y > 1000 for x, y in coordinates):
-        return
-
-    for owner, key in bounds_refs:
-        left, top, right, bottom = (float(part) for part in owner[key])
-        owner[key] = [
-            round(left * 1000 / frame_width),
-            round(top * 1000 / frame_height),
-            round(right * 1000 / frame_width),
-            round(bottom * 1000 / frame_height),
-        ]
-    for owner, key in point_refs:
-        x, y = (float(part) for part in owner[key])
-        owner[key] = [
-            round(x * 1000 / frame_width),
-            round(y * 1000 / frame_height),
-        ]
 
 
 def _normalize_input_audit_portrait_grid_from_local_rows(
@@ -3821,11 +3996,6 @@ def _apply_input_structure_audit(
 ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
-        if qwerty_row_frames:
-            _normalize_input_audit_pixel_coordinates(
-                payload,
-                frame_size=qwerty_row_frames[-1].size,
-            )
         if set(payload) != {
             "protocol_version",
             "application_inputs",

@@ -25,7 +25,7 @@ node .\test_frontend_browser_contract.js
 
 ## 控制器配置
 
-通用底层控制参数位于 `controller_config.json`；触控标定由 `tap_calibration.py`
+通用底层控制参数位于 `controller_config.json`；触控标定由 `agent/infrastructure/tap_calibration.py`
 和 `run_xy_calibration.py` 管理。`robot_gui_poc.py` 仅封装卖家控制端的画面捕获、
 点击、长按、拖动、滑动和系统导航原语，不包含 App 识别、业务流程或任务计划。
 

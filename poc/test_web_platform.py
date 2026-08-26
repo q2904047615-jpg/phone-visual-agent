@@ -273,7 +273,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             patch.object(controller, "_consume_physical_execution"),
             patch.object(controller, "_checkpoint"),
             patch(
-                "tap_calibration.corrected_grid_point",
+                "agent.infrastructure.tap_calibration.corrected_grid_point",
                 return_value=(500.0, 500.0),
             ),
             patch("robot_core.seller_gui.configure_click_count") as configure,
@@ -533,7 +533,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             patch.object(controller, "_consume_physical_execution"),
             patch.object(controller, "_checkpoint"),
             patch(
-                "tap_calibration.corrected_grid_point",
+                "agent.infrastructure.tap_calibration.corrected_grid_point",
                 return_value=(500.0, 500.0),
             ),
             patch(
@@ -813,7 +813,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             patch.object(controller, "_capture_phone", return_value=frame),
             patch.object(controller, "_checkpoint"),
             patch(
-                "tap_calibration.corrected_grid_point",
+                "agent.infrastructure.tap_calibration.corrected_grid_point",
                 side_effect=[(100.0, 200.0), (700.0, 800.0)],
             ),
             patch("robot_core.seller_gui.drag_client_path") as drag,
@@ -862,7 +862,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             patch.object(controller, "_capture_phone", return_value=frame),
             patch.object(controller, "_checkpoint"),
             patch(
-                "tap_calibration.reveal_system_navigation_path",
+                "agent.infrastructure.tap_calibration.reveal_system_navigation_path",
                 return_value=derived,
             ) as derive,
             patch("robot_core.seller_gui.drag_client_path") as drag,
@@ -887,7 +887,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             patch.object(controller, "_capture_phone", return_value=frame),
             patch.object(controller, "_checkpoint"),
             patch(
-                "tap_calibration.reveal_system_navigation_path",
+                "agent.infrastructure.tap_calibration.reveal_system_navigation_path",
                 return_value={"corrected_grid": [[92, 495], [333, 495]]},
             ),
             patch(
@@ -909,7 +909,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
             patch.object(controller, "_capture_phone", return_value=frame),
             patch(
-                "tap_calibration.reveal_system_navigation_path",
+                "agent.infrastructure.tap_calibration.reveal_system_navigation_path",
                 side_effect=RuntimeError("invalid calibration"),
             ),
             patch("robot_core.seller_gui.drag_client_path") as drag,

@@ -25,7 +25,7 @@ from agent.infrastructure import (
     SHARED_DEVICE_LEASE_DIR,
 )
 from robot_core import RobotController, load_controller_config
-from tap_calibration import (
+from agent.infrastructure.tap_calibration import (
     CALIBRATION_PATH,
     Affine2D,
     TapCalibrationError,

@@ -564,7 +564,9 @@ class RobotController:
     ) -> tuple[int, int]:
         """Resolve one dual-audited local target inside measured coverage."""
 
-        from tap_calibration import resolve_target_grid_point_within_calibration
+        from agent.infrastructure.tap_calibration import (
+            resolve_target_grid_point_within_calibration,
+        )
 
         return resolve_target_grid_point_within_calibration(
             x,
@@ -614,7 +616,7 @@ class RobotController:
         hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution("long_press", frame)
-        from tap_calibration import corrected_grid_point
+        from agent.infrastructure.tap_calibration import corrected_grid_point
 
         corrected_x, corrected_y = corrected_grid_point(
             x,
@@ -713,7 +715,7 @@ class RobotController:
         hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution(action, frame)
-        from tap_calibration import corrected_grid_point
+        from agent.infrastructure.tap_calibration import corrected_grid_point
 
         corrected_start = corrected_grid_point(
             start_x,
@@ -761,7 +763,7 @@ class RobotController:
         self._consume_physical_execution(
             "reveal_system_navigation", frame
         )
-        from tap_calibration import reveal_system_navigation_path
+        from agent.infrastructure.tap_calibration import reveal_system_navigation_path
 
         evidence = reveal_system_navigation_path(
             (frame.width, frame.height),
@@ -804,7 +806,7 @@ class RobotController:
         # Multi-position calibration corrects camera-to-physical XY distortion.
         # Dedicated Android navigation stays on its independently validated
         # ratios and intentionally does not pass through this transform.
-        from tap_calibration import corrected_grid_point
+        from agent.infrastructure.tap_calibration import corrected_grid_point
 
         x, y = corrected_grid_point(
             x,

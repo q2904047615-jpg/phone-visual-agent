@@ -1,3 +1,5 @@
+"""File-backed touch calibration and coordinate correction infrastructure."""
+
 from __future__ import annotations
 
 import json
@@ -10,7 +12,8 @@ from typing import Iterable, Sequence
 import numpy as np
 
 
-CALIBRATION_PATH = Path(__file__).with_name("tap_calibration.json")
+POC_ROOT = Path(__file__).resolve().parents[2]
+CALIBRATION_PATH = POC_ROOT / "tap_calibration.json"
 CALIBRATION_VERSION = 2
 MIN_COVERAGE_SPAN_X = 0.68
 MIN_COVERAGE_SPAN_Y = 0.82

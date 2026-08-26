@@ -12,7 +12,7 @@ from PIL import Image
 
 import run_xy_calibration
 from agent.infrastructure import DeviceTaskRegistry, InterProcessLease
-from tap_calibration import (
+from agent.infrastructure.tap_calibration import (
     Affine2D,
     TapCalibrationError,
     build_calibration,

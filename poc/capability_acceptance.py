@@ -19,7 +19,7 @@ from agent.infrastructure.orientation_safety import (
 )
 
 from agent.infrastructure import InterProcessLease
-from tap_calibration import (
+from agent.infrastructure.tap_calibration import (
     Affine2D,
     CALIBRATION_VERSION,
     MIN_COVERAGE_SPAN_X,

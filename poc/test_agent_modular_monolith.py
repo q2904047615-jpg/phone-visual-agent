@@ -745,6 +745,53 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_tap_calibration_has_one_infrastructure_entry(self) -> None:
+        import agent.infrastructure.tap_calibration as tap_calibration
+
+        root = Path(__file__).resolve().parent
+        runtime_path = (
+            root / "agent" / "infrastructure" / "tap_calibration.py"
+        )
+        self.assertFalse((root / "tap_calibration.py").exists())
+        self.assertTrue(runtime_path.is_file())
+        self.assertEqual(
+            root / "tap_calibration.json",
+            tap_calibration.CALIBRATION_PATH,
+        )
+        self.assertEqual(
+            "agent.infrastructure.tap_calibration",
+            tap_calibration.Affine2D.__module__,
+        )
+        coverage = tap_calibration.build_coverage(
+            [(0.05, 0.04), (0.95, 0.04), (0.95, 0.96), (0.05, 0.96)]
+        )
+        self.assertTrue(coverage["sufficient"])
+        self.assertEqual([0.9, 0.92], coverage["span"])
+
+        source = runtime_path.read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("class Affine2D:"))
+        self.assertEqual(1, source.count("class TapCalibrationError("))
+        self.assertEqual(1, source.count("def corrected_grid_point("))
+        self.assertIn("Path(__file__).resolve().parents[2]", source)
+        for forbidden in ("fastapi", "pydantic", "web_app", "robot_core"):
+            self.assertNotIn(forbidden, source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "tap_calibration"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "tap_calibration":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_web_uses_one_session_repository_instead_of_legacy_storage(self) -> None:
         source = (Path(__file__).resolve().parent / "web_app.py").read_text(
             encoding="utf-8"

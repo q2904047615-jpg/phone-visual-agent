@@ -19,6 +19,11 @@ from .session import (
     AgentSessionRepository,
     require_session_device,
 )
+from .session_evidence import (
+    AgentEvidenceStoreFactory,
+    AgentEvidenceStorePort,
+    EvidenceStoreError,
+)
 
 __all__ = [
     "ACTIVE_SESSION_STATUSES",
@@ -29,11 +34,14 @@ __all__ = [
     "AgentSessionDeviceMismatchError",
     "AgentSessionNotFoundError",
     "AgentSessionRepository",
+    "AgentEvidenceStoreFactory",
+    "AgentEvidenceStorePort",
     "DeviceActionRequest",
     "DeviceExecutionError",
     "DeviceExecutionResult",
     "DeviceExecutor",
     "DeviceTaskRegistryError",
     "DeviceTaskRegistryPort",
+    "EvidenceStoreError",
     "require_session_device",
 ]

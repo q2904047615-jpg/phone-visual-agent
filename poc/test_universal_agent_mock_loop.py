@@ -8,7 +8,7 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from agent.infrastructure import DeviceTaskRegistry
+from agent.infrastructure import DeviceTaskRegistry, FileSystemAgentEvidenceStore
 from canonical_action_protocol import compile_canonical_action_catalog
 from deepseek_task_graph import TargetApp
 from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
@@ -384,6 +384,7 @@ class UniversalAgentMockLoopTests(unittest.TestCase):
             qwen_observer=qwen,
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
+            evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=DeviceTaskRegistry(),
         )
         session = orchestrator.start(

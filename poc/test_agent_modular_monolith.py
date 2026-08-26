@@ -325,6 +325,56 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                     violations.append(f"{path.relative_to(root)}: {forbidden}")
         self.assertEqual([], violations)
 
+    def test_session_evidence_has_one_injected_file_system_implementation(self) -> None:
+        root = Path(__file__).resolve().parent
+        domain_port = root / "agent" / "domain" / "session_evidence.py"
+        infrastructure_store = (
+            root
+            / "agent"
+            / "infrastructure"
+            / "file_system_evidence_store.py"
+        )
+        self.assertTrue(domain_port.is_file())
+        self.assertTrue(infrastructure_store.is_file())
+
+        orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("class AgentEvidenceStore", orchestrator_source)
+        self.assertNotIn("class EvidenceStoreError", orchestrator_source)
+        self.assertIn(
+            "evidence_store_factory: AgentEvidenceStoreFactory",
+            orchestrator_source,
+        )
+        self.assertNotIn("FileSystemAgentEvidenceStore", orchestrator_source)
+        self.assertNotIn("evidence_store_factory or", orchestrator_source)
+
+        web_source = (root / "web_app.py").read_text(encoding="utf-8")
+        self.assertGreaterEqual(
+            web_source.count(
+                "evidence_store_factory=FileSystemAgentEvidenceStore"
+            ),
+            2,
+        )
+
+        forbidden_names = {"AgentEvidenceStore", "EvidenceStoreError"}
+        violations: list[str] = []
+        for path in root.rglob("*.py"):
+            if path.name.startswith("test_"):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                if node.module != "universal_agent_orchestrator":
+                    continue
+                for item in node.names:
+                    if item.name in forbidden_names:
+                        violations.append(
+                            f"{path.relative_to(root)}: {item.name}"
+                        )
+        self.assertEqual([], violations)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

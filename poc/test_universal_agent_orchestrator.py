@@ -10,8 +10,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from agent.domain import DeviceTaskRegistryError
-from agent.infrastructure import DeviceTaskRegistry
+from agent.domain import DeviceTaskRegistryError, EvidenceStoreError
+from agent.infrastructure import DeviceTaskRegistry, FileSystemAgentEvidenceStore
 from deepseek_task_graph import (
     CompletionCondition,
     ControllerTransitionEvidenceRef,
@@ -41,8 +41,6 @@ from qwen_visual_decision import QwenTaskContext
 from task_semantic_ir import compile_formal_semantic_authority
 from canonical_action_protocol import compile_canonical_action_catalog
 from universal_agent_orchestrator import (
-    AgentEvidenceStore,
-    EvidenceStoreError,
     ObservationBridge,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
@@ -1847,7 +1845,7 @@ class AgentEvidenceStoreTests(unittest.TestCase):
                 device_id="device-usage",
                 run_dir=run_dir,
                 adapter=adapter,
-                evidence_store=AgentEvidenceStore(run_dir),
+                evidence_store=FileSystemAgentEvidenceStore(run_dir),
                 vision_usage=ledger,
                 status="succeeded",
             )
@@ -1856,6 +1854,7 @@ class AgentEvidenceStoreTests(unittest.TestCase):
                 qwen_observer=FakeQwenObserver(status="blocked"),
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=_trusted_factory,
+                evidence_store_factory=FileSystemAgentEvidenceStore,
                 device_registry=DeviceTaskRegistry(),
             )
 
@@ -1880,7 +1879,7 @@ class AgentEvidenceStoreTests(unittest.TestCase):
 
     def test_writes_all_authoritative_json_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            store = AgentEvidenceStore(Path(temp))
+            store = FileSystemAgentEvidenceStore(Path(temp))
             graph = _graph()
 
             store.write_session({"session_id": "session-1", "status": "observing"})
@@ -1913,7 +1912,10 @@ class AgentEvidenceStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp) / "session.json"
             target.write_text('{"status":"old"}', encoding="utf-8")
-            store = AgentEvidenceStore(Path(temp), replace_file=fail_replace)
+            store = FileSystemAgentEvidenceStore(
+                Path(temp),
+                replace_file=fail_replace,
+            )
 
             with self.assertRaisesRegex(EvidenceStoreError, "原子写入失败"):
                 store.write_session({"status": "new"})
@@ -1923,7 +1925,7 @@ class AgentEvidenceStoreTests(unittest.TestCase):
 
     def test_rejects_path_traversal_and_non_serializable_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            store = AgentEvidenceStore(Path(temp))
+            store = FileSystemAgentEvidenceStore(Path(temp))
 
             with self.assertRaises(EvidenceStoreError):
                 store.write_json("../outside.json", {})
@@ -1940,6 +1942,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             qwen_observer=qwen,
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
+            evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=DeviceTaskRegistry(),
         )
 
@@ -2037,7 +2040,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 device_id=initial.device_id,
                 run_dir=Path(temp),
                 adapter=adapter,
-                evidence_store=AgentEvidenceStore(Path(temp)),
+                evidence_store=FileSystemAgentEvidenceStore(Path(temp)),
                 task_graph=initial,
             )
             result = orchestrator._try_advance_visible_presence_subgoal(
@@ -2116,7 +2119,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 device_id=graph.device_id,
                 run_dir=Path(temp),
                 adapter=adapter,
-                evidence_store=AgentEvidenceStore(Path(temp)),
+                evidence_store=FileSystemAgentEvidenceStore(Path(temp)),
                 task_graph=graph,
             )
             result = orchestrator._try_advance_visible_presence_subgoal(
@@ -2228,7 +2231,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 device_id=initial.device_id,
                 run_dir=Path(temp),
                 adapter=adapter,
-                evidence_store=AgentEvidenceStore(Path(temp)),
+                evidence_store=FileSystemAgentEvidenceStore(Path(temp)),
                 task_graph=initial,
             )
             trusted = FakeTrustedObservation(
@@ -2370,7 +2373,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 device_id=initial.device_id,
                 run_dir=Path(temp),
                 adapter=adapter,
-                evidence_store=AgentEvidenceStore(Path(temp)),
+                evidence_store=FileSystemAgentEvidenceStore(Path(temp)),
                 task_graph=initial,
             )
             result = orchestrator._try_advance_visible_presence_subgoal(
@@ -2590,7 +2593,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 device_id=initial.device_id,
                 run_dir=Path(temp),
                 adapter=adapter,
-                evidence_store=AgentEvidenceStore(Path(temp)),
+                evidence_store=FileSystemAgentEvidenceStore(Path(temp)),
                 task_graph=initial,
             )
             result = orchestrator._try_advance_visible_presence_subgoal(
@@ -3009,6 +3012,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 qwen_observer=FakeQwenObserver(),
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=recording_factory,
+                evidence_store_factory=FileSystemAgentEvidenceStore,
                 device_registry=DeviceTaskRegistry(),
             )
             orchestrator.start(
@@ -4283,6 +4287,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 qwen_observer=qwen,
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=_trusted_factory,
+                evidence_store_factory=FileSystemAgentEvidenceStore,
                 device_registry=DeviceTaskRegistry(),
             )
             session = orchestrator.start(
@@ -5039,6 +5044,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
             qwen_observer=qwen,
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
+            evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=DeviceTaskRegistry(),
         )
 
@@ -6673,6 +6679,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
                 qwen_observer=qwen,
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=insufficient_factory,
+                evidence_store_factory=FileSystemAgentEvidenceStore,
                 device_registry=DeviceTaskRegistry(),
             )
             session = orchestrator.start(
@@ -7959,7 +7966,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         planner=None,
         qwen=None,
         adapter=None,
-        evidence_store_factory=None,
+        evidence_store_factory=FileSystemAgentEvidenceStore,
     ):
         initial = _graph()
         planner = planner or FakeDeepSeekPlanner(
@@ -8218,6 +8225,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 qwen_observer=qwen,
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=_trusted_factory,
+                evidence_store_factory=FileSystemAgentEvidenceStore,
                 device_registry=DeviceTaskRegistry(),
             )
             session = orchestrator.start(
@@ -8284,6 +8292,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 qwen_observer=qwen,
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=_trusted_factory,
+                evidence_store_factory=FileSystemAgentEvidenceStore,
                 device_registry=DeviceTaskRegistry(),
             )
             session = orchestrator.start(
@@ -8462,6 +8471,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 qwen_observer=qwen,
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=wrong_after_factory,
+                evidence_store_factory=FileSystemAgentEvidenceStore,
                 device_registry=DeviceTaskRegistry(),
             )
             session = orchestrator.start(
@@ -8879,6 +8889,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 qwen_observer=qwen,
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=drifting_factory,
+                evidence_store_factory=FileSystemAgentEvidenceStore,
                 device_registry=DeviceTaskRegistry(),
             )
             session = orchestrator.start(
@@ -9112,6 +9123,7 @@ class DeviceTaskRegistryTests(unittest.TestCase):
             qwen_observer=qwen or FakeQwenObserver(),
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
+            evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=registry,
         )
 
@@ -9541,7 +9553,7 @@ class UniversalAgentConfirmFailureTests(unittest.TestCase):
         self.assertNotEqual(first_observation.fingerprint, observation.fingerprint)
 
     def test_evidence_failure_before_action_keeps_zero_physical_actions(self) -> None:
-        class FailSecondControllerStore(AgentEvidenceStore):
+        class FailSecondControllerStore(FileSystemAgentEvidenceStore):
             def __init__(self, run_dir):
                 super().__init__(run_dir)
                 self.controller_writes = 0
@@ -9564,7 +9576,7 @@ class UniversalAgentConfirmFailureTests(unittest.TestCase):
         self.assertEqual(0, session.physical_actions)
 
     def test_evidence_failure_after_action_blocks_any_next_action(self) -> None:
-        class FailVerificationStore(AgentEvidenceStore):
+        class FailVerificationStore(FileSystemAgentEvidenceStore):
             def write_verification(self, step_number, verification):
                 raise EvidenceStoreError("simulated verification evidence failure")
 

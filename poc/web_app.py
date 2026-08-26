@@ -32,9 +32,11 @@ from agent.domain import (
     AgentSessionDeviceMismatchError,
     AgentSessionNotFoundError,
     DeviceTaskRegistryError,
+    EvidenceStoreError,
 )
 from agent.infrastructure import (
     DeviceTaskRegistry,
+    FileSystemAgentEvidenceStore,
     InMemoryAgentSessionRepository,
     InterProcessLease,
     SHARED_DEVICE_LEASE_DIR,
@@ -492,6 +494,7 @@ class Runtime:
                 device_id=device_id,
                 input_lineage_store=self.input_lineage_store,
             ),
+            evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=self.device_task_registry,
         )
         self.agent_session_repository = InMemoryAgentSessionRepository()
@@ -579,6 +582,7 @@ class Runtime:
                 device_id=device_id,
                 input_lineage_store=self.input_lineage_store,
             ),
+            evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=self.device_task_registry,
         )
 
@@ -1143,6 +1147,7 @@ CAPABILITY_ACCEPTANCE_ERRORS = (
     IntentProviderError,
     TaskGraphError,
     UniversalActionError,
+    EvidenceStoreError,
     UniversalAgentOrchestratorError,
     VisionAgentError,
 )
@@ -1506,6 +1511,7 @@ def start_generic_supervised_session(
         IntentProviderError,
         GenericActionAdapterError,
         UniversalActionError,
+        EvidenceStoreError,
         UniversalAgentOrchestratorError,
         TaskGraphError,
         VisionAgentError,
@@ -1573,6 +1579,7 @@ def approve_generic_supervised_effect(
         DeviceTaskRegistryError,
         GenericActionAdapterError,
         UniversalActionError,
+        EvidenceStoreError,
         UniversalAgentOrchestratorError,
         IntentProviderError,
         TaskGraphError,
@@ -1627,6 +1634,7 @@ def confirm_generic_supervised_session(
         DeviceTaskRegistryError,
         GenericActionAdapterError,
         UniversalActionError,
+        EvidenceStoreError,
         UniversalAgentOrchestratorError,
         IntentProviderError,
         TaskGraphError,
@@ -1680,6 +1688,7 @@ def plan_next_generic_supervised_step(
         GenericActionAdapterError,
         UniversalActionError,
         IntentProviderError,
+        EvidenceStoreError,
         UniversalAgentOrchestratorError,
         TaskGraphError,
         VisionAgentError,
@@ -1739,6 +1748,7 @@ def run_generic_supervised_safe_loop(
         DeviceTaskRegistryError,
         GenericActionAdapterError,
         UniversalActionError,
+        EvidenceStoreError,
         UniversalAgentOrchestratorError,
         IntentProviderError,
         TaskGraphError,

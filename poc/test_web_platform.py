@@ -19,7 +19,12 @@ from PIL import Image, ImageDraw
 
 import robot_gui_poc
 import web_app
-from agent.infrastructure import DeviceTaskRegistry, InterProcessLease
+from agent.domain import EvidenceStoreError
+from agent.infrastructure import (
+    DeviceTaskRegistry,
+    FileSystemAgentEvidenceStore,
+    InterProcessLease,
+)
 from canonical_action_protocol import GenericStepProposal
 from generic_scene_observer import SINGLE_STEP_SCENE_OBSERVER_VERSION
 from robot_core import (
@@ -1310,6 +1315,7 @@ class ApiEndToEndTests(unittest.TestCase):
             qwen_observer=qwen,
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
+            evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=DeviceTaskRegistry(),
         )
         return orchestrator, planner, qwen, adapter
@@ -2153,6 +2159,35 @@ class ApiEndToEndTests(unittest.TestCase):
             len(web_app.runtime.controller.executions),
             before_executions,
         )
+
+    def test_generic_supervised_evidence_failure_remains_http_409(self) -> None:
+        orchestrator, _planner, _qwen, _adapter = self._universal_api_orchestrator()
+        with (
+            patch.object(web_app, "_require_supervised_device_ready"),
+            patch.object(
+                web_app.runtime,
+                "universal_agent_orchestrator",
+                orchestrator,
+            ),
+            patch.object(
+                orchestrator,
+                "start",
+                side_effect=EvidenceStoreError("simulated evidence disk failure"),
+            ),
+        ):
+            response = self.client.post(
+                "/api/agent/generic-supervised/start",
+                headers=self.headers,
+                json={
+                    "text": "查看当前页面的详情",
+                    "device_id": "phone-01",
+                    "auto_advance": False,
+                },
+            )
+
+        self.assertEqual(409, response.status_code, response.text)
+        self.assertEqual(0, response.json()["detail"]["physical_actions"])
+        self.assertIn("simulated evidence disk failure", response.text)
 
     def test_new_generic_session_clears_stop_from_an_earlier_task(self) -> None:
         orchestrator, _planner, _qwen, _adapter = self._universal_api_orchestrator()

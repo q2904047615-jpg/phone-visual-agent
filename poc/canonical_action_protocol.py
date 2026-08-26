@@ -6,7 +6,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Mapping
 
-from task_semantic_ir import (
+from agent.domain.task_semantic_ir import (
     ConstraintIntent,
     EffectIntent,
     SemanticEntity,

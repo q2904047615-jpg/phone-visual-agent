@@ -1,7 +1,7 @@
 import unittest
 from dataclasses import replace
 
-from task_semantic_ir import (
+from agent.domain.task_semantic_ir import (
     ConstraintIntent,
     EffectIntent,
     InputFieldIntent,

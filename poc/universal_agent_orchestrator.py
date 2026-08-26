@@ -61,7 +61,7 @@ from agent.domain.ui_scene import (
     UISceneError,
     scene_surface_kind,
 )
-from task_semantic_ir import (
+from agent.domain.task_semantic_ir import (
     TaskSemanticIRError,
     compile_formal_semantic_authority,
 )

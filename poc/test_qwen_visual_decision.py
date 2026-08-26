@@ -31,7 +31,7 @@ from qwen_visual_decision import (
 from agent.domain.ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
 from vision_agent import VisionAgentError
 from vision_agent import _image_data_url
-from task_semantic_ir import (
+from agent.domain.task_semantic_ir import (
     ConstraintIntent,
     DesiredState,
     EffectIntent,

@@ -43,7 +43,7 @@ from vision_agent import VisionAgentError
 from vision_usage import VisionSessionUsageLedger
 from canonical_action_protocol import scene_matches_target_app_surface
 from qwen_visual_decision import QwenTaskContext
-from task_semantic_ir import compile_formal_semantic_authority
+from agent.domain.task_semantic_ir import compile_formal_semantic_authority
 from canonical_action_protocol import compile_canonical_action_catalog
 from universal_agent_orchestrator import (
     ObservationBridge,

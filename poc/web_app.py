@@ -76,7 +76,7 @@ from universal_action_controller import (
     UniversalActionError,
 )
 from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION
-from task_semantic_ir import (
+from agent.domain.task_semantic_ir import (
     AUTHORITY_REPORT_PROTOCOL,
     RISK_POLICY_PROTOCOL,
     TASK_SEMANTIC_IR_PROTOCOL,

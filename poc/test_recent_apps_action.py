@@ -15,7 +15,7 @@ from qwen_visual_decision import (
 )
 from robot_core import DEFAULT_CONTROLLER_CONFIG, load_controller_config
 from agent.domain.semantic_action import SemanticAction
-from task_semantic_ir import compile_formal_semantic_authority
+from agent.domain.task_semantic_ir import compile_formal_semantic_authority
 from test_task_semantic_ir import required_actions_for_objective
 from agent.domain.ui_scene import UIElement, UIScene, scene_surface_kind
 from universal_action_controller import (

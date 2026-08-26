@@ -104,7 +104,7 @@ effect、claim、relation、fresh observation、geometry 和 capability。`goal_
 已有且能离线证明的单指动作；无法证明 ACK 或机械能力的动作只报告 gap。输入改为多 field/segment
 事务，canonical 内容来自用户实体，Qwen 不生成正文；每段动作后重新观察并验证。
 
-影响范围：`task_semantic_ir.py`、`deepseek_task_graph.py`、`visual_action_shadow.py`、
+影响范围：`poc/agent/domain/task_semantic_ir.py`、`deepseek_task_graph.py`、`visual_action_shadow.py`、
 `qwen_visual_decision.py`、`universal_action_controller.py`、`generic_action_adapter.py`、
 `robot_core.py`、`universal_agent_orchestrator.py`、Web 协议和对应测试。回滚方式是按批次整体撤销；
 不得只恢复旧关键词、`goal_relevant` 或固定 App 路径。

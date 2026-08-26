@@ -10,7 +10,7 @@ from deepseek_task_graph import (
     _graph_from_payload,
 )
 from deepseek_failure_diagnostics import persist_deepseek_failure_diagnostic
-from task_semantic_ir import (
+from agent.domain.task_semantic_ir import (
     AUTOMATIC,
     CONFIRMATION_REQUIRED,
     CriticalBinding,
@@ -24,9 +24,9 @@ from task_semantic_ir import (
     compile_runtime_graph_semantics,
     compile_formal_semantic_authority,
     apply_formal_semantic_risk_policy,
-    load_local_risk_policy,
     local_risk_policy_from_dict,
 )
+from agent.infrastructure.file_system_risk_policy import load_local_risk_policy
 
 
 RAW_GOAL = "打开微信，进入文件传输助手，输入“你好”，然后发送。"

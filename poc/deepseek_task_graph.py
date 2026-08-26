@@ -9,14 +9,14 @@ from difflib import SequenceMatcher
 from typing import Any, Callable, Protocol
 
 from generic_goal import GenericIntentError, _parse_json_object
-from task_semantic_ir import (
+from agent.domain.task_semantic_ir import (
     SemanticRiskAuthorityReport,
     TaskSemanticIRError,
     LocalRiskPolicyConfig,
     apply_formal_semantic_risk_policy,
     compile_formal_semantic_authority,
-    load_local_risk_policy,
 )
+from agent.infrastructure.file_system_risk_policy import load_local_risk_policy
 
 
 DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-20-deepseek-typed-task-graph-v4"

@@ -18,7 +18,7 @@ from deepseek_task_graph import (
     build_exact_input_task_graph,
     named_visual_identity_is_grounded,
 )
-from task_semantic_ir import compile_formal_semantic_authority
+from agent.domain.task_semantic_ir import compile_formal_semantic_authority
 
 
 class FakeProvider:

@@ -862,6 +862,60 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 path.read_text(encoding="utf-8"),
             )
 
+    def test_task_semantic_ir_has_one_domain_identity_and_one_loader(self) -> None:
+        import canonical_action_protocol as canonical_protocol
+        import deepseek_task_graph
+        from agent.domain.task_semantic_ir import (
+            TaskSemanticIR,
+            compile_formal_semantic_authority,
+        )
+
+        root = Path(__file__).resolve().parent
+        domain_path = root / "agent" / "domain" / "task_semantic_ir.py"
+        loader_path = (
+            root
+            / "agent"
+            / "infrastructure"
+            / "file_system_risk_policy.py"
+        )
+        self.assertFalse((root / "task_semantic_ir.py").exists())
+        self.assertTrue(domain_path.is_file())
+        self.assertTrue(loader_path.is_file())
+        self.assertIs(TaskSemanticIR, canonical_protocol.TaskSemanticIR)
+        self.assertIs(
+            compile_formal_semantic_authority,
+            deepseek_task_graph.compile_formal_semantic_authority,
+        )
+
+        domain_source = domain_path.read_text(encoding="utf-8")
+        loader_source = loader_path.read_text(encoding="utf-8")
+        for forbidden in (
+            "from pathlib",
+            "Path(",
+            ".read_text(",
+            "def load_local_risk_policy(",
+            "agent.infrastructure",
+        ):
+            self.assertNotIn(forbidden, domain_source)
+        self.assertEqual(1, loader_source.count("def load_local_risk_policy("))
+        self.assertEqual(1, loader_source.count(".read_text("))
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "task_semantic_ir"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "task_semantic_ir":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent
         self.assertFalse((root / "device_executor.py").exists())

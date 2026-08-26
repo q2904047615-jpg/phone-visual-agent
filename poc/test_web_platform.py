@@ -21,6 +21,8 @@ import robot_gui_poc
 import web_app
 from agent.domain import EvidenceStoreError
 from agent.infrastructure import (
+    CameraPreviewUnavailable,
+    DeviceCameraCoordinator,
     DeviceTaskRegistry,
     FileSystemAgentEvidenceStore,
     InterProcessLease,
@@ -1165,7 +1167,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
 
 class DeviceCameraCoordinatorTests(unittest.TestCase):
     def test_task_lease_serves_cached_preview_without_another_capture(self) -> None:
-        coordinator = web_app.DeviceCameraCoordinator()
+        coordinator = DeviceCameraCoordinator()
         preview_calls = []
 
         def capture_preview(*, quality):
@@ -1195,7 +1197,7 @@ class DeviceCameraCoordinatorTests(unittest.TestCase):
         self.assertEqual((540, 960), frame.size)
 
     def test_concurrent_preview_never_waits_or_captures_behind_task_lease(self) -> None:
-        coordinator = web_app.DeviceCameraCoordinator()
+        coordinator = DeviceCameraCoordinator()
         coordinator.capture_preview(
             lambda *, quality: b"primed-preview",
             quality=72,
@@ -1229,6 +1231,40 @@ class DeviceCameraCoordinatorTests(unittest.TestCase):
         self.assertTrue(cached)
         self.assertEqual([], capture_calls)
         self.assertFalse(worker.is_alive())
+
+    def test_cache_only_without_a_frame_fails_closed(self) -> None:
+        coordinator = DeviceCameraCoordinator()
+
+        with self.assertRaisesRegex(CameraPreviewUnavailable, "尚无可复用"):
+            coordinator.capture_preview(
+                lambda *, quality: b"must-not-run",
+                quality=72,
+                cache_only=True,
+            )
+
+    def test_two_device_coordinators_do_not_share_preview_cache(self) -> None:
+        first = DeviceCameraCoordinator()
+        second = DeviceCameraCoordinator()
+        first.capture_preview(
+            lambda *, quality: b"phone-a",
+            quality=72,
+            cache_only=False,
+        )
+
+        with self.assertRaises(CameraPreviewUnavailable):
+            second.capture_preview(
+                lambda *, quality: b"phone-b",
+                quality=72,
+                cache_only=True,
+            )
+
+        cached, is_cached = first.capture_preview(
+            lambda *, quality: b"wrong",
+            quality=72,
+            cache_only=True,
+        )
+        self.assertEqual(b"phone-a", cached)
+        self.assertTrue(is_cached)
 
 
 class ApiEndToEndTests(unittest.TestCase):

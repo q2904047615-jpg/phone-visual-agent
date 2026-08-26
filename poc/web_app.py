@@ -11,7 +11,6 @@ import uuid
 import webbrowser
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import datetime
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
 
@@ -35,6 +34,8 @@ from agent.domain import (
     EvidenceStoreError,
 )
 from agent.infrastructure import (
+    CameraPreviewUnavailable,
+    DeviceCameraCoordinator,
     DeviceTaskRegistry,
     FileSystemAgentEvidenceStore,
     InMemoryAgentSessionRepository,
@@ -370,75 +371,6 @@ class DeviceControllerRegistry:
 
     def descriptors(self) -> list[dict[str, Any]]:
         return [dict(self._descriptors[key]) for key in sorted(self._descriptors)]
-
-
-class CameraPreviewUnavailable(RuntimeError):
-    """The live camera is leased and no cached frame exists yet."""
-
-
-class DeviceCameraCoordinator:
-    """Give one closed-loop task priority over passive browser previews.
-
-    A task or doctor holds ``serial_session`` across its whole observation and
-    execution window. Agent captures are re-entrant on the owning thread and
-    refresh the preview cache. Browser previews never wait behind that lease:
-    they return the latest cache instead, so multiple open pages cannot starve
-    the four-frame verification gate.
-    """
-
-    def __init__(self) -> None:
-        self._serial_lock = threading.RLock()
-        self._cached_preview: bytes | None = None
-
-    @staticmethod
-    def _jpeg(frame: Any, *, quality: int = 72) -> bytes:
-        buffer = BytesIO()
-        frame.convert("RGB").save(
-            buffer,
-            format="JPEG",
-            quality=max(1, min(95, int(quality))),
-            optimize=True,
-        )
-        return buffer.getvalue()
-
-    @contextmanager
-    def serial_session(self) -> Iterator[None]:
-        with self._serial_lock:
-            yield
-
-    def capture_agent_frame(self, capture: Callable[[], Any]) -> Any:
-        with self._serial_lock:
-            frame = capture().convert("RGB")
-            self._cached_preview = self._jpeg(frame)
-            return frame
-
-    def capture_preview(
-        self,
-        capture: Callable[..., bytes],
-        *,
-        quality: int,
-        cache_only: bool,
-    ) -> tuple[bytes, bool]:
-        if cache_only:
-            if self._cached_preview is None:
-                raise CameraPreviewUnavailable(
-                    "任务正在独占相机，尚无可复用的缓存画面。"
-                )
-            return self._cached_preview, True
-
-        acquired = self._serial_lock.acquire(blocking=False)
-        if not acquired:
-            if self._cached_preview is None:
-                raise CameraPreviewUnavailable(
-                    "任务正在独占相机，尚无可复用的缓存画面。"
-                )
-            return self._cached_preview, True
-        try:
-            content = bytes(capture(quality=quality))
-            self._cached_preview = content
-            return content, False
-        finally:
-            self._serial_lock.release()
 
 
 class Runtime:

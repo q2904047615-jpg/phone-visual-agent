@@ -505,6 +505,19 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertNotIn("generic_supervised_session_lock", source)
         self.assertNotIn("_require_generic_session_device", source)
 
+    def test_camera_coordination_has_one_infrastructure_implementation(self) -> None:
+        root = Path(__file__).resolve().parent
+        web_source = (root / "web_app.py").read_text(encoding="utf-8")
+        infrastructure_source = (
+            root / "agent" / "infrastructure" / "camera_coordinator.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("class DeviceCameraCoordinator", web_source)
+        self.assertNotIn("class CameraPreviewUnavailable", web_source)
+        self.assertNotIn("from io import BytesIO", web_source)
+        self.assertIn("class DeviceCameraCoordinator", infrastructure_source)
+        self.assertIn("class CameraPreviewUnavailable", infrastructure_source)
+
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent
         self.assertFalse((root / "device_executor.py").exists())

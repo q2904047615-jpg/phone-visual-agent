@@ -5,7 +5,7 @@ import unittest
 
 from PIL import Image
 
-from action_capabilities import KNOWN_ACTION_CAPABILITIES
+from agent.domain.action_capabilities import KNOWN_ACTION_CAPABILITIES
 from runtime_doctor import run_runtime_doctor
 
 

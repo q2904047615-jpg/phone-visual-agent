@@ -29,6 +29,7 @@ from agent.application import (
     POST_ACTION_TRANSITION_PROTOCOL_VERSION,
     UniversalAgentSessionState,
 )
+from agent.domain.action_capabilities import build_device_capability_snapshot
 from agent.domain import (
     AgentEvidenceStoreFactory,
     CANONICAL_SELECTION_RECEIPT_VERSION,
@@ -1183,8 +1184,6 @@ class UniversalAgentOrchestrator:
             action for action in required_actions if action not in available_actions
         )
         if unsupported:
-            from action_capabilities import build_device_capability_snapshot
-
             provider = getattr(session.adapter, "capability_snapshot", None)
             capability = (
                 provider()
@@ -6947,8 +6946,6 @@ class UniversalAgentOrchestrator:
                 action for action in required_actions if action not in available_actions
             )
             if unsupported_actions:
-                from action_capabilities import build_device_capability_snapshot
-
                 capability_provider = getattr(
                     session.adapter,
                     "capability_snapshot",

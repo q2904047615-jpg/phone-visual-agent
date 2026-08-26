@@ -32,6 +32,7 @@ from generic_scene_observer import (
     SingleStepGenericSceneObserver,
 )
 from agent.application.input_value_lineage import TypedInputLineageStorePort
+from agent.domain.action_capabilities import build_device_capability_snapshot
 from agent.domain.input_value_lineage import (
     InputValueLineageError,
     TypedInputLineage,
@@ -1255,8 +1256,6 @@ class GenericSingleActionAdapter:
         return frozenset(supported)
 
     def capability_snapshot(self) -> Any:
-        from action_capabilities import build_device_capability_snapshot
-
         provider = getattr(self.robot, "hardware_capability_profile", None)
         raw_profile = provider() if callable(provider) else None
         return build_device_capability_snapshot(

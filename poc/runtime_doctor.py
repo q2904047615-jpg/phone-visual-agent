@@ -7,7 +7,7 @@ from typing import Any, Callable, Mapping
 
 from PIL import Image
 
-from action_capabilities import build_device_capability_snapshot
+from agent.domain.action_capabilities import build_device_capability_snapshot
 from observation_images import measure_local_stability
 from vision_usage import QWEN_PLUS_MODEL
 

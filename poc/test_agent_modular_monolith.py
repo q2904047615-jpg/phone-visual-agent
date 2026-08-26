@@ -752,6 +752,62 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_action_capabilities_have_one_domain_identity(self) -> None:
+        import runtime_doctor
+        from agent.domain.action_capabilities import (
+            KNOWN_ACTION_CAPABILITIES,
+            build_device_capability_snapshot,
+        )
+
+        root = Path(__file__).resolve().parent
+        domain_path = root / "agent" / "domain" / "action_capabilities.py"
+        self.assertFalse((root / "action_capabilities.py").exists())
+        self.assertTrue(domain_path.is_file())
+        self.assertIs(
+            build_device_capability_snapshot,
+            runtime_doctor.build_device_capability_snapshot,
+        )
+        self.assertIn("tap_semantic", KNOWN_ACTION_CAPABILITIES)
+
+        allowed = {
+            "__future__",
+            "dataclasses",
+            "hashlib",
+            "json",
+            "re",
+            "typing",
+        }
+        unexpected: list[str] = []
+        tree = ast.parse(domain_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [item.name for item in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            for name in names:
+                if name.split(".")[0] not in allowed:
+                    unexpected.append(name)
+        self.assertEqual([], unexpected)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "action_capabilities"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if not isinstance(node, ast.Import):
+                    continue
+                for item in node.names:
+                    if item.name == "action_capabilities":
+                        legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent
         self.assertFalse((root / "device_executor.py").exists())

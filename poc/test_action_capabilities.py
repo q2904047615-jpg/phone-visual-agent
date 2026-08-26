@@ -1,6 +1,6 @@
 import unittest
 
-from action_capabilities import (
+from agent.domain.action_capabilities import (
     ActionCapabilityError,
     KNOWN_ACTION_CAPABILITIES,
     build_device_capability_snapshot,

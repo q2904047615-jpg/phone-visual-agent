@@ -45,8 +45,13 @@ from orientation_safety import (
     OrientationFrameMismatchError,
     _claim_audit_seal,
 )
-from semantic_action import SemanticAction
-from ui_scene import CameraAlignmentFacts, SystemUIFacts, UIElement, UIScene
+from agent.domain.semantic_action import SemanticAction
+from agent.domain.ui_scene import (
+    CameraAlignmentFacts,
+    SystemUIFacts,
+    UIElement,
+    UIScene,
+)
 from universal_action_controller import (
     ResolvedSemanticAction,
     UniversalActionController,

@@ -1,8 +1,8 @@
 import unittest
 from dataclasses import replace
 
-from semantic_action import SemanticAction
-from ui_scene import (
+from agent.domain.semantic_action import SemanticAction
+from agent.domain.ui_scene import (
     UI_SCENE_PROTOCOL_VERSION,
     SystemUIFacts,
     UIElement,

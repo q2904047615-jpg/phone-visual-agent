@@ -44,7 +44,7 @@ from robot_core import (
     qwerty_key_point,
 )
 from orientation_safety import _mint_audited_credential
-from ui_scene import UIScene
+from agent.domain.ui_scene import UIScene
 
 
 class _TestDirectionCredentialMixin:

@@ -576,6 +576,54 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertNotIn("web_app", infrastructure_source)
         self.assertNotIn("agent.application", infrastructure_source)
 
+    def test_scene_and_semantic_action_have_one_domain_identity(self) -> None:
+        import canonical_action_protocol as canonical_protocol
+        from agent.domain.semantic_action import SemanticAction
+        from agent.domain.ui_scene import UIScene
+
+        root = Path(__file__).resolve().parent
+        self.assertFalse((root / "semantic_action.py").exists())
+        self.assertFalse((root / "ui_scene.py").exists())
+        self.assertIs(SemanticAction, canonical_protocol.SemanticAction)
+        self.assertIs(UIScene, canonical_protocol.UIScene)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module in {
+                    "semantic_action",
+                    "ui_scene",
+                }:
+                    legacy_imports.append(
+                        f"{path.relative_to(root)}: {node.module}"
+                    )
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name in {"semantic_action", "ui_scene"}:
+                            legacy_imports.append(
+                                f"{path.relative_to(root)}: {item.name}"
+                            )
+        self.assertEqual([], legacy_imports)
+
+        allowed = {"__future__", "dataclasses", "re", "typing"}
+        unexpected: list[str] = []
+        for path in (
+            root / "agent" / "domain" / "semantic_action.py",
+            root / "agent" / "domain" / "ui_scene.py",
+        ):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                names: list[str] = []
+                if isinstance(node, ast.Import):
+                    names = [item.name for item in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module]
+                for name in names:
+                    if name.split(".")[0] not in allowed:
+                        unexpected.append(f"{path.name}: {name}")
+        self.assertEqual([], unexpected)
+
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent
         self.assertFalse((root / "device_executor.py").exists())

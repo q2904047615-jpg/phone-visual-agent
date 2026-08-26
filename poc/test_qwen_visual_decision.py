@@ -28,7 +28,7 @@ from qwen_visual_decision import (
     _deterministic_exact_selection_payload,
     _selection_choices,
 )
-from ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
+from agent.domain.ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
 from vision_agent import VisionAgentError
 from vision_agent import _image_data_url
 from task_semantic_ir import (

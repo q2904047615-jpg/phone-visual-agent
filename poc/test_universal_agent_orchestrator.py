@@ -36,8 +36,8 @@ from generic_action_adapter import (
     GenericActionAdapterError,
     GenericActionExecutionResult,
 )
-from semantic_action import SemanticAction
-from ui_scene import SystemUIFacts, UIElement, UIScene
+from agent.domain.semantic_action import SemanticAction
+from agent.domain.ui_scene import SystemUIFacts, UIElement, UIScene
 from universal_action_controller import ResolvedSemanticAction
 from vision_agent import VisionAgentError
 from vision_usage import VisionSessionUsageLedger

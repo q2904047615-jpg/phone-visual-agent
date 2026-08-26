@@ -13,7 +13,7 @@ from generic_scene_observer import (
     PostActionVisualContext,
     SingleStepGenericSceneObserver,
 )
-from ui_scene import UI_SCENE_PROTOCOL_VERSION
+from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION
 from vision_agent import VisionAgentError, _image_data_url
 
 

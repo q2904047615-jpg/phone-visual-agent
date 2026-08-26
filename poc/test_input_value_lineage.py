@@ -25,7 +25,7 @@ from input_value_lineage import (
     build_pending_newline_lineage,
     build_pending_text_lineage,
 )
-from ui_scene import UIScene
+from agent.domain.ui_scene import UIScene
 from vision_agent import VisionAgentError
 
 

@@ -26,7 +26,7 @@ from tap_calibration import (
     MIN_COVERAGE_SPAN_Y,
     TapCalibrationError,
 )
-from ui_scene import UIScene, UISceneError
+from agent.domain.ui_scene import UIScene, UISceneError
 from universal_action_controller import (
     ResolvedSemanticAction,
     UniversalActionController,

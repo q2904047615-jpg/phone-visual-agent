@@ -159,7 +159,7 @@ class FixedAppRetirementTests(unittest.TestCase):
             "vision_agent.py",
             "robot_core.py",
             "robot_gui_poc.py",
-            "ui_scene.py",
+            "agent/domain/ui_scene.py",
             "vision_model_config.py",
         )
         hits = []

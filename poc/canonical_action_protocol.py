@@ -12,8 +12,8 @@ from task_semantic_ir import (
     SemanticEntity,
     TaskSemanticIR,
 )
-from semantic_action import SemanticAction
-from ui_scene import UIElement, UIScene, scene_surface_kind
+from agent.domain.semantic_action import SemanticAction
+from agent.domain.ui_scene import UIElement, UIScene, scene_surface_kind
 from verified_text_transaction import (
     VerifiedTextTransactionError,
     plan_from_input_states,

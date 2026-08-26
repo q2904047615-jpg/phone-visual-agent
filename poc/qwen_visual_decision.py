@@ -26,9 +26,9 @@ from message_intent import (
     subgoal_binds_recipient,
     subgoal_targets_recipient_control,
 )
-from semantic_action import SemanticAction
+from agent.domain.semantic_action import SemanticAction
 from task_semantic_ir import TaskSemanticIR
-from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene
+from agent.domain.ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene
 from vision_agent import VisionAgentError
 from vision_model_config import public_model_identity
 

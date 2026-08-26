@@ -55,7 +55,7 @@ from qwen_visual_decision import (
     QwenTaskContext,
     TrustedObservation,
 )
-from ui_scene import (
+from agent.domain.ui_scene import (
     MIN_TARGET_CONFIDENCE,
     UISceneError,
     scene_surface_kind,

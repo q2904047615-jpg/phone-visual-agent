@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field, replace
 import math
 from typing import Any
 
-from semantic_action import SemanticAction
+from agent.domain.semantic_action import SemanticAction
 from text_input_utils import editable_character_count
 from verified_text_transaction import (
     VerifiedTextTransactionError,
@@ -18,7 +18,7 @@ from input_value_lineage import (
     input_screen_identity_compatible,
     input_screen_identity_family,
 )
-from ui_scene import (
+from agent.domain.ui_scene import (
     MIN_TARGET_CONFIDENCE,
     UIElement,
     UIScene,

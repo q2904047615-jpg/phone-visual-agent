@@ -14,8 +14,8 @@ from deepseek_task_graph import TargetApp
 from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
 from canonical_action_protocol import GenericStepProposal
 from orientation_safety import _claim_audit_seal
-from semantic_action import SemanticAction
-from ui_scene import CameraAlignmentFacts, UIElement, UIScene
+from agent.domain.semantic_action import SemanticAction
+from agent.domain.ui_scene import CameraAlignmentFacts, UIElement, UIScene
 from universal_agent_orchestrator import UniversalAgentOrchestrator
 
 from test_universal_agent_orchestrator import (

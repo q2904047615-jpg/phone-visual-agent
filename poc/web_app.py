@@ -73,7 +73,7 @@ from universal_action_controller import (
     UniversalActionController,
     UniversalActionError,
 )
-from ui_scene import UI_SCENE_PROTOCOL_VERSION
+from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION
 from task_semantic_ir import (
     AUTHORITY_REPORT_PROTOCOL,
     RISK_POLICY_PROTOCOL,

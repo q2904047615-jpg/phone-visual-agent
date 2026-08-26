@@ -27,7 +27,7 @@ from qwen_runtime_errors import (
     classify_qwen_error,
 )
 from robot_core import WorkflowNotReady, qwerty_keyboard_config_from_anchors
-from ui_scene import (
+from agent.domain.ui_scene import (
     ALLOWED_ROLES,
     CAMERA_LAYOUT_ORIENTATIONS,
     CameraAlignmentFacts,

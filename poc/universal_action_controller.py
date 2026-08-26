@@ -12,7 +12,7 @@ from agent.domain.verified_text_transaction import (
     is_direct_latin_segment,
     plan_from_input_states,
 )
-from input_value_lineage import (
+from agent.domain.input_value_lineage import (
     input_app_identity_compatible,
     input_app_identity_is_concrete_package,
     input_screen_identity_compatible,

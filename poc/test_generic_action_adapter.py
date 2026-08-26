@@ -34,10 +34,12 @@ from generic_scene_observer import (
     SingleStepGenericSceneObserver,
     _local_frame_fingerprint,
 )
-from input_value_lineage import (
-    TypedInputLineageStore,
+from agent.domain.input_value_lineage import (
     input_screen_identity_compatible,
     input_screen_identity_family,
+)
+from agent.infrastructure.file_system_input_lineage_store import (
+    FileSystemTypedInputLineageStore as TypedInputLineageStore,
 )
 from observation_images import measure_frame_sharpness
 from orientation_safety import (

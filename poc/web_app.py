@@ -60,7 +60,9 @@ from generic_action_adapter import (
     stable_text_ocr_grounding,
 )
 from generic_scene_observer import SingleStepGenericSceneObserver
-from input_value_lineage import TypedInputLineageStore
+from agent.infrastructure.file_system_input_lineage_store import (
+    FileSystemTypedInputLineageStore,
+)
 from deepseek_task_graph import DeepSeekTaskGraphPlanner, TaskGraphError
 from qwen_visual_decision import QwenVisualDecisionObserver
 from universal_agent_orchestrator import (
@@ -264,7 +266,7 @@ class Runtime:
         )
         self.vision_provider = DashScopeVisionProvider()
         self.intent_provider = DeepSeekIntentProvider()
-        self.input_lineage_store = TypedInputLineageStore(
+        self.input_lineage_store = FileSystemTypedInputLineageStore(
             WEB_OUTPUT_DIR / "state"
         )
         self.generic_scene_observer = SingleStepGenericSceneObserver(

@@ -2,17 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import tempfile
 import time
 from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from PIL import Image, ImageOps
-
-from agent.domain.verified_text_transaction import (
+from .verified_text_transaction import (
     VerifiedTextTransactionError,
     local_pinyin,
 )
@@ -22,7 +17,6 @@ TYPED_INPUT_LINEAGE_VERSION = "2026-08-24-typed-input-lineage-v6"
 DEFAULT_LINEAGE_TTL_SECONDS = 6 * 60 * 60
 SURFACE_DESCRIPTOR_WIDTH = 32
 SURFACE_DESCRIPTOR_HEIGHT = 16
-SURFACE_DESCRIPTOR_MAX_MEAN_DISTANCE = 18.0
 PENDING_INPUT_LINEAGE_SOURCES = frozenset(
     {
         "pending_verified_literal_action",
@@ -110,36 +104,6 @@ def _exact_or_soft_wrapped_visual_text(raw_value: str, exact_value: str) -> bool
     return _collapsed_visual_text(raw_value) == exact_value
 
 
-def _surface_descriptor(
-    frame: Image.Image,
-    bounds: tuple[float, float, float, float],
-) -> str:
-    if not isinstance(frame, Image.Image):
-        raise InputValueLineageError("输入表面描述缺少真实图像帧。")
-    valid = _valid_bounds(bounds)
-    if valid is None or frame.width < 2 or frame.height < 2:
-        raise InputValueLineageError("输入表面描述的图像或 bounds 无效。")
-    left, top, right, bottom = valid
-    left = max(0.0, left - 0.04)
-    top = max(0.0, top - 0.035)
-    right = min(1.0, right + 0.04)
-    bottom = min(1.0, bottom + 0.035)
-    pixel_box = (
-        round(left * frame.width),
-        round(top * frame.height),
-        round(right * frame.width),
-        round(bottom * frame.height),
-    )
-    if pixel_box[0] >= pixel_box[2] or pixel_box[1] >= pixel_box[3]:
-        raise InputValueLineageError("输入表面描述的局部区域为空。")
-    gray = frame.convert("L").crop(pixel_box)
-    normalized = ImageOps.autocontrast(gray, cutoff=1).resize(
-        (SURFACE_DESCRIPTOR_WIDTH, SURFACE_DESCRIPTOR_HEIGHT),
-        Image.Resampling.LANCZOS,
-    )
-    return normalized.tobytes().hex()
-
-
 def _valid_surface_descriptor(value: Any) -> bool:
     expected_length = SURFACE_DESCRIPTOR_WIDTH * SURFACE_DESCRIPTOR_HEIGHT * 2
     return bool(
@@ -147,45 +111,6 @@ def _valid_surface_descriptor(value: Any) -> bool:
         and len(value) == expected_length
         and all(character in "0123456789abcdef" for character in value)
     )
-
-
-def _surface_descriptors(
-    frames: Any,
-    bounds: tuple[float, float, float, float],
-) -> tuple[str, ...]:
-    if not isinstance(frames, (list, tuple)) or len(frames) != 4:
-        raise InputValueLineageError("输入表面连续性必须绑定动作后四帧。")
-    descriptors = tuple(_surface_descriptor(frame, bounds) for frame in frames)
-    if len(set(descriptors)) == 0:
-        raise InputValueLineageError("输入表面连续性没有可用的局部描述。")
-    return descriptors
-
-
-def _surface_descriptor_matches(
-    descriptors: tuple[str, ...],
-    *,
-    frame: Image.Image | None,
-    bounds: tuple[float, float, float, float],
-) -> bool:
-    if frame is None or not descriptors:
-        return False
-    try:
-        current = bytes.fromhex(_surface_descriptor(frame, bounds))
-    except (InputValueLineageError, ValueError):
-        return False
-    for descriptor in descriptors:
-        try:
-            prior = bytes.fromhex(descriptor)
-        except ValueError:
-            continue
-        if len(prior) != len(current):
-            continue
-        mean_distance = sum(
-            abs(first - second) for first, second in zip(prior, current)
-        ) / len(current)
-        if mean_distance <= SURFACE_DESCRIPTOR_MAX_MEAN_DISTANCE:
-            return True
-    return False
 
 
 def input_app_identity_is_concrete_package(value: str) -> bool:
@@ -423,7 +348,7 @@ class TypedInputLineage:
         input_bounds: tuple[float, float, float, float] | None = None,
         now_epoch: float | None = None,
         ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
-        current_frame: Image.Image | None = None,
+        surface_matches: bool = False,
     ) -> bool:
         now = time.time() if now_epoch is None else float(now_epoch)
         if (
@@ -447,11 +372,7 @@ class TypedInputLineage:
             exact_value=self.exact_value,
         ):
             return True
-        return _surface_descriptor_matches(
-            self.surface_descriptors,
-            frame=current_frame,
-            bounds=self.input_bounds,
-        )
+        return surface_matches is True
 
     def matches_persisted_surface(
         self,
@@ -460,7 +381,7 @@ class TypedInputLineage:
         app_id: str,
         screen_id: str,
         input_bounds: tuple[float, float, float, float] | None,
-        current_frame: Image.Image | None,
+        surface_matches: bool,
         now_epoch: float | None = None,
         ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
     ) -> bool:
@@ -487,11 +408,7 @@ class TypedInputLineage:
                 current_screen_id=screen_id,
                 exact_value=self.exact_value,
             )
-            and _surface_descriptor_matches(
-                self.surface_descriptors,
-                frame=current_frame,
-                bounds=input_bounds,
-            )
+            and surface_matches is True
         )
 
     def matches_persisted_surface_cue(
@@ -503,7 +420,7 @@ class TypedInputLineage:
         raw_value: str,
         visible_editable_cues: tuple[str, ...],
         input_bounds: tuple[float, float, float, float] | None,
-        current_frame: Image.Image | None,
+        surface_matches: bool,
         now_epoch: float | None = None,
         ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
     ) -> bool:
@@ -517,7 +434,7 @@ class TypedInputLineage:
                 app_id=app_id,
                 screen_id=screen_id,
                 input_bounds=input_bounds,
-                current_frame=current_frame,
+                surface_matches=surface_matches,
                 now_epoch=now_epoch,
                 ttl_seconds=ttl_seconds,
             )
@@ -721,7 +638,7 @@ class TypedInputLineage:
         caret_line_index: int | None,
         input_bounds: tuple[float, float, float, float] | None,
         input_field_id: str | None,
-        current_frame: Image.Image | None = None,
+        surface_matches: bool = False,
         now_epoch: float | None = None,
         ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
     ) -> bool:
@@ -786,149 +703,12 @@ class TypedInputLineage:
                 app_id=app_id,
                 screen_id=screen_id,
                 input_bounds=input_bounds,
-                current_frame=current_frame,
+                surface_matches=surface_matches,
                 now_epoch=now_epoch,
                 ttl_seconds=ttl_seconds,
             )
         )
 
-
-class TypedInputLineageStore:
-    def __init__(
-        self,
-        directory: Path,
-        *,
-        ttl_seconds: float = DEFAULT_LINEAGE_TTL_SECONDS,
-        clock: Any = time.time,
-    ) -> None:
-        self.directory = Path(directory)
-        self.ttl_seconds = max(1.0, float(ttl_seconds))
-        self.clock = clock
-
-    def _path(self, device_id: str) -> Path:
-        token = hashlib.sha256(device_id.encode("utf-8")).hexdigest()[:24]
-        return self.directory / f"typed_input_lineage_{token}.json"
-
-    def write(self, record: TypedInputLineage) -> Path:
-        record.validate()
-        self.directory.mkdir(parents=True, exist_ok=True)
-        destination = self._path(record.device_id)
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=f".{destination.stem}.",
-            suffix=".tmp",
-            dir=str(self.directory),
-        )
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(record.to_dict(), handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, destination)
-        except Exception:
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
-            raise
-        return destination
-
-    def discard(self, device_id: str) -> None:
-        """Remove only the stale non-empty value for one verified device."""
-
-        try:
-            self._path(device_id).unlink()
-        except FileNotFoundError:
-            return
-
-    def load(self, device_id: str) -> TypedInputLineage | None:
-        path = self._path(device_id)
-        if not path.is_file():
-            return None
-        try:
-            record = TypedInputLineage.from_dict(
-                json.loads(path.read_text(encoding="utf-8"))
-            )
-        except (OSError, json.JSONDecodeError, InputValueLineageError):
-            return None
-        if record.device_id != device_id:
-            return None
-        now = float(self.clock())
-        if now < record.recorded_at_epoch or now - record.recorded_at_epoch > self.ttl_seconds:
-            return None
-        return record
-    def record_verified_literal_action(
-        self,
-        *,
-        device_id: str,
-        resolved_action: dict[str, Any],
-        before_scene: dict[str, Any],
-        after_scene: dict[str, Any],
-        hardware_receipt: dict[str, Any],
-        after_frames: tuple[Image.Image, ...],
-        source: str = "verified_live_literal_action",
-    ) -> TypedInputLineage:
-        record = _record_from_execution(
-            device_id=device_id,
-            resolved=resolved_action,
-            before_scene=before_scene,
-            after_scene=after_scene,
-            hardware_receipt=hardware_receipt,
-            recorded_at_epoch=float(self.clock()),
-            source=source,
-            surface_fallback=self.load(device_id),
-            surface_frames=after_frames,
-        )
-        self.write(record)
-        return record
-
-    def record_verified_text_action(
-        self,
-        *,
-        device_id: str,
-        resolved_action: dict[str, Any],
-        before_scene: dict[str, Any],
-        after_scene: dict[str, Any],
-        after_frames: tuple[Image.Image, ...],
-        source: str = "verified_live_text_action",
-    ) -> TypedInputLineage:
-        record = _record_from_text_execution(
-            device_id=device_id,
-            resolved=resolved_action,
-            before_scene=before_scene,
-            after_scene=after_scene,
-            recorded_at_epoch=float(self.clock()),
-            source=source,
-            surface_fallback=self.load(device_id),
-            surface_frames=after_frames,
-        )
-        self.write(record)
-        return record
-
-    def record_verified_newline_action(
-        self,
-        *,
-        device_id: str,
-        resolved_action: dict[str, Any],
-        before_scene: dict[str, Any],
-        after_scene: dict[str, Any],
-        hardware_receipt: dict[str, Any],
-        after_frames: tuple[Image.Image, ...],
-        source: str = "verified_live_newline_action",
-    ) -> TypedInputLineage:
-        record = _record_from_newline_execution(
-            device_id=device_id,
-            resolved=resolved_action,
-            before_scene=before_scene,
-            after_scene=after_scene,
-            hardware_receipt=hardware_receipt,
-            recorded_at_epoch=float(self.clock()),
-            source=source,
-            surface_fallback=self.load(device_id),
-            surface_frames=after_frames,
-        )
-        self.write(record)
-        return record
 
 def build_pending_text_lineage(
     *,
@@ -1703,7 +1483,7 @@ def _validated_chinese_preedit_action_chain(
     return before_input, prior, expected, fragment, pinyin
 
 
-def _record_from_text_execution(
+def build_verified_text_lineage(
     *,
     device_id: str,
     resolved: Any,
@@ -1712,7 +1492,9 @@ def _record_from_text_execution(
     recorded_at_epoch: float,
     source: str,
     surface_fallback: TypedInputLineage | None = None,
-    surface_frames: tuple[Image.Image, ...] | None = None,
+    surface_descriptor_factory: Callable[
+        [tuple[float, float, float, float]], tuple[str, ...]
+    ],
 ) -> TypedInputLineage:
     if not isinstance(after_scene, dict):
         raise InputValueLineageError("文字连续性缺少动作后场景。")
@@ -1798,8 +1580,7 @@ def _record_from_text_execution(
         after_fingerprint=after_fingerprint,
         action_digest=action_digest,
         receipt_digest=receipt_digest,
-        surface_descriptors=_surface_descriptors(
-            surface_frames,
+        surface_descriptors=surface_descriptor_factory(
             _valid_bounds(after_input["bounds"]),
         ),
         recorded_at_epoch=recorded_at_epoch,
@@ -1809,7 +1590,7 @@ def _record_from_text_execution(
     return record
 
 
-def _record_from_newline_execution(
+def build_verified_newline_lineage(
     *,
     device_id: str,
     resolved: Any,
@@ -1819,7 +1600,9 @@ def _record_from_newline_execution(
     recorded_at_epoch: float,
     source: str,
     surface_fallback: TypedInputLineage | None = None,
-    surface_frames: tuple[Image.Image, ...] | None = None,
+    surface_descriptor_factory: Callable[
+        [tuple[float, float, float, float]], tuple[str, ...]
+    ],
 ) -> TypedInputLineage:
     if not isinstance(after_scene, dict):
         raise InputValueLineageError("换行连续性缺少动作后场景。")
@@ -1899,8 +1682,7 @@ def _record_from_newline_execution(
         after_fingerprint=after_fingerprint,
         action_digest=_canonical_digest(resolved),
         receipt_digest=_canonical_digest(hardware_receipt),
-        surface_descriptors=_surface_descriptors(
-            surface_frames,
+        surface_descriptors=surface_descriptor_factory(
             _valid_bounds(after_input["bounds"]),
         ),
         recorded_at_epoch=recorded_at_epoch,
@@ -1910,7 +1692,7 @@ def _record_from_newline_execution(
     return record
 
 
-def _record_from_execution(
+def build_verified_literal_lineage(
     *,
     device_id: str,
     resolved: Any,
@@ -1920,7 +1702,9 @@ def _record_from_execution(
     recorded_at_epoch: float,
     source: str,
     surface_fallback: TypedInputLineage | None = None,
-    surface_frames: tuple[Image.Image, ...] | None = None,
+    surface_descriptor_factory: Callable[
+        [tuple[float, float, float, float]], tuple[str, ...]
+    ],
 ) -> TypedInputLineage:
     if not isinstance(resolved, dict) or resolved.get("kind") != "tap_semantic":
         raise InputValueLineageError("只有已验证的逐字符点击能形成输入值连续性。")
@@ -2034,8 +1818,7 @@ def _record_from_execution(
         after_fingerprint=after_fingerprint,
         action_digest=_canonical_digest(resolved),
         receipt_digest=_canonical_digest(hardware_receipt),
-        surface_descriptors=_surface_descriptors(
-            surface_frames,
+        surface_descriptors=surface_descriptor_factory(
             _valid_bounds(after_input["bounds"]),
         ),
         recorded_at_epoch=recorded_at_epoch,

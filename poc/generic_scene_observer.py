@@ -52,9 +52,14 @@ from agent.domain.verified_text_transaction import (
     preferred_keyboard_layout,
     required_keyboard_input_mode_for_step,
 )
-from input_value_lineage import (
+from agent.application.input_value_lineage import (
+    TypedInputLineageStorePort,
+    lineage_matches_persisted_surface_cue,
+    lineage_matches_trailing_newline_cue,
+    lineage_matches_visual,
+)
+from agent.domain.input_value_lineage import (
     TypedInputLineage,
-    TypedInputLineageStore,
 )
 SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-08-25-single-step-scene-observer-v2"
 SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = (
@@ -186,7 +191,7 @@ class _SingleStepObserverBase:
         self,
         provider: Any,
         *,
-        input_lineage_store: TypedInputLineageStore | None = None,
+        input_lineage_store: TypedInputLineageStorePort | None = None,
         qwerty_row_snapper: Callable[
             [list[Image.Image] | tuple[Image.Image, ...], dict[str, Any]],
             dict[str, list[int]] | None,
@@ -5033,7 +5038,8 @@ def _apply_input_structure_audit(
                     *lineage_visible_cues,
                     verified_input_lineage.exact_value,
                 )
-            if verified_input_lineage.matches_trailing_newline_cue(
+            if lineage_matches_trailing_newline_cue(
+                verified_input_lineage,
                 device_id=str(device_id or ""),
                 app_id=scene.app_id,
                 screen_id=scene.screen_id,
@@ -5061,7 +5067,8 @@ def _apply_input_structure_audit(
                     verified_input_lineage.exact_value
                 )
                 trusted_input["text"] = verified_input_lineage.exact_value
-            elif verified_input_lineage.matches_persisted_surface_cue(
+            elif lineage_matches_persisted_surface_cue(
+                verified_input_lineage,
                 device_id=str(device_id or ""),
                 app_id=scene.app_id,
                 screen_id=scene.screen_id,
@@ -5077,13 +5084,14 @@ def _apply_input_structure_audit(
                 trusted_input["text"] = verified_input_lineage.exact_value
             elif (
                 not _goal_active_input_field(goal_context)[2]
-                and verified_input_lineage.matches_visual(
-                device_id=str(device_id or ""),
-                app_id=scene.app_id,
-                screen_id=scene.screen_id,
-                raw_value=raw_lineage_text,
-                input_bounds=lineage_bounds,
-                current_frame=lineage_frame,
+                and lineage_matches_visual(
+                    verified_input_lineage,
+                    device_id=str(device_id or ""),
+                    app_id=scene.app_id,
+                    screen_id=scene.screen_id,
+                    raw_value=raw_lineage_text,
+                    input_bounds=lineage_bounds,
+                    current_frame=lineage_frame,
                 )
             ):
                 trusted_input = dict(trusted_input)

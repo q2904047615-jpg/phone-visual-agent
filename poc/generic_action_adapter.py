@@ -31,10 +31,10 @@ from generic_scene_observer import (
     PostActionVisualContext,
     SingleStepGenericSceneObserver,
 )
-from input_value_lineage import (
+from agent.application.input_value_lineage import TypedInputLineageStorePort
+from agent.domain.input_value_lineage import (
     InputValueLineageError,
     TypedInputLineage,
-    TypedInputLineageStore,
     build_pending_chinese_preedit_lineage,
     build_pending_ime_candidate_lineage,
     build_pending_input_state_lineage,
@@ -1655,7 +1655,7 @@ class GenericSingleActionAdapter:
         | None = None,
         require_local_qwerty_row_snap: bool = False,
         device_id: str,
-        input_lineage_store: TypedInputLineageStore | None = None,
+        input_lineage_store: TypedInputLineageStorePort | None = None,
     ) -> None:
         self.capture = capture
         self.observer = observer

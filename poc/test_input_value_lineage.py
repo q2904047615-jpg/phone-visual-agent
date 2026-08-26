@@ -12,18 +12,25 @@ from generic_scene_observer import (
     INPUT_STRUCTURE_AUDIT_VERSION,
     _apply_input_structure_audit,
 )
-from input_value_lineage import (
+from agent.application.input_value_lineage import (
+    describe_input_surface,
+    lineage_matches_persisted_surface,
+    lineage_matches_trailing_newline_cue,
+    lineage_matches_visual,
+)
+from agent.domain.input_value_lineage import (
     InputValueLineageError,
     TYPED_INPUT_LINEAGE_VERSION,
     TypedInputLineage,
-    TypedInputLineageStore,
-    _surface_descriptor,
     build_pending_chinese_preedit_lineage,
     build_pending_ime_candidate_lineage,
     build_pending_input_state_lineage,
     build_pending_literal_lineage,
     build_pending_newline_lineage,
     build_pending_text_lineage,
+)
+from agent.infrastructure.file_system_input_lineage_store import (
+    FileSystemTypedInputLineageStore as TypedInputLineageStore,
 )
 from agent.domain.ui_scene import UIScene
 from vision_agent import VisionAgentError
@@ -758,8 +765,11 @@ class TypedInputLineageTests(unittest.TestCase):
         observer_source = Path(__file__).with_name(
             "generic_scene_observer.py"
         ).read_text(encoding="utf-8")
-        lineage_source = Path(__file__).with_name(
-            "input_value_lineage.py"
+        lineage_source = (
+            Path(__file__).resolve().parent
+            / "agent"
+            / "domain"
+            / "input_value_lineage.py"
         ).read_text(encoding="utf-8")
         for retired in (
             "def _unique_scene_input_value(",
@@ -792,7 +802,8 @@ class TypedInputLineageTests(unittest.TestCase):
                 after_frames=surface_frames(),
             )
             self.assertTrue(
-                record.matches_visual(
+                lineage_matches_visual(
+                    record,
                     device_id=DEVICE,
                     app_id="unknown",
                     screen_id="editor_composing",
@@ -801,7 +812,8 @@ class TypedInputLineageTests(unittest.TestCase):
                 )
             )
             self.assertFalse(
-                record.matches_visual(
+                lineage_matches_visual(
+                    record,
                     device_id=DEVICE,
                     app_id="another.app",
                     screen_id="editor_composing",
@@ -822,7 +834,8 @@ class TypedInputLineageTests(unittest.TestCase):
                 after_frames=surface_frames(),
             )
             self.assertTrue(
-                record.matches_visual(
+                lineage_matches_visual(
+                    record,
                     device_id=DEVICE,
                     app_id="arbitrary.model.name",
                     screen_id="unrelated_model_screen_name",
@@ -833,7 +846,8 @@ class TypedInputLineageTests(unittest.TestCase):
                 )
             )
             self.assertFalse(
-                record.matches_visual(
+                lineage_matches_visual(
+                    record,
                     device_id=DEVICE,
                     app_id="arbitrary.model.name",
                     screen_id="unrelated_model_screen_name",
@@ -844,7 +858,8 @@ class TypedInputLineageTests(unittest.TestCase):
                 )
             )
             self.assertFalse(
-                record.matches_visual(
+                lineage_matches_visual(
+                    record,
                     device_id=DEVICE,
                     app_id="arbitrary.model.name",
                     screen_id="unrelated_model_screen_name",
@@ -854,7 +869,8 @@ class TypedInputLineageTests(unittest.TestCase):
                 )
             )
             self.assertFalse(
-                record.matches_visual(
+                lineage_matches_visual(
+                    record,
                     device_id=DEVICE,
                     app_id="unknown",
                     screen_id="unrelated_surface",
@@ -873,7 +889,8 @@ class TypedInputLineageTests(unittest.TestCase):
             recorded_at_epoch=1000.0,
         )
         self.assertFalse(
-            pending.matches_persisted_surface(
+            lineage_matches_persisted_surface(
+                pending,
                 device_id=DEVICE,
                 app_id="sample.app",
                 screen_id="editor",
@@ -1015,7 +1032,8 @@ class TypedInputLineageTests(unittest.TestCase):
         self.assertEqual(record.exact_value, EXPECTED)
         self.assertEqual(record.source, "pending_verified_literal_action")
         self.assertTrue(
-            record.matches_visual(
+            lineage_matches_visual(
+                record,
                 device_id=DEVICE,
                 app_id="sample.app",
                 screen_id="editor",
@@ -1944,7 +1962,8 @@ class TypedInputLineageTests(unittest.TestCase):
         self.assertEqual("pending_verified_text_action", pending.source)
         self.assertEqual((), pending.surface_descriptors)
         self.assertTrue(
-            pending.matches_visual(
+            lineage_matches_visual(
+                pending,
                 device_id=DEVICE,
                 app_id="sample.app",
                 screen_id="editor",
@@ -2292,7 +2311,7 @@ class TypedInputLineageTests(unittest.TestCase):
             action_digest="a" * 64,
             receipt_digest="b" * 64,
             surface_descriptors=tuple(
-                _surface_descriptor(
+                describe_input_surface(
                     surface_frame(variation=index % 2),
                     (0.13, 0.54, 0.69, 0.61),
                 )
@@ -2344,7 +2363,7 @@ class TypedInputLineageTests(unittest.TestCase):
             action_digest="a" * 64,
             receipt_digest="b" * 64,
             surface_descriptors=tuple(
-                _surface_descriptor(
+                describe_input_surface(
                     surface_frame(variation=index % 2),
                     (0.13, 0.54, 0.69, 0.61),
                 )
@@ -2382,7 +2401,7 @@ class TypedInputLineageTests(unittest.TestCase):
             action_digest="a" * 64,
             receipt_digest="b" * 64,
             surface_descriptors=tuple(
-                _surface_descriptor(
+                describe_input_surface(
                     surface_frame(variation=index % 2),
                     (0.13, 0.54, 0.69, 0.61),
                 )
@@ -2447,7 +2466,9 @@ class TypedInputLineageTests(unittest.TestCase):
             "input_field_id": "input_field_1",
             "now_epoch": 1000.0,
         }
-        self.assertTrue(pending.matches_trailing_newline_cue(**matching))
+        self.assertTrue(
+            lineage_matches_trailing_newline_cue(pending, **matching)
+        )
         for changed in (
             {"caret_line_index": 0},
             {"input_field_id": "other_field"},
@@ -2456,7 +2477,8 @@ class TypedInputLineageTests(unittest.TestCase):
         ):
             with self.subTest(changed=changed):
                 self.assertFalse(
-                    pending.matches_trailing_newline_cue(
+                    lineage_matches_trailing_newline_cue(
+                        pending,
                         **{**matching, **changed}
                     )
                 )
@@ -2480,7 +2502,8 @@ class TypedInputLineageTests(unittest.TestCase):
                 self.assertEqual("unknown", pending.app_id)
                 self.assertEqual("input_field_1", pending.input_field_id)
                 self.assertTrue(
-                    pending.matches_trailing_newline_cue(
+                    lineage_matches_trailing_newline_cue(
+                        pending,
                         device_id=DEVICE,
                         app_id="unknown",
                         screen_id="editor",
@@ -2626,7 +2649,8 @@ class TypedInputLineageTests(unittest.TestCase):
             )
             self.assertEqual("first\n", record.exact_value)
             self.assertTrue(
-                record.matches_trailing_newline_cue(
+                lineage_matches_trailing_newline_cue(
+                    record,
                     device_id=DEVICE,
                     app_id="sample.app",
                     screen_id="editor_input",

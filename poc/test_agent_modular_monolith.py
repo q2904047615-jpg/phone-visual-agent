@@ -473,7 +473,6 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 "fastapi",
                 "pydantic",
                 "web_app",
-                "agent.application",
                 "universal_agent_orchestrator",
             },
         }
@@ -688,6 +687,70 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                     if name.split(".")[0] not in allowed:
                         unexpected.append(f"{path.name}: {name}")
         self.assertEqual([], unexpected)
+
+    def test_typed_input_lineage_has_one_layered_runtime_entry(self) -> None:
+        from agent.application.input_value_lineage import (
+            TypedInputLineageStorePort,
+        )
+        from agent.domain.input_value_lineage import TypedInputLineage
+        from agent.infrastructure.file_system_input_lineage_store import (
+            FileSystemTypedInputLineageStore,
+        )
+
+        root = Path(__file__).resolve().parent
+        domain_path = root / "agent" / "domain" / "input_value_lineage.py"
+        application_path = (
+            root / "agent" / "application" / "input_value_lineage.py"
+        )
+        infrastructure_path = (
+            root
+            / "agent"
+            / "infrastructure"
+            / "file_system_input_lineage_store.py"
+        )
+        self.assertFalse((root / "input_value_lineage.py").exists())
+        self.assertTrue(domain_path.is_file())
+        self.assertTrue(application_path.is_file())
+        self.assertTrue(infrastructure_path.is_file())
+        self.assertTrue(issubclass(FileSystemTypedInputLineageStore, object))
+        self.assertTrue(hasattr(TypedInputLineage, "matches_typed_context"))
+        self.assertTrue(hasattr(TypedInputLineageStorePort, "load"))
+
+        domain_source = domain_path.read_text(encoding="utf-8")
+        application_source = application_path.read_text(encoding="utf-8")
+        infrastructure_source = infrastructure_path.read_text(encoding="utf-8")
+        for forbidden in (
+            "from PIL",
+            "import PIL",
+            "from pathlib",
+            "import os",
+            "import tempfile",
+            "agent.application",
+            "agent.infrastructure",
+        ):
+            self.assertNotIn(forbidden, domain_source)
+        self.assertNotIn("agent.infrastructure", application_source)
+        self.assertNotIn("class TypedInputLineageStore", domain_source)
+        self.assertEqual(
+            1,
+            infrastructure_source.count("class FileSystemTypedInputLineageStore"),
+        )
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "input_value_lineage"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "input_value_lineage":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
 
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent

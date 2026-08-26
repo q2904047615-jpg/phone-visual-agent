@@ -1,3 +1,5 @@
+"""DeepSeek HTTP provider for the task-graph application service."""
+
 from __future__ import annotations
 
 import os

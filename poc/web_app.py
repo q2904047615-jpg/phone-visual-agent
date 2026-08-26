@@ -51,7 +51,10 @@ from capability_acceptance import (
 )
 from capability_acceptance_runtime import CapabilityAcceptanceManager
 from capability_acceptance_planner import CapabilityAcceptanceTaskGraphPlanner
-from intent_provider import DeepSeekIntentProvider, IntentProviderError
+from agent.infrastructure.deepseek_intent_provider import (
+    DeepSeekIntentProvider,
+    IntentProviderError,
+)
 from agent.infrastructure.generic_action_adapter import (
     GenericSingleActionAdapter,
     persist_observer_failure_diagnostic,

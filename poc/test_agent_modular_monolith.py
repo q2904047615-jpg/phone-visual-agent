@@ -609,6 +609,52 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_deepseek_intent_provider_has_one_infrastructure_entry(self) -> None:
+        import agent.infrastructure.deepseek_intent_provider as provider
+
+        root = Path(__file__).resolve().parent
+        provider_path = (
+            root / "agent" / "infrastructure" / "deepseek_intent_provider.py"
+        )
+        self.assertFalse((root / "intent_provider.py").exists())
+        self.assertTrue(provider_path.is_file())
+        self.assertEqual(
+            "agent.infrastructure.deepseek_intent_provider",
+            provider.DeepSeekIntentProvider.__module__,
+        )
+        source = provider_path.read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("class DeepSeekIntentProvider:"))
+        self.assertEqual(1, source.count("class IntentProviderError("))
+        for forbidden in (
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "robot_core",
+            "vision_agent",
+        ):
+            self.assertNotIn(forbidden, source)
+
+        web_source = (root / "web_app.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "from agent.infrastructure.deepseek_intent_provider import (",
+            web_source,
+        )
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "intent_provider"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "intent_provider":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_web_uses_one_session_repository_instead_of_legacy_storage(self) -> None:
         source = (Path(__file__).resolve().parent / "web_app.py").read_text(
             encoding="utf-8"

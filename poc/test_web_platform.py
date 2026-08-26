@@ -81,7 +81,10 @@ class MockRobotController(_TestDirectionCredentialMixin, _MockRobotController):
 
 web_app.RobotController = RobotController
 web_app.MockRobotController = MockRobotController
-from intent_provider import DeepSeekIntentProvider, IntentProviderError
+from agent.infrastructure.deepseek_intent_provider import (
+    DeepSeekIntentProvider,
+    IntentProviderError,
+)
 from agent.domain.vision_model import VisionAgentError
 
 
@@ -1071,7 +1074,7 @@ class DeepSeekIntentProviderTests(unittest.TestCase):
             retry_base_delay=0,
         )
         with patch(
-            "intent_provider.httpx.post",
+            "agent.infrastructure.deepseek_intent_provider.httpx.post",
             return_value=self._response(),
         ) as mocked:
             result = provider.chat_json(
@@ -1088,14 +1091,21 @@ class DeepSeekIntentProviderTests(unittest.TestCase):
 
     def test_missing_key_fails_without_network_request(self) -> None:
         provider = DeepSeekIntentProvider(api_key="")
-        with patch("intent_provider.httpx.post") as mocked:
+        with patch(
+            "agent.infrastructure.deepseek_intent_provider.httpx.post"
+        ) as mocked:
             with self.assertRaisesRegex(IntentProviderError, "DEEPSEEK_API_KEY"):
                 provider.chat_json([{"role": "user", "content": "json"}])
         mocked.assert_not_called()
 
     def test_uses_windows_user_environment_when_process_env_is_stale(self) -> None:
-        with patch.dict("intent_provider.os.environ", {}, clear=True), patch(
-            "intent_provider._read_windows_user_environment",
+        with patch.dict(
+            "agent.infrastructure.deepseek_intent_provider.os.environ",
+            {},
+            clear=True,
+        ), patch(
+            "agent.infrastructure.deepseek_intent_provider."
+            "_read_windows_user_environment",
             return_value="registry-key",
         ):
             provider = DeepSeekIntentProvider()

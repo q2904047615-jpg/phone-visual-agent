@@ -816,7 +816,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_canonical_action_kinds_have_one_domain_identity(self) -> None:
         import agent.domain.canonical_action_protocol as canonical_protocol
-        import qwen_visual_decision
+        import agent.application.qwen_visual_decision as qwen_visual_decision
         from agent.domain.action_capabilities import KNOWN_ACTION_CAPABILITIES
         from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
         from agent.domain.device_execution import EXECUTABLE_ACTION_KINDS
@@ -921,7 +921,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], legacy_imports)
 
     def test_canonical_action_catalog_has_one_domain_identity(self) -> None:
-        import qwen_visual_decision
+        import agent.application.qwen_visual_decision as qwen_visual_decision
         from agent.domain.canonical_action_protocol import (
             CanonicalActionCandidate,
             GenericStepProposal,
@@ -1013,7 +1013,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_goal_context_semantics_have_one_domain_owner(self) -> None:
         import generic_scene_observer
-        import qwen_visual_decision
+        import agent.application.qwen_visual_decision as qwen_visual_decision
         from agent.domain.generic_goal import safe_goal_context
         from agent.domain.message_intent import (
             subgoal_binds_recipient,
@@ -1082,7 +1082,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], legacy_imports)
 
     def test_qwen_task_context_has_one_domain_identity(self) -> None:
-        import qwen_visual_decision
+        import agent.application.qwen_visual_decision as qwen_visual_decision
         import universal_agent_orchestrator
         from agent.domain.qwen_task_context import (
             QwenTaskContext,
@@ -1091,7 +1091,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
         root = Path(__file__).resolve().parent
         domain_path = root / "agent" / "domain" / "qwen_task_context.py"
-        provider_path = root / "qwen_visual_decision.py"
+        provider_path = (
+            root / "agent" / "application" / "qwen_visual_decision.py"
+        )
         self.assertTrue(domain_path.is_file())
         self.assertFalse((root / "qwen_task_context.py").exists())
         self.assertFalse(hasattr(qwen_visual_decision, "QwenTaskContext"))
@@ -1135,6 +1137,58 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                     and any(item.name == "QwenTaskContext" for item in node.names)
                 ):
                     legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
+    def test_qwen_visual_decision_has_one_application_entry(self) -> None:
+        import agent.application.qwen_visual_decision as qwen_visual_decision
+        from agent.application.qwen_visual_decision import (
+            QwenVisualDecisionObserver,
+        )
+
+        root = Path(__file__).resolve().parent
+        application_path = (
+            root / "agent" / "application" / "qwen_visual_decision.py"
+        )
+        self.assertFalse((root / "qwen_visual_decision.py").exists())
+        self.assertTrue(application_path.is_file())
+        self.assertEqual(
+            "agent.application.qwen_visual_decision",
+            QwenVisualDecisionObserver.__module__,
+        )
+        source = application_path.read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("class QwenVisualDecisionObserver:"))
+        self.assertEqual(
+            "2026-08-14-qwen-visual-decision-v5",
+            qwen_visual_decision.QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
+        )
+        for forbidden in (
+            "agent.infrastructure",
+            "from pathlib",
+            "Path(",
+            ".read_text(",
+            ".write_text(",
+            "import os",
+            "os.environ",
+            "web_app",
+            "robot_core",
+            "generic_scene_observer",
+        ):
+            self.assertNotIn(forbidden, source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "qwen_visual_decision"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "qwen_visual_decision":
+                            legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
     def test_deepseek_task_graph_has_one_application_entry(self) -> None:
@@ -1266,7 +1320,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_vision_model_contract_has_one_layered_identity(self) -> None:
         import generic_scene_observer
-        import qwen_visual_decision
+        import agent.application.qwen_visual_decision as qwen_visual_decision
         import vision_agent
         from agent.domain.vision_model import (
             VisionAgentError,
@@ -1342,7 +1396,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
     def test_visual_evidence_and_image_measurement_are_layered_once(self) -> None:
         import agent.infrastructure.observation_images as observation_images
         import generic_scene_observer
-        import qwen_visual_decision
+        import agent.application.qwen_visual_decision as qwen_visual_decision
         from agent.domain.visual_evidence import (
             LocalFrameStability,
             VisualObstruction,
@@ -1404,7 +1458,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         import agent.infrastructure.observation_images as observation_images
         import agent.infrastructure.trusted_observation_frames as frame_adapter
         import generic_scene_observer
-        import qwen_visual_decision
+        import agent.application.qwen_visual_decision as qwen_visual_decision
         import universal_agent_orchestrator
         from agent.domain.trusted_observation import TrustedObservation
 
@@ -1416,7 +1470,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             / "infrastructure"
             / "trusted_observation_frames.py"
         )
-        qwen_path = root / "qwen_visual_decision.py"
+        qwen_path = root / "agent" / "application" / "qwen_visual_decision.py"
         observer_path = root / "generic_scene_observer.py"
         self.assertTrue(domain_path.is_file())
         self.assertTrue(adapter_path.is_file())

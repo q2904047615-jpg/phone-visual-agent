@@ -8795,14 +8795,21 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         )
 
     def test_removed_duplicate_authorities_cannot_return_to_production(self) -> None:
+        root = Path(__file__).parent
+        production_paths = {
+            "universal_agent_orchestrator.py": root
+            / "universal_agent_orchestrator.py",
+            "qwen_visual_decision.py": root
+            / "agent"
+            / "application"
+            / "qwen_visual_decision.py",
+            "orientation_safety.py": root / "orientation_safety.py",
+            "universal_action_controller.py": root
+            / "universal_action_controller.py",
+        }
         production = {
-            name: (Path(__file__).parent / name).read_text(encoding="utf-8")
-            for name in (
-                "universal_agent_orchestrator.py",
-                "qwen_visual_decision.py",
-                "orientation_safety.py",
-                "universal_action_controller.py",
-            )
+            name: path.read_text(encoding="utf-8")
+            for name, path in production_paths.items()
         }
         joined = "\n".join(production.values())
         for forbidden in (

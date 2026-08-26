@@ -15,7 +15,7 @@ from agent.domain.canonical_action_protocol import (
     scene_matches_target_app_surface,
 )
 from agent.infrastructure.observation_images import local_frame_fingerprint
-from qwen_visual_decision import (
+from agent.application.qwen_visual_decision import (
     QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
     QwenVisualDecisionObserver,
     _exact_text_candidate_block,

@@ -188,7 +188,9 @@ class FixedAppRetirementTests(unittest.TestCase):
                 self.assertNotIn(retired, text)
 
     def test_retired_full_qwen_action_prompt_is_physically_absent(self) -> None:
-        text = (ROOT / "qwen_visual_decision.py").read_text(encoding="utf-8")
+        text = (
+            ROOT / "agent" / "application" / "qwen_visual_decision.py"
+        ).read_text(encoding="utf-8")
         for retired in ("def _decision_prompt(", "def _decision_retry_prompt("):
             with self.subTest(retired=retired):
                 self.assertNotIn(retired, text)

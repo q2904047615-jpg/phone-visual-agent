@@ -72,7 +72,7 @@ from agent.application.deepseek_task_graph import (
     DeepSeekTaskGraphPlanner,
 )
 from agent.domain.task_graph import TaskGraphError
-from qwen_visual_decision import QwenVisualDecisionObserver
+from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from universal_agent_orchestrator import (
     POST_ACTION_TRANSITION_PROTOCOL_VERSION,
     UniversalAgentOrchestrator,

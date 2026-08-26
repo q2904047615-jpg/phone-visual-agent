@@ -1,7 +1,9 @@
 import unittest
 from types import SimpleNamespace
 
-from qwen_visual_decision import _deterministic_exact_selection_payload
+from agent.application.qwen_visual_decision import (
+    _deterministic_exact_selection_payload,
+)
 
 
 class DeterministicExactSelectionTests(unittest.TestCase):

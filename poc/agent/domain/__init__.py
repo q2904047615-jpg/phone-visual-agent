@@ -1,5 +1,6 @@
 """Domain contracts shared by the modular monolith."""
 
+from .app_surface_lineage import VerifiedAppSurfaceLineage
 from .canonical_selection import (
     CANONICAL_SELECTION_RECEIPT_VERSION,
     CanonicalSelectionReceipt,
@@ -55,5 +56,6 @@ __all__ = [
     "DeviceTaskRegistryPort",
     "EvidenceStoreError",
     "EffectConfirmationAuthority",
+    "VerifiedAppSurfaceLineage",
     "require_session_device",
 ]

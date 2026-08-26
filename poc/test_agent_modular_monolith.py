@@ -19,6 +19,7 @@ from agent.domain import (
     CanonicalSelectionReceipt,
     ConfirmationAuthority,
     EffectConfirmationAuthority,
+    VerifiedAppSurfaceLineage,
 )
 from agent.infrastructure import InMemoryAgentSessionRepository
 
@@ -242,6 +243,48 @@ class AgentSessionApplicationTests(unittest.TestCase):
 
 
 class AgentDependencyBoundaryTests(unittest.TestCase):
+    def test_verified_app_surface_lineage_is_one_immutable_domain_record(self) -> None:
+        lineage = VerifiedAppSurfaceLineage(
+            session_id="session-1",
+            task_id="task-1",
+            device_id="phone-1",
+            app_id="messaging-product",
+            app_name="Messaging",
+            surface_id="conversation",
+            source_receipt_id="receipt-1",
+            source_subgoal_id="open-conversation",
+            functional_foreground_app_id="com.example.messaging",
+            physical_actions=2,
+        )
+
+        self.assertEqual(
+            {
+                "session_id": "session-1",
+                "task_id": "task-1",
+                "device_id": "phone-1",
+                "app_id": "messaging-product",
+                "app_name": "Messaging",
+                "surface_id": "conversation",
+                "source_receipt_id": "receipt-1",
+                "source_subgoal_id": "open-conversation",
+                "functional_foreground_app_id": "com.example.messaging",
+                "physical_actions": 2,
+            },
+            lineage.to_dict(),
+        )
+        with self.assertRaises(AttributeError):
+            lineage.physical_actions = 3  # type: ignore[misc]
+
+        root = Path(__file__).resolve().parent
+        orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("class VerifiedAppSurfaceLineage", orchestrator_source)
+        self.assertIn(
+            "verified_app_surface_lineage: VerifiedAppSurfaceLineage | None",
+            orchestrator_source,
+        )
+
     def test_confirmation_authorities_are_domain_scoped_and_stably_sorted(self) -> None:
         action = ConfirmationAuthority(
             session_id="session-1",

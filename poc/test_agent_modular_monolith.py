@@ -13,8 +13,10 @@ from agent.application import (
     UniversalAgentSessionApplicationService,
 )
 from agent.domain import (
+    CANONICAL_SELECTION_RECEIPT_VERSION,
     AgentSessionConflictError,
     AgentSessionDeviceMismatchError,
+    CanonicalSelectionReceipt,
 )
 from agent.infrastructure import InMemoryAgentSessionRepository
 
@@ -238,6 +240,39 @@ class AgentSessionApplicationTests(unittest.TestCase):
 
 
 class AgentDependencyBoundaryTests(unittest.TestCase):
+    def test_canonical_selection_receipt_is_one_domain_value_object(self) -> None:
+        allowed = CanonicalSelectionReceipt(
+            allowed=True,
+            reason="唯一 canonical 候选已绑定。",
+            canonical_class="tap_semantic",
+        )
+        denied = CanonicalSelectionReceipt(
+            allowed=False,
+            reason="当前设备不支持该动作。",
+        )
+
+        self.assertEqual(
+            {
+                "allowed": True,
+                "reason": "唯一 canonical 候选已绑定。",
+                "canonical_class": "tap_semantic",
+                "policy_version": CANONICAL_SELECTION_RECEIPT_VERSION,
+            },
+            allowed.to_dict(),
+        )
+        self.assertEqual("", denied.to_dict()["canonical_class"])
+
+        root = Path(__file__).resolve().parent
+        orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("class CanonicalSelectionReceipt", orchestrator_source)
+        self.assertNotIn(
+            '"2026-08-26-canonical-selection-receipt-v1"',
+            orchestrator_source,
+        )
+        self.assertIn("decision.to_dict()", orchestrator_source)
+
     def test_domain_and_application_dependencies_point_inward(self) -> None:
         root = Path(__file__).resolve().parent / "agent"
         banned_by_layer = {

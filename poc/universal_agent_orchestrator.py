@@ -28,6 +28,8 @@ from deepseek_failure_diagnostics import persist_deepseek_failure_diagnostic
 from agent.domain import (
     AgentEvidenceStoreFactory,
     AgentEvidenceStorePort,
+    CANONICAL_SELECTION_RECEIPT_VERSION,
+    CanonicalSelectionReceipt,
     DeviceTaskRegistryPort,
     EvidenceStoreError,
 )
@@ -70,9 +72,6 @@ POST_ACTION_TRANSITION_PROTOCOL_VERSION = (
     "2026-08-16-universal-post-action-transition-v1"
 )
 POST_ACTION_OUTCOMES = frozenset({"matched", "mismatched"})
-CANONICAL_SELECTION_RECEIPT_VERSION = (
-    "2026-08-26-canonical-selection-receipt-v1"
-)
 CORRECTIVE_RETRY_PROTOCOL_VERSION = (
     "2026-08-24-fresh-observation-corrective-retry-v1"
 )
@@ -1087,16 +1086,7 @@ class UniversalAgentSessionState:
             if self.qwen_decision is not None
             else None
         )
-        controller = (
-            {
-                "allowed": self.controller_decision.allowed,
-                "reason": self.controller_decision.reason,
-                "canonical_class": self.controller_decision.canonical_class,
-                "policy_version": CANONICAL_SELECTION_RECEIPT_VERSION,
-            }
-            if self.controller_decision is not None
-            else None
-        )
+        controller = self._serialize(self.controller_decision)
         scene = (
             self._serialize(getattr(self.trusted_observation, "scene", None))
             if self.trusted_observation is not None
@@ -3037,12 +3027,7 @@ class UniversalAgentOrchestrator:
     def _selection_receipt_payload(
         decision: CanonicalSelectionReceipt,
     ) -> dict[str, Any]:
-        return {
-            "allowed": decision.allowed,
-            "reason": decision.reason,
-            "canonical_class": decision.canonical_class,
-            "policy_version": CANONICAL_SELECTION_RECEIPT_VERSION,
-        }
+        return decision.to_dict()
 
     @classmethod
     def _selection_receipt(
@@ -7370,12 +7355,3 @@ class UniversalAgentOrchestrator:
                 self._write_terminal_snapshot(session)
         finally:
             self.device_registry.release(session.device_id, session.session_id)
-
-
-@dataclass(frozen=True)
-class CanonicalSelectionReceipt:
-    """Evidence that the sole step selector emitted one executable candidate."""
-
-    allowed: bool
-    reason: str
-    canonical_class: str = ""

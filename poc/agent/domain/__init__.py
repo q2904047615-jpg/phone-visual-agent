@@ -1,5 +1,9 @@
 """Domain contracts shared by the modular monolith."""
 
+from .canonical_selection import (
+    CANONICAL_SELECTION_RECEIPT_VERSION,
+    CanonicalSelectionReceipt,
+)
 from .device_execution import (
     DEVICE_EXECUTOR_PROTOCOL,
     EXECUTABLE_ACTION_KINDS,
@@ -27,6 +31,7 @@ from .session_evidence import (
 
 __all__ = [
     "ACTIVE_SESSION_STATUSES",
+    "CANONICAL_SELECTION_RECEIPT_VERSION",
     "DEVICE_EXECUTOR_PROTOCOL",
     "EXECUTABLE_ACTION_KINDS",
     "AgentSession",
@@ -36,6 +41,7 @@ __all__ = [
     "AgentSessionRepository",
     "AgentEvidenceStoreFactory",
     "AgentEvidenceStorePort",
+    "CanonicalSelectionReceipt",
     "DeviceActionRequest",
     "DeviceExecutionError",
     "DeviceExecutionResult",

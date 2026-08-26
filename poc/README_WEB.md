@@ -41,11 +41,11 @@ scope 和一次性执行权；动作后重新观察并验证。普通只读/导�
 
 ## 当前代码分层
 
-项目采用轻量、渐进式 DDD 模块化单体，不拆微服务，也不一次性重写。第一批已把通用 Agent 会话生命周期迁入 `agent/`：
+项目采用轻量、渐进式 DDD 模块化单体，不拆微服务，也不一次性重写。当前已迁入 `agent/` 的正式切片为：
 
-- `agent/domain/` 定义会话合同、设备绑定不变量和仓储端口；
+- `agent/domain/` 定义会话、设备执行、会话证据和 canonical 选择回执合同；
 - `agent/application/` 负责开始、确认、重观察、自动推进、暂停和取消用例；
-- `agent/infrastructure/` 提供唯一的线程安全进程内会话仓储；
+- `agent/infrastructure/` 提供唯一的线程安全进程内会话仓储、Robot/Replay 执行、设备独占和文件系统证据持久化；
 - `web_app.py` 保留 HTTP/Pydantic 转换与组合根职责。
 
-尚未迁移的 DeepSeek、Qwen、canonical action、Controller、typed input lineage 和机械执行模块仍是正式实现；不得为目录整齐而增加转发包装或第二套权威。每个后续批次只迁移一个正在运行的业务切片，并在新入口接管后删除旧调用。
+尚未迁移的 DeepSeek、Qwen、canonical action 目录、Controller 和 typed input lineage 仍是正式实现；不得为目录整齐而增加转发包装或第二套权威。每个后续批次只迁移一个正在运行的业务切片，并在新入口接管后删除旧调用。

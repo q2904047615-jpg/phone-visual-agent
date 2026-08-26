@@ -43,7 +43,6 @@ from universal_agent_orchestrator import (
     EvidenceStoreError,
     DeviceTaskRegistry,
     ObservationBridge,
-    CanonicalActionPolicy,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
     UniversalAgentSessionState,
@@ -778,6 +777,7 @@ class FakeQwenObserver:
         trusted_observation,
         decision_number=1,
         available_action_kinds=None,
+        navigation_history=(),
     ):
         self.calls.append((frames, task_context, trusted_observation, decision_number))
         if self.status == "action":
@@ -1089,21 +1089,6 @@ class VisibleCompletionConditionProgressTests(unittest.TestCase):
                     )
 
 
-class CanonicalActionPolicyTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.policy = CanonicalActionPolicy()
-
-    def test_missing_canonical_protocol_is_rejected(self) -> None:
-        current_scene = _scene()
-        result = self.policy.evaluate(
-            task_context=_context(),
-            trusted_observation=_decision(current_scene).trusted_observation,
-            decision=_decision(current_scene),
-        )
-        self.assertFalse(result.allowed)
-        self.assertIn("canonical action protocol", result.reason)
-
-
 class ObservationBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.bridge = ObservationBridge()
@@ -1314,6 +1299,124 @@ class ObservationBridgeTests(unittest.TestCase):
             unrelated_focus["goal_entities"],
         )
         self.assertNotIn("input_text", unrelated_focus["goal_entities"])
+
+    def test_projects_target_only_input_identity_for_clear_without_new_text(self) -> None:
+        for objective in (
+            (
+                "清空当前唯一已聚焦输入框中尚未提交的 aaazjie 预编辑，"
+                "直到应用输入值和输入法预编辑都为空"
+            ),
+            (
+                "Clear the visible IME composition from the currently focused "
+                "input field until both the App value and preedit are empty"
+            ),
+        ):
+            with self.subTest(objective=objective):
+                graph = DynamicTaskGraph(
+                    task_id="task-clear-target-only",
+                    device_id="device-1",
+                    revision=1,
+                    status="running",
+                    goal=GraphGoal(
+                        objective=objective,
+                        target_apps=(
+                            TargetApp(
+                                app_id="current_foreground",
+                                app_name="当前前台应用",
+                            ),
+                        ),
+                        entities={"target_ui_label": "aaazjie"},
+                    ),
+                    constraints=("不要发送或提交",),
+                    completion_conditions=(
+                        CompletionCondition(
+                            condition_id="input-empty",
+                            description="应用输入值和输入法预编辑都为空",
+                            evidence_required=("当前输入审计为空",),
+                        ),
+                    ),
+                    risk_actions=(),
+                    subgoals=(
+                        Subgoal(
+                            subgoal_id="clear-preedit",
+                            objective=objective,
+                            status="active",
+                            depends_on=(),
+                            constraints=("不要发送或提交",),
+                            completion_conditions=(
+                                "应用输入值和输入法预编辑都为空",
+                            ),
+                            completion_evidence=(),
+                            risk_action_ids=(),
+                            external_impact="navigation_only",
+                        ),
+                    ),
+                    active_subgoal_id="clear-preedit",
+                    raw_user_goal=objective,
+                )
+                graph.validate()
+
+                authority = compile_formal_semantic_authority(graph).semantic_ir
+                self.assertEqual((), authority.input_fields)
+                focus = self.bridge.goal_draft(graph).entities[
+                    "active_subgoal_visual_context"
+                ]["goal_entities"]
+
+                self.assertEqual(
+                    "input_field_clear_target",
+                    focus["active_input_field_id"],
+                )
+                self.assertIs(True, focus["active_input_target_only"])
+                self.assertFalse(focus["active_input_multiline"])
+                self.assertNotIn("active_input_transaction_text", focus)
+                self.assertNotIn("input_text", focus)
+
+        unrelated = DynamicTaskGraph(
+            task_id="task-delete-saved-content",
+            device_id="device-1",
+            revision=1,
+            status="running",
+            goal=GraphGoal(
+                objective="删除当前页面中的已保存内容",
+                target_apps=(
+                    TargetApp(
+                        app_id="current_foreground",
+                        app_name="当前前台应用",
+                    ),
+                ),
+                entities={"target_ui_label": "已保存内容"},
+            ),
+            constraints=(),
+            completion_conditions=(
+                CompletionCondition(
+                    condition_id="saved-content-absent",
+                    description="已保存内容不再存在",
+                    evidence_required=("页面中不再显示该内容",),
+                ),
+            ),
+            risk_actions=(),
+            subgoals=(
+                Subgoal(
+                    subgoal_id="delete-saved",
+                    objective="删除当前页面中的已保存内容",
+                    status="active",
+                    depends_on=(),
+                    constraints=(),
+                    completion_conditions=("已保存内容不再存在",),
+                    completion_evidence=(),
+                    risk_action_ids=(),
+                    external_impact="navigation_only",
+                ),
+            ),
+            active_subgoal_id="delete-saved",
+            raw_user_goal="删除当前页面中的已保存内容",
+        )
+        unrelated.validate()
+
+        unrelated_focus = self.bridge.goal_draft(unrelated).entities[
+            "active_subgoal_visual_context"
+        ]["goal_entities"]
+        self.assertNotIn("active_input_field_id", unrelated_focus)
 
     def test_post_effect_rendered_payload_does_not_reopen_input_transaction(self) -> None:
         graph = DynamicTaskGraph(
@@ -2025,6 +2128,284 @@ class UniversalAgentStartTests(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual([], planner.replan_calls)
+
+    def test_unique_container_can_prove_presence_but_never_action_authority(self) -> None:
+        base = _graph()
+        visible_card = Subgoal(
+            subgoal_id="observe_recent_task_card",
+            objective="确认示例聊天应用预览卡片可见",
+            status="active",
+            depends_on=(),
+            constraints=("仅观察，不执行动作",),
+            completion_conditions=(
+                "系统最近任务页面可见，且示例聊天应用预览卡片可见",
+            ),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="read_only",
+        )
+        dismiss_card = Subgoal(
+            subgoal_id="dismiss_recent_task_card",
+            objective="将示例聊天应用预览卡片向上划掉",
+            status="pending",
+            depends_on=(visible_card.subgoal_id,),
+            constraints=("只执行一次向上滑动",),
+            completion_conditions=("示例聊天应用预览卡片已移除",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        initial = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="从系统最近任务中划掉示例聊天应用预览卡片",
+                target_apps=(),
+                entities={
+                    "target_surface": "system",
+                    "target_ui_label": "示例聊天应用预览卡片",
+                },
+            ),
+            completion_conditions=(
+                CompletionCondition(
+                    condition_id="card-removed",
+                    description="示例聊天应用预览卡片已移除",
+                    evidence_required=("最近任务中不再显示该卡片",),
+                ),
+            ),
+            subgoals=(visible_card, dismiss_card),
+            active_subgoal_id=visible_card.subgoal_id,
+            raw_user_goal="从系统最近任务中划掉示例聊天应用预览卡片",
+        )
+        initial.validate()
+        card = UIElement(
+            element_id="recent-card",
+            role="container",
+            meaning="app_preview_card",
+            label="示例聊天",
+            bounds=(0.27, 0.30, 0.73, 0.82),
+            confidence=1.0,
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=("示例聊天图标和标题位于卡片顶部",),
+        )
+        scene = UIScene(
+            app_id="system",
+            screen_id="system_recent_tasks",
+            summary="系统最近任务页面，中央显示示例聊天应用预览卡片。",
+            elements=(card,),
+            stable=True,
+            confidence=1.0,
+            fingerprint="recent-task-card-visible",
+        )
+        revised = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    visible_card,
+                    status="completed",
+                    completion_evidence=(scene.summary,),
+                ),
+                replace(dismiss_card, status="active"),
+            ),
+            active_subgoal_id=dismiss_card.subgoal_id,
+        )
+        revised.validate()
+        planner = SequenceDeepSeekPlanner(initial, revised)
+        adapter = FakeAdapter(scene)
+        orchestrator = self._orchestrator(
+            planner,
+            FakeQwenObserver(),
+            adapter,
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = UniversalAgentSessionState(
+                session_id="session-container-presence",
+                raw_goal=initial.raw_user_goal,
+                device_id=initial.device_id,
+                run_dir=Path(temp),
+                adapter=adapter,
+                evidence_store=AgentEvidenceStore(Path(temp)),
+                task_graph=initial,
+            )
+            trusted = FakeTrustedObservation(
+                device_id=initial.device_id,
+                scene=scene,
+            )
+            result = orchestrator._try_advance_visible_presence_subgoal(
+                session,
+                graph=initial,
+                trusted_observation=trusted,
+            )
+            ambiguous_scene = replace(
+                scene,
+                elements=(
+                    card,
+                    replace(
+                        card,
+                        element_id="other-recent-card",
+                        label="另一个应用",
+                        bounds=(0.05, 0.30, 0.24, 0.82),
+                    ),
+                ),
+                fingerprint="two-recent-task-cards",
+            )
+            ambiguous = orchestrator._try_advance_visible_presence_subgoal(
+                session,
+                graph=initial,
+                trusted_observation=FakeTrustedObservation(
+                    device_id=initial.device_id,
+                    scene=ambiguous_scene,
+                ),
+            )
+
+        self.assertEqual(revised, result)
+        self.assertIsNone(scene.unique_trusted_goal_element())
+        self.assertEqual((card,), scene.trusted_completion_evidence())
+        self.assertIsNone(ambiguous)
+        self.assertEqual(1, len(planner.replan_calls))
+        self.assertTrue(
+            any(
+                "role=container" in item and "meaning=app_preview_card" in item
+                for item in planner.replan_calls[0][1].visible_evidence
+            )
+        )
+
+    def test_current_typed_system_surface_completes_idempotent_navigation(self) -> None:
+        base = _graph()
+        open_recents = Subgoal(
+            subgoal_id="open_recent_tasks",
+            objective="打开系统最近任务页面，使最近任务页面可见",
+            status="active",
+            depends_on=(),
+            constraints=(),
+            completion_conditions=("系统最近任务页面可见",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        dismiss_card = Subgoal(
+            subgoal_id="dismiss_recent_task_card",
+            objective="将示例应用预览卡片向上划掉",
+            status="pending",
+            depends_on=(open_recents.subgoal_id,),
+            constraints=("只执行一次向上滑动",),
+            completion_conditions=("示例应用预览卡片已移除",),
+            completion_evidence=(),
+            risk_action_ids=(),
+            external_impact="navigation_only",
+        )
+        initial = replace(
+            base,
+            goal=replace(
+                base.goal,
+                objective="从系统最近任务中划掉示例应用预览卡片",
+                target_apps=(),
+                entities={
+                    "target_surface": "system",
+                    "target_ui_label": "示例应用预览卡片",
+                },
+            ),
+            completion_conditions=(
+                CompletionCondition(
+                    condition_id="card-removed",
+                    description="示例应用预览卡片已移除",
+                    evidence_required=("最近任务中不再显示该卡片",),
+                ),
+            ),
+            subgoals=(open_recents, dismiss_card),
+            active_subgoal_id=open_recents.subgoal_id,
+            raw_user_goal="从系统最近任务中划掉示例应用预览卡片",
+        )
+        initial.validate()
+        scene = UIScene(
+            app_id="system",
+            screen_id="system_recent_tasks",
+            summary="系统最近任务页面，显示唯一示例应用预览卡片。",
+            elements=(
+                UIElement(
+                    element_id="recent-card",
+                    role="list_item",
+                    meaning="app_preview_card",
+                    label="示例应用",
+                    bounds=(0.27, 0.30, 0.73, 0.82),
+                    confidence=1.0,
+                    states={"goal_relevant": True, "fully_visible": True},
+                    evidence=("示例应用标题位于预览卡片顶部",),
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint="recent-tasks-already-current",
+        )
+        revised = replace(
+            initial,
+            revision=2,
+            subgoals=(
+                replace(
+                    open_recents,
+                    status="completed",
+                    completion_evidence=(scene.summary,),
+                ),
+                replace(dismiss_card, status="active"),
+            ),
+            active_subgoal_id=dismiss_card.subgoal_id,
+        )
+        revised.validate()
+        planner = SequenceDeepSeekPlanner(initial, revised)
+        adapter = FakeAdapter(scene)
+        orchestrator = self._orchestrator(
+            planner,
+            FakeQwenObserver(),
+            adapter,
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = UniversalAgentSessionState(
+                session_id="session-idempotent-recent-tasks",
+                raw_goal=initial.raw_user_goal,
+                device_id=initial.device_id,
+                run_dir=Path(temp),
+                adapter=adapter,
+                evidence_store=AgentEvidenceStore(Path(temp)),
+                task_graph=initial,
+            )
+            result = orchestrator._try_advance_visible_presence_subgoal(
+                session,
+                graph=initial,
+                trusted_observation=FakeTrustedObservation(
+                    device_id=initial.device_id,
+                    scene=scene,
+                ),
+            )
+            wrong_surface = orchestrator._try_advance_visible_presence_subgoal(
+                session,
+                graph=initial,
+                trusted_observation=FakeTrustedObservation(
+                    device_id=initial.device_id,
+                    scene=UIScene(
+                        app_id="launcher",
+                        screen_id="home_screen",
+                        summary="手机桌面。",
+                        elements=(),
+                        stable=True,
+                        confidence=1.0,
+                        fingerprint="launcher-not-recents",
+                    ),
+                ),
+            )
+
+        self.assertEqual(revised, result)
+        self.assertIsNone(wrong_surface)
+        self.assertEqual(1, len(planner.replan_calls))
+        self.assertTrue(
+            any(
+                '"predicate":"surface.kind"' in item
+                and '"value":"recent_tasks"' in item
+                for item in planner.replan_calls[0][1].visible_evidence
+            )
+        )
 
     def test_app_surface_binding_rejects_named_child_qualifiers(self) -> None:
         cases = (
@@ -5262,7 +5643,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
         )
         focused = replace(
             before,
-            summary="唯一输入框已聚焦，英文直输键盘可见。",
+            summary="唯一输入框已聚焦，拉丁按键模式可见。",
             elements=(focused_input, before.elements[1]),
             fingerprint="input-empty-focused",
         )
@@ -6958,7 +7339,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             before.elements[0],
             states={
                 **before.elements[0].states,
-                "keyboard_input_mode": "chinese_pinyin",
+                "keyboard_input_mode": "direct_latin",
                 "ime_preedit_text": "first",
                 "ime_exact_candidate_text": "first",
             },
@@ -7347,7 +7728,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 **before.elements[0].states,
                 "input_field_id": "subject_field",
                 "input_field_label": "主题",
-                "keyboard_input_mode": "chinese_pinyin",
+                "keyboard_input_mode": "direct_latin",
                 "ime_preedit_text": "first",
                 "ime_exact_candidate_text": "first",
             },
@@ -7572,7 +7953,6 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         planner=None,
         qwen=None,
         adapter=None,
-        policy=None,
         evidence_store_factory=None,
     ):
         initial = _graph()
@@ -7590,7 +7970,6 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             qwen_observer=qwen,
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
-            policy=policy,
             evidence_store_factory=evidence_store_factory,
         )
         session = orchestrator.start(
@@ -8468,70 +8847,49 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         )
         self.assertIsNone(report["session"]["last_post_action_transition"])
 
-    def test_policy_is_rechecked_immediately_before_execute(self) -> None:
-        class CountingReportStore(AgentEvidenceStore):
-            def __init__(self, run_dir):
-                super().__init__(run_dir)
-                self.report_writes = 0
-
-            def write_report(self, report):
-                self.report_writes += 1
-                return super().write_report(report)
-
-        class FlipPolicy(CanonicalActionPolicy):
-            def __init__(self):
-                super().__init__()
-                self.calls = 0
-
-            def evaluate(self, **kwargs):
-                self.calls += 1
-                if self.calls == 1:
-                    return super().evaluate(**kwargs)
-                return SimpleNamespace(
-                    allowed=False,
-                    reason="策略状态已变化",
-                    canonical_class="",
-                )
-
-        policy = FlipPolicy()
-        stores = []
-
-        def evidence_store_factory(run_dir):
-            store = CountingReportStore(run_dir)
-            stores.append(store)
-            return store
-
+    def test_confirmation_consumes_the_existing_selection_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            orchestrator, session, _planner, qwen, adapter = self._started(
-                temp,
-                policy=policy,
-                evidence_store_factory=evidence_store_factory,
+            orchestrator, session, _planner, _qwen, adapter = self._started(temp)
+
+            orchestrator.confirm_one(session, _confirmation(session))
+            persisted = json.loads(
+                (Path(temp) / "controller_decision_step_1.json").read_text(
+                    encoding="utf-8"
+                )
             )
 
-            with self.assertRaisesRegex(UniversalAgentOrchestratorError, "策略状态已变化"):
-                orchestrator.confirm_one(session, _confirmation(session))
-            report = json.loads(
-                (Path(temp) / "report.json").read_text(encoding="utf-8")
-            )
-            post_action_exists = (
-                Path(temp) / "post_action_transition_step_1.json"
-            ).exists()
-            confirmation_failure_exists = (
-                Path(temp) / "confirmation_failure_step_1.json"
-            ).exists()
+        self.assertEqual(1, adapter.execute_calls)
+        self.assertEqual("pre_execute_scope_consume", persisted["phase"])
+        self.assertEqual(
+            "2026-08-26-canonical-selection-receipt-v1",
+            persisted["policy_version"],
+        )
 
-        self.assertEqual(2, policy.calls)
-        self.assertEqual(0, adapter.execute_calls)
-        self.assertEqual(0, session.physical_actions)
-        self.assertEqual("blocked", session.status)
-        self.assertEqual("策略状态已变化", session.failed_reason)
-        self.assertIsNone(session.last_post_action_transition)
-        self.assertIsNone(session.last_confirmation_failure)
-        self.assertFalse(post_action_exists)
-        self.assertFalse(confirmation_failure_exists)
-        self.assertEqual(2, stores[0].report_writes)
-        self.assertEqual("blocked", report["session"]["status"])
-        self.assertEqual("策略状态已变化", report["session"]["failed_reason"])
+    def test_removed_duplicate_authorities_cannot_return_to_production(self) -> None:
+        production = {
+            name: (Path(__file__).parent / name).read_text(encoding="utf-8")
+            for name in (
+                "universal_agent_orchestrator.py",
+                "qwen_visual_decision.py",
+                "orientation_safety.py",
+                "universal_action_controller.py",
+            )
+        }
+        joined = "\n".join(production.values())
+        for forbidden in (
+            "class CanonicalActionPolicy",
+            "policy_recheck",
+            "self.policy.evaluate",
+            "MAX_ORIENTATION_BINDING_AGE_SECONDS",
+            "一次性方向授权已超过动作前时间窗",
+            "transition_evidence_after_action",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, joined)
+        self.assertNotIn(
+            "UniversalActionController().resolve_one",
+            production["qwen_visual_decision.py"],
+        )
 
     def test_new_observation_fingerprint_and_revision_are_required(self) -> None:
         initial = _graph()
@@ -9094,12 +9452,28 @@ class UniversalAgentConfirmFailureTests(unittest.TestCase):
             orchestrator, session, _planner, _qwen, adapter = self._started(
                 temp, adapter=adapter
             )
+            lineage = VerifiedAppSurfaceLineage(
+                session_id=session.session_id,
+                task_id=session.task_graph.task_id,
+                device_id=session.device_id,
+                app_id="sample.messaging",
+                app_name="示例消息工具",
+                surface_id="surface_sample_messaging",
+                source_receipt_id="receipt-entry",
+                source_subgoal_id=session.task_graph.active_subgoal_id,
+                functional_foreground_app_id=(
+                    session.trusted_observation.scene.foreground_app_id
+                ),
+                physical_actions=session.physical_actions,
+            )
+            session.verified_app_surface_lineage = lineage
             with self.assertRaises(GenericActionAdapterError):
                 orchestrator.confirm_one(session, _confirmation(session))
 
         self.assertEqual(1, adapter.execute_calls)
         self.assertEqual(1, session.physical_actions)
         self.assertEqual("failed", session.status)
+        self.assertIsNone(session.verified_app_surface_lineage)
 
     def test_pre_action_drift_consumes_scope_then_replans_without_action(self) -> None:
         initial = _graph()
@@ -9122,6 +9496,21 @@ class UniversalAgentConfirmFailureTests(unittest.TestCase):
                 planner=planner,
                 adapter=adapter,
             )
+            lineage = VerifiedAppSurfaceLineage(
+                session_id=session.session_id,
+                task_id=session.task_graph.task_id,
+                device_id=session.device_id,
+                app_id="sample.messaging",
+                app_name="示例消息工具",
+                surface_id="surface_sample_messaging",
+                source_receipt_id="receipt-entry",
+                source_subgoal_id=session.task_graph.active_subgoal_id,
+                functional_foreground_app_id=(
+                    session.trusted_observation.scene.foreground_app_id
+                ),
+                physical_actions=session.physical_actions,
+            )
+            session.verified_app_surface_lineage = lineage
             stale_authority = session.confirmation_authority
             with self.assertRaisesRegex(
                 GenericActionAdapterError,
@@ -9134,6 +9523,7 @@ class UniversalAgentConfirmFailureTests(unittest.TestCase):
             self.assertEqual("consumed_before_execution", stale_authority.invalid_reason)
             self.assertEqual(0, session.physical_actions)
             self.assertEqual(1, adapter.execute_calls)
+            self.assertIs(lineage, session.verified_app_surface_lineage)
             self.assertEqual(
                 "needs_reobservation",
                 session.last_confirmation_failure["disposition"],

@@ -264,7 +264,7 @@ def exact_input_evidence_error(execution: Any) -> str:
     if before_states.get("keyboard_layout") != "qwerty":
         return "输入验收要求动作前画面确认 QWERTY 键盘。"
     if before_states.get("keyboard_input_mode") != "direct_latin":
-        return "输入验收要求动作前画面确认 direct_latin 直输模式。"
+        return "输入验收要求动作前画面确认 direct_latin 拉丁按键模式。"
     eligible_before = [
         item
         for item in before_elements
@@ -883,6 +883,7 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
             device_id=device_id,
             scene_fingerprint=execution_before_fingerprint,
             frame_size=before_frame_size,
+            action=action,
         )
     except OrientationSafetyError as exc:
         raise CapabilityAcceptanceError(

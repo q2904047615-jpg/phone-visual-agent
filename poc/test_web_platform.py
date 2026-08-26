@@ -1158,6 +1158,74 @@ class DeviceControllerRegistryTests(unittest.TestCase):
                 web_app.DeviceControllerRegistry(path)
 
 
+class DeviceCameraCoordinatorTests(unittest.TestCase):
+    def test_task_lease_serves_cached_preview_without_another_capture(self) -> None:
+        coordinator = web_app.DeviceCameraCoordinator()
+        preview_calls = []
+
+        def capture_preview(*, quality):
+            preview_calls.append(quality)
+            return b"live-preview"
+
+        first, first_cached = coordinator.capture_preview(
+            capture_preview,
+            quality=72,
+            cache_only=False,
+        )
+        with coordinator.serial_session():
+            cached, cached_during_task = coordinator.capture_preview(
+                capture_preview,
+                quality=72,
+                cache_only=True,
+            )
+            frame = coordinator.capture_agent_frame(
+                lambda: Image.new("RGB", (540, 960), "#203040")
+            )
+
+        self.assertEqual(b"live-preview", first)
+        self.assertFalse(first_cached)
+        self.assertEqual(b"live-preview", cached)
+        self.assertTrue(cached_during_task)
+        self.assertEqual([72], preview_calls)
+        self.assertEqual((540, 960), frame.size)
+
+    def test_concurrent_preview_never_waits_or_captures_behind_task_lease(self) -> None:
+        coordinator = web_app.DeviceCameraCoordinator()
+        coordinator.capture_preview(
+            lambda *, quality: b"primed-preview",
+            quality=72,
+            cache_only=False,
+        )
+        lease_started = threading.Event()
+        release_lease = threading.Event()
+
+        def hold_task_lease():
+            with coordinator.serial_session():
+                lease_started.set()
+                release_lease.wait(2.0)
+
+        worker = threading.Thread(target=hold_task_lease)
+        worker.start()
+        self.assertTrue(lease_started.wait(1.0))
+        capture_calls = []
+        started = time.monotonic()
+        try:
+            payload, cached = coordinator.capture_preview(
+                lambda *, quality: capture_calls.append(quality) or b"wrong",
+                quality=72,
+                cache_only=False,
+            )
+        finally:
+            release_lease.set()
+            worker.join(2.0)
+
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(b"primed-preview", payload)
+        self.assertTrue(cached)
+        self.assertEqual([], capture_calls)
+        self.assertFalse(worker.is_alive())
+
+
 class ApiEndToEndTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -1193,6 +1261,8 @@ class ApiEndToEndTests(unittest.TestCase):
         self.device_registry_patcher.start()
         with web_app.runtime.generic_supervised_session_lock:
             web_app.runtime.generic_supervised_sessions.clear()
+        with web_app.runtime.device_camera_coordinator_guard:
+            web_app.runtime.device_camera_coordinators.clear()
 
     def tearDown(self) -> None:
         self.device_registry_patcher.stop()
@@ -2384,8 +2454,43 @@ class ApiEndToEndTests(unittest.TestCase):
         self.assertEqual(404, unknown.status_code)
         self.assertEqual(b"jpeg-phone-a", first.content)
         self.assertEqual(b"jpeg-phone-b", second.content)
-        self.assertEqual([76], phone_a.calls)
-        self.assertEqual([76], phone_b.calls)
+        self.assertEqual([72], phone_a.calls)
+        self.assertEqual([72], phone_b.calls)
+
+    def test_preview_uses_one_cached_frame_while_device_is_coordinated(self) -> None:
+        class PreviewController:
+            def __init__(self):
+                self.calls = []
+
+            def capture_preview(self, quality=76):
+                self.calls.append(quality)
+                return f"jpeg-live-{len(self.calls)}".encode("ascii")
+
+        controller = PreviewController()
+        device_id = "phone-camera-lease"
+        with patch.object(
+            web_app.runtime,
+            "controller_for_device",
+            return_value=controller,
+        ):
+            first = self.client.get(f"/api/preview.jpg?device_id={device_id}")
+            coordination = web_app.runtime.coordination_lock_for_device(device_id)
+            self.assertTrue(coordination.acquire(blocking=False))
+            try:
+                cached = [
+                    self.client.get(f"/api/preview.jpg?device_id={device_id}")
+                    for _index in range(3)
+                ]
+            finally:
+                coordination.release()
+
+        self.assertEqual(200, first.status_code)
+        self.assertEqual("live", first.headers["X-Camera-Source"])
+        self.assertEqual([72], controller.calls)
+        self.assertTrue(all(item.content == first.content for item in cached))
+        self.assertTrue(
+            all(item.headers["X-Camera-Source"] == "cache" for item in cached)
+        )
 
     def test_device_status_identifies_each_active_generic_session_device(self) -> None:
         def active_session(session_id: str, device_id: str):

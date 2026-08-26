@@ -9,10 +9,14 @@ import threading
 import time
 from collections import OrderedDict
 from contextlib import nullcontext
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from PIL import Image
+from canonical_action_protocol import (
+    StateExpectation,
+    SUPPORTED_ACTIONS as CANONICAL_ACTIONS,
+)
 from observation_images import (
     VisualObstruction,
     consensus_top_edge_obstructions,
@@ -52,14 +56,12 @@ from input_value_lineage import (
     TypedInputLineage,
     TypedInputLineageStore,
 )
-from system_navigation_privacy import (
-    privacy_minimized_system_navigation_view,
-)
-
-
 SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-08-25-single-step-scene-observer-v2"
 SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = (
     "2026-08-25-single-step-qwen-observation-v2"
+)
+POST_ACTION_VISUAL_CONTEXT_VERSION = (
+    "2026-08-25-local-post-action-visual-context-v1"
 )
 POST_NAVIGATION_RESULT_OBSERVATION_PHASE = "verified_navigation_result_v1"
 FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE = (
@@ -67,11 +69,99 @@ FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE = (
 )
 POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
 POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被重新观察"]
-INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-25-input-structure-audit-v10"
+INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-25-input-structure-audit-v11"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
 OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 12
 AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE = "输入结构只读审计确认软键盘不可见"
+
+
+@dataclass(frozen=True)
+class PostActionVisualContext:
+    """Local, typed context for the first observation after one action.
+
+    This object records only that one canonical action reached the physical
+    transport and which typed postconditions the already-validated canonical
+    transition expects.  It deliberately has no ``matched`` field: only the
+    fresh pixels and the Controller may decide whether the action succeeded.
+    """
+
+    canonical_action_kind: str
+    expected_postconditions: tuple[StateExpectation, ...]
+    protocol_version: str = POST_ACTION_VISUAL_CONTEXT_VERSION
+    execution_state: str = "physical_action_executed"
+    outcome: str = "pending_visual_verification"
+
+    def validate(self) -> None:
+        if self.protocol_version != POST_ACTION_VISUAL_CONTEXT_VERSION:
+            raise VisionAgentError("动作后视觉上下文协议版本无效。")
+        if self.execution_state != "physical_action_executed":
+            raise VisionAgentError("动作后视觉上下文没有证明物理动作已执行。")
+        if self.outcome != "pending_visual_verification":
+            raise VisionAgentError("动作后视觉上下文不得提前声明动作匹配结果。")
+        if self.canonical_action_kind not in CANONICAL_ACTIONS:
+            raise VisionAgentError("动作后视觉上下文包含非canonical动作。")
+        if not 1 <= len(self.expected_postconditions) <= 16:
+            raise VisionAgentError("动作后视觉上下文必须包含1..16个typed后置条件。")
+        for expectation in self.expected_postconditions:
+            expectation.validate()
+
+    def to_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "protocol_version": self.protocol_version,
+            "execution_state": self.execution_state,
+            "outcome": self.outcome,
+            "canonical_action_kind": self.canonical_action_kind,
+            "expected_postconditions": [
+                item.to_dict() for item in self.expected_postconditions
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "PostActionVisualContext":
+        if not isinstance(value, dict) or set(value) != {
+            "protocol_version",
+            "execution_state",
+            "outcome",
+            "canonical_action_kind",
+            "expected_postconditions",
+        }:
+            raise VisionAgentError("动作后视觉上下文结构无效。")
+        raw_expectations = value.get("expected_postconditions")
+        if not isinstance(raw_expectations, list):
+            raise VisionAgentError("动作后视觉上下文的typed后置条件必须是数组。")
+        expectations: list[StateExpectation] = []
+        for item in raw_expectations:
+            if not isinstance(item, dict):
+                raise VisionAgentError("动作后视觉上下文包含无效typed后置条件。")
+            required = {"subject_ref", "predicate", "operator"}
+            allowed = required | {"value"}
+            if not required.issubset(item) or set(item) - allowed:
+                raise VisionAgentError("动作后视觉上下文包含无效typed后置条件。")
+            operator = item.get("operator")
+            if operator in {"equals", "not_equals"}:
+                if "value" not in item:
+                    raise VisionAgentError("动作后视觉上下文的等值条件缺少value。")
+            elif "value" in item:
+                raise VisionAgentError("动作后视觉上下文的非等值条件不得携带value。")
+            expectations.append(
+                StateExpectation(
+                    subject_ref=str(item.get("subject_ref") or ""),
+                    predicate=str(item.get("predicate") or ""),
+                    operator=str(operator or ""),
+                    value=item.get("value"),
+                )
+            )
+        context = cls(
+            protocol_version=str(value.get("protocol_version") or ""),
+            execution_state=str(value.get("execution_state") or ""),
+            outcome=str(value.get("outcome") or ""),
+            canonical_action_kind=str(value.get("canonical_action_kind") or ""),
+            expected_postconditions=tuple(expectations),
+        )
+        context.validate()
+        return context
 
 STAGE_LABELS = {
     "idle": "空闲",
@@ -112,6 +202,7 @@ class _SingleStepObserverBase:
         self._current_stage = "idle"
         self._last_stage = "idle"
         self.supports_typed_input_continuation = True
+        self.supports_post_action_visual_context = True
         self._observation_cache_lock = threading.RLock()
         self._observation_cache: OrderedDict[str, UIScene] = OrderedDict()
         self._observation_cache_limit = 32
@@ -220,8 +311,18 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
         device_id: str | None = None,
         input_lineage_override: TypedInputLineage | None = None,
         prior_scene: UIScene | None = None,
+        post_action_context: PostActionVisualContext | dict[str, Any] | None = None,
     ) -> UIScene:
-        del prior_scene  # Fresh pixels and typed lineage are the only inputs.
+        # Never reuse model-authored facts from the prior scene.  The only
+        # cross-step visual context is a locally minted typed action summary;
+        # current pixels remain the sole source of current-screen facts.
+        del prior_scene
+        if isinstance(post_action_context, dict):
+            post_action_context = PostActionVisualContext.from_dict(
+                post_action_context
+            )
+        elif post_action_context is not None:
+            post_action_context.validate()
         self.last_raw_response = ""
         model_identity = public_model_identity(self.provider.status())
         self.last_diagnostics = {"vision_model": model_identity}
@@ -258,6 +359,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 fingerprint=fingerprint,
                 goal_context=context,
                 input_lineage=input_lineage_override,
+                post_action_context=post_action_context,
             )
             if cache_key is not None:
                 with self._observation_cache_lock:
@@ -281,6 +383,11 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                         "strategy": "single_step_exact_fingerprint_cache",
                         "model_calls": 0,
                         "observation_cache_hit": True,
+                        "post_action_visual_context": (
+                            post_action_context.to_dict()
+                            if post_action_context is not None
+                            else None
+                        ),
                         "fingerprint": fingerprint,
                         "element_count": len(cached.elements),
                         "elapsed_seconds": round(time.perf_counter() - started, 3),
@@ -298,19 +405,11 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 if verified_lineage is not None
                 else None
             )
-            privacy_minimized_system_home = (
-                _goal_requests_coordinate_free_system_home(context)
-            )
             model_frames = (
                 tuple(frames[stable_tail_start:])
                 if input_structure_required
                 else (frame,)
             )
-            if privacy_minimized_system_home:
-                model_frames = tuple(
-                    privacy_minimized_system_navigation_view(item.convert("RGB"))
-                    for item in model_frames
-                )
 
             request_image_sizes = {
                 _image_request_size(item) for item in model_frames
@@ -327,6 +426,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 current_input_text=ledger_value_hint,
                 image_count=len(model_frames),
                 request_image_size=request_image_size,
+                post_action_context=post_action_context,
             )
             content: list[dict[str, Any]] = [
                 {"type": "text", "text": prompt}
@@ -426,17 +526,6 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 fingerprint=fingerprint,
             )
 
-            if privacy_minimized_system_home:
-                scene = replace(
-                    scene,
-                    app_id="unknown",
-                    screen_id="unknown",
-                    summary="中央App内容未披露；仅建立系统Home前稳定画布观察。",
-                    elements=(),
-                    overlays=(),
-                )
-                scene.validate()
-
             if input_structure_required:
                 # The lineage can be trusted only after the same response has
                 # established the actual foreground App and screen identity.
@@ -498,8 +587,12 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                     fingerprint=fingerprint,
                 )
                 if (
-                    _goal_active_input_transaction_text(context)
+                    (
+                        _goal_active_input_transaction_text(context)
+                        or _goal_has_target_only_active_input_field(context)
+                    )
                     and not _input_audit_established_local_target(scene)
+                    and not _focus_only_input_surface_established(scene)
                     and not _goal_is_fused_post_action_next_step(context)
                 ):
                     raise VisionAgentError(
@@ -538,6 +631,11 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 "input_structure_in_same_response": input_structure_required,
                 "remote_retry_used": False,
                 "observation_cache_hit": False,
+                "post_action_visual_context": (
+                    post_action_context.to_dict()
+                    if post_action_context is not None
+                    else None
+                ),
                 "selected_frame_index": selected_frame_index,
                 "stable_tail_start_index": stable_tail_start,
                 "local_stability": stability.to_dict(),
@@ -578,6 +676,11 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 "input_structure_in_same_response": input_structure_required,
                 "remote_retry_used": False,
                 "failed_stage": failed_stage,
+                "post_action_visual_context": (
+                    post_action_context.to_dict()
+                    if post_action_context is not None
+                    else None
+                ),
                 "fingerprint": fingerprint,
                 "error": str(exc),
                 "error_type": classify_qwen_error(
@@ -697,9 +800,10 @@ INPUT_VALUE_AND_MODE_OBSERVATION_RULE = (
     "role=input且框内文字清晰可读时，必须在states.value中逐字填写当前可见文字；空框写空字符串，"
     "看不清才省略value，禁止根据目标补写。软键盘可见时还必须在states.keyboard_layout写"
     "qwerty、numeric、symbol或unknown，并在states.keyboard_input_mode写direct_latin、"
-    "chinese_pinyin或unknown。QWERTY只描述按键排列，绝不等于英文直输：画面出现中文候选、"
-    "拼音分词撇号或明确中文模式时必须写chinese_pinyin；只有明确显示英文/Latin直输模式时才能写"
-    "direct_latin；看不清写unknown。这些都只是画面事实，不授权输入。"
+    "chinese_pinyin或unknown。QWERTY只描述按键排列，绝不等于英文键入模式：画面出现中文候选、"
+    "拼音分词撇号或明确中文模式时必须写chinese_pinyin；只有明确显示英文/Latin按键模式时才能写"
+    "direct_latin；看不清写unknown。direct_latin只描述按键模式，不证明字母已提交到App输入框；"
+    "若仍有预编辑和候选，必须由后续输入结构审计分别报告。这些都只是画面事实，不授权输入。"
 )
 
 KEYBOARD_MODE_SWITCH_OBSERVATION_RULE = (
@@ -779,6 +883,7 @@ def _single_step_observation_prompt(
     current_input_text: str | None,
     image_count: int,
     request_image_size: tuple[int, int],
+    post_action_context: PostActionVisualContext | None,
 ) -> str:
     """Build the sole online prompt for one closed-loop observation step."""
 
@@ -803,12 +908,33 @@ def _single_step_observation_prompt(
         else "只有一张当前稳定手机画面。"
     )
     request_width, request_height = request_image_size
+    if post_action_context is None:
+        post_action_rule = (
+            "本轮不是本地已签发的动作后观察；不得猜测此前执行过任何动作。"
+        )
+    else:
+        post_action_payload = json.dumps(
+            post_action_context.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        post_action_rule = f"""
+本轮是一个物理动作后的首次观察。本地只读typed摘要如下：
+{post_action_payload}
+它只证明该canonical动作已到达物理执行层，并说明需要核对的typed后置条件；
+outcome=pending_visual_verification，绝不等于matched，也不能迫使你把预期写成事实。
+当前JPEG仍是当前画面的唯一权威：符合时报告可见结果，不符合时如实报告矛盾。
+识别时先判断最外层系统/App表面，再判断其中嵌入的卡片、预览或子内容；嵌入内容
+所属App不能替代承载它的最外层系统表面。该摘要只帮助选择核对重点，不授权动作。
+"""
     return f"""
 这是本闭环步骤唯一一次Qwen视觉调用。你必须在同一个JSON响应中完成当前
 画面理解、目标相关事实标记以及必要的输入/IME/键盘结构报告。不得要求第二次
 精查、App身份审计、几何审计、方向审计或动作选择调用；不确定时保留unknown、
 省略候选或降低confidence。你只报告事实，不输出动作、计划或坐标点击建议。
 {temporal_rule}
+{post_action_rule}
 
 本轮每张实际发送给你的JPEG均为{request_width}×{request_height}。整份响应的
 scene与input_structure必须共用一个coordinate_space，绝不能各用一把尺子：
@@ -1144,13 +1270,6 @@ def _parse_single_step_observation_envelope(
 
 
 def _compact_prompt(context: dict[str, Any]) -> str:
-    privacy_note = (
-        "本轮是坐标无关的Android系统Home观察。中央App内容已由本地固定遮罩隐藏；"
-        "只能根据保留的手机画布边缘和底部Android系统导航结构报告unknown场景、画布方向和稳定性，"
-        "不得猜测App、正文或元素。"
-        if _goal_requests_coordinate_free_system_home(context)
-        else ""
-    )
     context = _observation_goal_context(context)
     if _goal_requests_keyboard_mode_switch(context):
         keyboard_switch_rule = (
@@ -1169,11 +1288,11 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 你是通用手机页面观察器，只报告画面事实，不规划也不执行动作。
 用户目标只用于选择需要读清的控件，不能让你幻读：
 {json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
-{privacy_note}
 
 用最短JSON报告：当前前台App、页面类型、最上层弹层，以及与目标直接相关的可见控件。
 规则：
-1. 桌面写 launcher；不确定写 unknown。不得把目标App当成当前App，也不得把
+1. 桌面写 launcher；系统最近任务页面必须写foreground_app_id=system、
+   screen_id=system_recent_tasks；不确定写 unknown。不得把目标App当成当前App，也不得把
    current_foreground、current_app、foreground_app、target_app 或 active_app 等引用占位符
    写成foreground_app_id；该字段只能来自当前画面的视觉身份。
 2. elements最多{MAX_COMPACT_ELEMENTS}个。必须先报告目标相关控件和当前输入框，
@@ -1222,6 +1341,11 @@ def _compact_prompt(context: dict[str, Any]) -> str:
     goal_relevant:true、fully_visible:true、scrollable:true、scroll_axis:"vertical"或"horizontal"，
     evidence必须说明实际看见的重复结构或边缘延续。单张卡片、工具栏、页面边框、目标动作文字本身
     都不能证明scrollable；无法证明时不得输出该状态，也不得猜测。
+18. 当前画面是launcher、目标App图标尚未出现，且画面有两个或更多分页圆点并能明确看出恰好一个
+    当前圆点时，必须把承载桌面图标的完整分页区域额外报告为role=container、
+    meaning=paged_viewport。states必须包含goal_relevant:true、fully_visible:true、scrollable:true、
+    scroll_axis:"horizontal"、从0开始的page_index和page_count；evidence写明实际看见的圆点总数和
+    当前第几页。圆点不清、选中项不唯一或只有一页时不得输出page_index/page_count，也不得猜测。
 
 只返回下列完整JSON，不要Markdown：
 {{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}","foreground_app_id":"unknown",
@@ -1316,6 +1440,7 @@ def _input_structure_audit_prompt(
     active_field_id, active_field_label, active_multiline = (
         _goal_active_input_field(context)
     )
+    target_only_clear = _goal_has_target_only_active_input_field(context)
     target_text = (
         _goal_active_input_transaction_text(context)
         or _goal_explicit_input_text(context)
@@ -1378,8 +1503,8 @@ authority and is not supplied for reconciliation. Report only the structures
 literally visible in these audit images; local code combines them with typed
 action lineage and never asks you to choose between two prior visual answers.
 Distinguish three different visual structures; never merge them:
-1. application_inputs: editable search/address/form fields in the App content area. Include a visibly empty field when its complete input surface is visible. Literal editable evidence may be its complete border, a distinct fill/perimeter that separates the whole field surface from surrounding App chrome, a placeholder, caret, or focus highlight. A complete blank surface does not need placeholder text, a caret, or focus highlight. Never infer a field from the goal, an unexplained gap, or adjacent icons alone. field_labels must contain only literal labels visibly attached to that field (for example a nearby form label or its placeholder), never the local field_id. The active field selector is field_id={json.dumps(active_field_id, ensure_ascii=False)} and visible field_label={json.dumps(active_field_label, ensure_ascii=False)}; use the label only to enumerate visible evidence, never infer it from the goal.
-2. ime_preedit_regions: the input method's composition and its candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Many real IMEs render an underlined Latin composition inside the otherwise empty App field. In that layout the underlined letters remain IME preedit, application_inputs.text MUST be "", the literal may also appear in visible_editable_cues, and one ime_preedit_regions item MUST tightly bound the underlined composition with text set to that literal. Candidate words use their own complete bounds and may be either immediately adjacent to the composition or in one horizontal candidate row at the top of the visible keyboard, above the QWERTY letter rows. Never call those underlined letters committed application text. Enumerate only complete visible candidate words tied to that composition; candidates are read-only facts and never application inputs.
+1. application_inputs: editable search/address/form fields and message composers in the App content area. Include a visibly empty field when its complete input surface is visible. Literal editable evidence may be its complete border, a distinct fill/perimeter that separates the whole field surface from surrounding App chrome, a placeholder, caret, focus highlight, or one IME preedit visibly rendered inside that complete surface. A complete blank surface does not need placeholder text, a caret, or focus highlight. Never infer a field from the goal, an unexplained gap, or adjacent icons alone. field_labels must contain only literal labels visibly attached to that field (for example a nearby form label or its placeholder), never the local field_id. The active field selector is field_id={json.dumps(active_field_id, ensure_ascii=False)} and visible field_label={json.dumps(active_field_label, ensure_ascii=False)}; target_only_clear={str(target_only_clear).lower()} means the typed graph intentionally supplies no new text payload and asks only to audit the one currently focused field for clearing. It does not relax the visual evidence rules: enumerate that field only when its complete App surface plus focus/preedit evidence are visible, and never invent its bounds from the goal. Use the label only to enumerate visible evidence, never infer it from the goal.
+2. ime_preedit_regions: the input method's composition and its candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Many real IMEs render an underlined Latin composition inside the otherwise empty App field. In that layout the underlined letters remain IME preedit, application_inputs.text MUST be "", the literal may also appear in visible_editable_cues, and one ime_preedit_regions item MUST tightly bound the underlined composition with text set to that literal. Candidate words use their own complete bounds and may be either immediately adjacent to the composition or in one horizontal candidate row at the top of the visible keyboard, above the QWERTY letter rows. Never call those underlined letters committed application text. Enumerate only complete visible candidate words tied to that composition; candidates are read-only facts and never application inputs. The enum name direct_latin describes the keyboard key mode only: it NEVER proves that Latin letters bypass composition or are already committed.
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
    When keyboard.visible=true, report keyboard.bounds only when it confidently encloses the complete visible keyboard in the same coordinate system, has width at least 300 and height at least 180, and contains every reported keyboard key and anchor. Measure from the four edges of Image 1; do not shift the keyboard toward the bottom or describe only its letter rows. For QWERTY, qwerty_anchors remain mandatory; when the outer bounds cannot be measured confidently, set bounds=null instead of inventing it. Local code may reconstruct an execution envelope only after independent multi-frame row evidence validates all seven anchors. Non-QWERTY actionable geometry still requires complete keyboard.bounds.
@@ -1388,9 +1513,9 @@ Distinguish three different visual structures; never merge them:
 7. keyboard.enter_key: report at most one complete visible keyboard action key using exactly label, bounds, confidence, fully_visible and key_action. key_action must be one of newline, send, search, done, next, unknown and must describe the key's current visible behavior, never the requested goal. A plain multiline Return/Enter key may be newline. A key visibly labelled or iconographically acting as Send/Search/Done/Next must use that action and can never authorize a newline. The current transaction needs a newline={str(enter_required).lower()} and multiline={str(active_multiline).lower()}, but those facts do not change the visual classification.
 8. keyboard.layout_switches: enumerate every compact visible key with an explicit destination layout: qwerty, numeric, or symbol. Copy the literal label and report current_layout and target_layout; never infer a destination from the goal alone. In particular, on QWERTY report both a visible 123 key targeting numeric and a separately visible ！？# / !?# / symbol key targeting symbol. Never substitute 123 for a symbol-layout key.
 7. keyboard.case_mode and keyboard.case_switch apply only to direct_latin QWERTY. case_mode is lower, upper, or unknown from the visible letter glyphs. case_switch is null unless a complete visible shift/case key and its lower↔upper direction are independently clear.
-The local controller has one deterministic keyboard routing policy: Latin letters require QWERTY plus direct_latin; Chinese requires QWERTY plus chinese_pinyin and then an exact candidate; decimal digits require the visible 123/numeric layout and then the exact digit; every other printable symbol requires direct_latin first and then the separately visible symbol-layout switch such as ！？# before the exact symbol key. This policy does not authorize an action. It tells you which current state and visible controls must be reported completely so local typed code can select exactly one next action after a fresh observation.
+The local controller has one deterministic keyboard routing policy: Latin letters require QWERTY plus direct_latin, followed by an exact candidate click whenever the resulting letters remain in preedit; Chinese requires QWERTY plus chinese_pinyin and then an exact candidate; decimal digits require the visible 123/numeric layout and then the exact digit; every other printable symbol requires direct_latin first and then the separately visible symbol-layout switch such as ！？# before the exact symbol key. This policy does not authorize an action. It tells you which current state and visible controls must be reported completely so local typed code can select exactly one next action after a fresh observation.
 Determine keyboard.input_mode only from the current whole keyboard image, never from the goal, the JSON example, or the mode-switch key label alone. Visible Chinese composition/candidates or pinyin separators prove chinese_pinyin. A plain Latin QWERTY state with no Chinese composition/candidate strip may prove direct_latin only when the whole keyboard provides independent current-mode evidence. If the whole keyboard does not prove the current mode, use unknown and set mode_switch to null.
-When a visible preedit composition itself exactly matches a complete visible candidate, that exact candidate MUST be enumerated with its own bounds. Omitting the exact candidate while reporting the matching preedit is an incomplete audit; never silently turn useful target text into a clear/delete instruction.
+When a visible preedit composition itself exactly matches a complete visible candidate, that exact candidate MUST be enumerated with its own bounds. This applies equally to direct_latin and chinese_pinyin. In particular, when the same Latin glyph sequence appears once as underlined composition in the App field and again as a separate non-underlined word in the candidate strip above the QWERTY rows, the second occurrence is the exact candidate and MUST have its own candidate bounds. Omitting that second occurrence while reporting the matching preedit is an incomplete audit; never silently turn useful target text into a clear/delete instruction.
 keyboard.mode_switch.current_mode MUST equal keyboard.input_mode whenever input_mode is known, and target_mode MUST be the other supported mode. Across real keyboards the visible key label may name either the current mode or the destination mode: for example, 英/EN can be shown while Chinese pinyin is current and pressing it enters direct Latin, or while direct Latin is current and pressing it enters Chinese. Copy the literal label, but never derive current_mode or target_mode from that label. If the direction is not independently clear from the whole keyboard state, set mode_switch to null.
 For a text-entry verification goal, report the proven current keyboard.input_mode; keyboard.mode_switch is optional and should be null unless its direction is independently unambiguous. Never invent a switch direction merely because the goal asks for text entry.
 keyboard.mode_switch MUST be either null or an object with exactly these five fields: label, bounds, confidence, current_mode, target_mode. Never omit confidence or target_mode. Valid non-null shapes in the two directions are:
@@ -2641,14 +2766,17 @@ def _fused_preliminary_input_attestation(
 ) -> dict[str, Any] | None:
     """Keep one non-authoritative empty-field fact from the fused scene.
 
-    The dedicated input structure remains the sole value and geometry owner.
-    This record only proves that the same envelope described one visible,
-    goal-bound input region with non-empty visual evidence.  It can rescue an
-    empty field with no placeholder or caret text only when the input audit
-    later reports the same value and strongly overlapping bounds.
+    The dedicated input structure remains the sole value and text geometry
+    owner. This record proves only that the same envelope described one visible,
+    goal-bound edit surface with non-empty visual evidence. It can either rescue
+    an empty field when the audit reports matching structure, or be sanitized
+    into a focus-only surface when the audit misses and the keyboard is hidden.
     """
 
-    if not _goal_active_input_transaction_text(goal_context):
+    if not (
+        _goal_active_input_transaction_text(goal_context)
+        or _goal_has_target_only_active_input_field(goal_context)
+    ):
         return None
     elements = payload.get("elements")
     if not isinstance(elements, list):
@@ -2673,6 +2801,12 @@ def _fused_preliminary_input_attestation(
         raw_bounds = item.get("bounds")
         if (
             str(item.get("role") or "").strip() != "input"
+            or not isinstance(item.get("element_id"), str)
+            or not item["element_id"].strip()
+            or str(item["element_id"]).startswith("local_audited_")
+            or not isinstance(item.get("meaning"), str)
+            or not item["meaning"].strip()
+            or not isinstance(item.get("label"), str)
             or not isinstance(states, dict)
             or states.get("goal_relevant") is not True
             or states.get("fully_visible") is not True
@@ -2691,6 +2825,9 @@ def _fused_preliminary_input_attestation(
             bounds = [value * 1000.0 for value in bounds]
         candidates.append(
             {
+                "element_id": item["element_id"].strip(),
+                "meaning": item["meaning"].strip(),
+                "label": item["label"].strip()[:200],
                 "value": states["value"],
                 "bounds": bounds,
                 "confidence": float(confidence),
@@ -2990,6 +3127,12 @@ def _discard_compact_elements_for_targeted_geometry_recovery(
 
 def _goal_requests_input(context: dict[str, Any]) -> bool:
     focused = _active_subgoal_visual_context(context)
+    if _goal_has_target_only_active_input_field(context):
+        # A clear-only graph deliberately carries no desired text.  Its typed
+        # target marker still requires the same one-call application/IME/
+        # keyboard audit as ordinary input so the focused field cannot be
+        # replaced by a bare candidate word or an unbound backspace key.
+        return True
     if _goal_active_input_transaction_text(context):
         # A candidate-selection node may correctly describe only the visible
         # literal (for example, a Chinese IME candidate) without repeating
@@ -3197,6 +3340,97 @@ def _input_audit_established_local_target(scene: UIScene) -> bool:
     return len(candidates) == 1
 
 
+def _focus_only_input_surface_established(scene: UIScene) -> bool:
+    """Return true only for one locally sanitized coarse focus surface.
+
+    This state is deliberately weaker than a dedicated input audit: it may
+    authorize one focus tap, but it carries no value, typed field identity,
+    keyboard state, or permission to input, clear, or send text.
+    """
+
+    candidates = tuple(
+        element
+        for element in scene.elements
+        if element.role == "input"
+        and element.states.get("focus_only_input_surface") is True
+        and element.states.get("goal_relevant") is True
+        and element.states.get("fully_visible") is True
+        and float(element.confidence) >= MIN_TARGET_CONFIDENCE
+        and any(str(item).strip() for item in element.evidence)
+    )
+    if len(candidates) != 1:
+        return False
+    unique = scene.unique_trusted_goal_element()
+    return unique is not None and unique.element_id == candidates[0].element_id
+
+
+def _focus_only_compact_input_surface(
+    attestation: dict[str, Any] | None,
+    *,
+    keyboard_visible: bool,
+) -> dict[str, Any] | None:
+    """Sanitize one compact input into non-text focus authority only.
+
+    The compact model transcription is never copied. A visible keyboard means
+    focus has progressed far enough that the dedicated audit must now establish
+    the typed field; another coarse tap could only move the caret or hide the
+    real failure.
+    """
+
+    if keyboard_visible or not isinstance(attestation, dict):
+        return None
+    if set(attestation) != {
+        "element_id",
+        "meaning",
+        "label",
+        "value",
+        "bounds",
+        "confidence",
+        "evidence",
+    }:
+        return None
+    element_id = str(attestation.get("element_id") or "").strip()
+    meaning = str(attestation.get("meaning") or "").strip()
+    label = str(attestation.get("label") or "").strip()[:200]
+    bounds = attestation.get("bounds")
+    evidence = attestation.get("evidence")
+    confidence = attestation.get("confidence")
+    if (
+        not element_id
+        or element_id.startswith("local_audited_")
+        or not meaning
+        or not isinstance(bounds, (list, tuple))
+        or len(bounds) != 4
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0 <= float(value) <= 1000
+            for value in bounds
+        )
+        or isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or float(confidence) < MIN_TARGET_CONFIDENCE
+        or not isinstance(evidence, (list, tuple))
+        or not evidence
+        or any(not isinstance(item, str) or not item.strip() for item in evidence)
+    ):
+        return None
+    return {
+        "element_id": element_id,
+        "role": "input",
+        "meaning": meaning,
+        "bounds": [float(value) / 1000.0 for value in bounds],
+        "confidence": float(confidence),
+        "label": label,
+        "states": {
+            "goal_relevant": True,
+            "fully_visible": True,
+            "focus_only_input_surface": True,
+        },
+        "evidence": [str(item).strip()[:200] for item in evidence],
+    }
+
+
 def _goal_explicit_input_text(context: dict[str, Any]) -> str:
     """Return the active graph node's canonical text-entry payload, if any."""
 
@@ -3258,6 +3492,21 @@ def _goal_active_input_field(context: dict[str, Any]) -> tuple[str, str, bool]:
     ):
         return ("", "", False)
     return (field_id, field_label, multiline)
+
+
+def _goal_has_target_only_active_input_field(context: dict[str, Any]) -> bool:
+    """Return whether the bridge minted one clear-only typed field target."""
+
+    focused = _active_subgoal_visual_context(context)
+    if focused is context:
+        return False
+    entities = focused.get("goal_entities")
+    field_id, _field_label, _multiline = _goal_active_input_field(context)
+    return bool(
+        isinstance(entities, dict)
+        and entities.get("active_input_target_only") is True
+        and field_id
+    )
 
 
 def _goal_has_unique_typed_active_input_field(context: dict[str, Any]) -> bool:
@@ -3520,7 +3769,7 @@ def _resolve_pending_ime_candidate_input_state(
         or verified_input_lineage is None
         or verified_input_lineage.source
         != "pending_verified_ime_candidate_action"
-        or keyboard_input_mode != "chinese_pinyin"
+        or keyboard_input_mode not in {"direct_latin", "chinese_pinyin"}
         or not input_field_id
         or input_field_id == "unknown"
         or input_field_id != verified_input_lineage.input_field_id
@@ -4969,7 +5218,7 @@ def _apply_input_structure_audit(
         if (
             trusted_input is not None
             and active_field_id
-            and active_transaction_text
+            and (active_transaction_text or active_clear_goal)
             and keyboard_visible
             and keyboard_bounds is not None
             and (
@@ -5226,6 +5475,21 @@ def _apply_input_structure_audit(
             predecessor_input if next_field_key is not None else None
         )
 
+        focus_only_input = None
+        if (
+            trusted_input is None
+            and next_field_key is None
+            and (mode_switch is None or not switch_is_goal)
+            and (
+                _goal_active_input_transaction_text(goal_context)
+                or _goal_has_target_only_active_input_field(goal_context)
+            )
+        ):
+            focus_only_input = _focus_only_compact_input_surface(
+                fused_input_attestation,
+                keyboard_visible=keyboard_visible,
+            )
+
         value = scene.to_dict()
         elements: list[dict[str, Any]] = []
         for element in value.get("elements") or []:
@@ -5249,9 +5513,14 @@ def _apply_input_structure_audit(
             and next_field_key is None
             and (mode_switch is None or not switch_is_goal)
         ):
+            if focus_only_input is not None:
+                elements.append(focus_only_input)
             value["elements"] = elements
             value["summary"] = (
-                "typed输入状态账本未建立；compact输入摘要与输入转写不参与判断。"
+                "专用typed输入状态账本尚未建立；"
+                "仅保留唯一粗编辑面用于聚焦，不授权文字、清空或发送。"
+                if focus_only_input is not None
+                else "typed输入状态账本未建立；compact输入摘要与输入转写不参与判断。"
             )
             return UIScene.from_dict(
                 value,
@@ -6590,6 +6859,7 @@ def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:
             continue
         item["states"].pop("independent_geometry_verified", None)
         item["states"].pop("geometry_audit_source", None)
+        item["states"].pop("focus_only_input_surface", None)
         states = item["states"]
         if states.get("keyboard_input_mode_switch") is True:
             modes = {"direct_latin", "chinese_pinyin"}
@@ -6789,54 +7059,6 @@ def _normalize_known_scene_enums(payload: dict[str, Any]) -> None:
 
 
 
-def _goal_requests_coordinate_free_system_home(
-    context: dict[str, Any],
-) -> bool:
-    """Recognize only an explicit active system-Home transition.
-
-    App-local labels such as ``主页`` or ``首页`` deliberately do not match.
-    The completion condition is required as a second typed graph signal so a
-    compound root goal mentioning a later return cannot suppress refinement
-    for its current element-bound step.
-    """
-
-    focused = _observation_goal_context(context)
-    if str(focused.get("execution_class") or "").strip() != "navigate":
-        return False
-    objective = re.sub(
-        r"\s+",
-        "",
-        str(focused.get("objective") or "").strip().casefold(),
-    )
-    conditions = focused.get("completion_conditions")
-    if not objective or not isinstance(conditions, list):
-        return False
-    objective_matches = bool(
-        re.search(
-            r"(?:返回|回到|退回|切回)(?:手机|设备)?(?:的)?(?:桌面|主屏幕)",
-            objective,
-        )
-        or re.search(
-            r"\b(?:return|go|switch)(?:back)?to(?:the)?(?:phone|device)?homescreen\b",
-            objective,
-        )
-    )
-    if not objective_matches:
-        return False
-    return any(
-        re.search(
-            r"(?:手机|设备)?(?:的)?(?:桌面|主屏幕)(?:已)?(?:可见|显示|在前台)",
-            re.sub(r"\s+", "", str(condition or "").strip().casefold()),
-        )
-        for condition in conditions
-    )
-
-
-
-
-
-
-
 
 def _local_frame_fingerprint(frame: Image.Image) -> str:
     compact = frame.convert("L").resize((64, 96), Image.Resampling.BILINEAR)
@@ -6849,6 +7071,7 @@ def _observation_cache_key(
     fingerprint: str,
     goal_context: dict[str, Any],
     input_lineage: TypedInputLineage | None,
+    post_action_context: PostActionVisualContext | None,
 ) -> str | None:
     resolved_device = str(device_id or "").strip()
     if resolved_device.casefold() in {"", "unbound", "unknown", "none", "null"}:
@@ -6861,6 +7084,11 @@ def _observation_cache_key(
         "fingerprint": str(fingerprint or "").strip(),
         "goal_context": goal_context,
         "input_lineage": lineage_payload,
+        "post_action_context": (
+            post_action_context.to_dict()
+            if post_action_context is not None
+            else None
+        ),
     }
     return hashlib.sha256(
         json.dumps(

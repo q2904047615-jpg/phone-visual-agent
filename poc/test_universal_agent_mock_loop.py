@@ -148,6 +148,7 @@ class RecordingRobot:
             device_id="mock-device",
             scene_fingerprint=scene_fingerprint,
             frame_size=credential.frame_size,
+            action=action,
         )
         _claim_audit_seal(credential)
         self._armed = action
@@ -207,6 +208,7 @@ class ScriptedQwen:
         trusted_observation,
         decision_number=1,
         available_action_kinds=None,
+        navigation_history=(),
     ):
         self.calls.append((frames, task_context, trusted_observation, decision_number))
         if self.action_kind == "back":

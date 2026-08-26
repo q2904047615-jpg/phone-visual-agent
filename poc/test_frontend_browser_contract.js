@@ -11,7 +11,7 @@ const qwenFixture = require("./frontend_contract_fixtures/qwen_visual_decision_v
 const requests = {
   start: [], approveEffect: [], confirm: [], next: [], auto: [], pause: [], cancel: [], stop: [],
   capabilityStart: [], capabilityConfirm: [], capabilityPromote: [], capabilityCancel: [],
-  restore: [], previewDevices: [], assets: [],
+  restore: [], previewDevices: [], assets: [], startTokens: [],
 };
 
 function clone(value) {
@@ -263,6 +263,8 @@ function createServer({
   activeSessions = [],
   restoredSessions = {},
   restoredCapabilityTrials = [],
+  runtimeSession = { token: "browser-contract-token" },
+  enforceToken = false,
 } = {}) {
   let currentCapabilityTrial = null;
   let capabilityShouldFail = false;
@@ -282,7 +284,7 @@ function createServer({
       return;
     }
     if (url.pathname === "/api/session") {
-      json(response, 200, { token: "browser-contract-token", mock: true });
+      json(response, 200, { token: runtimeSession.token, mock: true });
       return;
     }
     if (url.pathname === "/api/device") {
@@ -308,6 +310,11 @@ function createServer({
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/agent/generic-supervised/start") {
+      requests.startTokens.push(String(request.headers["x-control-token"] || ""));
+      if (enforceToken && request.headers["x-control-token"] !== runtimeSession.token) {
+        json(response, 403, { detail: "控制令牌无效。" });
+        return;
+      }
       const body = await readBody(request);
       requests.start.push(body);
       if (body.text.includes("slow")) {
@@ -453,10 +460,54 @@ test("browser requests versioned task-status assets instead of stale cached URLs
   const server = createServer();
   const { browser } = await launchFixturePage(server);
   try {
-    assert.ok(requests.assets.includes("/assets/app.js?v=20260824-one-shot-stop-v1"));
+    assert.ok(requests.assets.includes("/assets/app.js?v=20260825-session-reconcile-v1"));
     assert.ok(requests.assets.includes("/assets/styles.css?v=20260824-task-status-v3"));
     assert.equal(requests.assets.includes("/assets/app.js"), false);
     assert.equal(requests.assets.includes("/assets/styles.css"), false);
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("browser stops showing a vanished backend session as running", { timeout: 30000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const restored = safeActionSessionForDevice("phone-01", "session-vanished-after-reload");
+  const activeSessions = [{
+    session_id: restored.session_id,
+    device_id: "phone-01",
+    status: restored.status,
+  }];
+  const restoredSessions = { [restored.session_id]: restored };
+  const server = createServer({ activeSessions, restoredSessions });
+  const { browser, page } = await launchFixturePage(server);
+  try {
+    await page.locator("#taskRunStatusLabel").getByText("进行中", { exact: true }).waitFor({ timeout: 5000 });
+    activeSessions.splice(0, activeSessions.length);
+    delete restoredSessions[restored.session_id];
+
+    await page.locator("#taskRunStatusLabel").getByText("失败", { exact: true }).waitFor({ timeout: 7000 });
+    assert.equal(await page.locator("#taskRunStatus").getAttribute("data-task-state"), "failure");
+    assert.match(await page.locator("#taskRunStatusDetail").innerText(), /已不在当前服务中.*停止显示为进行中/);
+    assert.equal(await page.locator("#startSupervisedAgent").isEnabled(), true);
+  } finally {
+    await browser.close();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test("browser refreshes the control token after a service reload", { timeout: 30000 }, async () => {
+  Object.values(requests).forEach(items => { items.length = 0; });
+  const runtimeSession = { token: "browser-token-before-reload" };
+  const server = createServer({ runtimeSession, enforceToken: true });
+  const { browser, page } = await launchFixturePage(server);
+  try {
+    runtimeSession.token = "browser-token-after-reload";
+    await page.waitForTimeout(3500);
+    await page.locator("#agentText").fill("succeeded after reload");
+    await page.locator("#startSupervisedAgent").click();
+    await page.locator("#taskRunStatusLabel").getByText("成功", { exact: true }).waitFor({ timeout: 5000 });
+    assert.equal(requests.startTokens.at(-1), "browser-token-after-reload");
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));

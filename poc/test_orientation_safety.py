@@ -52,6 +52,25 @@ def audited_credential(
 
 
 class OrientationCredentialTests(unittest.TestCase):
+    def test_fixed_system_navigation_keeps_frame_binding_without_app_rotation(self):
+        for action, rotation in (
+            ("back", "rotated_90"),
+            ("home", "unknown"),
+            ("open_recent_apps", "rotated_270"),
+        ):
+            with self.subTest(action=action, rotation=rotation):
+                gate = PhysicalExecutionGate("device-a")
+                credential = audited_credential(
+                    phone_content_rotation=rotation,
+                )
+                gate.arm(
+                    credential,
+                    action=action,
+                    scene_fingerprint="scene-a",
+                )
+                consumed = gate.consume(action=action, frame=FRAME.copy())
+                self.assertEqual(rotation, consumed.phone_content_rotation)
+
     def test_stable_local_qwerty_rows_mint_one_shot_upright_credential(self):
         reference = patterned_frame()
         credential = _mint_locally_verified_qwerty_credential(
@@ -137,6 +156,27 @@ class OrientationCredentialTests(unittest.TestCase):
             gate.consume(action="tap_semantic", frame=changed)
         self.assertEqual(changed.size, caught.exception.actual_frame.size)
         self.assertGreater(caught.exception.centered_mae, 6.0)
+
+    def test_gate_freshness_is_the_one_shot_visual_binding_not_wall_clock(self):
+        reference = patterned_frame()
+        gate = PhysicalExecutionGate("device-a")
+        credential = audited_credential(frame=reference)
+
+        with patch(
+            "time.monotonic",
+            side_effect=AssertionError("wall clock must not authorize the frame"),
+        ):
+            gate.arm(
+                credential,
+                action="tap_semantic",
+                scene_fingerprint="scene-a",
+            )
+            consumed = gate.consume(
+                action="tap_semantic",
+                frame=reference.copy(),
+            )
+
+        self.assertIs(consumed, credential)
 
     def test_small_camera_noise_and_exposure_pass_but_rotation_is_rejected(self):
         reference = patterned_frame()
@@ -293,7 +333,7 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                         [item.call_count for item in mocks],
                     )
 
-    def test_non_upright_credentials_cannot_reach_public_robot_physical_entry(self):
+    def test_non_upright_credentials_cannot_reach_visual_robot_physical_entry(self):
         for rotation in (
             "rotated_90",
             "rotated_180",
@@ -311,7 +351,7 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                 ):
                     controller.arm_physical_execution(
                         credential,
-                        action="back",
+                        action="tap_semantic",
                         scene_fingerprint="scene-a",
                     )
                 with (
@@ -334,7 +374,7 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                         OrientationSafetyError,
                         "一次性方向授权",
                     ):
-                        controller.vision_android_back()
+                        controller.vision_tap_relative(500, 500)
                     self.assertEqual(
                         [0, 0, 0, 0, 0],
                         [

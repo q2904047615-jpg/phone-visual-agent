@@ -925,6 +925,36 @@ class UISceneTests(unittest.TestCase):
 
         UniversalActionController().verify_after_action(resolved, before, after)
 
+    def test_focus_only_input_surface_cannot_carry_typed_input_authority(self) -> None:
+        states = {
+            "goal_relevant": True,
+            "fully_visible": True,
+            "focus_only_input_surface": True,
+        }
+        focus_only = element(
+            "coarse-input",
+            "message_input_field",
+            role="input",
+            states=states,
+        )
+        focus_only.validate()
+
+        for forbidden_key, forbidden_value in (
+            ("value", "draft"),
+            ("input_field_id", "message_field"),
+            ("focused", True),
+            ("primary_input_geometry_verified", True),
+        ):
+            with self.subTest(forbidden_key=forbidden_key):
+                with self.assertRaisesRegex(
+                    UISceneError,
+                    "不得携带正文、typed字段身份、键盘状态或本地审计权威",
+                ):
+                    replace(
+                        focus_only,
+                        states={**states, forbidden_key: forbidden_value},
+                    ).validate()
+
     def test_non_input_tap_cannot_use_input_semantic_alias(self) -> None:
         before = scene(
             element("rough-button", "target_control", role="button"),

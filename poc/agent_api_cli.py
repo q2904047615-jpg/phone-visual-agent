@@ -107,7 +107,10 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--device-id", default="device-local-01")
     start.add_argument("--text", required=True)
     start.add_argument("--exact-input-text")
-    start.add_argument("--exact-action-kind", choices=("back", "home", "tap_semantic"))
+    start.add_argument(
+        "--exact-action-kind",
+        choices=("back", "home", "open_recent_apps", "tap_semantic"),
+    )
     start.add_argument("--exact-target-label", default="")
     start.add_argument("--auto-advance", action="store_true")
     for name in ("get", "confirm-once", "next", "cancel", "pause"):

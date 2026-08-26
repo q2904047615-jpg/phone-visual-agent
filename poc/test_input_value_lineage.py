@@ -308,6 +308,7 @@ def ime_candidate_case(
     app_id: str = "sample.app",
     screen_id: str = "editor",
     bounds=(0.13, 0.54, 0.69, 0.61),
+    input_mode: str = "chinese_pinyin",
 ) -> tuple[dict, dict]:
     expected = prior + segment
     preedit = pinyin or segment
@@ -324,7 +325,7 @@ def ime_candidate_case(
             "input_field_id": "input_field_1",
             "input_multiline": "\n" in expected,
             "keyboard_layout": "qwerty",
-            "keyboard_input_mode": "chinese_pinyin",
+            "keyboard_input_mode": input_mode,
             "keyboard_case_mode": "lower",
             "ime_preedit_text": preedit,
             "ime_exact_candidate_text": segment,
@@ -670,6 +671,7 @@ def ime_prediction_commit_audit_raw(
     preedit_text: str | None = None,
     application_text: str | None = None,
     visible_editable_cues: list[str] | None = None,
+    input_mode: str = "chinese_pinyin",
 ) -> str:
     """Replay a committed candidate while the IME prediction row remains."""
 
@@ -725,7 +727,7 @@ def ime_prediction_commit_audit_raw(
                 "visible": True,
                 "bounds": [80, 570, 920, 1000],
                 "layout": "qwerty",
-                "input_mode": "chinese_pinyin",
+                "input_mode": input_mode,
                 "case_mode": "lower",
                 "qwerty_anchors": {
                     "q": [120, 710],
@@ -1504,6 +1506,20 @@ class TypedInputLineageTests(unittest.TestCase):
                 "caret_marker": "|",
                 "visible_editable_cues": ["bordered input area"],
             },
+            {
+                "prior": "",
+                "segment": "aaazjie",
+                "pinyin": "aaazjie",
+                "caret_marker": "|",
+                "input_mode": "direct_latin",
+            },
+            {
+                "prior": "first\n",
+                "segment": "second",
+                "pinyin": "second",
+                "caret_marker": "|",
+                "input_mode": "direct_latin",
+            },
         )
         records: list[tuple[dict, TypedInputLineage, dict, str]] = []
         for case in cases:
@@ -1515,6 +1531,7 @@ class TypedInputLineageTests(unittest.TestCase):
                     app_id="unknown",
                     screen_id="multiline_input_acceptance",
                     bounds=(0.14, 0.27, 0.86, 0.45),
+                    input_mode=case.get("input_mode", "chinese_pinyin"),
                 )
                 record = build_pending_ime_candidate_lineage(
                     device_id=DEVICE,
@@ -1553,6 +1570,7 @@ class TypedInputLineageTests(unittest.TestCase):
                         visible_editable_cues=case.get(
                             "visible_editable_cues"
                         ),
+                        input_mode=case.get("input_mode", "chinese_pinyin"),
                     ),
                     fingerprint="after-ime-prediction-commit",
                     goal_context=context,
@@ -2234,7 +2252,7 @@ class TypedInputLineageTests(unittest.TestCase):
                 "visible": True,
                 "bounds": [0, 620, 1000, 1000],
                 "layout": "qwerty",
-                "input_mode": "chinese_pinyin",
+                "input_mode": "direct_latin",
                 "case_mode": "lower",
                 "qwerty_anchors": {
                     "q": [122, 735],
@@ -2293,6 +2311,35 @@ class TypedInputLineageTests(unittest.TestCase):
         self.assertEqual(prior, candidate.states["prior_input_value"])
         self.assertEqual(expected, candidate.states["expected_input_value"])
         self.assertTrue(any("pending typed连续性" in item for item in input_element.evidence))
+
+        candidate_mutations = {}
+        missing_candidate = json.loads(json.dumps(audit, ensure_ascii=False))
+        missing_candidate["ime_preedit_regions"][0]["candidates"] = []
+        candidate_mutations["missing"] = missing_candidate
+        wrong_candidate = json.loads(json.dumps(audit, ensure_ascii=False))
+        wrong_candidate["ime_preedit_regions"][0]["candidates"][0][
+            "text"
+        ] = "different"
+        candidate_mutations["wrong"] = wrong_candidate
+        duplicate_candidate = json.loads(json.dumps(audit, ensure_ascii=False))
+        duplicate_candidate["ime_preedit_regions"][0]["candidates"].append(
+            dict(duplicate_candidate["ime_preedit_regions"][0]["candidates"][0])
+        )
+        candidate_mutations["duplicate"] = duplicate_candidate
+        for name, changed_audit in candidate_mutations.items():
+            with self.subTest(candidate=name), self.assertRaisesRegex(
+                VisionAgentError,
+                "唯一逐字候选几何",
+            ):
+                _apply_input_structure_audit(
+                    base,
+                    json.dumps(changed_audit, ensure_ascii=False),
+                    fingerprint="after-fp",
+                    goal_context=goal(),
+                    ledger_input_value=expected,
+                    verified_input_lineage=pending,
+                    device_id=DEVICE,
+                )
 
         for changed_goal in (
             (goal(field_id="other_field"), expected),

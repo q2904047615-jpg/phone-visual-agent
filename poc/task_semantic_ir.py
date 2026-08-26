@@ -36,6 +36,7 @@ SURFACE_KINDS = frozenset(
         "current_surface",
         "device",
         "system",
+        "recent_tasks",
     }
 )
 
@@ -62,6 +63,7 @@ REQUIRED_ACTION_KINDS = frozenset(
         "pinch",
         "home",
         "back",
+        "open_recent_apps",
         "hardware_key",
         "dismiss_overlay",
         "reveal_system_navigation",
@@ -1255,6 +1257,13 @@ def compile_runtime_graph_semantics(
         raw_goal = str(getattr(goal, "objective", "") or "").strip()
 
     target_apps = tuple(getattr(goal, "target_apps", ()) or ())
+    raw_entities = getattr(goal, "entities", {}) or {}
+    if not isinstance(raw_entities, Mapping):
+        raise TaskSemanticIRError("goal.entities 必须是映射。")
+    explicit_system_surface = bool(
+        not target_apps
+        and str(raw_entities.get("target_surface") or "") in {"device", "system"}
+    )
     surfaces: list[SurfaceRef] = []
     raw_goal_folded = raw_goal.casefold()
     launcher_terms = (
@@ -1265,6 +1274,9 @@ def compile_runtime_graph_semantics(
         "系统主屏幕",
         "home screen",
         "launcher",
+    )
+    launcher_terms_for_subgoal = launcher_terms + (
+        ("主屏幕",) if explicit_system_surface else ()
     )
     current_surface_terms = (
         "当前",
@@ -1282,8 +1294,29 @@ def compile_runtime_graph_semantics(
     raw_uses_current_surface = any(
         term in raw_goal_folded for term in current_surface_terms
     )
-    needs_launcher = len(target_apps) > 1 or any(
-        term in raw_goal_folded for term in launcher_terms
+    structured_launcher_text = " ".join(
+        value
+        for item in tuple(getattr(graph, "subgoals", ()) or ())
+        for value in (
+            str(getattr(item, "objective", "") or ""),
+            *tuple(
+                str(condition)
+                for condition in tuple(
+                    getattr(item, "completion_conditions", ()) or ()
+                )
+            ),
+        )
+    ).casefold()
+    needs_launcher = (
+        len(target_apps) > 1
+        or any(term in raw_goal_folded for term in launcher_terms)
+        or (
+            explicit_system_surface
+            and any(
+                term in structured_launcher_text
+                for term in launcher_terms_for_subgoal
+            )
+        )
     )
     if needs_launcher:
         surfaces.append(SurfaceRef(surface_id="surface_launcher", kind="launcher"))
@@ -1305,9 +1338,6 @@ def compile_runtime_graph_semantics(
             )
         )
 
-    raw_entities = getattr(goal, "entities", {}) or {}
-    if not isinstance(raw_entities, Mapping):
-        raise TaskSemanticIRError("goal.entities 必须是映射。")
     entities: list[SemanticEntity] = []
     input_field_id_by_entity: dict[str, str] = {}
     input_field_label_by_entity: dict[str, str] = {}
@@ -1592,7 +1622,18 @@ def compile_runtime_graph_semantics(
         (
             "home",
             re.compile(
-                r"home\s*键|回到主页|回到主桌面|回到(?:手机|系统)主屏幕",
+                r"home\s*键|回到主页|回到主桌面|回到(?:手机|系统)主屏幕"
+                + (r"|回到主屏幕" if explicit_system_surface else ""),
+                re.I,
+            ),
+        ),
+        (
+            "open_recent_apps",
+            re.compile(
+                r"(?:打开|进入|调出|显示)(?:系统)?(?:最近任务|最近应用)"
+                r"(?:页面|界面|列表)?|"
+                r"(?:打开|进入|调出|显示)系统多任务(?:页面|界面|列表)?|"
+                r"(?:open|show)\s+(?:the\s+)?(?:recent\s+(?:tasks|apps)|recents)",
                 re.I,
             ),
         ),
@@ -1694,7 +1735,7 @@ def compile_runtime_graph_semantics(
             ),
         )
         normalized = " ".join(values).casefold()
-        if any(term in normalized for term in launcher_terms):
+        if any(term in normalized for term in launcher_terms_for_subgoal):
             launcher = next(
                 (item.surface_id for item in surfaces if item.kind == "launcher"),
                 "",

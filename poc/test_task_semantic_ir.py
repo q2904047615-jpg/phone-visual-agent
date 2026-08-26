@@ -243,6 +243,54 @@ class TaskSemanticIRTests(unittest.TestCase):
             },
         )
 
+    def test_explicit_system_main_screen_compiles_launcher_and_home_action(self):
+        payload = current_send_failure_payload()
+        payload["goal"] = {
+            "objective": "回到主屏幕，随后打开最近任务",
+            "target_apps": [],
+            "entities": {
+                "target_surface": "system",
+                "target_ui_label": "目标卡片",
+            },
+        }
+        payload["effect_intents"] = []
+        payload["subgoals"] = [
+            {
+                "subgoal_id": "go_home",
+                "objective": "回到主屏幕",
+                "status": "active",
+                "depends_on": [],
+                "constraints": ["不要打开目标卡片"],
+                "completion_conditions": ["主屏幕可见"],
+                "completion_evidence": [],
+                "effect_ids": [],
+                "execution_class": "navigate",
+            }
+        ]
+        payload["active_subgoal_id"] = "go_home"
+        semantic_ir = compile_formal_semantic_authority(
+            _graph_from_payload(
+                payload,
+                task_id="explicit-system-main-screen-task",
+                device_id="device-local-01",
+                revision=1,
+                raw_user_goal="回到主屏幕，随后打开最近任务",
+            )
+        ).semantic_ir
+        subgoal = semantic_ir.subgoals[0]
+        constraints = {item.constraint_id: item for item in semantic_ir.constraints}
+        surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
+
+        self.assertEqual("launcher", surfaces[subgoal.surface_ref].kind)
+        self.assertIn(
+            "home",
+            {
+                constraints[ref].value
+                for ref in subgoal.constraint_refs
+                if constraints[ref].kind == "required_action"
+            },
+        )
+
     def test_app_main_screen_phrase_does_not_mint_system_home(self):
         payload = current_send_failure_payload()
         payload["goal"] = {

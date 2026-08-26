@@ -6,9 +6,14 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Mapping
 
-from task_semantic_ir import EffectIntent, SemanticEntity, TaskSemanticIR
+from task_semantic_ir import (
+    ConstraintIntent,
+    EffectIntent,
+    SemanticEntity,
+    TaskSemanticIR,
+)
 from semantic_action import SemanticAction
-from ui_scene import UIElement, UIScene
+from ui_scene import UIElement, UIScene, scene_surface_kind
 from verified_text_transaction import (
     VerifiedTextTransactionError,
     plan_from_input_states,
@@ -16,6 +21,19 @@ from verified_text_transaction import (
 
 
 CANONICAL_ACTION_PROTOCOL = "2026-08-20-canonical-action-v1"
+
+_IDEMPOTENT_SYSTEM_ACTION_SURFACE_KINDS = {
+    "home": "launcher",
+    "open_recent_apps": "recent_tasks",
+}
+
+
+def expected_idempotent_system_surface_kind(action_kind: str) -> str | None:
+    """Return the canonical surface that makes a system action a no-op."""
+
+    return _IDEMPOTENT_SYSTEM_ACTION_SURFACE_KINDS.get(
+        str(action_kind or "").strip()
+    )
 
 _EFFECT_CONTROL_MEANINGS = {
     "send_message": frozenset({"send_message"}),
@@ -63,6 +81,7 @@ SUPPORTED_ACTIONS = frozenset(
         "swipe",
         "back",
         "home",
+        "open_recent_apps",
         "reveal_system_navigation",
         "input_verified_text",
         "press_enter",
@@ -116,6 +135,7 @@ EXPECTATION_PREDICATES = frozenset(
         "system_ui.navigation_bar_visible",
         "observation.changed",
         "scene.changed",
+        "element.exists",
         "element.state.focused",
         "element.state.value",
         "element.state.ime_preedit_text",
@@ -142,6 +162,10 @@ _SAFE_STATE_KEYS = frozenset(
         "keyboard_layout",
         "keyboard_input_mode",
         "keyboard_case_mode",
+        "scrollable",
+        "scroll_axis",
+        "page_index",
+        "page_count",
         "input_next_field_key",
         "key_action",
         "source_input_field_id",
@@ -424,12 +448,7 @@ def _scene_source(scene: UIScene) -> dict[str, Any]:
 
 
 def _surface_kind(scene: UIScene) -> str:
-    identity = f"{scene.foreground_app_id} {scene.screen_id}".casefold()
-    if any(token in identity for token in ("launcher", "home_screen", "desktop")):
-        return "launcher"
-    if scene.overlays:
-        return "system_dialog" if "system" in identity else "app"
-    return "app"
+    return scene_surface_kind(scene)
 
 
 @dataclass(frozen=True)
@@ -904,6 +923,158 @@ def _element_proves_scrollable_viewport(element: UIElement) -> bool:
     )
 
 
+def _swipe_directions_for_viewport(element: UIElement) -> tuple[str, ...]:
+    """Return only directions supported by the observed viewport axis/edge."""
+
+    axis = element.states.get("scroll_axis")
+    if axis == "horizontal":
+        backward, forward = "right", "left"
+    elif axis == "vertical":
+        backward, forward = "down", "up"
+    else:
+        return ()
+    page_index = element.states.get("page_index")
+    page_count = element.states.get("page_count")
+    if (
+        isinstance(page_index, int)
+        and not isinstance(page_index, bool)
+        and isinstance(page_count, int)
+        and not isinstance(page_count, bool)
+        and page_count >= 2
+        and 0 <= page_index < page_count
+    ):
+        directions: list[str] = []
+        if page_index < page_count - 1:
+            directions.append(forward)
+        if page_index > 0:
+            directions.append(backward)
+        return tuple(directions)
+    return (forward, backward)
+
+
+_EXPLICIT_SWIPE_DIRECTION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "up": (
+        re.compile(r"(?:向|往|朝)\s*上(?!方)"),
+        re.compile(r"上\s*(?:滑|划|拖|推)"),
+        re.compile(r"\b(?:swipe|flick|drag)\s+up\b", re.IGNORECASE),
+        re.compile(
+            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}"
+            r"\b(?:upward|upwards)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}\bup\b"
+            r"\s*(?:away|off|out)?\s*(?:[.;!?]|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(r"\b(?:upward|upwards)\s+(?:swipe|flick|drag)\b", re.IGNORECASE),
+    ),
+    "down": (
+        re.compile(r"(?:向|往|朝)\s*下(?!方)"),
+        re.compile(r"下\s*(?:滑|划|拖|推)"),
+        re.compile(r"\b(?:swipe|flick|drag)\s+down\b", re.IGNORECASE),
+        re.compile(
+            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}"
+            r"\b(?:downward|downwards)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}\bdown\b"
+            r"\s*(?:away|off|out)?\s*(?:[.;!?]|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(r"\b(?:downward|downwards)\s+(?:swipe|flick|drag)\b", re.IGNORECASE),
+    ),
+    "left": (
+        re.compile(r"(?:向|往|朝)\s*左(?!方)"),
+        re.compile(r"左\s*(?:滑|划|拖|推)"),
+        re.compile(r"\b(?:swipe|flick|drag)\s+left\b", re.IGNORECASE),
+        re.compile(
+            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}\bleftward\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}\bleft\b"
+            r"\s*(?:away|off|out)?\s*(?:[.;!?]|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(r"\bleftward\s+(?:swipe|flick|drag)\b", re.IGNORECASE),
+    ),
+    "right": (
+        re.compile(r"(?:向|往|朝)\s*右(?!方)"),
+        re.compile(r"右\s*(?:滑|划|拖|推)"),
+        re.compile(r"\b(?:swipe|flick|drag)\s+right\b", re.IGNORECASE),
+        re.compile(
+            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}\brightward\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:swipe|flick|drag)\b[^.;!?\n]{0,80}\bright\b"
+            r"\s*(?:away|off|out)?\s*(?:[.;!?]|$)",
+            re.IGNORECASE,
+        ),
+        re.compile(r"\brightward\s+(?:swipe|flick|drag)\b", re.IGNORECASE),
+    ),
+}
+
+
+def _explicit_required_swipe_direction(
+    constraints: Iterable[ConstraintIntent],
+) -> str | None:
+    """Extract one explicit direction from authoritative swipe wording.
+
+    The free-form text may narrow an already typed ``required_action=swipe``;
+    it can never mint a swipe by itself. Ambiguous or missing directions fail
+    closed instead of becoming a guessed physical action.
+    """
+
+    source_text = " ".join(
+        item.source_text
+        for item in constraints
+        if item.kind == "required_action"
+        and item.value == "swipe"
+        and item.authoritative
+        and item.source_text.strip()
+    )
+    matches = {
+        direction
+        for direction, patterns in _EXPLICIT_SWIPE_DIRECTION_PATTERNS.items()
+        if any(pattern.search(source_text) for pattern in patterns)
+    }
+    if len(matches) != 1:
+        return None
+    return next(iter(matches))
+
+
+def _unique_directional_swipe_presence(scene: UIScene) -> UIElement | None:
+    """Prove one object can anchor a typed directional swipe-away gesture.
+
+    A local-action role may provide the identity directly.  A container or
+    dialog may contribute its observed bounds only to this non-click gesture;
+    the canonical candidate still carries no coordinates, and its direction
+    comes exclusively from the authoritative typed task constraint.
+    """
+
+    target = scene.unique_trusted_goal_element()
+    if target is None:
+        completion_evidence = scene.trusted_completion_evidence()
+        if len(completion_evidence) != 1:
+            return None
+        target = completion_evidence[0]
+        if any(
+            other.element_id != target.element_id
+            and other.states.get("goal_relevant") is True
+            and float(other.confidence) >= MIN_ELEMENT_CONFIDENCE
+            for other in scene.elements
+        ):
+            return None
+    if target.states.get("fully_visible") is not True:
+        return None
+    if not any(str(item).strip() for item in target.evidence):
+        return None
+    return target
+
+
 def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> bool:
     """Bind a typed App surface to one structured foreground identity.
 
@@ -1087,11 +1258,14 @@ def compile_canonical_action_catalog(
     constraints_by_id = {
         item.constraint_id: item for item in semantic_ir.constraints
     }
-    active_required_actions = frozenset(
-        str(constraints_by_id[ref].value)
+    active_required_action_constraints = tuple(
+        constraints_by_id[ref]
         for ref in active_subgoal.constraint_refs
         if ref in constraints_by_id
         and constraints_by_id[ref].kind == "required_action"
+    )
+    active_required_actions = frozenset(
+        str(item.value) for item in active_required_action_constraints
     )
     active_input_fields = tuple(
         item
@@ -1443,30 +1617,77 @@ def compile_canonical_action_catalog(
         for element in sorted_elements
         if _element_proves_scrollable_viewport(element)
     )
+    target_swipe_presence: UIElement | None = None
+    explicit_target_swipe_direction = _explicit_required_swipe_direction(
+        active_required_action_constraints
+    )
+    if (
+        not scrollable_viewports
+        and active_required_actions == {"swipe"}
+        and explicit_target_swipe_direction is not None
+    ):
+        target_swipe_presence = _unique_directional_swipe_presence(scene)
+    if len(scrollable_viewports) == 1:
+        swipe_directions = _swipe_directions_for_viewport(scrollable_viewports[0])
+    elif target_swipe_presence is not None:
+        swipe_directions = (explicit_target_swipe_direction,)
+    else:
+        swipe_directions = ()
+    target_swipe_claim_ids = (
+        tuple(element_claim_ids[target_swipe_presence.element_id])
+        if target_swipe_presence is not None
+        else ()
+    )
     affordances: list[Affordance] = []
     for action_kind in sorted(available):
-        if action_kind in {"back", "home", "reveal_system_navigation", "swipe", "wait_for_change"}:
-            if action_kind == "swipe" and len(scrollable_viewports) != 1:
+        if action_kind in {
+            "back",
+            "home",
+            "open_recent_apps",
+            "reveal_system_navigation",
+            "swipe",
+            "wait_for_change",
+        }:
+            if action_kind == "swipe" and not swipe_directions:
                 continue
             if action_kind == "reveal_system_navigation" and not (
                 scene.system_ui.immersive_or_fullscreen is True
                 and scene.system_ui.navigation_bar_visible is False
             ):
                 continue
-            affordances.append(_affordance(surface_ref, action_kind, surface_claim_ids))
+            support_claim_ids = (
+                tuple(surface_claim_ids) + target_swipe_claim_ids
+                if action_kind == "swipe" and target_swipe_presence is not None
+                else surface_claim_ids
+            )
+            affordances.append(
+                _affordance(surface_ref, action_kind, support_claim_ids)
+            )
     for element in sorted_elements:
         normally_actionable = _element_eligible(element)
         exact_tap_text_target = element.element_id in exact_tap_text_element_ids
         if not normally_actionable and not exact_tap_text_target:
             continue
+        focus_only_input_surface = bool(
+            element.role == "input"
+            and element.states.get("focus_only_input_surface") is True
+        )
         supported: set[str] = set()
         if "tap_semantic" in available:
             supported.add("tap_semantic")
-        if normally_actionable and "double_tap" in available:
+        if (
+            normally_actionable
+            and not focus_only_input_surface
+            and "double_tap" in available
+        ):
             supported.add("double_tap")
-        if normally_actionable and "long_press" in available:
+        if (
+            normally_actionable
+            and not focus_only_input_surface
+            and "long_press" in available
+        ):
             supported.add("long_press")
-        if normally_actionable and "drag" in available:
+        if normally_actionable and not focus_only_input_surface and "drag" in available:
             supported.add("drag")
         if element.role == "input" and element.states.get("focused") is True:
             active_field = active_input_fields[0] if len(active_input_fields) == 1 else None
@@ -2024,10 +2245,67 @@ def compile_canonical_action_catalog(
         for item in affordances
         if item.subject_ref == surface_ref
     }
+    target_swipe_ref = (
+        _element_ref(target_swipe_presence.element_id)
+        if target_swipe_presence is not None
+        else ""
+    )
+    swipe_specs = tuple(
+        (
+            "swipe",
+            (
+                StateExpectation(
+                    target_swipe_ref,
+                    "element.exists",
+                    "absent",
+                ),
+            )
+            if target_swipe_presence is not None
+            else (
+                StateExpectation(
+                    surface_ref,
+                    "surface.viewport",
+                    "changed",
+                ),
+            ),
+            target_swipe_presence is None,
+            {
+                "direction": direction,
+                **(
+                    {"element_id": target_swipe_presence.element_id}
+                    if target_swipe_presence is not None
+                    else {}
+                ),
+            },
+        )
+        for direction in swipe_directions
+    )
     system_specs: tuple[tuple[str, tuple[StateExpectation, ...], bool, dict[str, Any]], ...] = (
         (
+            "open_recent_apps",
+            (
+                StateExpectation(
+                    surface_ref,
+                    "surface.kind",
+                    "equals",
+                    expected_idempotent_system_surface_kind(
+                        "open_recent_apps"
+                    ),
+                ),
+            ),
+            False,
+            {},
+        ),
+        (
             "home",
-            (StateExpectation(surface_ref, "surface.kind", "equals", "launcher"),),
+            (
+                StateExpectation(
+                    surface_ref,
+                    "surface.kind",
+                    "equals",
+                    expected_idempotent_system_surface_kind("home"),
+                ),
+            ),
             False,
             {},
         ),
@@ -2050,15 +2328,7 @@ def compile_canonical_action_catalog(
             True,
             {},
         ),
-        *tuple(
-            (
-                "swipe",
-                (StateExpectation(surface_ref, "surface.viewport", "changed"),),
-                True,
-                {"direction": direction},
-            )
-            for direction in ("up", "down", "left", "right")
-        ),
+        *swipe_specs,
         (
             "wait_for_change",
             (StateExpectation(surface_ref, "observation.changed", "changed"),),
@@ -2070,7 +2340,13 @@ def compile_canonical_action_catalog(
         affordance = surface_affordance.get(action_kind)
         if affordance is None:
             continue
-        if action_kind == "home" and _surface_kind(scene) == "launcher":
+        idempotent_surface_kind = expected_idempotent_system_surface_kind(
+            action_kind
+        )
+        if (
+            idempotent_surface_kind is not None
+            and _surface_kind(scene) == idempotent_surface_kind
+        ):
             continue
         if (
             action_kind == "reveal_system_navigation"
@@ -2080,10 +2356,20 @@ def compile_canonical_action_catalog(
         candidates.append(
             _candidate(
                 action_kind=action_kind,
-                subject_refs=(surface_ref,),
+                subject_refs=(
+                    (surface_ref, target_swipe_ref)
+                    if action_kind == "swipe"
+                    and target_swipe_presence is not None
+                    else (surface_ref,)
+                ),
                 affordance_ids=(affordance.affordance_id,),
                 relation_ids=(),
-                precondition_claim_ids=surface_claim_ids,
+                precondition_claim_ids=(
+                    tuple(surface_claim_ids) + target_swipe_claim_ids
+                    if action_kind == "swipe"
+                    and target_swipe_presence is not None
+                    else surface_claim_ids
+                ),
                 expectations=expectations,
                 exploratory=exploratory,
                 parameters=parameters,
@@ -2099,11 +2385,12 @@ def compile_canonical_action_catalog(
         "double_tap": 5,
         "long_press": 6,
         "drag": 7,
-        "home": 8,
-        "reveal_system_navigation": 9,
-        "back": 10,
-        "swipe": 11,
-        "wait_for_change": 12,
+        "open_recent_apps": 8,
+        "home": 9,
+        "reveal_system_navigation": 10,
+        "back": 11,
+        "swipe": 12,
+        "wait_for_change": 13,
     }
     unique_candidates = {item.candidate_id: item for item in candidates}
     element_by_id = {item.element_id: item for item in sorted_elements}
@@ -2361,7 +2648,12 @@ def compile_canonical_action_catalog(
                 "read_only",
                 "navigation_only",
             }
-        if action_kind in {"back", "swipe", "reveal_system_navigation"}:
+        if action_kind in {
+            "back",
+            "open_recent_apps",
+            "swipe",
+            "reveal_system_navigation",
+        }:
             if active_input_fields:
                 return action_kind in active_required_actions
             surfaces = {
@@ -2428,6 +2720,27 @@ def canonical_candidate_expected_result(
     if candidate.action_kind == "reveal_system_navigation":
         return {"system_ui": {"navigation_bar_visible": True}}
     if candidate.action_kind == "swipe":
+        element_id = str(candidate.parameters.get("element_id") or "").strip()
+        if element_id:
+            matches = tuple(
+                element
+                for element in scene.elements
+                if element.element_id == element_id
+            )
+            if len(matches) != 1:
+                raise CanonicalActionProtocolError(
+                    "元素绑定 swipe 引用了不存在或不唯一的当前元素。"
+                )
+            element = matches[0]
+            return {
+                "content_changed": True,
+                "element_absent": {
+                    "element_id": element.element_id,
+                    "meaning": element.meaning,
+                    "role": element.role,
+                    "label": element.label,
+                },
+            }
         return {"content_changed": True}
 
     element_by_ref = {

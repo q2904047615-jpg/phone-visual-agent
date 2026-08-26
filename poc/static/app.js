@@ -86,6 +86,7 @@ async function api(path, options = {}) {
     const message = typeof detail === "string" ? detail : (detail?.error || JSON.stringify(detail || {}));
     const error = new Error(message || `请求失败（${response.status}）`);
     error.detail = detail;
+    error.status = response.status;
     throw error;
   }
   return data;
@@ -751,9 +752,54 @@ function render() {
 }
 
 async function refreshDevice() {
-  state.device = await api("/api/device");
+  const [device, runtimeSession] = await Promise.all([
+    api("/api/device"),
+    api("/api/session"),
+  ]);
+  state.device = device;
+  state.token = String(runtimeSession.token || "");
+  state.mock = Boolean(runtimeSession.mock);
+  await reconcileSupervisedSession();
   renderTaskRunStatus();
   renderStatus();
+}
+
+let sessionReconcileInFlight = false;
+
+async function reconcileSupervisedSession() {
+  const view = sessionView();
+  if (
+    !view
+    || view.isTerminal
+    || state.busy
+    || state.taskAttemptStatus?.state === "running"
+    || sessionReconcileInFlight
+  ) return;
+
+  sessionReconcileInFlight = true;
+  try {
+    const response = await api(`/api/agent/generic-supervised/${encodeURIComponent(view.sessionId)}`);
+    if (!response?.session) return;
+    state.supervisedSession = response.session;
+    state.taskAttemptStatus = null;
+    const refreshed = Protocol.adaptSession(response.session, { fallbackDeviceId: state.deviceId });
+    state.sessionDeviceId = refreshed.deviceId || state.deviceId;
+    if (refreshed.isTerminal) state.pendingConfirmationGrant = null;
+  } catch (error) {
+    if (Number(error?.status) !== 404) return;
+    const detail = `会话 ${view.sessionId} 已不在当前服务中，已停止显示为进行中；请建立新任务。`;
+    saveLastTaskOutcome({
+      state: "failure",
+      detail,
+      sessionId: view.sessionId,
+      updatedAt: new Date().toISOString(),
+    });
+    state.supervisedSession = null;
+    state.sessionDeviceId = "";
+    state.pendingConfirmationGrant = null;
+  } finally {
+    sessionReconcileInFlight = false;
+  }
 }
 
 function refreshPreview() {

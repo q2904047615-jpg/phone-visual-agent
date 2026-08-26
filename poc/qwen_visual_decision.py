@@ -29,7 +29,6 @@ from message_intent import (
 from semantic_action import SemanticAction
 from task_semantic_ir import TaskSemanticIR
 from ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene
-from universal_action_controller import UniversalActionController, UniversalActionError
 from vision_agent import VisionAgentError
 from vision_model_config import public_model_identity
 
@@ -46,6 +45,31 @@ SINGLE_ELEMENT_ACTIONS = frozenset(
         "clear_verified_text", "double_tap", "long_press",
     }
 )
+
+
+def _targets_single_element(
+    action_or_kind: SemanticAction | str,
+    params: Mapping[str, Any] | None = None,
+) -> bool:
+    """Return whether this exact canonical action binds one observed element.
+
+    Ordinary viewport swipes remain screen actions.  A swipe becomes an
+    element action only when the canonical catalog binds its immutable
+    ``element_id``; Qwen never invents that identity or any coordinates.
+    """
+
+    if isinstance(action_or_kind, SemanticAction):
+        kind = action_or_kind.action
+        values = action_or_kind.params
+    else:
+        kind = str(action_or_kind or "").strip()
+        values = params or {}
+    return kind in SINGLE_ELEMENT_ACTIONS or (
+        kind == "swipe"
+        and bool(str(values.get("element_id") or "").strip())
+    )
+
+
 QWEN_PROTOCOL_ACTIONS = frozenset(SUPPORTED_ACTIONS)
 
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -799,7 +823,7 @@ class VisualTargetRegion:
             raise GenericStepPlanningError(f"目标区域超出归一化画面：{self.bounds}")
         if not self.description.strip():
             raise GenericStepPlanningError("目标区域缺少可读描述。")
-        if action.action in SINGLE_ELEMENT_ACTIONS:
+        if _targets_single_element(action):
             if self.kind != "element":
                 raise GenericStepPlanningError("元素动作必须绑定可信候选元素。")
             action_id = str(action.params.get("element_id") or "").strip()
@@ -844,7 +868,13 @@ class VisualTargetRegion:
                 raise GenericStepPlanningError("屏幕/系统动作只能描述整屏区域。")
             expected_kind = (
                 "system_navigation"
-                if action.action in {"back", "home", "reveal_system_navigation"}
+                if action.action
+                in {
+                    "back",
+                    "home",
+                    "open_recent_apps",
+                    "reveal_system_navigation",
+                }
                 else "screen"
             )
             if self.kind != expected_kind:
@@ -931,7 +961,7 @@ class QwenVisualDecision:
             ):
                 raise GenericStepPlanningError("风险确认门未满足，禁止产生外部状态动作。")
             self.target_region.validate(self.trusted_observation, action)
-            if action.action in SINGLE_ELEMENT_ACTIONS:
+            if _targets_single_element(action):
                 element = self.trusted_observation.get_candidate(
                     str(action.params.get("element_id") or "")
                 )
@@ -1017,18 +1047,10 @@ class QwenVisualDecision:
                 raise GenericStepPlanningError("动作 expected_effect 与顶层预期不一致。")
             if float(self.confidence) < MIN_DECISION_CONFIDENCE:
                 raise GenericStepPlanningError("动作置信度不足，必须 blocked。")
-            try:
-                UniversalActionController().resolve_one(
-                    action,
-                    self.trusted_observation.scene,
-                    confirmed=True,
-                )
-            except UniversalActionError as exc:
-                raise GenericStepPlanningError(f"本地控制器拒绝动作：{exc}") from exc
             local_semantic_target = self.trusted_observation.target_local_candidate()
             if (
                 local_semantic_target is not None
-                and action.action in SINGLE_ELEMENT_ACTIONS
+                and _targets_single_element(action)
                 and not _formal_action_applies_effect(action)
                 and str(action.params.get("element_id") or "")
                 != local_semantic_target.element_id
@@ -1036,7 +1058,7 @@ class QwenVisualDecision:
                 raise GenericStepPlanningError(
                     "动作没有绑定当前画面唯一的语义目标候选。"
                 )
-            if exact_candidate_ids and action.action not in SINGLE_ELEMENT_ACTIONS:
+            if exact_candidate_ids and not _targets_single_element(action):
                 raise GenericStepPlanningError(
                     "存在逐字一致文字约束时，动作必须绑定该唯一候选。"
                 )
@@ -1133,6 +1155,7 @@ class QwenVisualDecisionObserver:
         trusted_observation: TrustedObservation,
         decision_number: int = 1,
         available_action_kinds: Iterable[str] | None = None,
+        navigation_history: Iterable[Mapping[str, Any]] = (),
     ) -> QwenVisualDecision:
         started = time.perf_counter()
         self.last_raw_response = ""
@@ -1178,6 +1201,15 @@ class QwenVisualDecisionObserver:
             "model_calls": 0,
             "hardware_actions_enabled": False,
             "available_action_kinds": canonical_action_kinds,
+            "canonical_choice_count": len(canonical_choices),
+            "canonical_choices": [
+                {
+                    "action": str(item.get("action") or ""),
+                    "direction": str(item.get("direction") or ""),
+                    "element_id": str(item.get("element_id") or ""),
+                }
+                for item in canonical_choices
+            ],
             "device_action_kinds": sorted(available_actions),
         }
         self.last_diagnostics = dict(base_diagnostics)
@@ -1247,6 +1279,7 @@ class QwenVisualDecisionObserver:
             context,
             canonical_choices,
             observation=trusted_observation,
+            navigation_history=navigation_history,
         )
         if deterministic_selection is not None:
             raw = json.dumps(
@@ -1272,8 +1305,8 @@ class QwenVisualDecisionObserver:
             return decision
 
         reason = (
-            "本轮单次Qwen画面没有把canonical目录缩小为唯一候选；"
-            "本地确定性选择器停止，不再发起第二次模型请求。"
+            "当前canonical目录未能依据唯一视觉目标或尚未探索的分页方向确定单一动作；"
+            "本地选择器停止，不发起重复模型请求。"
         )
         decision = _local_blocked_decision(
             context,
@@ -1346,6 +1379,7 @@ def _deterministic_exact_selection_payload(
     choices: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     *,
     observation: TrustedObservation | None = None,
+    navigation_history: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any] | None:
     """Select one canonical candidate from the sole step observation.
 
@@ -1402,6 +1436,7 @@ def _deterministic_exact_selection_payload(
         expected_action = {
             "exact_back": "back",
             "exact_home": "home",
+            "exact_open_recent_apps": "open_recent_apps",
             "exact_tap_semantic": "tap_semantic",
         }.get(active_id)
         matching_choices = (
@@ -1459,9 +1494,21 @@ def _deterministic_exact_selection_payload(
                 "单次Qwen画面的唯一目标与canonical目录唯一候选一致。",
             )
 
+    paged_swipe = _untried_paged_swipe_choice(
+        choices,
+        observation=observation,
+        navigation_history=navigation_history,
+    )
+    if paged_swipe is not None:
+        return action_payload(
+            paged_swipe,
+            "分页视口按当前会话尚未探索的方向选择唯一canonical swipe。",
+        )
+
     if len(choices) == 1 and str(choices[0].get("action") or "") in {
         "back",
         "home",
+        "open_recent_apps",
         "reveal_system_navigation",
         "swipe",
         "wait_for_change",
@@ -1470,6 +1517,99 @@ def _deterministic_exact_selection_payload(
             choices[0],
             "canonical目录只有一个坐标无关或容器级合法动作。",
         )
+    return None
+
+
+def _paged_viewport_key(scene: UIScene | Mapping[str, Any]) -> tuple[Any, ...] | None:
+    if isinstance(scene, UIScene):
+        foreground = scene.foreground_app_id
+        screen_id = scene.screen_id
+        elements: Iterable[Any] = scene.elements
+    elif isinstance(scene, Mapping):
+        foreground = scene.get("foreground_app_id") or scene.get("app_id")
+        screen_id = scene.get("screen_id")
+        elements = scene.get("elements") or ()
+    else:
+        return None
+    matches: list[tuple[Any, ...]] = []
+    for element in elements:
+        if isinstance(element, UIElement):
+            role = element.role
+            meaning = element.meaning
+            states = element.states
+        elif isinstance(element, Mapping):
+            role = element.get("role")
+            meaning = element.get("meaning")
+            states = element.get("states") or {}
+        else:
+            continue
+        if not isinstance(states, Mapping):
+            continue
+        page_index = states.get("page_index")
+        page_count = states.get("page_count")
+        axis = states.get("scroll_axis")
+        if (
+            role == "container"
+            and meaning == "paged_viewport"
+            and states.get("scrollable") is True
+            and states.get("fully_visible") is True
+            and isinstance(page_index, int)
+            and not isinstance(page_index, bool)
+            and isinstance(page_count, int)
+            and not isinstance(page_count, bool)
+            and page_count >= 2
+            and 0 <= page_index < page_count
+            and axis in {"horizontal", "vertical"}
+        ):
+            matches.append(
+                (
+                    str(foreground or "").strip().casefold(),
+                    str(screen_id or "").strip().casefold(),
+                    str(axis),
+                    page_index,
+                    page_count,
+                )
+            )
+    return matches[0] if len(matches) == 1 else None
+
+
+def _untried_paged_swipe_choice(
+    choices: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+    *,
+    observation: TrustedObservation,
+    navigation_history: Iterable[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    current_key = _paged_viewport_key(getattr(observation, "scene", None))
+    if current_key is None:
+        return None
+    tried: set[str] = set()
+    for item in navigation_history:
+        execution = item.get("execution")
+        decision = item.get("qwen_decision")
+        if not isinstance(execution, Mapping) or not isinstance(decision, Mapping):
+            continue
+        if execution.get("action_outcome") != "matched":
+            continue
+        action = decision.get("next_action")
+        trusted = decision.get("trusted_observation")
+        scene = trusted.get("scene") if isinstance(trusted, Mapping) else None
+        if (
+            isinstance(action, Mapping)
+            and action.get("action") == "swipe"
+            and isinstance(action.get("params"), Mapping)
+            and _paged_viewport_key(scene) == current_key
+        ):
+            direction = str(action["params"].get("direction") or "")
+            if direction:
+                tried.add(direction)
+    by_direction = {
+        str(choice.get("direction") or ""): choice
+        for choice in choices
+        if choice.get("action") == "swipe" and choice.get("direction")
+    }
+    for direction in ("left", "right", "up", "down"):
+        if direction in by_direction and direction not in tried:
+            return by_direction[direction]
     return None
 
 
@@ -1560,7 +1700,7 @@ def _hydrate_canonical_selection(
             "selection_context",
         }
     }
-    if kind in SINGLE_ELEMENT_ACTIONS:
+    if _targets_single_element(kind, params):
         element_id = str(params.get("element_id") or "").strip()
         element = observation.get_candidate(element_id)
         params.update(
@@ -1605,7 +1745,7 @@ def _hydrate_canonical_selection(
         float(raw_confidence),
         float(observation.scene.confidence),
     )
-    if kind in SINGLE_ELEMENT_ACTIONS:
+    if _targets_single_element(kind, params):
         confidence = min(
             confidence,
             float(
@@ -1653,7 +1793,7 @@ def _canonical_target_region(
     action: SemanticAction,
     observation: TrustedObservation,
 ) -> VisualTargetRegion:
-    if action.action in SINGLE_ELEMENT_ACTIONS:
+    if _targets_single_element(action):
         element = observation.get_candidate(
             str(action.params.get("element_id") or "").strip()
         )
@@ -1684,11 +1824,13 @@ def _canonical_target_region(
     is_system = action.action in {
         "back",
         "home",
+        "open_recent_apps",
         "reveal_system_navigation",
     }
     description = {
         "back": "系统返回区域",
         "home": "Android系统Home键",
+        "open_recent_apps": "Android系统最近任务键",
         "reveal_system_navigation": "Android系统导航栏",
     }.get(action.action, "当前屏幕")
     return VisualTargetRegion(
@@ -2094,6 +2236,7 @@ _IDENTITY_SCOPED_EXACT_TEXT_ACTIONS = frozenset(
         "swipe",
         "back",
         "home",
+        "open_recent_apps",
         "reveal_system_navigation",
         "wait_for_change",
     }

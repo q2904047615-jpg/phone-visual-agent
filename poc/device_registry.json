@@ -14,6 +14,7 @@
         "home",
         "input_verified_text",
         "long_press",
+        "open_recent_apps",
         "swipe",
         "tap_semantic",
         "wait_for_change"

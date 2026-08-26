@@ -674,7 +674,7 @@ class TypedInputLineage:
     ) -> str | None:
         """Recover only the committed prefix hidden beside an IME preedit.
 
-        A returned direct-text action may leave its new fragment in the IME
+        A returned Latin-key action may leave its new fragment in the IME
         composition buffer.  Some dedicated audits then report that preedit
         correctly but omit the already committed prefix after the placeholder
         disappears.  The prefix is derivable only when the pending typed
@@ -1726,7 +1726,7 @@ def _validated_text_action_chain(
         or resolved.get("input_method") != "direct_latin"
         or not isinstance(before_scene, dict)
     ):
-        raise InputValueLineageError("文字连续性只接受已解析的英文直输分段。")
+        raise InputValueLineageError("文字连续性只接受已解析的拉丁按键分段。")
     prior = resolved.get("prior_input_value")
     expected = resolved.get("expected_input_value")
     fragment = resolved.get("input_fragment")

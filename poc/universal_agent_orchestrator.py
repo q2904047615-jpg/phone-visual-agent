@@ -37,6 +37,7 @@ from canonical_action_protocol import (
     SUPPORTED_ACTIONS,
     CanonicalActionProtocolError,
     GenericStepProposal,
+    expected_idempotent_system_surface_kind,
     scene_matches_target_app_surface,
 )
 from qwen_visual_decision import (
@@ -46,6 +47,7 @@ from qwen_visual_decision import (
 from ui_scene import (
     MIN_TARGET_CONFIDENCE,
     UISceneError,
+    scene_surface_kind,
 )
 from task_semantic_ir import (
     TaskSemanticIRError,
@@ -65,6 +67,9 @@ POST_ACTION_TRANSITION_PROTOCOL_VERSION = (
     "2026-08-16-universal-post-action-transition-v1"
 )
 POST_ACTION_OUTCOMES = frozenset({"matched", "mismatched"})
+CANONICAL_SELECTION_RECEIPT_VERSION = (
+    "2026-08-26-canonical-selection-receipt-v1"
+)
 CORRECTIVE_RETRY_PROTOCOL_VERSION = (
     "2026-08-24-fresh-observation-corrective-retry-v1"
 )
@@ -76,6 +81,7 @@ CORRECTIVE_RETRY_ACTION_KINDS = frozenset(
         "double_tap",
         "drag",
         "home",
+        "open_recent_apps",
         "long_press",
         "swipe",
         "tap_semantic",
@@ -559,6 +565,33 @@ class ObservationBridge:
             for item in semantic_ir.input_fields
             if typed_subgoal.subgoal_id in item.source_subgoal_ids
         )
+        constraints_by_id = {
+            item.constraint_id: item for item in semantic_ir.constraints
+        }
+        required_actions = {
+            str(constraints_by_id[constraint_ref].value)
+            for constraint_ref in typed_subgoal.constraint_refs
+            if constraint_ref in constraints_by_id
+            and constraints_by_id[constraint_ref].kind == "required_action"
+        }
+        if (
+            not fields
+            and "clear_verified_text" in required_actions
+            and "input_verified_text" not in required_actions
+        ):
+            # A clear-only goal has no new text payload by design.  Give its
+            # sole active input target a stable local identity so the same
+            # single-step visual audit must still enumerate the application
+            # field, IME preedit and visible backspace key.  This marker grants
+            # no text or geometry authority; the fresh audit and canonical
+            # clear candidate remain mandatory.
+            return {
+                "text": "",
+                "field_id": "input_field_clear_target",
+                "field_label": "",
+                "multiline": False,
+                "target_only": True,
+            }
         if len(fields) != 1:
             return {}
         field = fields[0]
@@ -698,9 +731,16 @@ class ObservationBridge:
             goal_entities["target_ui_label"] = active_app_label
         active_input = cls._active_input_transaction(graph, subgoal)
         active_input_text = active_input.get("text")
-        if isinstance(active_input_text, str) and active_input_text:
-            goal_entities["active_input_transaction_text"] = active_input_text
+        target_only_input = active_input.get("target_only") is True
+        if (
+            isinstance(active_input_text, str)
+            and (bool(active_input_text) or target_only_input)
+        ):
+            if active_input_text:
+                goal_entities["active_input_transaction_text"] = active_input_text
             goal_entities["active_input_field_id"] = active_input["field_id"]
+            if target_only_input:
+                goal_entities["active_input_target_only"] = True
             if active_input.get("field_label"):
                 goal_entities["active_input_field_label"] = active_input[
                     "field_label"
@@ -1134,7 +1174,7 @@ class UniversalAgentSessionState:
     trusted_observation: Any = None
     trusted_frames: tuple[Any, ...] = field(default_factory=tuple, repr=False)
     qwen_decision: Any = None
-    controller_decision: NavigationPolicyDecision | None = None
+    controller_decision: CanonicalSelectionReceipt | None = None
     confirmation_authority: Any = field(default=None, repr=False)
     effect_confirmation_authority: Any = field(default=None, repr=False)
     confirmed_effect_ids: tuple[str, ...] = ()
@@ -1187,7 +1227,7 @@ class UniversalAgentSessionState:
                 "allowed": self.controller_decision.allowed,
                 "reason": self.controller_decision.reason,
                 "canonical_class": self.controller_decision.canonical_class,
-                "policy_version": CanonicalActionPolicy.VERSION,
+                "policy_version": CANONICAL_SELECTION_RECEIPT_VERSION,
             }
             if self.controller_decision is not None
             else None
@@ -1244,7 +1284,7 @@ class UniversalAgentSessionState:
             "available_action_kinds": sorted(
                 self.adapter.supported_action_kinds()
                 if callable(getattr(self.adapter, "supported_action_kinds", None))
-                else CanonicalActionPolicy.ALLOWED_ACTIONS
+                else SUPPORTED_ACTIONS
             ),
             "confirmation_scope": (
                 self.confirmation_authority.scope()
@@ -1425,7 +1465,6 @@ class UniversalAgentOrchestrator:
         adapter_factory: Callable[[str], Any],
         trusted_observation_factory: Callable[..., Any] | None = None,
         evidence_store_factory: Callable[[Path], AgentEvidenceStore] | None = None,
-        policy: CanonicalActionPolicy | None = None,
         bridge: ObservationBridge | None = None,
         device_registry: DeviceTaskRegistry | None = None,
     ) -> None:
@@ -1436,7 +1475,6 @@ class UniversalAgentOrchestrator:
             trusted_observation_factory or TrustedObservation.from_scene
         )
         self.evidence_store_factory = evidence_store_factory or AgentEvidenceStore
-        self.policy = policy or CanonicalActionPolicy()
         self.bridge = bridge or ObservationBridge()
         self.device_registry = device_registry or DeviceTaskRegistry()
 
@@ -1458,13 +1496,13 @@ class UniversalAgentOrchestrator:
     ) -> frozenset[str]:
         provider = getattr(session.adapter, "supported_action_kinds", None)
         if not callable(provider):
-            return CanonicalActionPolicy.ALLOWED_ACTIONS
+            return SUPPORTED_ACTIONS
         actions = frozenset(str(item or "").strip() for item in provider())
         if not actions or "" in actions:
             raise UniversalAgentOrchestratorError(
                 "设备动作能力为空或包含无效动作。"
             )
-        unexpected = actions - CanonicalActionPolicy.ALLOWED_ACTIONS
+        unexpected = actions - SUPPORTED_ACTIONS
         if unexpected:
             raise UniversalAgentOrchestratorError(
                 "设备报告了协议外动作：" + ", ".join(sorted(unexpected))
@@ -1708,6 +1746,7 @@ class UniversalAgentOrchestrator:
             trusted_observation=trusted_observation,
             decision_number=session.step_number,
             available_action_kinds=available_actions,
+            navigation_history=tuple(session.history),
         )
 
     @staticmethod
@@ -2231,6 +2270,64 @@ class UniversalAgentOrchestrator:
         surface = surfaces.get(typed_subgoal.surface_ref)
         return bool(surface is not None and surface.kind == "launcher")
 
+    @staticmethod
+    def _typed_idempotent_system_surface_fact(
+        graph: DynamicTaskGraph,
+        subgoal_id: str,
+        scene: Any,
+    ) -> str | None:
+        """Bind one canonical system action to its already-reached surface."""
+
+        if not str(subgoal_id or "").strip():
+            return None
+        try:
+            semantic_ir = compile_formal_semantic_authority(graph).semantic_ir
+            actual_surface_kind = scene_surface_kind(scene)
+        except (TaskSemanticIRError, UISceneError):
+            return None
+        typed_subgoal = next(
+            (
+                item
+                for item in semantic_ir.subgoals
+                if item.subgoal_id == subgoal_id
+            ),
+            None,
+        )
+        if typed_subgoal is None:
+            return None
+        constraints_by_id = {
+            item.constraint_id: item for item in semantic_ir.constraints
+        }
+        required_actions = {
+            str(constraints_by_id[constraint_ref].value)
+            for constraint_ref in typed_subgoal.constraint_refs
+            if constraint_ref in constraints_by_id
+            and constraints_by_id[constraint_ref].kind == "required_action"
+        }
+        if len(required_actions) != 1:
+            return None
+        action_kind = next(iter(required_actions))
+        expected_surface_kind = expected_idempotent_system_surface_kind(
+            action_kind
+        )
+        if (
+            expected_surface_kind is None
+            or actual_surface_kind != expected_surface_kind
+        ):
+            return None
+        return json.dumps(
+            {
+                "action_kind": action_kind,
+                "operator": "equals",
+                "predicate": "surface.kind",
+                "source": "canonical_action_protocol",
+                "value": actual_surface_kind,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
     @classmethod
     def _referenced_target_app_pages(
         cls,
@@ -2605,6 +2702,11 @@ class UniversalAgentOrchestrator:
                 *tuple(current.completion_conditions or ()),
             )
         )
+        typed_system_surface_fact = self._typed_idempotent_system_surface_fact(
+            graph,
+            current.subgoal_id,
+            scene,
+        )
         referenced_app_pages = self._referenced_target_app_pages(
             graph=graph,
             presence_text=presence_text,
@@ -2620,6 +2722,35 @@ class UniversalAgentOrchestrator:
         unique_goal_candidate = scene.unique_trusted_goal_element(
             min_confidence=MIN_TARGET_CONFIDENCE,
         )
+        if unique_goal_candidate is None:
+            completion_reader = getattr(
+                scene,
+                "trusted_completion_evidence",
+                None,
+            )
+            completion_candidates = (
+                tuple(
+                    completion_reader(
+                        min_confidence=MIN_TARGET_CONFIDENCE,
+                    )
+                )
+                if callable(completion_reader)
+                else ()
+            )
+            if len(completion_candidates) == 1:
+                completion_candidate = completion_candidates[0]
+                competing_goal_evidence = any(
+                    other.element_id != completion_candidate.element_id
+                    and other.states.get("goal_relevant") is True
+                    and float(other.confidence) >= MIN_TARGET_CONFIDENCE
+                    for other in tuple(getattr(scene, "elements", ()) or ())
+                )
+                if not competing_goal_evidence:
+                    # Containers and dialogs may prove one already-visible
+                    # presence checkpoint, but they remain excluded from
+                    # TARGET_LOCAL_ACTION_ROLES and therefore grant no action
+                    # or geometry authority.
+                    unique_goal_candidate = completion_candidate
         presence_terms = self._presence_binding_terms(presence_text)
         unique_candidate_terms = (
             self._presence_binding_terms(
@@ -2694,6 +2825,7 @@ class UniversalAgentOrchestrator:
             if not (
                 app_foreground_is_complete_destination
                 or named_destination_grounded
+                or typed_system_surface_fact is not None
             ):
                 return None
         elif not (
@@ -2717,7 +2849,14 @@ class UniversalAgentOrchestrator:
             # business control or navigation affordance that repeats the
             # destination name must neither grant nor veto this page claim.
             candidates = ()
-            scene_identity_facts = self._scene_page_identity_facts(scene)
+            scene_identity_facts = (
+                *self._scene_page_identity_facts(scene),
+                *(
+                    (typed_system_surface_fact,)
+                    if typed_system_surface_fact is not None
+                    else ()
+                ),
+            )
         elif self._is_explicit_multi_presence_text(presence_text):
             candidates = self._multi_presence_candidates(
                 subgoal=current,
@@ -3144,13 +3283,46 @@ class UniversalAgentOrchestrator:
         )
 
     @staticmethod
-    def _policy_payload(decision: NavigationPolicyDecision) -> dict[str, Any]:
+    def _selection_receipt_payload(
+        decision: CanonicalSelectionReceipt,
+    ) -> dict[str, Any]:
         return {
             "allowed": decision.allowed,
             "reason": decision.reason,
             "canonical_class": decision.canonical_class,
-            "policy_version": CanonicalActionPolicy.VERSION,
+            "policy_version": CANONICAL_SELECTION_RECEIPT_VERSION,
         }
+
+    @classmethod
+    def _selection_receipt(
+        cls,
+        session: UniversalAgentSessionState,
+        decision: Any,
+    ) -> CanonicalSelectionReceipt:
+        """Record the already-validated canonical choice without judging it again."""
+
+        proposal = getattr(decision, "proposal", None)
+        action = getattr(proposal, "action", None)
+        if proposal is None or getattr(proposal, "status", "") != "action":
+            return CanonicalSelectionReceipt(
+                allowed=False,
+                reason="当前单步决策没有唯一 canonical 动作。",
+            )
+        action_kind = str(getattr(action, "action", "") or "").strip()
+        available = cls._available_action_kinds(session)
+        if action_kind not in available:
+            return CanonicalSelectionReceipt(
+                allowed=False,
+                reason=f"当前设备没有 canonical 动作能力：{action_kind or 'missing'}。",
+            )
+        return CanonicalSelectionReceipt(
+            allowed=True,
+            reason=(
+                "单步 Qwen 决策已绑定当前 observation、canonical candidate "
+                "和 typed transition；后续只消费同一 scope。"
+            ),
+            canonical_class=action_kind,
+        )
 
     @classmethod
     def _validate_newly_completed_named_app_surfaces(
@@ -3832,7 +4004,7 @@ class UniversalAgentOrchestrator:
         report_path = session.evidence_store.write_report(
             {
                 "mode": "universal_agent_safe_live_loop",
-                "policy_version": CanonicalActionPolicy.VERSION,
+                "policy_version": CANONICAL_SELECTION_RECEIPT_VERSION,
                 "session": session.snapshot(),
             }
         )
@@ -5402,7 +5574,7 @@ class UniversalAgentOrchestrator:
                 if decision.proposal.status == "blocked"
                 else f"本地动作选择器返回了不支持的状态：{decision.proposal.status}"
             )
-            session.controller_decision = NavigationPolicyDecision(
+            session.controller_decision = CanonicalSelectionReceipt(
                 allowed=False,
                 reason=session.failed_reason,
             )
@@ -5430,7 +5602,7 @@ class UniversalAgentOrchestrator:
                 "一次性 controller_transition 完成证据已满足，"
                 "但同一活动子目标仍提出等价动作；禁止生成第二确认。"
             )
-            session.controller_decision = NavigationPolicyDecision(
+            session.controller_decision = CanonicalSelectionReceipt(
                 allowed=False,
                 reason=session.failed_reason,
             )
@@ -5439,26 +5611,20 @@ class UniversalAgentOrchestrator:
             transition_record["diagnostic"] = session.failed_reason
             persist_transition()
             return
-        policy_decision = self.policy.evaluate(
-            task_context=session.semantic_task_context
-            or QwenTaskContext.from_dict(context),
-            trusted_observation=new_observation,
-            decision=decision,
-            available_action_kinds=self._available_action_kinds(session),
-        )
-        session.controller_decision = policy_decision
+        selection_receipt = self._selection_receipt(session, decision)
+        session.controller_decision = selection_receipt
         self._remember(
             session,
             session.evidence_store.write_controller_decision(
                 session.step_number,
-                self._policy_payload(policy_decision),
+                self._selection_receipt_payload(selection_receipt),
             ),
         )
-        if not policy_decision.allowed:
+        if not selection_receipt.allowed:
             session.status = "blocked"
-            session.failed_reason = policy_decision.reason
+            session.failed_reason = selection_receipt.reason
             session.confirmation_authority = None
-            transition_record["disposition"] = "blocked_policy"
+            transition_record["disposition"] = "blocked_canonical_selection"
             transition_record["diagnostic"] = session.failed_reason
             persist_transition()
             return
@@ -5517,7 +5683,7 @@ class UniversalAgentOrchestrator:
             session.status = "blocked"
             session.failed_reason = failed["reason"]
             session.qwen_decision = None
-            session.controller_decision = NavigationPolicyDecision(
+            session.controller_decision = CanonicalSelectionReceipt(
                 allowed=False,
                 reason=session.failed_reason,
             )
@@ -5685,7 +5851,7 @@ class UniversalAgentOrchestrator:
                 session.status = "blocked"
                 session.failed_reason = f"重新观察证据不足：{exc}"
                 session.qwen_decision = None
-                session.controller_decision = NavigationPolicyDecision(
+                session.controller_decision = CanonicalSelectionReceipt(
                     allowed=False,
                     reason=session.failed_reason,
                 )
@@ -5860,7 +6026,7 @@ class UniversalAgentOrchestrator:
                     session.status = "blocked"
                     session.failed_reason = f"页面变化重规划失败：{exc}"
                     session.qwen_decision = None
-                    session.controller_decision = NavigationPolicyDecision(
+                    session.controller_decision = CanonicalSelectionReceipt(
                         allowed=False,
                         reason=session.failed_reason,
                     )
@@ -5962,28 +6128,22 @@ class UniversalAgentOrchestrator:
             )
 
             if decision.proposal.status == "action":
-                policy_decision = self.policy.evaluate(
-                    task_context=session.semantic_task_context
-                    or QwenTaskContext.from_dict(context),
-                    trusted_observation=observation,
-                    decision=decision,
-                    available_action_kinds=self._available_action_kinds(session),
-                )
-                session.controller_decision = policy_decision
+                selection_receipt = self._selection_receipt(session, decision)
+                session.controller_decision = selection_receipt
                 self._remember(
                     session,
                     session.evidence_store.write_controller_decision(
                         session.step_number,
-                        self._policy_payload(policy_decision),
+                        self._selection_receipt_payload(selection_receipt),
                     ),
                 )
-                if policy_decision.allowed:
+                if selection_receipt.allowed:
                     session.status = "awaiting_confirmation"
                     session.failed_reason = ""
                     self._bind_confirmation(session)
                 else:
                     session.status = "blocked"
-                    session.failed_reason = policy_decision.reason
+                    session.failed_reason = selection_receipt.reason
             else:
                 session.status = "blocked"
                 session.failed_reason = (
@@ -5991,7 +6151,7 @@ class UniversalAgentOrchestrator:
                     if decision.proposal.status == "blocked"
                     else f"不支持的 Qwen 状态：{decision.proposal.status}"
                 )
-                session.controller_decision = NavigationPolicyDecision(
+                session.controller_decision = CanonicalSelectionReceipt(
                     allowed=False,
                     reason=session.failed_reason,
                 )
@@ -6208,39 +6368,14 @@ class UniversalAgentOrchestrator:
         decision = session.qwen_decision
         assert graph is not None and observation is not None and decision is not None
 
-        session.confirm_stage = "policy_recheck"
-        if session.confirmed_effect_ids:
-            context = graph.to_qwen_context(
-                confirmed_effect_ids=session.confirmed_effect_ids,
-                confirmed_task_id=graph.task_id,
-                confirmed_device_id=graph.device_id,
-                confirmed_subgoal_id=graph.active_subgoal_id,
-                confirmed_revision=graph.revision,
+        session.confirm_stage = "scope_consumed"
+        selection_receipt = session.controller_decision
+        if selection_receipt is None or not selection_receipt.allowed:
+            raise UniversalAgentOrchestratorError(
+                "确认作用域缺少已验证的 canonical selection receipt。"
             )
-        else:
-            context = graph.to_qwen_context()
-        policy_decision = self.policy.evaluate(
-            task_context=session.semantic_task_context
-            or QwenTaskContext.from_dict(context),
-            trusted_observation=observation,
-            decision=decision,
-            available_action_kinds=self._available_action_kinds(session),
-        )
-        session.controller_decision = policy_decision
         authority.consumed = True
         authority.invalid_reason = "consumed_before_execution"
-        if not policy_decision.allowed:
-            session.status = "blocked"
-            session.failed_reason = policy_decision.reason
-            self._remember(
-                session,
-                session.evidence_store.write_controller_decision(
-                    session.step_number,
-                    self._policy_payload(policy_decision),
-                ),
-            )
-            self._write_terminal_snapshot(session)
-            raise UniversalAgentOrchestratorError(policy_decision.reason)
 
         session.confirm_stage = "pre_execute_evidence"
         try:
@@ -6249,8 +6384,8 @@ class UniversalAgentOrchestrator:
                 session.evidence_store.write_controller_decision(
                     session.step_number,
                     {
-                        **self._policy_payload(policy_decision),
-                        "phase": "pre_execute_recheck",
+                        **self._selection_receipt_payload(selection_receipt),
+                        "phase": "pre_execute_scope_consume",
                     },
                 ),
             )
@@ -6277,11 +6412,16 @@ class UniversalAgentOrchestrator:
                 planned_frames=session.trusted_frames,
             )
         except GenericActionAdapterError as exc:
-            session.physical_actions += max(0, int(exc.physical_actions))
+            failed_physical_actions = max(0, int(exc.physical_actions))
+            if failed_physical_actions == 0:
+                session.verified_app_surface_lineage = (
+                    prior_verified_app_surface_lineage
+                )
+            session.physical_actions += failed_physical_actions
             self._remember(session, exc.evidence)
             session.status = (
                 "needs_reobservation"
-                if int(exc.physical_actions) == 0
+                if failed_physical_actions == 0
                 else "failed"
             )
             session.failed_reason = str(exc)
@@ -7068,28 +7208,22 @@ class UniversalAgentOrchestrator:
             ),
         )
         if decision.proposal.status == "action":
-            policy_decision = self.policy.evaluate(
-                task_context=session.semantic_task_context
-                or QwenTaskContext.from_dict(dict(task_context)),
-                trusted_observation=observation,
-                decision=decision,
-                available_action_kinds=self._available_action_kinds(session),
-            )
-            session.controller_decision = policy_decision
+            selection_receipt = self._selection_receipt(session, decision)
+            session.controller_decision = selection_receipt
             self._remember(
                 session,
                 session.evidence_store.write_controller_decision(
                     session.step_number,
-                    self._policy_payload(policy_decision),
+                    self._selection_receipt_payload(selection_receipt),
                 ),
             )
-            if policy_decision.allowed:
+            if selection_receipt.allowed:
                 session.status = "awaiting_confirmation"
                 session.failed_reason = ""
                 self._bind_confirmation(session)
             else:
                 session.status = "blocked"
-                session.failed_reason = policy_decision.reason
+                session.failed_reason = selection_receipt.reason
         else:
             session.status = "blocked"
             session.failed_reason = (
@@ -7457,30 +7591,25 @@ class UniversalAgentOrchestrator:
 
             proposal = decision.proposal
             if proposal.status == "action":
-                policy_decision = self.policy.evaluate(
-                    task_context=task_context,
-                    trusted_observation=observation,
-                    decision=decision,
-                    available_action_kinds=self._available_action_kinds(session),
-                )
-                session.controller_decision = policy_decision
+                selection_receipt = self._selection_receipt(session, decision)
+                session.controller_decision = selection_receipt
                 self._remember(
                     session,
                     store.write_controller_decision(
                         session.step_number,
-                        self._policy_payload(policy_decision),
+                        self._selection_receipt_payload(selection_receipt),
                     ),
                 )
-                if policy_decision.allowed:
+                if selection_receipt.allowed:
                     session.status = "awaiting_confirmation"
                     self._bind_confirmation(session)
                 else:
                     session.status = "blocked"
-                    session.failed_reason = policy_decision.reason
+                    session.failed_reason = selection_receipt.reason
             elif proposal.status == "blocked":
                 session.status = "blocked"
                 session.failed_reason = proposal.reason
-                session.controller_decision = NavigationPolicyDecision(
+                session.controller_decision = CanonicalSelectionReceipt(
                     allowed=False,
                     reason=proposal.reason,
                 )
@@ -7576,227 +7705,9 @@ class UniversalAgentOrchestrator:
 
 
 @dataclass(frozen=True)
-class NavigationPolicyDecision:
+class CanonicalSelectionReceipt:
+    """Evidence that the sole step selector emitted one executable candidate."""
+
     allowed: bool
     reason: str
     canonical_class: str = ""
-
-
-class CanonicalActionPolicy:
-    """Revalidate one selected canonical action against its current scope.
-
-    This class classifies one already proposed visual action.  It never plans
-    a task, chooses an App, invents an element, or changes coordinates.
-    """
-
-    VERSION = "2026-08-20-canonical-action-policy-v1"
-    ALLOWED_ACTIONS = SUPPORTED_ACTIONS
-    def __init__(self, *, min_confidence: float = MIN_TARGET_CONFIDENCE) -> None:
-        self.min_confidence = float(min_confidence)
-
-    @staticmethod
-    def _value(source: Any, name: str, default: Any = "") -> Any:
-        if isinstance(source, dict):
-            return source.get(name, default)
-        return getattr(source, name, default)
-
-    @staticmethod
-    def _deny(reason: str) -> NavigationPolicyDecision:
-        return NavigationPolicyDecision(allowed=False, reason=reason)
-
-    def _formal_candidate_decision(
-        self,
-        *,
-        task_context: Any,
-        scene: Any,
-        action: Any,
-        available_action_kinds: frozenset[str] | None,
-    ) -> NavigationPolicyDecision | None:
-        """Validate a typed candidate without interpreting business prose."""
-
-        semantic_ir = self._value(task_context, "semantic_ir", None)
-        if semantic_ir is None:
-            return None
-        try:
-            from canonical_action_protocol import (
-                compile_canonical_action_catalog,
-                select_canonical_action_candidate,
-            )
-
-            report = compile_canonical_action_catalog(
-                scene,
-                semantic_ir,
-                available_action_kinds or self.ALLOWED_ACTIONS,
-            )
-            candidate_id = str(
-                action.params.get("formal_candidate_id") or ""
-            ).strip()
-            report_digest = str(
-                action.params.get("formal_report_digest") or ""
-            ).strip()
-            if not candidate_id or not report_digest:
-                return self._deny("动作缺少 canonical candidate 绑定。")
-            candidate = select_canonical_action_candidate(
-                report,
-                report_digest=report_digest,
-                candidate_id=candidate_id,
-            )
-        except Exception as exc:
-            return self._deny(f"canonical action protocol 拒绝：{exc}")
-
-        action_kind = str(self._value(action, "action", "")).strip()
-        if candidate.action_kind != action_kind:
-            return self._deny("动作 kind 与正式 candidate 不一致。")
-        if action.params.get("formal_transition") != candidate.transition.to_dict():
-            return self._deny("动作 typed transition 与正式 candidate 不一致。")
-        if action_kind == "drag":
-            element_ids = (
-                str(action.params.get("source_element_id") or ""),
-                str(action.params.get("destination_element_id") or ""),
-            )
-            candidate_element_ids = (
-                str(candidate.parameters.get("source_element_id") or ""),
-                str(candidate.parameters.get("destination_element_id") or ""),
-            )
-        elif action_kind in {
-            "tap_semantic",
-            "dismiss_overlay",
-            "input_verified_text",
-            "clear_verified_text",
-            "double_tap",
-            "long_press",
-        }:
-            element_ids = (str(action.params.get("element_id") or ""),)
-            candidate_element_ids = (
-                str(candidate.parameters.get("element_id") or ""),
-            )
-        else:
-            element_ids = ()
-            candidate_element_ids = ()
-        if element_ids and candidate_element_ids != element_ids:
-            return self._deny("动作元素与正式 candidate subject 不一致。")
-        if action_kind == "swipe" and str(
-            candidate.parameters.get("direction") or ""
-        ) != str(action.params.get("direction") or ""):
-            return self._deny("滑动方向与正式 candidate 不一致。")
-        return NavigationPolicyDecision(
-            allowed=True,
-            reason="canonical action candidate、scope 与设备能力一致。",
-            canonical_class=action_kind,
-        )
-    def evaluate(
-        self,
-        *,
-        task_context: Any,
-        trusted_observation: Any,
-        decision: Any,
-        available_action_kinds: frozenset[str] | None = None,
-    ) -> NavigationPolicyDecision:
-        impact = str(
-            self._value(task_context, "current_execution_class", "unknown")
-        ).strip()
-        if impact == "unknown":
-            return self._deny("unknown 子目标禁止进入视觉或机械臂执行。")
-        external_allowed = bool(
-            self._value(task_context, "effect_action_allowed", False)
-        )
-        if impact == "effect" and not external_allowed:
-            return self._deny("effect 子目标缺少当前作用域确认。")
-
-        proposal = self._value(decision, "proposal", None)
-        if proposal is None or str(self._value(proposal, "status", "")) != "action":
-            return self._deny("当前 Qwen 决策没有唯一可执行动作。")
-        action = self._value(proposal, "action", None)
-        if action is None:
-            return self._deny("当前 Qwen 决策缺少动作。")
-        action_kind = str(self._value(action, "action", "")).strip()
-        if action_kind not in self.ALLOWED_ACTIONS:
-            return self._deny(f"通用策略不允许动作：{action_kind or 'missing'}。")
-        if (
-            available_action_kinds is not None
-            and action_kind not in available_action_kinds
-        ):
-            return self._deny(f"当前设备没有本地验证动作能力：{action_kind}。")
-        if action_kind == "wait_for_change":
-            if impact not in {"observe", "navigate"}:
-                return self._deny(f"等待动作不能用于 {impact} 子目标。")
-        elif impact not in {"navigate", "effect"}:
-            return self._deny(f"物理动作不能用于 {impact} 子目标。")
-
-        for field in ("task_id", "device_id", "revision"):
-            expected = self._value(task_context, field, None)
-            actual = self._value(decision, field, None)
-            if expected is not None and actual != expected:
-                return self._deny(f"Qwen 决策 {field} 与任务上下文不一致。")
-
-        observation_device = str(
-            self._value(trusted_observation, "device_id", "")
-        ).strip()
-        context_device = str(self._value(task_context, "device_id", "")).strip()
-        decision_device = str(self._value(decision, "device_id", "")).strip()
-        if not observation_device or observation_device not in {
-            context_device,
-            decision_device,
-        } or context_device != decision_device:
-            return self._deny("可信观察、任务和 Qwen 决策的 device_id 不一致。")
-
-        observation_fingerprint = str(
-            self._value(trusted_observation, "fingerprint", "")
-        ).strip()
-        decision_fingerprint = str(
-            self._value(decision, "fingerprint", "")
-        ).strip()
-        if not observation_fingerprint or decision_fingerprint != observation_fingerprint:
-            return self._deny("Qwen 决策 fingerprint 与当前可信观察不一致。")
-
-        decision_observation = self._value(decision, "trusted_observation", None)
-        if decision_observation is not None:
-            bound_fingerprint = str(
-                self._value(decision_observation, "fingerprint", "")
-            ).strip()
-            if bound_fingerprint != observation_fingerprint:
-                return self._deny("Qwen 决策绑定了不同的可信观察。")
-
-        scene = self._value(trusted_observation, "scene", None)
-        if scene is None:
-            return self._deny("可信观察缺少页面场景。")
-        try:
-            scene.validate()
-        except (AttributeError, UISceneError) as exc:
-            return self._deny(f"可信页面场景无效：{exc}")
-        if not scene.stable:
-            return self._deny("页面不稳定或整体置信度不足。")
-        if float(scene.confidence) < self.min_confidence:
-            local_candidate = trusted_observation.target_local_candidate()
-            action_element_id = str(action.params.get("element_id") or "").strip()
-            if (
-                action_kind not in {
-                    "tap_semantic",
-                    "dismiss_overlay",
-                    "input_verified_text",
-                    "press_enter",
-                    "double_tap",
-                    "long_press",
-                }
-                or local_candidate is None
-                or local_candidate.element_id != action_element_id
-            ):
-                return self._deny("页面整体置信度不足，且没有唯一可信的目标局部证据。")
-        if scene.fingerprint != observation_fingerprint:
-            return self._deny("页面 fingerprint 与可信观察不一致。")
-        if float(self._value(decision, "confidence", 0.0)) < self.min_confidence:
-            return self._deny("Qwen 决策置信度不足。")
-
-        current_subgoal = self._value(task_context, "current_subgoal", {})
-        active_effect_ids = self._value(current_subgoal, "effect_ids", ()) or ()
-        if impact == "navigate" and active_effect_ids:
-            return self._deny("navigate 动作不能携带当前子目标效果。")
-        formal_decision = self._formal_candidate_decision(
-            task_context=task_context,
-            scene=scene,
-            action=action,
-            available_action_kinds=available_action_kinds,
-        )
-        if formal_decision is None:
-            return self._deny("typed v4 动作缺少 canonical action protocol。")
-        return formal_decision

@@ -1517,6 +1517,9 @@ class DeepSeekTaskGraphPlanner:
         payload = _normalize_explicit_ui_label_payload(payload, raw_user_goal)
         payload = _normalize_local_input_execution_class(payload)
         payload = _normalize_local_refresh_execution_class(payload)
+        payload = _normalize_local_recent_task_card_dismissal_execution_class(
+            payload
+        )
         if payload_normalizer is not None:
             payload = payload_normalizer(payload)
         graph = _graph_from_payload(
@@ -1580,7 +1583,9 @@ Shell、ADB、keycode、main.exe 指令或其他可直接驱动设备的控制�
    最终需要由当前画面或正式效果回执证明的正向结果。确认只由 EffectIntent.kind 与本地版本化策略决定。
 6. observe 只能描述查看、读取、检查等纯观察结果；navigate 只能描述打开或进入页面等
    导航结果。仅改变本机临时界面层级、前后台页面或临时标签页也属于 navigation_only，不得为它
-   虚构 effect_intents；但登录/退出账号、修改账号数据或云端同步状态仍属于 effect。
+   虚构 effect_intents；系统最近任务/任务概览中划掉、关闭或移除应用预览卡片，只改变本机临时
+   任务层级，也属于 navigate，不得为卡片对应 App 的内容虚构 effect_intents；关闭或删除 App 内
+   真实数据仍属于 effect。登录/退出账号、修改账号数据或云端同步状态也仍属于 effect。
    当用户要查看、读取或核对某个目标页面的结果，但没有明确说明该结果已经在当前画面中时，
    必须先建立一个 navigation_only 子目标描述“目标页面或目标区域可见”，再建立 read_only 子目标
    描述要核对的结果；不得把潜在导航需求隐藏在单个 read_only 子目标中。
@@ -1746,12 +1751,21 @@ def build_exact_action_task_graph(
     label = str(target_label or "").strip()
     if not goal_text:
         raise TaskGraphError("用户目标不能为空。")
-    if resolved_action not in {"back", "home", "tap_semantic"}:
-        raise TaskGraphError("exact_action_kind 只允许 back、home 或 tap_semantic。")
+    if resolved_action not in {
+        "back",
+        "home",
+        "open_recent_apps",
+        "tap_semantic",
+    }:
+        raise TaskGraphError(
+            "exact_action_kind 只允许 back、home、open_recent_apps 或 tap_semantic。"
+        )
     if resolved_action == "tap_semantic" and not label:
         raise TaskGraphError("tap_semantic 直推必须提供 exact_target_label。")
     if resolved_action != "tap_semantic" and label:
-        raise TaskGraphError("back/home 直推不得携带 exact_target_label。")
+        raise TaskGraphError(
+            "back/home/open_recent_apps 直推不得携带 exact_target_label。"
+        )
     if len(label) > 120 or "\n" in label or "\r" in label:
         raise TaskGraphError("exact_target_label 必须为不超过120字符的单行文字。")
     _validate_device_id(device_id)
@@ -1760,6 +1774,7 @@ def build_exact_action_task_graph(
     objective_by_action = {
         "back": "按一次返回键",
         "home": "回到系统主屏幕",
+        "open_recent_apps": "打开系统最近任务页面",
         "tap_semantic": "点击当前画面中的目标控件",
     }
     entities: dict[str, Any] = {"target_surface": "current_surface"}
@@ -3411,14 +3426,68 @@ def _validate_revision(
     evidence = (
         set(visual_claim_refs)
         if visual_claim_refs
-        else set(observation.visible_evidence).union(
-            observation.grounded_visual_facts
-        )
+        else {
+            item
+            for item in (
+                *observation.visible_evidence,
+                *observation.grounded_visual_facts,
+            )
+            if not item.startswith("controller_transition:")
+        }
     )
     controller_refs = {
         item.ref_id: item
         for item in observation.controller_transition_evidence_refs
     }
+    # A controller transition is not general visual evidence.  Admit its ref
+    # to a global completion condition only for the exact previous active
+    # navigation node that the same candidate also completes with that ref.
+    # This keeps stale/cross-task receipts out while allowing the terminal
+    # exact-condition projector to reuse one already-proven transition.
+    transition = observation.verified_action_transition
+    previous_current = previous.active_subgoal()
+    candidate_current = (
+        next(
+            (
+                item
+                for item in candidate.subgoals
+                if previous_current is not None
+                and item.subgoal_id == previous_current.subgoal_id
+            ),
+            None,
+        )
+        if previous_current is not None
+        else None
+    )
+    consumed_receipts = {
+        item.consumed_action_transition_receipt_id
+        for item in previous.replan_history
+        if item.consumed_action_transition_receipt_id
+    }
+    strict_controller_global_refs: set[str] = set()
+    if (
+        transition is not None
+        and transition.outcome == "matched"
+        and transition.receipt_id not in consumed_receipts
+        and previous_current is not None
+        and previous_current.external_impact == "navigation_only"
+        and candidate_current is not None
+        and candidate_current.status == "completed"
+        and transition.session_id.strip()
+        and transition.task_id == previous.task_id
+        and transition.device_id == previous.device_id
+        and transition.prior_revision == previous.revision
+        and transition.subgoal_id == previous_current.subgoal_id
+        and transition.after_observation_id == observation.scene_id
+    ):
+        strict_controller_global_refs = {
+            ref_id
+            for ref_id, ref in controller_refs.items()
+            if ref.receipt_id == transition.receipt_id
+            and ref.subgoal_id == previous_current.subgoal_id
+            and ref_id in candidate_current.completion_evidence
+        }
+        evidence.update(strict_controller_global_refs)
     for condition_id, old in old_conditions.items():
         new = new_conditions[condition_id]
         if (
@@ -3968,6 +4037,101 @@ def _normalize_local_refresh_execution_class(
             if not isinstance(item, dict)
             or str(item.get("effect_id") or "") not in removed_effect_ids
         ]
+    return value
+
+
+def _normalize_local_recent_task_card_dismissal_execution_class(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep dismissing a local recent-task card out of typed effect authority."""
+
+    if not isinstance(payload, dict):
+        return payload
+    goal_payload = payload.get("goal")
+    entities = (
+        goal_payload.get("entities")
+        if isinstance(goal_payload, dict)
+        else None
+    )
+    subgoals = payload.get("subgoals")
+    effects = payload.get("effect_intents")
+    if (
+        not isinstance(entities, dict)
+        or not isinstance(subgoals, list)
+        or not isinstance(effects, list)
+    ):
+        return payload
+
+    target_surface = str(entities.get("target_surface") or "")
+    system_surface_pattern = re.compile(
+        r"系统|设备|当前(?:界面|页面|前台)|"
+        r"\b(?:system|device|current[_\s-]?(?:surface|screen|view))\b",
+        re.IGNORECASE,
+    )
+    recent_tasks_pattern = re.compile(
+        r"最近任务|任务概览|后台(?:任务|应用)|"
+        r"\brecents?\b|\brecent\s+(?:tasks?|apps?)\b|"
+        r"\boverview\s+(?:screen|view)\b",
+        re.IGNORECASE,
+    )
+    preview_card_pattern = re.compile(
+        r"应用预览卡片|预览卡片|任务卡片|应用卡片|"
+        r"\bapp\s+(?:preview\s+)?card\b|\btask\s+card\b",
+        re.IGNORECASE,
+    )
+    dismiss_pattern = re.compile(
+        r"划掉|滑走|移出|移除|关闭|清除|"
+        r"\bswipe\b.{0,80}\b(?:away|off)\b|\bdismiss\b|\bremove\b|"
+        r"\bclose\b|\bclear\b",
+        re.IGNORECASE,
+    )
+    bound_effect_subgoals = {
+        str(subgoal_id)
+        for effect in effects
+        for subgoal_id in (
+            effect.get("source_subgoal_ids", [])
+            if isinstance(effect, dict)
+            and isinstance(effect.get("source_subgoal_ids"), list)
+            else []
+        )
+    }
+
+    changed = False
+    normalized_subgoals: list[Any] = []
+    for item in subgoals:
+        if not isinstance(item, dict):
+            normalized_subgoals.append(item)
+            continue
+        local_context = " ".join(
+            [
+                str(item.get("objective") or ""),
+                *(
+                    str(value)
+                    for value in item.get("completion_conditions", [])
+                    if isinstance(value, str)
+                ),
+            ]
+        )
+        subgoal_id = str(item.get("subgoal_id") or "")
+        if (
+            item.get("execution_class") in {"effect", "unknown"}
+            and item.get("effect_ids") == []
+            and subgoal_id not in bound_effect_subgoals
+            and system_surface_pattern.search(target_surface)
+            and recent_tasks_pattern.search(local_context)
+            and preview_card_pattern.search(local_context)
+            and dismiss_pattern.search(local_context)
+        ):
+            normalized = dict(item)
+            normalized["execution_class"] = "navigate"
+            normalized_subgoals.append(normalized)
+            changed = True
+        else:
+            normalized_subgoals.append(item)
+    if not changed:
+        return payload
+    value = json.loads(json.dumps(payload, ensure_ascii=False))
+    value["subgoals"] = normalized_subgoals
     return value
 
 

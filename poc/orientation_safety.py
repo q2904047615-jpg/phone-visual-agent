@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
-import time
 import uuid
 import weakref
 from dataclasses import dataclass, field
@@ -15,12 +14,14 @@ from PIL import Image, ImageFilter
 ORIENTATION_AUDIT_PROTOCOL_VERSION = "2026-08-15-orientation-audit-v2"
 ORIENTATION_CREDENTIAL_VERSION = "2026-08-24-orientation-credential-v2"
 MIN_ORIENTATION_CONFIDENCE = 0.80
-MAX_ORIENTATION_BINDING_AGE_SECONDS = 3.0
 MAX_ORIENTATION_MEAN_BRIGHTNESS_DELTA = 18.0
 MAX_ORIENTATION_CENTERED_MAE = 6.0
 ORIENTATION_AUDIT_SOURCE = "independent_orientation_audit"
 LOCAL_QWERTY_ORIENTATION_SOURCE = "stable_local_qwerty_orientation_audit"
 SINGLE_STEP_SCENE_ORIENTATION_SOURCE = "single_step_scene_orientation"
+FIXED_SYSTEM_NAVIGATION_ACTIONS = frozenset(
+    {"back", "home", "open_recent_apps"}
+)
 _PLACEHOLDER_DEVICE_IDS = frozenset({"", "unbound", "unknown", "none", "null"})
 _AUDIT_SEAL_LOCK = threading.Lock()
 _LIVE_AUDIT_SEALS: dict[object, "_FrameVisualBinding"] = {}
@@ -193,7 +194,14 @@ class OrientationCredential:
             if forbidden.search(item):
                 raise OrientationSafetyError("方向凭据包含坐标、动作或外部控制端证据。")
 
-    def assert_authorizes(self, *, device_id: str, scene_fingerprint: str, frame_size: tuple[int, int]) -> None:
+    def assert_authorizes(
+        self,
+        *,
+        device_id: str,
+        scene_fingerprint: str,
+        frame_size: tuple[int, int],
+        action: str | None = None,
+    ) -> None:
         self.validate()
         if self.device_id != device_id:
             raise OrientationSafetyError("方向凭据与设备不匹配。")
@@ -201,7 +209,15 @@ class OrientationCredential:
             raise OrientationSafetyError("方向凭据与稳定场景不匹配。")
         if self.frame_size != tuple(frame_size):
             raise OrientationSafetyError("方向凭据与本地画布尺寸不匹配。")
-        if self.phone_content_rotation != "upright":
+        # These calibrated system-navigation primitives stay bound to the
+        # exact device, scene, frame, confidence and one-shot live seal, but
+        # do not depend on the central App content disclosing its rotation.
+        # Visual/geometry actions remain strict, including callers that omit
+        # an action scope.
+        if (
+            self.phone_content_rotation != "upright"
+            and action not in FIXED_SYSTEM_NAVIGATION_ACTIONS
+        ):
             raise OrientationSafetyError("手机内容方向不一致或未知。")
         if float(self.confidence) < MIN_ORIENTATION_CONFIDENCE:
             raise OrientationSafetyError("方向独立审计置信度不足。")
@@ -290,10 +306,7 @@ def _mint_audited_credential(
         _audit_seal=seal,
     )
     item.validate()
-    if (
-        item.phone_content_rotation == "upright"
-        and float(item.confidence) >= MIN_ORIENTATION_CONFIDENCE
-    ):
+    if float(item.confidence) >= MIN_ORIENTATION_CONFIDENCE:
         with _AUDIT_SEAL_LOCK:
             _LIVE_AUDIT_SEALS[seal] = _frame_visual_binding(frame)
     return item
@@ -423,10 +436,7 @@ def _mint_single_step_scene_credential(
         _audit_seal=seal,
     )
     item.validate()
-    if (
-        item.phone_content_rotation == "upright"
-        and float(item.confidence) >= MIN_ORIENTATION_CONFIDENCE
-    ):
+    if float(item.confidence) >= MIN_ORIENTATION_CONFIDENCE:
         with _AUDIT_SEAL_LOCK:
             _LIVE_AUDIT_SEALS[seal] = _frame_visual_binding(frame)
     return item
@@ -451,7 +461,7 @@ class PhysicalExecutionGate:
         self.device_id = validate_device_id(device_id)
         self._lock = threading.Lock()
         self._armed: tuple[
-            str, OrientationCredential, _FrameVisualBinding, float
+            str, OrientationCredential, _FrameVisualBinding
         ] | None = None
 
     def arm(self, credential: OrientationCredential, *, action: str, scene_fingerprint: str) -> None:
@@ -464,13 +474,13 @@ class PhysicalExecutionGate:
                 device_id=self.device_id,
                 scene_fingerprint=scene_fingerprint,
                 frame_size=credential.frame_size,
+                action=action,
             )
             visual_binding = _claim_audit_seal(credential)
             self._armed = (
                 action,
                 credential,
                 visual_binding,
-                time.monotonic(),
             )
 
     def clear(self) -> None:
@@ -483,15 +493,14 @@ class PhysicalExecutionGate:
             self._armed = None
         if armed is None:
             raise OrientationSafetyError("物理执行缺少一次性方向授权。")
-        armed_action, credential, visual_binding, armed_at = armed
+        armed_action, credential, visual_binding = armed
         if armed_action != action:
             raise OrientationSafetyError("一次性方向授权与物理动作不匹配。")
         credential.assert_authorizes(
             device_id=self.device_id,
             scene_fingerprint=credential.scene_fingerprint,
             frame_size=tuple(frame.size),
+            action=action,
         )
-        if time.monotonic() - armed_at > MAX_ORIENTATION_BINDING_AGE_SECONDS:
-            raise OrientationSafetyError("一次性方向授权已超过动作前时间窗。")
         _assert_visually_bound(visual_binding, frame)
         return credential

@@ -54,13 +54,33 @@ class DeviceActionRequest:
             self._validate_point(self.end_point, "拖动终点")
             if self.point == self.end_point:
                 raise DeviceExecutionError("拖动起点和终点不能相同。")
-        if self.kind == "swipe" and self.direction not in {
-            "up",
-            "down",
-            "left",
-            "right",
-        }:
-            raise DeviceExecutionError("滑动方向无效。")
+        if self.kind == "swipe":
+            if self.direction not in {"up", "down", "left", "right"}:
+                raise DeviceExecutionError("滑动方向无效。")
+            has_start = self.point is not None
+            has_end = self.end_point is not None
+            if has_start != has_end:
+                raise DeviceExecutionError(
+                    "元素绑定滑动必须同时提供起点和终点。"
+                )
+            if has_start:
+                self._validate_point(self.point, "元素滑动起点")
+                self._validate_point(self.end_point, "元素滑动终点")
+                if self.point == self.end_point:
+                    raise DeviceExecutionError("元素滑动起点和终点不能相同。")
+                assert self.point is not None and self.end_point is not None
+                delta_x = self.end_point[0] - self.point[0]
+                delta_y = self.end_point[1] - self.point[1]
+                direction_matches = {
+                    "up": delta_y < 0 and abs(delta_y) > abs(delta_x),
+                    "down": delta_y > 0 and abs(delta_y) > abs(delta_x),
+                    "left": delta_x < 0 and abs(delta_x) > abs(delta_y),
+                    "right": delta_x > 0 and abs(delta_x) > abs(delta_y),
+                }[self.direction]
+                if not direction_matches:
+                    raise DeviceExecutionError(
+                        "元素滑动轨迹与请求方向不一致。"
+                    )
         if self.kind == "long_press" and (
             isinstance(self.hold_seconds, bool)
             or not isinstance(self.hold_seconds, (int, float))
@@ -171,6 +191,7 @@ class RobotDeviceExecutor:
             "swipe": self._swipe,
             "back": self._back,
             "home": self._home,
+            "open_recent_apps": self._open_recent_apps,
             "input_verified_text": self._input_text,
             "clear_verified_text": self._clear_text,
             "long_press": self._long_press,
@@ -282,6 +303,16 @@ class RobotDeviceExecutor:
 
     def _swipe(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         assert request.direction is not None
+        if request.point is not None and request.end_point is not None:
+            return DeviceExecutionResult(
+                physical_actions=1,
+                transport_result=self._hardware_call(
+                    "vision_swipe_relative",
+                    *request.point,
+                    *request.end_point,
+                    request.direction,
+                ),
+            )
         return DeviceExecutionResult(
             physical_actions=1,
             transport_result=self._hardware_call(
@@ -299,6 +330,17 @@ class RobotDeviceExecutor:
 
     def _home(self, _request: DeviceActionRequest) -> DeviceExecutionResult:
         result = self._hardware_call("vision_android_home")
+        return DeviceExecutionResult(
+            physical_actions=1,
+            transport_result=result,
+            hardware_receipt=self._consume_click_receipt(expected_count=1),
+        )
+
+    def _open_recent_apps(
+        self,
+        _request: DeviceActionRequest,
+    ) -> DeviceExecutionResult:
+        result = self._hardware_call("vision_android_recent_apps")
         return DeviceExecutionResult(
             physical_actions=1,
             transport_result=result,

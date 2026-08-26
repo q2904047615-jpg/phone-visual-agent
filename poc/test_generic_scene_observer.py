@@ -8,11 +8,13 @@ from PIL import Image, ImageDraw, ImageFilter
 from generic_scene_observer import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     INPUT_STRUCTURE_AUDIT_VERSION,
+    POST_ACTION_VISUAL_CONTEXT_VERSION,
     SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+    PostActionVisualContext,
     SingleStepGenericSceneObserver,
 )
 from ui_scene import UI_SCENE_PROTOCOL_VERSION
-from vision_agent import VisionAgentError
+from vision_agent import VisionAgentError, _image_data_url
 
 
 class FakeProvider:
@@ -470,6 +472,326 @@ def multifield_next_audit(
 
 
 class SingleStepGenericSceneObserverTests(unittest.TestCase):
+    def test_explicit_system_home_observation_sends_unmasked_phone_frame(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "chinese",
+                (173, 61, 211),
+                {
+                    "objective": "回到手机主屏幕",
+                    "execution_class": "navigate",
+                    "completion_conditions": ["手机主屏幕可见"],
+                },
+            ),
+            (
+                "english-variation",
+                (27, 189, 116),
+                {
+                    "objective": "return to the phone home screen",
+                    "execution_class": "navigate",
+                    "completion_conditions": ["phone home screen is visible"],
+                },
+            ),
+        )
+        for name, color, goal_context in cases:
+            with self.subTest(name=name):
+                envelope = {
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "coordinate_space": {
+                        "kind": "normalized_1000",
+                        "width": 1000,
+                        "height": 1000,
+                    },
+                    "scene": scene_payload(),
+                    "input_structure": None,
+                }
+                provider = SequenceProvider([envelope])
+                frames = stable_frames(color)
+
+                observed = SingleStepGenericSceneObserver(provider).observe(
+                    frames=frames,
+                    goal_context=goal_context,
+                    device_id="device-local-01",
+                )
+
+                image_parts = [
+                    part
+                    for part in provider.messages_seen[0][1]["content"]
+                    if part.get("type") == "image_url"
+                ]
+                self.assertEqual(1, len(image_parts))
+                self.assertEqual(
+                    _image_data_url(frames[-1].convert("RGB")),
+                    image_parts[0]["image_url"]["url"],
+                )
+                self.assertEqual("calculator", observed.foreground_app_id)
+                self.assertEqual("app_home", observed.screen_id)
+                prompt = provider.messages_seen[0][1]["content"][0]["text"]
+                self.assertNotIn("中央App内容未披露", prompt)
+                self.assertNotIn("固定遮罩", prompt)
+
+    def test_post_action_context_is_typed_prompt_data_and_separates_cache(
+        self,
+    ) -> None:
+        envelope = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {
+                "kind": "normalized_1000",
+                "width": 1000,
+                "height": 1000,
+            },
+            "scene": scene_payload(),
+            "input_structure": None,
+        }
+        provider = SequenceProvider(
+            [
+                json.loads(json.dumps(envelope)),
+                json.loads(json.dumps(envelope)),
+            ]
+        )
+        observer = SingleStepGenericSceneObserver(provider)
+        frames = stable_frames()
+        goal_context = {
+            "objective": "观察当前稳定画面",
+            "completion_conditions": ["当前画面已被观察"],
+        }
+
+        observer.observe(
+            frames=frames,
+            goal_context=goal_context,
+            device_id="device-local-01",
+        )
+        post_action = PostActionVisualContext.from_dict(
+            {
+                "protocol_version": POST_ACTION_VISUAL_CONTEXT_VERSION,
+                "execution_state": "physical_action_executed",
+                "outcome": "pending_visual_verification",
+                "canonical_action_kind": "open_recent_apps",
+                "expected_postconditions": [
+                    {
+                        "subject_ref": "surface_current",
+                        "predicate": "surface.kind",
+                        "operator": "equals",
+                        "value": "recent_tasks",
+                    }
+                ],
+            }
+        )
+        observer.observe(
+            frames=frames,
+            goal_context=goal_context,
+            device_id="device-local-01",
+            post_action_context=post_action,
+        )
+
+        self.assertEqual(2, provider.calls)
+        initial_prompt = provider.messages_seen[0][1]["content"][0]["text"]
+        post_prompt = provider.messages_seen[1][1]["content"][0]["text"]
+        self.assertNotIn(POST_ACTION_VISUAL_CONTEXT_VERSION, initial_prompt)
+        self.assertIn(POST_ACTION_VISUAL_CONTEXT_VERSION, post_prompt)
+        self.assertIn('"canonical_action_kind":"open_recent_apps"', post_prompt)
+        self.assertIn('"predicate":"surface.kind"', post_prompt)
+        self.assertIn('"value":"recent_tasks"', post_prompt)
+        self.assertIn("绝不等于matched", post_prompt)
+        self.assertIn("当前JPEG仍是当前画面的唯一权威", post_prompt)
+        self.assertEqual(
+            "pending_visual_verification",
+            observer.last_diagnostics["post_action_visual_context"]["outcome"],
+        )
+
+    def test_post_action_context_cannot_predeclare_matched(self) -> None:
+        provider = SequenceProvider([])
+        with self.assertRaisesRegex(VisionAgentError, "不得提前声明"):
+            SingleStepGenericSceneObserver(provider).observe(
+                frames=stable_frames(),
+                goal_context={"objective": "观察当前稳定画面"},
+                device_id="device-local-01",
+                post_action_context={
+                    "protocol_version": POST_ACTION_VISUAL_CONTEXT_VERSION,
+                    "execution_state": "physical_action_executed",
+                    "outcome": "matched",
+                    "canonical_action_kind": "back",
+                    "expected_postconditions": [
+                        {
+                            "subject_ref": "surface_current",
+                            "predicate": "surface.navigation_depth",
+                            "operator": "changed",
+                        }
+                    ],
+                },
+            )
+        self.assertEqual(0, provider.calls)
+
+    def test_target_only_clear_binds_visible_preedit_to_unique_focused_field(
+        self,
+    ) -> None:
+        scene = scene_payload()
+        scene.update(
+            {
+                "foreground_app_id": "com.example.messaging",
+                "screen_id": "conversation",
+                "summary": "会话页中唯一输入框已聚焦",
+                "elements": [],
+            }
+        )
+        audit = input_audit_payload(
+            application_inputs=[
+                audited_application_input(
+                    structure_id="composer",
+                    bounds=[100, 500, 760, 600],
+                    text="",
+                    placeholder="",
+                    visible_editable_cues=["aaazjie"],
+                    caret_line_index=0,
+                )
+            ],
+            ime_preedit_regions=[
+                {
+                    "region_id": "preedit",
+                    "bounds": [160, 525, 330, 570],
+                    "text": "aaazjie",
+                    "confidence": 0.99,
+                    "candidates": [
+                        {
+                            "text": "aaazjie",
+                            "bounds": [160, 610, 330, 645],
+                            "confidence": 0.99,
+                            "fully_visible": True,
+                        }
+                    ],
+                }
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 650, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "mode_switch": None,
+                "backspace_key": {
+                    "label": "⌫",
+                    "bounds": [830, 810, 930, 880],
+                    "confidence": 0.99,
+                    "fully_visible": True,
+                },
+            },
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "clear_preedit",
+                    "objective": "清空当前唯一聚焦输入框中的预编辑",
+                    "constraints": ["不要发送"],
+                    "completion_conditions": ["输入框和预编辑都为空"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_field_id": "input_field_clear_target",
+                        "active_input_target_only": True,
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+
+        observed = SingleStepGenericSceneObserver(
+            SequenceProvider(
+                [
+                    {
+                        "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                        "coordinate_space": {
+                            "kind": "normalized_1000",
+                            "width": 1000,
+                            "height": 1000,
+                        },
+                        "scene": scene,
+                        "input_structure": audit,
+                    }
+                ]
+            )
+        ).observe(
+            frames=stable_frames(),
+            goal_context=context,
+            device_id="device-local-01",
+        )
+
+        field = observed.unique_trusted_goal_element()
+        self.assertIsNotNone(field)
+        self.assertEqual(
+            "input_field_clear_target",
+            field.states["input_field_id"],
+        )
+        self.assertEqual("aaazjie", field.states["ime_preedit_text"])
+        self.assertEqual("", field.states["value"])
+
+    def test_target_only_clear_rejects_unbound_preedit_and_backspace(self) -> None:
+        scene = scene_payload()
+        scene["elements"] = []
+        audit = input_audit_payload(
+            ime_preedit_regions=[
+                {
+                    "region_id": "preedit",
+                    "bounds": [160, 525, 330, 570],
+                    "text": "aaazjie",
+                    "confidence": 0.99,
+                    "candidates": [],
+                }
+            ],
+            keyboard={
+                "visible": True,
+                "bounds": [0, 650, 1000, 1000],
+                "layout": "qwerty",
+                "input_mode": "direct_latin",
+                "case_mode": "lower",
+                "mode_switch": None,
+                "backspace_key": {
+                    "label": "⌫",
+                    "bounds": [830, 810, 930, 880],
+                    "confidence": 0.99,
+                    "fully_visible": True,
+                },
+            },
+        )
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "clear_preedit",
+                    "objective": "清空当前唯一聚焦输入框中的预编辑",
+                    "constraints": ["不要发送"],
+                    "completion_conditions": ["输入框和预编辑都为空"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_field_id": "input_field_clear_target",
+                        "active_input_target_only": True,
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+
+        with self.assertRaisesRegex(VisionAgentError, "唯一本地目标"):
+            SingleStepGenericSceneObserver(
+                SequenceProvider(
+                    [
+                        {
+                            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                            "coordinate_space": {
+                                "kind": "normalized_1000",
+                                "width": 1000,
+                                "height": 1000,
+                            },
+                            "scene": scene,
+                            "input_structure": audit,
+                        }
+                    ]
+                )
+            ).observe(
+                frames=stable_frames(),
+                goal_context=context,
+                device_id="device-local-01",
+            )
+
     def test_single_step_observer_uses_one_request_for_scene_and_input(self) -> None:
         scene = scene_payload()
         scene.update(
@@ -531,6 +853,13 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
 
         self.assertEqual(provider.calls, 1)
         self.assertEqual(provider.call_options["max_attempts"], 1)
+        prompt = json.dumps(provider.messages_seen[0], ensure_ascii=False)
+        self.assertIn(
+            "direct_latin describes the keyboard key mode only",
+            prompt,
+        )
+        self.assertIn("same Latin glyph sequence", prompt)
+        self.assertIn("second occurrence is the exact candidate", prompt)
         self.assertEqual(
             observed.unique_trusted_goal_element().element_id,
             "local_audited_input_1",
@@ -600,6 +929,180 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 goal_context=strict_context,
                 device_id="device-local-01",
             )
+
+    def test_unique_compact_input_miss_is_preserved_only_for_focus(self):
+        compact_scene = scene_payload()
+        compact_scene.update(
+            {
+                "foreground_app_id": "com.example.messaging",
+                "screen_id": "named_conversation",
+                "summary": "指定会话页底部有一个空白编辑面",
+                "elements": [
+                    {
+                        "element_id": "coarse-input",
+                        "role": "input",
+                        "meaning": "message_input_field",
+                        "label": "",
+                        "bounds": [120, 910, 780, 960],
+                        "confidence": 1.0,
+                        "states": {
+                            "goal_relevant": True,
+                            "fully_visible": True,
+                            "focus_only_input_surface": True,
+                            "value": "模型粗转写不得保留",
+                            "input_field_id": "model_minted_id",
+                        },
+                        "evidence": ["底部工具栏中唯一完整白色文本输入区域"],
+                    }
+                ],
+            }
+        )
+        envelope = {
+            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+            "coordinate_space": {
+                "kind": "normalized_1000",
+                "width": 1000,
+                "height": 1000,
+            },
+            "scene": compact_scene,
+            "input_structure": input_audit_payload(),
+        }
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_message",
+                    "objective": "在消息输入框输入abc",
+                    "constraints": [],
+                    "completion_conditions": ["消息输入框内容为abc"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "abc",
+                        "active_input_field_id": "message_field",
+                        "active_input_field_label": "消息",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+
+        for fused in (False, True):
+            with self.subTest(fused=fused):
+                current_context = json.loads(json.dumps(context, ensure_ascii=False))
+                if fused:
+                    current_context["entities"]["active_subgoal_visual_context"][
+                        "goal_entities"
+                    ]["observation_phase"] = (
+                        FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
+                    )
+                observed = SingleStepGenericSceneObserver(
+                    SequenceProvider([envelope])
+                ).observe(
+                    frames=stable_frames(),
+                    goal_context=current_context,
+                    device_id="device-local-01",
+                )
+
+                target = observed.unique_trusted_goal_element()
+                self.assertIsNotNone(target)
+                self.assertEqual("coarse-input", target.element_id)
+                self.assertEqual("input", target.role)
+                self.assertEqual(
+                    {
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "focus_only_input_surface": True,
+                    },
+                    target.states,
+                )
+                self.assertNotIn("value", target.states)
+                self.assertNotIn("input_field_id", target.states)
+                self.assertFalse(target.element_id.startswith("local_audited_"))
+
+    def test_focus_only_input_requires_one_surface_and_hidden_keyboard(self):
+        base_input = {
+            "element_id": "coarse-input-1",
+            "role": "input",
+            "meaning": "form_text_field",
+            "label": "备注",
+            "bounds": [100, 300, 900, 390],
+            "confidence": 0.99,
+            "states": {"goal_relevant": True, "fully_visible": True},
+            "evidence": ["表单中完整可见的备注编辑区域"],
+        }
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_notes",
+                    "objective": "在备注字段输入release",
+                    "constraints": [],
+                    "completion_conditions": ["备注字段为release"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "release",
+                        "active_input_field_id": "notes_field",
+                        "active_input_field_label": "备注",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+        cases = (
+            (
+                "two-inputs",
+                [
+                    base_input,
+                    {
+                        **base_input,
+                        "element_id": "coarse-input-2",
+                        "label": "正文",
+                        "bounds": [100, 430, 900, 520],
+                        "evidence": ["表单中另一个完整可见的正文编辑区域"],
+                    },
+                ],
+                input_audit_payload(),
+            ),
+            (
+                "keyboard-visible",
+                [base_input],
+                input_audit_payload(
+                    keyboard={
+                        "visible": True,
+                        "bounds": [50, 600, 950, 990],
+                        "layout": "numeric",
+                        "input_mode": "unknown",
+                        "mode_switch": None,
+                    }
+                ),
+            ),
+        )
+        for name, elements, audit in cases:
+            with self.subTest(name=name):
+                candidate_scene = scene_payload()
+                candidate_scene.update(
+                    {
+                        "foreground_app_id": "com.example.form",
+                        "screen_id": "edit_form",
+                        "elements": elements,
+                    }
+                )
+                envelope = {
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "coordinate_space": {
+                        "kind": "normalized_1000",
+                        "width": 1000,
+                        "height": 1000,
+                    },
+                    "scene": candidate_scene,
+                    "input_structure": audit,
+                }
+                with self.assertRaisesRegex(VisionAgentError, "唯一本地目标"):
+                    SingleStepGenericSceneObserver(
+                        SequenceProvider([envelope])
+                    ).observe(
+                        frames=stable_frames(),
+                        goal_context=context,
+                        device_id="device-local-01",
+                    )
 
     def test_single_step_observer_accepts_one_fused_blank_input_without_placeholder(
         self,

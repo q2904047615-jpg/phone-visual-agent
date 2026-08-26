@@ -24,10 +24,11 @@ from ui_scene import (
     UIScene,
     UISceneError,
     compact_drag_source_container_error,
+    scene_surface_kind,
 )
 
 
-UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-25-universal-action-v15"
+UNIVERSAL_CONTROLLER_PROTOCOL_VERSION = "2026-08-26-universal-action-v17"
 
 LOCAL_POINT_GROUNDING_SOURCE = "2026-08-25-stable-local-ocr-label-v1"
 MAX_LOCAL_GROUNDING_BOX_GAP = 0.06
@@ -40,6 +41,7 @@ REVEAL_SYSTEM_NAVIGATION_EFFECT = {
 # minted by verified_text_transaction. Digits, uppercase and symbols continue
 # through their independently audited visible-key paths.
 GESTURE_EDGE_MARGIN = 0.02
+TARGETED_SWIPE_EDGE_MARGIN = 0.08
 MIN_DRAG_DISTANCE = 0.08
 MAX_DRAG_DISTANCE = 0.90
 DRAG_DURATION_SECONDS = 0.8
@@ -696,6 +698,34 @@ class UniversalActionController:
             direction = str(action.params.get("direction") or "").strip().lower()
             if direction not in {"up", "down", "left", "right"}:
                 raise UniversalActionError(f"不支持的滑动方向：{direction}")
+            element_id = str(action.params.get("element_id") or "").strip()
+            absence = expected_effect.get("element_absent")
+            if element_id:
+                element = self._resolve_target(action, scene)
+                self._validate_targeted_swipe_absence_contract(
+                    element,
+                    absence,
+                )
+                start, end = self._targeted_swipe_path(element, direction)
+                distance = math.dist(start, end)
+                return ResolvedSemanticAction(
+                    node_id=action.node_id,
+                    kind="swipe",
+                    normalized_point=start,
+                    normalized_end_point=end,
+                    direction=direction,
+                    hold_seconds=DRAG_DURATION_SECONDS,
+                    path_distance=distance,
+                    target_element_id=element.element_id,
+                    before_fingerprint=scene.fingerprint,
+                    expected_effect=expected_effect,
+                    formal_candidate_id=formal_candidate_id,
+                    formal_transition=formal_transition,
+                )
+            if absence is not None:
+                raise UniversalActionError(
+                    "元素消失后置条件必须绑定同一 swipe element_id。"
+                )
             return ResolvedSemanticAction(
                 node_id=action.node_id,
                 kind="swipe",
@@ -708,6 +738,7 @@ class UniversalActionController:
         if action.action in {
             "back",
             "home",
+            "open_recent_apps",
             "observe",
             "wait_for_change",
             "verify",
@@ -978,6 +1009,8 @@ class UniversalActionController:
             "clear_verified_text",
         }:
             self._verify_exact_input_value(resolved, before, after)
+        if expected.get("element_absent") is not None:
+            self._verify_expected_element_absent(resolved, before, after)
         if resolved.formal_candidate_id:
             self._verify_formal_transition(resolved, before, after)
         element_state = expected.get("element_state")
@@ -1095,6 +1128,211 @@ class UniversalActionController:
             )
 
     @staticmethod
+    def _validate_targeted_swipe_absence_contract(
+        element: UIElement,
+        absence: Any,
+    ) -> None:
+        if not isinstance(absence, Mapping) or set(absence) != {
+            "element_id",
+            "meaning",
+            "role",
+            "label",
+        }:
+            raise UniversalActionError(
+                "元素绑定滑动必须精确声明同一目标的 element_absent 后置条件。"
+            )
+        expected = {
+            "element_id": element.element_id,
+            "meaning": element.meaning,
+            "role": element.role,
+            "label": element.label,
+        }
+        if dict(absence) != expected:
+            raise UniversalActionError(
+                "元素绑定滑动的消失目标与当前可信元素不一致。"
+            )
+
+    @classmethod
+    def _targeted_swipe_path(
+        cls,
+        element: UIElement,
+        direction: str,
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        left, top, right, bottom = element.bounds
+        width = right - left
+        height = bottom - top
+        center_x = (left + right) / 2.0
+        center_y = (top + bottom) / 2.0
+        if direction == "up":
+            start = (center_x, top + height * 0.75)
+            end = (center_x, TARGETED_SWIPE_EDGE_MARGIN)
+        elif direction == "down":
+            start = (center_x, top + height * 0.25)
+            end = (center_x, 1.0 - TARGETED_SWIPE_EDGE_MARGIN)
+        elif direction == "left":
+            start = (left + width * 0.75, center_y)
+            end = (TARGETED_SWIPE_EDGE_MARGIN, center_y)
+        elif direction == "right":
+            start = (left + width * 0.25, center_y)
+            end = (1.0 - TARGETED_SWIPE_EDGE_MARGIN, center_y)
+        else:
+            raise UniversalActionError(f"不支持的元素滑动方向：{direction}")
+        cls._validate_gesture_point(start, label="元素滑动起点")
+        cls._validate_gesture_point(end, label="元素滑动终点")
+        delta_x = end[0] - start[0]
+        delta_y = end[1] - start[1]
+        direction_matches = {
+            "up": delta_y < 0 and abs(delta_y) > abs(delta_x),
+            "down": delta_y > 0 and abs(delta_y) > abs(delta_x),
+            "left": delta_x < 0 and abs(delta_x) > abs(delta_y),
+            "right": delta_x > 0 and abs(delta_x) > abs(delta_y),
+        }[direction]
+        distance = math.dist(start, end)
+        if not direction_matches:
+            raise UniversalActionError("元素边界无法形成指定方向的滑动轨迹。")
+        if not MIN_DRAG_DISTANCE <= distance <= MAX_DRAG_DISTANCE:
+            raise UniversalActionError(
+                "元素滑动轨迹距离必须在"
+                f"{MIN_DRAG_DISTANCE:.2f}～{MAX_DRAG_DISTANCE:.2f}之间。"
+            )
+        return start, end
+
+    @staticmethod
+    def _element_identity_surface_is_continuous(
+        before: UIScene,
+        after: UIScene,
+    ) -> bool:
+        """Return whether observation-local element identity may carry over.
+
+        ``element_id`` is minted independently for every observation.  It can
+        therefore help identify a surviving element only while the typed
+        surface itself is continuous; it is never a global identity across a
+        navigation transition.
+        """
+
+        if scene_surface_kind(before) != scene_surface_kind(after):
+            return False
+        before_app = before.foreground_app_id.strip().casefold()
+        after_app = after.foreground_app_id.strip().casefold()
+        if (
+            before_app not in {"", "unknown"}
+            and after_app not in {"", "unknown"}
+            and before_app != after_app
+        ):
+            return False
+        before_screen = before.screen_id.strip().casefold()
+        after_screen = after.screen_id.strip().casefold()
+        if (
+            before_screen not in {"", "unknown"}
+            and after_screen not in {"", "unknown"}
+            and before_screen != after_screen
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _element_regions_stably_overlap(
+        before_bounds: tuple[float, float, float, float],
+        after_bounds: tuple[float, float, float, float],
+    ) -> bool:
+        left = max(before_bounds[0], after_bounds[0])
+        top = max(before_bounds[1], after_bounds[1])
+        right = min(before_bounds[2], after_bounds[2])
+        bottom = min(before_bounds[3], after_bounds[3])
+        intersection = max(0.0, right - left) * max(0.0, bottom - top)
+        before_area = max(0.0, before_bounds[2] - before_bounds[0]) * max(
+            0.0, before_bounds[3] - before_bounds[1]
+        )
+        after_area = max(0.0, after_bounds[2] - after_bounds[0]) * max(
+            0.0, after_bounds[3] - after_bounds[1]
+        )
+        smaller = min(before_area, after_area)
+        return intersection > 0 and smaller > 0 and intersection / smaller >= 0.60
+
+    @classmethod
+    def _is_same_absence_target(
+        cls,
+        before_target: UIElement,
+        after_element: UIElement,
+        *,
+        surface_is_continuous: bool,
+    ) -> bool:
+        before_label = before_target.label.strip().casefold()
+        after_label = after_element.label.strip().casefold()
+        before_role = before_target.role.strip().casefold()
+        after_role = after_element.role.strip().casefold()
+        before_meaning = before_target.meaning.strip().casefold()
+        after_meaning = after_element.meaning.strip().casefold()
+        label_matches = bool(before_label) and before_label == after_label
+        exact_semantics = (
+            bool(before_meaning)
+            and before_role == after_role
+            and before_meaning == after_meaning
+            and (
+                label_matches
+                or not before_label
+                or not after_label
+            )
+        )
+        if exact_semantics:
+            return True
+        if not surface_is_continuous:
+            return False
+        spatially_continuous = cls._element_regions_stably_overlap(
+            before_target.bounds,
+            after_element.bounds,
+        )
+        return spatially_continuous and (
+            after_element.element_id == before_target.element_id
+            or label_matches
+        )
+
+    def _verify_expected_element_absent(
+        self,
+        resolved: ResolvedSemanticAction,
+        before: UIScene,
+        after: UIScene,
+    ) -> None:
+        absence = resolved.expected_effect.get("element_absent")
+        target_id = str(resolved.target_element_id or "").strip()
+        if resolved.kind != "swipe" or not target_id:
+            raise UniversalActionError(
+                "element_absent 结果没有绑定元素滑动动作。"
+            )
+        try:
+            before_target = before.get_element(
+                target_id,
+                min_confidence=self.min_confidence,
+            )
+        except UISceneError as exc:
+            raise UniversalActionError(
+                f"元素滑动前目标证据无效：{exc}"
+            ) from exc
+        self._validate_targeted_swipe_absence_contract(
+            before_target,
+            absence,
+        )
+        surface_is_continuous = self._element_identity_surface_is_continuous(
+            before,
+            after,
+        )
+        still_visible = tuple(
+            element
+            for element in after.elements
+            if float(element.confidence) >= self.min_confidence
+            and element.states.get("visible") is not False
+            and self._is_same_absence_target(
+                before_target,
+                element,
+                surface_is_continuous=surface_is_continuous,
+            )
+        )
+        if still_visible:
+            raise UniversalActionError(
+                "元素滑动后同一目标仍然可见，不能判定已划掉。"
+            )
+
+    @staticmethod
     def _has_structured_postcondition(
         expected: dict[str, Any],
         before: UIScene,
@@ -1111,6 +1349,9 @@ class UniversalActionController:
         if expected_screen and expected_screen != before.screen_id:
             return True
         element_state = expected.get("element_state")
+        element_absent = expected.get("element_absent")
+        if isinstance(element_absent, Mapping):
+            return bool(str(element_absent.get("element_id") or "").strip())
         return bool(
             isinstance(element_state, dict)
             and str(element_state.get("meaning") or "").strip()
@@ -1291,8 +1532,8 @@ class UniversalActionController:
             "长按后缺少新增弹层、目标状态变化或等价结构化结果证据。"
         )
 
-    @staticmethod
     def _verify_formal_transition(
+        self,
         resolved: ResolvedSemanticAction,
         before: UIScene,
         after: UIScene,
@@ -1308,17 +1549,14 @@ class UniversalActionController:
             operator = str(expectation.get("operator") or "")
             value = expectation.get("value")
             if predicate == "surface.kind" and operator == "equals":
-                identity = f"{after.foreground_app_id} {after.screen_id}".casefold()
-                actual = (
-                    "launcher"
-                    if any(token in identity for token in ("launcher", "home_screen", "desktop"))
-                    else "app"
-                )
+                actual = scene_surface_kind(after)
                 if actual != value:
                     raise UniversalActionError("typed surface.kind 后置状态未满足。")
             elif predicate == "surface.overlay_present" and operator == "equals":
                 if bool(after.overlays) is not bool(value):
                     raise UniversalActionError("typed overlay 后置状态未满足。")
+            elif predicate == "element.exists" and operator == "absent":
+                self._verify_expected_element_absent(resolved, before, after)
             elif predicate == "system_ui.navigation_bar_visible" and operator == "equals":
                 if after.system_ui.navigation_bar_visible is not value:
                     raise UniversalActionError("typed system_ui 后置状态未满足。")
@@ -1430,7 +1668,44 @@ class UniversalActionController:
             } and operator == "equals":
                 target_id = str(resolved.target_element_id or "")
                 matches = [item for item in after.elements if item.element_id == target_id]
-                if len(matches) != 1 or matches[0].states.get("focused") is not value:
+                if len(matches) == 1 and matches[0].states.get("focused") is value:
+                    continue
+                focus_only_sources = tuple(
+                    item
+                    for item in before.elements
+                    if item.element_id == target_id
+                    and item.role == "input"
+                    and item.states.get("focus_only_input_surface") is True
+                )
+                audited_focus_matches = tuple(
+                    item
+                    for item in after.elements
+                    if item.role == "input"
+                    and item.meaning == "application_text_input"
+                    and item.element_id.startswith("local_audited_")
+                    and item.states.get("focused") is value
+                    and item.states.get("fully_visible") is True
+                    and item.states.get("primary_input_geometry_verified") is True
+                    and item.states.get("geometry_audit_source")
+                    == "input_structure_audit"
+                    and str(item.states.get("input_field_id") or "").strip()
+                    not in {"", "unknown"}
+                    and float(item.confidence) >= self.min_confidence
+                )
+                focus_only_transition_verified = bool(
+                    value is True
+                    and len(focus_only_sources) == 1
+                    and len(audited_focus_matches) == 1
+                    and input_app_identity_compatible(
+                        before.foreground_app_id,
+                        after.foreground_app_id,
+                    )
+                    and input_screen_identity_compatible(
+                        before.screen_id,
+                        after.screen_id,
+                    )
+                )
+                if not focus_only_transition_verified:
                     raise UniversalActionError("typed focused 后置状态未满足。")
             elif predicate == "input_field.focused" and operator == "equals":
                 executed_targets = [
@@ -1888,22 +2163,21 @@ class UniversalActionController:
         after.validate()
         return signature(before) == signature(after)
 
-    def transition_evidence_after_action(
+    def transition_evidence_from_verified_action(
         self,
         resolved: ResolvedSemanticAction,
         before: UIScene,
         after: UIScene,
     ) -> tuple[str, ...]:
-        """Return concrete controller facts proven by the action transition.
+        """Describe a transition already accepted by ``verify_after_action``.
 
         These facts describe only the verified transition. DeepSeek remains
-        the sole author of task completion and may use or ignore them when it
-        advances the task graph.
+        the sole author of task completion.  This method deliberately does
+        not verify again; the physical adapter calls the verifier exactly once
+        before asking for this evidence projection.
         """
 
         expected = resolved.expected_effect
-        # Reuse the same safety checks that accepted the physical action result.
-        self.verify_after_action(resolved, before, after)
         evidence: list[str] = []
 
         scene_change_requested = any(
@@ -1950,6 +2224,16 @@ class UniversalActionController:
                 "控制器确认目标元素状态："
                 f"{element.meaning} {element.states}"
             )
+
+        element_absent = expected.get("element_absent")
+        if isinstance(element_absent, Mapping):
+            self._verify_expected_element_absent(resolved, before, after)
+            identity = (
+                str(element_absent.get("label") or "").strip()
+                or str(element_absent.get("meaning") or "").strip()
+                or str(element_absent.get("element_id") or "").strip()
+            )
+            evidence.append(f"控制器确认目标元素已消失：{identity}")
 
         return tuple(evidence)
 

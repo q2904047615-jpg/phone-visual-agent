@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from PIL import Image, ImageChops, ImageStat
 
+from canonical_action_protocol import CanonicalActionProtocolError
 from device_executor import (
     DeviceActionRequest,
     DeviceExecutionError,
@@ -23,11 +24,12 @@ from device_executor import (
 from generic_goal import GenericIntentDraft
 from generic_scene_observer import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
+    POST_ACTION_VISUAL_CONTEXT_VERSION,
     POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS,
     POST_NAVIGATION_RESULT_OBJECTIVE,
     POST_NAVIGATION_RESULT_OBSERVATION_PHASE,
+    PostActionVisualContext,
     SingleStepGenericSceneObserver,
-    _input_audit_established_local_target,
 )
 from input_value_lineage import (
     InputValueLineageError,
@@ -98,7 +100,14 @@ _URL_USERINFO_RE = re.compile(r"(https?://)[^/@\s:]+:[^/@\s]+@", re.IGNORECASE)
 _OPENAI_STYLE_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
 
 _POST_NAVIGATION_RESULT_KINDS = frozenset(
-    {"tap_semantic", "double_tap", "swipe", "back", "home"}
+    {
+        "tap_semantic",
+        "double_tap",
+        "swipe",
+        "back",
+        "home",
+        "open_recent_apps",
+    }
 )
 _POST_NAVIGATION_ALLOWED_EFFECT_KEYS = frozenset(
     {
@@ -287,26 +296,36 @@ def _post_action_observation_context(
     return result_context
 
 
-def _requires_fused_next_input_target(context: dict[str, Any]) -> bool:
-    entities = context.get("entities")
-    focus = (
-        entities.get("active_subgoal_visual_context")
-        if isinstance(entities, dict)
-        else None
-    )
-    goal_entities = (
-        focus.get("goal_entities") if isinstance(focus, dict) else None
-    )
-    return bool(
-        isinstance(goal_entities, dict)
-        and goal_entities.get("observation_phase")
-        == FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
-        and isinstance(
-            goal_entities.get("active_input_transaction_text"),
-            str,
-        )
-        and goal_entities.get("active_input_transaction_text")
-    )
+def _post_action_visual_context(
+    resolved: ResolvedSemanticAction,
+) -> PostActionVisualContext | None:
+    """Project one locally validated canonical transition into Qwen context.
+
+    The adapter calls this only after the device executor reports one physical
+    action.  The summary intentionally carries neither coordinates nor a
+    success verdict; the new pixels and Controller still own verification.
+    Legacy/non-formal test actions have no typed transition and therefore do
+    not mint cross-step context.
+    """
+
+    raw_expectations = resolved.formal_transition.get("expectations")
+    if not isinstance(raw_expectations, list) or not raw_expectations:
+        return None
+    if not all(isinstance(item, dict) for item in raw_expectations):
+        raise GenericActionAdapterError("canonical动作的typed后置条件结构无效。")
+    payload = {
+        "protocol_version": POST_ACTION_VISUAL_CONTEXT_VERSION,
+        "execution_state": "physical_action_executed",
+        "outcome": "pending_visual_verification",
+        "canonical_action_kind": resolved.kind,
+        "expected_postconditions": [dict(item) for item in raw_expectations],
+    }
+    try:
+        return PostActionVisualContext.from_dict(payload)
+    except (CanonicalActionProtocolError, VisionAgentError, TypeError, ValueError) as exc:
+        raise GenericActionAdapterError(
+            f"canonical动作不能建立typed动作后视觉上下文：{exc}"
+        ) from exc
 
 
 def stable_qwerty_ocr_anchors(
@@ -1002,6 +1021,7 @@ class GenericSingleActionAdapter:
             "reveal_system_navigation",
             "back",
             "home",
+            "open_recent_apps",
             "input_verified_text",
             "press_enter",
             "clear_verified_text",
@@ -1217,6 +1237,8 @@ class GenericSingleActionAdapter:
             supported.add("back")
         if available("home", "vision_android_home"):
             supported.add("home")
+        if available("open_recent_apps", "vision_android_recent_apps"):
+            supported.add("open_recent_apps")
         if available("input_verified_text", "vision_type_text_with_layout"):
             supported.add("input_verified_text")
         if available("tap_semantic", "vision_tap_relative"):
@@ -1772,6 +1794,7 @@ class GenericSingleActionAdapter:
         *,
         input_lineage_override: TypedInputLineage | None = None,
         prior_scene: UIScene | None = None,
+        post_action_context: PostActionVisualContext | None = None,
     ) -> UIScene:
         kwargs: dict[str, Any] = {
             "frames": list(frames),
@@ -1790,6 +1813,16 @@ class GenericSingleActionAdapter:
             is True
         ):
             kwargs["prior_scene"] = prior_scene
+        if (
+            post_action_context is not None
+            and getattr(
+                self.observer,
+                "supports_post_action_visual_context",
+                False,
+            )
+            is True
+        ):
+            kwargs["post_action_context"] = post_action_context
         return self.observer.observe(**kwargs)
 
     def capture_scene(
@@ -2037,6 +2070,7 @@ class GenericSingleActionAdapter:
             resolved,
             physical_action_executed=True,
         )
+        post_action_visual_context = _post_action_visual_context(resolved)
         # This observation is the next closed-loop step: capture locally until
         # stable, then consume exactly one fused Qwen response.  A mismatch is
         # evidence for replanning, never permission for another model sample.
@@ -2075,6 +2109,7 @@ class GenericSingleActionAdapter:
                     observation_context,
                     input_lineage_override=input_lineage_override,
                     prior_scene=before,
+                    post_action_context=post_action_visual_context,
                 )
             except RuntimeError as exc:
                 last_error = exc
@@ -2108,14 +2143,6 @@ class GenericSingleActionAdapter:
             )
 
             try:
-                if (
-                    _requires_fused_next_input_target(observation_context)
-                    and not _input_audit_established_local_target(after)
-                ):
-                    raise UniversalActionError(
-                        "动作后页面没有建立预期的下一输入目标；"
-                        "当前导航结果必须按 mismatched 重新观察。"
-                    )
                 self.controller.verify_after_action(resolved, before, after)
                 return (
                     after,
@@ -2637,17 +2664,18 @@ class GenericSingleActionAdapter:
                                 persisted.convert("RGB")
                             ),
                         )
-                orientation_credential.assert_authorizes(
-                    device_id=self.device_id,
-                    scene_fingerprint=before.fingerprint,
-                    frame_size=orientation_credential.frame_size,
-                )
                 hardware_action = (
                     "input_verified_text"
                     if resolved.kind == "clear_verified_text"
                     else "tap_semantic"
                     if resolved.kind == "press_enter"
                     else resolved.kind
+                )
+                orientation_credential.assert_authorizes(
+                    device_id=self.device_id,
+                    scene_fingerprint=before.fingerprint,
+                    frame_size=orientation_credential.frame_size,
+                    action=hardware_action,
                 )
                 arm(
                     orientation_credential,
@@ -2813,7 +2841,7 @@ class GenericSingleActionAdapter:
         if not verification_errors:
             try:
                 controller_transition_evidence = (
-                    self.controller.transition_evidence_after_action(
+                    self.controller.transition_evidence_from_verified_action(
                         resolved,
                         before,
                         after,

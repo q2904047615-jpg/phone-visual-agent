@@ -1,6 +1,7 @@
 import copy
 import json
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 import deepseek_task_graph as task_graph_module
@@ -137,6 +138,47 @@ class TypedPlannerTransportTests(unittest.TestCase):
             revised.subgoals[0].completion_evidence,
             revised.completion_conditions[0].evidence,
         )
+
+    def test_wrong_task_controller_receipt_cannot_complete_global_condition(self):
+        initial = payload(objective="打开目标应用")
+        planner = DeepSeekTaskGraphPlanner(FakeProvider(copy.deepcopy(initial)))
+        graph = planner.plan(initial["goal"]["objective"], device_id="phone-1")
+        observation = self._matched_navigation_observation(graph)
+        ref_id = observation.controller_transition_evidence_refs[0].ref_id
+        candidate = replace(
+            graph,
+            revision=graph.revision + 1,
+            status="completed",
+            completion_conditions=(
+                replace(
+                    graph.completion_conditions[0],
+                    satisfied=True,
+                    evidence=(ref_id,),
+                ),
+            ),
+            subgoals=(
+                replace(
+                    graph.subgoals[0],
+                    status="completed",
+                    completion_evidence=(ref_id,),
+                ),
+            ),
+            active_subgoal_id=None,
+        )
+        wrong_observation = replace(
+            observation,
+            verified_action_transition=replace(
+                observation.verified_action_transition,
+                task_id="different-task",
+            ),
+        )
+
+        with self.assertRaisesRegex(TaskGraphError, "当前观察之外"):
+            task_graph_module._validate_revision(
+                graph,
+                candidate,
+                wrong_observation,
+            )
 
     def test_terminal_graph_does_not_fuzzily_complete_uncovered_global_condition(self):
         initial = payload(objective="打开目标应用")
@@ -427,6 +469,63 @@ class TypedPlannerTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskGraphError, "effect 子目标必须引用"):
             DeepSeekTaskGraphPlanner(FakeProvider(unrelated_effect)).plan(
                 unrelated_effect["goal"]["objective"],
+                device_id="phone-1",
+            )
+
+    def test_recent_task_card_dismissal_is_local_navigation(self):
+        cases = (
+            (
+                "在当前系统最近任务页面，把聊天应用预览卡片向上划掉",
+                "在最近任务页面中，将聊天应用预览卡片向上划掉",
+                "聊天应用预览卡片已从最近任务页面移除",
+            ),
+            (
+                "Remove the browser task card from the system recents screen",
+                "Swipe the browser task card away in recent tasks",
+                "The browser task card is no longer visible in recent tasks",
+            ),
+        )
+        for goal, objective, result in cases:
+            with self.subTest(goal=goal):
+                raw = payload(objective=goal)
+                raw["goal"]["target_apps"] = []
+                raw["goal"]["entities"] = {"target_surface": "system"}
+                raw["completion_conditions"][0].update(
+                    description=result,
+                    evidence_required=[result],
+                )
+                raw["subgoals"][0].update(
+                    {
+                        "objective": objective,
+                        "completion_conditions": [result],
+                        "execution_class": "effect",
+                        "effect_ids": [],
+                    }
+                )
+                graph = DeepSeekTaskGraphPlanner(FakeProvider(raw)).plan(
+                    goal,
+                    device_id="phone-1",
+                )
+                self.assertEqual((), graph.risk_actions)
+                self.assertEqual(
+                    "navigation_only",
+                    graph.subgoals[0].external_impact,
+                )
+
+        real_effect = payload(objective="在聊天应用中发送你好")
+        real_effect["goal"]["target_apps"] = []
+        real_effect["goal"]["entities"] = {"target_surface": "system"}
+        real_effect["subgoals"][0].update(
+            {
+                "objective": "在最近任务预览卡片对应的聊天应用中发送你好",
+                "completion_conditions": ["消息你好已发送"],
+                "execution_class": "effect",
+                "effect_ids": [],
+            }
+        )
+        with self.assertRaisesRegex(TaskGraphError, "effect 子目标必须引用"):
+            DeepSeekTaskGraphPlanner(FakeProvider(real_effect)).plan(
+                real_effect["goal"]["objective"],
                 device_id="phone-1",
             )
 

@@ -9,10 +9,11 @@ import threading
 import time
 import uuid
 import webbrowser
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Callable, Iterator, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -353,6 +354,75 @@ class DeviceControllerRegistry:
         return [dict(self._descriptors[key]) for key in sorted(self._descriptors)]
 
 
+class CameraPreviewUnavailable(RuntimeError):
+    """The live camera is leased and no cached frame exists yet."""
+
+
+class DeviceCameraCoordinator:
+    """Give one closed-loop task priority over passive browser previews.
+
+    A task or doctor holds ``serial_session`` across its whole observation and
+    execution window. Agent captures are re-entrant on the owning thread and
+    refresh the preview cache. Browser previews never wait behind that lease:
+    they return the latest cache instead, so multiple open pages cannot starve
+    the four-frame verification gate.
+    """
+
+    def __init__(self) -> None:
+        self._serial_lock = threading.RLock()
+        self._cached_preview: bytes | None = None
+
+    @staticmethod
+    def _jpeg(frame: Any, *, quality: int = 72) -> bytes:
+        buffer = BytesIO()
+        frame.convert("RGB").save(
+            buffer,
+            format="JPEG",
+            quality=max(1, min(95, int(quality))),
+            optimize=True,
+        )
+        return buffer.getvalue()
+
+    @contextmanager
+    def serial_session(self) -> Iterator[None]:
+        with self._serial_lock:
+            yield
+
+    def capture_agent_frame(self, capture: Callable[[], Any]) -> Any:
+        with self._serial_lock:
+            frame = capture().convert("RGB")
+            self._cached_preview = self._jpeg(frame)
+            return frame
+
+    def capture_preview(
+        self,
+        capture: Callable[..., bytes],
+        *,
+        quality: int,
+        cache_only: bool,
+    ) -> tuple[bytes, bool]:
+        if cache_only:
+            if self._cached_preview is None:
+                raise CameraPreviewUnavailable(
+                    "任务正在独占相机，尚无可复用的缓存画面。"
+                )
+            return self._cached_preview, True
+
+        acquired = self._serial_lock.acquire(blocking=False)
+        if not acquired:
+            if self._cached_preview is None:
+                raise CameraPreviewUnavailable(
+                    "任务正在独占相机，尚无可复用的缓存画面。"
+                )
+            return self._cached_preview, True
+        try:
+            content = bytes(capture(quality=quality))
+            self._cached_preview = content
+            return content, False
+        finally:
+            self._serial_lock.release()
+
+
 class Runtime:
     def __init__(self) -> None:
         self.loaded_code_revision = current_code_revision()
@@ -386,7 +456,7 @@ class Runtime:
             deepseek_planner=self.deepseek_task_graph_planner,
             qwen_observer=self.qwen_visual_decision_observer,
             adapter_factory=lambda device_id: GenericSingleActionAdapter(
-                capture=self.controller_for_device(device_id).vision_capture,
+                capture=lambda: self.capture_agent_frame(device_id),
                 observer=self.generic_scene_observer,
                 robot=self.controller_for_device(device_id),
                 controller=UniversalActionController(),
@@ -422,6 +492,10 @@ class Runtime:
         self.device_coordination_locks: dict[str, threading.Lock] = {
             self.device_controllers.default_device_id: threading.Lock(),
         }
+        self.device_camera_coordinator_guard = threading.RLock()
+        self.device_camera_coordinators: dict[str, DeviceCameraCoordinator] = {
+            self.device_controllers.default_device_id: DeviceCameraCoordinator(),
+        }
         self.generic_supervised_sessions: dict[str, UniversalAgentSessionState] = {}
         self.generic_supervised_session_lock = threading.RLock()
 
@@ -455,7 +529,10 @@ class Runtime:
             ),
             qwen_observer=self.qwen_visual_decision_observer,
             adapter_factory=lambda device_id: GenericSingleActionAdapter(
-                capture=provisional_controller.vision_capture,
+                capture=lambda: self.capture_agent_frame(
+                    device_id,
+                    controller=provisional_controller,
+                ),
                 observer=self.generic_scene_observer,
                 robot=provisional_controller,
                 controller=UniversalActionController(),
@@ -486,6 +563,49 @@ class Runtime:
                 resolved,
                 threading.Lock(),
             )
+
+    def camera_coordinator_for_device(
+        self,
+        device_id: str,
+    ) -> DeviceCameraCoordinator:
+        resolved = str(device_id or "").strip()
+        if not resolved:
+            raise UniversalAgentOrchestratorError("device_id 不能为空。")
+        with self.device_camera_coordinator_guard:
+            return self.device_camera_coordinators.setdefault(
+                resolved,
+                DeviceCameraCoordinator(),
+            )
+
+    def capture_agent_frame(
+        self,
+        device_id: str,
+        *,
+        controller: RobotController | None = None,
+    ) -> Any:
+        resolved_controller = controller or self.controller_for_device(device_id)
+        return self.camera_coordinator_for_device(device_id).capture_agent_frame(
+            resolved_controller.vision_capture
+        )
+
+    def capture_preview(
+        self,
+        device_id: str,
+        *,
+        quality: int = 72,
+    ) -> tuple[bytes, bool]:
+        controller = self.controller_for_device(device_id)
+        cache_only = self.coordination_lock_for_device(device_id).locked()
+        return self.camera_coordinator_for_device(device_id).capture_preview(
+            controller.capture_preview,
+            quality=quality,
+            cache_only=cache_only,
+        )
+
+    @contextmanager
+    def serial_camera_session(self, device_id: str) -> Iterator[None]:
+        with self.camera_coordinator_for_device(device_id).serial_session():
+            yield
 
     def start(self) -> None:
         return None
@@ -644,6 +764,7 @@ def device() -> dict[str, Any]:
                 "swipe",
                 "back",
                 "home",
+                "open_recent_apps",
                 "reveal_system_navigation",
                 "input_verified_text",
                 "press_enter",
@@ -717,21 +838,27 @@ def runtime_doctor(device_id: str) -> dict[str, Any]:
     if not acquired and not active_session:
         active_session = "device-coordination-busy"
     try:
-        return run_runtime_doctor(
-            device_id=device_id,
-            controller=controller,
-            deepseek_provider=runtime.intent_provider,
-            qwen_provider=runtime.vision_provider,
-            active_session=active_session,
-            protocols={
-                "goal": "2026-08-20-deepseek-typed-task-graph-v4",
-                "scene": UI_SCENE_PROTOCOL_VERSION,
-                "action": CANONICAL_ACTION_PROTOCOL,
-                "controller": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
-                "semantic_ir": TASK_SEMANTIC_IR_PROTOCOL,
-                "risk": RISK_POLICY_PROTOCOL,
-            },
+        camera_session = (
+            runtime.serial_camera_session(device_id)
+            if acquired
+            else nullcontext()
         )
+        with camera_session:
+            return run_runtime_doctor(
+                device_id=device_id,
+                controller=controller,
+                deepseek_provider=runtime.intent_provider,
+                qwen_provider=runtime.vision_provider,
+                active_session=active_session,
+                protocols={
+                    "goal": "2026-08-20-deepseek-typed-task-graph-v4",
+                    "scene": UI_SCENE_PROTOCOL_VERSION,
+                    "action": CANONICAL_ACTION_PROTOCOL,
+                    "controller": UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
+                    "semantic_ir": TASK_SEMANTIC_IR_PROTOCOL,
+                    "risk": RISK_POLICY_PROTOCOL,
+                },
+            )
     finally:
         if acquired:
             coordination_lock.release()
@@ -780,7 +907,8 @@ def _supervised_hardware_lock(device_id: str | None = None) -> Iterator[None]:
         process_lease.release()
         raise HTTPException(status_code=409, detail="机械臂物理控制权已被占用。")
     try:
-        yield
+        with runtime.serial_camera_session(resolved_device):
+            yield
     finally:
         controller.operation_lock.release()
         coordination_lock.release()
@@ -1713,27 +1841,33 @@ def stop_all(
 @app.get("/api/preview.jpg")
 def preview_jpg(device_id: str) -> Response:
     try:
-        controller = runtime.controller_for_device(device_id)
+        content, cached = runtime.capture_preview(device_id)
     except UniversalAgentOrchestratorError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    try:
-        content = controller.capture_preview()
     except Exception:
         content = MockRobotController(device_id="mock-preview").capture_preview()
-    return Response(content, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+        cached = True
+    return Response(
+        content,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Camera-Source": "cache" if cached else "live",
+        },
+    )
 
 
 @app.get("/api/preview.mjpg")
 def preview_mjpg(device_id: str) -> StreamingResponse:
     try:
-        controller = runtime.controller_for_device(device_id)
+        runtime.controller_for_device(device_id)
     except UniversalAgentOrchestratorError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     def generate() -> Iterator[bytes]:
         while True:
             try:
-                frame = controller.capture_preview(quality=68)
+                frame, _cached = runtime.capture_preview(device_id, quality=68)
             except Exception:
                 frame = MockRobotController(
                     device_id="mock-preview"

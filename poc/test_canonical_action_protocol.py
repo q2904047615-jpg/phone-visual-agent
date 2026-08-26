@@ -228,19 +228,19 @@ def exact_tap_ir(*, target_label: str) -> TaskSemanticIR:
     )
 
 
-def swipe_ir() -> TaskSemanticIR:
+def swipe_ir(*, source_text: str = "向上滑动一次") -> TaskSemanticIR:
     required_swipe = ConstraintIntent(
         constraint_id="constraint.swipe",
         kind="required_action",
         value="swipe",
-        source_text="向上滑动一次",
+        source_text=source_text,
         authoritative=True,
     )
     return TaskSemanticIR(
         task_id="task-swipe",
         device_id="device-1",
         revision=1,
-        raw_goal="向上滑动一次，让下方内容进入画面",
+        raw_goal=source_text,
         surfaces=(SurfaceRef("surface_current", "current_surface"),),
         entities=(),
         effects=(),
@@ -350,9 +350,17 @@ class CanonicalActionProtocolTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            {"up", "down", "left", "right"},
+            {"up", "down"},
             {item.parameters.get("direction") for item in report.candidates},
         )
+        for candidate in report.candidates:
+            self.assertNotIn("element_id", candidate.parameters)
+            self.assertEqual(("surface_current",), candidate.subject_refs)
+            self.assertTrue(candidate.transition.exploratory)
+            self.assertEqual(
+                "surface.viewport",
+                candidate.transition.expectations[0].predicate,
+            )
 
     def test_swipe_admits_unique_goal_relevant_cropped_viewport(self) -> None:
         for axis in ("vertical", "horizontal"):
@@ -378,10 +386,51 @@ class CanonicalActionProtocolTests(unittest.TestCase):
                     {"swipe"},
                 )
 
-                self.assertEqual(4, len(report.candidates))
+                self.assertEqual(2, len(report.candidates))
                 self.assertEqual(
                     {"swipe"},
                     {item.action_kind for item in report.candidates},
+                )
+                self.assertEqual(
+                    {"up", "down"} if axis == "vertical" else {"left", "right"},
+                    {item.parameters.get("direction") for item in report.candidates},
+                )
+
+    def test_paged_viewport_exposes_only_axis_and_edge_valid_directions(self) -> None:
+        expected = {
+            0: {"left"},
+            1: {"left", "right"},
+            2: {"right"},
+        }
+        for page_index, directions in expected.items():
+            with self.subTest(page_index=page_index):
+                current_scene = scene(
+                    element(
+                        "pages",
+                        label="桌面分页区",
+                        meaning="paged_viewport",
+                        role="container",
+                        states={
+                            "goal_relevant": True,
+                            "scrollable": True,
+                            "scroll_axis": "horizontal",
+                            "page_index": page_index,
+                            "page_count": 3,
+                        },
+                        bounds=(0.02, 0.10, 0.98, 0.90),
+                    ),
+                    app_id="launcher",
+                )
+
+                report = compile_canonical_action_catalog(
+                    current_scene,
+                    swipe_ir(),
+                    {"swipe"},
+                )
+
+                self.assertEqual(
+                    directions,
+                    {item.parameters.get("direction") for item in report.candidates},
                 )
 
     def test_swipe_rejects_untrusted_or_ambiguous_cropped_viewports(self) -> None:
@@ -441,6 +490,159 @@ class CanonicalActionProtocolTests(unittest.TestCase):
                 )
                 self.assertFalse(report.candidates)
                 self.assertEqual("blocked", report.status)
+
+    def test_explicit_direction_swipes_unique_visible_object_without_coordinates(self) -> None:
+        samples = (
+            (
+                "向上划掉当前唯一预览卡片",
+                "当前任务",
+                "sample.tasks",
+                "container",
+            ),
+            (
+                "Swipe the only visible preview tile upward",
+                "Browser preview",
+                "sample.browser.tasks",
+                "list_item",
+            ),
+        )
+        for source_text, label, app_id, role in samples:
+            with self.subTest(source_text=source_text):
+                target = element(
+                    "preview",
+                    label=label,
+                    meaning="application_preview_card",
+                    role=role,
+                    states={"goal_relevant": True},
+                )
+                current_scene = scene(
+                    target,
+                    element(
+                        "close",
+                        label="关闭",
+                        meaning="close_preview",
+                        states={"goal_relevant": False},
+                        bounds=(0.35, 0.21, 0.39, 0.25),
+                    ),
+                    app_id=app_id,
+                )
+
+                report = compile_canonical_action_catalog(
+                    current_scene,
+                    swipe_ir(source_text=source_text),
+                    {"swipe"},
+                )
+
+                self.assertEqual("ready", report.status)
+                self.assertEqual(1, len(report.candidates))
+                candidate = report.candidates[0]
+                self.assertEqual("swipe", candidate.action_kind)
+                self.assertEqual(
+                    {"direction": "up", "element_id": "preview"},
+                    candidate.parameters,
+                )
+                self.assertIn("surface_current", candidate.subject_refs)
+                self.assertEqual(2, len(candidate.subject_refs))
+                self.assertEqual(
+                    {"surface_current"},
+                    {item.subject_ref for item in report.affordances},
+                )
+                target_subjects = {
+                    claim.subject_ref
+                    for claim in report.claims
+                    if claim.predicate == "element.label"
+                    and claim.value == label
+                }
+                self.assertEqual(1, len(target_subjects))
+                target_subject = next(iter(target_subjects))
+                target_claim_ids = {
+                    claim.claim_id
+                    for claim in report.claims
+                    if claim.subject_ref == target_subject
+                }
+                self.assertTrue(target_claim_ids)
+                self.assertTrue(
+                    target_claim_ids.issubset(
+                        set(candidate.transition.precondition_claim_ids)
+                    )
+                )
+                self.assertEqual(
+                    [(target_subject, "element.exists", "absent")],
+                    [
+                        (
+                            item.subject_ref,
+                            item.predicate,
+                            item.operator,
+                        )
+                        for item in candidate.transition.expectations
+                    ],
+                )
+                self.assertFalse(candidate.transition.exploratory)
+                self.assertEqual(
+                    {
+                        "content_changed": True,
+                        "element_absent": {
+                            "element_id": "preview",
+                            "meaning": "application_preview_card",
+                            "role": role,
+                            "label": label,
+                        },
+                    },
+                    canonical_candidate_expected_result(candidate, current_scene),
+                )
+
+    def test_directional_object_swipe_fails_closed_without_unique_typed_anchor(self) -> None:
+        valid = element(
+            "preview",
+            label="Current preview",
+            meaning="application_preview_card",
+            role="list_item",
+            states={"goal_relevant": True},
+        )
+        cases = {
+            "missing_direction": (
+                scene(valid),
+                swipe_ir(source_text="划掉当前唯一预览卡片"),
+            ),
+            "competing_goal_object": (
+                scene(
+                    valid,
+                    replace(
+                        valid,
+                        element_id="preview-2",
+                        label="Another preview",
+                        bounds=(0.5, 0.2, 0.9, 0.3),
+                    ),
+                ),
+                swipe_ir(source_text="向上划掉当前预览卡片"),
+            ),
+            "duplicate_completion_containers": (
+                scene(
+                    replace(valid, role="container"),
+                    replace(
+                        valid,
+                        element_id="preview-2",
+                        label="Another preview",
+                        role="container",
+                        bounds=(0.5, 0.2, 0.9, 0.3),
+                    ),
+                ),
+                swipe_ir(source_text="向上划掉当前预览卡片"),
+            ),
+            "ambiguous_directions": (
+                scene(valid),
+                swipe_ir(source_text="先向上再向下滑动当前预览卡片"),
+            ),
+        }
+        for reason, (current_scene, semantic_ir) in cases.items():
+            with self.subTest(reason=reason):
+                report = compile_canonical_action_catalog(
+                    current_scene,
+                    semantic_ir,
+                    {"swipe"},
+                )
+                self.assertEqual("blocked", report.status)
+                self.assertFalse(report.candidates)
 
     def test_exact_tap_admits_unique_visible_text_target(self) -> None:
         current_scene = scene(
@@ -903,6 +1105,45 @@ class CanonicalActionProtocolTests(unittest.TestCase):
             any(
                 candidate.parameters.get("element_id") == "key-2"
                 for candidate in report.candidates
+            )
+        )
+
+    def test_focus_only_input_surface_exposes_tap_but_never_text_authority(self) -> None:
+        focus_surface = element(
+            "coarse-input",
+            label="消息",
+            meaning="message_input_field",
+            role="input",
+            states={
+                "goal_relevant": True,
+                "focus_only_input_surface": True,
+            },
+        )
+
+        report = compile_canonical_action_catalog(
+            scene(focus_surface),
+            input_ir(active="type_last_char"),
+            ALL_ACTIONS,
+        )
+
+        bound_actions = [
+            candidate.action_kind
+            for candidate in report.candidates
+            if candidate.parameters.get("element_id") == "coarse-input"
+        ]
+        self.assertEqual(["tap_semantic"], bound_actions)
+        self.assertFalse(
+            any(
+                candidate.action_kind
+                in {
+                    "input_verified_text",
+                    "clear_verified_text",
+                    "double_tap",
+                    "long_press",
+                    "drag",
+                }
+                for candidate in report.candidates
+                if candidate.parameters.get("element_id") == "coarse-input"
             )
         )
 

@@ -379,6 +379,48 @@ class UIElement:
                 raise UISceneError(
                     "keyboard_input_mode_switch 必须是方向明确的独立模式切换按钮。"
                 )
+        if "page_index" in self.states or "page_count" in self.states:
+            page_index = self.states.get("page_index")
+            page_count = self.states.get("page_count")
+            if (
+                self.role != "container"
+                or self.meaning != "paged_viewport"
+                or isinstance(page_index, bool)
+                or not isinstance(page_index, int)
+                or isinstance(page_count, bool)
+                or not isinstance(page_count, int)
+                or page_count < 2
+                or not 0 <= page_index < page_count
+                or self.states.get("scrollable") is not True
+                or self.states.get("scroll_axis") not in {"horizontal", "vertical"}
+                or self.states.get("fully_visible") is not True
+                or not self.evidence
+            ):
+                raise UISceneError(
+                    "分页视口必须用 paged_viewport container 保存有证据的零基页码、"
+                    "总页数和滚动轴。"
+                )
+        if "focus_only_input_surface" in self.states:
+            allowed_focus_only_states = {
+                "enabled",
+                "visible",
+                "fully_visible",
+                "goal_relevant",
+                "focus_only_input_surface",
+            }
+            if (
+                self.states.get("focus_only_input_surface") is not True
+                or self.role != "input"
+                or self.element_id.startswith("local_audited_")
+                or self.states.get("goal_relevant") is not True
+                or self.states.get("fully_visible") is not True
+                or set(self.states) - allowed_focus_only_states
+                or not any(str(item).strip() for item in self.evidence)
+            ):
+                raise UISceneError(
+                    "focus_only_input_surface 只能标记唯一完整可见的粗输入面，"
+                    "且不得携带正文、typed字段身份、键盘状态或本地审计权威。"
+                )
         _reject_action_data(self.states, "states")
 
     @property
@@ -794,6 +836,33 @@ class UIScene:
         )
         scene.validate()
         return scene
+
+
+def scene_surface_kind(scene: UIScene) -> str:
+    """Return the one typed surface class used by catalog and receipt checks."""
+
+    scene.validate()
+    foreground = scene.foreground_app_id.strip().casefold()
+    screen = scene.screen_id.strip().casefold()
+    if (
+        screen
+        in {
+            "system_recent_tasks",
+            "android_recent_tasks",
+            "recent_tasks",
+            "recent_apps",
+            "recents",
+        }
+        and foreground in {"system", "android_system", "launcher", "unknown"}
+    ):
+        return "recent_tasks"
+    identity = f"{foreground} {screen}"
+    if any(token in identity for token in ("launcher", "home_screen", "desktop")):
+        return "launcher"
+    if scene.overlays:
+        return "system_dialog" if "system" in identity else "app"
+    return "app"
+
 
 def _infer_app_id(screen_id: str) -> str:
     normalized_screen = screen_id.strip().lower()

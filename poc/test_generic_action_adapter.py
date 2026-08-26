@@ -14,11 +14,17 @@ from types import SimpleNamespace
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from capability_acceptance import _validate_live_promotion_source
+from device_executor import (
+    DeviceActionRequest,
+    DeviceExecutionError,
+    RobotDeviceExecutor,
+)
 from generic_action_adapter import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     GenericActionAdapterError,
     GenericSingleActionAdapter as _GenericSingleActionAdapter,
     _post_action_observation_context,
+    _post_action_visual_context,
     stable_qwerty_ocr_anchors,
     stable_text_ocr_grounding,
 )
@@ -138,6 +144,7 @@ class FakeRobot:
             device_id=self.device_id,
             scene_fingerprint=scene_fingerprint,
             frame_size=credential.frame_size,
+            action=action,
         )
         _claim_audit_seal(credential)
         self._armed = action
@@ -179,6 +186,27 @@ class FakeRobot:
     def vision_swipe_up(self):
         self._consume("swipe")
         self.actions.append(("swipe", "up"))
+
+    def vision_swipe_relative(
+        self,
+        start_x,
+        start_y,
+        end_x,
+        end_y,
+        direction,
+    ):
+        self._consume("swipe")
+        self.actions.append(
+            (
+                "swipe_relative",
+                direction,
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+            )
+        )
+        return (start_x, start_y), (end_x, end_y)
 
     def vision_reveal_system_navigation(self):
         self._consume("reveal_system_navigation")
@@ -538,6 +566,198 @@ class RevealSystemNavigationControllerTests(unittest.TestCase):
                 )
 
 
+class ElementBoundSwipeControllerTests(unittest.TestCase):
+    @staticmethod
+    def before_scene() -> UIScene:
+        return UIScene(
+            app_id="system",
+            screen_id="recent_tasks",
+            summary="唯一应用预览卡片可见",
+            elements=(
+                UIElement(
+                    element_id="preview-card",
+                    role="list_item",
+                    meaning="application_preview_card",
+                    label="示例应用",
+                    bounds=(0.27, 0.29, 0.73, 0.81),
+                    confidence=0.99,
+                    states={
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                    },
+                    evidence=("唯一完整可见的应用预览卡片",),
+                ),
+            ),
+            stable=True,
+            confidence=0.99,
+            fingerprint="before-card",
+            camera_alignment=aligned_camera_facts(),
+        )
+
+    @classmethod
+    def action(cls) -> SemanticAction:
+        element = cls.before_scene().elements[0]
+        return SemanticAction(
+            node_id="dismiss-card",
+            action="swipe",
+            params={
+                "direction": "up",
+                "element_id": element.element_id,
+                "target": element.meaning,
+                "role": element.role,
+                "label": element.label,
+                "states": dict(element.states),
+                "expected_effect": {
+                    "content_changed": True,
+                    "element_absent": {
+                        "element_id": element.element_id,
+                        "meaning": element.meaning,
+                        "role": element.role,
+                        "label": element.label,
+                    },
+                },
+                "formal_candidate_id": "candidate.swipe",
+                "formal_transition": {
+                    "expectations": [
+                        {
+                            "subject_ref": "element.preview",
+                            "predicate": "element.exists",
+                            "operator": "absent",
+                        }
+                    ]
+                },
+            },
+        )
+
+    def test_controller_derives_path_and_requires_same_target_to_disappear(self):
+        controller = UniversalActionController()
+        before = self.before_scene()
+        resolved = controller.resolve_one(self.action(), before, confirmed=True)
+
+        self.assertAlmostEqual(0.5, resolved.normalized_point[0])
+        self.assertAlmostEqual(0.68, resolved.normalized_point[1])
+        self.assertEqual((0.5, 0.08), resolved.normalized_end_point)
+        self.assertEqual("preview-card", resolved.target_element_id)
+        self.assertEqual("up", resolved.direction)
+
+        role_drift_same_card = replace(
+            before,
+            summary="同一应用卡片仍在",
+            fingerprint="after-role-drift",
+            elements=(
+                replace(
+                    before.elements[0],
+                    element_id="new-observation-card-id",
+                    role="container",
+                    meaning="app_card",
+                    bounds=(0.27, 0.32, 0.73, 0.86),
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(UniversalActionError, "同一目标仍然可见"):
+            controller.verify_after_action(
+                resolved,
+                before,
+                role_drift_same_card,
+            )
+
+        different_surface_same_name = UIScene(
+            app_id="launcher",
+            screen_id="home_screen",
+            summary="已回到桌面，同名应用入口可见",
+            elements=(
+                UIElement(
+                    # IDs and labels may both be reused by a fresh observation;
+                    # neither makes this launcher icon the dismissed card.
+                    element_id="preview-card",
+                    role="icon",
+                    meaning="application_launcher_icon",
+                    label="示例应用",
+                    bounds=(0.39, 0.63, 0.57, 0.78),
+                    confidence=0.99,
+                    states={"visible": True},
+                    evidence=("桌面应用入口",),
+                ),
+            ),
+            stable=True,
+            confidence=0.99,
+            fingerprint="after-launcher-same-name",
+            camera_alignment=aligned_camera_facts(),
+        )
+        controller.verify_after_action(
+            resolved,
+            before,
+            different_surface_same_name,
+        )
+        self.assertIn(
+            "控制器确认目标元素已消失：示例应用",
+            controller.transition_evidence_from_verified_action(
+                resolved,
+                before,
+                different_surface_same_name,
+            ),
+        )
+
+        after_absent = replace(
+            before,
+            summary="应用卡片已消失",
+            fingerprint="after-absent",
+            elements=(
+                UIElement(
+                    element_id="empty-state",
+                    role="text",
+                    meaning="empty_recent_tasks",
+                    label="没有最近使用的应用",
+                    bounds=(0.20, 0.40, 0.80, 0.48),
+                    confidence=0.99,
+                ),
+            ),
+        )
+        controller.verify_after_action(resolved, before, after_absent)
+        self.assertIn(
+            "控制器确认目标元素已消失：示例应用",
+            controller.transition_evidence_from_verified_action(
+                resolved,
+                before,
+                after_absent,
+            ),
+        )
+
+    def test_targeted_transport_uses_relative_path_but_viewport_keeps_preset(self):
+        robot = FakeRobot()
+        executor = RobotDeviceExecutor(robot)
+
+        robot._armed = "swipe"
+        targeted = executor.execute(
+            DeviceActionRequest(
+                kind="swipe",
+                point=(500, 680),
+                end_point=(500, 80),
+                direction="up",
+            )
+        )
+        self.assertEqual(1, targeted.physical_actions)
+        self.assertEqual(
+            [("swipe_relative", "up", 500, 680, 500, 80)],
+            robot.actions,
+        )
+
+        robot._armed = "swipe"
+        viewport = executor.execute(
+            DeviceActionRequest(kind="swipe", direction="up")
+        )
+        self.assertEqual(1, viewport.physical_actions)
+        self.assertEqual(("swipe", "up"), robot.actions[-1])
+
+        with self.assertRaisesRegex(DeviceExecutionError, "请求方向不一致"):
+            DeviceActionRequest(
+                kind="swipe",
+                point=(500, 80),
+                end_point=(500, 680),
+                direction="up",
+            ).validate()
+
+
 class FormalTypedTransitionControllerTests(unittest.TestCase):
     def test_home_requires_typed_launcher_postcondition(self):
         controller = UniversalActionController()
@@ -875,6 +1095,110 @@ class FormalTypedTransitionControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(UniversalActionError, "文字不匹配"):
             controller.verify_after_action(resolved, before, wrong)
 
+    def test_focus_only_input_tap_requires_fresh_dedicated_input_audit(self):
+        controller = UniversalActionController()
+        before = UIScene(
+            app_id="com.example.messaging",
+            screen_id="named_conversation",
+            summary="底部唯一空白编辑面尚未聚焦",
+            elements=(
+                UIElement(
+                    element_id="coarse-input",
+                    role="input",
+                    meaning="message_input_field",
+                    label="",
+                    bounds=(0.12, 0.91, 0.78, 0.96),
+                    confidence=0.99,
+                    states={
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "focus_only_input_surface": True,
+                    },
+                    evidence=("底部工具栏中唯一完整白色文本输入区域",),
+                ),
+            ),
+            stable=True,
+            confidence=0.99,
+            fingerprint="before-focus-only",
+        )
+        action = SemanticAction(
+            node_id="focus-input",
+            action="tap_semantic",
+            params={
+                "element_id": "coarse-input",
+                "target": "message_input_field",
+                "role": "input",
+                "label": "",
+                "states": dict(before.elements[0].states),
+                "expected_effect": {
+                    "element_state": {
+                        "meaning": "message_input_field",
+                        "states": {"focused": True},
+                    }
+                },
+                "formal_candidate_id": "candidate.focus-input",
+                "formal_report_digest": "c" * 64,
+                "formal_transition": {
+                    "transition_id": "transition.focus-input",
+                    "precondition_claim_ids": ["claim.coarse-input"],
+                    "expectations": [
+                        {
+                            "subject_ref": "element.coarse-input",
+                            "predicate": "element.state.focused",
+                            "operator": "equals",
+                            "value": True,
+                        }
+                    ],
+                    "exploratory": False,
+                },
+            },
+        )
+        resolved = controller.resolve_one(action, before, confirmed=True)
+        audited_after = UIScene(
+            app_id="com.example.messaging",
+            screen_id="named_conversation",
+            summary="专用输入审计建立typed字段并证明聚焦",
+            elements=(
+                UIElement(
+                    element_id="local_audited_input_1",
+                    role="input",
+                    meaning="application_text_input",
+                    label="",
+                    bounds=(0.12, 0.52, 0.78, 0.60),
+                    confidence=1.0,
+                    states={
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "focused": True,
+                        "value": "",
+                        "input_field_id": "message_field",
+                        "primary_input_geometry_verified": True,
+                        "geometry_audit_source": "input_structure_audit",
+                    },
+                    evidence=("输入结构审计确认唯一聚焦应用输入框",),
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint="after-dedicated-audit",
+        )
+
+        controller.verify_after_action(resolved, before, audited_after)
+
+        unaudited_after = replace(
+            audited_after,
+            elements=(
+                replace(
+                    audited_after.elements[0],
+                    element_id="coarse-after",
+                    states={"fully_visible": True, "focused": True},
+                ),
+            ),
+            fingerprint="after-without-dedicated-audit",
+        )
+        with self.assertRaisesRegex(UniversalActionError, "typed focused"):
+            controller.verify_after_action(resolved, before, unaudited_after)
+
     def test_press_enter_requires_newline_key_and_verifies_exact_multiline_value(self):
         controller = UniversalActionController()
         before = UIScene(
@@ -999,6 +1323,56 @@ class GenericActionAdapterTests(unittest.TestCase):
             post_action_settle=0,
             **kwargs,
         )
+
+    def test_adapter_forwards_only_typed_post_action_visual_context(self) -> None:
+        class RecordingObserver(FakeSceneObserver):
+            supports_post_action_visual_context = True
+
+            def __init__(self, scenes):
+                super().__init__(scenes)
+                self.post_action_contexts = []
+
+            def observe(
+                self,
+                *,
+                frames,
+                goal_context=None,
+                post_action_context=None,
+            ):
+                self.post_action_contexts.append(post_action_context)
+                return super().observe(frames=frames, goal_context=goal_context)
+
+        observer = RecordingObserver([scene("post-action")])
+        adapter = self._adapter(observer, FakeRobot())
+        context = _post_action_visual_context(
+            ResolvedSemanticAction(
+                node_id="resolved-back",
+                kind="back",
+                before_fingerprint="a" * 64,
+                formal_candidate_id="candidate.back",
+                formal_transition={
+                    "transition_id": "transition.back",
+                    "precondition_claim_ids": ["claim.surface"],
+                    "expectations": [
+                        {
+                            "subject_ref": "surface_current",
+                            "predicate": "surface.navigation_depth",
+                            "operator": "changed",
+                        }
+                    ],
+                    "exploratory": False,
+                },
+            )
+        )
+        self.assertIsNotNone(context)
+
+        adapter._observe_scene(
+            [Image.new("RGB", (540, 960), "gray") for _ in range(4)],
+            {"objective": "观察当前画面"},
+            post_action_context=context,
+        )
+
+        self.assertEqual([context], observer.post_action_contexts)
 
     @staticmethod
     def _coarse_text_target_scene() -> tuple[UIScene, SemanticAction]:
@@ -2907,7 +3281,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertIn("wait_for_change", supported)
         self.assertIn("swipe", supported)
 
-    def test_orientation_mismatch_blocks_tap_back_home_and_drag_before_robot(self):
+    def test_orientation_mismatch_blocks_visual_actions_before_robot(self):
         mismatch = CameraAlignmentFacts(
             camera_layout_orientation="portrait",
             phone_content_rotation="rotated_90",
@@ -2952,14 +3326,16 @@ class GenericActionAdapterTests(unittest.TestCase):
                 ),
             ),
             (
-                "back",
+                "swipe",
                 ordinary_scene,
-                SemanticAction(node_id="blocked-back", action="back", params={}),
-            ),
-            (
-                "home",
-                ordinary_scene,
-                SemanticAction(node_id="blocked-home", action="home", params={}),
+                SemanticAction(
+                    node_id="blocked-swipe",
+                    action="swipe",
+                    params={
+                        "direction": "up",
+                        "expected_effect": {"scene_changed": True},
+                    },
+                ),
             ),
             (
                 "drag",
@@ -3005,7 +3381,7 @@ class GenericActionAdapterTests(unittest.TestCase):
                 self.assertEqual(0, caught.exception.physical_actions)
                 self.assertEqual([], robot.actions)
 
-    def test_orientation_gate_rejects_unknown_low_confidence_or_local_mismatch(self):
+    def test_visual_orientation_gate_rejects_unknown_low_confidence_or_local_mismatch(self):
         cases = (
             ("rotated_90", 0.95, "方向不一致或未知"),
             ("rotated_180", 0.95, "方向不一致或未知"),
@@ -3016,29 +3392,32 @@ class GenericActionAdapterTests(unittest.TestCase):
         frames = tuple(Image.new("RGB", (540, 960), "gray") for _ in range(4))
         for rotation, confidence, error in cases:
             with self.subTest(rotation=rotation, confidence=confidence):
+                planned = scene(
+                    "planned",
+                    camera_alignment=CameraAlignmentFacts(
+                        camera_layout_orientation="portrait",
+                        phone_content_rotation=rotation,
+                        confidence=confidence,
+                        evidence=("手机界面方向由本轮完整画面报告",),
+                    ),
+                )
                 robot = FakeRobot()
                 adapter = GenericSingleActionAdapter(
                     capture=SequenceCapture(["gray"] * 4),
-                    observer=FakeSceneObserver([]),
+                    observer=FakeSceneObserver([planned]),
                     robot=robot,
                     frame_interval=0,
                     post_action_settle=0,
                 )
                 with self.assertRaisesRegex(GenericActionAdapterError, error) as caught:
-                    planned = scene(
-                        "planned",
-                        camera_alignment=CameraAlignmentFacts(
-                            camera_layout_orientation="portrait",
-                            phone_content_rotation=rotation,
-                            confidence=confidence,
-                            evidence=("手机界面方向由本轮完整画面报告",),
-                        ),
-                    )
                     adapter.execute(
                         requested_action=SemanticAction(
-                            node_id="blocked-back",
-                            action="back",
-                            params={},
+                            node_id="blocked-tap",
+                            action="tap_semantic",
+                            params={
+                                "element_id": "e1",
+                                "target": "app_icon",
+                            },
                         ),
                         planned_scene=planned,
                         planned_frames=frames,
@@ -3173,6 +3552,66 @@ class GenericActionAdapterTests(unittest.TestCase):
             "single_step_scene_orientation",
             result.orientation_credential.source,
         )
+
+    def test_fixed_system_home_uses_frame_binding_when_app_content_is_hidden(self):
+        class ExactAlignmentObserver(FakeSceneObserver):
+            def observe(self, *, frames, goal_context=None):
+                self.calls += 1
+                self.goal_contexts.append(goal_context)
+                result = self.scenes.pop(0)
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+
+        hidden_content_alignment = CameraAlignmentFacts(
+            camera_layout_orientation="portrait",
+            phone_content_rotation="unknown",
+            confidence=0.95,
+            evidence=("中央App内容被隐私遮罩，当前完整画布保持稳定",),
+        )
+        planned = scene(
+            "planned-hidden-content",
+            screen_id="unknown",
+            app_id="unknown",
+            camera_alignment=hidden_content_alignment,
+        )
+        fresh = scene(
+            "fresh-hidden-content",
+            screen_id="unknown",
+            app_id="unknown",
+            camera_alignment=hidden_content_alignment,
+        )
+        after = scene(
+            "launcher-after-fixed-home",
+            screen_id="android_home",
+            app_id="launcher",
+        )
+        observer = ExactAlignmentObserver([fresh, after])
+        robot = FakeRobot()
+
+        result = self._adapter(observer, robot).execute(
+            requested_action=SemanticAction(
+                node_id="fixed-system-home",
+                action="home",
+                params={
+                    "expected_effect": {
+                        "scene_changed": True,
+                        "app_id": "launcher",
+                    }
+                },
+            ),
+            planned_scene=planned,
+            goal=goal(),
+            confirmed=True,
+        )
+
+        self.assertEqual([("home",)], robot.actions)
+        self.assertEqual(1, result.physical_actions)
+        self.assertEqual(
+            "unknown",
+            result.orientation_credential.phone_content_rotation,
+        )
+        self.assertEqual(2, observer.calls)
 
     def test_home_records_single_click_transport_receipt(self):
         planned = scene("planned", screen_id="settings_home", app_id="settings")
@@ -6866,7 +7305,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertIn("没有可验证", result.verification_errors[-1])
         self.assertEqual(len(robot.actions), 1)
 
-    def test_wrong_navigation_surface_becomes_mismatch_before_next_input(self):
+    def test_navigation_receipt_does_not_depend_on_next_input_readiness(self):
         planned = scene("before")
         wrong_conversation = scene(
             "wrong-after",
@@ -6915,10 +7354,8 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(1, result.physical_actions)
-        self.assertEqual("mismatched", result.action_outcome)
-        self.assertTrue(
-            any("预期的下一输入目标" in item for item in result.verification_errors)
-        )
+        self.assertEqual("matched", result.action_outcome)
+        self.assertEqual((), result.verification_errors)
         self.assertEqual(1, len(robot.actions))
 
     def test_post_action_waits_until_four_frame_window_is_locally_stable(self):

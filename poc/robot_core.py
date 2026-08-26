@@ -60,6 +60,8 @@ DEFAULT_CONTROLLER_CONFIG: dict[str, Any] = {
     "tap_hold": 0.35,
     "android_home_x_ratio": 0.50,
     "android_home_y_ratio": 0.976,
+    "android_recents_x_ratio": 0.330,
+    "android_recents_y_ratio": 0.976,
     "android_back_x_ratio": 0.685,
     "android_back_y_ratio": 0.976,
     "keyboard_backspace_x_ratio": 0.862,
@@ -299,6 +301,7 @@ class RobotController:
             "swipe",
             "back",
             "home",
+            "open_recent_apps",
             "wait_for_change",
         }
         self.verified_actions = frozenset(
@@ -326,6 +329,7 @@ class RobotController:
                 "swipe",
                 "back",
                 "home",
+                "open_recent_apps",
                 "wait_for_change",
                 "input_verified_text",
                 "double_tap",
@@ -352,6 +356,7 @@ class RobotController:
                     "dismiss_overlay",
                     "back",
                     "home",
+                    "open_recent_apps",
                     "double_tap",
                     "long_press",
                 }
@@ -649,15 +654,65 @@ class RobotController:
     ) -> tuple[tuple[int, int], tuple[int, int]]:
         """Drag between two calibrated visual points through the seller UI."""
 
-        self._require_verified_action("drag", "任意两点拖动")
+        return self._vision_path_relative(
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            action="drag",
+            label="任意两点拖动",
+        )
+
+    def vision_swipe_relative(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        direction: str,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Swipe one observed object along a controller-derived calibrated path."""
+
+        delta_x = end_x - start_x
+        delta_y = end_y - start_y
+        direction_matches = {
+            "up": delta_y < 0 and abs(delta_y) > abs(delta_x),
+            "down": delta_y > 0 and abs(delta_y) > abs(delta_x),
+            "left": delta_x < 0 and abs(delta_x) > abs(delta_y),
+            "right": delta_x > 0 and abs(delta_x) > abs(delta_y),
+        }.get(str(direction or "").strip().lower())
+        if direction_matches is not True:
+            raise ValueError("元素滑动轨迹与请求方向不一致。")
+        return self._vision_path_relative(
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            action="swipe",
+            label="元素绑定滑动",
+        )
+
+    def _vision_path_relative(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        *,
+        action: str,
+        label: str,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Execute one calibrated two-point touch path under typed authority."""
+
+        self._require_verified_action(action, label)
         values = (start_x, start_y, end_x, end_y)
         if any(not 0 <= value <= 1000 for value in values):
-            raise ValueError("拖动视觉坐标必须全部在0～1000之间。")
+            raise ValueError(f"{label}视觉坐标必须全部在0～1000之间。")
         if (start_x, start_y) == (end_x, end_y):
-            raise ValueError("拖动起点和终点不能相同。")
+            raise ValueError(f"{label}起点和终点不能相同。")
         hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
-        self._consume_physical_execution("drag", frame)
+        self._consume_physical_execution(action, frame)
         from tap_calibration import corrected_grid_point
 
         corrected_start = corrected_grid_point(
@@ -688,7 +743,7 @@ class RobotController:
         start = to_pixel(corrected_start)
         end = to_pixel(corrected_end)
         if start == end:
-            raise ValueError("标定后的拖动起点和终点重合。")
+            raise ValueError(f"标定后的{label}起点和终点重合。")
         self._checkpoint()
         seller_gui.drag_client_path(hwnd, start, end)
         seller_gui.clear_seller_camera_overlay(hwnd)
@@ -845,6 +900,18 @@ class RobotController:
             float(cfg["android_back_x_ratio"]),
             float(cfg["android_back_y_ratio"]),
             action="back",
+        )
+
+    def vision_android_recent_apps(self) -> tuple[int, int]:
+        self._require_verified_action(
+            "open_recent_apps",
+            "Android系统最近任务",
+        )
+        cfg = load_controller_config()
+        return self._vision_nav_tap(
+            float(cfg["android_recents_x_ratio"]),
+            float(cfg["android_recents_y_ratio"]),
+            action="open_recent_apps",
         )
 
     def _vision_swipe(self, direction: str) -> None:
@@ -1087,6 +1154,7 @@ class MockRobotController(RobotController):
             "swipe",
             "back",
             "home",
+            "open_recent_apps",
             "wait_for_change",
             "input_verified_text",
             "double_tap",
@@ -1198,6 +1266,25 @@ class MockRobotController(RobotController):
         )
         return (start_x, start_y), (end_x, end_y)
 
+    def vision_swipe_relative(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        direction: str,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        self._consume_mock_execution("swipe")
+        self.executions.append(
+            {
+                "action": "swipe_relative",
+                "direction": direction,
+                "start": [start_x, start_y],
+                "end": [end_x, end_y],
+            }
+        )
+        return (start_x, start_y), (end_x, end_y)
+
     def vision_reveal_system_navigation(self) -> dict[str, Any]:
         self._require_verified_action(
             "reveal_system_navigation",
@@ -1228,6 +1315,12 @@ class MockRobotController(RobotController):
         self.executions.append({"action": "android_back"})
         self._record_mock_click_receipt()
         return 910, 976
+
+    def vision_android_recent_apps(self) -> tuple[int, int]:
+        self._consume_mock_execution("open_recent_apps")
+        self.executions.append({"action": "android_recent_apps"})
+        self._record_mock_click_receipt()
+        return 315, 976
 
     def vision_swipe_up(self) -> None:
         self._consume_mock_execution("swipe")

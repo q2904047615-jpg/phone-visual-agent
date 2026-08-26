@@ -22,6 +22,7 @@ from qwen_visual_decision import (
     TrustedObservation,
     _exact_text_candidate_block,
     _identity_text_candidate_block,
+    _hydrate_canonical_selection,
     _launcher_app_entry_candidate_ids,
     _required_exact_candidate_ids,
     _deterministic_exact_selection_payload,
@@ -30,7 +31,6 @@ from qwen_visual_decision import (
 from ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
 from vision_agent import VisionAgentError
 from vision_agent import _image_data_url
-from system_navigation_privacy import privacy_minimized_system_navigation_view
 from task_semantic_ir import (
     ConstraintIntent,
     DesiredState,
@@ -215,6 +215,313 @@ class StructuredAppSurfaceSelectionRegressionTests(unittest.TestCase):
         )
         self.assertEqual("tap_semantic", selected_choice["action"])
         self.assertEqual("file-transfer", selected_choice["element_id"])
+
+
+class PagedViewportSelectionRegressionTests(unittest.TestCase):
+    def test_session_history_explores_each_paged_direction_once(self) -> None:
+        task_id = "task_paged_launcher"
+        device_id = "device-local-01"
+        surface = SurfaceRef(
+            "surface_target",
+            "app",
+            app_id="sample.app",
+            app_name="示例应用",
+        )
+        semantic_ir = TaskSemanticIR(
+            task_id=task_id,
+            device_id=device_id,
+            revision=2,
+            raw_goal="打开示例应用",
+            surfaces=(surface,),
+            entities=(),
+            effects=(),
+            subgoals=(
+                SemanticSubgoal(
+                    "open_target_app",
+                    surface.surface_id,
+                    "active",
+                    "navigation_only",
+                ),
+            ),
+        )
+        context = QwenTaskContext(
+            protocol_version="2026-08-20-deepseek-typed-task-graph-v4",
+            task_id=task_id,
+            device_id=device_id,
+            revision=2,
+            task_status="running",
+            goal={
+                "objective": "打开示例应用",
+                "target_apps": [
+                    {"app_id": "sample.app", "app_name": "示例应用"}
+                ],
+                "entities": {},
+            },
+            global_constraints=(),
+            goal_completion_conditions=(),
+            current_subgoal={
+                "subgoal_id": "open_target_app",
+                "objective": "打开示例应用",
+                "status": "active",
+                "depends_on": (),
+                "constraints": (),
+                "completion_conditions": ("示例应用主界面可见",),
+                "completion_evidence": (),
+                "effect_ids": (),
+                "execution_class": "navigate",
+            },
+            current_execution_class="navigate",
+            effect_intents=(),
+            effect_gate={
+                "required": False,
+                "state": "not_required",
+                "effect_ids": [],
+                "effect_action_allowed": False,
+                "scope": {
+                    "task_id": task_id,
+                    "device_id": device_id,
+                    "revision": 2,
+                    "subgoal_id": "open_target_app",
+                },
+            },
+            semantic_ir=semantic_ir,
+        )
+        current_scene = UIScene(
+            app_id="launcher",
+            screen_id="home_screen",
+            summary="三页桌面的第二页，目标应用未出现",
+            elements=(
+                UIElement(
+                    element_id="pages",
+                    role="container",
+                    meaning="paged_viewport",
+                    label="桌面分页区",
+                    bounds=(0.02, 0.10, 0.98, 0.90),
+                    confidence=1.0,
+                    states={
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "scrollable": True,
+                        "scroll_axis": "horizontal",
+                        "page_index": 1,
+                        "page_count": 3,
+                    },
+                    evidence=("三个分页圆点中第二个高亮",),
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+        )
+        observation = SimpleNamespace(
+            scene=current_scene,
+            target_local_candidate=lambda: None,
+        )
+        choices = _selection_choices(
+            context,
+            observation,
+            frozenset({"back", "swipe", "tap_semantic", "wait_for_change"}),
+        )
+
+        def selected_direction(history):
+            payload = _deterministic_exact_selection_payload(
+                context,
+                choices,
+                observation=observation,
+                navigation_history=history,
+            )
+            if payload is None:
+                return None
+            selected = next(
+                item for item in choices if item["choice_id"] == payload["choice_id"]
+            )
+            return selected.get("direction")
+
+        def history_item(direction):
+            return {
+                "qwen_decision": {
+                    "trusted_observation": {"scene": current_scene.to_dict()},
+                    "next_action": {
+                        "action": "swipe",
+                        "params": {"direction": direction},
+                    },
+                },
+                "execution": {"action_outcome": "matched"},
+            }
+
+        self.assertEqual("left", selected_direction(()))
+        self.assertEqual("right", selected_direction((history_item("left"),)))
+        self.assertIsNone(
+            selected_direction((history_item("left"), history_item("right")))
+        )
+
+
+class ElementBoundSwipeSelectionRegressionTests(unittest.TestCase):
+    @staticmethod
+    def context(*, source_text: str) -> QwenTaskContext:
+        constraint = ConstraintIntent(
+            constraint_id="constraint.swipe",
+            kind="required_action",
+            value="swipe",
+            source_text=source_text,
+            authoritative=True,
+        )
+        semantic_ir = TaskSemanticIR(
+            task_id="task_element_swipe",
+            device_id="device-local-01",
+            revision=1,
+            raw_goal=source_text,
+            surfaces=(SurfaceRef("surface_current", "current_surface"),),
+            entities=(),
+            effects=(),
+            constraints=(constraint,),
+            subgoals=(
+                SemanticSubgoal(
+                    "dismiss_visible_object",
+                    "surface_current",
+                    "active",
+                    "navigation_only",
+                    constraint_refs=(constraint.constraint_id,),
+                ),
+            ),
+        )
+        return QwenTaskContext(
+            protocol_version="2026-08-20-deepseek-typed-task-graph-v4",
+            task_id=semantic_ir.task_id,
+            device_id=semantic_ir.device_id,
+            revision=semantic_ir.revision,
+            task_status="running",
+            goal={"objective": source_text, "target_apps": [], "entities": {}},
+            global_constraints=(),
+            goal_completion_conditions=(),
+            current_subgoal={
+                "subgoal_id": "dismiss_visible_object",
+                "objective": source_text,
+                "status": "active",
+                "depends_on": (),
+                "constraints": (),
+                "completion_conditions": ("目标不再可见",),
+                "completion_evidence": (),
+                "effect_ids": (),
+                "execution_class": "navigate",
+            },
+            current_execution_class="navigate",
+            effect_intents=(),
+            effect_gate={
+                "required": False,
+                "state": "not_required",
+                "effect_ids": [],
+                "effect_action_allowed": False,
+                "scope": {
+                    "task_id": semantic_ir.task_id,
+                    "device_id": semantic_ir.device_id,
+                    "revision": semantic_ir.revision,
+                    "subgoal_id": "dismiss_visible_object",
+                },
+            },
+            semantic_ir=semantic_ir,
+        )
+
+    @staticmethod
+    def observation(current_scene: UIScene) -> SimpleNamespace:
+        return SimpleNamespace(
+            observation_id="obs_1234567890abcdef",
+            device_id="device-local-01",
+            fingerprint=current_scene.fingerprint,
+            scene=current_scene,
+            get_candidate=current_scene.get_element,
+            target_local_candidate=current_scene.unique_trusted_goal_element,
+        )
+
+    def test_targeted_swipe_hydrates_element_while_viewport_swipe_stays_screen(self):
+        target = UIElement(
+            element_id="preview",
+            role="container",
+            meaning="application_preview_card",
+            label="示例应用",
+            bounds=(0.27, 0.29, 0.73, 0.81),
+            confidence=0.99,
+            states={"goal_relevant": True, "fully_visible": True},
+            evidence=("唯一完整可见的应用预览卡片",),
+        )
+        target_scene = UIScene(
+            app_id="system",
+            screen_id="recent_tasks",
+            summary="唯一预览卡片可见",
+            elements=(target,),
+            stable=True,
+            confidence=0.99,
+            fingerprint="target-before",
+        )
+        target_context = self.context(source_text="向上划掉当前唯一预览卡片")
+        target_observation = self.observation(target_scene)
+        target_choices = _selection_choices(
+            target_context,
+            target_observation,
+            frozenset({"swipe"}),
+        )
+        target_decision = _hydrate_canonical_selection(
+            {
+                "status": "action",
+                "choice_id": target_choices[0]["choice_id"],
+                "confidence": 1.0,
+                "reason": "唯一元素绑定滑动",
+            },
+            context=target_context,
+            observation=target_observation,
+            choices=target_choices,
+        )
+
+        self.assertEqual("element", target_decision.target_region.kind)
+        self.assertEqual("preview", target_decision.target_region.element_id)
+        self.assertEqual("preview", target_decision.proposal.action.params["element_id"])
+        self.assertEqual(
+            target.states,
+            target_decision.proposal.action.params["states"],
+        )
+
+        viewport = replace(
+            target,
+            element_id="viewport",
+            meaning="content_viewport",
+            label="内容区",
+            states={
+                "goal_relevant": True,
+                "fully_visible": True,
+                "scrollable": True,
+                "scroll_axis": "vertical",
+            },
+        )
+        viewport_scene = replace(
+            target_scene,
+            elements=(viewport,),
+            fingerprint="viewport-before",
+        )
+        viewport_context = self.context(source_text="向上滑动当前内容区")
+        viewport_observation = self.observation(viewport_scene)
+        viewport_choices = _selection_choices(
+            viewport_context,
+            viewport_observation,
+            frozenset({"swipe"}),
+        )
+        up_choice = next(
+            item for item in viewport_choices if item.get("direction") == "up"
+        )
+        viewport_decision = _hydrate_canonical_selection(
+            {
+                "status": "action",
+                "choice_id": up_choice["choice_id"],
+                "confidence": 1.0,
+                "reason": "视口滑动",
+            },
+            context=viewport_context,
+            observation=viewport_observation,
+            choices=viewport_choices,
+        )
+        self.assertEqual("screen", viewport_decision.target_region.kind)
+        self.assertNotIn(
+            "element_id",
+            viewport_decision.proposal.action.params,
+        )
 
 
 class CanonicalEffectSelectionRegressionTests(unittest.TestCase):

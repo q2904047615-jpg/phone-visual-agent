@@ -18,6 +18,7 @@ KNOWN_ACTION_CAPABILITIES = frozenset(
         "reveal_system_navigation",
         "back",
         "home",
+        "open_recent_apps",
         "wait_for_change",
         "input_verified_text",
         "clear_verified_text",

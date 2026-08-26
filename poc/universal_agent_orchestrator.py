@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 import hashlib
@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 import re
-import threading
 from types import SimpleNamespace
 from typing import Any, Callable
 import uuid
@@ -27,7 +26,7 @@ from deepseek_task_graph import (
     named_visual_identity_is_grounded,
 )
 from deepseek_failure_diagnostics import persist_deepseek_failure_diagnostic
-from device_exclusivity import InterProcessLease
+from agent.domain import DeviceTaskRegistryPort
 from generic_action_adapter import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     GenericActionAdapterError,
@@ -1341,119 +1340,6 @@ class UniversalAgentSessionState:
         }
 
 
-class DeviceTaskRegistry:
-    """Own active-session identity and one re-entrant lock per device."""
-
-    TERMINAL_STATUSES = frozenset(
-        {"succeeded", "blocked", "failed", "paused", "cancelled"}
-    )
-
-    def __init__(self, *, lease_directory: Path | None = None) -> None:
-        self._guard = threading.RLock()
-        self._locks: dict[str, threading.RLock] = {}
-        self._active: dict[str, str] = {}
-        self._owners: dict[str, tuple[int, int]] = {}
-        self._lease_directory = (
-            Path(lease_directory) if lease_directory is not None else None
-        )
-        self._leases: dict[str, InterProcessLease] = {}
-
-    def _lease_path(self, device_id: str) -> Path | None:
-        if self._lease_directory is None:
-            return None
-        import hashlib
-
-        digest = hashlib.sha256(device_id.encode("utf-8")).hexdigest()[:24]
-        return self._lease_directory / f"device_{digest}.lease"
-
-    @staticmethod
-    def _id(value: str, field_name: str) -> str:
-        result = str(value or "").strip()
-        if not result:
-            raise UniversalAgentOrchestratorError(f"{field_name} 不能为空。")
-        return result
-
-    def reserve(self, device_id: str, session_id: str) -> None:
-        device = self._id(device_id, "device_id")
-        session = self._id(session_id, "session_id")
-        with self._guard:
-            active = self._active.get(device)
-            if active is not None and active != session:
-                raise UniversalAgentOrchestratorError(
-                    f"设备 {device} 已有活动任务：{active}。"
-                )
-            lease_path = self._lease_path(device)
-            if lease_path is not None and device not in self._leases:
-                lease = InterProcessLease(
-                    lease_path,
-                    owner_id=session,
-                    metadata={"device_id": device, "session_id": session},
-                )
-                if not lease.acquire():
-                    payload = InterProcessLease.active_payload(lease_path) or {}
-                    owner = str(payload.get("session_id") or "另一个进程")
-                    raise UniversalAgentOrchestratorError(
-                        f"设备 {device} 已有活动任务：{owner}。"
-                    )
-                self._leases[device] = lease
-            self._active[device] = session
-            self._locks.setdefault(device, threading.RLock())
-
-    def release(self, device_id: str, session_id: str) -> None:
-        device = self._id(device_id, "device_id")
-        session = self._id(session_id, "session_id")
-        with self._guard:
-            if self._active.get(device) == session:
-                self._active.pop(device, None)
-                lease = self._leases.pop(device, None)
-                if lease is not None:
-                    lease.release()
-
-    def active_session(self, device_id: str) -> str | None:
-        device = self._id(device_id, "device_id")
-        with self._guard:
-            local = self._active.get(device)
-            if local is not None:
-                return local
-            lease_path = self._lease_path(device)
-            if lease_path is None:
-                return None
-            payload = InterProcessLease.active_payload(lease_path) or {}
-            return str(payload.get("session_id") or "").strip() or None
-
-    @contextmanager
-    def device_lock(self, device_id: str):
-        device = self._id(device_id, "device_id")
-        with self._guard:
-            lock = self._locks.setdefault(device, threading.RLock())
-        lock.acquire()
-        thread_id = threading.get_ident()
-        with self._guard:
-            owner, depth = self._owners.get(device, (thread_id, 0))
-            if depth and owner != thread_id:
-                lock.release()
-                raise UniversalAgentOrchestratorError(
-                    f"设备锁所有者异常：{device}。"
-                )
-            self._owners[device] = (thread_id, depth + 1)
-        try:
-            yield
-        finally:
-            with self._guard:
-                owner, depth = self._owners.get(device, (thread_id, 1))
-                if owner == thread_id and depth <= 1:
-                    self._owners.pop(device, None)
-                elif owner == thread_id:
-                    self._owners[device] = (owner, depth - 1)
-            lock.release()
-
-    def is_locked_by_current_thread(self, device_id: str) -> bool:
-        device = self._id(device_id, "device_id")
-        with self._guard:
-            owner = self._owners.get(device)
-            return bool(owner and owner[0] == threading.get_ident() and owner[1] > 0)
-
-
 class UniversalAgentOrchestrator:
     """Coordinate the generic one-action visual loop without App workflows."""
 
@@ -1466,7 +1352,7 @@ class UniversalAgentOrchestrator:
         trusted_observation_factory: Callable[..., Any] | None = None,
         evidence_store_factory: Callable[[Path], AgentEvidenceStore] | None = None,
         bridge: ObservationBridge | None = None,
-        device_registry: DeviceTaskRegistry | None = None,
+        device_registry: DeviceTaskRegistryPort,
     ) -> None:
         self.deepseek_planner = deepseek_planner
         self.qwen_observer = qwen_observer
@@ -1476,7 +1362,7 @@ class UniversalAgentOrchestrator:
         )
         self.evidence_store_factory = evidence_store_factory or AgentEvidenceStore
         self.bridge = bridge or ObservationBridge()
-        self.device_registry = device_registry or DeviceTaskRegistry()
+        self.device_registry = device_registry
 
     def _vision_usage_scope(
         self,
@@ -1487,7 +1373,7 @@ class UniversalAgentOrchestrator:
         return scope_factory(ledger) if callable(scope_factory) else nullcontext()
 
     def _release_if_terminal(self, session: UniversalAgentSessionState) -> None:
-        if session.status in DeviceTaskRegistry.TERMINAL_STATUSES:
+        if session.status in self.device_registry.TERMINAL_STATUSES:
             self.device_registry.release(session.device_id, session.session_id)
 
     @staticmethod

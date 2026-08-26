@@ -9,12 +9,9 @@ from agent.domain import (
     AgentSession,
     AgentSessionConflictError,
     AgentSessionRepository,
+    DeviceTaskRegistryPort,
     require_session_device,
 )
-
-
-class DeviceTaskRegistryPort(Protocol):
-    def active_session(self, device_id: str) -> str | None: ...
 
 
 class UniversalAgentOrchestratorPort(Protocol):

@@ -14,11 +14,11 @@ from types import SimpleNamespace
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from capability_acceptance import _validate_live_promotion_source
-from device_executor import (
+from agent.domain import (
     DeviceActionRequest,
     DeviceExecutionError,
-    RobotDeviceExecutor,
 )
+from agent.infrastructure import RobotDeviceExecutor
 from generic_action_adapter import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     GenericActionAdapterError,

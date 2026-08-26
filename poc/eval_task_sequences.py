@@ -8,11 +8,11 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
-from device_executor import (
+from agent.domain import (
     DeviceActionRequest,
     DeviceExecutionError,
-    ReplayDeviceExecutor,
 )
+from agent.infrastructure import ReplayDeviceExecutor
 
 
 TASK_SEQUENCE_BENCHMARK_PROTOCOL = "2026-08-25-task-sequence-replay-v1"

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from PIL import Image
 
 import run_xy_calibration
-from device_exclusivity import InterProcessLease
+from agent.infrastructure import DeviceTaskRegistry, InterProcessLease
 from tap_calibration import (
     Affine2D,
     TapCalibrationError,
@@ -28,9 +28,6 @@ from run_xy_calibration import (
     run_calibration_step,
     wait_for_page_state,
 )
-from universal_agent_orchestrator import DeviceTaskRegistry
-
-
 def fresh_page_state(
     phase: str,
     *,

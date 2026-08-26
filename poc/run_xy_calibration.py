@@ -18,7 +18,12 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 import robot_gui_poc as seller_gui
-from device_exclusivity import InterProcessLease, SHARED_DEVICE_LEASE_DIR
+from agent.domain import DeviceTaskRegistryError
+from agent.infrastructure import (
+    DeviceTaskRegistry,
+    InterProcessLease,
+    SHARED_DEVICE_LEASE_DIR,
+)
 from robot_core import RobotController, load_controller_config
 from tap_calibration import (
     CALIBRATION_PATH,
@@ -28,12 +33,6 @@ from tap_calibration import (
     build_coverage,
     save_calibration,
 )
-from universal_agent_orchestrator import (
-    DeviceTaskRegistry,
-    UniversalAgentOrchestratorError,
-)
-
-
 ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = ROOT / "output" / "xy_calibration"
 CALIBRATION_SESSION_VERSION = 1
@@ -265,7 +264,7 @@ def _calibration_device_reservation(
     registry = DeviceTaskRegistry(lease_directory=SHARED_DEVICE_LEASE_DIR)
     try:
         registry.reserve(resolved, session_id)
-    except UniversalAgentOrchestratorError as exc:
+    except DeviceTaskRegistryError as exc:
         raise TapCalibrationError(str(exc)) from exc
     try:
         confirmed, current_default, _status = _require_device_ready(

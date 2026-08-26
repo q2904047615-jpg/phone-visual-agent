@@ -48,12 +48,7 @@ def _unlock(descriptor: int) -> None:
 
 
 class InterProcessLease:
-    """An OS-backed non-blocking lease with inspectable JSON metadata.
-
-    The operating system releases the byte-range lock when a process exits, so
-    dead owners need no unlink/recreate recovery and cannot create a TOCTOU
-    double-owner window.  The file itself is stable and is never deleted.
-    """
+    """An OS-backed non-blocking lease with inspectable JSON metadata."""
 
     def __init__(self, path: Path, *, owner_id: str, metadata: dict[str, Any]) -> None:
         self.path = Path(path)

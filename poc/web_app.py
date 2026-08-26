@@ -31,8 +31,14 @@ from agent.domain import (
     AgentSessionConflictError,
     AgentSessionDeviceMismatchError,
     AgentSessionNotFoundError,
+    DeviceTaskRegistryError,
 )
-from agent.infrastructure import InMemoryAgentSessionRepository
+from agent.infrastructure import (
+    DeviceTaskRegistry,
+    InMemoryAgentSessionRepository,
+    InterProcessLease,
+    SHARED_DEVICE_LEASE_DIR,
+)
 from capability_acceptance import (
     CapabilityAcceptanceError,
     PROMOTABLE_ACTIONS,
@@ -51,9 +57,7 @@ from generic_scene_observer import SingleStepGenericSceneObserver
 from input_value_lineage import TypedInputLineageStore
 from deepseek_task_graph import DeepSeekTaskGraphPlanner, TaskGraphError
 from qwen_visual_decision import QwenVisualDecisionObserver
-from device_exclusivity import InterProcessLease, SHARED_DEVICE_LEASE_DIR
 from universal_agent_orchestrator import (
-    DeviceTaskRegistry,
     POST_ACTION_TRANSITION_PROTOCOL_VERSION,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
@@ -1134,6 +1138,7 @@ def _require_capability_trial_binding(
 
 CAPABILITY_ACCEPTANCE_ERRORS = (
     CapabilityAcceptanceError,
+    DeviceTaskRegistryError,
     GenericActionAdapterError,
     IntentProviderError,
     TaskGraphError,
@@ -1497,6 +1502,7 @@ def start_generic_supervised_session(
     except (
         AgentSessionCommandError,
         AgentSessionConflictError,
+        DeviceTaskRegistryError,
         IntentProviderError,
         GenericActionAdapterError,
         UniversalActionError,
@@ -1564,6 +1570,7 @@ def approve_generic_supervised_effect(
         _raise_agent_session_device_mismatch(exc)
     except (
         AgentSessionCommandError,
+        DeviceTaskRegistryError,
         GenericActionAdapterError,
         UniversalActionError,
         UniversalAgentOrchestratorError,
@@ -1617,6 +1624,7 @@ def confirm_generic_supervised_session(
         _raise_agent_device_runtime_error(exc)
     except (
         AgentSessionCommandError,
+        DeviceTaskRegistryError,
         GenericActionAdapterError,
         UniversalActionError,
         UniversalAgentOrchestratorError,
@@ -1668,6 +1676,7 @@ def plan_next_generic_supervised_step(
         _raise_agent_session_device_mismatch(exc)
     except (
         AgentSessionCommandError,
+        DeviceTaskRegistryError,
         GenericActionAdapterError,
         UniversalActionError,
         IntentProviderError,
@@ -1727,6 +1736,7 @@ def run_generic_supervised_safe_loop(
         _raise_agent_session_device_mismatch(exc)
     except (
         AgentSessionCommandError,
+        DeviceTaskRegistryError,
         GenericActionAdapterError,
         UniversalActionError,
         UniversalAgentOrchestratorError,

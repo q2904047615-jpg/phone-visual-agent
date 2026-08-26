@@ -15,12 +15,12 @@ from typing import Any, Callable
 from PIL import Image, ImageChops, ImageStat
 
 from canonical_action_protocol import CanonicalActionProtocolError
-from device_executor import (
+from agent.domain import (
     DeviceActionRequest,
     DeviceExecutionError,
     DeviceExecutor,
-    RobotDeviceExecutor,
 )
+from agent.infrastructure import RobotDeviceExecutor
 from generic_goal import GenericIntentDraft
 from generic_scene_observer import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,

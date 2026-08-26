@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 from canonical_action_protocol import compile_canonical_action_catalog
 from deepseek_task_graph import _graph_from_payload, build_exact_action_task_graph
-from device_executor import DeviceActionRequest, RobotDeviceExecutor
+from agent.domain import DeviceActionRequest
+from agent.infrastructure import RobotDeviceExecutor
 from generic_action_adapter import _post_action_visual_context
 from generic_scene_observer import POST_ACTION_VISUAL_CONTEXT_VERSION
 from qwen_visual_decision import (

@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw
 
 import robot_gui_poc
 import web_app
-from device_exclusivity import InterProcessLease
+from agent.infrastructure import DeviceTaskRegistry, InterProcessLease
 from canonical_action_protocol import GenericStepProposal
 from generic_scene_observer import SINGLE_STEP_SCENE_OBSERVER_VERSION
 from robot_core import (
@@ -1251,8 +1251,6 @@ class ApiEndToEndTests(unittest.TestCase):
         cls.no_browser_patcher.stop()
 
     def setUp(self) -> None:
-        from universal_agent_orchestrator import DeviceTaskRegistry
-
         self.device_registry_patcher = patch.object(
             web_app.runtime,
             "device_task_registry",
@@ -1276,10 +1274,7 @@ class ApiEndToEndTests(unittest.TestCase):
             _scene,
             _trusted_factory,
         )
-        from universal_agent_orchestrator import (
-            DeviceTaskRegistry,
-            UniversalAgentOrchestrator,
-        )
+        from universal_agent_orchestrator import UniversalAgentOrchestrator
 
         initial = graph or _graph(device_id=device_id)
         planner = FakeDeepSeekPlanner(

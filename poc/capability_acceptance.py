@@ -18,7 +18,7 @@ from orientation_safety import (
     frame_fingerprint,
 )
 
-from device_exclusivity import InterProcessLease
+from agent.infrastructure import InterProcessLease
 from tap_calibration import (
     Affine2D,
     CALIBRATION_VERSION,

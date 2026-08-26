@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from agent.domain import DeviceTaskRegistryError
+from agent.infrastructure import DeviceTaskRegistry
 from deepseek_task_graph import (
     CompletionCondition,
     ControllerTransitionEvidenceRef,
@@ -41,7 +43,6 @@ from canonical_action_protocol import compile_canonical_action_catalog
 from universal_agent_orchestrator import (
     AgentEvidenceStore,
     EvidenceStoreError,
-    DeviceTaskRegistry,
     ObservationBridge,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
@@ -1855,6 +1856,7 @@ class AgentEvidenceStoreTests(unittest.TestCase):
                 qwen_observer=FakeQwenObserver(status="blocked"),
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=_trusted_factory,
+                device_registry=DeviceTaskRegistry(),
             )
 
             orchestrator._write_terminal_snapshot(session)
@@ -1938,6 +1940,7 @@ class UniversalAgentStartTests(unittest.TestCase):
             qwen_observer=qwen,
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
+            device_registry=DeviceTaskRegistry(),
         )
 
     def test_start_preserves_literal_newline_in_raw_goal(self) -> None:
@@ -3006,6 +3009,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 qwen_observer=FakeQwenObserver(),
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=recording_factory,
+                device_registry=DeviceTaskRegistry(),
             )
             orchestrator.start(
                 session_id="session-1",
@@ -4279,6 +4283,7 @@ class UniversalAgentStartTests(unittest.TestCase):
                 qwen_observer=qwen,
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=_trusted_factory,
+                device_registry=DeviceTaskRegistry(),
             )
             session = orchestrator.start(
                 session_id="session-home-reset-progress",
@@ -5034,6 +5039,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
             qwen_observer=qwen,
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
+            device_registry=DeviceTaskRegistry(),
         )
 
     @staticmethod
@@ -6667,6 +6673,7 @@ class UniversalAgentOfflineClosedLoopTests(unittest.TestCase):
                 qwen_observer=qwen,
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=insufficient_factory,
+                device_registry=DeviceTaskRegistry(),
             )
             session = orchestrator.start(
                 session_id="session-refresh-insufficient-evidence",
@@ -7970,6 +7977,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             adapter_factory=lambda _device_id: adapter,
             trusted_observation_factory=_trusted_factory,
             evidence_store_factory=evidence_store_factory,
+            device_registry=DeviceTaskRegistry(),
         )
         session = orchestrator.start(
             session_id="session-confirm",
@@ -8210,6 +8218,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 qwen_observer=qwen,
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=_trusted_factory,
+                device_registry=DeviceTaskRegistry(),
             )
             session = orchestrator.start(
                 session_id="session-ordinary-send-fresh",
@@ -8275,6 +8284,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 qwen_observer=qwen,
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=_trusted_factory,
+                device_registry=DeviceTaskRegistry(),
             )
             session = orchestrator.start(
                 session_id="session-ordinary-send-read-only-proof",
@@ -8452,6 +8462,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 qwen_observer=qwen,
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=wrong_after_factory,
+                device_registry=DeviceTaskRegistry(),
             )
             session = orchestrator.start(
                 session_id="session-bad-after-fp",
@@ -8868,6 +8879,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
                 qwen_observer=qwen,
                 adapter_factory=lambda _device_id: adapter,
                 trusted_observation_factory=drifting_factory,
+                device_registry=DeviceTaskRegistry(),
             )
             session = orchestrator.start(
                 session_id="session-post-drift",
@@ -9146,7 +9158,7 @@ class DeviceTaskRegistryTests(unittest.TestCase):
                 run_dir=Path(first),
             )
             second_qwen = FakeQwenObserver()
-            with self.assertRaisesRegex(UniversalAgentOrchestratorError, "已有活动任务"):
+            with self.assertRaisesRegex(DeviceTaskRegistryError, "已有活动任务"):
                 self._orchestrator(
                     registry,
                     FakeAdapter(_scene()),
@@ -9171,7 +9183,7 @@ class DeviceTaskRegistryTests(unittest.TestCase):
                     "session-first", second.active_session("device-shared")
                 )
                 with self.assertRaisesRegex(
-                    UniversalAgentOrchestratorError, "已有活动任务"
+                    DeviceTaskRegistryError, "已有活动任务"
                 ):
                     second.reserve("device-shared", "session-second")
             finally:

@@ -16,7 +16,7 @@ from capability_acceptance import (
     validated_calibration_evidence,
     validate_acceptance_report,
 )
-from device_exclusivity import InterProcessLease
+from agent.infrastructure import InterProcessLease
 from orientation_safety import (
     ORIENTATION_AUDIT_SOURCE,
     ORIENTATION_CREDENTIAL_VERSION,

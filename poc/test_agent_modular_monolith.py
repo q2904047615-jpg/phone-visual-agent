@@ -258,6 +258,13 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 "robot_core",
                 "vision_agent",
             },
+            "infrastructure": {
+                "fastapi",
+                "pydantic",
+                "web_app",
+                "agent.application",
+                "universal_agent_orchestrator",
+            },
         }
         violations: list[str] = []
         for layer, banned in banned_by_layer.items():
@@ -286,6 +293,37 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertNotIn("generic_supervised_sessions", source)
         self.assertNotIn("generic_supervised_session_lock", source)
         self.assertNotIn("_require_generic_session_device", source)
+
+    def test_device_execution_has_one_modular_runtime_entry(self) -> None:
+        root = Path(__file__).resolve().parent
+        self.assertFalse((root / "device_executor.py").exists())
+        self.assertFalse((root / "device_exclusivity.py").exists())
+
+        orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("class DeviceTaskRegistry", orchestrator_source)
+        self.assertIn(
+            "device_registry: DeviceTaskRegistryPort",
+            orchestrator_source,
+        )
+        self.assertNotIn("agent.infrastructure", orchestrator_source)
+
+        forbidden_imports = (
+            "from device_executor",
+            "import device_executor",
+            "from device_exclusivity",
+            "import device_exclusivity",
+        )
+        violations: list[str] = []
+        for path in root.rglob("*.py"):
+            if path.name.startswith("test_"):
+                continue
+            source = path.read_text(encoding="utf-8")
+            for forbidden in forbidden_imports:
+                if forbidden in source:
+                    violations.append(f"{path.relative_to(root)}: {forbidden}")
+        self.assertEqual([], violations)
 
 
 if __name__ == "__main__":

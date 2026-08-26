@@ -1,8 +1,10 @@
 import unittest
 
-from device_executor import (
+from agent.domain import (
     DeviceActionRequest,
     DeviceExecutionError,
+)
+from agent.infrastructure import (
     ReplayDeviceExecutor,
     RobotDeviceExecutor,
 )
@@ -165,6 +167,22 @@ class DeviceExecutorTests(unittest.TestCase):
             executor.execute(
                 DeviceActionRequest(kind="tap_semantic", point=(2, 1))
             )
+
+    def test_invalid_swipe_trajectory_is_rejected_before_transport(self):
+        robot = FakeRobot()
+        executor = RobotDeviceExecutor(robot)
+
+        with self.assertRaisesRegex(DeviceExecutionError, "请求方向不一致"):
+            executor.execute(
+                DeviceActionRequest(
+                    kind="swipe",
+                    direction="up",
+                    point=(500, 100),
+                    end_point=(500, 900),
+                )
+            )
+
+        self.assertEqual([], robot.calls)
 
 
 if __name__ == "__main__":

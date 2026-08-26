@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 import capability_acceptance_runtime as acceptance_runtime
+from agent.infrastructure import DeviceTaskRegistry
 from orientation_safety import (
     PhysicalExecutionGate,
     _mint_audited_credential,
@@ -21,7 +22,6 @@ from capability_acceptance import (
 )
 from capability_acceptance_runtime import CapabilityAcceptanceManager
 from generic_action_adapter import GenericActionAdapterError
-from universal_agent_orchestrator import DeviceTaskRegistry
 from web_app import DeviceControllerRegistry
 
 

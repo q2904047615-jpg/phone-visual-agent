@@ -6,19 +6,32 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from device_exclusivity import InterProcessLease
-from universal_agent_orchestrator import (
+from agent.domain import DeviceTaskRegistryError
+from agent.infrastructure import (
     DeviceTaskRegistry,
-    UniversalAgentOrchestratorError,
+    InterProcessLease,
 )
 
 
 class InterProcessLeaseTests(unittest.TestCase):
+    def test_device_lock_is_reentrant_for_same_thread(self) -> None:
+        registry = DeviceTaskRegistry()
+
+        with registry.device_lock("device-a"):
+            self.assertTrue(registry.is_locked_by_current_thread("device-a"))
+            with registry.device_lock("device-a"):
+                self.assertTrue(
+                    registry.is_locked_by_current_thread("device-a")
+                )
+            self.assertTrue(registry.is_locked_by_current_thread("device-a"))
+
+        self.assertFalse(registry.is_locked_by_current_thread("device-a"))
+
     def test_real_second_process_cannot_acquire_same_lease(self) -> None:
         child_code = r'''
 import sys
 from pathlib import Path
-from device_exclusivity import InterProcessLease
+from agent.infrastructure import InterProcessLease
 lease = InterProcessLease(Path(sys.argv[1]), owner_id="child", metadata={"session_id": "child-session"})
 if not lease.acquire():
     raise SystemExit(2)
@@ -65,7 +78,7 @@ lease.release()
         child_code = r'''
 import sys
 from pathlib import Path
-from universal_agent_orchestrator import DeviceTaskRegistry
+from agent.infrastructure import DeviceTaskRegistry
 registry = DeviceTaskRegistry(lease_directory=Path(sys.argv[1]))
 registry.reserve("device-a", "child-session-a")
 print("READY", flush=True)
@@ -91,7 +104,7 @@ registry.release("device-a", "child-session-a")
                     parent.active_session("device-a"),
                 )
                 with self.assertRaisesRegex(
-                    UniversalAgentOrchestratorError,
+                    DeviceTaskRegistryError,
                     "已有活动任务",
                 ):
                     parent.reserve("device-a", "parent-session-a")

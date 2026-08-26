@@ -9,7 +9,7 @@ from PIL import Image
 
 from agent.domain.action_capabilities import build_device_capability_snapshot
 from agent.infrastructure.observation_images import measure_local_stability
-from vision_usage import QWEN_PLUS_MODEL
+from agent.application.vision_usage import QWEN_PLUS_MODEL
 
 
 RUNTIME_DOCTOR_VERSION = "2026-08-25-runtime-doctor-v1"

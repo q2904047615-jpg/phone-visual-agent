@@ -1,3 +1,5 @@
+"""Application orchestration for the generic one-action visual loop."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -23,8 +25,7 @@ from agent.domain.task_graph import (
     build_exact_input_task_graph,
     named_visual_identity_is_grounded,
 )
-from deepseek_failure_diagnostics import persist_deepseek_failure_diagnostic
-from agent.application import (
+from agent.application.runtime_session import (
     CORRECTIVE_RETRY_PROTOCOL_VERSION,
     POST_ACTION_TRANSITION_PROTOCOL_VERSION,
     UniversalAgentSessionState,
@@ -73,7 +74,7 @@ from agent.domain.verified_text_transaction import (
     preferred_keyboard_layout,
     required_keyboard_input_mode_for_step,
 )
-from vision_usage import VisionSessionUsageLedger
+from agent.application.vision_usage import VisionSessionUsageLedger
 
 
 POST_ACTION_OUTCOMES = frozenset({"matched", "mismatched"})
@@ -317,6 +318,15 @@ def _effect_confirmation_material(
 
 class UniversalAgentOrchestratorError(RuntimeError):
     pass
+
+
+def _discard_deepseek_failure_diagnostic(
+    *_args: Any,
+    **_kwargs: Any,
+) -> tuple[str, ...]:
+    """Default application port when no diagnostic sink is configured."""
+
+    return ()
 
 
 class ObservationBridge:
@@ -953,6 +963,7 @@ class UniversalAgentOrchestrator:
         trusted_observation_factory: Callable[..., Any],
         bridge: ObservationBridge | None = None,
         device_registry: DeviceTaskRegistryPort,
+        deepseek_failure_diagnostic_writer: Callable[..., tuple[str, ...]] | None = None,
     ) -> None:
         self.deepseek_planner = deepseek_planner
         self.qwen_observer = qwen_observer
@@ -961,6 +972,10 @@ class UniversalAgentOrchestrator:
         self.evidence_store_factory = evidence_store_factory
         self.bridge = bridge or ObservationBridge()
         self.device_registry = device_registry
+        self.deepseek_failure_diagnostic_writer = (
+            deepseek_failure_diagnostic_writer
+            or _discard_deepseek_failure_diagnostic
+        )
 
     def _vision_usage_scope(
         self,
@@ -3454,7 +3469,7 @@ class UniversalAgentOrchestrator:
         if not isinstance(error, TaskGraphError):
             return
         try:
-            paths = persist_deepseek_failure_diagnostic(
+            paths = self.deepseek_failure_diagnostic_writer(
                 self.deepseek_planner,
                 evidence_dir=session.run_dir,
                 prefix=f"deepseek_{stage}_step_{session.step_number}",
@@ -3489,9 +3504,11 @@ class UniversalAgentOrchestrator:
     def _ensure_terminal_snapshot(self, session: UniversalAgentSessionState) -> None:
         """Write a terminal report only when the persisted one is missing/stale."""
 
-        report_path = session.run_dir / "report.json"
         try:
-            persisted = json.loads(report_path.read_text(encoding="utf-8"))["session"]
+            report = session.evidence_store.read_report()
+            if report is None:
+                raise KeyError("report")
+            persisted = report["session"]
             current = session.snapshot()
             compared_fields = (
                 "status",
@@ -3504,7 +3521,7 @@ class UniversalAgentOrchestrator:
             )
             if all(persisted.get(key) == current.get(key) for key in compared_fields):
                 return
-        except (OSError, ValueError, KeyError, TypeError):
+        except (EvidenceStoreError, KeyError, TypeError):
             pass
         self._write_terminal_snapshot(session)
 

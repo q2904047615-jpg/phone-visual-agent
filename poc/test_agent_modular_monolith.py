@@ -310,9 +310,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertIsNone(consumed["confirmation_scope"])
 
         root = Path(__file__).resolve().parent
-        orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
-            encoding="utf-8"
-        )
+        orchestrator_source = (
+            root / "agent" / "application" / "universal_agent_orchestrator.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("class UniversalAgentSessionState", orchestrator_source)
         self.assertNotIn(
             '"2026-08-16-universal-post-action-transition-v1"',
@@ -356,9 +356,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             lineage.physical_actions = 3  # type: ignore[misc]
 
         root = Path(__file__).resolve().parent
-        orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
-            encoding="utf-8"
-        )
+        orchestrator_source = (
+            root / "agent" / "application" / "universal_agent_orchestrator.py"
+        ).read_text(encoding="utf-8")
         session_source = (
             root / "agent" / "application" / "runtime_session.py"
         ).read_text(encoding="utf-8")
@@ -399,9 +399,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertFalse(effect.consumed)
 
         root = Path(__file__).resolve().parent
-        orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
-            encoding="utf-8"
-        )
+        orchestrator_source = (
+            root / "agent" / "application" / "universal_agent_orchestrator.py"
+        ).read_text(encoding="utf-8")
         session_source = (
             root / "agent" / "application" / "runtime_session.py"
         ).read_text(encoding="utf-8")
@@ -439,9 +439,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual("", denied.to_dict()["canonical_class"])
 
         root = Path(__file__).resolve().parent
-        orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
-            encoding="utf-8"
-        )
+        orchestrator_source = (
+            root / "agent" / "application" / "universal_agent_orchestrator.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("class CanonicalSelectionReceipt", orchestrator_source)
         self.assertNotIn(
             '"2026-08-26-canonical-selection-receipt-v1"',
@@ -495,6 +495,119 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                         ):
                             violations.append(f"{path.name}: {name}")
         self.assertEqual([], violations)
+
+    def test_universal_orchestrator_and_usage_have_one_layered_entry(self) -> None:
+        import agent.application.universal_agent_orchestrator as orchestrator
+        import agent.application.vision_usage as vision_usage
+        import agent.infrastructure.deepseek_failure_diagnostics as diagnostics
+
+        root = Path(__file__).resolve().parent
+        orchestrator_path = (
+            root / "agent" / "application" / "universal_agent_orchestrator.py"
+        )
+        usage_path = root / "agent" / "application" / "vision_usage.py"
+        diagnostic_path = (
+            root
+            / "agent"
+            / "infrastructure"
+            / "deepseek_failure_diagnostics.py"
+        )
+        for legacy_name in (
+            "universal_agent_orchestrator.py",
+            "vision_usage.py",
+            "deepseek_failure_diagnostics.py",
+        ):
+            self.assertFalse((root / legacy_name).exists())
+        self.assertTrue(orchestrator_path.is_file())
+        self.assertTrue(usage_path.is_file())
+        self.assertTrue(diagnostic_path.is_file())
+        self.assertEqual(
+            "agent.application.universal_agent_orchestrator",
+            orchestrator.UniversalAgentOrchestrator.__module__,
+        )
+        self.assertEqual(
+            "agent.application.vision_usage",
+            vision_usage.VisionSessionUsageLedger.__module__,
+        )
+        self.assertEqual(
+            "agent.infrastructure.deepseek_failure_diagnostics",
+            diagnostics.persist_deepseek_failure_diagnostic.__module__,
+        )
+
+        orchestrator_source = orchestrator_path.read_text(encoding="utf-8")
+        usage_source = usage_path.read_text(encoding="utf-8")
+        diagnostic_source = diagnostic_path.read_text(encoding="utf-8")
+        for forbidden in (
+            "agent.infrastructure",
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "robot_core",
+            "vision_agent",
+            ".read_text(",
+            ".write_text(",
+            ".write_bytes(",
+            "os.replace",
+            ".mkdir(",
+        ):
+            self.assertNotIn(forbidden, orchestrator_source)
+            self.assertNotIn(forbidden, usage_source)
+        self.assertIn("deepseek_failure_diagnostic_writer", orchestrator_source)
+        self.assertNotIn(
+            "persist_deepseek_failure_diagnostic",
+            orchestrator_source,
+        )
+        self.assertEqual(
+            1,
+            orchestrator_source.count("class UniversalAgentOrchestrator:"),
+        )
+        self.assertEqual(
+            1,
+            usage_source.count("class VisionSessionUsageLedger:"),
+        )
+        self.assertEqual(
+            1,
+            diagnostic_source.count(
+                "def persist_deepseek_failure_diagnostic("
+            ),
+        )
+
+        web_source = (root / "web_app.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "from agent.application.universal_agent_orchestrator import (",
+            web_source,
+        )
+        self.assertIn(
+            "from agent.infrastructure.deepseek_failure_diagnostics import (",
+            web_source,
+        )
+        self.assertEqual(
+            2,
+            web_source.count(
+                "deepseek_failure_diagnostic_writer=("
+            ),
+        )
+
+        legacy_modules = {
+            "universal_agent_orchestrator",
+            "vision_usage",
+            "deepseek_failure_diagnostics",
+        }
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module in legacy_modules
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name in legacy_modules:
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
 
     def test_web_uses_one_session_repository_instead_of_legacy_storage(self) -> None:
         source = (Path(__file__).resolve().parent / "web_app.py").read_text(
@@ -967,7 +1080,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
     def test_generic_goal_projection_has_one_domain_identity(self) -> None:
         import agent.application.deepseek_task_graph as deepseek_task_graph
         import agent.infrastructure.generic_action_adapter as generic_action_adapter
-        import universal_agent_orchestrator
+        import agent.application.universal_agent_orchestrator as universal_agent_orchestrator
         from agent.application import runtime_session
         from agent.domain.generic_goal import (
             GenericIntentDraft,
@@ -1085,7 +1198,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_qwen_task_context_has_one_domain_identity(self) -> None:
         import agent.application.qwen_visual_decision as qwen_visual_decision
-        import universal_agent_orchestrator
+        import agent.application.universal_agent_orchestrator as universal_agent_orchestrator
         from agent.domain.qwen_task_context import (
             QwenTaskContext,
             SUPPORTED_TASK_CONTEXT_PROTOCOL,
@@ -1414,7 +1527,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
     def test_deepseek_task_graph_has_one_application_entry(self) -> None:
         import agent.application.deepseek_task_graph as deepseek_task_graph
         import capability_acceptance_planner
-        import universal_agent_orchestrator
+        import agent.application.universal_agent_orchestrator as universal_agent_orchestrator
         from agent.domain.task_graph import DynamicTaskGraph, ObservedState
 
         root = Path(__file__).resolve().parent
@@ -1481,7 +1594,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_task_graph_aggregate_has_one_domain_identity(self) -> None:
         import capability_acceptance_planner
-        import universal_agent_orchestrator
+        import agent.application.universal_agent_orchestrator as universal_agent_orchestrator
         from agent.domain.task_graph import (
             DynamicTaskGraph,
             ObservedState,
@@ -1679,7 +1792,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         import agent.infrastructure.trusted_observation_frames as frame_adapter
         import agent.infrastructure.generic_scene_observer as generic_scene_observer
         import agent.application.qwen_visual_decision as qwen_visual_decision
-        import universal_agent_orchestrator
+        import agent.application.universal_agent_orchestrator as universal_agent_orchestrator
         from agent.domain.trusted_observation import TrustedObservation
 
         root = Path(__file__).resolve().parent
@@ -1761,9 +1874,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertFalse((root / "device_executor.py").exists())
         self.assertFalse((root / "device_exclusivity.py").exists())
 
-        orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
-            encoding="utf-8"
-        )
+        orchestrator_source = (
+            root / "agent" / "application" / "universal_agent_orchestrator.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("class DeviceTaskRegistry", orchestrator_source)
         self.assertIn(
             "device_registry: DeviceTaskRegistryPort",
@@ -1799,9 +1912,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertTrue(domain_port.is_file())
         self.assertTrue(infrastructure_store.is_file())
 
-        orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
-            encoding="utf-8"
-        )
+        orchestrator_source = (
+            root / "agent" / "application" / "universal_agent_orchestrator.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("class AgentEvidenceStore", orchestrator_source)
         self.assertNotIn("class EvidenceStoreError", orchestrator_source)
         self.assertIn(

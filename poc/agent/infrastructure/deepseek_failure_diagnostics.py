@@ -1,3 +1,5 @@
+"""File-system persistence for redacted DeepSeek failure evidence."""
+
 from __future__ import annotations
 
 import hashlib

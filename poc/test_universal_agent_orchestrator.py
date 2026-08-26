@@ -40,12 +40,15 @@ from agent.domain.semantic_action import SemanticAction
 from agent.domain.ui_scene import SystemUIFacts, UIElement, UIScene
 from agent.domain.universal_action_controller import ResolvedSemanticAction
 from agent.domain.vision_model import VisionAgentError
-from vision_usage import VisionSessionUsageLedger
+from agent.application.vision_usage import VisionSessionUsageLedger
+from agent.infrastructure.deepseek_failure_diagnostics import (
+    persist_deepseek_failure_diagnostic,
+)
 from agent.domain.canonical_action_protocol import scene_matches_target_app_surface
 from agent.domain.qwen_task_context import QwenTaskContext
 from agent.domain.task_semantic_ir import compile_formal_semantic_authority
 from agent.domain.canonical_action_protocol import compile_canonical_action_catalog
-from universal_agent_orchestrator import (
+from agent.application.universal_agent_orchestrator import (
     ObservationBridge,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
@@ -1947,6 +1950,9 @@ class UniversalAgentStartTests(unittest.TestCase):
             trusted_observation_factory=_trusted_factory,
             evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=DeviceTaskRegistry(),
+            deepseek_failure_diagnostic_writer=(
+                persist_deepseek_failure_diagnostic
+            ),
         )
 
     def test_start_preserves_literal_newline_in_raw_goal(self) -> None:
@@ -3472,7 +3478,8 @@ class UniversalAgentStartTests(unittest.TestCase):
 
         adapter = FakeAdapter(_scene())
         with tempfile.TemporaryDirectory() as temp, patch(
-            "universal_agent_orchestrator.persist_deepseek_failure_diagnostic",
+            "test_universal_agent_orchestrator."
+            "persist_deepseek_failure_diagnostic",
             side_effect=OSError("diagnostic disk failure"),
         ):
             with self.assertRaisesRegex(TaskGraphError, "original task graph failure"):
@@ -7988,6 +7995,9 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             trusted_observation_factory=_trusted_factory,
             evidence_store_factory=evidence_store_factory,
             device_registry=DeviceTaskRegistry(),
+            deepseek_failure_diagnostic_writer=(
+                persist_deepseek_failure_diagnostic
+            ),
         )
         session = orchestrator.start(
             session_id="session-confirm",
@@ -8798,6 +8808,8 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         root = Path(__file__).parent
         production_paths = {
             "universal_agent_orchestrator.py": root
+            / "agent"
+            / "application"
             / "universal_agent_orchestrator.py",
             "qwen_visual_decision.py": root
             / "agent"

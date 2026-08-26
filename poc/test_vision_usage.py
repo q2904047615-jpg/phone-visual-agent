@@ -6,8 +6,8 @@ from unittest.mock import Mock, patch
 
 from qwen_runtime_errors import classify_qwen_error
 from vision_agent import DashScopeVisionProvider
-import vision_usage
-from vision_usage import (
+import agent.application.vision_usage as vision_usage
+from agent.application.vision_usage import (
     VisionModelIdentityMismatch,
     VisionSessionUsageLedger,
     VisionStepContractViolation,

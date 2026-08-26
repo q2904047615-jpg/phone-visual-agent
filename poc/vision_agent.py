@@ -19,7 +19,7 @@ from agent.domain.vision_model import VisionAgentError, VisionModelConfig
 from agent.infrastructure.environment_vision_model_config import (
     load_vision_model_config,
 )
-from vision_usage import VisionSessionUsageLedger
+from agent.application.vision_usage import VisionSessionUsageLedger
 
 
 class _DuplicateJSONKeyError(ValueError):

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from deepseek_failure_diagnostics import (
+from agent.infrastructure.deepseek_failure_diagnostics import (
     MAX_REDACTED_DEEPSEEK_RESPONSE_CHARS,
     persist_deepseek_failure_diagnostic,
 )

@@ -1,3 +1,5 @@
+"""Session-scoped in-memory accounting for visual-model requests."""
+
 from __future__ import annotations
 
 import threading

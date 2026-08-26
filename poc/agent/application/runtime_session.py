@@ -16,7 +16,7 @@ from agent.domain import (
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.domain.task_graph import DynamicTaskGraph
 from agent.domain.generic_goal import GenericIntentDraft
-from vision_usage import VisionSessionUsageLedger
+from agent.application.vision_usage import VisionSessionUsageLedger
 
 
 POST_ACTION_TRANSITION_PROTOCOL_VERSION = (

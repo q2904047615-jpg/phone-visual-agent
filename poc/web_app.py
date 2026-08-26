@@ -73,10 +73,13 @@ from agent.application.deepseek_task_graph import (
 )
 from agent.domain.task_graph import TaskGraphError
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
-from universal_agent_orchestrator import (
+from agent.application.universal_agent_orchestrator import (
     POST_ACTION_TRANSITION_PROTOCOL_VERSION,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
+)
+from agent.infrastructure.deepseek_failure_diagnostics import (
+    persist_deepseek_failure_diagnostic,
 )
 from agent.domain.universal_action_controller import (
     UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
@@ -323,6 +326,9 @@ class Runtime:
             trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=self.device_task_registry,
+            deepseek_failure_diagnostic_writer=(
+                persist_deepseek_failure_diagnostic
+            ),
         )
         self.agent_session_repository = InMemoryAgentSessionRepository()
         self.universal_agent_session_service = (
@@ -407,6 +413,9 @@ class Runtime:
             trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=self.device_task_registry,
+            deepseek_failure_diagnostic_writer=(
+                persist_deepseek_failure_diagnostic
+            ),
         )
 
     def capture_agent_frame(

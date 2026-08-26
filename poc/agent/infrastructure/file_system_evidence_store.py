@@ -154,5 +154,13 @@ class FileSystemAgentEvidenceStore:
             transition,
         )
 
+    def read_report(self) -> dict[str, Any] | None:
+        target = self.run_dir / "report.json"
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            return None
+        return dict(payload) if isinstance(payload, Mapping) else None
+
     def write_report(self, report: Any) -> Path:
         return self.write_json("report.json", report)

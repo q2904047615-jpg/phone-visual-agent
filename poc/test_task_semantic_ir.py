@@ -9,7 +9,9 @@ from agent.domain.task_graph import (
     TaskGraphError,
     _graph_from_payload,
 )
-from deepseek_failure_diagnostics import persist_deepseek_failure_diagnostic
+from agent.infrastructure.deepseek_failure_diagnostics import (
+    persist_deepseek_failure_diagnostic,
+)
 from agent.domain.task_semantic_ir import (
     AUTOMATIC,
     CONFIRMATION_REQUIRED,

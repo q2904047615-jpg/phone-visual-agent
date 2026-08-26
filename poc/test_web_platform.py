@@ -1451,7 +1451,9 @@ class ApiEndToEndTests(unittest.TestCase):
             _scene,
             _trusted_factory,
         )
-        from universal_agent_orchestrator import UniversalAgentOrchestrator
+        from agent.application.universal_agent_orchestrator import (
+            UniversalAgentOrchestrator,
+        )
 
         initial = graph or _graph(device_id=device_id)
         planner = FakeDeepSeekPlanner(

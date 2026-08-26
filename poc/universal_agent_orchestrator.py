@@ -41,9 +41,12 @@ from agent.domain import (
     EvidenceStoreError,
     VerifiedAppSurfaceLineage,
 )
-from generic_action_adapter import (
-    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
+from agent.application.action_adapter import (
     GenericActionAdapterError,
+    GenericSingleActionAdapterPort,
+)
+from agent.domain.post_action_observation import (
+    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
 )
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.domain.canonical_action_protocol import (
@@ -945,7 +948,7 @@ class UniversalAgentOrchestrator:
         *,
         deepseek_planner: Any,
         qwen_observer: Any,
-        adapter_factory: Callable[[str], Any],
+        adapter_factory: Callable[[str], GenericSingleActionAdapterPort],
         evidence_store_factory: AgentEvidenceStoreFactory,
         trusted_observation_factory: Callable[..., Any],
         bridge: ObservationBridge | None = None,

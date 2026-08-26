@@ -11,7 +11,8 @@ from PIL import Image, ImageDraw
 from agent.infrastructure import DeviceTaskRegistry, FileSystemAgentEvidenceStore
 from agent.domain.canonical_action_protocol import compile_canonical_action_catalog
 from agent.domain.task_graph import TargetApp
-from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
+from agent.application.action_adapter import GenericActionAdapterError
+from agent.infrastructure.generic_action_adapter import GenericSingleActionAdapter
 from agent.domain.canonical_action_protocol import GenericStepProposal
 from orientation_safety import _claim_audit_seal
 from agent.domain.semantic_action import SemanticAction

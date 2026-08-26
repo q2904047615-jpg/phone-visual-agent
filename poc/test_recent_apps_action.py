@@ -10,8 +10,8 @@ from agent.domain.task_graph import (
 )
 from agent.domain import DeviceActionRequest
 from agent.infrastructure import RobotDeviceExecutor
-from generic_action_adapter import _post_action_visual_context
-from agent.infrastructure.generic_scene_observer import (
+from agent.infrastructure.generic_action_adapter import _post_action_visual_context
+from agent.domain.post_action_observation import (
     POST_ACTION_VISUAL_CONTEXT_VERSION,
 )
 from agent.application.qwen_visual_decision import (

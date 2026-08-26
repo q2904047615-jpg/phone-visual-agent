@@ -11,14 +11,11 @@ import threading
 import time
 from collections import OrderedDict
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any, Callable
 
 from PIL import Image
-from agent.domain.canonical_action_protocol import StateExpectation
-from agent.domain.canonical_action_kinds import (
-    CANONICAL_ACTION_KINDS as CANONICAL_ACTIONS,
-)
+import agent.domain.post_action_observation as post_action_contract
 from agent.infrastructure.observation_images import (
     consensus_top_edge_obstructions,
     local_frame_fingerprint,
@@ -65,108 +62,12 @@ SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-08-25-single-step-scene-observer-v2"
 SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = (
     "2026-08-25-single-step-qwen-observation-v2"
 )
-POST_ACTION_VISUAL_CONTEXT_VERSION = (
-    "2026-08-25-local-post-action-visual-context-v1"
-)
-POST_NAVIGATION_RESULT_OBSERVATION_PHASE = "verified_navigation_result_v1"
-FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE = (
-    "2026-08-24-verified-previous-and-plan-next-v1"
-)
-POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
-POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被重新观察"]
 INPUT_STRUCTURE_AUDIT_VERSION = "2026-08-25-input-structure-audit-v11"
 SINGLE_STEP_OUTPUT_TOKENS = 5200
 OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 12
 AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE = "输入结构只读审计确认软键盘不可见"
 
-
-@dataclass(frozen=True)
-class PostActionVisualContext:
-    """Local, typed context for the first observation after one action.
-
-    This object records only that one canonical action reached the physical
-    transport and which typed postconditions the already-validated canonical
-    transition expects.  It deliberately has no ``matched`` field: only the
-    fresh pixels and the Controller may decide whether the action succeeded.
-    """
-
-    canonical_action_kind: str
-    expected_postconditions: tuple[StateExpectation, ...]
-    protocol_version: str = POST_ACTION_VISUAL_CONTEXT_VERSION
-    execution_state: str = "physical_action_executed"
-    outcome: str = "pending_visual_verification"
-
-    def validate(self) -> None:
-        if self.protocol_version != POST_ACTION_VISUAL_CONTEXT_VERSION:
-            raise VisionAgentError("动作后视觉上下文协议版本无效。")
-        if self.execution_state != "physical_action_executed":
-            raise VisionAgentError("动作后视觉上下文没有证明物理动作已执行。")
-        if self.outcome != "pending_visual_verification":
-            raise VisionAgentError("动作后视觉上下文不得提前声明动作匹配结果。")
-        if self.canonical_action_kind not in CANONICAL_ACTIONS:
-            raise VisionAgentError("动作后视觉上下文包含非canonical动作。")
-        if not 1 <= len(self.expected_postconditions) <= 16:
-            raise VisionAgentError("动作后视觉上下文必须包含1..16个typed后置条件。")
-        for expectation in self.expected_postconditions:
-            expectation.validate()
-
-    def to_dict(self) -> dict[str, Any]:
-        self.validate()
-        return {
-            "protocol_version": self.protocol_version,
-            "execution_state": self.execution_state,
-            "outcome": self.outcome,
-            "canonical_action_kind": self.canonical_action_kind,
-            "expected_postconditions": [
-                item.to_dict() for item in self.expected_postconditions
-            ],
-        }
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "PostActionVisualContext":
-        if not isinstance(value, dict) or set(value) != {
-            "protocol_version",
-            "execution_state",
-            "outcome",
-            "canonical_action_kind",
-            "expected_postconditions",
-        }:
-            raise VisionAgentError("动作后视觉上下文结构无效。")
-        raw_expectations = value.get("expected_postconditions")
-        if not isinstance(raw_expectations, list):
-            raise VisionAgentError("动作后视觉上下文的typed后置条件必须是数组。")
-        expectations: list[StateExpectation] = []
-        for item in raw_expectations:
-            if not isinstance(item, dict):
-                raise VisionAgentError("动作后视觉上下文包含无效typed后置条件。")
-            required = {"subject_ref", "predicate", "operator"}
-            allowed = required | {"value"}
-            if not required.issubset(item) or set(item) - allowed:
-                raise VisionAgentError("动作后视觉上下文包含无效typed后置条件。")
-            operator = item.get("operator")
-            if operator in {"equals", "not_equals"}:
-                if "value" not in item:
-                    raise VisionAgentError("动作后视觉上下文的等值条件缺少value。")
-            elif "value" in item:
-                raise VisionAgentError("动作后视觉上下文的非等值条件不得携带value。")
-            expectations.append(
-                StateExpectation(
-                    subject_ref=str(item.get("subject_ref") or ""),
-                    predicate=str(item.get("predicate") or ""),
-                    operator=str(operator or ""),
-                    value=item.get("value"),
-                )
-            )
-        context = cls(
-            protocol_version=str(value.get("protocol_version") or ""),
-            execution_state=str(value.get("execution_state") or ""),
-            outcome=str(value.get("outcome") or ""),
-            canonical_action_kind=str(value.get("canonical_action_kind") or ""),
-            expected_postconditions=tuple(expectations),
-        )
-        context.validate()
-        return context
 
 STAGE_LABELS = {
     "idle": "空闲",
@@ -316,14 +217,14 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
         device_id: str | None = None,
         input_lineage_override: TypedInputLineage | None = None,
         prior_scene: UIScene | None = None,
-        post_action_context: PostActionVisualContext | dict[str, Any] | None = None,
+        post_action_context: post_action_contract.PostActionVisualContext | dict[str, Any] | None = None,
     ) -> UIScene:
         # Never reuse model-authored facts from the prior scene.  The only
         # cross-step visual context is a locally minted typed action summary;
         # current pixels remain the sole source of current-screen facts.
         del prior_scene
         if isinstance(post_action_context, dict):
-            post_action_context = PostActionVisualContext.from_dict(
+            post_action_context = post_action_contract.PostActionVisualContext.from_dict(
                 post_action_context
             )
         elif post_action_context is not None:
@@ -888,7 +789,7 @@ def _single_step_observation_prompt(
     current_input_text: str | None,
     image_count: int,
     request_image_size: tuple[int, int],
-    post_action_context: PostActionVisualContext | None,
+    post_action_context: post_action_contract.PostActionVisualContext | None,
 ) -> str:
     """Build the sole online prompt for one closed-loop observation step."""
 
@@ -3473,7 +3374,7 @@ def _goal_is_fused_post_action_next_step(context: dict[str, Any]) -> bool:
     return bool(
         isinstance(entities, dict)
         and entities.get("observation_phase")
-        == FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
+        == post_action_contract.FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
     )
 
 
@@ -7076,7 +6977,7 @@ def _observation_cache_key(
     fingerprint: str,
     goal_context: dict[str, Any],
     input_lineage: TypedInputLineage | None,
-    post_action_context: PostActionVisualContext | None,
+    post_action_context: post_action_contract.PostActionVisualContext | None,
 ) -> str | None:
     resolved_device = str(device_id or "").strip()
     if resolved_device.casefold() in {"", "unbound", "unknown", "none", "null"}:

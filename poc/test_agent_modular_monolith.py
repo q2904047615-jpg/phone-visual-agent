@@ -966,7 +966,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_generic_goal_projection_has_one_domain_identity(self) -> None:
         import agent.application.deepseek_task_graph as deepseek_task_graph
-        import generic_action_adapter
+        import agent.infrastructure.generic_action_adapter as generic_action_adapter
         import universal_agent_orchestrator
         from agent.application import runtime_session
         from agent.domain.generic_goal import (
@@ -1264,8 +1264,10 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_generic_scene_observer_has_one_infrastructure_entry(self) -> None:
         import agent.infrastructure.generic_scene_observer as observer_module
-        from agent.infrastructure.generic_scene_observer import (
+        from agent.domain.post_action_observation import (
             PostActionVisualContext,
+        )
+        from agent.infrastructure.generic_scene_observer import (
             SingleStepGenericSceneObserver,
         )
 
@@ -1273,23 +1275,39 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         infrastructure_path = (
             root / "agent" / "infrastructure" / "generic_scene_observer.py"
         )
+        domain_path = root / "agent" / "domain" / "post_action_observation.py"
         self.assertFalse((root / "generic_scene_observer.py").exists())
         self.assertTrue(infrastructure_path.is_file())
+        self.assertTrue(domain_path.is_file())
         self.assertEqual(
             "agent.infrastructure.generic_scene_observer",
             SingleStepGenericSceneObserver.__module__,
         )
         self.assertEqual(
-            "agent.infrastructure.generic_scene_observer",
+            "agent.domain.post_action_observation",
             PostActionVisualContext.__module__,
         )
+        self.assertFalse(hasattr(observer_module, "PostActionVisualContext"))
         self.assertEqual(
             "2026-08-25-single-step-scene-observer-v2",
             observer_module.SINGLE_STEP_SCENE_OBSERVER_VERSION,
         )
 
         source = infrastructure_path.read_text(encoding="utf-8")
+        domain_source = domain_path.read_text(encoding="utf-8")
         self.assertEqual(1, source.count("class SingleStepGenericSceneObserver("))
+        self.assertNotIn("class PostActionVisualContext:", source)
+        self.assertEqual(1, domain_source.count("class PostActionVisualContext:"))
+        for forbidden in (
+            "agent.application",
+            "agent.infrastructure",
+            "from PIL",
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "robot_core",
+        ):
+            self.assertNotIn(forbidden, domain_source)
         for forbidden in (
             "fastapi",
             "pydantic",
@@ -1312,6 +1330,84 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 if isinstance(node, ast.Import):
                     for item in node.names:
                         if item.name == "generic_scene_observer":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
+    def test_generic_action_adapter_has_one_infrastructure_entry(self) -> None:
+        import agent.infrastructure.generic_action_adapter as adapter_module
+        from agent.application.action_adapter import (
+            GenericActionAdapterError,
+            GenericSingleActionAdapterPort,
+        )
+        from agent.infrastructure.generic_action_adapter import (
+            GenericActionExecutionResult,
+            GenericSingleActionAdapter,
+        )
+
+        root = Path(__file__).resolve().parent
+        infrastructure_path = (
+            root / "agent" / "infrastructure" / "generic_action_adapter.py"
+        )
+        application_path = root / "agent" / "application" / "action_adapter.py"
+        self.assertFalse((root / "generic_action_adapter.py").exists())
+        self.assertTrue(infrastructure_path.is_file())
+        self.assertTrue(application_path.is_file())
+        for symbol in (
+            GenericActionExecutionResult,
+            GenericSingleActionAdapter,
+        ):
+            self.assertEqual(
+                "agent.infrastructure.generic_action_adapter",
+                symbol.__module__,
+            )
+        self.assertEqual(
+            "agent.application.action_adapter",
+            GenericActionAdapterError.__module__,
+        )
+        self.assertEqual(
+            "agent.application.action_adapter",
+            GenericSingleActionAdapterPort.__module__,
+        )
+        self.assertEqual(
+            "2026-08-17-qwen-failure-diagnostic-v1",
+            adapter_module.QWEN_FAILURE_DIAGNOSTIC_VERSION,
+        )
+
+        source = infrastructure_path.read_text(encoding="utf-8")
+        application_source = application_path.read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("class GenericSingleActionAdapter:"))
+        self.assertEqual(1, source.count("class GenericActionExecutionResult:"))
+        self.assertNotIn("class GenericActionAdapterError(", source)
+        self.assertEqual(
+            1,
+            application_source.count("class GenericActionAdapterError("),
+        )
+        self.assertEqual(
+            1,
+            application_source.count("class GenericSingleActionAdapterPort("),
+        )
+        self.assertNotIn("agent.infrastructure", application_source)
+        for forbidden in (
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "universal_agent_orchestrator",
+        ):
+            self.assertNotIn(forbidden, source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "generic_action_adapter"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "generic_action_adapter":
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 

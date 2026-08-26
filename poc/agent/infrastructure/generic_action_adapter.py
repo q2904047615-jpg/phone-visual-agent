@@ -1,3 +1,5 @@
+"""Infrastructure adapter for one observed, verified device action."""
+
 from __future__ import annotations
 
 import hashlib
@@ -23,13 +25,16 @@ from agent.domain import (
 from agent.infrastructure import RobotDeviceExecutor
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.infrastructure.generic_scene_observer import (
+    SingleStepGenericSceneObserver,
+)
+from agent.application.action_adapter import GenericActionAdapterError
+from agent.domain.post_action_observation import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     POST_ACTION_VISUAL_CONTEXT_VERSION,
     POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS,
     POST_NAVIGATION_RESULT_OBJECTIVE,
     POST_NAVIGATION_RESULT_OBSERVATION_PHASE,
     PostActionVisualContext,
-    SingleStepGenericSceneObserver,
 )
 from agent.application.input_value_lineage import TypedInputLineageStorePort
 from agent.domain.action_capabilities import build_device_capability_snapshot
@@ -901,23 +906,6 @@ def persist_observer_failure_diagnostic(
             ).__name__
         return ()
     return (str(path),) if path is not None else ()
-
-
-class GenericActionAdapterError(RuntimeError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        physical_actions: int = 0,
-        evidence: tuple[str, ...] = (),
-        observation_errors: tuple[str, ...] = (),
-        verification_errors: tuple[str, ...] = (),
-    ) -> None:
-        super().__init__(message)
-        self.physical_actions = int(physical_actions)
-        self.evidence = tuple(evidence)
-        self.observation_errors = tuple(observation_errors)
-        self.verification_errors = tuple(verification_errors)
 
 
 @dataclass(frozen=True)

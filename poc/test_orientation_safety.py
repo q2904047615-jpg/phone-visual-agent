@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw, ImageEnhance
 
-from generic_action_adapter import GenericSingleActionAdapter
+from agent.infrastructure.generic_action_adapter import GenericSingleActionAdapter
 from orientation_safety import (
     LOCAL_QWERTY_ORIENTATION_SOURCE,
     OrientationCredential,

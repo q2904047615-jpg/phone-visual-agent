@@ -52,13 +52,13 @@ from capability_acceptance import (
 from capability_acceptance_runtime import CapabilityAcceptanceManager
 from capability_acceptance_planner import CapabilityAcceptanceTaskGraphPlanner
 from intent_provider import DeepSeekIntentProvider, IntentProviderError
-from generic_action_adapter import (
-    GenericActionAdapterError,
+from agent.infrastructure.generic_action_adapter import (
     GenericSingleActionAdapter,
     persist_observer_failure_diagnostic,
     stable_qwerty_ocr_anchors,
     stable_text_ocr_grounding,
 )
+from agent.application.action_adapter import GenericActionAdapterError
 from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
 from agent.infrastructure.file_system_input_lineage_store import (
     FileSystemTypedInputLineageStore,

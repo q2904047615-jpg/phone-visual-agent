@@ -26,7 +26,7 @@ from capability_acceptance import (
     validate_acceptance_report,
 )
 from capability_acceptance_runtime import CapabilityAcceptanceManager
-from generic_action_adapter import GenericActionAdapterError
+from agent.application.action_adapter import GenericActionAdapterError
 class ProvisionalControllerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()

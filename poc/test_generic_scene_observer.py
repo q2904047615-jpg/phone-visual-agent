@@ -5,12 +5,14 @@ import unittest
 
 from PIL import Image, ImageDraw, ImageFilter
 
-from agent.infrastructure.generic_scene_observer import (
+from agent.domain.post_action_observation import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
-    INPUT_STRUCTURE_AUDIT_VERSION,
     POST_ACTION_VISUAL_CONTEXT_VERSION,
-    SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
     PostActionVisualContext,
+)
+from agent.infrastructure.generic_scene_observer import (
+    INPUT_STRUCTURE_AUDIT_VERSION,
+    SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
     SingleStepGenericSceneObserver,
 )
 from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION

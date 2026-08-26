@@ -19,14 +19,16 @@ from agent.domain import (
     DeviceExecutionError,
 )
 from agent.infrastructure import RobotDeviceExecutor
-from generic_action_adapter import (
-    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
-    GenericActionAdapterError,
+from agent.infrastructure.generic_action_adapter import (
     GenericSingleActionAdapter as _GenericSingleActionAdapter,
     _post_action_observation_context,
     _post_action_visual_context,
     stable_qwerty_ocr_anchors,
     stable_text_ocr_grounding,
+)
+from agent.application.action_adapter import GenericActionAdapterError
+from agent.domain.post_action_observation import (
+    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
 )
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.infrastructure.generic_scene_observer import (
@@ -3241,7 +3243,7 @@ class GenericActionAdapterTests(unittest.TestCase):
     def test_diagnostic_write_failure_preserves_primary_observation_error(self):
         observer = RawFailureSceneObserver('{"broken":true}')
         with tempfile.TemporaryDirectory() as temp, patch(
-            "generic_action_adapter._persist_qwen_failure_diagnostic",
+            "agent.infrastructure.generic_action_adapter._persist_qwen_failure_diagnostic",
             side_effect=OSError("disk unavailable"),
         ):
             with self.assertRaisesRegex(
@@ -7478,7 +7480,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         with patch(
-            "generic_action_adapter.time.monotonic",
+            "agent.infrastructure.generic_action_adapter.time.monotonic",
             side_effect=[0.0, 0.0, 0.0, 1.0],
         ):
             with self.assertRaisesRegex(
@@ -7636,7 +7638,7 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         with patch(
-            "generic_action_adapter.time.monotonic",
+            "agent.infrastructure.generic_action_adapter.time.monotonic",
             side_effect=[0.0, 0.0, 0.0, 1.0],
         ):
             with self.assertRaisesRegex(

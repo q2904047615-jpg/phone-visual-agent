@@ -31,11 +31,11 @@ from agent.domain.task_graph import (
 )
 from agent.domain.canonical_action_protocol import GenericStepProposal
 from agent.domain.generic_goal import safe_goal_context
-from generic_action_adapter import (
+from agent.application.action_adapter import GenericActionAdapterError
+from agent.domain.post_action_observation import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
-    GenericActionAdapterError,
-    GenericActionExecutionResult,
 )
+from agent.infrastructure.generic_action_adapter import GenericActionExecutionResult
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.ui_scene import SystemUIFacts, UIElement, UIScene
 from agent.domain.universal_action_controller import ResolvedSemanticAction

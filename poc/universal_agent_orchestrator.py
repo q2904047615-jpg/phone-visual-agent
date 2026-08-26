@@ -1746,7 +1746,6 @@ class UniversalAgentOrchestrator:
             trusted_observation=trusted_observation,
             decision_number=session.step_number,
             available_action_kinds=available_actions,
-            navigation_history=tuple(session.history),
         )
 
     @staticmethod

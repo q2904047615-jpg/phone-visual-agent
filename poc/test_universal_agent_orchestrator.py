@@ -777,7 +777,6 @@ class FakeQwenObserver:
         trusted_observation,
         decision_number=1,
         available_action_kinds=None,
-        navigation_history=(),
     ):
         self.calls.append((frames, task_context, trusted_observation, decision_number))
         if self.status == "action":
@@ -8884,6 +8883,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             "一次性方向授权已超过动作前时间窗",
             "transition_evidence_after_action",
             "_untried_paged_swipe_choice",
+            "navigation_history",
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, joined)

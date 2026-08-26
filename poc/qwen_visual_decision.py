@@ -1155,7 +1155,6 @@ class QwenVisualDecisionObserver:
         trusted_observation: TrustedObservation,
         decision_number: int = 1,
         available_action_kinds: Iterable[str] | None = None,
-        navigation_history: Iterable[Mapping[str, Any]] = (),
     ) -> QwenVisualDecision:
         started = time.perf_counter()
         self.last_raw_response = ""

@@ -208,7 +208,6 @@ class ScriptedQwen:
         trusted_observation,
         decision_number=1,
         available_action_kinds=None,
-        navigation_history=(),
     ):
         self.calls.append((frames, task_context, trusted_observation, decision_number))
         if self.action_kind == "back":

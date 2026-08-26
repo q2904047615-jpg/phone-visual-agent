@@ -1,3 +1,5 @@
+"""Windows OCR subprocess adapter and deterministic text-box matching."""
+
 from __future__ import annotations
 
 import json
@@ -12,7 +14,7 @@ from typing import Any, Iterable
 from PIL import Image
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 OCR_SCRIPT = ROOT / "windows_ocr.ps1"
 POWERSHELL = Path(
     os.environ.get(

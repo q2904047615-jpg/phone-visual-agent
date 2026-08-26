@@ -655,6 +655,57 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_windows_ocr_runtime_has_one_infrastructure_entry(self) -> None:
+        import agent.infrastructure.windows_ocr_runtime as ocr_runtime
+
+        root = Path(__file__).resolve().parent
+        runtime_path = (
+            root / "agent" / "infrastructure" / "windows_ocr_runtime.py"
+        )
+        self.assertFalse((root / "ocr_runtime.py").exists())
+        self.assertTrue(runtime_path.is_file())
+        self.assertEqual(root / "windows_ocr.ps1", ocr_runtime.OCR_SCRIPT)
+        self.assertEqual(
+            "agent.infrastructure.windows_ocr_runtime",
+            ocr_runtime.OcrMatch.__module__,
+        )
+        payload = {
+            "lines": [
+                {
+                    "text": "文件 传输 助手",
+                    "words": [
+                        {"text": "文件", "left": 10, "top": 20, "width": 30, "height": 12},
+                        {"text": "传输", "left": 42, "top": 20, "width": 30, "height": 12},
+                        {"text": "助手", "left": 74, "top": 20, "width": 30, "height": 12},
+                    ],
+                }
+            ]
+        }
+        matches = ocr_runtime.find_text(payload, "传输助手")
+        self.assertEqual(1, len(matches))
+        self.assertEqual((73, 26), matches[0].center)
+        self.assertEqual([], ocr_runtime.find_text(payload, "   "))
+
+        source = runtime_path.read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("class OcrMatch:"))
+        self.assertEqual(1, source.count("def recognize("))
+        self.assertIn("Path(__file__).resolve().parents[2]", source)
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "ocr_runtime"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "ocr_runtime":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_web_uses_one_session_repository_instead_of_legacy_storage(self) -> None:
         source = (Path(__file__).resolve().parent / "web_app.py").read_text(
             encoding="utf-8"

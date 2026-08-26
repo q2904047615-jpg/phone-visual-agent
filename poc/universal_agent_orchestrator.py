@@ -30,6 +30,7 @@ from agent.application import (
     UniversalAgentSessionState,
 )
 from agent.domain.action_capabilities import build_device_capability_snapshot
+from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.domain import (
     AgentEvidenceStoreFactory,
     CANONICAL_SELECTION_RECEIPT_VERSION,
@@ -46,7 +47,6 @@ from generic_action_adapter import (
 )
 from generic_goal import GenericIntentDraft
 from canonical_action_protocol import (
-    SUPPORTED_ACTIONS,
     CanonicalActionProtocolError,
     GenericStepProposal,
     expected_idempotent_system_surface_kind,
@@ -981,13 +981,13 @@ class UniversalAgentOrchestrator:
     ) -> frozenset[str]:
         provider = getattr(session.adapter, "supported_action_kinds", None)
         if not callable(provider):
-            return SUPPORTED_ACTIONS
+            return CANONICAL_ACTION_KINDS
         actions = frozenset(str(item or "").strip() for item in provider())
         if not actions or "" in actions:
             raise UniversalAgentOrchestratorError(
                 "设备动作能力为空或包含无效动作。"
             )
-        unexpected = actions - SUPPORTED_ACTIONS
+        unexpected = actions - CANONICAL_ACTION_KINDS
         if unexpected:
             raise UniversalAgentOrchestratorError(
                 "设备报告了协议外动作：" + ", ".join(sorted(unexpected))

@@ -13,6 +13,7 @@ from task_semantic_ir import (
     TaskSemanticIR,
 )
 from agent.domain.semantic_action import SemanticAction
+from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from agent.domain.ui_scene import UIElement, UIScene, scene_surface_kind
 from agent.domain.verified_text_transaction import (
     VerifiedTextTransactionError,
@@ -73,24 +74,6 @@ MAX_READY_CANDIDATES = 24
 
 ELEMENT_ACTION_ROLES = frozenset(
     {"button", "icon", "input", "tab", "toggle", "list_item"}
-)
-SUPPORTED_ACTIONS = frozenset(
-    {
-        "tap_semantic",
-        "dismiss_overlay",
-        "swipe",
-        "back",
-        "home",
-        "open_recent_apps",
-        "reveal_system_navigation",
-        "input_verified_text",
-        "press_enter",
-        "clear_verified_text",
-        "double_tap",
-        "long_press",
-        "drag",
-        "wait_for_change",
-    }
 )
 RELATION_KINDS = frozenset(
     {
@@ -207,7 +190,7 @@ class GenericStepProposal:
         if self.status == "action":
             if self.action is None:
                 raise CanonicalActionProtocolError("action 状态缺少唯一动作。")
-            if self.action.action not in SUPPORTED_ACTIONS:
+            if self.action.action not in CANONICAL_ACTION_KINDS:
                 raise CanonicalActionProtocolError(
                     f"单步动作不在 canonical 动作集合：{self.action.action}"
                 )
@@ -532,7 +515,7 @@ class Affordance:
     def validate(self) -> None:
         _validate_id(self.affordance_id, "affordance.affordance_id")
         _validate_id(self.subject_ref, "affordance.subject_ref")
-        if self.action_kind not in SUPPORTED_ACTIONS:
+        if self.action_kind not in CANONICAL_ACTION_KINDS:
             raise CanonicalActionProtocolError(
                 f"affordance.action_kind 无效：{self.action_kind}"
             )
@@ -638,7 +621,7 @@ class CanonicalActionCandidate:
 
     def validate(self) -> None:
         _validate_id(self.candidate_id, "candidate.candidate_id")
-        if self.action_kind not in SUPPORTED_ACTIONS:
+        if self.action_kind not in CANONICAL_ACTION_KINDS:
             raise CanonicalActionProtocolError(f"candidate.action_kind 无效：{self.action_kind}")
         if not self.subject_refs or not self.affordance_ids:
             raise CanonicalActionProtocolError("candidate 缺少 subject/affordance 绑定。")
@@ -1336,7 +1319,7 @@ def compile_canonical_action_catalog(
         )
     )
     available = frozenset(str(value) for value in available_action_kinds)
-    unknown = available - SUPPORTED_ACTIONS
+    unknown = available - CANONICAL_ACTION_KINDS
     if unknown:
         raise CanonicalActionProtocolError(
             "available_action_kinds 含未知动作：" + ", ".join(sorted(unknown))

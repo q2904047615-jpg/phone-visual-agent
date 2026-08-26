@@ -13,9 +13,9 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from PIL import Image
-from canonical_action_protocol import (
-    StateExpectation,
-    SUPPORTED_ACTIONS as CANONICAL_ACTIONS,
+from canonical_action_protocol import StateExpectation
+from agent.domain.canonical_action_kinds import (
+    CANONICAL_ACTION_KINDS as CANONICAL_ACTIONS,
 )
 from observation_images import (
     VisualObstruction,

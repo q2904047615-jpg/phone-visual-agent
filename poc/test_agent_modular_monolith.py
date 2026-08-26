@@ -453,6 +453,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         root = Path(__file__).resolve().parent / "agent"
         banned_by_layer = {
             "domain": {
+                "canonical_action_protocol",
                 "fastapi",
                 "pydantic",
                 "web_app",
@@ -462,6 +463,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 "vision_agent",
             },
             "application": {
+                "canonical_action_protocol",
                 "fastapi",
                 "pydantic",
                 "web_app",
@@ -807,6 +809,58 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                     if item.name == "action_capabilities":
                         legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
+
+    def test_canonical_action_kinds_have_one_domain_identity(self) -> None:
+        import canonical_action_protocol as canonical_protocol
+        import qwen_visual_decision
+        from agent.domain.action_capabilities import KNOWN_ACTION_CAPABILITIES
+        from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
+        from agent.domain.device_execution import EXECUTABLE_ACTION_KINDS
+
+        expected = {
+            "back",
+            "clear_verified_text",
+            "dismiss_overlay",
+            "double_tap",
+            "drag",
+            "home",
+            "input_verified_text",
+            "long_press",
+            "open_recent_apps",
+            "press_enter",
+            "reveal_system_navigation",
+            "swipe",
+            "tap_semantic",
+            "wait_for_change",
+        }
+        self.assertEqual(expected, CANONICAL_ACTION_KINDS)
+        self.assertIs(
+            CANONICAL_ACTION_KINDS,
+            canonical_protocol.CANONICAL_ACTION_KINDS,
+        )
+        self.assertIs(CANONICAL_ACTION_KINDS, EXECUTABLE_ACTION_KINDS)
+        self.assertEqual(
+            CANONICAL_ACTION_KINDS,
+            qwen_visual_decision.QWEN_PROTOCOL_ACTIONS,
+        )
+        self.assertEqual(
+            {"hardware_key", "pinch"},
+            KNOWN_ACTION_CAPABILITIES - CANONICAL_ACTION_KINDS,
+        )
+
+        root = Path(__file__).resolve().parent
+        canonical_source = (root / "canonical_action_protocol.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("SUPPORTED_ACTIONS =", canonical_source)
+        for path in (
+            root / "agent" / "domain" / "device_execution.py",
+            root / "agent" / "application" / "runtime_session.py",
+        ):
+            self.assertNotIn(
+                "canonical_action_protocol",
+                path.read_text(encoding="utf-8"),
+            )
 
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent

@@ -13,10 +13,10 @@ from PIL import Image
 
 from generic_scene_observer import _local_frame_fingerprint, _safe_goal_context
 from canonical_action_protocol import (
-    SUPPORTED_ACTIONS,
     CanonicalActionProtocolError as GenericStepPlanningError,
     GenericStepProposal,
 )
+from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from observation_images import (
     LocalFrameStability,
     measure_frame_sharpness,
@@ -70,7 +70,7 @@ def _targets_single_element(
     )
 
 
-QWEN_PROTOCOL_ACTIONS = frozenset(SUPPORTED_ACTIONS)
+QWEN_PROTOCOL_ACTIONS = frozenset(CANONICAL_ACTION_KINDS)
 
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -1551,7 +1551,7 @@ def _hydrate_canonical_selection(
         raise VisionAgentError("本地选择引用了不存在或不唯一的 choice_id。")
     choice = matches[0]
     kind = str(choice.get("action") or "").strip()
-    if kind not in SUPPORTED_ACTIONS:
+    if kind not in CANONICAL_ACTION_KINDS:
         raise VisionAgentError("canonical candidate 包含未知动作。")
     raw_expected = choice.get("expected_result")
     if not isinstance(raw_expected, Mapping) or not raw_expected:

@@ -4,14 +4,14 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
 
-from canonical_action_protocol import SUPPORTED_ACTIONS
+from .canonical_action_kinds import CANONICAL_ACTION_KINDS
 
 
 DEVICE_EXECUTOR_PROTOCOL = "2026-08-25-device-executor-v1"
 
 # The canonical catalog is the only action-kind authority. The executor owns
 # only transport dispatch and must not maintain a second action whitelist.
-EXECUTABLE_ACTION_KINDS = SUPPORTED_ACTIONS
+EXECUTABLE_ACTION_KINDS = CANONICAL_ACTION_KINDS
 
 
 class DeviceExecutionError(RuntimeError):

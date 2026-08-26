@@ -13,7 +13,7 @@ from agent.domain import (
     EffectConfirmationAuthority,
     VerifiedAppSurfaceLineage,
 )
-from canonical_action_protocol import SUPPORTED_ACTIONS
+from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from deepseek_task_graph import DynamicTaskGraph
 from generic_goal import GenericIntentDraft
 from vision_usage import VisionSessionUsageLedger
@@ -151,7 +151,7 @@ class UniversalAgentSessionState:
             "available_action_kinds": sorted(
                 self.adapter.supported_action_kinds()
                 if callable(getattr(self.adapter, "supported_action_kinds", None))
-                else SUPPORTED_ACTIONS
+                else CANONICAL_ACTION_KINDS
             ),
             "confirmation_scope": (
                 self.confirmation_authority.scope()

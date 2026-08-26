@@ -35,9 +35,10 @@ from agent.domain import (
 )
 from agent.infrastructure import (
     CameraPreviewUnavailable,
-    DeviceCameraCoordinator,
     DeviceControllerRegistry as InfrastructureDeviceControllerRegistry,
     DeviceControllerRegistryError,
+    DeviceRuntimeResourceError,
+    DeviceRuntimeResourceRegistry,
     DeviceTaskRegistry,
     FileSystemAgentEvidenceStore,
     InMemoryAgentSessionRepository,
@@ -333,14 +334,9 @@ class Runtime:
             registry_path=DEVICE_REGISTRY_PATH,
             code_revision_provider=self.capability_code_revision,
         )
-        self.device_coordination_lock_guard = threading.RLock()
-        self.device_coordination_locks: dict[str, threading.Lock] = {
-            self.device_controllers.default_device_id: threading.Lock(),
-        }
-        self.device_camera_coordinator_guard = threading.RLock()
-        self.device_camera_coordinators: dict[str, DeviceCameraCoordinator] = {
-            self.device_controllers.default_device_id: DeviceCameraCoordinator(),
-        }
+        self.device_runtime_resources = DeviceRuntimeResourceRegistry(
+            (self.device_controllers.default_device_id,)
+        )
 
     def controller_for_device(self, device_id: str) -> RobotController:
         if str(device_id or "").strip() == self.device_controllers.default_device_id:
@@ -396,31 +392,6 @@ class Runtime:
             device_registry=self.device_task_registry,
         )
 
-    def coordination_lock_for_device(self, device_id: str) -> threading.Lock:
-        """Serialize observation/action work per device, not across devices."""
-
-        resolved = str(device_id or "").strip()
-        if not resolved:
-            raise UniversalAgentOrchestratorError("device_id 不能为空。")
-        with self.device_coordination_lock_guard:
-            return self.device_coordination_locks.setdefault(
-                resolved,
-                threading.Lock(),
-            )
-
-    def camera_coordinator_for_device(
-        self,
-        device_id: str,
-    ) -> DeviceCameraCoordinator:
-        resolved = str(device_id or "").strip()
-        if not resolved:
-            raise UniversalAgentOrchestratorError("device_id 不能为空。")
-        with self.device_camera_coordinator_guard:
-            return self.device_camera_coordinators.setdefault(
-                resolved,
-                DeviceCameraCoordinator(),
-            )
-
     def capture_agent_frame(
         self,
         device_id: str,
@@ -428,9 +399,9 @@ class Runtime:
         controller: RobotController | None = None,
     ) -> Any:
         resolved_controller = controller or self.controller_for_device(device_id)
-        return self.camera_coordinator_for_device(device_id).capture_agent_frame(
-            resolved_controller.vision_capture
-        )
+        return self.device_runtime_resources.camera_coordinator(
+            device_id
+        ).capture_agent_frame(resolved_controller.vision_capture)
 
     def capture_preview(
         self,
@@ -439,8 +410,12 @@ class Runtime:
         quality: int = 72,
     ) -> tuple[bytes, bool]:
         controller = self.controller_for_device(device_id)
-        cache_only = self.coordination_lock_for_device(device_id).locked()
-        return self.camera_coordinator_for_device(device_id).capture_preview(
+        cache_only = self.device_runtime_resources.coordination_lock(
+            device_id
+        ).locked()
+        return self.device_runtime_resources.camera_coordinator(
+            device_id
+        ).capture_preview(
             controller.capture_preview,
             quality=quality,
             cache_only=cache_only,
@@ -448,7 +423,9 @@ class Runtime:
 
     @contextmanager
     def serial_camera_session(self, device_id: str) -> Iterator[None]:
-        with self.camera_coordinator_for_device(device_id).serial_session():
+        with self.device_runtime_resources.camera_coordinator(
+            device_id
+        ).serial_session():
             yield
 
     def start(self) -> None:
@@ -666,7 +643,9 @@ def runtime_doctor(device_id: str) -> dict[str, Any]:
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     active_session = runtime.device_task_registry.active_session(device_id)
-    coordination_lock = runtime.coordination_lock_for_device(device_id)
+    coordination_lock = runtime.device_runtime_resources.coordination_lock(
+        device_id
+    )
     acquired = coordination_lock.acquire(blocking=False)
     if not acquired and not active_session:
         active_session = "device-coordination-busy"
@@ -731,7 +710,9 @@ def _supervised_hardware_lock(device_id: str | None = None) -> Iterator[None]:
     )
     if not process_lease.acquire():
         raise HTTPException(status_code=409, detail="另一进程已占用机械臂物理控制权。")
-    coordination_lock = runtime.coordination_lock_for_device(resolved_device)
+    coordination_lock = runtime.device_runtime_resources.coordination_lock(
+        resolved_device
+    )
     if not coordination_lock.acquire(blocking=False):
         process_lease.release()
         raise HTTPException(status_code=409, detail="已有语义观察或动作正在进行。")
@@ -953,6 +934,7 @@ def _require_capability_trial_binding(
 CAPABILITY_ACCEPTANCE_ERRORS = (
     CapabilityAcceptanceError,
     DeviceControllerRegistryError,
+    DeviceRuntimeResourceError,
     DeviceTaskRegistryError,
     GenericActionAdapterError,
     IntentProviderError,
@@ -1319,6 +1301,7 @@ def start_generic_supervised_session(
         AgentSessionCommandError,
         AgentSessionConflictError,
         DeviceControllerRegistryError,
+        DeviceRuntimeResourceError,
         DeviceTaskRegistryError,
         IntentProviderError,
         GenericActionAdapterError,
@@ -1389,6 +1372,7 @@ def approve_generic_supervised_effect(
     except (
         AgentSessionCommandError,
         DeviceControllerRegistryError,
+        DeviceRuntimeResourceError,
         DeviceTaskRegistryError,
         GenericActionAdapterError,
         UniversalActionError,
@@ -1445,6 +1429,7 @@ def confirm_generic_supervised_session(
     except (
         AgentSessionCommandError,
         DeviceControllerRegistryError,
+        DeviceRuntimeResourceError,
         DeviceTaskRegistryError,
         GenericActionAdapterError,
         UniversalActionError,
@@ -1499,6 +1484,7 @@ def plan_next_generic_supervised_step(
     except (
         AgentSessionCommandError,
         DeviceControllerRegistryError,
+        DeviceRuntimeResourceError,
         DeviceTaskRegistryError,
         GenericActionAdapterError,
         UniversalActionError,
@@ -1561,6 +1547,7 @@ def run_generic_supervised_safe_loop(
     except (
         AgentSessionCommandError,
         DeviceControllerRegistryError,
+        DeviceRuntimeResourceError,
         DeviceTaskRegistryError,
         GenericActionAdapterError,
         UniversalActionError,
@@ -1654,7 +1641,11 @@ def stop_all(
 def preview_jpg(device_id: str) -> Response:
     try:
         content, cached = runtime.capture_preview(device_id)
-    except (DeviceControllerRegistryError, UniversalAgentOrchestratorError) as exc:
+    except (
+        DeviceControllerRegistryError,
+        DeviceRuntimeResourceError,
+        UniversalAgentOrchestratorError,
+    ) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception:
         content = MockRobotController(device_id="mock-preview").capture_preview()
@@ -1673,7 +1664,11 @@ def preview_jpg(device_id: str) -> Response:
 def preview_mjpg(device_id: str) -> StreamingResponse:
     try:
         runtime.controller_for_device(device_id)
-    except (DeviceControllerRegistryError, UniversalAgentOrchestratorError) as exc:
+    except (
+        DeviceControllerRegistryError,
+        DeviceRuntimeResourceError,
+        UniversalAgentOrchestratorError,
+    ) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     def generate() -> Iterator[bytes]:

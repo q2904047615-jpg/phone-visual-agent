@@ -25,6 +25,8 @@ from agent.infrastructure import (
     DeviceCameraCoordinator,
     DeviceControllerRegistry,
     DeviceControllerRegistryError,
+    DeviceRuntimeResourceError,
+    DeviceRuntimeResourceRegistry,
     DeviceTaskRegistry,
     FileSystemAgentEvidenceStore,
     InterProcessLease,
@@ -1350,6 +1352,54 @@ class DeviceCameraCoordinatorTests(unittest.TestCase):
         self.assertTrue(is_cached)
 
 
+class DeviceRuntimeResourceRegistryTests(unittest.TestCase):
+    def test_same_device_reuses_resources_and_devices_remain_isolated(self) -> None:
+        registry = DeviceRuntimeResourceRegistry(("phone-a",))
+
+        self.assertIs(
+            registry.coordination_lock("phone-a"),
+            registry.coordination_lock("phone-a"),
+        )
+        self.assertIs(
+            registry.camera_coordinator("phone-a"),
+            registry.camera_coordinator("phone-a"),
+        )
+        self.assertIsNot(
+            registry.coordination_lock("phone-a"),
+            registry.coordination_lock("phone-b"),
+        )
+        self.assertIsNot(
+            registry.camera_coordinator("phone-a"),
+            registry.camera_coordinator("phone-b"),
+        )
+
+    def test_concurrent_first_lookup_returns_one_stable_resource(self) -> None:
+        registry = DeviceRuntimeResourceRegistry()
+        barrier = threading.Barrier(9)
+        results = []
+
+        def resolve() -> None:
+            barrier.wait()
+            results.append(registry.coordination_lock("phone-parallel"))
+
+        workers = [threading.Thread(target=resolve) for _index in range(8)]
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join(timeout=2)
+
+        self.assertEqual(8, len(results))
+        self.assertTrue(all(item is results[0] for item in results))
+
+    def test_empty_device_fails_before_resource_creation(self) -> None:
+        registry = DeviceRuntimeResourceRegistry()
+        with self.assertRaisesRegex(DeviceRuntimeResourceError, "device_id 不能为空"):
+            registry.coordination_lock("  ")
+        with self.assertRaisesRegex(DeviceRuntimeResourceError, "device_id 不能为空"):
+            registry.camera_coordinator("")
+
+
 class ApiEndToEndTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -1382,8 +1432,9 @@ class ApiEndToEndTests(unittest.TestCase):
         )
         self.device_registry_patcher.start()
         web_app.runtime.agent_session_repository.clear()
-        with web_app.runtime.device_camera_coordinator_guard:
-            web_app.runtime.device_camera_coordinators.clear()
+        web_app.runtime.device_runtime_resources = DeviceRuntimeResourceRegistry(
+            (web_app.runtime.device_controllers.default_device_id,)
+        )
 
     def tearDown(self) -> None:
         self.device_registry_patcher.stop()
@@ -2618,7 +2669,11 @@ class ApiEndToEndTests(unittest.TestCase):
             return_value=controller,
         ):
             first = self.client.get(f"/api/preview.jpg?device_id={device_id}")
-            coordination = web_app.runtime.coordination_lock_for_device(device_id)
+            coordination = (
+                web_app.runtime.device_runtime_resources.coordination_lock(
+                    device_id
+                )
+            )
             self.assertTrue(coordination.acquire(blocking=False))
             try:
                 cached = [

@@ -552,6 +552,30 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                     violations.append(f"{path.name}: {value}")
         self.assertEqual([], violations)
 
+    def test_per_device_runtime_resources_are_not_owned_by_web(self) -> None:
+        root = Path(__file__).resolve().parent
+        web_source = (root / "web_app.py").read_text(encoding="utf-8")
+        infrastructure_source = (
+            root
+            / "agent"
+            / "infrastructure"
+            / "device_runtime_resources.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("class DeviceRuntimeResourceRegistry", infrastructure_source)
+        self.assertIn("DeviceRuntimeResourceRegistry(", web_source)
+        for legacy in (
+            "device_coordination_lock_guard",
+            "device_coordination_locks",
+            "device_camera_coordinator_guard",
+            "device_camera_coordinators",
+            "def coordination_lock_for_device",
+            "def camera_coordinator_for_device",
+        ):
+            self.assertNotIn(legacy, web_source)
+        self.assertNotIn("web_app", infrastructure_source)
+        self.assertNotIn("agent.application", infrastructure_source)
+
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent
         self.assertFalse((root / "device_executor.py").exists())

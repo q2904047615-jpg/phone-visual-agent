@@ -21,7 +21,7 @@ from agent.domain import (
     DeviceExecutor,
 )
 from agent.infrastructure import RobotDeviceExecutor
-from generic_goal import GenericIntentDraft
+from agent.domain.generic_goal import GenericIntentDraft
 from generic_scene_observer import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     POST_ACTION_VISUAL_CONTEXT_VERSION,

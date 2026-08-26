@@ -15,7 +15,7 @@ from agent.domain import (
 )
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
 from deepseek_task_graph import DynamicTaskGraph
-from generic_goal import GenericIntentDraft
+from agent.domain.generic_goal import GenericIntentDraft
 from vision_usage import VisionSessionUsageLedger
 
 

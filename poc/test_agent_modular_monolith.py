@@ -964,6 +964,53 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_generic_goal_projection_has_one_domain_identity(self) -> None:
+        import deepseek_task_graph
+        import generic_action_adapter
+        import universal_agent_orchestrator
+        from agent.application import runtime_session
+        from agent.domain.generic_goal import (
+            GenericIntentDraft,
+            _parse_json_object,
+        )
+
+        root = Path(__file__).resolve().parent
+        domain_path = root / "agent" / "domain" / "generic_goal.py"
+        self.assertFalse((root / "generic_goal.py").exists())
+        self.assertTrue(domain_path.is_file())
+        self.assertIs(GenericIntentDraft, generic_action_adapter.GenericIntentDraft)
+        self.assertIs(GenericIntentDraft, runtime_session.GenericIntentDraft)
+        self.assertIs(GenericIntentDraft, universal_agent_orchestrator.GenericIntentDraft)
+        self.assertIs(_parse_json_object, deepseek_task_graph._parse_json_object)
+
+        source = domain_path.read_text(encoding="utf-8")
+        for forbidden in (
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "agent.application",
+            "agent.infrastructure",
+            "vision_agent",
+            "robot_core",
+        ):
+            self.assertNotIn(forbidden, source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "generic_goal"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "generic_goal":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent
         self.assertFalse((root / "device_executor.py").exists())

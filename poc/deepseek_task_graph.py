@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Any, Callable, Protocol
 
-from generic_goal import GenericIntentError, _parse_json_object
+from agent.domain.generic_goal import GenericIntentError, _parse_json_object
 from agent.domain.task_semantic_ir import (
     SemanticRiskAuthorityReport,
     TaskSemanticIRError,

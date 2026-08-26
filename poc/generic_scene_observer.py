@@ -56,6 +56,8 @@ from agent.application.input_value_lineage import (
 from agent.domain.input_value_lineage import (
     TypedInputLineage,
 )
+import agent.domain.generic_goal as generic_goal_domain
+
 SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-08-25-single-step-scene-observer-v2"
 SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION = (
     "2026-08-25-single-step-qwen-observation-v2"
@@ -353,7 +355,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             )
             frame = frames[selected_frame_index].convert("RGB")
             fingerprint = _local_frame_fingerprint(frame)
-            context = _safe_goal_context(goal_context or {})
+            context = generic_goal_domain.safe_goal_context(goal_context or {})
             cache_key = _observation_cache_key(
                 device_id=device_id,
                 fingerprint=fingerprint,
@@ -7101,49 +7103,3 @@ def _observation_cache_key(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-
-
-
-
-def _safe_goal_context(value: dict[str, Any]) -> dict[str, Any]:
-    """Keep goal data useful to OCR while refusing hidden control instructions."""
-
-    forbidden = {
-        "action",
-        "actions",
-        "step",
-        "steps",
-        "tap",
-        "swipe",
-        "coordinate",
-        "coordinates",
-        "x",
-        "y",
-        "command",
-        "shell",
-        "execution_plan",
-    }
-
-    def clean(item: Any, depth: int = 0) -> Any:
-        if depth > 5:
-            raise VisionAgentError("目标上下文嵌套过深。")
-        if isinstance(item, dict):
-            result: dict[str, Any] = {}
-            for raw_key, raw_value in item.items():
-                key = str(raw_key).strip()
-                if key.lower() in forbidden:
-                    raise VisionAgentError(f"目标上下文包含控制字段：{key}")
-                result[key[:80]] = clean(raw_value, depth + 1)
-            return result
-        if isinstance(item, (list, tuple)):
-            return [clean(part, depth + 1) for part in list(item)[:50]]
-        if isinstance(item, str):
-            return item[:1000]
-        if isinstance(item, (int, float, bool)) or item is None:
-            return item
-        raise VisionAgentError("目标上下文包含不支持的数据类型。")
-
-    cleaned = clean(value)
-    if not isinstance(cleaned, dict):
-        raise VisionAgentError("目标上下文必须是对象。")
-    return cleaned

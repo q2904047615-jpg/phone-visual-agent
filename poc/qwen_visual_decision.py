@@ -11,7 +11,7 @@ from typing import Any, Iterable
 
 from PIL import Image
 
-from generic_scene_observer import _local_frame_fingerprint, _safe_goal_context
+from generic_scene_observer import _local_frame_fingerprint
 from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError as GenericStepPlanningError,
     GenericStepProposal,
@@ -22,10 +22,8 @@ from observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
 )
-from message_intent import (
-    subgoal_binds_recipient,
-    subgoal_targets_recipient_control,
-)
+import agent.domain.generic_goal as generic_goal_domain
+import agent.domain.message_intent as message_intent_domain
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.task_semantic_ir import TaskSemanticIR
 from agent.domain.ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene
@@ -264,7 +262,7 @@ class QwenTaskContext(Mapping[str, Any]):
             raise VisionAgentError(
                 "current_subgoal.execution_class 与顶层上下文不一致。"
             )
-        _safe_goal_context(self.to_dict())
+        generic_goal_domain.safe_goal_context(self.to_dict())
 
         effect_allowed = {
             "effect_id",
@@ -431,7 +429,10 @@ class QwenTaskContext(Mapping[str, Any]):
 
         values: list[str] = []
         for recipient in self.recipient_values:
-            if subgoal_targets_recipient_control(recipient, self.current_subgoal):
+            if message_intent_domain.subgoal_targets_recipient_control(
+                recipient,
+                self.current_subgoal,
+            ):
                 if recipient not in values:
                     values.append(recipient)
         return tuple(values)
@@ -470,8 +471,11 @@ class QwenTaskContext(Mapping[str, Any]):
         return tuple(
             recipient
             for recipient in self.recipient_values
-            if subgoal_binds_recipient(recipient, self.current_subgoal)
-            and not subgoal_targets_recipient_control(
+            if message_intent_domain.subgoal_binds_recipient(
+                recipient,
+                self.current_subgoal,
+            )
+            and not message_intent_domain.subgoal_targets_recipient_control(
                 recipient,
                 self.current_subgoal,
             )

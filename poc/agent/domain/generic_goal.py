@@ -5,6 +5,8 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from .vision_model import VisionAgentError
+
 
 GOAL_PROJECTION_PROTOCOL = "2026-08-20-typed-goal-projection-v1"
 APP_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
@@ -86,3 +88,47 @@ def _validate_json_value(value: Any, path: str) -> None:
             _validate_json_value(item, f"{path}[{index}]")
     elif not isinstance(value, (str, int, float, bool, type(None))):
         raise GenericIntentError(f"目标参数类型不受支持：{path}")
+
+
+def safe_goal_context(value: dict[str, Any]) -> dict[str, Any]:
+    """Keep goal data useful to observation while refusing control fields."""
+
+    forbidden = {
+        "action",
+        "actions",
+        "step",
+        "steps",
+        "tap",
+        "swipe",
+        "coordinate",
+        "coordinates",
+        "x",
+        "y",
+        "command",
+        "shell",
+        "execution_plan",
+    }
+
+    def clean(item: Any, depth: int = 0) -> Any:
+        if depth > 5:
+            raise VisionAgentError("目标上下文嵌套过深。")
+        if isinstance(item, dict):
+            result: dict[str, Any] = {}
+            for raw_key, raw_value in item.items():
+                key = str(raw_key).strip()
+                if key.lower() in forbidden:
+                    raise VisionAgentError(f"目标上下文包含控制字段：{key}")
+                result[key[:80]] = clean(raw_value, depth + 1)
+            return result
+        if isinstance(item, (list, tuple)):
+            return [clean(part, depth + 1) for part in list(item)[:50]]
+        if isinstance(item, str):
+            return item[:1000]
+        if isinstance(item, (int, float, bool)) or item is None:
+            return item
+        raise VisionAgentError("目标上下文包含不支持的数据类型。")
+
+    cleaned = clean(value)
+    if not isinstance(cleaned, dict):
+        raise VisionAgentError("目标上下文必须是对象。")
+    return cleaned

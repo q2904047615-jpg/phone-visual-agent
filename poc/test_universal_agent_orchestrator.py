@@ -30,7 +30,7 @@ from agent.domain.task_graph import (
     _graph_from_payload,
 )
 from agent.domain.canonical_action_protocol import GenericStepProposal
-from generic_scene_observer import _safe_goal_context
+from agent.domain.generic_goal import safe_goal_context
 from generic_action_adapter import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     GenericActionAdapterError,
@@ -1512,14 +1512,14 @@ class ObservationBridgeTests(unittest.TestCase):
             },
         )
         self.assertEqual("current_surface", focus["goal_entities"]["target_surface"])
-        self.assertIsInstance(_safe_goal_context(observation_context), dict)
+        self.assertIsInstance(safe_goal_context(observation_context), dict)
 
         historical_context = json.loads(json.dumps(observation_context))
         historical_context["entities"]["active_subgoal_visual_context"][
             "goal_entities"
         ]["input_fields"] = list(graph.goal.entities["input_fields"])
         with self.assertRaisesRegex(VisionAgentError, "目标上下文嵌套过深"):
-            _safe_goal_context(historical_context)
+            safe_goal_context(historical_context)
 
     def test_projects_one_unique_direct_successor_for_fused_post_action_observation(
         self,

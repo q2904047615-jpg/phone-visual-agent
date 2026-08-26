@@ -1011,6 +1011,76 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_goal_context_semantics_have_one_domain_owner(self) -> None:
+        import generic_scene_observer
+        import qwen_visual_decision
+        from agent.domain.generic_goal import safe_goal_context
+        from agent.domain.message_intent import (
+            subgoal_binds_recipient,
+            subgoal_targets_recipient_control,
+        )
+
+        root = Path(__file__).resolve().parent
+        generic_goal_path = root / "agent" / "domain" / "generic_goal.py"
+        message_intent_path = root / "agent" / "domain" / "message_intent.py"
+        observer_path = root / "generic_scene_observer.py"
+        self.assertFalse((root / "message_intent.py").exists())
+        self.assertTrue(message_intent_path.is_file())
+        self.assertFalse(hasattr(generic_scene_observer, "_safe_goal_context"))
+        self.assertFalse(hasattr(qwen_visual_decision, "safe_goal_context"))
+        self.assertFalse(hasattr(qwen_visual_decision, "subgoal_binds_recipient"))
+
+        self.assertEqual(
+            {"objective": "选择 Alice", "values": [1, True, None]},
+            safe_goal_context(
+                {"objective": "选择 Alice", "values": [1, True, None]}
+            ),
+        )
+        self.assertTrue(subgoal_binds_recipient("Alice", "选择 Alice"))
+        self.assertTrue(
+            subgoal_targets_recipient_control("Alice", "选择 Alice")
+        )
+        self.assertFalse(
+            subgoal_targets_recipient_control("Alice", "编辑 Alice 的正文")
+        )
+
+        generic_goal_source = generic_goal_path.read_text(encoding="utf-8")
+        message_intent_source = message_intent_path.read_text(encoding="utf-8")
+        observer_source = observer_path.read_text(encoding="utf-8")
+        self.assertEqual(1, generic_goal_source.count("def safe_goal_context("))
+        self.assertEqual(1, message_intent_source.count("def subgoal_binds_recipient("))
+        self.assertEqual(
+            1,
+            message_intent_source.count("def subgoal_targets_recipient_control("),
+        )
+        self.assertNotIn("def _safe_goal_context(", observer_source)
+        for forbidden in (
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "agent.application",
+            "agent.infrastructure",
+            "vision_agent",
+            "robot_core",
+        ):
+            self.assertNotIn(forbidden, message_intent_source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "message_intent"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "message_intent":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_deepseek_task_graph_has_one_application_entry(self) -> None:
         import agent.application.deepseek_task_graph as deepseek_task_graph
         import capability_acceptance_planner

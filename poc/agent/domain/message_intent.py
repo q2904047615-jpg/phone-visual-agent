@@ -1,3 +1,5 @@
+"""Pure recipient-binding semantics for the active task goal."""
+
 from __future__ import annotations
 
 from typing import Any, Iterable, Mapping

@@ -1,6 +1,6 @@
 import unittest
 
-from message_intent import (
+from agent.domain.message_intent import (
     subgoal_binds_recipient,
     subgoal_targets_recipient_control,
 )

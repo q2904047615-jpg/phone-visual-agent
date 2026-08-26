@@ -4,6 +4,10 @@ from .canonical_selection import (
     CANONICAL_SELECTION_RECEIPT_VERSION,
     CanonicalSelectionReceipt,
 )
+from .confirmation_authority import (
+    ConfirmationAuthority,
+    EffectConfirmationAuthority,
+)
 from .device_execution import (
     DEVICE_EXECUTOR_PROTOCOL,
     EXECUTABLE_ACTION_KINDS,
@@ -42,6 +46,7 @@ __all__ = [
     "AgentEvidenceStoreFactory",
     "AgentEvidenceStorePort",
     "CanonicalSelectionReceipt",
+    "ConfirmationAuthority",
     "DeviceActionRequest",
     "DeviceExecutionError",
     "DeviceExecutionResult",
@@ -49,5 +54,6 @@ __all__ = [
     "DeviceTaskRegistryError",
     "DeviceTaskRegistryPort",
     "EvidenceStoreError",
+    "EffectConfirmationAuthority",
     "require_session_device",
 ]

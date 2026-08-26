@@ -30,7 +30,9 @@ from agent.domain import (
     AgentEvidenceStorePort,
     CANONICAL_SELECTION_RECEIPT_VERSION,
     CanonicalSelectionReceipt,
+    ConfirmationAuthority,
     DeviceTaskRegistryPort,
+    EffectConfirmationAuthority,
     EvidenceStoreError,
 )
 from generic_action_adapter import (
@@ -910,61 +912,6 @@ class ObservationBridge:
         return observed
 
 
-@dataclass
-class ConfirmationAuthority:
-    session_id: str
-    task_id: str
-    device_id: str
-    revision: int
-    subgoal_id: str
-    effect_ids: tuple[str, ...]
-    observation_id: str
-    fingerprint: str
-    decision_node_id: str
-    action_digest: str
-    consumed: bool = False
-    invalid_reason: str = ""
-
-    def scope(self) -> dict[str, Any]:
-        return {
-            "session_id": self.session_id,
-            "task_id": self.task_id,
-            "device_id": self.device_id,
-            "revision": self.revision,
-            "subgoal_id": self.subgoal_id,
-            "effect_ids": sorted(self.effect_ids),
-            "observation_id": self.observation_id,
-            "fingerprint": self.fingerprint,
-            "decision_node_id": self.decision_node_id,
-            "action_digest": self.action_digest,
-        }
-
-
-@dataclass
-class EffectConfirmationAuthority:
-    session_id: str
-    task_id: str
-    device_id: str
-    revision: int
-    subgoal_id: str
-    effect_ids: tuple[str, ...]
-    intent_digest: str
-    intent_preview: dict[str, Any]
-    consumed: bool = False
-    invalid_reason: str = ""
-
-    def scope(self) -> dict[str, Any]:
-        return {
-            "session_id": self.session_id,
-            "task_id": self.task_id,
-            "device_id": self.device_id,
-            "revision": self.revision,
-            "subgoal_id": self.subgoal_id,
-            "effect_ids": sorted(self.effect_ids),
-            "intent_digest": self.intent_digest,
-        }
-
-
 @dataclass(frozen=True)
 class VerifiedAppSurfaceLineage:
     session_id: str
@@ -1039,8 +986,14 @@ class UniversalAgentSessionState:
     trusted_frames: tuple[Any, ...] = field(default_factory=tuple, repr=False)
     qwen_decision: Any = None
     controller_decision: CanonicalSelectionReceipt | None = None
-    confirmation_authority: Any = field(default=None, repr=False)
-    effect_confirmation_authority: Any = field(default=None, repr=False)
+    confirmation_authority: ConfirmationAuthority | None = field(
+        default=None,
+        repr=False,
+    )
+    effect_confirmation_authority: EffectConfirmationAuthority | None = field(
+        default=None,
+        repr=False,
+    )
     confirmed_effect_ids: tuple[str, ...] = ()
     status: str = "created"
     step_number: int = 1

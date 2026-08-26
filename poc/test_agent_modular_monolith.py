@@ -17,6 +17,8 @@ from agent.domain import (
     AgentSessionConflictError,
     AgentSessionDeviceMismatchError,
     CanonicalSelectionReceipt,
+    ConfirmationAuthority,
+    EffectConfirmationAuthority,
 )
 from agent.infrastructure import InMemoryAgentSessionRepository
 
@@ -240,6 +242,51 @@ class AgentSessionApplicationTests(unittest.TestCase):
 
 
 class AgentDependencyBoundaryTests(unittest.TestCase):
+    def test_confirmation_authorities_are_domain_scoped_and_stably_sorted(self) -> None:
+        action = ConfirmationAuthority(
+            session_id="session-1",
+            task_id="task-1",
+            device_id="phone-1",
+            revision=3,
+            subgoal_id="authenticate",
+            effect_ids=("risk-b", "risk-a"),
+            observation_id="obs-1",
+            fingerprint="frame-1",
+            decision_node_id="node-1",
+            action_digest="a" * 64,
+        )
+        effect = EffectConfirmationAuthority(
+            session_id="session-1",
+            task_id="task-1",
+            device_id="phone-1",
+            revision=3,
+            subgoal_id="authenticate",
+            effect_ids=("risk-b", "risk-a"),
+            intent_digest="b" * 64,
+            intent_preview={"effect": "authentication"},
+        )
+
+        self.assertEqual(["risk-a", "risk-b"], action.scope()["effect_ids"])
+        self.assertEqual(["risk-a", "risk-b"], effect.scope()["effect_ids"])
+        self.assertNotIn("intent_preview", effect.scope())
+        self.assertFalse(action.consumed)
+        self.assertFalse(effect.consumed)
+
+        root = Path(__file__).resolve().parent
+        orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("class ConfirmationAuthority", orchestrator_source)
+        self.assertNotIn("class EffectConfirmationAuthority", orchestrator_source)
+        self.assertIn(
+            "confirmation_authority: ConfirmationAuthority | None",
+            orchestrator_source,
+        )
+        self.assertIn(
+            "effect_confirmation_authority: EffectConfirmationAuthority | None",
+            orchestrator_source,
+        )
+
     def test_canonical_selection_receipt_is_one_domain_value_object(self) -> None:
         allowed = CanonicalSelectionReceipt(
             allowed=True,

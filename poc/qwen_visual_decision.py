@@ -12,7 +12,7 @@ from typing import Any, Iterable
 from PIL import Image
 
 from generic_scene_observer import _local_frame_fingerprint, _safe_goal_context
-from canonical_action_protocol import (
+from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError as GenericStepPlanningError,
     GenericStepProposal,
 )
@@ -1310,7 +1310,7 @@ def _selection_choices(
     if context.semantic_ir is None:
         raise VisionAgentError("typed v4 视觉选择缺少 canonical TaskSemanticIR。")
     try:
-        from canonical_action_protocol import (
+        from agent.domain.canonical_action_protocol import (
             canonical_candidate_expected_result,
             compile_canonical_action_catalog,
         )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from canonical_action_protocol import compile_canonical_action_catalog
+from agent.domain.canonical_action_protocol import compile_canonical_action_catalog
 from deepseek_task_graph import _graph_from_payload, build_exact_action_task_graph
 from agent.domain import DeviceActionRequest
 from agent.infrastructure import RobotDeviceExecutor

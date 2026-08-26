@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 from PIL import Image, ImageDraw
 
-from canonical_action_protocol import (
+from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError as GenericStepPlanningError,
     compile_canonical_action_catalog,
     scene_matches_target_app_surface,

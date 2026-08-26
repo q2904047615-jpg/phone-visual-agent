@@ -29,7 +29,7 @@ from deepseek_task_graph import (
     VerifiedActionTransition,
     _graph_from_payload,
 )
-from canonical_action_protocol import GenericStepProposal
+from agent.domain.canonical_action_protocol import GenericStepProposal
 from generic_scene_observer import _safe_goal_context
 from generic_action_adapter import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
@@ -41,10 +41,10 @@ from agent.domain.ui_scene import SystemUIFacts, UIElement, UIScene
 from universal_action_controller import ResolvedSemanticAction
 from vision_agent import VisionAgentError
 from vision_usage import VisionSessionUsageLedger
-from canonical_action_protocol import scene_matches_target_app_surface
+from agent.domain.canonical_action_protocol import scene_matches_target_app_surface
 from qwen_visual_decision import QwenTaskContext
 from agent.domain.task_semantic_ir import compile_formal_semantic_authority
-from canonical_action_protocol import compile_canonical_action_catalog
+from agent.domain.canonical_action_protocol import compile_canonical_action_catalog
 from universal_agent_orchestrator import (
     ObservationBridge,
     UniversalAgentOrchestrator,

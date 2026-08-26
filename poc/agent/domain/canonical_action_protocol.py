@@ -6,16 +6,16 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Mapping
 
-from agent.domain.task_semantic_ir import (
+from .task_semantic_ir import (
     ConstraintIntent,
     EffectIntent,
     SemanticEntity,
     TaskSemanticIR,
 )
-from agent.domain.semantic_action import SemanticAction
-from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
-from agent.domain.ui_scene import UIElement, UIScene, scene_surface_kind
-from agent.domain.verified_text_transaction import (
+from .semantic_action import SemanticAction
+from .canonical_action_kinds import CANONICAL_ACTION_KINDS
+from .ui_scene import UIElement, UIScene, scene_surface_kind
+from .verified_text_transaction import (
     VerifiedTextTransactionError,
     plan_from_input_states,
 )

@@ -46,7 +46,7 @@ from generic_action_adapter import (
     GenericActionAdapterError,
 )
 from generic_goal import GenericIntentDraft
-from canonical_action_protocol import (
+from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError,
     GenericStepProposal,
     expected_idempotent_system_surface_kind,

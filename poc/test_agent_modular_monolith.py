@@ -578,7 +578,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertNotIn("agent.application", infrastructure_source)
 
     def test_scene_and_semantic_action_have_one_domain_identity(self) -> None:
-        import canonical_action_protocol as canonical_protocol
+        import agent.domain.canonical_action_protocol as canonical_protocol
         from agent.domain.semantic_action import SemanticAction
         from agent.domain.ui_scene import UIScene
 
@@ -592,10 +592,14 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         for path in root.rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module in {
-                    "semantic_action",
-                    "ui_scene",
-                }:
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module in {
+                        "semantic_action",
+                        "ui_scene",
+                    }
+                ):
                     legacy_imports.append(
                         f"{path.relative_to(root)}: {node.module}"
                     )
@@ -626,7 +630,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], unexpected)
 
     def test_verified_text_planner_has_one_domain_identity(self) -> None:
-        import canonical_action_protocol as canonical_protocol
+        import agent.domain.canonical_action_protocol as canonical_protocol
         from agent.domain.verified_text_transaction import (
             VerifiedTextTransactionError,
         )
@@ -811,7 +815,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], legacy_imports)
 
     def test_canonical_action_kinds_have_one_domain_identity(self) -> None:
-        import canonical_action_protocol as canonical_protocol
+        import agent.domain.canonical_action_protocol as canonical_protocol
         import qwen_visual_decision
         from agent.domain.action_capabilities import KNOWN_ACTION_CAPABILITIES
         from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
@@ -849,9 +853,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         )
 
         root = Path(__file__).resolve().parent
-        canonical_source = (root / "canonical_action_protocol.py").read_text(
-            encoding="utf-8"
-        )
+        canonical_source = (
+            root / "agent" / "domain" / "canonical_action_protocol.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("SUPPORTED_ACTIONS =", canonical_source)
         for path in (
             root / "agent" / "domain" / "device_execution.py",
@@ -863,7 +867,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             )
 
     def test_task_semantic_ir_has_one_domain_identity_and_one_loader(self) -> None:
-        import canonical_action_protocol as canonical_protocol
+        import agent.domain.canonical_action_protocol as canonical_protocol
         import deepseek_task_graph
         from agent.domain.task_semantic_ir import (
             TaskSemanticIR,
@@ -913,6 +917,50 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 if isinstance(node, ast.Import):
                     for item in node.names:
                         if item.name == "task_semantic_ir":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
+    def test_canonical_action_catalog_has_one_domain_identity(self) -> None:
+        import qwen_visual_decision
+        from agent.domain.canonical_action_protocol import (
+            CanonicalActionCandidate,
+            GenericStepProposal,
+        )
+
+        root = Path(__file__).resolve().parent
+        domain_path = (
+            root / "agent" / "domain" / "canonical_action_protocol.py"
+        )
+        self.assertFalse((root / "canonical_action_protocol.py").exists())
+        self.assertTrue(domain_path.is_file())
+        self.assertIs(GenericStepProposal, qwen_visual_decision.GenericStepProposal)
+        self.assertTrue(hasattr(CanonicalActionCandidate, "to_dict"))
+
+        source = domain_path.read_text(encoding="utf-8")
+        for forbidden in (
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "agent.application",
+            "agent.infrastructure",
+            "vision_agent",
+            "robot_core",
+        ):
+            self.assertNotIn(forbidden, source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "canonical_action_protocol"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "canonical_action_protocol":
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 

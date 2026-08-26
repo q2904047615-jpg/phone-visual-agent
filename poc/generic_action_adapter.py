@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from PIL import Image, ImageChops, ImageStat
 
-from canonical_action_protocol import CanonicalActionProtocolError
+from agent.domain.canonical_action_protocol import CanonicalActionProtocolError
 from agent.domain import (
     DeviceActionRequest,
     DeviceExecutionError,

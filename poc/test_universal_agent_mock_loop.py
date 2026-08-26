@@ -9,10 +9,10 @@ import unittest
 from PIL import Image, ImageDraw
 
 from agent.infrastructure import DeviceTaskRegistry, FileSystemAgentEvidenceStore
-from canonical_action_protocol import compile_canonical_action_catalog
+from agent.domain.canonical_action_protocol import compile_canonical_action_catalog
 from deepseek_task_graph import TargetApp
 from generic_action_adapter import GenericActionAdapterError, GenericSingleActionAdapter
-from canonical_action_protocol import GenericStepProposal
+from agent.domain.canonical_action_protocol import GenericStepProposal
 from orientation_safety import _claim_audit_seal
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.ui_scene import CameraAlignmentFacts, UIElement, UIScene

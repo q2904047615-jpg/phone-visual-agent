@@ -81,7 +81,7 @@ from agent.domain.task_semantic_ir import (
     RISK_POLICY_PROTOCOL,
     TASK_SEMANTIC_IR_PROTOCOL,
 )
-from canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
+from agent.domain.canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
 from runtime_doctor import run_runtime_doctor
 
 from robot_core import (

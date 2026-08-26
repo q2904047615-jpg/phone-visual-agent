@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from typing import Mapping
@@ -15,13 +14,13 @@ VISION_COORDINATE_SCALE = 1000
 _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
 
+class VisionAgentError(RuntimeError):
+    """The configured visual model or its response cannot be used."""
+
+
 @dataclass(frozen=True)
 class VisionModelConfig:
-    """Immutable runtime identity and request policy for the visual model.
-
-    The model may be replaced through configuration, while the observation,
-    safety and mechanical-action contracts remain local and unchanged.
-    """
+    """Immutable runtime identity and request policy for the visual model."""
 
     model: str
     base_url: str
@@ -35,7 +34,9 @@ class VisionModelConfig:
         base_url = self.base_url.strip().rstrip("/")
         if not _MODEL_ID_RE.fullmatch(model):
             raise ValueError("视觉模型 ID 格式无效。")
-        if not base_url.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+        if not base_url.startswith(
+            ("https://", "http://127.0.0.1", "http://localhost")
+        ):
             raise ValueError("视觉模型地址必须使用 HTTPS 或本机回环地址。")
         if self.coordinate_scale != VISION_COORDINATE_SCALE:
             raise ValueError("视觉模型坐标必须使用项目统一的 0..1000 归一化尺度。")
@@ -44,26 +45,6 @@ class VisionModelConfig:
 
     def request_options(self) -> dict[str, bool]:
         return {"enable_thinking": self.enable_thinking}
-
-def load_vision_model_config(
-    *,
-    model: str | None = None,
-    base_url: str | None = None,
-    enable_thinking: bool = False,
-    environ: Mapping[str, str] | None = None,
-) -> VisionModelConfig:
-    """Resolve the visual model from the single current configuration surface."""
-
-    values = os.environ if environ is None else environ
-    resolved_model = model or values.get("VISION_MODEL") or DEFAULT_VISION_MODEL
-    resolved_base_url = (
-        base_url or values.get("VISION_MODEL_BASE_URL") or DEFAULT_VISION_BASE_URL
-    )
-    return VisionModelConfig(
-        model=resolved_model,
-        base_url=resolved_base_url,
-        enable_thinking=bool(enable_thinking),
-    )
 
 
 def public_model_identity(status: Mapping[str, object]) -> dict[str, object]:

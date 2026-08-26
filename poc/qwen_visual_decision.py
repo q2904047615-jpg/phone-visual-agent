@@ -29,8 +29,7 @@ from message_intent import (
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.task_semantic_ir import TaskSemanticIR
 from agent.domain.ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene
-from vision_agent import VisionAgentError
-from vision_model_config import public_model_identity
+from agent.domain.vision_model import VisionAgentError, public_model_identity
 
 
 QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-14-qwen-visual-decision-v5"

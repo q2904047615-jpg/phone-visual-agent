@@ -93,10 +93,8 @@ from robot_core import (
     RobotController,
     WEB_OUTPUT_DIR,
 )
-from vision_agent import (
-    DashScopeVisionProvider,
-    VisionAgentError,
-)
+from vision_agent import DashScopeVisionProvider
+from agent.domain.vision_model import VisionAgentError
 
 
 ROOT = Path(__file__).resolve().parent

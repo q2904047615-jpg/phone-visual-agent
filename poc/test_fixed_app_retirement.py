@@ -160,7 +160,8 @@ class FixedAppRetirementTests(unittest.TestCase):
             "robot_core.py",
             "robot_gui_poc.py",
             "agent/domain/ui_scene.py",
-            "vision_model_config.py",
+            "agent/domain/vision_model.py",
+            "agent/infrastructure/environment_vision_model_config.py",
         )
         hits = []
         for name in sources:

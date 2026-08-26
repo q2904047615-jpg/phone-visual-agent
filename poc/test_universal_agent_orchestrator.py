@@ -39,7 +39,7 @@ from generic_action_adapter import (
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.ui_scene import SystemUIFacts, UIElement, UIScene
 from universal_action_controller import ResolvedSemanticAction
-from vision_agent import VisionAgentError
+from agent.domain.vision_model import VisionAgentError
 from vision_usage import VisionSessionUsageLedger
 from agent.domain.canonical_action_protocol import scene_matches_target_app_surface
 from qwen_visual_decision import QwenTaskContext

@@ -21,7 +21,8 @@ from qwen_visual_decision import (
     QwenVisualDecisionObserver,
     TrustedObservation,
 )
-from vision_agent import DashScopeVisionProvider, VisionAgentError
+from vision_agent import DashScopeVisionProvider
+from agent.domain.vision_model import VisionAgentError
 
 
 ROOT = Path(__file__).resolve().parent

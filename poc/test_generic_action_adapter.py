@@ -59,7 +59,7 @@ from universal_action_controller import (
     UniversalActionController,
     UniversalActionError,
 )
-from vision_agent import VisionAgentError
+from agent.domain.vision_model import VisionAgentError
 
 
 TEST_QWERTY_GEOMETRY = {

@@ -38,13 +38,8 @@ from agent.domain.ui_scene import (
     UISceneError,
     camera_alignment_evidence_is_safe,
 )
-from vision_agent import (
-    VisionAgentError,
-    _extract_json_object,
-    _image_data_url,
-    _image_request_size,
-)
-from vision_model_config import public_model_identity
+from vision_agent import _extract_json_object, _image_data_url, _image_request_size
+from agent.domain.vision_model import VisionAgentError, public_model_identity
 from agent.domain.verified_text_transaction import (
     VerifiedTextTransactionError,
     next_keyboard_layout_towards,

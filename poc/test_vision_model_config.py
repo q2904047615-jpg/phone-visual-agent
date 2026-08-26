@@ -5,13 +5,15 @@ from unittest.mock import patch
 import httpx
 
 from vision_agent import DashScopeVisionProvider
-from vision_model_config import (
+from agent.domain.vision_model import (
     DEFAULT_VISION_BASE_URL,
     DEFAULT_VISION_MODEL,
     VISION_MODEL_CONFIG_VERSION,
     VisionModelConfig,
-    load_vision_model_config,
     public_model_identity,
+)
+from agent.infrastructure.environment_vision_model_config import (
+    load_vision_model_config,
 )
 
 

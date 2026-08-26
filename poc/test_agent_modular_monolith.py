@@ -1138,6 +1138,81 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                         )
         self.assertEqual([], misplaced_imports)
 
+    def test_vision_model_contract_has_one_layered_identity(self) -> None:
+        import generic_scene_observer
+        import qwen_visual_decision
+        import vision_agent
+        from agent.domain.vision_model import (
+            VisionAgentError,
+            VisionModelConfig,
+            public_model_identity,
+        )
+        from agent.infrastructure.environment_vision_model_config import (
+            load_vision_model_config,
+        )
+
+        root = Path(__file__).resolve().parent
+        domain_path = root / "agent" / "domain" / "vision_model.py"
+        loader_path = (
+            root
+            / "agent"
+            / "infrastructure"
+            / "environment_vision_model_config.py"
+        )
+        self.assertFalse((root / "vision_model_config.py").exists())
+        self.assertTrue(domain_path.is_file())
+        self.assertTrue(loader_path.is_file())
+        self.assertIs(VisionAgentError, qwen_visual_decision.VisionAgentError)
+        self.assertIs(VisionAgentError, generic_scene_observer.VisionAgentError)
+        self.assertIs(VisionModelConfig, vision_agent.VisionModelConfig)
+        self.assertIs(
+            public_model_identity,
+            qwen_visual_decision.public_model_identity,
+        )
+        self.assertTrue(callable(load_vision_model_config))
+
+        domain_source = domain_path.read_text(encoding="utf-8")
+        loader_source = loader_path.read_text(encoding="utf-8")
+        provider_source = (root / "vision_agent.py").read_text(encoding="utf-8")
+        for forbidden in (
+            "agent.application",
+            "agent.infrastructure",
+            "import os",
+            "os.environ",
+            "httpx",
+            "from PIL",
+            "vision_agent",
+        ):
+            self.assertNotIn(forbidden, domain_source)
+        self.assertEqual(1, loader_source.count("def load_vision_model_config("))
+        self.assertEqual(1, loader_source.count("os.environ"))
+        self.assertNotIn("class VisionAgentError", provider_source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "vision_model_config"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "vision_agent"
+                    and any(
+                        item.name == "VisionAgentError" for item in node.names
+                    )
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "vision_model_config":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent
         self.assertFalse((root / "device_executor.py").exists())

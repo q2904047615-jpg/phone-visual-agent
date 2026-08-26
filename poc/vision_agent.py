@@ -15,12 +15,11 @@ from typing import Any, Iterator
 import httpx
 from PIL import Image
 
-from vision_model_config import VisionModelConfig, load_vision_model_config
+from agent.domain.vision_model import VisionAgentError, VisionModelConfig
+from agent.infrastructure.environment_vision_model_config import (
+    load_vision_model_config,
+)
 from vision_usage import VisionSessionUsageLedger
-
-
-class VisionAgentError(RuntimeError):
-    """The configured visual model or its response cannot be used."""
 
 
 class _DuplicateJSONKeyError(ValueError):

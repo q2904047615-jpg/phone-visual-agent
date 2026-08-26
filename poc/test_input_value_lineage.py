@@ -33,7 +33,7 @@ from agent.infrastructure.file_system_input_lineage_store import (
     FileSystemTypedInputLineageStore as TypedInputLineageStore,
 )
 from agent.domain.ui_scene import UIScene
-from vision_agent import VisionAgentError
+from agent.domain.vision_model import VisionAgentError
 
 
 DEVICE = "device-test-01"

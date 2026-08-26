@@ -16,7 +16,7 @@ from eval_qwen_visual_decision import (
     _write_report,
 )
 from qwen_runtime_errors import classify_qwen_error, looks_like_truncated_json
-from vision_agent import VisionAgentError
+from agent.domain.vision_model import VisionAgentError
 
 
 ROOT = Path(__file__).resolve().parent

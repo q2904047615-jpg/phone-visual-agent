@@ -80,7 +80,7 @@ class MockRobotController(_TestDirectionCredentialMixin, _MockRobotController):
 web_app.RobotController = RobotController
 web_app.MockRobotController = MockRobotController
 from intent_provider import DeepSeekIntentProvider, IntentProviderError
-from vision_agent import VisionAgentError
+from agent.domain.vision_model import VisionAgentError
 
 
 TEST_QWERTY_LAYOUT = {

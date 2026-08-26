@@ -64,6 +64,10 @@ from agent.infrastructure.file_system_input_lineage_store import (
     FileSystemTypedInputLineageStore,
 )
 from agent.infrastructure.file_system_risk_policy import load_local_risk_policy
+from agent.infrastructure.trusted_observation_frames import (
+    build_trusted_observation,
+    validate_trusted_observation_against_frames,
+)
 from agent.application.deepseek_task_graph import (
     DeepSeekTaskGraphPlanner,
 )
@@ -284,7 +288,10 @@ class Runtime:
             ),
         )
         self.qwen_visual_decision_observer = QwenVisualDecisionObserver(
-            self.vision_provider
+            self.vision_provider,
+            trusted_observation_frame_validator=(
+                validate_trusted_observation_against_frames
+            ),
         )
         self.device_task_registry = DeviceTaskRegistry(
             lease_directory=SHARED_DEVICE_LEASE_DIR
@@ -313,6 +320,7 @@ class Runtime:
                 device_id=device_id,
                 input_lineage_store=self.input_lineage_store,
             ),
+            trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=self.device_task_registry,
         )
@@ -396,6 +404,7 @@ class Runtime:
                 device_id=device_id,
                 input_lineage_store=self.input_lineage_store,
             ),
+            trusted_observation_factory=build_trusted_observation,
             evidence_store_factory=FileSystemAgentEvidenceStore,
             device_registry=self.device_task_registry,
         )

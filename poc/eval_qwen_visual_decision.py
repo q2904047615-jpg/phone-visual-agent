@@ -16,11 +16,13 @@ from PIL import Image
 
 from generic_scene_observer import SingleStepGenericSceneObserver
 from qwen_runtime_errors import classify_qwen_error, failure_diagnostics
-from qwen_visual_decision import (
-    QwenVisualDecisionObserver,
-    TrustedObservation,
-)
+from qwen_visual_decision import QwenVisualDecisionObserver
 from agent.domain.qwen_task_context import QwenTaskContext
+from agent.domain.trusted_observation import TrustedObservation
+from agent.infrastructure.trusted_observation_frames import (
+    build_trusted_observation,
+    validate_trusted_observation_against_frames,
+)
 from vision_agent import DashScopeVisionProvider
 from agent.domain.vision_model import VisionAgentError
 
@@ -120,7 +122,12 @@ def _evaluate_case(
     path = Path(manifest_path)
     provider = provider_factory()
     scene_observer = SingleStepGenericSceneObserver(provider)
-    decision_observer = QwenVisualDecisionObserver(provider)
+    decision_observer = QwenVisualDecisionObserver(
+        provider,
+        trusted_observation_frame_validator=(
+            validate_trusted_observation_against_frames
+        ),
+    )
     frames: list[Image.Image] = []
     frame_paths: list[str] = []
     context: QwenTaskContext | None = None
@@ -169,7 +176,7 @@ def _evaluate_case(
             frames=frames,
             goal_context=context.to_observation_context(),
         )
-        observation = TrustedObservation.from_scene(
+        observation = build_trusted_observation(
             frames=frames,
             device_id=context.device_id,
             scene=scene,

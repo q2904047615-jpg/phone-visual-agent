@@ -14,11 +14,10 @@ from agent.domain.canonical_action_protocol import (
     compile_canonical_action_catalog,
     scene_matches_target_app_surface,
 )
-from generic_scene_observer import _local_frame_fingerprint
+from agent.infrastructure.observation_images import local_frame_fingerprint
 from qwen_visual_decision import (
     QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
     QwenVisualDecisionObserver,
-    TrustedObservation,
     _exact_text_candidate_block,
     _identity_text_candidate_block,
     _hydrate_canonical_selection,
@@ -26,6 +25,11 @@ from qwen_visual_decision import (
     _required_exact_candidate_ids,
     _deterministic_exact_selection_payload,
     _selection_choices,
+)
+from agent.domain.trusted_observation import TrustedObservation
+from agent.infrastructure.trusted_observation_frames import (
+    build_trusted_observation,
+    validate_trusted_observation_against_frames,
 )
 from agent.domain.ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
 from vision_agent import _image_data_url
@@ -516,7 +520,7 @@ class CanonicalEffectSelectionRegressionTests(unittest.TestCase):
                 if (x // 12 + y // 12) % 2:
                     draw.rectangle((x, y, x + 5, y + 5), fill="white")
         self.frames = [frame.copy() for _ in range(4)]
-        fingerprint = _local_frame_fingerprint(frame)
+        fingerprint = local_frame_fingerprint(frame)
         self.scene = UIScene(
             app_id="chat",
             screen_id="conversation",
@@ -586,7 +590,7 @@ class CanonicalEffectSelectionRegressionTests(unittest.TestCase):
             confidence=1.0,
             fingerprint=fingerprint,
         )
-        self.observation = TrustedObservation.from_scene(
+        self.observation = build_trusted_observation(
             frames=self.frames,
             device_id="device-local-01",
             scene=self.scene,
@@ -732,7 +736,12 @@ class CanonicalEffectSelectionRegressionTests(unittest.TestCase):
 
     def _decide(self):
         provider = FakeProvider({})
-        decision = QwenVisualDecisionObserver(provider).decide(
+        decision = QwenVisualDecisionObserver(
+            provider,
+            trusted_observation_frame_validator=(
+                validate_trusted_observation_against_frames
+            ),
+        ).decide(
             frames=self.frames,
             task_context=self.context,
             trusted_observation=self.observation,

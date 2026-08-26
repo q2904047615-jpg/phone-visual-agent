@@ -52,7 +52,7 @@ from agent.domain.canonical_action_protocol import (
     expected_idempotent_system_surface_kind,
     scene_matches_target_app_surface,
 )
-from qwen_visual_decision import TrustedObservation
+from agent.domain.trusted_observation import TrustedObservation
 from agent.domain.qwen_task_context import QwenTaskContext
 from agent.domain.ui_scene import (
     MIN_TARGET_CONFIDENCE,
@@ -947,16 +947,14 @@ class UniversalAgentOrchestrator:
         qwen_observer: Any,
         adapter_factory: Callable[[str], Any],
         evidence_store_factory: AgentEvidenceStoreFactory,
-        trusted_observation_factory: Callable[..., Any] | None = None,
+        trusted_observation_factory: Callable[..., Any],
         bridge: ObservationBridge | None = None,
         device_registry: DeviceTaskRegistryPort,
     ) -> None:
         self.deepseek_planner = deepseek_planner
         self.qwen_observer = qwen_observer
         self.adapter_factory = adapter_factory
-        self.trusted_observation_factory = (
-            trusted_observation_factory or TrustedObservation.from_scene
-        )
+        self.trusted_observation_factory = trusted_observation_factory
         self.evidence_store_factory = evidence_store_factory
         self.bridge = bridge or ObservationBridge()
         self.device_registry = device_registry

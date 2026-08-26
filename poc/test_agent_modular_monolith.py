@@ -1356,7 +1356,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertFalse((root / "observation_images.py").exists())
         self.assertTrue(domain_path.is_file())
         self.assertTrue(infrastructure_path.is_file())
-        self.assertIs(LocalFrameStability, qwen_visual_decision.LocalFrameStability)
+        self.assertFalse(hasattr(qwen_visual_decision, "LocalFrameStability"))
         self.assertIs(VisualObstruction, generic_scene_observer.VisualObstruction)
         self.assertIs(
             LocalFrameStability,
@@ -1398,6 +1398,86 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                     for item in node.names:
                         if item.name == "observation_images":
                             legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
+    def test_trusted_observation_has_one_layered_identity(self) -> None:
+        import agent.infrastructure.observation_images as observation_images
+        import agent.infrastructure.trusted_observation_frames as frame_adapter
+        import generic_scene_observer
+        import qwen_visual_decision
+        import universal_agent_orchestrator
+        from agent.domain.trusted_observation import TrustedObservation
+
+        root = Path(__file__).resolve().parent
+        domain_path = root / "agent" / "domain" / "trusted_observation.py"
+        adapter_path = (
+            root
+            / "agent"
+            / "infrastructure"
+            / "trusted_observation_frames.py"
+        )
+        qwen_path = root / "qwen_visual_decision.py"
+        observer_path = root / "generic_scene_observer.py"
+        self.assertTrue(domain_path.is_file())
+        self.assertTrue(adapter_path.is_file())
+        self.assertFalse((root / "trusted_observation.py").exists())
+        self.assertFalse(hasattr(qwen_visual_decision, "TrustedObservation"))
+        self.assertIs(
+            TrustedObservation,
+            universal_agent_orchestrator.TrustedObservation,
+        )
+        self.assertEqual(
+            "agent.domain.trusted_observation",
+            TrustedObservation.__module__,
+        )
+        self.assertTrue(callable(frame_adapter.build_trusted_observation))
+        self.assertTrue(
+            callable(frame_adapter.validate_trusted_observation_against_frames)
+        )
+        self.assertTrue(callable(observation_images.local_frame_fingerprint))
+        self.assertFalse(hasattr(generic_scene_observer, "_local_frame_fingerprint"))
+
+        domain_source = domain_path.read_text(encoding="utf-8")
+        adapter_source = adapter_path.read_text(encoding="utf-8")
+        qwen_source = qwen_path.read_text(encoding="utf-8")
+        observer_source = observer_path.read_text(encoding="utf-8")
+        self.assertEqual(1, domain_source.count("class TrustedObservation:"))
+        self.assertNotIn("class TrustedObservation:", qwen_source)
+        self.assertNotIn("def _canonicalize_trusted_scene(", qwen_source)
+        self.assertNotIn("def _trusted_target_local_candidate(", qwen_source)
+        self.assertNotIn("def _local_frame_fingerprint(", observer_source)
+        self.assertEqual(1, adapter_source.count("def build_trusted_observation("))
+        self.assertEqual(
+            1,
+            adapter_source.count(
+                "def validate_trusted_observation_against_frames("
+            ),
+        )
+        for forbidden in (
+            "agent.application",
+            "agent.infrastructure",
+            "from PIL",
+            "import os",
+            "import uuid",
+            "Image.",
+            "web_app",
+            "vision_agent",
+            "generic_scene_observer",
+            "robot_core",
+        ):
+            self.assertNotIn(forbidden, domain_source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "qwen_visual_decision"
+                    and any(item.name == "TrustedObservation" for item in node.names)
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:

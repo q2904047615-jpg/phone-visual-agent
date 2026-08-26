@@ -1,28 +1,20 @@
 from __future__ import annotations
 
 import json
-import os
-import re
 import time
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from PIL import Image
 
-from generic_scene_observer import _local_frame_fingerprint
 from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError as GenericStepPlanningError,
     GenericStepProposal,
 )
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
-from agent.infrastructure.observation_images import (
-    measure_frame_sharpness,
-    measure_local_stability,
-)
 import agent.domain.qwen_task_context as qwen_task_context_domain
-from agent.domain.visual_evidence import LocalFrameStability
+import agent.domain.trusted_observation as trusted_observation_domain
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.task_semantic_ir import TaskSemanticIR
 from agent.domain.ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene
@@ -32,7 +24,6 @@ from agent.domain.vision_model import VisionAgentError, public_model_identity
 QWEN_VISUAL_DECISION_PROTOCOL_VERSION = "2026-08-14-qwen-visual-decision-v5"
 QWEN_VISUAL_DECISION_MODEL_ROLE = "trusted_observation_single_step_selector"
 MIN_DECISION_CONFIDENCE = 0.72
-MIN_TRUSTED_FRAME_SHARPNESS = 4.0
 SINGLE_ELEMENT_ACTIONS = frozenset(
     {
         "tap_semantic", "dismiss_overlay", "input_verified_text", "press_enter",
@@ -66,200 +57,9 @@ def _targets_single_element(
 
 QWEN_PROTOCOL_ACTIONS = frozenset(CANONICAL_ACTION_KINDS)
 
-OBSERVATION_ID_PATTERN = re.compile(r"^obs_[A-Za-z0-9]{16,64}$")
 ACTIONABLE_EXACT_TEXT_ROLES = frozenset(
     {"button", "icon", "input", "tab", "toggle", "list_item", "keyboard_key"}
 )
-ROLE_PRIORITY = {
-    "input": 100,
-    "button": 95,
-    "icon": 90,
-    "keyboard_key": 85,
-    "list_item": 80,
-    "tab": 75,
-    "toggle": 75,
-    "dialog": 60,
-    "text": 40,
-    "image": 35,
-    "container": 10,
-    "unknown": 0,
-}
-
-
-def _structured_system_ui(scene: UIScene) -> dict[str, Any] | None:
-    facts = getattr(scene, "system_ui", None)
-    if facts is None:
-        return None
-    immersive = getattr(facts, "immersive_or_fullscreen", None)
-    navigation_visible = getattr(facts, "navigation_bar_visible", None)
-    if isinstance(facts, Mapping):
-        if immersive is None:
-            immersive = facts.get("immersive_or_fullscreen")
-        if navigation_visible is None:
-            navigation_visible = facts.get("navigation_bar_visible")
-    return {
-        "immersive_or_fullscreen": immersive,
-        "navigation_bar_visible": navigation_visible,
-    }
-
-@dataclass(frozen=True)
-class TrustedObservation:
-    observation_id: str
-    device_id: str
-    fingerprint: str
-    scene: UIScene
-    local_stability: LocalFrameStability
-    selected_frame_index: int
-    frame_sharpness_scores: tuple[float, ...]
-    candidate_aliases: tuple[tuple[str, str], ...] = ()
-    candidate_conflicts: tuple[dict[str, Any], ...] = ()
-
-    @classmethod
-    def from_scene(
-        cls,
-        *,
-        frames: list[Image.Image],
-        device_id: str,
-        scene: UIScene,
-        observation_id: str | None = None,
-    ) -> "TrustedObservation":
-        if len(frames) < 4:
-            raise VisionAgentError("可信观察至少需要4帧。")
-        if not qwen_task_context_domain.DEVICE_ID_PATTERN.fullmatch(str(device_id or "").strip()):
-            raise VisionAgentError(f"可信观察 device_id 无效：{device_id!r}")
-        stability = measure_local_stability(frames, allow_leading_outlier=True)
-        if not stability.stable:
-            raise VisionAgentError(
-                f"本地多帧稳定性检查未通过：{stability.reason}；不能建立可信观察。"
-            )
-        sharpness = tuple(measure_frame_sharpness(frame) for frame in frames)
-        # The single-step observer permits one stale leading camera frame and only
-        # exposes a fingerprint from the converged three-frame tail.  Reusing
-        # the leading sample here could make the same read-only capture reject
-        # itself merely because a transient overlay looked sharper.
-        stable_tail_start = max(0, len(frames) - min(3, len(frames)))
-        selected = max(
-            range(stable_tail_start, len(frames)),
-            key=sharpness.__getitem__,
-        )
-        sharpness_floor = float(
-            os.environ.get(
-                "ROBOT_LOCAL_FRAME_SHARPNESS_MIN",
-                str(MIN_TRUSTED_FRAME_SHARPNESS),
-            )
-        )
-        if sharpness[selected] < sharpness_floor:
-            raise VisionAgentError(
-                "当前最清晰帧仍然模糊："
-                f"sharpness={sharpness[selected]:.3f} < {sharpness_floor:.3f}。"
-            )
-        fingerprint = _local_frame_fingerprint(frames[selected].convert("RGB"))
-        scene.validate()
-        canonical_scene, aliases, conflicts = _canonicalize_trusted_scene(scene)
-        target_local_candidate = _trusted_target_local_candidate(
-            canonical_scene,
-            conflicts,
-        )
-        if not scene.stable or (
-            float(scene.confidence) < MIN_TARGET_CONFIDENCE
-            and target_local_candidate is None
-            and not canonical_scene.trusted_completion_evidence()
-        ):
-            raise VisionAgentError("页面不稳定或整体置信度不足，不能建立可信候选。")
-        if scene.fingerprint != fingerprint:
-            raise VisionAgentError(
-                "只读观察 fingerprint 与当前本地帧不一致，拒绝建立可信候选。"
-            )
-        resolved_id = observation_id or f"obs_{uuid.uuid4().hex}"
-        if not OBSERVATION_ID_PATTERN.fullmatch(resolved_id):
-            raise VisionAgentError(f"observation_id 格式无效：{resolved_id!r}")
-        result = cls(
-            observation_id=resolved_id,
-            device_id=str(device_id).strip(),
-            fingerprint=fingerprint,
-            scene=canonical_scene,
-            local_stability=stability,
-            selected_frame_index=selected,
-            frame_sharpness_scores=sharpness,
-            candidate_aliases=aliases,
-            candidate_conflicts=conflicts,
-        )
-        result.validate_against_frames(frames, allow_leading_outlier=True)
-        return result
-
-    def validate_against_frames(
-        self,
-        frames: list[Image.Image],
-        *,
-        allow_leading_outlier: bool = False,
-    ) -> None:
-        if len(frames) < 4:
-            raise VisionAgentError("新鲜度校验至少需要4帧。")
-        stability = measure_local_stability(
-            frames,
-            allow_leading_outlier=allow_leading_outlier,
-        )
-        if not stability.stable:
-            raise VisionAgentError(
-                f"当前画面已不稳定：{stability.reason}；旧观察失效。"
-            )
-        sharpness = [measure_frame_sharpness(frame) for frame in frames]
-        eligible_start = (
-            max(0, len(frames) - min(3, len(frames)))
-            if allow_leading_outlier
-            else 0
-        )
-        selected = max(
-            range(eligible_start, len(frames)),
-            key=sharpness.__getitem__,
-        )
-        sharpness_floor = float(
-            os.environ.get(
-                "ROBOT_LOCAL_FRAME_SHARPNESS_MIN",
-                str(MIN_TRUSTED_FRAME_SHARPNESS),
-            )
-        )
-        if sharpness[selected] < sharpness_floor:
-            raise VisionAgentError("当前新鲜画面仍然模糊，旧动作失效。")
-        current_fingerprint = _local_frame_fingerprint(
-            frames[selected].convert("RGB")
-        )
-        if current_fingerprint != self.fingerprint:
-            raise VisionAgentError("当前画面 fingerprint 已变化，旧动作失效。")
-        if self.scene.fingerprint != self.fingerprint:
-            raise VisionAgentError("可信观察内部 fingerprint 不一致。")
-
-    def get_candidate(self, element_id: str) -> UIElement:
-        return self.scene.get_element(element_id)
-
-    def target_local_candidate(self) -> UIElement | None:
-        """Return the sole conflict-free goal element usable on a dynamic page."""
-
-        return _trusted_target_local_candidate(
-            self.scene,
-            self.candidate_conflicts,
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        scene = self.scene.to_dict()
-        system_ui = _structured_system_ui(self.scene)
-        if system_ui is not None:
-            scene["system_ui"] = system_ui
-        return {
-            "observation_id": self.observation_id,
-            "device_id": self.device_id,
-            "fingerprint": self.fingerprint,
-            "scene": scene,
-            "local_stability": self.local_stability.to_dict(),
-            "selected_frame_index": self.selected_frame_index,
-            "frame_sharpness_scores": [
-                round(value, 3) for value in self.frame_sharpness_scores
-            ],
-            "candidate_aliases": dict(self.candidate_aliases),
-            "candidate_conflicts": [dict(item) for item in self.candidate_conflicts],
-        }
-
-
 @dataclass(frozen=True)
 class ModelPageState:
     foreground_app_id: str
@@ -315,7 +115,7 @@ class VisualTargetRegion:
     destination_element_id: str = ""
     destination_bounds: tuple[float, float, float, float] | None = None
 
-    def validate(self, observation: TrustedObservation, action: SemanticAction) -> None:
+    def validate(self, observation: trusted_observation_domain.TrustedObservation, action: SemanticAction) -> None:
         if self.kind not in {"element", "element_path", "screen", "system_navigation"}:
             raise GenericStepPlanningError(f"不支持的目标区域类型：{self.kind}")
         if len(self.bounds) != 4:
@@ -405,7 +205,7 @@ class QwenVisualDecision:
     observation_id: str
     fingerprint: str
     page_state: ModelPageState
-    trusted_observation: TrustedObservation
+    trusted_observation: trusted_observation_domain.TrustedObservation
     proposal: GenericStepProposal
     target_region: VisualTargetRegion | None
     expected_result: dict[str, Any]
@@ -570,7 +370,7 @@ class QwenVisualDecision:
     def validate_fresh(
         self,
         current_context: qwen_task_context_domain.QwenTaskContext | dict[str, Any],
-        current_observation: TrustedObservation,
+        current_observation: trusted_observation_domain.TrustedObservation,
     ) -> None:
         context = (
             current_context
@@ -618,8 +418,16 @@ class QwenVisualDecision:
 class QwenVisualDecisionObserver:
     """Select one canonical action locally from one trusted observation."""
 
-    def __init__(self, provider: Any) -> None:
+    def __init__(
+        self,
+        provider: Any,
+        *,
+        trusted_observation_frame_validator: Callable[..., None],
+    ) -> None:
         self.provider = provider
+        self.trusted_observation_frame_validator = (
+            trusted_observation_frame_validator
+        )
         self.last_raw_response = ""
         self.last_diagnostics: dict[str, Any] = {}
         self._metrics = {
@@ -654,7 +462,7 @@ class QwenVisualDecisionObserver:
         *,
         frames: list[Image.Image],
         task_context: qwen_task_context_domain.QwenTaskContext | dict[str, Any],
-        trusted_observation: TrustedObservation,
+        trusted_observation: trusted_observation_domain.TrustedObservation,
         decision_number: int = 1,
         available_action_kinds: Iterable[str] | None = None,
     ) -> QwenVisualDecision:
@@ -674,7 +482,8 @@ class QwenVisualDecisionObserver:
         # observation, so apply the observer's one-leading-frame tolerance.
         # Confirmation-time recapture and post-action verification use their
         # own stricter full-window stability checks.
-        trusted_observation.validate_against_frames(
+        self.trusted_observation_frame_validator(
+            trusted_observation,
             frames,
             allow_leading_outlier=True,
         )
@@ -828,7 +637,7 @@ class QwenVisualDecisionObserver:
 
 def _selection_choices(
     context: qwen_task_context_domain.QwenTaskContext,
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
     available_action_kinds: frozenset[str],
 ) -> tuple[dict[str, Any], ...]:
     """Build generic action choices from the trusted scene, never app steps."""
@@ -878,7 +687,7 @@ def _deterministic_exact_selection_payload(
     context: qwen_task_context_domain.QwenTaskContext,
     choices: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     *,
-    observation: TrustedObservation | None = None,
+    observation: trusted_observation_domain.TrustedObservation | None = None,
 ) -> dict[str, Any] | None:
     """Select one canonical candidate from the sole step observation.
 
@@ -1053,7 +862,7 @@ def _hydrate_canonical_selection(
     payload: Mapping[str, Any],
     *,
     context: qwen_task_context_domain.QwenTaskContext,
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
     choices: tuple[dict[str, Any], ...],
 ) -> QwenVisualDecision:
     """Hydrate the already-selected immutable canonical candidate."""
@@ -1186,7 +995,7 @@ def _hydrate_canonical_selection(
 
 def _canonical_target_region(
     action: SemanticAction,
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
 ) -> VisualTargetRegion:
     if _targets_single_element(action):
         element = observation.get_candidate(
@@ -1280,194 +1089,9 @@ def _typed_required_action_kinds(context: qwen_task_context_domain.QwenTaskConte
     )
 
 
-def _canonicalize_trusted_scene(
-    scene: UIScene,
-) -> tuple[UIScene, tuple[tuple[str, str], ...], tuple[dict[str, Any], ...]]:
-    """Collapse duplicate descriptions of one visual object, preserving bounds.
-
-    The canonical element is always one of the original observed elements. No
-    coordinate is averaged or invented. Strongly overlapping but semantically
-    conflicting elements stay separate and are reported as conflicts.
-    """
-
-    elements = list(scene.elements)
-    if len(elements) < 2:
-        return scene, (), ()
-    parents = list(range(len(elements)))
-
-    def find(index: int) -> int:
-        while parents[index] != index:
-            parents[index] = parents[parents[index]]
-            index = parents[index]
-        return index
-
-    def union(left: int, right: int) -> None:
-        left_root = find(left)
-        right_root = find(right)
-        if left_root != right_root:
-            parents[right_root] = left_root
-
-    conflicts: list[dict[str, Any]] = []
-    for left in range(len(elements)):
-        for right in range(left + 1, len(elements)):
-            overlap = _bounds_overlap(elements[left].bounds, elements[right].bounds)
-            compatible = _elements_semantically_compatible(
-                elements[left],
-                elements[right],
-            )
-            exact_same_role = bool(
-                elements[left].label.strip()
-                and elements[left].label.strip().casefold()
-                == elements[right].label.strip().casefold()
-                and elements[left].role == elements[right].role
-            )
-            if compatible and (
-                overlap["intersection_over_smaller"] >= 0.85
-                or (exact_same_role and overlap["iou"] >= 0.5)
-            ):
-                union(left, right)
-            elif overlap["iou"] >= 0.5:
-                conflicts.append(
-                    {
-                        "kind": "overlapping_semantic_conflict",
-                        "element_ids": [
-                            elements[left].element_id,
-                            elements[right].element_id,
-                        ],
-                        "iou": round(overlap["iou"], 4),
-                    }
-                )
-
-    groups: dict[int, list[UIElement]] = {}
-    for index, element in enumerate(elements):
-        groups.setdefault(find(index), []).append(element)
-    canonical: list[UIElement] = []
-    aliases: list[tuple[str, str]] = []
-    for group in groups.values():
-        selected = max(group, key=_canonical_element_rank)
-        canonical.append(selected)
-        if len(group) > 1:
-            duplicate_ids = sorted(item.element_id for item in group)
-            conflicts.append(
-                {
-                    "kind": "duplicate_visual_object_collapsed",
-                    "canonical_element_id": selected.element_id,
-                    "element_ids": duplicate_ids,
-                }
-            )
-            aliases.extend(
-                (item.element_id, selected.element_id)
-                for item in group
-                if item.element_id != selected.element_id
-            )
-    canonical.sort(key=lambda item: elements.index(item))
-    if len(canonical) == len(elements):
-        return scene, tuple(sorted(aliases)), tuple(conflicts)
-    canonical_scene = UIScene(
-            app_id=scene.app_id,
-            screen_id=scene.screen_id,
-            summary=scene.summary,
-            elements=tuple(canonical),
-            overlays=scene.overlays,
-            stable=scene.stable,
-            confidence=scene.confidence,
-            fingerprint=scene.fingerprint,
-            protocol_version=scene.protocol_version,
-            system_ui=scene.system_ui,
-            camera_alignment=scene.camera_alignment,
-        )
-    return (
-        canonical_scene,
-        tuple(sorted(aliases)),
-        tuple(conflicts),
-    )
-
-
-def _trusted_target_local_candidate(
-    scene: UIScene,
-    conflicts: tuple[dict[str, Any], ...],
-) -> UIElement | None:
-    """Resolve one strong goal element and fail closed on unresolved overlap."""
-
-    candidate = scene.unique_trusted_goal_element()
-    if candidate is None:
-        return None
-    for conflict in conflicts:
-        conflict_ids = tuple(str(item) for item in conflict.get("element_ids") or ())
-        if candidate.element_id not in conflict_ids:
-            continue
-        if (
-            conflict.get("kind") == "duplicate_visual_object_collapsed"
-            and conflict.get("canonical_element_id") == candidate.element_id
-        ):
-            continue
-        return None
-    return candidate
-
-
-def _canonical_element_rank(element: UIElement) -> tuple[int, int, float, float]:
-    left, top, right, bottom = element.bounds
-    area = (right - left) * (bottom - top)
-    locally_audited_input_control = int(
-        element.element_id.startswith("local_audited_")
-        and (
-            (
-                element.meaning == "ime_exact_candidate"
-                and element.states.get("ime_candidate") is True
-            )
-            or (
-                element.meaning == "input_exact_literal_key"
-                and element.states.get("input_literal_key") is True
-            )
-            or element.states.get("keyboard_layout_switch") is True
-            or element.states.get("keyboard_case_switch") is True
-            or element.states.get("keyboard_input_mode_switch") is True
-        )
-    )
-    return (
-        locally_audited_input_control,
-        ROLE_PRIORITY.get(element.role, 0),
-        float(element.confidence),
-        -area,
-    )
-
-
-def _elements_semantically_compatible(left: UIElement, right: UIElement) -> bool:
-    left_texts = {
-        text.strip().casefold()
-        for text in (left.label, *left.evidence)
-        if text.strip()
-    }
-    right_texts = {
-        text.strip().casefold()
-        for text in (right.label, *right.evidence)
-        if text.strip()
-    }
-    if left_texts and right_texts and left_texts.intersection(right_texts):
-        return True
-    return left.meaning.strip().casefold() == right.meaning.strip().casefold()
-
-
-def _bounds_overlap(
-    left: tuple[float, float, float, float],
-    right: tuple[float, float, float, float],
-) -> dict[str, float]:
-    intersection_width = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
-    intersection_height = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
-    intersection = intersection_width * intersection_height
-    left_area = (left[2] - left[0]) * (left[3] - left[1])
-    right_area = (right[2] - right[0]) * (right[3] - right[1])
-    union = left_area + right_area - intersection
-    smaller = min(left_area, right_area)
-    return {
-        "iou": intersection / union if union > 0 else 0.0,
-        "intersection_over_smaller": intersection / smaller if smaller > 0 else 0.0,
-    }
-
-
 def _launcher_app_entry_candidate_ids(
     context: qwen_task_context_domain.QwenTaskContext,
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
 ) -> tuple[str, ...]:
     """Return one typed App entry before applying inner-page text gates."""
 
@@ -1508,7 +1132,7 @@ def _launcher_app_entry_candidate_ids(
 
 def _exact_text_candidate_block(
     context: qwen_task_context_domain.QwenTaskContext,
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
 ) -> tuple[str, str] | None:
     """Reject missing or ambiguous structured exact-text targets locally."""
 
@@ -1553,7 +1177,7 @@ def _exact_text_candidate_block(
 
 def _required_exact_candidate_ids(
     context: qwen_task_context_domain.QwenTaskContext,
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
 ) -> set[str]:
     if _launcher_app_entry_candidate_ids(context, observation):
         return set()
@@ -1588,7 +1212,7 @@ def _required_exact_candidate_ids(
 
 def _identity_text_candidate_block(
     context: qwen_task_context_domain.QwenTaskContext,
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
 ) -> tuple[str, str] | None:
     if _launcher_app_entry_candidate_ids(context, observation):
         return None
@@ -1602,7 +1226,7 @@ def _identity_text_candidate_block(
 
 
 def _matching_identity_text_candidates(
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
     required_text: str,
 ) -> list[str]:
     return [
@@ -1685,7 +1309,7 @@ def _surface_identity_text_matches(label: str, required_text: str) -> bool:
 
 
 def _matching_surface_identity_candidates(
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
     required_text: str,
 ) -> list[str]:
     return [
@@ -1745,7 +1369,7 @@ def _surface_descriptor_identity_candidate_ids(
 
 def _identity_scoped_exact_text_matches(
     context: qwen_task_context_domain.QwenTaskContext,
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
     required_text: str,
 ) -> list[str] | None:
     """Resolve exact text as surface identity for non-element actions.
@@ -1775,7 +1399,7 @@ def _identity_scoped_exact_text_matches(
 
 def _matching_exact_text_candidates(
     context: qwen_task_context_domain.QwenTaskContext,
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
     required_text: str,
 ) -> list[str]:
     active_input_matches = _active_input_transaction_exact_candidate_ids(
@@ -1807,7 +1431,7 @@ def _matching_exact_text_candidates(
 
 def _active_input_transaction_exact_candidate_ids(
     context: qwen_task_context_domain.QwenTaskContext,
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
     required_text: str,
 ) -> list[str] | None:
     """Keep one typed input field bound after its placeholder disappears.
@@ -1877,7 +1501,7 @@ def _active_input_transaction_exact_candidate_ids(
 
 def _local_blocked_decision(
     context: qwen_task_context_domain.QwenTaskContext,
-    observation: TrustedObservation,
+    observation: trusted_observation_domain.TrustedObservation,
     *,
     reason: str,
 ) -> QwenVisualDecision:

@@ -19,6 +19,7 @@ from agent.domain.canonical_action_kinds import (
 )
 from agent.infrastructure.observation_images import (
     consensus_top_edge_obstructions,
+    local_frame_fingerprint,
     measure_frame_sharpness,
     measure_local_stability,
 )
@@ -354,7 +355,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 key=sharpness_scores.__getitem__,
             )
             frame = frames[selected_frame_index].convert("RGB")
-            fingerprint = _local_frame_fingerprint(frame)
+            fingerprint = local_frame_fingerprint(frame)
             context = generic_goal_domain.safe_goal_context(goal_context or {})
             cache_key = _observation_cache_key(
                 device_id=device_id,
@@ -7065,9 +7066,6 @@ def _normalize_known_scene_enums(payload: dict[str, Any]) -> None:
 
 
 
-def _local_frame_fingerprint(frame: Image.Image) -> str:
-    compact = frame.convert("L").resize((64, 96), Image.Resampling.BILINEAR)
-    return hashlib.sha256(compact.tobytes()).hexdigest()[:20]
 
 
 def _observation_cache_key(

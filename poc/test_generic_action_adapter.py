@@ -32,8 +32,8 @@ from agent.domain.generic_goal import GenericIntentDraft
 from generic_scene_observer import (
     SINGLE_STEP_OUTPUT_TOKENS,
     SingleStepGenericSceneObserver,
-    _local_frame_fingerprint,
 )
+from agent.infrastructure.observation_images import local_frame_fingerprint
 from agent.domain.input_value_lineage import (
     input_screen_identity_compatible,
     input_screen_identity_family,
@@ -1566,7 +1566,7 @@ class GenericActionAdapterTests(unittest.TestCase):
 
     def test_literal_key_reuses_single_step_scene_on_matching_frames(self):
         gray = Image.new("RGB", (540, 960), "gray")
-        planned_fingerprint = _local_frame_fingerprint(gray)
+        planned_fingerprint = local_frame_fingerprint(gray)
         planned = self._literal_input_scene(planned_fingerprint)
         fresh_missing = self._literal_input_scene(
             planned_fingerprint,
@@ -1669,7 +1669,7 @@ class GenericActionAdapterTests(unittest.TestCase):
 
     def test_press_enter_executes_one_verified_tap_and_matches_exact_newline(self):
         gray = Image.new("RGB", (540, 960), "gray")
-        fingerprint = _local_frame_fingerprint(gray)
+        fingerprint = local_frame_fingerprint(gray)
 
         def enter_scene(value, *, audited=False, include_key=True, fp=fingerprint):
             source = self._literal_input_scene(
@@ -1926,7 +1926,7 @@ class GenericActionAdapterTests(unittest.TestCase):
     def test_strict_input_execute_uses_zero_duplicate_pre_action_model_audits(self):
         gray = Image.new("RGB", (540, 960), "gray")
         planned = self._strict_primary_input_scene(
-            _local_frame_fingerprint(gray)
+            local_frame_fingerprint(gray)
         )
         field = planned.elements[0]
         after_field = replace(
@@ -4864,8 +4864,8 @@ class GenericActionAdapterTests(unittest.TestCase):
     def test_execution_result_keeps_exact_four_verified_after_frames(self):
         gray = Image.new("RGB", (540, 960), "gray")
         white = Image.new("RGB", (540, 960), "white")
-        before_fingerprint = _local_frame_fingerprint(gray)
-        after_fingerprint = _local_frame_fingerprint(white)
+        before_fingerprint = local_frame_fingerprint(gray)
+        after_fingerprint = local_frame_fingerprint(white)
         planned = scene(before_fingerprint)
         fresh = scene(before_fingerprint, element_id="fresh")
         after = scene(
@@ -4926,8 +4926,8 @@ class GenericActionAdapterTests(unittest.TestCase):
     def test_after_frame_fingerprint_matches_after_scene(self):
         gray = Image.new("RGB", (540, 960), "gray")
         white = Image.new("RGB", (540, 960), "white")
-        before_fingerprint = _local_frame_fingerprint(gray)
-        after_fingerprint = _local_frame_fingerprint(white)
+        before_fingerprint = local_frame_fingerprint(gray)
+        after_fingerprint = local_frame_fingerprint(white)
         adapter = GenericSingleActionAdapter(
             capture=SequenceCapture(["gray"] * 4 + ["white"] * 4),
             observer=FakeSceneObserver(
@@ -4953,7 +4953,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             confirmed=True,
         )
 
-        selected_fingerprint = _local_frame_fingerprint(result.after_frames[0])
+        selected_fingerprint = local_frame_fingerprint(result.after_frames[0])
         self.assertEqual(result.after_scene.fingerprint, selected_fingerprint)
 
     def test_rebind_accepts_same_visible_target_when_meaning_wording_changes(self):

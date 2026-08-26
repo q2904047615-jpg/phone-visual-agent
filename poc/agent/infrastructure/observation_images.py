@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from typing import Iterable
 
 from PIL import Image, ImageChops, ImageFilter, ImageStat
 
 from agent.domain.visual_evidence import LocalFrameStability, VisualObstruction
+
+
+def local_frame_fingerprint(frame: Image.Image) -> str:
+    compact = frame.convert("L").resize((64, 96), Image.Resampling.BILINEAR)
+    return hashlib.sha256(compact.tobytes()).hexdigest()[:20]
 
 
 def _ratio_bounds(

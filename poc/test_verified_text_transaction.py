@@ -1,6 +1,6 @@
 import unittest
 
-from verified_text_transaction import (
+from agent.domain.verified_text_transaction import (
     VerifiedTextTransactionError,
     is_direct_latin_segment,
     keyboard_layout_switch_advances,

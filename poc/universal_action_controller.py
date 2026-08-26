@@ -6,8 +6,8 @@ import math
 from typing import Any
 
 from agent.domain.semantic_action import SemanticAction
-from text_input_utils import editable_character_count
-from verified_text_transaction import (
+from agent.domain.text_input_utils import editable_character_count
+from agent.domain.verified_text_transaction import (
     VerifiedTextTransactionError,
     is_direct_latin_segment,
     plan_from_input_states,

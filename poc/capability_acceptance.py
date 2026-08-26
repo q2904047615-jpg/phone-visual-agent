@@ -32,7 +32,7 @@ from universal_action_controller import (
     UniversalActionController,
     UniversalActionError,
 )
-from verified_text_transaction import is_direct_latin_segment
+from agent.domain.verified_text_transaction import is_direct_latin_segment
 
 
 PROMOTABLE_ACTIONS = frozenset(

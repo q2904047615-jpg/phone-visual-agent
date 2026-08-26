@@ -45,7 +45,7 @@ from vision_agent import (
     _image_request_size,
 )
 from vision_model_config import public_model_identity
-from verified_text_transaction import (
+from agent.domain.verified_text_transaction import (
     VerifiedTextTransactionError,
     next_keyboard_layout_towards,
     plan_next_verified_input,

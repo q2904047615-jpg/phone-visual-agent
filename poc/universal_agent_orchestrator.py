@@ -64,7 +64,7 @@ from task_semantic_ir import (
     TaskSemanticIRError,
     compile_formal_semantic_authority,
 )
-from verified_text_transaction import (
+from agent.domain.verified_text_transaction import (
     VerifiedTextTransactionError,
     keyboard_layout_switch_advances,
     plan_next_verified_input,

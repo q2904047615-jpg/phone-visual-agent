@@ -12,7 +12,10 @@ from typing import Any
 
 from PIL import Image, ImageOps
 
-from verified_text_transaction import VerifiedTextTransactionError, local_pinyin
+from agent.domain.verified_text_transaction import (
+    VerifiedTextTransactionError,
+    local_pinyin,
+)
 
 
 TYPED_INPUT_LINEAGE_VERSION = "2026-08-24-typed-input-lineage-v6"

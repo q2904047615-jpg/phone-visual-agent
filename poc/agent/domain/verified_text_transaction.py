@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from text_input_utils import normalize_user_text
+from .text_input_utils import normalize_user_text
 
 
 class VerifiedTextTransactionError(ValueError):

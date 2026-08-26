@@ -11,7 +11,7 @@ from task_semantic_ir import (
     TaskSemanticIR,
 )
 from agent.domain.ui_scene import UIElement, UIScene
-from verified_text_transaction import plan_from_input_states
+from agent.domain.verified_text_transaction import plan_from_input_states
 from canonical_action_protocol import (
     CANONICAL_ACTION_PROTOCOL,
     canonical_candidate_expected_result,

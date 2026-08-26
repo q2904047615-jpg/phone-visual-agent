@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from text_input_utils import (
+from agent.domain.text_input_utils import (
     editable_character_count,
     normalize_user_text,
 )

@@ -174,7 +174,9 @@ class FixedAppRetirementTests(unittest.TestCase):
         self.assertNotIn("固定 App", text)
 
     def test_retired_input_segmentation_authority_is_physically_absent(self) -> None:
-        text = (ROOT / "text_input_utils.py").read_text(encoding="utf-8")
+        text = (
+            ROOT / "agent" / "domain" / "text_input_utils.py"
+        ).read_text(encoding="utf-8")
         for retired in (
             "split_input_segments",
             "InputAttemptState",

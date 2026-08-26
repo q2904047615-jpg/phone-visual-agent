@@ -14,7 +14,7 @@ from orientation_safety import (
     OrientationCredential,
     PhysicalExecutionGate,
 )
-from verified_text_transaction import (
+from agent.domain.verified_text_transaction import (
     MAX_DIRECT_LATIN_SEGMENT_CHARS,
     VerifiedTextTransactionError,
     plan_next_verified_input,

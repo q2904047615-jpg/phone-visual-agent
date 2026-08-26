@@ -624,6 +624,71 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                         unexpected.append(f"{path.name}: {name}")
         self.assertEqual([], unexpected)
 
+    def test_verified_text_planner_has_one_domain_identity(self) -> None:
+        import canonical_action_protocol as canonical_protocol
+        from agent.domain.verified_text_transaction import (
+            VerifiedTextTransactionError,
+        )
+
+        root = Path(__file__).resolve().parent
+        self.assertFalse((root / "text_input_utils.py").exists())
+        self.assertFalse((root / "verified_text_transaction.py").exists())
+        self.assertIs(
+            VerifiedTextTransactionError,
+            canonical_protocol.VerifiedTextTransactionError,
+        )
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module
+                    in {"text_input_utils", "verified_text_transaction"}
+                ):
+                    legacy_imports.append(
+                        f"{path.relative_to(root)}: {node.module}"
+                    )
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name in {
+                            "text_input_utils",
+                            "verified_text_transaction",
+                        }:
+                            legacy_imports.append(
+                                f"{path.relative_to(root)}: {item.name}"
+                            )
+        self.assertEqual([], legacy_imports)
+
+        allowed = {
+            "__future__",
+            "dataclasses",
+            "pypinyin",
+            "re",
+            "typing",
+            "unicodedata",
+        }
+        unexpected: list[str] = []
+        for path in (
+            root / "agent" / "domain" / "text_input_utils.py",
+            root / "agent" / "domain" / "verified_text_transaction.py",
+        ):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                names: list[str] = []
+                if isinstance(node, ast.Import):
+                    names = [item.name for item in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module]
+                for name in names:
+                    if isinstance(node, ast.ImportFrom) and node.level:
+                        continue
+                    if name.split(".")[0] not in allowed:
+                        unexpected.append(f"{path.name}: {name}")
+        self.assertEqual([], unexpected)
+
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent
         self.assertFalse((root / "device_executor.py").exists())

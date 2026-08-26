@@ -23,10 +23,13 @@ from agent.domain import EvidenceStoreError
 from agent.infrastructure import (
     CameraPreviewUnavailable,
     DeviceCameraCoordinator,
+    DeviceControllerRegistry,
+    DeviceControllerRegistryError,
     DeviceTaskRegistry,
     FileSystemAgentEvidenceStore,
     InterProcessLease,
 )
+from capability_acceptance import PROMOTABLE_ACTIONS
 from canonical_action_protocol import GenericStepProposal
 from generic_scene_observer import SINGLE_STEP_SCENE_OBSERVER_VERSION
 from robot_core import (
@@ -1098,7 +1101,11 @@ class DeepSeekIntentProviderTests(unittest.TestCase):
 
 class DeviceControllerRegistryTests(unittest.TestCase):
     def test_default_real_device_advertises_only_actions_with_live_evidence(self) -> None:
-        registry = web_app.DeviceControllerRegistry(web_app.DEVICE_REGISTRY_PATH, mock=False)
+        registry = DeviceControllerRegistry(
+            web_app.DEVICE_REGISTRY_PATH,
+            promotable_actions=PROMOTABLE_ACTIONS,
+            mock=False,
+        )
         controller = registry.controller(registry.default_device_id)
 
         self.assertTrue(controller.hardware_capabilities()["input_verified_text"])
@@ -1132,7 +1139,11 @@ class DeviceControllerRegistryTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            registry = web_app.DeviceControllerRegistry(path, mock=False)
+            registry = DeviceControllerRegistry(
+                path,
+                promotable_actions=PROMOTABLE_ACTIONS,
+                mock=False,
+            )
 
             first = registry.controller("phone-a")
             second = registry.controller("phone-b")
@@ -1142,7 +1153,7 @@ class DeviceControllerRegistryTests(unittest.TestCase):
         self.assertEqual(second.title, "controller-b")
         self.assertTrue(str(first.calibration_path).endswith("calibration-a.json"))
         self.assertTrue(str(second.calibration_path).endswith("calibration-b.json"))
-        with self.assertRaisesRegex(web_app.UniversalAgentOrchestratorError, "未登记"):
+        with self.assertRaisesRegex(DeviceControllerRegistryError, "未登记"):
             registry.controller("phone-c")
 
     def test_duplicate_enabled_window_fails_closed(self) -> None:
@@ -1162,7 +1173,79 @@ class DeviceControllerRegistryTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(RuntimeError, "同一个机械臂控制窗口"):
-                web_app.DeviceControllerRegistry(path)
+                DeviceControllerRegistry(
+                    path,
+                    promotable_actions=PROMOTABLE_ACTIONS,
+                )
+
+    def test_mock_devices_remain_independent_without_mutating_descriptors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "devices.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "default_device_id": "phone-a",
+                        "devices": [
+                            {
+                                "device_id": "phone-a",
+                                "enabled": True,
+                                "window_title": "controller-a",
+                                "calibration_path": "a.json",
+                            },
+                            {
+                                "device_id": "phone-b",
+                                "enabled": True,
+                                "window_title": "controller-b",
+                                "calibration_path": "b.json",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            registry = DeviceControllerRegistry(
+                path,
+                promotable_actions=PROMOTABLE_ACTIONS,
+                mock=True,
+            )
+
+            first = registry.controller("phone-a")
+            second = registry.controller("phone-b")
+            descriptors_before = registry.descriptors()
+
+        self.assertIsInstance(first, _MockRobotController)
+        self.assertIsInstance(second, _MockRobotController)
+        self.assertIsNot(first, second)
+        self.assertEqual(descriptors_before, registry.descriptors())
+
+    def test_invalid_verified_actions_fails_before_controller_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "devices.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "default_device_id": "phone-a",
+                        "devices": [
+                            {
+                                "device_id": "phone-a",
+                                "enabled": True,
+                                "verified_actions": ["back", ""],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                DeviceControllerRegistryError,
+                "verified_actions 格式无效",
+            ):
+                DeviceControllerRegistry(
+                    path,
+                    promotable_actions=PROMOTABLE_ACTIONS,
+                )
 
 
 class DeviceCameraCoordinatorTests(unittest.TestCase):

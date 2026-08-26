@@ -518,6 +518,40 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertIn("class DeviceCameraCoordinator", infrastructure_source)
         self.assertIn("class CameraPreviewUnavailable", infrastructure_source)
 
+    def test_device_controller_registry_has_one_infrastructure_implementation(self) -> None:
+        root = Path(__file__).resolve().parent
+        web_source = (root / "web_app.py").read_text(encoding="utf-8")
+        infrastructure_path = (
+            root
+            / "agent"
+            / "infrastructure"
+            / "device_controller_registry.py"
+        )
+        infrastructure_source = infrastructure_path.read_text(encoding="utf-8")
+
+        self.assertNotIn("class DeviceControllerRegistry", web_source)
+        self.assertIn("class DeviceControllerRegistry", infrastructure_source)
+        self.assertIn(
+            "promotable_actions=PROMOTABLE_ACTIONS",
+            web_source,
+        )
+        self.assertNotIn("capability_acceptance", infrastructure_source)
+        self.assertNotIn("universal_agent_orchestrator", infrastructure_source)
+
+        forbidden = (
+            "web_app.DeviceControllerRegistry",
+            "from web_app import DeviceControllerRegistry",
+        )
+        violations: list[str] = []
+        for path in root.rglob("test_*.py"):
+            if path.resolve() == Path(__file__).resolve():
+                continue
+            source = path.read_text(encoding="utf-8")
+            for value in forbidden:
+                if value in source:
+                    violations.append(f"{path.name}: {value}")
+        self.assertEqual([], violations)
+
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent
         self.assertFalse((root / "device_executor.py").exists())

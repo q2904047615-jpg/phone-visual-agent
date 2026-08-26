@@ -45,7 +45,7 @@ scope 和一次性执行权；动作后重新观察并验证。普通只读/导�
 
 - `agent/domain/` 定义会话、设备执行、会话证据、canonical 选择回执、一次性确认作用域和已验证 App 表面血缘合同；
 - `agent/application/` 负责运行会话聚合以及开始、确认、重观察、自动推进、暂停和取消用例；
-- `agent/infrastructure/` 提供唯一的线程安全进程内会话仓储、Robot/Replay 执行、设备独占、文件系统证据持久化和每设备相机协调；
+- `agent/infrastructure/` 提供唯一的线程安全进程内会话仓储、Robot/Replay 执行、设备独占、文件系统证据持久化、每设备相机协调和设备控制器注册表；
 - `web_app.py` 保留 HTTP/Pydantic 转换与组合根职责。
 
 尚未迁移的 DeepSeek、Qwen、canonical action 目录、Controller 和 typed input lineage 仍是正式实现；不得为目录整齐而增加转发包装或第二套权威。每个后续批次只迁移一个正在运行的业务切片，并在新入口接管后删除旧调用。

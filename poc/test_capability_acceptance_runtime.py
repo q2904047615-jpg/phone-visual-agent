@@ -8,7 +8,11 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 import capability_acceptance_runtime as acceptance_runtime
-from agent.infrastructure import DeviceTaskRegistry
+from agent.infrastructure import (
+    DeviceControllerRegistry,
+    DeviceTaskRegistry,
+    ProvisionalDeviceControllerError,
+)
 from orientation_safety import (
     PhysicalExecutionGate,
     _mint_audited_credential,
@@ -18,13 +22,11 @@ from orientation_safety import (
 from capability_acceptance import (
     CapabilityAcceptanceError,
     CapabilityRegistryPromoter,
+    PROMOTABLE_ACTIONS,
     validate_acceptance_report,
 )
 from capability_acceptance_runtime import CapabilityAcceptanceManager
 from generic_action_adapter import GenericActionAdapterError
-from web_app import DeviceControllerRegistry
-
-
 class ProvisionalControllerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -69,7 +71,11 @@ class ProvisionalControllerTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        self.registry = DeviceControllerRegistry(self.registry_path, mock=False)
+        self.registry = DeviceControllerRegistry(
+            self.registry_path,
+            promotable_actions=PROMOTABLE_ACTIONS,
+            mock=False,
+        )
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -105,7 +111,10 @@ class ProvisionalControllerTests(unittest.TestCase):
         with patch("robot_core.seller_gui.find_window") as find_window:
             for device_id, action, message in cases:
                 with self.subTest(device_id=device_id, action=action):
-                    with self.assertRaisesRegex(CapabilityAcceptanceError, message):
+                    with self.assertRaisesRegex(
+                        ProvisionalDeviceControllerError,
+                        message,
+                    ):
                         self.registry.provisional_controller(device_id, action)
 
         find_window.assert_not_called()

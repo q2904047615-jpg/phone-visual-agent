@@ -17,10 +17,10 @@ from PIL import Image
 from generic_scene_observer import SingleStepGenericSceneObserver
 from qwen_runtime_errors import classify_qwen_error, failure_diagnostics
 from qwen_visual_decision import (
-    QwenTaskContext,
     QwenVisualDecisionObserver,
     TrustedObservation,
 )
+from agent.domain.qwen_task_context import QwenTaskContext
 from vision_agent import DashScopeVisionProvider
 from agent.domain.vision_model import VisionAgentError
 

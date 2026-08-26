@@ -1081,6 +1081,62 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_qwen_task_context_has_one_domain_identity(self) -> None:
+        import qwen_visual_decision
+        import universal_agent_orchestrator
+        from agent.domain.qwen_task_context import (
+            QwenTaskContext,
+            SUPPORTED_TASK_CONTEXT_PROTOCOL,
+        )
+
+        root = Path(__file__).resolve().parent
+        domain_path = root / "agent" / "domain" / "qwen_task_context.py"
+        provider_path = root / "qwen_visual_decision.py"
+        self.assertTrue(domain_path.is_file())
+        self.assertFalse((root / "qwen_task_context.py").exists())
+        self.assertFalse(hasattr(qwen_visual_decision, "QwenTaskContext"))
+        self.assertIs(QwenTaskContext, universal_agent_orchestrator.QwenTaskContext)
+        self.assertEqual(
+            "2026-08-20-deepseek-typed-task-graph-v4",
+            SUPPORTED_TASK_CONTEXT_PROTOCOL,
+        )
+        self.assertEqual("agent.domain.qwen_task_context", QwenTaskContext.__module__)
+
+        domain_source = domain_path.read_text(encoding="utf-8")
+        provider_source = provider_path.read_text(encoding="utf-8")
+        self.assertEqual(1, domain_source.count("class QwenTaskContext("))
+        self.assertNotIn("class QwenTaskContext(", provider_source)
+        self.assertNotIn("def _require_dict(", provider_source)
+        self.assertNotIn("def _text_tuple(", provider_source)
+        self.assertNotIn("def _dict_tuple(", provider_source)
+        for forbidden in (
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "agent.application",
+            "agent.infrastructure",
+            "from PIL",
+            "import os",
+            "httpx",
+            "vision_agent",
+            "generic_scene_observer",
+            "robot_core",
+        ):
+            self.assertNotIn(forbidden, domain_source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "qwen_visual_decision"
+                    and any(item.name == "QwenTaskContext" for item in node.names)
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_deepseek_task_graph_has_one_application_entry(self) -> None:
         import agent.application.deepseek_task_graph as deepseek_task_graph
         import capability_acceptance_planner

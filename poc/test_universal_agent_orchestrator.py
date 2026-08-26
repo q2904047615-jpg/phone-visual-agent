@@ -42,7 +42,7 @@ from universal_action_controller import ResolvedSemanticAction
 from agent.domain.vision_model import VisionAgentError
 from vision_usage import VisionSessionUsageLedger
 from agent.domain.canonical_action_protocol import scene_matches_target_app_surface
-from qwen_visual_decision import QwenTaskContext
+from agent.domain.qwen_task_context import QwenTaskContext
 from agent.domain.task_semantic_ir import compile_formal_semantic_authority
 from agent.domain.canonical_action_protocol import compile_canonical_action_catalog
 from universal_agent_orchestrator import (

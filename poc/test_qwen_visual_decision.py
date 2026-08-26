@@ -17,7 +17,6 @@ from agent.domain.canonical_action_protocol import (
 from generic_scene_observer import _local_frame_fingerprint
 from qwen_visual_decision import (
     QWEN_VISUAL_DECISION_PROTOCOL_VERSION,
-    QwenTaskContext,
     QwenVisualDecisionObserver,
     TrustedObservation,
     _exact_text_candidate_block,
@@ -31,6 +30,7 @@ from qwen_visual_decision import (
 from agent.domain.ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
 from vision_agent import _image_data_url
 from agent.domain.vision_model import VisionAgentError
+from agent.domain.qwen_task_context import QwenTaskContext
 from agent.domain.task_semantic_ir import (
     ConstraintIntent,
     DesiredState,

@@ -52,10 +52,8 @@ from agent.domain.canonical_action_protocol import (
     expected_idempotent_system_surface_kind,
     scene_matches_target_app_surface,
 )
-from qwen_visual_decision import (
-    QwenTaskContext,
-    TrustedObservation,
-)
+from qwen_visual_decision import TrustedObservation
+from agent.domain.qwen_task_context import QwenTaskContext
 from agent.domain.ui_scene import (
     MIN_TARGET_CONFIDENCE,
     UISceneError,

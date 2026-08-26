@@ -32,7 +32,7 @@ from agent.infrastructure.trusted_observation_frames import (
     validate_trusted_observation_against_frames,
 )
 from agent.domain.ui_scene import SystemUIFacts, UIElement, UIScene, UISceneError
-from vision_agent import _image_data_url
+from agent.infrastructure.dashscope_vision_provider import _image_data_url
 from agent.domain.vision_model import VisionAgentError
 from agent.domain.qwen_task_context import QwenTaskContext
 from agent.domain.task_semantic_ir import (

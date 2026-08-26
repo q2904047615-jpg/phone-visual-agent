@@ -4,7 +4,9 @@ from unittest.mock import patch
 
 import httpx
 
-from vision_agent import DashScopeVisionProvider
+from agent.infrastructure.dashscope_vision_provider import (
+    DashScopeVisionProvider,
+)
 from agent.domain.vision_model import (
     DEFAULT_VISION_BASE_URL,
     DEFAULT_VISION_MODEL,
@@ -93,7 +95,10 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
             clear=True,
         ):
             provider = DashScopeVisionProvider(max_attempts=1)
-        with patch("vision_agent.httpx.post", return_value=self._response()) as mocked:
+        with patch(
+            "agent.infrastructure.dashscope_vision_provider.httpx.post",
+            return_value=self._response(),
+        ) as mocked:
             self.assertEqual(
                 provider._chat([{"role": "user", "content": "json"}], max_tokens=1200),
                 '{"ok":true}',
@@ -110,7 +115,10 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
 
     def test_json_object_mode_is_forwarded_only_when_requested(self) -> None:
         provider = DashScopeVisionProvider(api_key="test-key", max_attempts=1)
-        with patch("vision_agent.httpx.post", return_value=self._response()) as mocked:
+        with patch(
+            "agent.infrastructure.dashscope_vision_provider.httpx.post",
+            return_value=self._response(),
+        ) as mocked:
             provider._chat(
                 [{"role": "user", "content": "json"}],
                 max_tokens=500,
@@ -159,7 +167,10 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
                 },
             },
         )
-        with patch("vision_agent.httpx.post", side_effect=[first, second]):
+        with patch(
+            "agent.infrastructure.dashscope_vision_provider.httpx.post",
+            side_effect=[first, second],
+        ):
             provider._chat([{"role": "user", "content": "one"}], max_tokens=10)
             provider._chat([{"role": "user", "content": "two"}], max_tokens=10)
         status = provider.status()
@@ -205,7 +216,7 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
             }
         ]
         with patch(
-            "vision_agent.httpx.post",
+            "agent.infrastructure.dashscope_vision_provider.httpx.post",
             side_effect=[rejected, self._response()],
         ) as mocked:
             self.assertEqual(provider._chat(messages, max_tokens=10), '{"ok":true}')
@@ -241,7 +252,10 @@ class DashScopeVisionModelRequestTests(unittest.TestCase):
                 ],
             }
         ]
-        with patch("vision_agent.httpx.post", return_value=rejected) as mocked:
+        with patch(
+            "agent.infrastructure.dashscope_vision_provider.httpx.post",
+            return_value=rejected,
+        ) as mocked:
             with self.assertRaisesRegex(Exception, "HTTP 400"):
                 provider._chat(messages, max_tokens=10)
         self.assertEqual(1, mocked.call_count)

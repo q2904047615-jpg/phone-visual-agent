@@ -156,7 +156,7 @@ class FixedAppRetirementTests(unittest.TestCase):
         }
         sources = (
             "web_app.py",
-            "vision_agent.py",
+            "agent/infrastructure/dashscope_vision_provider.py",
             "robot_core.py",
             "robot_gui_poc.py",
             "agent/domain/ui_scene.py",

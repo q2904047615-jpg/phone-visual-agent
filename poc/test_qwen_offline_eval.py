@@ -15,7 +15,10 @@ from eval_qwen_visual_decision import (
     _timeout_result,
     _write_report,
 )
-from qwen_runtime_errors import classify_qwen_error, looks_like_truncated_json
+from agent.infrastructure.qwen_runtime_errors import (
+    classify_qwen_error,
+    looks_like_truncated_json,
+)
 from agent.domain.vision_model import VisionAgentError
 
 

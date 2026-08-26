@@ -4,8 +4,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from qwen_runtime_errors import classify_qwen_error
-from vision_agent import DashScopeVisionProvider
+from agent.infrastructure.qwen_runtime_errors import classify_qwen_error
+from agent.infrastructure.dashscope_vision_provider import (
+    DashScopeVisionProvider,
+)
 import agent.application.vision_usage as vision_usage
 from agent.application.vision_usage import (
     VisionModelIdentityMismatch,
@@ -224,7 +226,10 @@ class DashScopeUsageIntegrationTests(unittest.TestCase):
             ],
         }
         ledger = VisionSessionUsageLedger(session_id="provider-session")
-        with patch("vision_agent.httpx.post", return_value=response) as post:
+        with patch(
+            "agent.infrastructure.dashscope_vision_provider.httpx.post",
+            return_value=response,
+        ) as post:
             with provider.session_usage_scope(ledger):
                 with provider.call_scope(
                     stage="single_step_observation",

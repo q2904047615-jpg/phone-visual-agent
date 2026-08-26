@@ -103,7 +103,9 @@ from robot_core import (
     RobotController,
     WEB_OUTPUT_DIR,
 )
-from vision_agent import DashScopeVisionProvider
+from agent.infrastructure.dashscope_vision_provider import (
+    DashScopeVisionProvider,
+)
 from agent.domain.vision_model import VisionAgentError
 
 

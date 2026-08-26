@@ -23,7 +23,7 @@ from agent.infrastructure.observation_images import (
     measure_local_stability,
 )
 from agent.domain.visual_evidence import VisualObstruction
-from qwen_runtime_errors import (
+from agent.infrastructure.qwen_runtime_errors import (
     classify_qwen_error,
 )
 from robot_core import WorkflowNotReady, qwerty_keyboard_config_from_anchors
@@ -38,7 +38,11 @@ from agent.domain.ui_scene import (
     UISceneError,
     camera_alignment_evidence_is_safe,
 )
-from vision_agent import _extract_json_object, _image_data_url, _image_request_size
+from agent.infrastructure.dashscope_vision_provider import (
+    _extract_json_object,
+    _image_data_url,
+    _image_request_size,
+)
 from agent.domain.vision_model import VisionAgentError, public_model_identity
 from agent.domain.verified_text_transaction import (
     VerifiedTextTransactionError,

@@ -1,3 +1,5 @@
+"""Diagnostics for failures emitted by the Qwen infrastructure path."""
+
 from __future__ import annotations
 
 import json

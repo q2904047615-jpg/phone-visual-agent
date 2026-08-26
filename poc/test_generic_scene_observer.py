@@ -16,7 +16,7 @@ from agent.infrastructure.generic_scene_observer import (
     SingleStepGenericSceneObserver,
 )
 from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION
-from vision_agent import _image_data_url
+from agent.infrastructure.dashscope_vision_provider import _image_data_url
 from agent.domain.vision_model import VisionAgentError
 
 

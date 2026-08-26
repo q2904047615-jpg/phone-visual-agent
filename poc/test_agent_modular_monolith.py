@@ -1699,8 +1699,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_vision_model_contract_has_one_layered_identity(self) -> None:
         import agent.infrastructure.generic_scene_observer as generic_scene_observer
+        import agent.infrastructure.dashscope_vision_provider as vision_agent
+        import agent.infrastructure.qwen_runtime_errors as qwen_runtime_errors
         import agent.application.qwen_visual_decision as qwen_visual_decision
-        import vision_agent
         from agent.domain.vision_model import (
             VisionAgentError,
             VisionModelConfig,
@@ -1718,9 +1719,22 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             / "infrastructure"
             / "environment_vision_model_config.py"
         )
+        provider_path = (
+            root
+            / "agent"
+            / "infrastructure"
+            / "dashscope_vision_provider.py"
+        )
+        runtime_errors_path = (
+            root / "agent" / "infrastructure" / "qwen_runtime_errors.py"
+        )
         self.assertFalse((root / "vision_model_config.py").exists())
+        self.assertFalse((root / "vision_agent.py").exists())
+        self.assertFalse((root / "qwen_runtime_errors.py").exists())
         self.assertTrue(domain_path.is_file())
         self.assertTrue(loader_path.is_file())
+        self.assertTrue(provider_path.is_file())
+        self.assertTrue(runtime_errors_path.is_file())
         self.assertIs(VisionAgentError, qwen_visual_decision.VisionAgentError)
         self.assertIs(VisionAgentError, generic_scene_observer.VisionAgentError)
         self.assertIs(VisionModelConfig, vision_agent.VisionModelConfig)
@@ -1732,7 +1746,8 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
         domain_source = domain_path.read_text(encoding="utf-8")
         loader_source = loader_path.read_text(encoding="utf-8")
-        provider_source = (root / "vision_agent.py").read_text(encoding="utf-8")
+        provider_source = provider_path.read_text(encoding="utf-8")
+        runtime_errors_source = runtime_errors_path.read_text(encoding="utf-8")
         for forbidden in (
             "agent.application",
             "agent.infrastructure",
@@ -1746,6 +1761,8 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual(1, loader_source.count("def load_vision_model_config("))
         self.assertEqual(1, loader_source.count("os.environ"))
         self.assertNotIn("class VisionAgentError", provider_source)
+        self.assertEqual(1, provider_source.count("class DashScopeVisionProvider:"))
+        self.assertEqual(1, runtime_errors_source.count("def classify_qwen_error("))
 
         legacy_imports: list[str] = []
         for path in root.rglob("*.py"):
@@ -1760,15 +1777,16 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 if (
                     isinstance(node, ast.ImportFrom)
                     and node.level == 0
-                    and node.module == "vision_agent"
-                    and any(
-                        item.name == "VisionAgentError" for item in node.names
-                    )
+                    and node.module in {"vision_agent", "qwen_runtime_errors"}
                 ):
                     legacy_imports.append(str(path.relative_to(root)))
                 if isinstance(node, ast.Import):
                     for item in node.names:
-                        if item.name == "vision_model_config":
+                        if item.name in {
+                            "vision_model_config",
+                            "vision_agent",
+                            "qwen_runtime_errors",
+                        }:
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 

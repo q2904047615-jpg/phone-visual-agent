@@ -5,7 +5,7 @@ from typing import Final
 import uuid
 
 from capability_acceptance import PROMOTABLE_ACTIONS
-from agent.application.deepseek_task_graph import (
+from agent.domain.task_graph import (
     CompletionCondition,
     DynamicTaskGraph,
     GraphGoal,

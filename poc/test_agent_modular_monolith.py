@@ -1015,6 +1015,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         import agent.application.deepseek_task_graph as deepseek_task_graph
         import capability_acceptance_planner
         import universal_agent_orchestrator
+        from agent.domain.task_graph import DynamicTaskGraph, ObservedState
 
         root = Path(__file__).resolve().parent
         application_path = (
@@ -1023,12 +1024,16 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertFalse((root / "deepseek_task_graph.py").exists())
         self.assertTrue(application_path.is_file())
         self.assertIs(
-            deepseek_task_graph.DynamicTaskGraph,
+            DynamicTaskGraph,
             universal_agent_orchestrator.DynamicTaskGraph,
         )
         self.assertIs(
-            deepseek_task_graph.ObservedState,
+            ObservedState,
             capability_acceptance_planner.ObservedState,
+        )
+        self.assertEqual(
+            ("DeepSeekTaskGraphPlanner", "JsonTaskGraphProvider"),
+            deepseek_task_graph.__all__,
         )
 
         application_source = application_path.read_text(encoding="utf-8")
@@ -1046,6 +1051,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, application_source)
         self.assertIn("else LocalRiskPolicyConfig()", application_source)
+        self.assertNotIn("@dataclass", application_source)
+        self.assertNotIn("class DynamicTaskGraph", application_source)
+        self.assertNotIn("def _graph_from_payload", application_source)
 
         web_source = (root / "web_app.py").read_text(encoding="utf-8")
         self.assertIn(
@@ -1070,6 +1078,65 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                         if item.name == "deepseek_task_graph":
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
+
+    def test_task_graph_aggregate_has_one_domain_identity(self) -> None:
+        import capability_acceptance_planner
+        import universal_agent_orchestrator
+        from agent.domain.task_graph import (
+            DynamicTaskGraph,
+            ObservedState,
+            TaskGraphError,
+            _graph_from_payload,
+        )
+
+        root = Path(__file__).resolve().parent
+        domain_path = root / "agent" / "domain" / "task_graph.py"
+        self.assertTrue(domain_path.is_file())
+        self.assertIs(DynamicTaskGraph, universal_agent_orchestrator.DynamicTaskGraph)
+        self.assertIs(ObservedState, capability_acceptance_planner.ObservedState)
+        self.assertTrue(issubclass(TaskGraphError, ValueError))
+        self.assertTrue(callable(_graph_from_payload))
+
+        domain_source = domain_path.read_text(encoding="utf-8")
+        for forbidden in (
+            "agent.application",
+            "agent.infrastructure",
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "vision_agent",
+            "robot_core",
+            "class DeepSeekTaskGraphPlanner",
+            "class JsonTaskGraphProvider",
+            "def _initial_prompt",
+            "def _replan_prompt",
+            "def _schema_prompt",
+            "chat_json",
+        ):
+            self.assertNotIn(forbidden, domain_source)
+
+        misplaced_imports: list[str] = []
+        allowed_application_exports = {
+            "DeepSeekTaskGraphPlanner",
+            "JsonTaskGraphProvider",
+        }
+        for path in root.rglob("*.py"):
+            if path.name.startswith("test_"):
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module
+                    == "agent.application.deepseek_task_graph"
+                ):
+                    names = {item.name for item in node.names}
+                    if not names.issubset(allowed_application_exports):
+                        misplaced_imports.append(
+                            f"{path.relative_to(root)}: {sorted(names)}"
+                        )
+        self.assertEqual([], misplaced_imports)
 
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent

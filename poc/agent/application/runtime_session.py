@@ -14,7 +14,7 @@ from agent.domain import (
     VerifiedAppSurfaceLineage,
 )
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
-from agent.application.deepseek_task_graph import DynamicTaskGraph
+from agent.domain.task_graph import DynamicTaskGraph
 from agent.domain.generic_goal import GenericIntentDraft
 from vision_usage import VisionSessionUsageLedger
 

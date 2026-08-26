@@ -66,8 +66,8 @@ from agent.infrastructure.file_system_input_lineage_store import (
 from agent.infrastructure.file_system_risk_policy import load_local_risk_policy
 from agent.application.deepseek_task_graph import (
     DeepSeekTaskGraphPlanner,
-    TaskGraphError,
 )
+from agent.domain.task_graph import TaskGraphError
 from qwen_visual_decision import QwenVisualDecisionObserver
 from universal_agent_orchestrator import (
     POST_ACTION_TRANSITION_PROTOCOL_VERSION,

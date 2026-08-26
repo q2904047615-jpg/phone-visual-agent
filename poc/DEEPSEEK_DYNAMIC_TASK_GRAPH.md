@@ -4,7 +4,7 @@
 
 ## 职责
 
-`agent/application/deepseek_task_graph.py` 只把自然语言目标组织为可修订的高层任务图。它不输出坐标、不调用机械臂，也不能决定是否需要确认。用户可以直接使用“点击、滑动、输入、长按、拖动、返回、Home、发送、关注、评论”等自然动作词；只有坐标、ADB、Shell、keycode、卖家控制命令和绕过闭环的自由动作脚本会被拒绝。
+`agent/application/deepseek_task_graph.py` 只负责调用 provider 并组织 plan/replan 用例；`agent/domain/task_graph.py` 是可修订高层任务图、typed transport、校验、builder 和确定性投影的唯一领域实现。两者都不输出坐标或调用机械臂，确认只由正式本地策略决定。用户可以直接使用“点击、滑动、输入、长按、拖动、返回、Home、发送、关注、评论”等自然动作词；只有坐标、ADB、Shell、keycode、卖家控制命令和绕过闭环的自由动作脚本会被拒绝。
 
 ## 模型输出
 

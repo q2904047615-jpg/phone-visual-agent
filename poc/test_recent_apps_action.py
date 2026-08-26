@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from agent.domain.canonical_action_protocol import compile_canonical_action_catalog
-from agent.application.deepseek_task_graph import (
+from agent.domain.task_graph import (
     _graph_from_payload,
     build_exact_action_task_graph,
 )

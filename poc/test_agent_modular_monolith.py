@@ -1191,6 +1191,75 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_universal_action_controller_has_one_domain_entry(self) -> None:
+        import agent.domain.universal_action_controller as controller_module
+        from agent.domain.universal_action_controller import (
+            LocalPointGrounding,
+            ResolvedSemanticAction,
+            UniversalActionController,
+            UniversalActionError,
+        )
+
+        root = Path(__file__).resolve().parent
+        domain_path = (
+            root / "agent" / "domain" / "universal_action_controller.py"
+        )
+        self.assertFalse((root / "universal_action_controller.py").exists())
+        self.assertTrue(domain_path.is_file())
+        for symbol in (
+            LocalPointGrounding,
+            ResolvedSemanticAction,
+            UniversalActionController,
+            UniversalActionError,
+        ):
+            self.assertEqual(
+                "agent.domain.universal_action_controller",
+                symbol.__module__,
+            )
+        self.assertEqual(
+            "2026-08-26-universal-action-v17",
+            controller_module.UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
+        )
+
+        source = domain_path.read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("class UniversalActionController:"))
+        self.assertEqual(1, source.count("class ResolvedSemanticAction:"))
+        for forbidden in (
+            "agent.application",
+            "agent.infrastructure",
+            "fastapi",
+            "pydantic",
+            "from pathlib",
+            "Path(",
+            ".read_text(",
+            ".write_text(",
+            "import os",
+            "os.environ",
+            "from PIL",
+            "web_app",
+            "vision_agent",
+            "generic_scene_observer",
+            "generic_action_adapter",
+            "robot_core",
+        ):
+            self.assertNotIn(forbidden, source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "universal_action_controller"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "universal_action_controller":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_deepseek_task_graph_has_one_application_entry(self) -> None:
         import agent.application.deepseek_task_graph as deepseek_task_graph
         import capability_acceptance_planner

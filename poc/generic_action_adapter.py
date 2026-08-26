@@ -64,7 +64,7 @@ from qwen_runtime_errors import classify_qwen_error
 from agent.domain.vision_model import VisionAgentError
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.ui_scene import UIElement, UIScene, UISceneError
-from universal_action_controller import (
+from agent.domain.universal_action_controller import (
     LOCAL_POINT_GROUNDING_SOURCE,
     LocalPointGrounding,
     ResolvedSemanticAction,

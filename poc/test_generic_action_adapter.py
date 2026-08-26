@@ -54,7 +54,7 @@ from agent.domain.ui_scene import (
     UIElement,
     UIScene,
 )
-from universal_action_controller import (
+from agent.domain.universal_action_controller import (
     ResolvedSemanticAction,
     UniversalActionController,
     UniversalActionError,

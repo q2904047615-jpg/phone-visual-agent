@@ -78,7 +78,7 @@ from universal_agent_orchestrator import (
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
 )
-from universal_action_controller import (
+from agent.domain.universal_action_controller import (
     UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
     UniversalActionController,
     UniversalActionError,

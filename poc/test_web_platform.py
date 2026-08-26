@@ -1259,8 +1259,7 @@ class ApiEndToEndTests(unittest.TestCase):
             DeviceTaskRegistry(),
         )
         self.device_registry_patcher.start()
-        with web_app.runtime.generic_supervised_session_lock:
-            web_app.runtime.generic_supervised_sessions.clear()
+        web_app.runtime.agent_session_repository.clear()
         with web_app.runtime.device_camera_coordinator_guard:
             web_app.runtime.device_camera_coordinators.clear()
 
@@ -1765,8 +1764,7 @@ class ApiEndToEndTests(unittest.TestCase):
             device_id="phone-01",
             run_dir=web_app.WEB_OUTPUT_DIR / "api-scope",
         )
-        with web_app.runtime.generic_supervised_session_lock:
-            web_app.runtime.generic_supervised_sessions[session.session_id] = session
+        web_app.runtime.agent_session_repository.add(session)
         path = f"/api/agent/generic-supervised/{session.session_id}/confirm"
         scope = session.snapshot()["confirmation_scope"]
 
@@ -1825,8 +1823,7 @@ class ApiEndToEndTests(unittest.TestCase):
             device_id="phone-01",
             run_dir=web_app.WEB_OUTPUT_DIR / "api-confirm-once",
         )
-        with web_app.runtime.generic_supervised_session_lock:
-            web_app.runtime.generic_supervised_sessions[session.session_id] = session
+        web_app.runtime.agent_session_repository.add(session)
         path = f"/api/agent/generic-supervised/{session.session_id}/confirm"
         payload = {
             "confirmed": True,
@@ -1860,8 +1857,7 @@ class ApiEndToEndTests(unittest.TestCase):
             device_id="phone-01",
             run_dir=web_app.WEB_OUTPUT_DIR / "api-disconnect-invalidates",
         )
-        with web_app.runtime.generic_supervised_session_lock:
-            web_app.runtime.generic_supervised_sessions[session.session_id] = session
+        web_app.runtime.agent_session_repository.add(session)
         path = f"/api/agent/generic-supervised/{session.session_id}/confirm"
         payload = {
             "confirmed": True,
@@ -1959,8 +1955,7 @@ class ApiEndToEndTests(unittest.TestCase):
             device_id="phone-01",
             run_dir=web_app.WEB_OUTPUT_DIR / "api-cross-device",
         )
-        with web_app.runtime.generic_supervised_session_lock:
-            web_app.runtime.generic_supervised_sessions[session.session_id] = session
+        web_app.runtime.agent_session_repository.add(session)
         scope = session.snapshot()["confirmation_scope"]
         scope["device_id"] = "phone-02"
 
@@ -2502,17 +2497,18 @@ class ApiEndToEndTests(unittest.TestCase):
                 "proposal": {"status": "action"},
             }
             return SimpleNamespace(
+                session_id=session_id,
+                device_id=device_id,
                 status="awaiting_confirmation",
                 snapshot=lambda payload=payload: dict(payload),
             )
 
-        with web_app.runtime.generic_supervised_session_lock:
-            web_app.runtime.generic_supervised_sessions.update(
-                {
-                    "session-phone-a": active_session("session-phone-a", "phone-a"),
-                    "session-phone-b": active_session("session-phone-b", "phone-b"),
-                }
-            )
+        web_app.runtime.agent_session_repository.add(
+            active_session("session-phone-a", "phone-a")
+        )
+        web_app.runtime.agent_session_repository.add(
+            active_session("session-phone-b", "phone-b")
+        )
 
         active = self.client.get("/api/device").json()[
             "generic_supervised_execution"

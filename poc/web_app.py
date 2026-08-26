@@ -20,6 +20,19 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 
+from agent.application import (
+    AgentDeviceRuntimeError,
+    AgentSessionCommandError,
+    StartUniversalAgentSessionCommand,
+    UniversalAgentSessionApplicationService,
+)
+from agent.domain import (
+    AgentSession,
+    AgentSessionConflictError,
+    AgentSessionDeviceMismatchError,
+    AgentSessionNotFoundError,
+)
+from agent.infrastructure import InMemoryAgentSessionRepository
 from capability_acceptance import (
     CapabilityAcceptanceError,
     PROMOTABLE_ACTIONS,
@@ -44,7 +57,6 @@ from universal_agent_orchestrator import (
     POST_ACTION_TRANSITION_PROTOCOL_VERSION,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
-    UniversalAgentSessionState,
 )
 from universal_action_controller import (
     UNIVERSAL_CONTROLLER_PROTOCOL_VERSION,
@@ -478,6 +490,22 @@ class Runtime:
             ),
             device_registry=self.device_task_registry,
         )
+        self.agent_session_repository = InMemoryAgentSessionRepository()
+        self.universal_agent_session_service = (
+            UniversalAgentSessionApplicationService(
+                orchestrator_provider=lambda: self.universal_agent_orchestrator,
+                sessions=self.agent_session_repository,
+                ensure_device_ready=lambda device_id: (
+                    _require_agent_device_ready(device_id)
+                ),
+                exclusive_device_session=lambda device_id: (
+                    _agent_device_execution(device_id)
+                ),
+                begin_new_task=lambda device_id: (
+                    self.controller_for_device(device_id).begin_new_task()
+                ),
+            )
+        )
         self.capability_acceptance_manager = CapabilityAcceptanceManager(
             provisional_controller_factory=(
                 self.device_controllers.provisional_controller
@@ -496,8 +524,6 @@ class Runtime:
         self.device_camera_coordinators: dict[str, DeviceCameraCoordinator] = {
             self.device_controllers.default_device_id: DeviceCameraCoordinator(),
         }
-        self.generic_supervised_sessions: dict[str, UniversalAgentSessionState] = {}
-        self.generic_supervised_session_lock = threading.RLock()
 
     def controller_for_device(self, device_id: str) -> RobotController:
         if str(device_id or "").strip() == self.device_controllers.default_device_id:
@@ -788,18 +814,7 @@ def device() -> dict[str, Any]:
         },
     }
     status["active_tasks"] = []
-    with runtime.generic_supervised_session_lock:
-        generic_sessions = [
-            item.snapshot()
-            for item in runtime.generic_supervised_sessions.values()
-            if item.status in {
-                "awaiting_effect_confirmation",
-                "awaiting_confirmation",
-                "paused_after_action",
-                "needs_reobservation",
-                "needs_effect_verification",
-            }
-        ]
+    generic_sessions = runtime.universal_agent_session_service.active_snapshots()
     status["generic_supervised_execution"] = {
         "enabled": True,
         "automatic_loop_enabled": True,
@@ -917,19 +932,50 @@ def _supervised_hardware_lock(device_id: str | None = None) -> Iterator[None]:
 
 
 
-def _require_generic_session_device(
-    session: UniversalAgentSessionState,
-    requested_device_id: str,
+def _require_agent_device_ready(device_id: str) -> None:
+    try:
+        _require_supervised_device_ready(device_id)
+    except HTTPException as exc:
+        raise AgentDeviceRuntimeError(
+            exc.detail,
+            status_code=exc.status_code,
+        ) from exc
+
+
+@contextmanager
+def _agent_device_execution(device_id: str) -> Iterator[None]:
+    try:
+        with _supervised_hardware_lock(device_id):
+            yield
+    except HTTPException as exc:
+        raise AgentDeviceRuntimeError(
+            exc.detail,
+            status_code=exc.status_code,
+        ) from exc
+
+
+def _require_generic_supervised_session(session_id: str) -> AgentSession:
+    try:
+        return runtime.universal_agent_session_service.require(session_id)
+    except AgentSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _raise_agent_device_runtime_error(exc: AgentDeviceRuntimeError) -> None:
+    raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+def _raise_agent_session_device_mismatch(
+    exc: AgentSessionDeviceMismatchError,
 ) -> None:
-    if str(requested_device_id or "") != session.device_id:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "success": False,
-                "physical_actions": 0,
-                "error": "请求device_id与会话锁定设备不一致。",
-            },
-        )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "success": False,
+            "physical_actions": 0,
+            "error": str(exc),
+        },
+    ) from exc
 
 
 @app.post("/api/agent/generic-scene")
@@ -985,14 +1031,14 @@ def observe_generic_scene(
     }
 
 
-def _write_generic_supervised_report(session: UniversalAgentSessionState) -> str:
+def _write_generic_supervised_report(session: AgentSession) -> str:
     """Return the atomic report already maintained by the orchestrator."""
 
     return str(session.run_dir / "report.json")
 
 
 def _generic_supervised_failure(
-    session: UniversalAgentSessionState | None,
+    session: AgentSession | None,
     exc: Exception,
     *,
     request_action_count: int = 0,
@@ -1410,41 +1456,16 @@ def start_generic_supervised_session(
     """Plan once, then autonomously advance only safe read/navigation actions."""
 
     verify_local_request(request, x_control_token)
-    active_session_id = (
-        runtime.universal_agent_orchestrator.device_registry.active_session(
-            body.device_id
-        )
-    )
-    if active_session_id is not None:
-        exc = UniversalAgentOrchestratorError(
-            f"设备 {body.device_id} 已有活动任务：{active_session_id}。"
-        )
-        raise HTTPException(
-            status_code=409,
-            detail=_generic_supervised_failure(None, exc),
-        )
-    _require_supervised_device_ready(body.device_id)
     session_id = uuid.uuid4().hex
     run_dir = WEB_OUTPUT_DIR / (
         "generic_supervised_"
         + datetime.now().strftime("%Y%m%d_%H%M%S_")
         + session_id[:8]
     )
-    run_dir.mkdir(parents=True, exist_ok=True)
     session = None
     try:
-        with _supervised_hardware_lock(body.device_id):
-            active_session_id = (
-                runtime.universal_agent_orchestrator.device_registry.active_session(
-                    body.device_id
-                )
-            )
-            if active_session_id is not None:
-                raise UniversalAgentOrchestratorError(
-                    f"设备 {body.device_id} 已有活动任务：{active_session_id}。"
-                )
-            runtime.controller_for_device(body.device_id).begin_new_task()
-            session = runtime.universal_agent_orchestrator.start(
+        started = runtime.universal_agent_session_service.start(
+            StartUniversalAgentSessionCommand(
                 session_id=session_id,
                 raw_goal=body.text,
                 exact_input_text=body.exact_input_text,
@@ -1452,27 +1473,11 @@ def start_generic_supervised_session(
                 exact_target_label=body.exact_target_label,
                 device_id=body.device_id,
                 run_dir=run_dir,
+                auto_advance=body.auto_advance,
             )
-        with runtime.generic_supervised_session_lock:
-            runtime.generic_supervised_sessions[session_id] = session
-        auto_result = {
-            "physical_actions": 0,
-            "iterations": 0,
-            "status": session.status,
-            "pause_reason": "当前没有可自动推进的安全动作。",
-        }
-        if (
-            body.auto_advance is True
-            and session.status in {"awaiting_confirmation", "needs_reobservation"}
-        ):
-            with _supervised_hardware_lock(body.device_id):
-                auto_result = (
-                    runtime.universal_agent_orchestrator.run_autonomous_safe_loop(
-                        session,
-                        max_physical_actions=12,
-                        max_iterations=24,
-                    )
-                )
+        )
+        session = started.session
+        auto_result = started.automatic_progress
         report = _write_generic_supervised_report(session)
         return {
             "mode": (
@@ -1487,7 +1492,11 @@ def start_generic_supervised_session(
             "session": session.snapshot(),
             "report": report,
         }
+    except AgentDeviceRuntimeError as exc:
+        _raise_agent_device_runtime_error(exc)
     except (
+        AgentSessionCommandError,
+        AgentSessionConflictError,
         IntentProviderError,
         GenericActionAdapterError,
         UniversalActionError,
@@ -1504,10 +1513,7 @@ def start_generic_supervised_session(
 
 @app.get("/api/agent/generic-supervised/{session_id}")
 def get_generic_supervised_session(session_id: str) -> dict[str, Any]:
-    with runtime.generic_supervised_session_lock:
-        session = runtime.generic_supervised_sessions.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
+    session = _require_generic_supervised_session(session_id)
     return {
         "mode": "generic_supervised_single_step",
         "session": session.snapshot(),
@@ -1525,28 +1531,20 @@ def approve_generic_supervised_effect(
     """Approve one canonical local-effect policy scope and execute at most one action."""
 
     verify_local_request(request, x_control_token)
-    with runtime.generic_supervised_session_lock:
-        session = runtime.generic_supervised_sessions.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
-    _require_supervised_device_ready(session.device_id)
+    session = _require_generic_supervised_session(session_id)
     before_actions = session.physical_actions
     try:
-        if body.confirmed is not True or body.confirmation is None:
-            raise UniversalAgentOrchestratorError(
-                "调用 Qwen 处理受限效果前必须确认完整效果作用域。"
-            )
-        _require_generic_session_device(session, body.confirmation.device_id)
-        with _supervised_hardware_lock(session.device_id):
-            result = runtime.universal_agent_orchestrator.approve_effects(
-                session,
-                body.confirmation.model_dump(),
-            )
-        request_actions = session.physical_actions - before_actions
-        if request_actions not in {0, 1}:
-            raise UniversalAgentOrchestratorError(
-                "一次效果确认产生了超过一个物理动作。"
-            )
+        approved = runtime.universal_agent_session_service.approve_effects(
+            session,
+            confirmed=body.confirmed,
+            confirmation=(
+                body.confirmation.model_dump()
+                if body.confirmation is not None
+                else None
+            ),
+        )
+        result = approved.operation
+        request_actions = approved.physical_actions
         report = _write_generic_supervised_report(session)
         response = {
             "mode": "generic_supervised_single_step",
@@ -1560,7 +1558,12 @@ def approve_generic_supervised_effect(
         else:
             response["proposal"] = result.proposal.to_dict()
         return response
+    except AgentDeviceRuntimeError as exc:
+        _raise_agent_device_runtime_error(exc)
+    except AgentSessionDeviceMismatchError as exc:
+        _raise_agent_session_device_mismatch(exc)
     except (
+        AgentSessionCommandError,
         GenericActionAdapterError,
         UniversalActionError,
         UniversalAgentOrchestratorError,
@@ -1589,32 +1592,19 @@ def confirm_generic_supervised_session(
     """Consume one exact authority scope and execute at most one action."""
 
     verify_local_request(request, x_control_token)
-    with runtime.generic_supervised_session_lock:
-        session = runtime.generic_supervised_sessions.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
-    try:
-        _require_supervised_device_ready(session.device_id)
-    except HTTPException:
-        try:
-            runtime.universal_agent_orchestrator.invalidate_confirmation(
-                session,
-                reason="device_readiness_failed",
-            )
-        except Exception:
-            pass
-        raise
+    session = _require_generic_supervised_session(session_id)
     before_actions = session.physical_actions
     try:
-        if body.confirmed is not True or body.confirmation is None:
-            raise UniversalAgentOrchestratorError(
-                "执行一个动作前必须提交完整且明确的确认作用域。"
-            )
-        with _supervised_hardware_lock(session.device_id):
-            result = runtime.universal_agent_orchestrator.confirm_one(
-                session,
-                body.confirmation.model_dump(),
-            )
+        confirmed = runtime.universal_agent_session_service.confirm(
+            session,
+            confirmed=body.confirmed,
+            confirmation=(
+                body.confirmation.model_dump()
+                if body.confirmation is not None
+                else None
+            ),
+        )
+        result = confirmed.operation
         report = _write_generic_supervised_report(session)
         return {
             "mode": "generic_supervised_single_step",
@@ -1623,7 +1613,10 @@ def confirm_generic_supervised_session(
             "session": session.snapshot(),
             "report": report,
         }
+    except AgentDeviceRuntimeError as exc:
+        _raise_agent_device_runtime_error(exc)
     except (
+        AgentSessionCommandError,
         GenericActionAdapterError,
         UniversalActionError,
         UniversalAgentOrchestratorError,
@@ -1652,16 +1645,14 @@ def plan_next_generic_supervised_step(
     """Reobserve and propose the next action without touching the robot."""
 
     verify_local_request(request, x_control_token)
-    with runtime.generic_supervised_session_lock:
-        session = runtime.generic_supervised_sessions.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
-    _require_generic_session_device(session, body.device_id)
-    _require_supervised_device_ready(session.device_id)
+    session = _require_generic_supervised_session(session_id)
     before_actions = session.physical_actions
     try:
-        with _supervised_hardware_lock(session.device_id):
-            decision = runtime.universal_agent_orchestrator.refresh_decision(session)
+        refreshed = runtime.universal_agent_session_service.refresh(
+            session,
+            requested_device_id=body.device_id,
+        )
+        decision = refreshed.operation
         report = _write_generic_supervised_report(session)
         return {
             "mode": "generic_supervised_single_step",
@@ -1671,7 +1662,12 @@ def plan_next_generic_supervised_step(
             "session": session.snapshot(),
             "report": report,
         }
+    except AgentDeviceRuntimeError as exc:
+        _raise_agent_device_runtime_error(exc)
+    except AgentSessionDeviceMismatchError as exc:
+        _raise_agent_session_device_mismatch(exc)
     except (
+        AgentSessionCommandError,
         GenericActionAdapterError,
         UniversalActionError,
         IntentProviderError,
@@ -1701,34 +1697,22 @@ def run_generic_supervised_safe_loop(
     """Continue only safe read/navigation work without user action confirmation."""
 
     verify_local_request(request, x_control_token)
-    with runtime.generic_supervised_session_lock:
-        session = runtime.generic_supervised_sessions.get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="通用单步会话不存在。")
-    _require_generic_session_device(session, body.device_id)
-    try:
-        _require_supervised_device_ready(session.device_id)
-    except HTTPException:
-        try:
-            runtime.universal_agent_orchestrator.invalidate_confirmation(
-                session,
-                reason="device_readiness_failed",
-            )
-        except Exception:
-            pass
-        raise
+    session = _require_generic_supervised_session(session_id)
     before_actions = session.physical_actions
     try:
-        if body.confirmed is True or body.confirmation is not None:
-            raise UniversalAgentOrchestratorError(
-                "安全自动推进不接收用户动作确认；外部影响请使用风险确认接口。"
-            )
-        with _supervised_hardware_lock(session.device_id):
-            result = runtime.universal_agent_orchestrator.run_autonomous_safe_loop(
-                session,
-                max_physical_actions=body.max_physical_actions,
-                max_iterations=body.max_iterations,
-            )
+        automatic = runtime.universal_agent_session_service.run_automatic(
+            session,
+            requested_device_id=body.device_id,
+            confirmed=body.confirmed,
+            confirmation=(
+                body.confirmation.model_dump()
+                if body.confirmation is not None
+                else None
+            ),
+            max_physical_actions=body.max_physical_actions,
+            max_iterations=body.max_iterations,
+        )
+        result = automatic.operation
         report = _write_generic_supervised_report(session)
         return {
             "mode": "generic_supervised_safe_loop",
@@ -1737,7 +1721,12 @@ def run_generic_supervised_safe_loop(
             "session": session.snapshot(),
             "report": report,
         }
+    except AgentDeviceRuntimeError as exc:
+        _raise_agent_device_runtime_error(exc)
+    except AgentSessionDeviceMismatchError as exc:
+        _raise_agent_session_device_mismatch(exc)
     except (
+        AgentSessionCommandError,
         GenericActionAdapterError,
         UniversalActionError,
         UniversalAgentOrchestratorError,
@@ -1765,12 +1754,16 @@ def cancel_generic_supervised_session(
     x_control_token: str | None = Header(default=None, alias="X-Control-Token"),
 ) -> dict[str, Any]:
     verify_local_request(request, x_control_token)
-    with runtime.generic_supervised_session_lock:
-        session = runtime.generic_supervised_sessions.get(session_id)
-        if session is None:
-            raise HTTPException(status_code=404, detail="通用单步会话不存在。")
-        _require_generic_session_device(session, body.device_id)
-        runtime.universal_agent_orchestrator.cancel(session)
+    try:
+        cancelled = runtime.universal_agent_session_service.cancel(
+            session_id,
+            requested_device_id=body.device_id,
+        )
+    except AgentSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AgentSessionDeviceMismatchError as exc:
+        _raise_agent_session_device_mismatch(exc)
+    session = cancelled.session
     report = _write_generic_supervised_report(session)
     return {"session": session.snapshot(), "report": report}
 
@@ -1785,12 +1778,16 @@ def pause_generic_supervised_session(
     """Invalidate any pending confirmation without touching hardware."""
 
     verify_local_request(request, x_control_token)
-    with runtime.generic_supervised_session_lock:
-        session = runtime.generic_supervised_sessions.get(session_id)
-        if session is None:
-            raise HTTPException(status_code=404, detail="通用单步会话不存在。")
-        _require_generic_session_device(session, body.device_id)
-        runtime.universal_agent_orchestrator.pause(session)
+    try:
+        paused = runtime.universal_agent_session_service.pause(
+            session_id,
+            requested_device_id=body.device_id,
+        )
+    except AgentSessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AgentSessionDeviceMismatchError as exc:
+        _raise_agent_session_device_mismatch(exc)
+    session = paused.session
     report = _write_generic_supervised_report(session)
     return {
         "physical_actions": 0,

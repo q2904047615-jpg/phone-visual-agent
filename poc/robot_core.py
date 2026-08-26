@@ -9,7 +9,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
-import robot_gui_poc as seller_gui
+from agent.infrastructure import seller_window_adapter as seller_gui
 from agent.infrastructure.orientation_safety import (
     OrientationCredential,
     PhysicalExecutionGate,

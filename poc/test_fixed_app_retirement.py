@@ -158,7 +158,7 @@ class FixedAppRetirementTests(unittest.TestCase):
             "web_app.py",
             "agent/infrastructure/dashscope_vision_provider.py",
             "robot_core.py",
-            "robot_gui_poc.py",
+            "agent/infrastructure/seller_window_adapter.py",
             "agent/domain/ui_scene.py",
             "agent/domain/vision_model.py",
             "agent/infrastructure/environment_vision_model_config.py",
@@ -204,7 +204,7 @@ class FixedAppRetirementTests(unittest.TestCase):
             (ROOT / name).read_text(encoding="utf-8")
             for name in (
                 "robot_core.py",
-                "robot_gui_poc.py",
+                "agent/infrastructure/seller_window_adapter.py",
                 "controller_config.json",
             )
         )

@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-import robot_gui_poc as seller
+from agent.infrastructure import seller_window_adapter as seller
 
 
 class _FakeCursorUser32:

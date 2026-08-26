@@ -792,6 +792,69 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_seller_window_adapter_has_one_infrastructure_entry(self) -> None:
+        import agent.infrastructure.seller_window_adapter as seller_window
+
+        root = Path(__file__).resolve().parent
+        adapter_path = (
+            root / "agent" / "infrastructure" / "seller_window_adapter.py"
+        )
+        self.assertFalse((root / "robot_gui_poc.py").exists())
+        self.assertTrue(adapter_path.is_file())
+        self.assertEqual(root, seller_window.ROOT)
+        self.assertEqual(root / "output", seller_window.OUTPUT_DIR)
+        self.assertEqual(
+            "agent.infrastructure.seller_window_adapter",
+            seller_window.INPUT.__module__,
+        )
+        self.assertEqual(1.25, seller_window.seller_ui_scale(675))
+        self.assertEqual(
+            (2557, 2),
+            seller_window.cursor_parking_screen_point(
+                (0, 0, 830, 1600),
+                (0, 0, 2560, 1600),
+            ),
+        )
+
+        source = adapter_path.read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("class INPUT(ctypes.Structure):"))
+        self.assertEqual(1, source.count("def capture_client_passive("))
+        self.assertEqual(1, source.count("def temporarily_park_cursor_outside_camera("))
+        self.assertIn("Path(__file__).resolve().parents[2]", source)
+        for forbidden in (
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "robot_core",
+            "canonical_action",
+        ):
+            self.assertNotIn(forbidden, source)
+
+        legacy_imports: list[str] = []
+        legacy_patches: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "robot_gui_poc"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "robot_gui_poc":
+                            legacy_imports.append(str(path.relative_to(root)))
+                if (
+                    path.name != "test_agent_modular_monolith.py"
+                    and isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and node.value.startswith("robot_gui_poc.")
+                ):
+                    legacy_patches.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+        self.assertEqual([], legacy_patches)
+
     def test_web_uses_one_session_repository_instead_of_legacy_storage(self) -> None:
         source = (Path(__file__).resolve().parent / "web_app.py").read_text(
             encoding="utf-8"

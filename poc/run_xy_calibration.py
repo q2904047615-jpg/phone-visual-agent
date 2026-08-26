@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 import numpy as np
 from PIL import Image, ImageDraw
 
-import robot_gui_poc as seller_gui
+from agent.infrastructure import seller_window_adapter as seller_gui
 from agent.domain import DeviceTaskRegistryError
 from agent.infrastructure import (
     DeviceTaskRegistry,

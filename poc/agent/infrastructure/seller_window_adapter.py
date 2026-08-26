@@ -23,7 +23,7 @@ DEFAULT_WINDOW_TITLE = "智联新途"
 BASELINE_CLIENT_WIDTH = 540
 DEFAULT_CAMERA_HEIGHT = 960
 MIN_AUTO_LAYOUT_WIDTH = 300
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = ROOT / "output"
 
 

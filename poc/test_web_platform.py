@@ -17,7 +17,7 @@ import numpy as np
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
-import robot_gui_poc
+from agent.infrastructure import seller_window_adapter as robot_gui_poc
 import web_app
 from agent.domain import EvidenceStoreError
 from agent.infrastructure import (
@@ -141,14 +141,14 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         frame = Image.new("RGB", (540, 1038), "white")
 
         with (
-            patch("robot_gui_poc._window_is_minimized", return_value=False),
-            patch("robot_gui_poc._validate_camera_region_unoccluded") as validate,
+            patch("agent.infrastructure.seller_window_adapter._window_is_minimized", return_value=False),
+            patch("agent.infrastructure.seller_window_adapter._validate_camera_region_unoccluded") as validate,
             patch(
-                "robot_gui_poc.client_geometry",
+                "agent.infrastructure.seller_window_adapter.client_geometry",
                 return_value=(10, 20, 540, 1038),
             ),
-            patch("robot_gui_poc.ImageGrab.grab", return_value=frame) as grab,
-            patch("robot_gui_poc.ensure_camera_region_unoccluded") as activate,
+            patch("agent.infrastructure.seller_window_adapter.ImageGrab.grab", return_value=frame) as grab,
+            patch("agent.infrastructure.seller_window_adapter.ensure_camera_region_unoccluded") as activate,
         ):
             result = robot_gui_poc.capture_client_passive(123)
 
@@ -162,9 +162,9 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
 
     def test_passive_capture_keeps_minimized_window_minimized(self):
         with (
-            patch("robot_gui_poc._window_is_minimized", return_value=True),
-            patch("robot_gui_poc.ImageGrab.grab") as grab,
-            patch("robot_gui_poc.ensure_camera_region_unoccluded") as activate,
+            patch("agent.infrastructure.seller_window_adapter._window_is_minimized", return_value=True),
+            patch("agent.infrastructure.seller_window_adapter.ImageGrab.grab") as grab,
+            patch("agent.infrastructure.seller_window_adapter.ensure_camera_region_unoccluded") as activate,
         ):
             with self.assertRaisesRegex(RuntimeError, "已最小化"):
                 robot_gui_poc.capture_client_passive(123)
@@ -344,15 +344,15 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         fake = FakeUser32()
         baseline = np.zeros((45, 180, 3), dtype=np.int16)
         with (
-            patch("robot_gui_poc.user32", fake),
-            patch("robot_gui_poc.client_geometry", return_value=(0, 0, 540, 1038)),
-            patch("robot_gui_poc._stable_seller_position_baseline", return_value=baseline),
-            patch("robot_gui_poc._capture_seller_position_overlay", return_value=baseline),
+            patch("agent.infrastructure.seller_window_adapter.user32", fake),
+            patch("agent.infrastructure.seller_window_adapter.client_geometry", return_value=(0, 0, 540, 1038)),
+            patch("agent.infrastructure.seller_window_adapter._stable_seller_position_baseline", return_value=baseline),
+            patch("agent.infrastructure.seller_window_adapter._capture_seller_position_overlay", return_value=baseline),
             patch(
-                "robot_gui_poc._wait_for_seller_position_state",
+                "agent.infrastructure.seller_window_adapter._wait_for_seller_position_state",
                 side_effect=((240, 0.01), (235, 0.02)),
             ) as wait_state,
-            patch("robot_gui_poc.time.sleep"),
+            patch("agent.infrastructure.seller_window_adapter.time.sleep"),
         ):
             receipt = robot_gui_poc.click_client_point(
                 123,
@@ -408,14 +408,14 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         fake = FakeUser32()
         baseline = np.zeros((45, 180, 3), dtype=np.int16)
         with (
-            patch("robot_gui_poc.user32", fake),
-            patch("robot_gui_poc.client_geometry", return_value=(0, 0, 540, 1038)),
-            patch("robot_gui_poc._stable_seller_position_baseline", return_value=baseline),
+            patch("agent.infrastructure.seller_window_adapter.user32", fake),
+            patch("agent.infrastructure.seller_window_adapter.client_geometry", return_value=(0, 0, 540, 1038)),
+            patch("agent.infrastructure.seller_window_adapter._stable_seller_position_baseline", return_value=baseline),
             patch(
-                "robot_gui_poc._wait_for_seller_position_state",
+                "agent.infrastructure.seller_window_adapter._wait_for_seller_position_state",
                 side_effect=RuntimeError("控制端事件栅栏超时"),
             ),
-            patch("robot_gui_poc.time.sleep"),
+            patch("agent.infrastructure.seller_window_adapter.time.sleep"),
         ):
             with self.assertRaisesRegex(RuntimeError, "事件栅栏超时"):
                 robot_gui_poc.click_client_point(
@@ -472,9 +472,9 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
                 raise outcome
 
         with (
-            patch("robot_gui_poc.user32", fake),
-            patch("robot_gui_poc.client_geometry", return_value=(0, 0, 540, 1038)),
-            patch("robot_gui_poc.time.sleep", side_effect=sleep_side_effect),
+            patch("agent.infrastructure.seller_window_adapter.user32", fake),
+            patch("agent.infrastructure.seller_window_adapter.client_geometry", return_value=(0, 0, 540, 1038)),
+            patch("agent.infrastructure.seller_window_adapter.time.sleep", side_effect=sleep_side_effect),
         ):
             with self.assertRaisesRegex(RuntimeError, "hold interrupted"):
                 robot_gui_poc.click_client_point(
@@ -591,7 +591,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         moved[0:20, 0:20, :] = 20
 
         with patch(
-            "robot_gui_poc._capture_seller_position_overlay",
+            "agent.infrastructure.seller_window_adapter._capture_seller_position_overlay",
             side_effect=[baseline.copy(), moved, moved, baseline.copy()],
         ):
             changed, _ = robot_gui_poc._wait_for_seller_position_state(
@@ -675,7 +675,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         fake = FakeUser32()
         with (
             patch.object(robot_gui_poc, "user32", fake),
-            patch("robot_gui_poc.time.sleep"),
+            patch("agent.infrastructure.seller_window_adapter.time.sleep"),
         ):
             robot_gui_poc.type_unicode_text("ab1")
 
@@ -694,14 +694,14 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
 
     def test_single_click_configuration_uses_current_unicode_helper(self):
         with (
-            patch("robot_gui_poc.ensure_window_fully_visible"),
-            patch("robot_gui_poc.client_geometry", return_value=(0, 0, 540, 1010)),
-            patch("robot_gui_poc.seller_control_point", return_value=(308, 992)),
-            patch("robot_gui_poc.click_client_control"),
+            patch("agent.infrastructure.seller_window_adapter.ensure_window_fully_visible"),
+            patch("agent.infrastructure.seller_window_adapter.client_geometry", return_value=(0, 0, 540, 1010)),
+            patch("agent.infrastructure.seller_window_adapter.seller_control_point", return_value=(308, 992)),
+            patch("agent.infrastructure.seller_window_adapter.click_client_control"),
             patch.object(robot_gui_poc.user32, "keybd_event"),
-            patch("robot_gui_poc.press_virtual_key") as press,
-            patch("robot_gui_poc.type_unicode_text") as type_text,
-            patch("robot_gui_poc.time.sleep"),
+            patch("agent.infrastructure.seller_window_adapter.press_virtual_key") as press,
+            patch("agent.infrastructure.seller_window_adapter.type_unicode_text") as type_text,
+            patch("agent.infrastructure.seller_window_adapter.time.sleep"),
         ):
             robot_gui_poc.configure_single_click_count(123)
 

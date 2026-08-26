@@ -33,7 +33,9 @@ from agent.infrastructure import (
 )
 from capability_acceptance import PROMOTABLE_ACTIONS
 from agent.domain.canonical_action_protocol import GenericStepProposal
-from generic_scene_observer import SINGLE_STEP_SCENE_OBSERVER_VERSION
+from agent.infrastructure.generic_scene_observer import (
+    SINGLE_STEP_SCENE_OBSERVER_VERSION,
+)
 from robot_core import (
     DEFAULT_CONTROLLER_CONFIG,
     MockRobotController as _MockRobotController,

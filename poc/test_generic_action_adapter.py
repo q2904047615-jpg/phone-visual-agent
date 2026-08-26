@@ -29,7 +29,7 @@ from generic_action_adapter import (
     stable_text_ocr_grounding,
 )
 from agent.domain.generic_goal import GenericIntentDraft
-from generic_scene_observer import (
+from agent.infrastructure.generic_scene_observer import (
     SINGLE_STEP_OUTPUT_TOKENS,
     SingleStepGenericSceneObserver,
 )

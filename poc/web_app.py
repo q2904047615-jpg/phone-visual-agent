@@ -59,7 +59,7 @@ from generic_action_adapter import (
     stable_qwerty_ocr_anchors,
     stable_text_ocr_grounding,
 )
-from generic_scene_observer import SingleStepGenericSceneObserver
+from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
 from agent.infrastructure.file_system_input_lineage_store import (
     FileSystemTypedInputLineageStore,
 )

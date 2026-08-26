@@ -5,7 +5,7 @@ import unittest
 
 from PIL import Image, ImageDraw, ImageFilter
 
-from generic_scene_observer import (
+from agent.infrastructure.generic_scene_observer import (
     FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     INPUT_STRUCTURE_AUDIT_VERSION,
     POST_ACTION_VISUAL_CONTEXT_VERSION,

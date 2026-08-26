@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from generic_scene_observer import (
+from agent.infrastructure.generic_scene_observer import (
     INPUT_STRUCTURE_AUDIT_VERSION,
     _apply_input_structure_audit,
 )
@@ -762,8 +762,11 @@ class TypedInputLineageTests(unittest.TestCase):
         return TypedInputLineageStore(Path(root), clock=lambda: now)
 
     def test_compact_input_value_shadow_authority_is_physically_absent(self) -> None:
-        observer_source = Path(__file__).with_name(
-            "generic_scene_observer.py"
+        observer_source = (
+            Path(__file__).resolve().parent
+            / "agent"
+            / "infrastructure"
+            / "generic_scene_observer.py"
         ).read_text(encoding="utf-8")
         lineage_source = (
             Path(__file__).resolve().parent

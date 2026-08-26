@@ -1,3 +1,5 @@
+"""Local visual-observation adapter for the generic Agent runtime."""
+
 from __future__ import annotations
 
 import hashlib

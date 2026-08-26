@@ -1012,7 +1012,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], legacy_imports)
 
     def test_goal_context_semantics_have_one_domain_owner(self) -> None:
-        import generic_scene_observer
+        import agent.infrastructure.generic_scene_observer as generic_scene_observer
         import agent.application.qwen_visual_decision as qwen_visual_decision
         from agent.domain.generic_goal import safe_goal_context
         from agent.domain.message_intent import (
@@ -1023,7 +1023,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         root = Path(__file__).resolve().parent
         generic_goal_path = root / "agent" / "domain" / "generic_goal.py"
         message_intent_path = root / "agent" / "domain" / "message_intent.py"
-        observer_path = root / "generic_scene_observer.py"
+        observer_path = (
+            root / "agent" / "infrastructure" / "generic_scene_observer.py"
+        )
         self.assertFalse((root / "message_intent.py").exists())
         self.assertTrue(message_intent_path.is_file())
         self.assertFalse(hasattr(generic_scene_observer, "_safe_goal_context"))
@@ -1260,6 +1262,59 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_generic_scene_observer_has_one_infrastructure_entry(self) -> None:
+        import agent.infrastructure.generic_scene_observer as observer_module
+        from agent.infrastructure.generic_scene_observer import (
+            PostActionVisualContext,
+            SingleStepGenericSceneObserver,
+        )
+
+        root = Path(__file__).resolve().parent
+        infrastructure_path = (
+            root / "agent" / "infrastructure" / "generic_scene_observer.py"
+        )
+        self.assertFalse((root / "generic_scene_observer.py").exists())
+        self.assertTrue(infrastructure_path.is_file())
+        self.assertEqual(
+            "agent.infrastructure.generic_scene_observer",
+            SingleStepGenericSceneObserver.__module__,
+        )
+        self.assertEqual(
+            "agent.infrastructure.generic_scene_observer",
+            PostActionVisualContext.__module__,
+        )
+        self.assertEqual(
+            "2026-08-25-single-step-scene-observer-v2",
+            observer_module.SINGLE_STEP_SCENE_OBSERVER_VERSION,
+        )
+
+        source = infrastructure_path.read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("class SingleStepGenericSceneObserver("))
+        for forbidden in (
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "universal_agent_orchestrator",
+            "generic_action_adapter",
+        ):
+            self.assertNotIn(forbidden, source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "generic_scene_observer"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "generic_scene_observer":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_deepseek_task_graph_has_one_application_entry(self) -> None:
         import agent.application.deepseek_task_graph as deepseek_task_graph
         import capability_acceptance_planner
@@ -1388,7 +1443,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], misplaced_imports)
 
     def test_vision_model_contract_has_one_layered_identity(self) -> None:
-        import generic_scene_observer
+        import agent.infrastructure.generic_scene_observer as generic_scene_observer
         import agent.application.qwen_visual_decision as qwen_visual_decision
         import vision_agent
         from agent.domain.vision_model import (
@@ -1464,7 +1519,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_visual_evidence_and_image_measurement_are_layered_once(self) -> None:
         import agent.infrastructure.observation_images as observation_images
-        import generic_scene_observer
+        import agent.infrastructure.generic_scene_observer as generic_scene_observer
         import agent.application.qwen_visual_decision as qwen_visual_decision
         from agent.domain.visual_evidence import (
             LocalFrameStability,
@@ -1526,7 +1581,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
     def test_trusted_observation_has_one_layered_identity(self) -> None:
         import agent.infrastructure.observation_images as observation_images
         import agent.infrastructure.trusted_observation_frames as frame_adapter
-        import generic_scene_observer
+        import agent.infrastructure.generic_scene_observer as generic_scene_observer
         import agent.application.qwen_visual_decision as qwen_visual_decision
         import universal_agent_orchestrator
         from agent.domain.trusted_observation import TrustedObservation
@@ -1540,7 +1595,9 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
             / "trusted_observation_frames.py"
         )
         qwen_path = root / "agent" / "application" / "qwen_visual_decision.py"
-        observer_path = root / "generic_scene_observer.py"
+        observer_path = (
+            root / "agent" / "infrastructure" / "generic_scene_observer.py"
+        )
         self.assertTrue(domain_path.is_file())
         self.assertTrue(adapter_path.is_file())
         self.assertFalse((root / "trusted_observation.py").exists())

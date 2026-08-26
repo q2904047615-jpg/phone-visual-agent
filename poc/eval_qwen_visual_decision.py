@@ -14,7 +14,7 @@ from typing import Any
 
 from PIL import Image
 
-from generic_scene_observer import SingleStepGenericSceneObserver
+from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
 from qwen_runtime_errors import classify_qwen_error, failure_diagnostics
 from agent.application.qwen_visual_decision import QwenVisualDecisionObserver
 from agent.domain.qwen_task_context import QwenTaskContext

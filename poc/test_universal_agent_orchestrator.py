@@ -8883,6 +8883,7 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             "MAX_ORIENTATION_BINDING_AGE_SECONDS",
             "一次性方向授权已超过动作前时间窗",
             "transition_evidence_after_action",
+            "_untried_paged_swipe_choice",
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, joined)

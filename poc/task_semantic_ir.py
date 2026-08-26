@@ -104,6 +104,29 @@ _STATE_CLAUSE_SPLIT_PATTERN = re.compile(
     re.I,
 )
 
+_RECENT_TASKS_SURFACE_PATTERN = re.compile(
+    r"最近任务|最近应用|任务概览|后台(?:任务|应用)|系统多任务|"
+    r"\brecents?\b|\brecent\s+(?:tasks?|apps?)\b|"
+    r"\boverview\s+(?:screen|view)\b",
+    re.IGNORECASE,
+)
+_RECENT_TASK_CARD_PATTERN = re.compile(
+    r"(?:应用)?(?:预览|任务)?卡片|"
+    r"\b(?:app\s+)?(?:preview\s+|task\s+)?card\b",
+    re.IGNORECASE,
+)
+_DISMISS_LOCAL_OBJECT_PATTERN = re.compile(
+    r"划掉|滑走|移出|移除|关闭|清除|"
+    r"\b(?:dismiss|remove|close|clear)\b|"
+    r"\bswipe\b.{0,80}\b(?:away|off)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_SWIPE_DIRECTION_PATTERN = re.compile(
+    r"向(?:上|下|左|右)|(?:上|下|左|右)(?:划|滑)|"
+    r"\b(?:up|down|left|right)(?:ward)?\b",
+    re.IGNORECASE,
+)
+
 _RUNTIME_RISK_EFFECT_KIND = {
     "message_or_communication": "send_message",
     "content_publication": "publish_content",
@@ -1307,6 +1330,19 @@ def compile_runtime_graph_semantics(
             ),
         )
     ).casefold()
+    structured_subgoal_text = " ".join(
+        value
+        for item in tuple(getattr(graph, "subgoals", ()) or ())
+        for value in (
+            str(getattr(item, "objective", "") or ""),
+            *tuple(
+                str(condition)
+                for condition in tuple(
+                    getattr(item, "completion_conditions", ()) or ()
+                )
+            ),
+        )
+    )
     needs_launcher = (
         len(target_apps) > 1
         or any(term in raw_goal_folded for term in launcher_terms)
@@ -1320,6 +1356,13 @@ def compile_runtime_graph_semantics(
     )
     if needs_launcher:
         surfaces.append(SurfaceRef(surface_id="surface_launcher", kind="launcher"))
+    if _RECENT_TASKS_SURFACE_PATTERN.search(structured_subgoal_text):
+        surfaces.append(
+            SurfaceRef(
+                surface_id="surface_recent_tasks",
+                kind="recent_tasks",
+            )
+        )
     for app in target_apps:
         app_id = _slug(getattr(app, "app_id", ""), fallback="app")
         surfaces.append(
@@ -1688,12 +1731,53 @@ def compile_runtime_graph_semantics(
         if str(getattr(subgoal, "external_impact", "") or "") == "read_only":
             continue
         objective = str(getattr(subgoal, "objective", "") or "")
+        subgoal_state_text = " ".join(
+            (
+                objective,
+                *tuple(
+                    str(item)
+                    for item in tuple(
+                        getattr(subgoal, "completion_conditions", ()) or ()
+                    )
+                ),
+            )
+        )
+        recent_task_card_dismissal = bool(
+            _RECENT_TASKS_SURFACE_PATTERN.search(subgoal_state_text)
+            and _RECENT_TASK_CARD_PATTERN.search(subgoal_state_text)
+            and _DISMISS_LOCAL_OBJECT_PATTERN.search(subgoal_state_text)
+        )
+        if recent_task_card_dismissal:
+            constraint_id = f"constraint_action_{len(typed_constraints) + 1}"
+            typed_constraints.append(
+                ConstraintIntent(
+                    constraint_id=constraint_id,
+                    kind="required_action",
+                    value="swipe",
+                    # The current device's typed recents-card dismissal
+                    # affordance is leftward. This is a system-surface action
+                    # contract, not an App, screenshot, element, or coordinate
+                    # special case. An explicit user direction in the objective
+                    # remains in the same authoritative source text.
+                    source_text=(
+                        objective
+                        if _EXPLICIT_SWIPE_DIRECTION_PATTERN.search(objective)
+                        else f"{objective}；系统最近任务卡片向左滑动清除"
+                    ),
+                    authoritative=True,
+                )
+            )
+            action_constraint_ids_by_subgoal.setdefault(subgoal_id, []).append(
+                constraint_id
+            )
         for action_kind, pattern in action_patterns:
             if not has_positive_action_match(
                 objective,
                 pattern,
                 action_kind=action_kind,
             ):
+                continue
+            if action_kind == "swipe" and recent_task_card_dismissal:
                 continue
             # A visible title, mode name, or capability description may contain
             # the word "input" without requesting any text entry.  Only a
@@ -1735,6 +1819,17 @@ def compile_runtime_graph_semantics(
             ),
         )
         normalized = " ".join(values).casefold()
+        if _RECENT_TASKS_SURFACE_PATTERN.search(normalized):
+            recent_tasks = next(
+                (
+                    item.surface_id
+                    for item in surfaces
+                    if item.kind == "recent_tasks"
+                ),
+                "",
+            )
+            if recent_tasks:
+                return recent_tasks
         if any(term in normalized for term in launcher_terms_for_subgoal):
             launcher = next(
                 (item.surface_id for item in surfaces if item.kind == "launcher"),

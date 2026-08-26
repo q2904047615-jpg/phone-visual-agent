@@ -1279,7 +1279,6 @@ class QwenVisualDecisionObserver:
             context,
             canonical_choices,
             observation=trusted_observation,
-            navigation_history=navigation_history,
         )
         if deterministic_selection is not None:
             raw = json.dumps(
@@ -1305,8 +1304,8 @@ class QwenVisualDecisionObserver:
             return decision
 
         reason = (
-            "当前canonical目录未能依据唯一视觉目标或尚未探索的分页方向确定单一动作；"
-            "本地选择器停止，不发起重复模型请求。"
+            "当前canonical目录未能依据本步当前截图中的唯一视觉目标确定单一动作；"
+            "本地选择器停止，不沿用历史页面动作，也不发起重复模型请求。"
         )
         decision = _local_blocked_decision(
             context,
@@ -1379,7 +1378,6 @@ def _deterministic_exact_selection_payload(
     choices: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     *,
     observation: TrustedObservation | None = None,
-    navigation_history: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any] | None:
     """Select one canonical candidate from the sole step observation.
 
@@ -1494,17 +1492,6 @@ def _deterministic_exact_selection_payload(
                 "单次Qwen画面的唯一目标与canonical目录唯一候选一致。",
             )
 
-    paged_swipe = _untried_paged_swipe_choice(
-        choices,
-        observation=observation,
-        navigation_history=navigation_history,
-    )
-    if paged_swipe is not None:
-        return action_payload(
-            paged_swipe,
-            "分页视口按当前会话尚未探索的方向选择唯一canonical swipe。",
-        )
-
     if len(choices) == 1 and str(choices[0].get("action") or "") in {
         "back",
         "home",
@@ -1517,99 +1504,6 @@ def _deterministic_exact_selection_payload(
             choices[0],
             "canonical目录只有一个坐标无关或容器级合法动作。",
         )
-    return None
-
-
-def _paged_viewport_key(scene: UIScene | Mapping[str, Any]) -> tuple[Any, ...] | None:
-    if isinstance(scene, UIScene):
-        foreground = scene.foreground_app_id
-        screen_id = scene.screen_id
-        elements: Iterable[Any] = scene.elements
-    elif isinstance(scene, Mapping):
-        foreground = scene.get("foreground_app_id") or scene.get("app_id")
-        screen_id = scene.get("screen_id")
-        elements = scene.get("elements") or ()
-    else:
-        return None
-    matches: list[tuple[Any, ...]] = []
-    for element in elements:
-        if isinstance(element, UIElement):
-            role = element.role
-            meaning = element.meaning
-            states = element.states
-        elif isinstance(element, Mapping):
-            role = element.get("role")
-            meaning = element.get("meaning")
-            states = element.get("states") or {}
-        else:
-            continue
-        if not isinstance(states, Mapping):
-            continue
-        page_index = states.get("page_index")
-        page_count = states.get("page_count")
-        axis = states.get("scroll_axis")
-        if (
-            role == "container"
-            and meaning == "paged_viewport"
-            and states.get("scrollable") is True
-            and states.get("fully_visible") is True
-            and isinstance(page_index, int)
-            and not isinstance(page_index, bool)
-            and isinstance(page_count, int)
-            and not isinstance(page_count, bool)
-            and page_count >= 2
-            and 0 <= page_index < page_count
-            and axis in {"horizontal", "vertical"}
-        ):
-            matches.append(
-                (
-                    str(foreground or "").strip().casefold(),
-                    str(screen_id or "").strip().casefold(),
-                    str(axis),
-                    page_index,
-                    page_count,
-                )
-            )
-    return matches[0] if len(matches) == 1 else None
-
-
-def _untried_paged_swipe_choice(
-    choices: tuple[dict[str, Any], ...] | list[dict[str, Any]],
-    *,
-    observation: TrustedObservation,
-    navigation_history: Iterable[Mapping[str, Any]],
-) -> dict[str, Any] | None:
-    current_key = _paged_viewport_key(getattr(observation, "scene", None))
-    if current_key is None:
-        return None
-    tried: set[str] = set()
-    for item in navigation_history:
-        execution = item.get("execution")
-        decision = item.get("qwen_decision")
-        if not isinstance(execution, Mapping) or not isinstance(decision, Mapping):
-            continue
-        if execution.get("action_outcome") != "matched":
-            continue
-        action = decision.get("next_action")
-        trusted = decision.get("trusted_observation")
-        scene = trusted.get("scene") if isinstance(trusted, Mapping) else None
-        if (
-            isinstance(action, Mapping)
-            and action.get("action") == "swipe"
-            and isinstance(action.get("params"), Mapping)
-            and _paged_viewport_key(scene) == current_key
-        ):
-            direction = str(action["params"].get("direction") or "")
-            if direction:
-                tried.add(direction)
-    by_direction = {
-        str(choice.get("direction") or ""): choice
-        for choice in choices
-        if choice.get("action") == "swipe" and choice.get("direction")
-    }
-    for direction in ("left", "right", "up", "down"):
-        if direction in by_direction and direction not in tried:
-            return by_direction[direction]
     return None
 
 

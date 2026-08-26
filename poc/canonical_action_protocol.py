@@ -2450,6 +2450,25 @@ def compile_canonical_action_catalog(
         if candidate.effect_ref:
             return candidate.effect_ref in active_effect_refs
         action_kind = candidate.action_kind
+        surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
+        target_surface = surfaces.get(active_subgoal.surface_ref)
+        current_surface_kind = _surface_kind(scene)
+        required_system_action = {
+            "launcher": "home",
+            "recent_tasks": "open_recent_apps",
+        }.get(target_surface.kind if target_surface is not None else "")
+        if (
+            required_system_action is not None
+            and current_surface_kind != target_surface.kind
+        ):
+            # The current screenshot has not reached the subgoal's typed
+            # system surface. Only the coordinate-free transition into that
+            # surface belongs to this step; visible targets and viewports on
+            # the old page cannot authorize a later-page action.
+            return bool(
+                active_subgoal.external_impact == "navigation_only"
+                and action_kind == required_system_action
+            )
         if (
             action_kind == "clear_verified_text"
             and clears_useful_active_preedit(candidate)
@@ -2531,9 +2550,7 @@ def compile_canonical_action_catalog(
             element = element_by_id.get(element_id)
             if element is None:
                 return False
-            surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
-            target_surface = surfaces.get(active_subgoal.surface_ref)
-            current_kind = _surface_kind(scene)
+            current_kind = current_surface_kind
             if (
                 target_surface is not None
                 and target_surface.kind == "app"
@@ -2586,7 +2603,6 @@ def compile_canonical_action_catalog(
                         )
                     )
                 return active_targets_input
-            target_surface = surfaces.get(active_subgoal.surface_ref)
             if target_surface is not None and target_surface.kind == "app":
                 if current_kind == "launcher":
                     return any(
@@ -2618,10 +2634,7 @@ def compile_canonical_action_catalog(
         if action_kind in {"double_tap", "long_press", "drag"}:
             return action_kind in active_required_actions
         if action_kind == "home":
-            surfaces = {
-                item.surface_id: item for item in semantic_ir.surfaces
-            }
-            target = surfaces.get(active_subgoal.surface_ref)
+            target = target_surface
             current_kind = _surface_kind(scene)
             if target is None:
                 return False
@@ -2633,10 +2646,7 @@ def compile_canonical_action_catalog(
         if action_kind == "wait_for_change":
             if active_input_fields:
                 return action_kind in active_required_actions
-            surfaces = {
-                item.surface_id: item for item in semantic_ir.surfaces
-            }
-            target = surfaces.get(active_subgoal.surface_ref)
+            target = target_surface
             if (
                 target is not None
                 and target.kind == "app"
@@ -2656,10 +2666,7 @@ def compile_canonical_action_catalog(
         }:
             if active_input_fields:
                 return action_kind in active_required_actions
-            surfaces = {
-                item.surface_id: item for item in semantic_ir.surfaces
-            }
-            target = surfaces.get(active_subgoal.surface_ref)
+            target = target_surface
             if (
                 target is not None
                 and target.kind == "app"

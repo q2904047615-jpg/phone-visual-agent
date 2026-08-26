@@ -4,16 +4,19 @@ import unittest
 from types import SimpleNamespace
 
 from canonical_action_protocol import compile_canonical_action_catalog
-from deepseek_task_graph import build_exact_action_task_graph
+from deepseek_task_graph import _graph_from_payload, build_exact_action_task_graph
 from device_executor import DeviceActionRequest, RobotDeviceExecutor
 from generic_action_adapter import _post_action_visual_context
 from generic_scene_observer import POST_ACTION_VISUAL_CONTEXT_VERSION
-from qwen_visual_decision import _deterministic_exact_selection_payload
+from qwen_visual_decision import (
+    _deterministic_exact_selection_payload,
+    _selection_choices,
+)
 from robot_core import DEFAULT_CONTROLLER_CONFIG, load_controller_config
 from semantic_action import SemanticAction
 from task_semantic_ir import compile_formal_semantic_authority
 from test_task_semantic_ir import required_actions_for_objective
-from ui_scene import UIScene, scene_surface_kind
+from ui_scene import UIElement, UIScene, scene_surface_kind
 from universal_action_controller import (
     ResolvedSemanticAction,
     UniversalActionController,
@@ -54,6 +57,209 @@ class FakeRobot:
 
 
 class RecentAppsActionTests(unittest.TestCase):
+    @staticmethod
+    def clear_card_graph(
+        card_objective: str = "在最近任务界面中清除示例应用卡片",
+    ):
+        raw_goal = "先清除示例应用卡片，然后打开示例应用"
+        return _graph_from_payload(
+            {
+                "status": "ready",
+                "goal": {
+                    "objective": raw_goal,
+                    "target_apps": [
+                        {"app_id": "sample_app", "app_name": "示例应用"}
+                    ],
+                    "entities": {},
+                },
+                "constraints": [],
+                "completion_conditions": [
+                    {
+                        "condition_id": "opened",
+                        "description": "示例应用主界面可见",
+                        "evidence_required": ["示例应用页面"],
+                        "satisfied": False,
+                        "evidence": [],
+                    }
+                ],
+                "effect_intents": [],
+                "subgoals": [
+                    {
+                        "subgoal_id": "clear_card",
+                        "objective": card_objective,
+                        "status": "active",
+                        "depends_on": [],
+                        "constraints": ["仅清除应用预览卡片"],
+                        "completion_conditions": [
+                            "最近任务界面中示例应用卡片被移除"
+                        ],
+                        "completion_evidence": [],
+                        "effect_ids": [],
+                        "execution_class": "navigate",
+                    },
+                    {
+                        "subgoal_id": "open_app",
+                        "objective": "打开示例应用",
+                        "status": "pending",
+                        "depends_on": ["clear_card"],
+                        "constraints": [],
+                        "completion_conditions": ["示例应用主界面可见"],
+                        "completion_evidence": [],
+                        "effect_ids": [],
+                        "execution_class": "navigate",
+                    },
+                ],
+                "active_subgoal_id": "clear_card",
+                "clarification_questions": [],
+            },
+            task_id="task-clear-card-current-frame",
+            device_id="device-local-01",
+            revision=1,
+            raw_user_goal=raw_goal,
+        )
+
+    def test_clear_card_from_launcher_only_allows_entering_recent_tasks(self) -> None:
+        authority = compile_formal_semantic_authority(self.clear_card_graph())
+        active = next(
+            item
+            for item in authority.semantic_ir.subgoals
+            if item.subgoal_id == "clear_card"
+        )
+        surfaces = {
+            item.surface_id: item for item in authority.semantic_ir.surfaces
+        }
+        self.assertEqual("recent_tasks", surfaces[active.surface_ref].kind)
+
+        launcher = UIScene(
+            app_id="launcher",
+            screen_id="home_screen",
+            summary="桌面分页中可见示例应用图标",
+            elements=(
+                UIElement(
+                    element_id="app-icon",
+                    role="icon",
+                    meaning="app_launcher_sample",
+                    label="示例应用",
+                    bounds=(0.1, 0.2, 0.3, 0.4),
+                    confidence=1.0,
+                    states={"goal_relevant": True, "fully_visible": True},
+                ),
+                UIElement(
+                    element_id="pages",
+                    role="container",
+                    meaning="paged_viewport",
+                    label="桌面分页区",
+                    bounds=(0.0, 0.1, 1.0, 0.9),
+                    confidence=1.0,
+                    states={
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "scrollable": True,
+                        "scroll_axis": "horizontal",
+                        "page_index": 0,
+                        "page_count": 2,
+                    },
+                    evidence=("两个桌面分页圆点",),
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint="launcher-current-frame",
+        )
+        report = compile_canonical_action_catalog(
+            launcher,
+            authority.semantic_ir,
+            {"tap_semantic", "swipe", "back", "home", "open_recent_apps"},
+        )
+        self.assertEqual(
+            ["open_recent_apps"],
+            [item.action_kind for item in report.candidates],
+        )
+        observation = SimpleNamespace(
+            scene=launcher,
+            target_local_candidate=launcher.unique_trusted_goal_element,
+        )
+        context = SimpleNamespace(
+            semantic_ir=authority.semantic_ir,
+            current_subgoal={"subgoal_id": "clear_card"},
+            current_execution_class="navigate",
+            effect_action_allowed=False,
+        )
+        choices = _selection_choices(
+            context,
+            observation,
+            frozenset(
+                {"tap_semantic", "swipe", "back", "home", "open_recent_apps"}
+            ),
+        )
+        selected = _deterministic_exact_selection_payload(
+            context,
+            choices,
+            observation=observation,
+        )
+        selected_choice = next(
+            item for item in choices if item["choice_id"] == selected["choice_id"]
+        )
+        self.assertEqual("open_recent_apps", selected_choice["action"])
+
+    def test_new_recent_tasks_frame_only_allows_bound_card_swipe(self) -> None:
+        recent_tasks = UIScene(
+            app_id="system",
+            screen_id="system_recent_tasks",
+            summary="最近任务中显示唯一示例应用预览卡片",
+            elements=(
+                UIElement(
+                    element_id="preview-card",
+                    role="list_item",
+                    meaning="sample_preview_card",
+                    label="示例应用",
+                    bounds=(0.25, 0.2, 0.75, 0.8),
+                    confidence=1.0,
+                    states={"goal_relevant": True, "fully_visible": True},
+                    evidence=("唯一完整可见的应用预览卡片",),
+                ),
+            ),
+            stable=True,
+            confidence=1.0,
+            fingerprint="new-recent-tasks-frame",
+        )
+        for objective, expected_direction in (
+            ("在最近任务界面中清除示例应用卡片", "left"),
+            ("在最近任务界面中向右划掉示例应用卡片", "right"),
+        ):
+            with self.subTest(objective=objective):
+                authority = compile_formal_semantic_authority(
+                    self.clear_card_graph(objective)
+                )
+                report = compile_canonical_action_catalog(
+                    recent_tasks,
+                    authority.semantic_ir,
+                    {
+                        "tap_semantic",
+                        "swipe",
+                        "back",
+                        "home",
+                        "open_recent_apps",
+                    },
+                )
+                self.assertEqual(1, len(report.candidates))
+                candidate = report.candidates[0]
+                self.assertEqual("swipe", candidate.action_kind)
+                self.assertEqual(
+                    {
+                        "direction": expected_direction,
+                        "element_id": "preview-card",
+                    },
+                    candidate.parameters,
+                )
+                self.assertEqual(
+                    [("element.exists", "absent")],
+                    [
+                        (item.predicate, item.operator)
+                        for item in candidate.transition.expectations
+                    ],
+                )
+
     def test_device_recents_calibration_stays_inside_left_navigation_key(self) -> None:
         configured = load_controller_config()
         for source in (DEFAULT_CONTROLLER_CONFIG, configured):

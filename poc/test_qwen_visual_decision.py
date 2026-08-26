@@ -218,7 +218,7 @@ class StructuredAppSurfaceSelectionRegressionTests(unittest.TestCase):
 
 
 class PagedViewportSelectionRegressionTests(unittest.TestCase):
-    def test_session_history_explores_each_paged_direction_once(self) -> None:
+    def test_paged_viewport_does_not_self_select_a_direction(self) -> None:
         task_id = "task_paged_launcher"
         device_id = "device-local-01"
         surface = SurfaceRef(
@@ -322,12 +322,11 @@ class PagedViewportSelectionRegressionTests(unittest.TestCase):
             frozenset({"back", "swipe", "tap_semantic", "wait_for_change"}),
         )
 
-        def selected_direction(history):
+        def selected_direction():
             payload = _deterministic_exact_selection_payload(
                 context,
                 choices,
                 observation=observation,
-                navigation_history=history,
             )
             if payload is None:
                 return None
@@ -336,23 +335,7 @@ class PagedViewportSelectionRegressionTests(unittest.TestCase):
             )
             return selected.get("direction")
 
-        def history_item(direction):
-            return {
-                "qwen_decision": {
-                    "trusted_observation": {"scene": current_scene.to_dict()},
-                    "next_action": {
-                        "action": "swipe",
-                        "params": {"direction": direction},
-                    },
-                },
-                "execution": {"action_outcome": "matched"},
-            }
-
-        self.assertEqual("left", selected_direction(()))
-        self.assertEqual("right", selected_direction((history_item("left"),)))
-        self.assertIsNone(
-            selected_direction((history_item("left"), history_item("right")))
-        )
+        self.assertIsNone(selected_direction())
 
 
 class ElementBoundSwipeSelectionRegressionTests(unittest.TestCase):

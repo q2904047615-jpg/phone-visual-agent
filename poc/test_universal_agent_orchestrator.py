@@ -10,7 +10,12 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from agent.domain import DeviceTaskRegistryError, EvidenceStoreError
+from agent.application import UniversalAgentSessionState
+from agent.domain import (
+    DeviceTaskRegistryError,
+    EvidenceStoreError,
+    VerifiedAppSurfaceLineage,
+)
 from agent.infrastructure import DeviceTaskRegistry, FileSystemAgentEvidenceStore
 from deepseek_task_graph import (
     CompletionCondition,
@@ -44,8 +49,6 @@ from universal_agent_orchestrator import (
     ObservationBridge,
     UniversalAgentOrchestrator,
     UniversalAgentOrchestratorError,
-    UniversalAgentSessionState,
-    VerifiedAppSurfaceLineage,
     _action_digest,
     _action_equivalence_digest,
     _allows_fresh_observation_corrective_retry,

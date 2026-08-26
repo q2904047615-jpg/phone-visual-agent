@@ -9,8 +9,11 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from agent.application import (
+    CORRECTIVE_RETRY_PROTOCOL_VERSION,
+    POST_ACTION_TRANSITION_PROTOCOL_VERSION,
     StartUniversalAgentSessionCommand,
     UniversalAgentSessionApplicationService,
+    UniversalAgentSessionState,
 )
 from agent.domain import (
     CANONICAL_SELECTION_RECEIPT_VERSION,
@@ -243,6 +246,83 @@ class AgentSessionApplicationTests(unittest.TestCase):
 
 
 class AgentDependencyBoundaryTests(unittest.TestCase):
+    def test_runtime_session_aggregate_is_owned_by_application(self) -> None:
+        class SnapshotAdapter:
+            @staticmethod
+            def supported_action_kinds() -> frozenset[str]:
+                return frozenset({"back", "home"})
+
+            @staticmethod
+            def capability_snapshot() -> Any:
+                return type(
+                    "Capability",
+                    (),
+                    {"to_dict": lambda self: {"device_id": "phone-1"}},
+                )()
+
+        authority = ConfirmationAuthority(
+            session_id="session-1",
+            task_id="task-1",
+            device_id="phone-1",
+            revision=1,
+            subgoal_id="authenticate",
+            effect_ids=("risk-1",),
+            observation_id="obs-1",
+            fingerprint="frame-1",
+            decision_node_id="node-1",
+            action_digest="a" * 64,
+        )
+        session = UniversalAgentSessionState(
+            session_id="session-1",
+            raw_goal="完成身份认证",
+            device_id="phone-1",
+            run_dir=Path("unused"),
+            adapter=SnapshotAdapter(),
+            evidence_store=object(),  # type: ignore[arg-type]
+            status="awaiting_confirmation",
+            controller_decision=CanonicalSelectionReceipt(
+                allowed=True,
+                reason="唯一动作已绑定。",
+                canonical_class="tap_semantic",
+            ),
+            confirmation_authority=authority,
+            evidence_paths=["a.json", "a.json", "b.json"],
+        )
+
+        snapshot = session.snapshot()
+        self.assertEqual(1, snapshot["step_number"])
+        self.assertEqual(0, snapshot["physical_actions"])
+        self.assertTrue(snapshot["confirmation_ready"])
+        self.assertEqual(authority.scope(), snapshot["confirmation_scope"])
+        self.assertEqual(["a.json", "b.json"], snapshot["evidence"])
+        self.assertEqual(["back", "home"], snapshot["available_action_kinds"])
+        self.assertEqual(
+            CORRECTIVE_RETRY_PROTOCOL_VERSION,
+            snapshot["corrective_retry_protocol"],
+        )
+        self.assertEqual(
+            POST_ACTION_TRANSITION_PROTOCOL_VERSION,
+            snapshot["post_action_transition_protocol"],
+        )
+        authority.consumed = True
+        consumed = session.snapshot()
+        self.assertFalse(consumed["confirmation_ready"])
+        self.assertIsNone(consumed["confirmation_scope"])
+
+        root = Path(__file__).resolve().parent
+        orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("class UniversalAgentSessionState", orchestrator_source)
+        self.assertNotIn(
+            '"2026-08-16-universal-post-action-transition-v1"',
+            orchestrator_source,
+        )
+        self.assertNotIn(
+            '"2026-08-24-fresh-observation-corrective-retry-v1"',
+            orchestrator_source,
+        )
+
     def test_verified_app_surface_lineage_is_one_immutable_domain_record(self) -> None:
         lineage = VerifiedAppSurfaceLineage(
             session_id="session-1",
@@ -279,10 +359,13 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
             encoding="utf-8"
         )
+        session_source = (
+            root / "agent" / "application" / "runtime_session.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("class VerifiedAppSurfaceLineage", orchestrator_source)
         self.assertIn(
             "verified_app_surface_lineage: VerifiedAppSurfaceLineage | None",
-            orchestrator_source,
+            session_source,
         )
 
     def test_confirmation_authorities_are_domain_scoped_and_stably_sorted(self) -> None:
@@ -319,15 +402,18 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         orchestrator_source = (root / "universal_agent_orchestrator.py").read_text(
             encoding="utf-8"
         )
+        session_source = (
+            root / "agent" / "application" / "runtime_session.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("class ConfirmationAuthority", orchestrator_source)
         self.assertNotIn("class EffectConfirmationAuthority", orchestrator_source)
         self.assertIn(
             "confirmation_authority: ConfirmationAuthority | None",
-            orchestrator_source,
+            session_source,
         )
         self.assertIn(
             "effect_confirmation_authority: EffectConfirmationAuthority | None",
-            orchestrator_source,
+            session_source,
         )
 
     def test_canonical_selection_receipt_is_one_domain_value_object(self) -> None:

@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -25,9 +24,13 @@ from deepseek_task_graph import (
     named_visual_identity_is_grounded,
 )
 from deepseek_failure_diagnostics import persist_deepseek_failure_diagnostic
+from agent.application import (
+    CORRECTIVE_RETRY_PROTOCOL_VERSION,
+    POST_ACTION_TRANSITION_PROTOCOL_VERSION,
+    UniversalAgentSessionState,
+)
 from agent.domain import (
     AgentEvidenceStoreFactory,
-    AgentEvidenceStorePort,
     CANONICAL_SELECTION_RECEIPT_VERSION,
     CanonicalSelectionReceipt,
     ConfirmationAuthority,
@@ -71,13 +74,7 @@ from verified_text_transaction import (
 from vision_usage import VisionSessionUsageLedger
 
 
-POST_ACTION_TRANSITION_PROTOCOL_VERSION = (
-    "2026-08-16-universal-post-action-transition-v1"
-)
 POST_ACTION_OUTCOMES = frozenset({"matched", "mismatched"})
-CORRECTIVE_RETRY_PROTOCOL_VERSION = (
-    "2026-08-24-fresh-observation-corrective-retry-v1"
-)
 CORRECTIVE_RETRY_IMPACTS = frozenset({"read_only", "navigation_only"})
 CORRECTIVE_RETRY_ACTION_KINDS = frozenset(
     {
@@ -938,187 +935,6 @@ class TaskGraphTransitionReport:
             "reason": self.reason,
             "completion_evidence": list(self.completion_evidence),
             "authority": self.authority,
-        }
-
-
-@dataclass
-class UniversalAgentSessionState:
-    session_id: str
-    raw_goal: str
-    device_id: str
-    run_dir: Path
-    adapter: Any = field(repr=False)
-    evidence_store: AgentEvidenceStorePort = field(repr=False)
-    vision_usage: VisionSessionUsageLedger | None = field(
-        default=None,
-        repr=False,
-    )
-    task_graph: DynamicTaskGraph | None = None
-    goal_draft: GenericIntentDraft | None = None
-    trusted_observation: Any = None
-    trusted_frames: tuple[Any, ...] = field(default_factory=tuple, repr=False)
-    qwen_decision: Any = None
-    controller_decision: CanonicalSelectionReceipt | None = None
-    confirmation_authority: ConfirmationAuthority | None = field(
-        default=None,
-        repr=False,
-    )
-    effect_confirmation_authority: EffectConfirmationAuthority | None = field(
-        default=None,
-        repr=False,
-    )
-    confirmed_effect_ids: tuple[str, ...] = ()
-    status: str = "created"
-    step_number: int = 1
-    physical_actions: int = 0
-    local_exact_input_authority: bool = field(default=False, repr=False)
-    automatic_loop_enabled: bool = False
-    auto_pause_reason: str = ""
-    corrective_retry_history: list[dict[str, Any]] = field(default_factory=list)
-    history: list[dict[str, Any]] = field(default_factory=list)
-    evidence_paths: list[str] = field(default_factory=list)
-    last_post_action_transition: dict[str, Any] | None = None
-    verified_app_surface_lineage: VerifiedAppSurfaceLineage | None = None
-    last_confirmation_failure: dict[str, Any] | None = None
-    capability_gap: dict[str, Any] | None = None
-    effect_previews: tuple[dict[str, Any], ...] = ()
-    effect_verification: dict[str, Any] | None = None
-    semantic_task_context: Any = field(default=None, repr=False)
-    confirm_stage: str = ""
-    failed_reason: str = ""
-    created_at: str = field(
-        default_factory=lambda: datetime.now().astimezone().isoformat(
-            timespec="seconds"
-        )
-    )
-
-    @staticmethod
-    def _serialize(value: Any) -> Any:
-        if value is None:
-            return None
-        if isinstance(value, Mapping):
-            return dict(value)
-        method = getattr(value, "to_dict", None)
-        if callable(method):
-            return method()
-        return value
-
-    def snapshot(self) -> dict[str, Any]:
-        decision = self._serialize(self.qwen_decision)
-        graph = self._serialize(self.task_graph)
-        observation = self._serialize(self.trusted_observation)
-        proposal = (
-            self._serialize(getattr(self.qwen_decision, "proposal", None))
-            if self.qwen_decision is not None
-            else None
-        )
-        controller = self._serialize(self.controller_decision)
-        scene = (
-            self._serialize(getattr(self.trusted_observation, "scene", None))
-            if self.trusted_observation is not None
-            else None
-        )
-        return {
-            "session_id": self.session_id,
-            "raw_goal": self.raw_goal,
-            "device_id": self.device_id,
-            "created_at": self.created_at,
-            "status": self.status,
-            "step_number": self.step_number,
-            "physical_actions": self.physical_actions,
-            "qwen_usage": (
-                self.vision_usage.to_dict()
-                if self.vision_usage is not None
-                else None
-            ),
-            "local_exact_input_authority": self.local_exact_input_authority,
-            "failed_reason": self.failed_reason,
-            "confirm_stage": self.confirm_stage,
-            "task_graph": graph,
-            "goal": self._serialize(self.goal_draft),
-            "trusted_observation": observation,
-            "current_scene": scene,
-            "qwen_decision": decision,
-            "proposal": proposal,
-            "controller_decision": controller,
-            "history": list(self.history),
-            "evidence": list(dict.fromkeys(self.evidence_paths)),
-            "automatic_loop_enabled": self.automatic_loop_enabled,
-            "auto_pause_reason": self.auto_pause_reason,
-            "corrective_retry_protocol": CORRECTIVE_RETRY_PROTOCOL_VERSION,
-            "corrective_retry_history": [
-                dict(item) for item in self.corrective_retry_history
-            ],
-            "post_action_transition_protocol": (
-                POST_ACTION_TRANSITION_PROTOCOL_VERSION
-            ),
-            "last_post_action_transition": (
-                dict(self.last_post_action_transition)
-                if self.last_post_action_transition is not None
-                else None
-            ),
-            "last_confirmation_failure": (
-                dict(self.last_confirmation_failure)
-                if self.last_confirmation_failure is not None
-                else None
-            ),
-            "available_action_kinds": sorted(
-                self.adapter.supported_action_kinds()
-                if callable(getattr(self.adapter, "supported_action_kinds", None))
-                else SUPPORTED_ACTIONS
-            ),
-            "confirmation_scope": (
-                self.confirmation_authority.scope()
-                if self.confirmation_authority is not None
-                and not self.confirmation_authority.consumed
-                else None
-            ),
-            "confirmation_ready": bool(
-                self.status == "awaiting_confirmation"
-                and self.controller_decision is not None
-                and self.controller_decision.allowed
-                and self.confirmation_authority is not None
-                and not self.confirmation_authority.consumed
-            ),
-            "effect_confirmation_scope": (
-                self.effect_confirmation_authority.scope()
-                if self.effect_confirmation_authority is not None
-                and not self.effect_confirmation_authority.consumed
-                else None
-            ),
-            "effect_confirmation_ready": bool(
-                self.status == "awaiting_effect_confirmation"
-                and self.effect_confirmation_authority is not None
-                and not self.effect_confirmation_authority.consumed
-            ),
-            "capability_gap": (
-                dict(self.capability_gap)
-                if self.capability_gap is not None
-                else None
-            ),
-            "verified_app_surface_lineage": (
-                self.verified_app_surface_lineage.to_dict()
-                if self.verified_app_surface_lineage is not None
-                else None
-            ),
-            "effect_previews": [dict(item) for item in self.effect_previews],
-            "effect_verification": (
-                dict(self.effect_verification)
-                if self.effect_verification is not None
-                else None
-            ),
-            "device_capability": (
-                self.adapter.capability_snapshot().to_dict()
-                if callable(getattr(self.adapter, "capability_snapshot", None))
-                else None
-            ),
-            "effect_confirmation_preview": (
-                dict(self.effect_confirmation_authority.intent_preview)
-                if self.effect_confirmation_authority is not None
-                and not self.effect_confirmation_authority.consumed
-                else None
-            ),
-            "confirmed_effect_ids": list(self.confirmed_effect_ids),
         }
 
 

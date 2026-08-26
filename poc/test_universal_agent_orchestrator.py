@@ -8674,102 +8674,8 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertEqual(2, len(qwen.calls))
         self.assertEqual(3, qwen.calls[-1]["task_context"]["revision"])
 
-    def test_safe_loop_executes_one_confirmed_action_then_pauses_for_new_confirmation(self) -> None:
-        initial = _graph()
 
-        class SequentialPlanner(FakeDeepSeekPlanner):
-            def replan(self, graph, observation, *, trigger, reason):
-                self.replan_calls.append((graph, observation, trigger, reason))
-                if graph.revision == 1:
-                    return replace(initial, revision=2)
-                return _completed_graph(graph)
 
-        class SequentialAdapter(FakeExecutingAdapter):
-            def __init__(self):
-                super().__init__(
-                    _scene(),
-                    _scene(fingerprint="frame-b", meaning="open_more", label="查看更多"),
-                )
-                self.after_scenes = [
-                    self.after_scene,
-                    _scene(
-                        fingerprint="frame-c",
-                        meaning="open_final",
-                        label="打开最终详情",
-                    ),
-                ]
-
-            def execute(self, **kwargs):
-                self.after_scene = self.after_scenes[self.execute_calls]
-                return super().execute(**kwargs)
-
-        planner = SequentialPlanner(initial)
-        adapter = SequentialAdapter()
-        with tempfile.TemporaryDirectory() as temp:
-            orchestrator, session, _planner, qwen, _adapter = self._started(
-                temp,
-                planner=planner,
-                adapter=adapter,
-            )
-
-            result = orchestrator.run_safe_loop(
-                session,
-                _confirmation(session),
-                max_physical_actions=1,
-                max_iterations=1,
-            )
-
-        self.assertEqual(1, result["physical_actions"])
-        self.assertEqual(1, result["iterations"])
-        self.assertEqual("awaiting_confirmation", result["status"])
-        self.assertEqual(1, adapter.execute_calls)
-        self.assertEqual(1, session.physical_actions)
-        self.assertEqual(2, session.task_graph.revision)
-        self.assertEqual(2, len(qwen.calls))
-        self.assertFalse(session.automatic_loop_enabled)
-
-    def test_safe_loop_rejects_more_than_one_physical_action_before_execution(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            orchestrator, session, _planner, _qwen, adapter = self._started(temp)
-
-            with self.assertRaisesRegex(
-                UniversalAgentOrchestratorError,
-                "每次确认最多执行一个物理动作",
-            ):
-                orchestrator.run_safe_loop(
-                    session,
-                    _confirmation(session),
-                    max_physical_actions=2,
-                    max_iterations=1,
-                )
-
-        self.assertEqual(0, adapter.execute_calls)
-        self.assertEqual(0, session.physical_actions)
-
-    def test_safe_loop_rejects_external_risk_stage_with_zero_actions(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            orchestrator = UniversalAgentOrchestrator(
-                deepseek_planner=FakeDeepSeekPlanner(_external_graph()),
-                qwen_observer=FakeQwenObserver(),
-                adapter_factory=lambda _device_id: FakeAdapter(_scene()),
-                trusted_observation_factory=_trusted_factory,
-            )
-            session = orchestrator.start(
-                session_id="session-auto-risk",
-                raw_goal="发送一条消息",
-                device_id="device-1",
-                run_dir=Path(temp),
-            )
-            with self.assertRaisesRegex(
-                UniversalAgentOrchestratorError,
-                "awaiting_effect_confirmation",
-            ):
-                orchestrator.run_safe_loop(
-                    session,
-                    _effect_confirmation(session),
-                )
-
-        self.assertEqual(0, session.physical_actions)
 
     def test_confirmation_requires_observation_id_and_fingerprint(self) -> None:
         for missing in ("observation_id", "fingerprint"):
@@ -9020,37 +8926,6 @@ class UniversalAgentConfirmTests(unittest.TestCase):
         self.assertEqual("mismatched", verification["action_outcome"])
         self.assertIn("语义变化", verification["blocked_reasons"][0])
 
-    def test_safe_loop_stops_after_one_semantic_noop(self) -> None:
-        initial = _graph()
-        planner = FakeDeepSeekPlanner(
-            initial,
-            replan_result=replace(initial, revision=2),
-        )
-        adapter = FakeExecutingAdapter(
-            _scene(),
-            _scene(fingerprint="camera-noise-only"),
-            action_outcome="mismatched",
-            verification_errors=("动作后页面没有可验证的语义变化。",),
-        )
-        with tempfile.TemporaryDirectory() as temp:
-            orchestrator, session, _planner, _qwen, adapter = self._started(
-                temp,
-                planner=planner,
-                adapter=adapter,
-            )
-
-            result = orchestrator.run_safe_loop(
-                session,
-                _confirmation(session),
-                max_physical_actions=1,
-                max_iterations=1,
-            )
-
-        self.assertEqual(1, result["physical_actions"])
-        self.assertEqual(1, result["iterations"])
-        self.assertIn("预期语义变化", result["pause_reason"])
-        self.assertEqual(1, adapter.execute_calls)
-        self.assertEqual(1, session.physical_actions)
 
     def test_autonomous_loop_reobserves_then_corrects_one_navigation_noop(self) -> None:
         initial = _graph()

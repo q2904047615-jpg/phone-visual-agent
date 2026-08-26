@@ -5,13 +5,8 @@ import unittest
 from PIL import Image, ImageDraw
 
 from observation_images import (
-    ObservationRoi,
-    build_overview,
-    build_roi,
     consensus_top_edge_obstructions,
     detect_top_edge_opaque_bands,
-    map_roi_bounds_to_full,
-    map_roi_point_to_full,
     measure_local_stability,
 )
 
@@ -82,29 +77,7 @@ class ObservationImageTests(unittest.TestCase):
             ),
         )
 
-    def test_overview_and_roi_stay_inside_payload_budget(self) -> None:
-        image = patterned_frame()
-        overview = build_overview(image)
-        roi = build_roi(
-            image,
-            ObservationRoi("right_actions", (580, 60, 1000, 880), "测试"),
-        )
-        self.assertLessEqual(overview.jpeg_bytes, 28000)
-        self.assertLessEqual(roi.jpeg_bytes, 24000)
-        self.assertEqual(overview.width, 320)
-        # The ROI covers only 42% of the original width. Even when its encoded
-        # width equals the overview width, it carries substantially more pixels
-        # per unit of the original screen.
-        roi_screen_fraction = (1000 - 580) / 1000
-        self.assertGreater(roi.width / roi_screen_fraction, overview.width)
 
-    def test_roi_coordinates_map_back_to_full_frame(self) -> None:
-        bounds = (580, 60, 1000, 880)
-        self.assertEqual(map_roi_point_to_full((500, 500), bounds), (790, 470))
-        self.assertEqual(
-            map_roi_bounds_to_full((200, 300, 800, 700), bounds),
-            (664, 306, 916, 634),
-        )
 
     def test_local_stability_rejects_oscillating_recent_frames(self) -> None:
         frame = patterned_frame()

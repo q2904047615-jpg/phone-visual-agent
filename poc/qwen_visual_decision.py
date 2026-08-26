@@ -713,31 +713,6 @@ class TrustedObservation:
             self.candidate_conflicts,
         )
 
-    def prompt_dict(self) -> dict[str, Any]:
-        candidates: list[dict[str, Any]] = []
-        for item in self.scene.elements:
-            value = item.to_dict()
-            value["bounds"] = [round(part * 1000) for part in item.bounds]
-            candidates.append(value)
-        value = {
-            "observation_id": self.observation_id,
-            "device_id": self.device_id,
-            "fingerprint": self.fingerprint,
-            "foreground_app_id": self.scene.foreground_app_id,
-            "screen_id": self.scene.screen_id,
-            "summary": self.scene.summary,
-            "overlays": list(self.scene.overlays),
-            "scene_confidence": float(self.scene.confidence),
-            "candidate_bounds_scale": 1000,
-            "candidates": candidates,
-            "candidate_aliases": dict(self.candidate_aliases),
-            "candidate_conflicts": [dict(item) for item in self.candidate_conflicts],
-        }
-        system_ui = _structured_system_ui(self.scene)
-        if system_ui is not None:
-            value["system_ui"] = system_ui
-        return value
-
     def to_dict(self) -> dict[str, Any]:
         scene = self.scene.to_dict()
         system_ui = _structured_system_ui(self.scene)

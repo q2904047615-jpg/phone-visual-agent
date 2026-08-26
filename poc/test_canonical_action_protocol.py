@@ -14,10 +14,8 @@ from ui_scene import UIElement, UIScene
 from verified_text_transaction import plan_from_input_states
 from canonical_action_protocol import (
     CANONICAL_ACTION_PROTOCOL,
-    CanonicalActionProtocolError,
     canonical_candidate_expected_result,
     compile_canonical_action_catalog,
-    select_canonical_action_candidate,
 )
 
 
@@ -1754,25 +1752,6 @@ class CanonicalActionProtocolTests(unittest.TestCase):
                     )
                 )
 
-    def test_selection_only_returns_existing_candidate_from_same_digest(self) -> None:
-        report = compile_canonical_action_catalog(
-            input_scene(),
-            input_ir(active="type_last_char"),
-            {"tap_semantic"},
-        )
-        candidate = report.candidates[0]
-        selected = select_canonical_action_candidate(
-            report,
-            report_digest=report.report_digest,
-            candidate_id=candidate.candidate_id,
-        )
-        self.assertIs(candidate, selected)
-        with self.assertRaisesRegex(CanonicalActionProtocolError, "digest"):
-            select_canonical_action_candidate(
-                report,
-                report_digest="0" * 64,
-                candidate_id=candidate.candidate_id,
-            )
 
     def test_effect_candidate_only_exists_for_active_effect_subgoal(self) -> None:
         recipient = SemanticEntity(

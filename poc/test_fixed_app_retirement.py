@@ -44,6 +44,7 @@ RETIRED_SOURCE_FILES = {
     "analyze_state_graph_reliability.py",
     "build_vision_history_index.py",
     "build_vision_review_queue.py",
+    "constraint_target_filter.py",
     "web_workflows.json",
     "sequence.example.json",
     "templates/douyin_home.png",
@@ -62,6 +63,7 @@ RETIRED_TEST_FILES = {
     "test_reliability.py",
     "test_vision_replay.py",
     "test_vision_review_queue.py",
+    "test_constraint_target_filter.py",
 }
 
 RETIRED_PATHS = {
@@ -101,6 +103,42 @@ class FixedAppRetirementTests(unittest.TestCase):
             if (ROOT / relative).exists()
         )
         self.assertEqual([], leftovers)
+
+    def test_unreferenced_compatibility_surfaces_cannot_return(self) -> None:
+        forbidden = {
+            "class EncodedObservationImage:",
+            "class ObservationRoi:",
+            "def _encode_bounded_jpeg(",
+            "def _infer_app_id(",
+            "def _new_generic_action_adapter(",
+            "def _normalized_crop(",
+            "def _post_observation_retryable(",
+            "def _pre_action_observation_retryable(",
+            "def _run_safe_loop_locked(",
+            "def build_overview(",
+            "def build_roi(",
+            "def ensure_dirs(",
+            "def ensure_scene_elements(",
+            "def map_roi_bounds_to_full(",
+            "def map_roi_point_to_full(",
+            "def match_surface(",
+            "def match_visual(",
+            "def prompt_dict(",
+            "def public_identity(",
+            "def recover_from_session_file(",
+            "def run_safe_loop(",
+            "def select_canonical_action_candidate(",
+            "def window_dpi(",
+        }
+        hits = []
+        for path in ROOT.glob("*.py"):
+            if path.name.startswith("test_"):
+                continue
+            text = path.read_text(encoding="utf-8")
+            hits.extend(
+                f"{path.name}:{token}" for token in forbidden if token in text
+            )
+        self.assertEqual([], sorted(hits))
 
     def test_current_runtime_sources_cannot_restore_fixed_app_authority(self) -> None:
         forbidden = {

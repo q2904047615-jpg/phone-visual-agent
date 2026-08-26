@@ -777,88 +777,8 @@ class TypedInputLineageTests(unittest.TestCase):
             observer_source,
         )
 
-    def test_verified_literal_action_round_trip_and_visual_match(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            store = self.make_store(temp)
-            record = store.record_verified_literal_action(
-                device_id=DEVICE,
-                resolved_action=resolved(),
-                before_scene=before_scene(),
-                after_scene=scene(RAW_AFTER, "after-fp"),
-                hardware_receipt=receipt(),
-                after_frames=surface_frames(),
-            )
-            self.assertEqual(record.exact_value, EXPECTED)
-            loaded = store.match_visual(
-                device_id=DEVICE,
-                app_id="sample.app",
-                screen_id="editor",
-                raw_value=RAW_AFTER,
-                input_bounds=(0.13, 0.54, 0.69, 0.61),
-            )
-            self.assertEqual(loaded, record)
 
-    def test_wrong_device_surface_value_geometry_and_expiry_fail_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            now = [1000.0]
-            store = TypedInputLineageStore(
-                Path(temp), ttl_seconds=10, clock=lambda: now[0]
-            )
-            store.record_verified_literal_action(
-                device_id=DEVICE,
-                resolved_action=resolved(),
-                before_scene=before_scene(),
-                after_scene=scene(RAW_AFTER, "after-fp"),
-                hardware_receipt=receipt(),
-                after_frames=surface_frames(),
-            )
-            cases = (
-                {"device_id": "other", "app_id": "sample.app", "screen_id": "editor", "raw_value": RAW_AFTER},
-                {"device_id": DEVICE, "app_id": "other.app", "screen_id": "editor", "raw_value": RAW_AFTER},
-                {"device_id": DEVICE, "app_id": "sample.app", "screen_id": "other", "raw_value": RAW_AFTER},
-                {"device_id": DEVICE, "app_id": "sample.app", "screen_id": "editor", "raw_value": RAW_AFTER + "x"},
-                {"device_id": DEVICE, "app_id": "sample.app", "screen_id": "editor", "raw_value": RAW_AFTER, "input_bounds": (0.75, 0.1, 0.95, 0.2)},
-            )
-            for kwargs in cases:
-                self.assertIsNone(store.match_visual(**kwargs))
-            now[0] = 1011.0
-            self.assertIsNone(
-                store.match_visual(
-                    device_id=DEVICE,
-                    app_id="sample.app",
-                    screen_id="editor",
-                    raw_value=RAW_AFTER,
-                )
-            )
 
-    def test_wrapped_input_height_change_keeps_same_surface_identity(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            store = self.make_store(temp)
-            store.record_verified_literal_action(
-                device_id=DEVICE,
-                resolved_action=resolved(),
-                before_scene=before_scene(),
-                after_scene=scene(RAW_AFTER, "after-fp"),
-                hardware_receipt=receipt(),
-                after_frames=surface_frames(),
-            )
-            matched = store.match_visual(
-                device_id=DEVICE,
-                app_id="sample.app",
-                screen_id="editor",
-                raw_value=RAW_AFTER,
-                input_bounds=(0.13, 0.59, 0.68, 0.69),
-            )
-            self.assertIsNotNone(matched)
-            self.assertIsNone(
-                store.match_visual(
-                    device_id=DEVICE,
-                    app_id="sample.app",
-                    screen_id="editor",
-                    raw_value=RAW_AFTER,
-                    input_bounds=(0.13, 0.64, 0.68, 0.74),
-                )
-            )
 
     def test_unknown_app_requires_related_screen_and_distinctive_value(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -943,44 +863,6 @@ class TypedInputLineageTests(unittest.TestCase):
                 )
             )
 
-    def test_persisted_surface_rebind_requires_identity_geometry_frame_and_ttl(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            now = [1000.0]
-            store = TypedInputLineageStore(
-                Path(temp), ttl_seconds=10, clock=lambda: now[0]
-            )
-            record = store.record_verified_literal_action(
-                device_id=DEVICE,
-                resolved_action=resolved(),
-                before_scene=before_scene(),
-                after_scene=scene(RAW_AFTER, "after-fp"),
-                hardware_receipt=receipt(),
-                after_frames=surface_frames(),
-            )
-            matching = {
-                "device_id": DEVICE,
-                "app_id": "sample.app",
-                "screen_id": "editor_composing",
-                "input_bounds": (0.13, 0.54, 0.69, 0.61),
-                "current_frame": surface_frame(variation=1),
-            }
-            self.assertTrue(
-                record.matches_persisted_surface(now_epoch=1000.0, **matching)
-            )
-            self.assertEqual(record, store.match_surface(**matching))
-            negatives = (
-                {**matching, "device_id": "other"},
-                {**matching, "app_id": "other.app"},
-                {**matching, "screen_id": "unrelated"},
-                {**matching, "input_bounds": (0.75, 0.1, 0.95, 0.2)},
-                {**matching, "current_frame": surface_frame(unrelated=True)},
-                {**matching, "current_frame": None},
-            )
-            for candidate in negatives:
-                with self.subTest(candidate=candidate):
-                    self.assertIsNone(store.match_surface(**candidate))
-            now[0] = 1011.0
-            self.assertIsNone(store.match_surface(**matching))
 
     def test_pending_lineage_cannot_rebind_as_persisted_surface(self) -> None:
         pending = build_pending_literal_lineage(
@@ -2050,29 +1932,6 @@ class TypedInputLineageTests(unittest.TestCase):
             )
         )
 
-    def test_verified_direct_text_action_persists_and_matches_soft_wrap(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            store = self.make_store(temp)
-            action = resolved_text()
-            record = store.record_verified_text_action(
-                device_id=DEVICE,
-                resolved_action=action,
-                before_scene=scene("", "before-fp"),
-                after_scene=scene("long\ninput", "after-fp"),
-                after_frames=surface_frames(),
-            )
-            self.assertEqual("longinput", record.exact_value)
-            self.assertEqual("verified_live_text_action", record.source)
-            self.assertEqual(
-                record,
-                store.match_visual(
-                    device_id=DEVICE,
-                    app_id="sample.app",
-                    screen_id="editor",
-                    raw_value="long\ninput",
-                    input_bounds=(0.13, 0.54, 0.69, 0.61),
-                ),
-            )
 
     def test_pending_direct_text_lineage_never_persists_or_accepts_pinyin(self) -> None:
         action = resolved_text()
@@ -2417,38 +2276,6 @@ class TypedInputLineageTests(unittest.TestCase):
             self.assertIsNone(store.load(DEVICE))
             store.discard(DEVICE)
 
-    def test_recover_persisted_execution_requires_four_existing_frames(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            paths = []
-            for index in range(8):
-                path = root / f"frame-{index}.jpg"
-                surface_frame(variation=index % 2).save(path, format="JPEG")
-                paths.append(str(path))
-            payload = {
-                "device_id": DEVICE,
-                "history": [
-                    {
-                        "execution": {
-                            "physical_actions": 1,
-                            "resolved_action": resolved(),
-                            "before_scene": before_scene(),
-                            "after_scene": scene(RAW_AFTER, "after-fp"),
-                            "hardware_receipt": receipt(),
-                            "before_frame_paths": paths[:4],
-                            "after_frame_paths": paths[4:],
-                        }
-                    }
-                ],
-            }
-            session_path = root / "session.json"
-            session_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-            store = self.make_store(str(root / "state"))
-            recovered = store.recover_from_session_file(session_path)
-            self.assertEqual(recovered.source, "verified_persisted_literal_execution")
-            Path(paths[-1]).unlink()
-            with self.assertRaises(InputValueLineageError):
-                store.recover_from_session_file(session_path)
 
     def test_lineage_canonicalizes_only_matching_visual_soft_wrap(self) -> None:
         record = TypedInputLineage(

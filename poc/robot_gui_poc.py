@@ -171,10 +171,6 @@ class MONITORINFO(ctypes.Structure):
     ]
 
 
-def ensure_dirs() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-
 def find_window(title_fragment: str) -> tuple[int, str]:
     matches: list[tuple[int, str]] = []
 
@@ -276,19 +272,6 @@ def ensure_window_fully_visible(hwnd: int) -> None:
         ):
             raise ctypes.WinError()
         time.sleep(0.2)
-
-
-def window_dpi(hwnd: int) -> int:
-    """Return the effective DPI for diagnostics without driving layout."""
-
-    try:
-        getter = user32.GetDpiForWindow
-        getter.argtypes = [wintypes.HWND]
-        getter.restype = wintypes.UINT
-        value = int(getter(hwnd))
-    except (AttributeError, OSError, ValueError):
-        value = 96
-    return value if value > 0 else 96
 
 
 def seller_ui_scale(client_width: int) -> float:

@@ -59,7 +59,7 @@ from orientation_safety import (
     frame_fingerprint,
     validate_device_id,
 )
-from qwen_runtime_errors import FORMAT_ERROR_TYPES, classify_qwen_error
+from qwen_runtime_errors import classify_qwen_error
 from semantic_action import SemanticAction
 from ui_scene import UIElement, UIScene, UISceneError
 from universal_action_controller import (
@@ -1849,18 +1849,6 @@ class GenericSingleActionAdapter:
                 observation_errors=(error,),
             ) from exc
 
-    def _pre_action_observation_retryable(self, error: Exception) -> bool:
-        text = str(error)
-        return self._post_observation_retryable(error) or any(
-            marker in text
-            for marker in (
-                "页面不稳定",
-                "画面不稳定",
-                "整体置信度不足",
-                "不能建立可信候选",
-            )
-        )
-
     @staticmethod
     def _requires_post_action_relative_clarity(
         resolved: ResolvedSemanticAction,
@@ -2388,18 +2376,6 @@ class GenericSingleActionAdapter:
         )
         reconciled.validate()
         return reconciled
-
-    def _post_observation_retryable(self, error: Exception) -> bool:
-        diagnostics = getattr(self.observer, "last_diagnostics", {})
-        error_type = (
-            diagnostics.get("error_type")
-            if isinstance(diagnostics, dict)
-            else None
-        )
-        return (
-            error_type in FORMAT_ERROR_TYPES
-            or classify_qwen_error(error) in FORMAT_ERROR_TYPES
-        )
 
     def execute(
         self,

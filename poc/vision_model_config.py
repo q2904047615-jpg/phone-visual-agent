@@ -45,16 +45,6 @@ class VisionModelConfig:
     def request_options(self) -> dict[str, bool]:
         return {"enable_thinking": self.enable_thinking}
 
-    def public_identity(self) -> dict[str, object]:
-        return {
-            "config_version": self.config_version,
-            "provider": self.provider,
-            "model": self.model,
-            "thinking_enabled": self.enable_thinking,
-            "coordinate_scale": self.coordinate_scale,
-        }
-
-
 def load_vision_model_config(
     *,
     model: str | None = None,

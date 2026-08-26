@@ -2779,24 +2779,3 @@ def canonical_candidate_expected_result(
             }
         }
     return {"scene_changed": True}
-
-
-def select_canonical_action_candidate(
-    report: CanonicalActionCatalog,
-    *,
-    report_digest: str,
-    candidate_id: str,
-) -> CanonicalActionCandidate:
-    """Return exactly one immutable candidate from the current catalog."""
-
-    report.validate()
-    if report_digest != report.report_digest:
-        raise CanonicalActionProtocolError(
-            "canonical action catalog digest 已过期或不匹配。"
-        )
-    matches = [item for item in report.candidates if item.candidate_id == candidate_id]
-    if len(matches) != 1:
-        raise CanonicalActionProtocolError(
-            "canonical candidate_id 不存在或不唯一。"
-        )
-    return matches[0]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 
 UI_SCENE_PROTOCOL_VERSION = "2026-08-14-ui-scene-v3"
@@ -864,19 +864,6 @@ def scene_surface_kind(scene: UIScene) -> str:
     return "app"
 
 
-def _infer_app_id(screen_id: str) -> str:
-    normalized_screen = screen_id.strip().lower()
-    if normalized_screen in {
-        "android_home",
-        "ios_home",
-        "launcher",
-        "home_screen",
-    }:
-        return "launcher"
-    prefix = screen_id.split("_", 1)[0].strip().lower()
-    return prefix if prefix and prefix not in {"android", "unknown"} else "unknown"
-
-
 def _is_system_navigation_bar_fact(meaning: str) -> bool:
     normalized = meaning.strip().casefold().replace("-", "_").replace(" ", "_")
     return normalized in {
@@ -940,10 +927,3 @@ def _reject_action_data(value: Any, path: str) -> None:
     elif isinstance(value, (list, tuple)):
         for index, item in enumerate(value):
             _reject_action_data(item, f"{path}[{index}]")
-
-
-def ensure_scene_elements(elements: Iterable[UIElement]) -> tuple[UIElement, ...]:
-    result = tuple(elements)
-    for element in result:
-        element.validate()
-    return result

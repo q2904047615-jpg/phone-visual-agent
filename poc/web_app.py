@@ -985,27 +985,6 @@ def observe_generic_scene(
     }
 
 
-def _new_generic_action_adapter() -> GenericSingleActionAdapter:
-    return GenericSingleActionAdapter(
-        capture=runtime.controller.vision_capture,
-        observer=runtime.generic_scene_observer,
-        robot=runtime.controller,
-        controller=UniversalActionController(),
-        qwerty_row_snapper=stable_qwerty_ocr_anchors,
-        text_point_grounder=(
-            stable_text_ocr_grounding
-            if not isinstance(runtime.controller, MockRobotController)
-            else None
-        ),
-        require_local_qwerty_row_snap=not isinstance(
-            runtime.controller,
-            MockRobotController,
-        ),
-        device_id=runtime.device_controllers.default_device_id,
-        input_lineage_store=runtime.input_lineage_store,
-    )
-
-
 def _write_generic_supervised_report(session: UniversalAgentSessionState) -> str:
     """Return the atomic report already maintained by the orchestrator."""
 

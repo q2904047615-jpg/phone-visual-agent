@@ -1,39 +1,10 @@
 from __future__ import annotations
 
-import base64
 import os
 from dataclasses import dataclass
-from io import BytesIO
 from typing import Iterable
 
 from PIL import Image, ImageChops, ImageFilter, ImageStat
-
-
-@dataclass(frozen=True)
-class EncodedObservationImage:
-    """One bounded image sent to the observation model.
-
-    ``bounds`` always refers to the original full camera frame in normalized
-    0..1000 coordinates.  The model may therefore report ROI-local geometry;
-    the controller maps it back to the original frame before any target can
-    reach the physical action adapter.
-    """
-
-    role: str
-    bounds: tuple[int, int, int, int]
-    data_url: str
-    width: int
-    height: int
-    jpeg_bytes: int
-
-    def metadata(self) -> dict[str, object]:
-        return {
-            "role": self.role,
-            "bounds": list(self.bounds),
-            "width": self.width,
-            "height": self.height,
-            "jpeg_bytes": self.jpeg_bytes,
-        }
 
 
 @dataclass(frozen=True)
@@ -54,13 +25,6 @@ class LocalFrameStability:
             "threshold": self.threshold,
             "reason": self.reason,
         }
-
-
-@dataclass(frozen=True)
-class ObservationRoi:
-    name: str
-    bounds: tuple[int, int, int, int]
-    purpose: str
 
 
 @dataclass(frozen=True)
@@ -273,140 +237,6 @@ def consensus_top_edge_obstructions(
             )
         )
     return tuple(accepted)
-
-
-def _normalized_crop(
-    image: Image.Image,
-    bounds: tuple[int, int, int, int],
-) -> Image.Image:
-    left, top, right, bottom = bounds
-    if not (0 <= left < right <= 1000 and 0 <= top < bottom <= 1000):
-        raise ValueError(f"ROI越界：{bounds}")
-    x0 = max(0, min(image.width - 1, round(left * image.width / 1000)))
-    y0 = max(0, min(image.height - 1, round(top * image.height / 1000)))
-    x1 = max(x0 + 1, min(image.width, round(right * image.width / 1000)))
-    y1 = max(y0 + 1, min(image.height, round(bottom * image.height / 1000)))
-    return image.crop((x0, y0, x1, y1))
-
-
-def _encode_bounded_jpeg(
-    image: Image.Image,
-    *,
-    role: str,
-    bounds: tuple[int, int, int, int],
-    width_candidates: Iterable[int],
-    max_bytes: int,
-) -> EncodedObservationImage:
-    source = image.convert("RGB")
-    qualities = (70, 60, 52, 44, 36, 30)
-    last: tuple[Image.Image, bytes] | None = None
-    for requested_width in width_candidates:
-        width = max(48, min(source.width, int(requested_width)))
-        height = max(1, round(source.height * width / source.width))
-        resized = (
-            source
-            if (width, height) == source.size
-            else source.resize((width, height), Image.Resampling.LANCZOS)
-        )
-        for quality in qualities:
-            buffer = BytesIO()
-            resized.save(buffer, format="JPEG", quality=quality, optimize=True)
-            payload = buffer.getvalue()
-            last = (resized, payload)
-            if len(payload) <= max_bytes:
-                encoded = base64.b64encode(payload).decode("ascii")
-                return EncodedObservationImage(
-                    role=role,
-                    bounds=bounds,
-                    data_url=f"data:image/jpeg;base64,{encoded}",
-                    width=resized.width,
-                    height=resized.height,
-                    jpeg_bytes=len(payload),
-                )
-    assert last is not None
-    resized, payload = last
-    if len(payload) > max_bytes:
-        raise ValueError(
-            f"{role}压缩后仍为{len(payload)}字节，超过{max_bytes}字节安全预算。"
-        )
-    encoded = base64.b64encode(payload).decode("ascii")
-    return EncodedObservationImage(
-        role=role,
-        bounds=bounds,
-        data_url=f"data:image/jpeg;base64,{encoded}",
-        width=resized.width,
-        height=resized.height,
-        jpeg_bytes=len(payload),
-    )
-
-
-def build_overview(
-    image: Image.Image,
-    *,
-    max_bytes: int = 28000,
-) -> EncodedObservationImage:
-    """Build a readable full-page image used for page classification.
-
-    The former 160-pixel overview erased small labels and icon colors. 320
-    pixels keeps the request small while preserving roughly four times as many
-    pixels for the observer.
-    """
-
-    return _encode_bounded_jpeg(
-        image,
-        role="overview",
-        bounds=(0, 0, 1000, 1000),
-        width_candidates=(320, 288, 256, 224, 192),
-        max_bytes=max_bytes,
-    )
-
-
-def build_roi(
-    image: Image.Image,
-    roi: ObservationRoi,
-    *,
-    max_bytes: int = 24000,
-) -> EncodedObservationImage:
-    """Build a crop with more pixel density than the full-page overview."""
-
-    crop = _normalized_crop(image, roi.bounds)
-    high_detail_rois = {
-        "page_state_right",
-        "right_actions",
-    }
-    width_candidates = (
-        (400, 360, 320, 288, 256, 224)
-        if roi.name in high_detail_rois
-        else (320, 288, 256, 224, 192, 160)
-    )
-    return _encode_bounded_jpeg(
-        crop,
-        role=roi.name,
-        bounds=roi.bounds,
-        width_candidates=width_candidates,
-        max_bytes=max_bytes,
-    )
-
-
-def map_roi_point_to_full(
-    point: tuple[int, int],
-    bounds: tuple[int, int, int, int],
-) -> tuple[int, int]:
-    x, y = point
-    left, top, right, bottom = bounds
-    return (
-        round(left + x * (right - left) / 1000),
-        round(top + y * (bottom - top) / 1000),
-    )
-
-
-def map_roi_bounds_to_full(
-    box: tuple[int, int, int, int],
-    bounds: tuple[int, int, int, int],
-) -> tuple[int, int, int, int]:
-    left, top = map_roi_point_to_full((box[0], box[1]), bounds)
-    right, bottom = map_roi_point_to_full((box[2], box[3]), bounds)
-    return left, top, right, bottom
 
 
 def _static_band_sheet(image: Image.Image) -> Image.Image:

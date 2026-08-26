@@ -17,7 +17,7 @@ from capability_acceptance import (
     validate_acceptance_report,
 )
 from agent.infrastructure import InterProcessLease
-from orientation_safety import (
+from agent.infrastructure.orientation_safety import (
     ORIENTATION_AUDIT_SOURCE,
     ORIENTATION_CREDENTIAL_VERSION,
     OrientationCredential,

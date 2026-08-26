@@ -14,7 +14,7 @@ from agent.domain.task_graph import TargetApp
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.infrastructure.generic_action_adapter import GenericSingleActionAdapter
 from agent.domain.canonical_action_protocol import GenericStepProposal
-from orientation_safety import _claim_audit_seal
+from agent.infrastructure.orientation_safety import _claim_audit_seal
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.ui_scene import CameraAlignmentFacts, UIElement, UIScene
 from agent.application.universal_agent_orchestrator import (

@@ -12,7 +12,7 @@ from typing import Any, Callable, Mapping
 import uuid
 
 from PIL import Image, UnidentifiedImageError
-from orientation_safety import (
+from agent.infrastructure.orientation_safety import (
     OrientationCredential,
     OrientationSafetyError,
     frame_fingerprint,

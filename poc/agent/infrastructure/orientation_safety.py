@@ -1,3 +1,5 @@
+"""Frame-bound one-shot orientation credentials for physical execution."""
+
 from __future__ import annotations
 
 import hashlib

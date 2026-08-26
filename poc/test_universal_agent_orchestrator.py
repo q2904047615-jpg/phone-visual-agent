@@ -8815,7 +8815,10 @@ class UniversalAgentConfirmTests(unittest.TestCase):
             / "agent"
             / "application"
             / "qwen_visual_decision.py",
-            "orientation_safety.py": root / "orientation_safety.py",
+            "orientation_safety.py": root
+            / "agent"
+            / "infrastructure"
+            / "orientation_safety.py",
             "universal_action_controller.py": root
             / "agent"
             / "domain"

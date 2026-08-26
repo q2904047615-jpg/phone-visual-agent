@@ -59,7 +59,7 @@ from agent.infrastructure.observation_images import (
     measure_local_stability,
     measure_static_band_identity_delta,
 )
-from orientation_safety import (
+from agent.infrastructure.orientation_safety import (
     OrientationCredential,
     OrientationFrameMismatchError,
     OrientationSafetyError,

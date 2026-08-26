@@ -706,6 +706,45 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_orientation_safety_has_one_infrastructure_entry(self) -> None:
+        import agent.infrastructure.orientation_safety as orientation_safety
+
+        root = Path(__file__).resolve().parent
+        runtime_path = (
+            root / "agent" / "infrastructure" / "orientation_safety.py"
+        )
+        self.assertFalse((root / "orientation_safety.py").exists())
+        self.assertTrue(runtime_path.is_file())
+        self.assertEqual(
+            "agent.infrastructure.orientation_safety",
+            orientation_safety.OrientationCredential.__module__,
+        )
+        self.assertEqual(
+            "agent.infrastructure.orientation_safety",
+            orientation_safety.PhysicalExecutionGate.__module__,
+        )
+        source = runtime_path.read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("class OrientationCredential:"))
+        self.assertEqual(1, source.count("class PhysicalExecutionGate:"))
+        for forbidden in ("fastapi", "pydantic", "web_app", "robot_core"):
+            self.assertNotIn(forbidden, source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "orientation_safety"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "orientation_safety":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_web_uses_one_session_repository_instead_of_legacy_storage(self) -> None:
         source = (Path(__file__).resolve().parent / "web_app.py").read_text(
             encoding="utf-8"

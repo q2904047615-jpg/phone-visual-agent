@@ -9,7 +9,7 @@ from agent.domain import (
     DeviceExecutionError,
     DeviceExecutionResult,
 )
-from orientation_safety import OrientationSafetyError
+from agent.infrastructure.orientation_safety import OrientationSafetyError
 
 
 class RobotDeviceExecutor:

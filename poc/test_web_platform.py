@@ -45,7 +45,7 @@ from robot_core import (
     qwerty_keyboard_config_from_anchors,
     qwerty_key_point,
 )
-from orientation_safety import _mint_audited_credential
+from agent.infrastructure.orientation_safety import _mint_audited_credential
 from agent.domain.ui_scene import UIScene
 
 

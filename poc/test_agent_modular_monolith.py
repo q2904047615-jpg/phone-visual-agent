@@ -1339,6 +1339,67 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_visual_evidence_and_image_measurement_are_layered_once(self) -> None:
+        import agent.infrastructure.observation_images as observation_images
+        import generic_scene_observer
+        import qwen_visual_decision
+        from agent.domain.visual_evidence import (
+            LocalFrameStability,
+            VisualObstruction,
+        )
+
+        root = Path(__file__).resolve().parent
+        domain_path = root / "agent" / "domain" / "visual_evidence.py"
+        infrastructure_path = (
+            root / "agent" / "infrastructure" / "observation_images.py"
+        )
+        self.assertFalse((root / "observation_images.py").exists())
+        self.assertTrue(domain_path.is_file())
+        self.assertTrue(infrastructure_path.is_file())
+        self.assertIs(LocalFrameStability, qwen_visual_decision.LocalFrameStability)
+        self.assertIs(VisualObstruction, generic_scene_observer.VisualObstruction)
+        self.assertIs(
+            LocalFrameStability,
+            observation_images.LocalFrameStability,
+        )
+        self.assertIs(VisualObstruction, observation_images.VisualObstruction)
+        self.assertEqual("agent.domain.visual_evidence", LocalFrameStability.__module__)
+        self.assertEqual("agent.domain.visual_evidence", VisualObstruction.__module__)
+
+        domain_source = domain_path.read_text(encoding="utf-8")
+        infrastructure_source = infrastructure_path.read_text(encoding="utf-8")
+        self.assertEqual(1, domain_source.count("class LocalFrameStability:"))
+        self.assertEqual(1, domain_source.count("class VisualObstruction:"))
+        self.assertNotIn("class LocalFrameStability:", infrastructure_source)
+        self.assertNotIn("class VisualObstruction:", infrastructure_source)
+        for forbidden in (
+            "agent.application",
+            "agent.infrastructure",
+            "from PIL",
+            "import os",
+            "Image.",
+            "web_app",
+            "vision_agent",
+            "robot_core",
+        ):
+            self.assertNotIn(forbidden, domain_source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "observation_images"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "observation_images":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
     def test_device_execution_has_one_modular_runtime_entry(self) -> None:
         root = Path(__file__).resolve().parent
         self.assertFalse((root / "device_executor.py").exists())

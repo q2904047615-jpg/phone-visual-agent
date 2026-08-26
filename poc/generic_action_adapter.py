@@ -46,7 +46,7 @@ from agent.domain.input_value_lineage import (
     input_screen_identity_compatible,
 )
 from ocr_runtime import find_text, recognize as recognize_ocr
-from observation_images import (
+from agent.infrastructure.observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
     measure_static_band_identity_delta,

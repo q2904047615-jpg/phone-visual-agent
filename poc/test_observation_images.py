@@ -4,7 +4,7 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from observation_images import (
+from agent.infrastructure.observation_images import (
     consensus_top_edge_obstructions,
     detect_top_edge_opaque_bands,
     measure_local_stability,

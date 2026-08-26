@@ -17,12 +17,12 @@ from agent.domain.canonical_action_protocol import (
     GenericStepProposal,
 )
 from agent.domain.canonical_action_kinds import CANONICAL_ACTION_KINDS
-from observation_images import (
-    LocalFrameStability,
+from agent.infrastructure.observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
 )
 import agent.domain.qwen_task_context as qwen_task_context_domain
+from agent.domain.visual_evidence import LocalFrameStability
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.task_semantic_ir import TaskSemanticIR
 from agent.domain.ui_scene import MIN_TARGET_CONFIDENCE, UIElement, UIScene

@@ -41,7 +41,7 @@ from agent.domain.input_value_lineage import (
 from agent.infrastructure.file_system_input_lineage_store import (
     FileSystemTypedInputLineageStore as TypedInputLineageStore,
 )
-from observation_images import measure_frame_sharpness
+from agent.infrastructure.observation_images import measure_frame_sharpness
 from orientation_safety import (
     LOCAL_QWERTY_ORIENTATION_SOURCE,
     OrientationFrameMismatchError,

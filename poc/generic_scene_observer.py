@@ -17,12 +17,12 @@ from agent.domain.canonical_action_protocol import StateExpectation
 from agent.domain.canonical_action_kinds import (
     CANONICAL_ACTION_KINDS as CANONICAL_ACTIONS,
 )
-from observation_images import (
-    VisualObstruction,
+from agent.infrastructure.observation_images import (
     consensus_top_edge_obstructions,
     measure_frame_sharpness,
     measure_local_stability,
 )
+from agent.domain.visual_evidence import VisualObstruction
 from qwen_runtime_errors import (
     classify_qwen_error,
 )

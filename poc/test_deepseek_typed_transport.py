@@ -4,9 +4,9 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-import deepseek_task_graph as task_graph_module
+import agent.application.deepseek_task_graph as task_graph_module
 
-from deepseek_task_graph import (
+from agent.application.deepseek_task_graph import (
     ControllerTransitionEvidenceRef,
     DeepSeekTaskGraphPlanner,
     ObservedState,

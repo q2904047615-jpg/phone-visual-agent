@@ -17,7 +17,7 @@ from agent.domain import (
     VerifiedAppSurfaceLineage,
 )
 from agent.infrastructure import DeviceTaskRegistry, FileSystemAgentEvidenceStore
-from deepseek_task_graph import (
+from agent.application.deepseek_task_graph import (
     CompletionCondition,
     ControllerTransitionEvidenceRef,
     DynamicTaskGraph,

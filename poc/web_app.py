@@ -63,7 +63,11 @@ from generic_scene_observer import SingleStepGenericSceneObserver
 from agent.infrastructure.file_system_input_lineage_store import (
     FileSystemTypedInputLineageStore,
 )
-from deepseek_task_graph import DeepSeekTaskGraphPlanner, TaskGraphError
+from agent.infrastructure.file_system_risk_policy import load_local_risk_policy
+from agent.application.deepseek_task_graph import (
+    DeepSeekTaskGraphPlanner,
+    TaskGraphError,
+)
 from qwen_visual_decision import QwenVisualDecisionObserver
 from universal_agent_orchestrator import (
     POST_ACTION_TRANSITION_PROTOCOL_VERSION,
@@ -97,6 +101,7 @@ from vision_agent import (
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
+LOCAL_RISK_POLICY_PATH = ROOT / "config" / "local_risk_policy.v1.json"
 CONTROL_TOKEN = secrets.token_urlsafe(24)
 DEVICE_REGISTRY_PATH = Path(
     os.environ.get(
@@ -276,6 +281,9 @@ class Runtime:
         )
         self.deepseek_task_graph_planner = DeepSeekTaskGraphPlanner(
             self.intent_provider,
+            semantic_risk_policy=load_local_risk_policy(
+                LOCAL_RISK_POLICY_PATH
+            ),
         )
         self.qwen_visual_decision_observer = QwenVisualDecisionObserver(
             self.vision_provider

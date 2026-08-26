@@ -7,7 +7,7 @@ from capability_acceptance_planner import (
     CapabilityAcceptancePlannerError,
     CapabilityAcceptanceTaskGraphPlanner,
 )
-from deepseek_task_graph import ObservedState
+from agent.application.deepseek_task_graph import ObservedState
 
 
 class CapabilityAcceptanceTaskGraphPlannerTests(unittest.TestCase):

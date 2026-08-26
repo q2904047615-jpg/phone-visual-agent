@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 import uuid
 
-from deepseek_task_graph import (
+from agent.application.deepseek_task_graph import (
     ControllerTransitionEvidenceRef,
     TaskGraphError,
     DynamicTaskGraph,

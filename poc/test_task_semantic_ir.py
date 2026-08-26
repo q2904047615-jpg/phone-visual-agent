@@ -4,7 +4,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from deepseek_task_graph import (
+from agent.application.deepseek_task_graph import (
     DeepSeekTaskGraphPlanner,
     TaskGraphError,
     _graph_from_payload,

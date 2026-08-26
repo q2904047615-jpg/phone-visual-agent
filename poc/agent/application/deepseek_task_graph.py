@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import re
 import uuid
 from dataclasses import asdict, dataclass, field, replace
@@ -16,7 +15,6 @@ from agent.domain.task_semantic_ir import (
     apply_formal_semantic_risk_policy,
     compile_formal_semantic_authority,
 )
-from agent.infrastructure.file_system_risk_policy import load_local_risk_policy
 
 
 DEEPSEEK_TASK_GRAPH_PROTOCOL_VERSION = "2026-08-20-deepseek-typed-task-graph-v4"
@@ -154,9 +152,6 @@ FORBIDDEN_EXECUTION_INSTRUCTION_PATTERN = re.compile(
     r"\b(?:coordinate|keycode|system[ _-]?command|shell[ _-]?command)\b"
     r")",
     re.IGNORECASE,
-)
-DEFAULT_LOCAL_RISK_POLICY_PATH = (
-    Path(__file__).resolve().parent / "config" / "local_risk_policy.v1.json"
 )
 NATURAL_ACTION_INTENT_PATTERN = re.compile(
     r"(?:点击|轻触|点按|滑动|上划|下划|左划|右划|长按|拖动|输入|"
@@ -1230,7 +1225,7 @@ class DeepSeekTaskGraphPlanner:
         self.semantic_risk_policy = (
             semantic_risk_policy
             if semantic_risk_policy is not None
-            else load_local_risk_policy(DEFAULT_LOCAL_RISK_POLICY_PATH)
+            else LocalRiskPolicyConfig()
         )
         self.last_raw_response = ""
         self.last_semantic_authority: SemanticRiskAuthorityReport | None = None

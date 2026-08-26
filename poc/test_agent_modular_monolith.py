@@ -868,7 +868,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
 
     def test_task_semantic_ir_has_one_domain_identity_and_one_loader(self) -> None:
         import agent.domain.canonical_action_protocol as canonical_protocol
-        import deepseek_task_graph
+        import agent.application.deepseek_task_graph as deepseek_task_graph
         from agent.domain.task_semantic_ir import (
             TaskSemanticIR,
             compile_formal_semantic_authority,
@@ -965,7 +965,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], legacy_imports)
 
     def test_generic_goal_projection_has_one_domain_identity(self) -> None:
-        import deepseek_task_graph
+        import agent.application.deepseek_task_graph as deepseek_task_graph
         import generic_action_adapter
         import universal_agent_orchestrator
         from agent.application import runtime_session
@@ -1008,6 +1008,66 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                 if isinstance(node, ast.Import):
                     for item in node.names:
                         if item.name == "generic_goal":
+                            legacy_imports.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+
+    def test_deepseek_task_graph_has_one_application_entry(self) -> None:
+        import agent.application.deepseek_task_graph as deepseek_task_graph
+        import capability_acceptance_planner
+        import universal_agent_orchestrator
+
+        root = Path(__file__).resolve().parent
+        application_path = (
+            root / "agent" / "application" / "deepseek_task_graph.py"
+        )
+        self.assertFalse((root / "deepseek_task_graph.py").exists())
+        self.assertTrue(application_path.is_file())
+        self.assertIs(
+            deepseek_task_graph.DynamicTaskGraph,
+            universal_agent_orchestrator.DynamicTaskGraph,
+        )
+        self.assertIs(
+            deepseek_task_graph.ObservedState,
+            capability_acceptance_planner.ObservedState,
+        )
+
+        application_source = application_path.read_text(encoding="utf-8")
+        for forbidden in (
+            "agent.infrastructure",
+            "from pathlib",
+            "Path(",
+            ".read_text(",
+            "load_local_risk_policy",
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "vision_agent",
+            "robot_core",
+        ):
+            self.assertNotIn(forbidden, application_source)
+        self.assertIn("else LocalRiskPolicyConfig()", application_source)
+
+        web_source = (root / "web_app.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "from agent.infrastructure.file_system_risk_policy import "
+            "load_local_risk_policy",
+            web_source,
+        )
+        self.assertIn("semantic_risk_policy=load_local_risk_policy(", web_source)
+
+        legacy_imports: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "deepseek_task_graph"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "deepseek_task_graph":
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 

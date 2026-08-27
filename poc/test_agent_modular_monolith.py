@@ -1187,6 +1187,55 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_root_production_modules_are_only_interfaces_and_tools(self) -> None:
+        root = Path(__file__).resolve().parent
+        expected = {
+            "agent_api_cli.py",
+            "capture_click_burst.py",
+            "eval_qwen_visual_decision.py",
+            "eval_task_sequences.py",
+            "local_agent_api_client.py",
+            "run_xy_calibration.py",
+            "touch_calibration_server.py",
+            "web_app.py",
+        }
+        actual = {
+            path.name
+            for path in root.glob("*.py")
+            if not path.name.startswith("test_")
+        }
+        self.assertEqual(expected, actual)
+
+        web_source = (root / "web_app.py").read_text(encoding="utf-8")
+        client_source = (root / "local_agent_api_client.py").read_text(
+            encoding="utf-8"
+        )
+        cli_source = (root / "agent_api_cli.py").read_text(encoding="utf-8")
+        self.assertIn("from fastapi import", web_source)
+        self.assertIn('"/openapi.json"', client_source)
+        self.assertIn("LocalAgentApiClient", cli_source)
+
+        root_module_names = {path.removesuffix(".py") for path in expected}
+        reverse_imports: list[str] = []
+        for path in (root / "agent").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                names: list[str] = []
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module
+                ):
+                    names = [node.module]
+                for name in names:
+                    if name.split(".", 1)[0] in root_module_names:
+                        reverse_imports.append(
+                            f"{path.relative_to(root)}: {name}"
+                        )
+        self.assertEqual([], reverse_imports)
+
     def test_runtime_doctor_has_one_infrastructure_entry(self) -> None:
         import agent.infrastructure.runtime_doctor as runtime_doctor
         from agent.application.vision_usage import QWEN_PLUS_MODEL

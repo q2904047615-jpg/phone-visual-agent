@@ -37,3 +37,14 @@ node .\test_frontend_browser_contract.js
 网页服务只公开通用会话、通用场景观察、能力验收、设备状态与预览接口。
 本地 Agent 调用必须使用 `local_agent_api_client.py` 或 `agent_api_cli.py`，并先从
 当前服务 OpenAPI 核对路径和 schema。
+
+轻量 DDD 迁移完成后，根目录只保留 8 个 interfaces/tools/evals 入口：
+
+- `web_app.py`：FastAPI 接口与依赖组合根；
+- `local_agent_api_client.py`、`agent_api_cli.py`：唯一受支持的类型化本地 API 网关与 CLI；
+- `eval_qwen_visual_decision.py`、`eval_task_sequences.py`：显式离线评估入口；
+- `capture_click_burst.py`、`run_xy_calibration.py`：显式人工机械采集/标定工具；
+- `touch_calibration_server.py`：本地标定与动作验收页面服务。
+
+正式任务图、动作、视觉、验收、模型和设备业务权威均位于 `agent/domain`、`agent/application` 或
+`agent/infrastructure`。架构测试对上述根入口使用精确 allowlist，并禁止 `agent` 包反向导入这些工具。

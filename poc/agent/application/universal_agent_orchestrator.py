@@ -1192,6 +1192,7 @@ class UniversalAgentOrchestrator:
                 expected_result={},
                 confidence=1.0,
                 reason=reason,
+                block_stage="required_action_capability",
             )
             decision.to_dict = lambda: {
                 "task_id": decision.task_id,
@@ -1212,6 +1213,130 @@ class UniversalAgentOrchestrator:
             decision_number=session.step_number,
             available_action_kinds=available_actions,
         )
+
+    def _build_and_record_current_observation(
+        self,
+        session: UniversalAgentSessionState,
+        *,
+        scene: Any,
+        frames: list[Any],
+        observation_id: str | None = None,
+    ) -> Any:
+        """Adopt one current trusted observation through a single evidence path."""
+
+        factory_args: dict[str, Any] = {
+            "frames": frames,
+            "device_id": session.device_id,
+            "scene": scene,
+        }
+        if observation_id is not None:
+            factory_args["observation_id"] = observation_id
+        observation = self.trusted_observation_factory(**factory_args)
+        session.trusted_observation = observation
+        session.trusted_frames = tuple(frames)
+        self._remember(
+            session,
+            session.evidence_store.write_trusted_observation(
+                session.step_number,
+                observation,
+            ),
+        )
+        return observation
+
+    def _stage_current_observation_decision(
+        self,
+        session: UniversalAgentSessionState,
+        *,
+        graph: DynamicTaskGraph,
+        frames: list[Any],
+        task_context: Any,
+        trusted_observation: Any,
+        unsupported_status_reason: Callable[[str], str] | None = None,
+        before_selection: Callable[[Any], str | None] | None = None,
+        stage_capability_block: bool = True,
+    ) -> Any:
+        """Decide and stage exactly one action from the current observation.
+
+        Capture/replan callers retain their own lifecycle rules, while every
+        path shares the same decision binding, evidence, canonical selection,
+        and one-shot confirmation state transition.
+        """
+
+        decision = self._decide_next_action(
+            session,
+            frames=frames,
+            task_context=task_context,
+            trusted_observation=trusted_observation,
+        )
+        self._validate_decision_binding(graph, trusted_observation, decision)
+        if (
+            not stage_capability_block
+            and str(getattr(decision, "block_stage", ""))
+            == "required_action_capability"
+        ):
+            session.status = "blocked"
+            session.failed_reason = decision.proposal.reason
+            session.qwen_decision = None
+            session.controller_decision = None
+            session.confirmation_authority = None
+            return decision
+
+        session.qwen_decision = decision
+        self._remember(
+            session,
+            session.evidence_store.write_qwen_decision(
+                session.step_number,
+                decision,
+            ),
+        )
+        proposal = decision.proposal
+        if proposal.status != "action":
+            if proposal.status == "blocked":
+                reason = proposal.reason
+            elif unsupported_status_reason is None:
+                raise UniversalAgentOrchestratorError(
+                    f"不支持的 Qwen 状态：{proposal.status}"
+                )
+            else:
+                reason = unsupported_status_reason(proposal.status)
+            session.status = "blocked"
+            session.failed_reason = reason
+            session.controller_decision = CanonicalSelectionReceipt(
+                allowed=False,
+                reason=reason,
+            )
+            session.confirmation_authority = None
+            return decision
+
+        guard_reason = before_selection(decision) if before_selection else None
+        if guard_reason:
+            session.status = "blocked"
+            session.failed_reason = guard_reason
+            session.controller_decision = CanonicalSelectionReceipt(
+                allowed=False,
+                reason=guard_reason,
+            )
+            session.confirmation_authority = None
+            return decision
+
+        selection_receipt = self._selection_receipt(session, decision)
+        session.controller_decision = selection_receipt
+        self._remember(
+            session,
+            session.evidence_store.write_controller_decision(
+                session.step_number,
+                self._selection_receipt_payload(selection_receipt),
+            ),
+        )
+        if selection_receipt.allowed:
+            session.status = "awaiting_confirmation"
+            session.failed_reason = ""
+            self._bind_confirmation(session)
+        else:
+            session.status = "blocked"
+            session.failed_reason = selection_receipt.reason
+            session.confirmation_authority = None
+        return decision
 
     @staticmethod
     def _context_value(source: Any, name: str, default: Any = None) -> Any:
@@ -5003,84 +5128,51 @@ class UniversalAgentOrchestrator:
 
         frames = list(result.after_frames)
         context = revised.to_qwen_context()
-        decision = self._decide_next_action(
-            session,
-            frames=frames,
-            task_context=context,
-            trusted_observation=new_observation,
-        )
-        self._validate_decision_binding(revised, new_observation, decision)
-        session.qwen_decision = decision
-        self._remember(
-            session,
-            session.evidence_store.write_qwen_decision(
-                session.step_number,
-                decision,
-            ),
-        )
-        if decision.proposal.status != "action":
-            session.status = "blocked"
-            session.failed_reason = (
-                decision.proposal.reason
-                if decision.proposal.status == "blocked"
-                else f"本地动作选择器返回了不支持的状态：{decision.proposal.status}"
+        def block_equivalent_repeat(next_decision: Any) -> str | None:
+            new_equivalence_digest = _action_equivalence_digest(
+                next_decision.proposal.action
             )
-            session.controller_decision = CanonicalSelectionReceipt(
-                allowed=False,
-                reason=session.failed_reason,
+            transition_record["next_action_equivalence_digest"] = (
+                new_equivalence_digest
             )
-            session.confirmation_authority = None
-            transition_record["disposition"] = "blocked_qwen_no_action"
-            transition_record["diagnostic"] = session.failed_reason
-            persist_transition()
-            return
-        new_equivalence_digest = _action_equivalence_digest(
-            decision.proposal.action
-        )
-        transition_record["next_action_equivalence_digest"] = (
-            new_equivalence_digest
-        )
-        if (
-            bool(controller_refs)
-            and matched
-            and transition_record.get("revised_subgoal_signature")
-            == previous_signature
-            and new_equivalence_digest
-            == transition_record["prior_action_equivalence_digest"]
-        ):
-            session.status = "blocked"
-            session.failed_reason = (
+            if not (
+                bool(controller_refs)
+                and matched
+                and transition_record.get("revised_subgoal_signature")
+                == previous_signature
+                and new_equivalence_digest
+                == transition_record["prior_action_equivalence_digest"]
+            ):
+                return None
+            reason = (
                 "一次性 controller_transition 完成证据已满足，"
                 "但同一活动子目标仍提出等价动作；禁止生成第二确认。"
             )
-            session.controller_decision = CanonicalSelectionReceipt(
-                allowed=False,
-                reason=session.failed_reason,
-            )
-            session.confirmation_authority = None
             transition_record["disposition"] = "blocked_equivalent_repeat"
-            transition_record["diagnostic"] = session.failed_reason
-            persist_transition()
-            return
-        selection_receipt = self._selection_receipt(session, decision)
-        session.controller_decision = selection_receipt
-        self._remember(
+            transition_record["diagnostic"] = reason
+            return reason
+
+        decision = self._stage_current_observation_decision(
             session,
-            session.evidence_store.write_controller_decision(
-                session.step_number,
-                self._selection_receipt_payload(selection_receipt),
+            graph=revised,
+            frames=frames,
+            task_context=context,
+            trusted_observation=new_observation,
+            unsupported_status_reason=(
+                lambda status: (
+                    "本地动作选择器返回了不支持的状态：" + status
+                )
             ),
+            before_selection=block_equivalent_repeat,
         )
-        if not selection_receipt.allowed:
-            session.status = "blocked"
-            session.failed_reason = selection_receipt.reason
-            session.confirmation_authority = None
-            transition_record["disposition"] = "blocked_canonical_selection"
+        if session.status == "blocked":
+            if decision.proposal.status != "action":
+                transition_record["disposition"] = "blocked_qwen_no_action"
+            elif transition_record.get("disposition") != "blocked_equivalent_repeat":
+                transition_record["disposition"] = "blocked_canonical_selection"
             transition_record["diagnostic"] = session.failed_reason
             persist_transition()
             return
-        session.status = "awaiting_confirmation"
-        self._bind_confirmation(session)
         transition_record["disposition"] = "advanced_to_new_confirmation"
         transition_record["next_confirmation_scope"] = (
             session.confirmation_authority.scope()
@@ -5293,12 +5385,14 @@ class UniversalAgentOrchestrator:
             )
             self._remember(session, frame_paths)
             try:
-                observation = self.trusted_observation_factory(
-                    frames=frames,
-                    device_id=session.device_id,
+                observation = self._build_and_record_current_observation(
+                    session,
                     scene=scene,
+                    frames=frames,
                     observation_id=observation_id,
                 )
+            except EvidenceStoreError:
+                raise
             except Exception as exc:
                 session.status = "blocked"
                 session.failed_reason = f"重新观察证据不足：{exc}"
@@ -5319,8 +5413,6 @@ class UniversalAgentOrchestrator:
                 )
                 self._write_terminal_snapshot(session)
                 return blocked_decision
-            session.trusted_observation = observation
-            session.trusted_frames = tuple(frames)
             lineage = session.verified_app_surface_lineage
             if lineage is not None and (
                 lineage.physical_actions != session.physical_actions
@@ -5337,13 +5429,6 @@ class UniversalAgentOrchestrator:
                         new_observation=observation,
                     )
                 )
-            self._remember(
-                session,
-                session.evidence_store.write_trusted_observation(
-                    session.step_number,
-                    observation,
-                ),
-            )
 
             if pending_effect is not None:
                 return self._complete_pending_effect_verification(
@@ -5584,50 +5669,16 @@ class UniversalAgentOrchestrator:
                 )
             else:
                 context = graph.to_qwen_context()
-            decision = self._decide_next_action(
+            decision = self._stage_current_observation_decision(
                 session,
+                graph=graph,
                 frames=frames,
                 task_context=context,
                 trusted_observation=observation,
-            )
-            self._validate_decision_binding(graph, observation, decision)
-            session.qwen_decision = decision
-            self._remember(
-                session,
-                session.evidence_store.write_qwen_decision(
-                    session.step_number,
-                    decision,
+                unsupported_status_reason=(
+                    lambda status: f"不支持的 Qwen 状态：{status}"
                 ),
             )
-
-            if decision.proposal.status == "action":
-                selection_receipt = self._selection_receipt(session, decision)
-                session.controller_decision = selection_receipt
-                self._remember(
-                    session,
-                    session.evidence_store.write_controller_decision(
-                        session.step_number,
-                        self._selection_receipt_payload(selection_receipt),
-                    ),
-                )
-                if selection_receipt.allowed:
-                    session.status = "awaiting_confirmation"
-                    session.failed_reason = ""
-                    self._bind_confirmation(session)
-                else:
-                    session.status = "blocked"
-                    session.failed_reason = selection_receipt.reason
-            else:
-                session.status = "blocked"
-                session.failed_reason = (
-                    decision.proposal.reason
-                    if decision.proposal.status == "blocked"
-                    else f"不支持的 Qwen 状态：{decision.proposal.status}"
-                )
-                session.controller_decision = CanonicalSelectionReceipt(
-                    allowed=False,
-                    reason=session.failed_reason,
-                )
             if session.physical_actions != before_actions:
                 raise UniversalAgentOrchestratorError(
                     "重新观察路径错误地改变了物理动作计数。"
@@ -6568,59 +6619,23 @@ class UniversalAgentOrchestrator:
             prefix=f"before_step_{session.step_number}_frame",
         )
         self._remember(session, frame_paths)
-        observation = self.trusted_observation_factory(
-            frames=frames,
-            device_id=session.device_id,
+        observation = self._build_and_record_current_observation(
+            session,
             scene=scene,
+            frames=frames,
         )
-        session.trusted_observation = observation
-        session.trusted_frames = tuple(frames)
-        self._remember(
+        decision = self._stage_current_observation_decision(
             session,
-            session.evidence_store.write_trusted_observation(
-                session.step_number,
-                observation,
-            ),
-        )
-        decision = self._decide_next_action(
-            session,
+            graph=graph,
             frames=frames,
             task_context=task_context,
             trusted_observation=observation,
-        )
-        self._validate_decision_binding(graph, observation, decision)
-        session.qwen_decision = decision
-        self._remember(
-            session,
-            session.evidence_store.write_qwen_decision(
-                session.step_number,
-                decision,
+            unsupported_status_reason=(
+                lambda _status: (
+                    "外部状态目标的完成候选必须由 DeepSeek 新 revision 复核。"
+                )
             ),
         )
-        if decision.proposal.status == "action":
-            selection_receipt = self._selection_receipt(session, decision)
-            session.controller_decision = selection_receipt
-            self._remember(
-                session,
-                session.evidence_store.write_controller_decision(
-                    session.step_number,
-                    self._selection_receipt_payload(selection_receipt),
-                ),
-            )
-            if selection_receipt.allowed:
-                session.status = "awaiting_confirmation"
-                session.failed_reason = ""
-                self._bind_confirmation(session)
-            else:
-                session.status = "blocked"
-                session.failed_reason = selection_receipt.reason
-        else:
-            session.status = "blocked"
-            session.failed_reason = (
-                decision.proposal.reason
-                if decision.proposal.status == "blocked"
-                else "外部状态目标的完成候选必须由 DeepSeek 新 revision 复核。"
-            )
         if session.physical_actions != before_actions:
             raise UniversalAgentOrchestratorError("效果确认路径错误地产生了额外物理动作。")
         return decision
@@ -6738,16 +6753,10 @@ class UniversalAgentOrchestrator:
                 prefix=f"before_step_{session.step_number}_frame",
             )
             self._remember(session, frame_paths)
-            observation = self.trusted_observation_factory(
-                frames=frames,
-                device_id=session.device_id,
-                scene=scene,
-            )
-            session.trusted_observation = observation
-            session.trusted_frames = tuple(frames)
-            self._remember(
+            observation = self._build_and_record_current_observation(
                 session,
-                store.write_trusted_observation(session.step_number, observation),
+                scene=scene,
+                frames=frames,
             )
 
             if impact == "unknown":
@@ -6914,97 +6923,14 @@ class UniversalAgentOrchestrator:
                 }
                 for preview in semantic_authority.effect_previews
             )
-            active_typed_subgoal = next(
-                (
-                    item
-                    for item in semantic_ir.subgoals
-                    if item.subgoal_id
-                    == str(task_context.current_subgoal.get("subgoal_id") or "")
-                ),
-                None,
-            )
-            constraints = {
-                item.constraint_id: item for item in semantic_ir.constraints
-            }
-            required_actions = tuple(
-                dict.fromkeys(
-                    str(constraints[constraint_ref].value)
-                    for constraint_ref in (
-                        active_typed_subgoal.constraint_refs
-                        if active_typed_subgoal is not None
-                        else ()
-                    )
-                    if constraints[constraint_ref].kind == "required_action"
-                )
-            )
-            available_actions = self._available_action_kinds(session)
-            unsupported_actions = tuple(
-                action for action in required_actions if action not in available_actions
-            )
-            if unsupported_actions:
-                capability_provider = getattr(
-                    session.adapter,
-                    "capability_snapshot",
-                    None,
-                )
-                snapshot = (
-                    capability_provider()
-                    if callable(capability_provider)
-                    else build_device_capability_snapshot(
-                        device_id=session.device_id,
-                        supported_actions=available_actions,
-                    )
-                )
-                gap = snapshot.gap(unsupported_actions[0])
-                session.capability_gap = gap.to_dict() if gap is not None else None
-                session.status = "blocked"
-                session.failed_reason = (
-                    "当前设备能力不支持 typed required_action："
-                    + unsupported_actions[0]
-                )
-                self._write_terminal_snapshot(session)
-                return session
-            decision = self._decide_next_action(
+            self._stage_current_observation_decision(
                 session,
+                graph=graph,
                 frames=frames,
                 task_context=task_context,
                 trusted_observation=observation,
+                stage_capability_block=False,
             )
-            self._validate_decision_binding(graph, observation, decision)
-            session.qwen_decision = decision
-            self._remember(
-                session,
-                store.write_qwen_decision(session.step_number, decision),
-            )
-
-            proposal = decision.proposal
-            if proposal.status == "action":
-                selection_receipt = self._selection_receipt(session, decision)
-                session.controller_decision = selection_receipt
-                self._remember(
-                    session,
-                    store.write_controller_decision(
-                        session.step_number,
-                        self._selection_receipt_payload(selection_receipt),
-                    ),
-                )
-                if selection_receipt.allowed:
-                    session.status = "awaiting_confirmation"
-                    self._bind_confirmation(session)
-                else:
-                    session.status = "blocked"
-                    session.failed_reason = selection_receipt.reason
-            elif proposal.status == "blocked":
-                session.status = "blocked"
-                session.failed_reason = proposal.reason
-                session.controller_decision = CanonicalSelectionReceipt(
-                    allowed=False,
-                    reason=proposal.reason,
-                )
-            else:
-                raise UniversalAgentOrchestratorError(
-                    f"不支持的 Qwen 状态：{proposal.status}"
-                )
 
             if session.physical_actions != 0:
                 raise UniversalAgentOrchestratorError(

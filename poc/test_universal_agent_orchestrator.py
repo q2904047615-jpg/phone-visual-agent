@@ -1980,6 +1980,37 @@ class UniversalAgentStartTests(unittest.TestCase):
         self.assertEqual(raw_goal, session.raw_goal)
         self.assertEqual(raw_goal, planner.plan_calls[0][0])
 
+    def test_start_uses_shared_decision_capability_gate_without_qwen(self) -> None:
+        class HomeOnlyAdapter(FakeAdapter):
+            @staticmethod
+            def supported_action_kinds() -> frozenset[str]:
+                return frozenset({"home"})
+
+        qwen = FakeQwenObserver()
+        adapter = HomeOnlyAdapter(_scene())
+        orchestrator = self._orchestrator(
+            FakeDeepSeekPlanner(_graph()),
+            qwen,
+            adapter,
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            session = orchestrator.start(
+                session_id="session-capability-gap",
+                raw_goal="打开系统最近任务页面",
+                exact_action_kind="open_recent_apps",
+                device_id="device-1",
+                run_dir=Path(temp),
+            )
+
+        self.assertEqual("blocked", session.status)
+        self.assertIn("open_recent_apps", session.failed_reason)
+        self.assertEqual("open_recent_apps", session.capability_gap["requested_action"])
+        self.assertEqual([], qwen.calls)
+        self.assertIsNone(session.qwen_decision)
+        self.assertIsNone(session.controller_decision)
+        self.assertEqual(0, session.physical_actions)
+
     def test_named_app_already_foreground_completes_open_node_without_action(self) -> None:
         base = _graph()
         open_app = replace(

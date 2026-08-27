@@ -496,6 +496,61 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             violations.append(f"{path.name}: {name}")
         self.assertEqual([], violations)
 
+    def test_orchestrator_has_one_current_observation_decision_stage(self) -> None:
+        root = Path(__file__).resolve().parent
+        orchestrator_path = (
+            root / "agent" / "application" / "universal_agent_orchestrator.py"
+        )
+        tree = ast.parse(orchestrator_path.read_text(encoding="utf-8"))
+        orchestrator = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "UniversalAgentOrchestrator"
+        )
+
+        owners: dict[str, list[str]] = {
+            "_decide_next_action": [],
+            "write_qwen_decision": [],
+            "_selection_receipt": [],
+            "trusted_observation_factory": [],
+        }
+        for method in orchestrator.body:
+            if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(method):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = (
+                    node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else ""
+                )
+                if name in owners:
+                    owners[name].append(method.name)
+
+        self.assertEqual(
+            ["_stage_current_observation_decision"],
+            owners["_decide_next_action"],
+        )
+        self.assertEqual(
+            ["_stage_current_observation_decision"],
+            owners["write_qwen_decision"],
+        )
+        self.assertEqual(
+            ["_stage_current_observation_decision"],
+            owners["_selection_receipt"],
+        )
+        self.assertEqual(
+            [
+                "_build_and_record_current_observation",
+                "_confirm_one_locked",
+            ],
+            owners["trusted_observation_factory"],
+        )
+
     def test_universal_orchestrator_and_usage_have_one_layered_entry(self) -> None:
         import agent.application.universal_agent_orchestrator as orchestrator
         import agent.application.vision_usage as vision_usage

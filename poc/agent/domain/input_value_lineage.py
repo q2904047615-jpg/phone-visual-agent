@@ -710,21 +710,26 @@ class TypedInputLineage:
         )
 
 
-def build_pending_text_lineage(
-    *,
-    device_id: str,
-    resolved_action: dict[str, Any],
-    before_scene: dict[str, Any],
-    recorded_at_epoch: float | None = None,
-) -> TypedInputLineage:
-    """Bind one returned text transaction to its immediate visual result."""
+@dataclass(frozen=True)
+class _PendingInputSurface:
+    app_id: str
+    screen_id: str
+    input_field_id: str
+    input_bounds: tuple[float, float, float, float]
+    before_fingerprint: str
 
-    parts = _validated_text_action_chain(resolved_action, before_scene)
-    before_input, prior, expected, _fragment = parts
+
+def _resolve_pending_input_surface(
+    before_scene: dict[str, Any],
+    before_input: dict[str, Any],
+    *,
+    missing_surface_message: str,
+) -> _PendingInputSurface:
     app_id = before_scene.get("app_id")
     screen_id = before_scene.get("screen_id")
     before_fingerprint = before_scene.get("fingerprint")
     input_field_id = _typed_input_field_id(before_input)
+    input_bounds = _valid_bounds(before_input.get("bounds"))
     if (
         not isinstance(app_id, str)
         or not app_id.strip()
@@ -735,40 +740,84 @@ def build_pending_text_lineage(
         or not before_fingerprint.strip()
         or before_fingerprint == "unknown"
         or (app_id == "unknown" and input_field_id == "unknown")
+        or input_bounds is None
     ):
-        raise InputValueLineageError("临时文字连续性缺少明确输入表面。")
-    action_digest = _canonical_digest(resolved_action)
-    receipt_digest = _canonical_digest(
-        {
-            "protocol_version": "2026-08-20-verified-text-transaction-v1",
-            "stage": "controller_call_returned",
-            "device_id": device_id,
-            "action_digest": action_digest,
-            "before_fingerprint": before_fingerprint,
-            "expected_value": expected,
-        }
+        raise InputValueLineageError(missing_surface_message)
+    return _PendingInputSurface(
+        app_id=app_id,
+        screen_id=screen_id,
+        input_field_id=input_field_id,
+        input_bounds=input_bounds,
+        before_fingerprint=before_fingerprint,
     )
+
+
+def _build_pending_input_lineage(
+    *,
+    device_id: str,
+    exact_value: str,
+    surface: _PendingInputSurface,
+    action_digest: str,
+    receipt: Any,
+    source: str,
+    recorded_at_epoch: float | None,
+) -> TypedInputLineage:
     record = TypedInputLineage(
         version=TYPED_INPUT_LINEAGE_VERSION,
         device_id=device_id,
-        exact_value=expected,
-        app_id=app_id,
-        screen_id=screen_id,
+        exact_value=exact_value,
+        app_id=surface.app_id,
+        screen_id=surface.screen_id,
         input_meaning="application_text_input",
-        input_field_id=input_field_id,
-        input_bounds=_valid_bounds(before_input["bounds"]),
-        before_fingerprint=before_fingerprint,
+        input_field_id=surface.input_field_id,
+        input_bounds=surface.input_bounds,
+        before_fingerprint=surface.before_fingerprint,
         after_fingerprint="pending-visual-verification",
         action_digest=action_digest,
-        receipt_digest=receipt_digest,
+        receipt_digest=_canonical_digest(receipt),
         surface_descriptors=(),
         recorded_at_epoch=(
             time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
         ),
-        source="pending_verified_text_action",
+        source=source,
     )
     record.validate()
     return record
+
+
+def build_pending_text_lineage(
+    *,
+    device_id: str,
+    resolved_action: dict[str, Any],
+    before_scene: dict[str, Any],
+    recorded_at_epoch: float | None = None,
+) -> TypedInputLineage:
+    """Bind one returned text transaction to its immediate visual result."""
+
+    parts = _validated_text_action_chain(resolved_action, before_scene)
+    before_input, _prior, expected, _fragment = parts
+    surface = _resolve_pending_input_surface(
+        before_scene,
+        before_input,
+        missing_surface_message="临时文字连续性缺少明确输入表面。",
+    )
+    action_digest = _canonical_digest(resolved_action)
+    return _build_pending_input_lineage(
+        device_id=device_id,
+        exact_value=expected,
+        surface=surface,
+        action_digest=action_digest,
+        receipt={
+            "protocol_version": "2026-08-20-verified-text-transaction-v1",
+            "stage": "controller_call_returned",
+            "device_id": device_id,
+            "action_digest": action_digest,
+            "before_fingerprint": surface.before_fingerprint,
+            "expected_value": expected,
+        },
+        source="pending_verified_text_action",
+        recorded_at_epoch=recorded_at_epoch,
+    )
 
 
 def build_pending_chinese_preedit_lineage(
@@ -783,55 +832,29 @@ def build_pending_chinese_preedit_lineage(
     before_input, _prior, expected, _fragment, pinyin = (
         _validated_chinese_preedit_action_chain(resolved_action, before_scene)
     )
-    app_id = before_scene.get("app_id")
-    screen_id = before_scene.get("screen_id")
-    before_fingerprint = before_scene.get("fingerprint")
-    input_field_id = _typed_input_field_id(before_input)
-    if (
-        not isinstance(app_id, str)
-        or not app_id.strip()
-        or not isinstance(screen_id, str)
-        or not screen_id.strip()
-        or screen_id == "unknown"
-        or not isinstance(before_fingerprint, str)
-        or not before_fingerprint.strip()
-        or before_fingerprint == "unknown"
-        or (app_id == "unknown" and input_field_id == "unknown")
-    ):
-        raise InputValueLineageError("临时中文预编辑连续性缺少明确输入表面。")
+    surface = _resolve_pending_input_surface(
+        before_scene,
+        before_input,
+        missing_surface_message="临时中文预编辑连续性缺少明确输入表面。",
+    )
     action_digest = _canonical_digest(resolved_action)
-    receipt_digest = _canonical_digest(
-        {
+    return _build_pending_input_lineage(
+        device_id=device_id,
+        exact_value=expected,
+        surface=surface,
+        action_digest=action_digest,
+        receipt={
             "protocol_version": "2026-08-24-verified-chinese-preedit-v1",
             "stage": "controller_call_returned",
             "device_id": device_id,
             "action_digest": action_digest,
-            "before_fingerprint": before_fingerprint,
+            "before_fingerprint": surface.before_fingerprint,
             "expected_value": expected,
             "input_pinyin": pinyin,
-        }
-    )
-    record = TypedInputLineage(
-        version=TYPED_INPUT_LINEAGE_VERSION,
-        device_id=device_id,
-        exact_value=expected,
-        app_id=app_id,
-        screen_id=screen_id,
-        input_meaning="application_text_input",
-        input_field_id=input_field_id,
-        input_bounds=_valid_bounds(before_input["bounds"]),
-        before_fingerprint=before_fingerprint,
-        after_fingerprint="pending-visual-verification",
-        action_digest=action_digest,
-        receipt_digest=receipt_digest,
-        surface_descriptors=(),
-        recorded_at_epoch=(
-            time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
-        ),
+        },
         source="pending_verified_chinese_preedit_action",
+        recorded_at_epoch=recorded_at_epoch,
     )
-    record.validate()
-    return record
 
 
 def _validated_newline_action_chain(
@@ -916,43 +939,20 @@ def build_pending_newline_lineage(
         resolved_action,
         before_scene,
     )
-    app_id = before_scene.get("app_id")
-    screen_id = before_scene.get("screen_id")
-    before_fingerprint = before_scene.get("fingerprint")
-    input_field_id = _typed_input_field_id(before_input)
-    if (
-        not isinstance(app_id, str)
-        or not app_id.strip()
-        or not isinstance(screen_id, str)
-        or not screen_id.strip()
-        or screen_id == "unknown"
-        or not isinstance(before_fingerprint, str)
-        or not before_fingerprint.strip()
-        or before_fingerprint == "unknown"
-        or (app_id == "unknown" and input_field_id == "unknown")
-    ):
-        raise InputValueLineageError("临时换行连续性缺少明确输入表面。")
-    record = TypedInputLineage(
-        version=TYPED_INPUT_LINEAGE_VERSION,
+    surface = _resolve_pending_input_surface(
+        before_scene,
+        before_input,
+        missing_surface_message="临时换行连续性缺少明确输入表面。",
+    )
+    return _build_pending_input_lineage(
         device_id=device_id,
         exact_value=expected,
-        app_id=app_id,
-        screen_id=screen_id,
-        input_meaning="application_text_input",
-        input_field_id=input_field_id,
-        input_bounds=_valid_bounds(before_input["bounds"]),
-        before_fingerprint=before_fingerprint,
-        after_fingerprint="pending-visual-verification",
+        surface=surface,
         action_digest=_canonical_digest(resolved_action),
-        receipt_digest=_canonical_digest(hardware_receipt),
-        surface_descriptors=(),
-        recorded_at_epoch=(
-            time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
-        ),
+        receipt=hardware_receipt,
         source="pending_verified_newline_action",
+        recorded_at_epoch=recorded_at_epoch,
     )
-    record.validate()
-    return record
 
 
 def build_pending_input_state_lineage(
@@ -1041,45 +1041,20 @@ def build_pending_input_state_lineage(
         raise InputValueLineageError(
             "临时输入状态连续性的切换方向与 expected 不一致。"
         )
-    app_id = before_scene.get("app_id")
-    screen_id = before_scene.get("screen_id")
-    before_fingerprint = before_scene.get("fingerprint")
-    input_field_id = _typed_input_field_id(before_input)
-    if (
-        not isinstance(app_id, str)
-        or not app_id.strip()
-        or not isinstance(screen_id, str)
-        or not screen_id.strip()
-        or screen_id == "unknown"
-        or not isinstance(before_fingerprint, str)
-        or not before_fingerprint.strip()
-        or before_fingerprint == "unknown"
-        or (app_id == "unknown" and input_field_id == "unknown")
-    ):
-        raise InputValueLineageError(
-            "临时输入状态连续性缺少明确输入表面。"
-        )
-    record = TypedInputLineage(
-        version=TYPED_INPUT_LINEAGE_VERSION,
+    surface = _resolve_pending_input_surface(
+        before_scene,
+        before_input,
+        missing_surface_message="临时输入状态连续性缺少明确输入表面。",
+    )
+    return _build_pending_input_lineage(
         device_id=device_id,
         exact_value=prior,
-        app_id=app_id,
-        screen_id=screen_id,
-        input_meaning="application_text_input",
-        input_field_id=input_field_id,
-        input_bounds=_valid_bounds(before_input["bounds"]),
-        before_fingerprint=before_fingerprint,
-        after_fingerprint="pending-visual-verification",
+        surface=surface,
         action_digest=_canonical_digest(resolved_action),
-        receipt_digest=_canonical_digest(hardware_receipt),
-        surface_descriptors=(),
-        recorded_at_epoch=(
-            time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
-        ),
+        receipt=hardware_receipt,
         source="pending_verified_input_state_action",
+        recorded_at_epoch=recorded_at_epoch,
     )
-    record.validate()
-    return record
 
 
 def build_pending_ime_candidate_lineage(
@@ -1183,44 +1158,20 @@ def build_pending_ime_candidate_lineage(
         raise InputValueLineageError(
             "临时候选提交连续性没有绑定同一输入法预编辑串。"
         )
-    app_id = before_scene.get("app_id")
-    screen_id = before_scene.get("screen_id")
-    before_fingerprint = before_scene.get("fingerprint")
-    if (
-        not isinstance(app_id, str)
-        or not app_id.strip()
-        or not isinstance(screen_id, str)
-        or not screen_id.strip()
-        or screen_id == "unknown"
-        or not isinstance(before_fingerprint, str)
-        or not before_fingerprint.strip()
-        or before_fingerprint == "unknown"
-        or (app_id == "unknown" and field_id == "unknown")
-    ):
-        raise InputValueLineageError(
-            "临时候选提交连续性缺少明确输入表面。"
-        )
-    record = TypedInputLineage(
-        version=TYPED_INPUT_LINEAGE_VERSION,
+    surface = _resolve_pending_input_surface(
+        before_scene,
+        before_input,
+        missing_surface_message="临时候选提交连续性缺少明确输入表面。",
+    )
+    return _build_pending_input_lineage(
         device_id=device_id,
         exact_value=expected,
-        app_id=app_id,
-        screen_id=screen_id,
-        input_meaning="application_text_input",
-        input_field_id=field_id,
-        input_bounds=_valid_bounds(before_input["bounds"]),
-        before_fingerprint=before_fingerprint,
-        after_fingerprint="pending-visual-verification",
+        surface=surface,
         action_digest=_canonical_digest(resolved_action),
-        receipt_digest=_canonical_digest(hardware_receipt),
-        surface_descriptors=(),
-        recorded_at_epoch=(
-            time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
-        ),
+        receipt=hardware_receipt,
         source="pending_verified_ime_candidate_action",
+        recorded_at_epoch=recorded_at_epoch,
     )
-    record.validate()
-    return record
 
 
 def build_pending_literal_lineage(
@@ -1284,43 +1235,20 @@ def build_pending_literal_lineage(
         or states.get("independent_geometry_verified") is not True
     ):
         raise InputValueLineageError("临时输入连续性目标键未形成 exact 链。")
-    app_id = before_scene.get("app_id")
-    screen_id = before_scene.get("screen_id")
-    before_fingerprint = before_scene.get("fingerprint")
-    input_field_id = _typed_input_field_id(before_input)
-    if (
-        not isinstance(app_id, str)
-        or not app_id.strip()
-        or not isinstance(screen_id, str)
-        or not screen_id.strip()
-        or screen_id == "unknown"
-        or not isinstance(before_fingerprint, str)
-        or not before_fingerprint.strip()
-        or before_fingerprint == "unknown"
-        or (app_id == "unknown" and input_field_id == "unknown")
-    ):
-        raise InputValueLineageError("临时输入连续性缺少明确输入表面。")
-    record = TypedInputLineage(
-        version=TYPED_INPUT_LINEAGE_VERSION,
+    surface = _resolve_pending_input_surface(
+        before_scene,
+        before_input,
+        missing_surface_message="临时输入连续性缺少明确输入表面。",
+    )
+    return _build_pending_input_lineage(
         device_id=device_id,
         exact_value=expected,
-        app_id=app_id,
-        screen_id=screen_id,
-        input_meaning="application_text_input",
-        input_field_id=input_field_id,
-        input_bounds=_valid_bounds(before_input["bounds"]),
-        before_fingerprint=before_fingerprint,
-        after_fingerprint="pending-visual-verification",
+        surface=surface,
         action_digest=_canonical_digest(resolved_action),
-        receipt_digest=_canonical_digest(hardware_receipt),
-        surface_descriptors=(),
-        recorded_at_epoch=(
-            time.time() if recorded_at_epoch is None else float(recorded_at_epoch)
-        ),
+        receipt=hardware_receipt,
         source="pending_verified_literal_action",
+        recorded_at_epoch=recorded_at_epoch,
     )
-    record.validate()
-    return record
 
 
 def _single_input(scene: dict[str, Any], *, expected_value: str | None = None) -> dict[str, Any]:

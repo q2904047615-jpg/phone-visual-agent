@@ -903,6 +903,10 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         )
         self.assertIn("same Latin glyph sequence", prompt)
         self.assertIn("second occurrence is the exact candidate", prompt)
+        self.assertIn(
+            "不得在scene.states.value中重复正文",
+            prompt,
+        )
         self.assertEqual(
             observed.unique_trusted_goal_element().element_id,
             "local_audited_input_1",
@@ -1128,56 +1132,9 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                         device_id="device-local-01",
                     )
 
-    def test_single_step_observer_accepts_one_fused_blank_input_without_placeholder(
+    def test_single_step_observer_uses_only_input_structure_for_blank_value(
         self,
     ) -> None:
-        scene = scene_payload()
-        scene.update(
-            {
-                "foreground_app_id": "com.example.messaging",
-                "screen_id": "named_conversation",
-                "summary": "指定会话页底部有一个空输入框",
-                "elements": [
-                    {
-                        "element_id": "e1",
-                        "role": "input",
-                        "meaning": "message_input_field",
-                        "label": "",
-                        "bounds": [120, 910, 780, 960],
-                        "confidence": 1.0,
-                        "states": {
-                            "goal_relevant": True,
-                            "fully_visible": True,
-                            "value": "",
-                        },
-                        "evidence": ["底部工具栏中唯一完整白色文本输入区域"],
-                    }
-                ],
-            }
-        )
-        audit = input_audit_payload(
-            application_inputs=[
-                audited_application_input(
-                    structure_id="message",
-                    bounds=[120, 910, 780, 960],
-                    text="",
-                    placeholder="",
-                    visible_editable_cues=[],
-                )
-            ]
-        )
-        provider = SequenceProvider(
-            [
-                {
-                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
-                    "coordinate_space": {
-                        "kind": "normalized_1000", "width": 1000, "height": 1000,
-                    },
-                    "scene": scene,
-                    "input_structure": audit,
-                }
-            ]
-        )
         context = {
             "entities": {
                 "active_subgoal_visual_context": {
@@ -1194,18 +1151,89 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 }
             }
         }
-
-        observed = SingleStepGenericSceneObserver(provider).observe(
-            frames=stable_frames(),
-            goal_context=context,
-            device_id="device-local-01",
+        cases = (
+            (
+                "scene-value-omitted",
+                "com.example.messaging",
+                "named_conversation",
+                [120, 910, 780, 960],
+                {"goal_relevant": True, "fully_visible": True},
+                "底部工具栏中唯一完整白色文本输入区域",
+            ),
+            (
+                "stale-scene-transcription",
+                "com.example.notes",
+                "edit_note",
+                [100, 300, 900, 390],
+                {
+                    "goal_relevant": True,
+                    "fully_visible": True,
+                    "value": "stale scene transcription",
+                },
+                "表单中唯一完整可见的文本编辑表面",
+            ),
         )
+        for name, app_id, screen_id, bounds, states, visual_evidence in cases:
+            with self.subTest(name=name):
+                scene = scene_payload()
+                scene.update(
+                    {
+                        "foreground_app_id": app_id,
+                        "screen_id": screen_id,
+                        "summary": "当前页面有一个空输入框",
+                        "elements": [
+                            {
+                                "element_id": "e1",
+                                "role": "input",
+                                "meaning": "application_text_input",
+                                "label": "",
+                                "bounds": bounds,
+                                "confidence": 1.0,
+                                "states": states,
+                                "evidence": [visual_evidence],
+                            }
+                        ],
+                    }
+                )
+                audit = input_audit_payload(
+                    application_inputs=[
+                        audited_application_input(
+                            structure_id="field",
+                            bounds=bounds,
+                            text="",
+                            placeholder="",
+                            visible_editable_cues=[],
+                        )
+                    ]
+                )
+                provider = SequenceProvider(
+                    [
+                        {
+                            "protocol_version": (
+                                SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
+                            ),
+                            "coordinate_space": {
+                                "kind": "normalized_1000",
+                                "width": 1000,
+                                "height": 1000,
+                            },
+                            "scene": scene,
+                            "input_structure": audit,
+                        }
+                    ]
+                )
 
-        self.assertEqual(provider.calls, 1)
-        field = observed.unique_trusted_goal_element()
-        self.assertEqual("local_audited_input_1", field.element_id)
-        self.assertEqual("", field.states["value"])
-        self.assertIn("当前输入框为空", " ".join(field.evidence))
+                observed = SingleStepGenericSceneObserver(provider).observe(
+                    frames=stable_frames(),
+                    goal_context=context,
+                    device_id="device-local-01",
+                )
+
+                self.assertEqual(provider.calls, 1)
+                field = observed.unique_trusted_goal_element()
+                self.assertEqual("local_audited_input_1", field.element_id)
+                self.assertEqual("", field.states["value"])
+                self.assertIn("输入结构审计确认当前输入框为空", " ".join(field.evidence))
 
     def test_single_step_observer_atomically_normalizes_declared_image_grid(
         self,

@@ -403,8 +403,8 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                     scene_payload,
                     context,
                 )
-            single_step_input_attestation = (
-                _single_step_preliminary_input_attestation(
+            single_step_input_surface = (
+                _single_step_input_surface_attestation(
                     scene_payload,
                     goal_context=context,
                 )
@@ -494,7 +494,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                         lineage_frame=frame,
                         qwerty_row_snapper=self.qwerty_row_snapper,
                         qwerty_row_frames=frames[stable_tail_start:],
-                        single_step_input_attestation=single_step_input_attestation,
+                        single_step_input_surface=single_step_input_surface,
                     ),
                     obstructions,
                     fingerprint=fingerprint,
@@ -800,7 +800,11 @@ def _single_step_observation_prompt(
     """Build the sole online prompt for one closed-loop observation step."""
 
     request_width, request_height = request_image_size
-    scene_contract = _compact_prompt(context, wire_height=request_height)
+    scene_contract = _compact_prompt(
+        context,
+        wire_height=request_height,
+        input_structure_is_value_authority=include_input_structure,
+    )
     if include_input_structure:
         input_contract = _input_structure_audit_prompt(
             context,
@@ -1244,6 +1248,7 @@ def _compact_prompt(
     context: dict[str, Any],
     *,
     wire_height: int = 1000,
+    input_structure_is_value_authority: bool = False,
 ) -> str:
     context = _observation_goal_context(context)
     if _goal_requests_keyboard_mode_switch(context):
@@ -1254,11 +1259,21 @@ def _compact_prompt(
         )
     else:
         keyboard_switch_rule = KEYBOARD_MODE_SWITCH_OBSERVATION_RULE
-    input_observation_rule = (
-        INPUT_VALUE_AND_MODE_OBSERVATION_RULE
-        + keyboard_switch_rule
-        + LOCAL_TEXT_CLEAR_OBSERVATION_RULE
-    )
+    if input_structure_is_value_authority:
+        input_observation_rule = (
+            "本轮input_structure.application_inputs.text是应用输入正文空/非空事实的"
+            "唯一视觉权威。scene中的role=input只可报告一个目标相关输入表面的身份、"
+            "可见边界、goal_relevant、fully_visible和外观证据；不得在scene.states.value"
+            "中重复正文，也不得用scene正文否决input_structure。键盘模式、IME和可执行"
+            "输入几何只在同一响应的input_structure中报告。"
+            + LOCAL_TEXT_CLEAR_OBSERVATION_RULE
+        )
+    else:
+        input_observation_rule = (
+            INPUT_VALUE_AND_MODE_OBSERVATION_RULE
+            + keyboard_switch_rule
+            + LOCAL_TEXT_CLEAR_OBSERVATION_RULE
+        )
     return f"""
 你是通用手机页面观察器，只报告画面事实，不规划也不执行动作。
 用户目标只用于选择需要读清的控件，不能让你幻读：
@@ -2738,18 +2753,19 @@ def _strip_preliminary_input_geometry_for_dedicated_audit(
     return isolated
 
 
-def _single_step_preliminary_input_attestation(
+def _single_step_input_surface_attestation(
     payload: dict[str, Any],
     *,
     goal_context: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Keep one non-authoritative empty-field fact from the current scene.
+    """Keep one non-authoritative input-surface fact from the current scene.
 
-    The dedicated input structure remains the sole value and text geometry
-    owner. This record proves only that the same envelope described one visible,
-    goal-bound edit surface with non-empty visual evidence. It can either rescue
-    an empty field when the audit reports matching structure, or be sanitized
-    into a focus-only surface when the audit misses and the keyboard is hidden.
+    ``input_structure.application_inputs`` remains the sole owner of committed
+    text and executable input geometry.  This record deliberately carries no
+    scene transcription.  It proves only that the same envelope described one
+    visible, goal-bound edit surface with non-empty visual evidence.  It can
+    either corroborate one matching empty audited field, or be sanitized into a
+    focus-only surface when the audit misses and the keyboard is hidden.
     """
 
     if not (
@@ -2789,7 +2805,6 @@ def _single_step_preliminary_input_attestation(
             or not isinstance(states, dict)
             or states.get("goal_relevant") is not True
             or states.get("fully_visible") is not True
-            or not isinstance(states.get("value"), str)
             or isinstance(confidence, bool)
             or not isinstance(confidence, (int, float))
             or float(confidence) < 0.9
@@ -2807,7 +2822,6 @@ def _single_step_preliminary_input_attestation(
                 "element_id": item["element_id"].strip(),
                 "meaning": item["meaning"].strip(),
                 "label": item["label"].strip()[:200],
-                "value": states["value"],
                 "bounds": bounds,
                 "confidence": float(confidence),
                 "evidence": tuple(str(value).strip()[:200] for value in evidence),
@@ -3362,7 +3376,6 @@ def _focus_only_compact_input_surface(
         "element_id",
         "meaning",
         "label",
-        "value",
         "bounds",
         "confidence",
         "evidence",
@@ -4228,7 +4241,7 @@ def _apply_input_structure_audit(
     ]
     | None = None,
     qwerty_row_frames: list[Image.Image] | tuple[Image.Image, ...] | None = None,
-    single_step_input_attestation: dict[str, Any] | None = None,
+    single_step_input_surface: dict[str, Any] | None = None,
 ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
@@ -4682,15 +4695,14 @@ def _apply_input_structure_audit(
             # the value itself must never be trimmed.
             text = raw_text
             placeholder = str(item.get("placeholder") or "").strip()
-            single_step_empty_field_evidence: tuple[str, ...] = ()
+            same_frame_input_surface_evidence: tuple[str, ...] = ()
             if (
                 len(application_inputs) == 1
                 and text == ""
-                and isinstance(single_step_input_attestation, dict)
-                and single_step_input_attestation.get("value") == text
+                and isinstance(single_step_input_surface, dict)
             ):
-                attested_bounds = single_step_input_attestation.get("bounds")
-                attested_evidence = single_step_input_attestation.get("evidence")
+                attested_bounds = single_step_input_surface.get("bounds")
+                attested_evidence = single_step_input_surface.get("evidence")
                 if (
                     isinstance(attested_bounds, (list, tuple))
                     and len(attested_bounds) == 4
@@ -4708,7 +4720,7 @@ def _apply_input_structure_audit(
                         _bounds_overlap_ratio(audit_bounds, scene_bounds) >= 0.85
                         and _bounds_overlap_ratio(scene_bounds, audit_bounds) >= 0.85
                     ):
-                        single_step_empty_field_evidence = tuple(
+                        same_frame_input_surface_evidence = tuple(
                             str(value).strip()[:200]
                             for value in attested_evidence
                             if str(value).strip()
@@ -4724,7 +4736,7 @@ def _apply_input_structure_audit(
                 and not placeholder
                 and not cues
                 and not pending_candidate_shell
-                and not single_step_empty_field_evidence
+                and not same_frame_input_surface_evidence
             ):
                 continue
             bounds = tuple(float(value) for value in item["bounds"])
@@ -4842,8 +4854,8 @@ def _apply_input_structure_audit(
                     "input_bounds": input_bounds,
                     "right_button": button_match,
                     "pending_ime_candidate_state": pending_ime_candidate_state,
-                    "single_step_empty_field_evidence": (
-                        single_step_empty_field_evidence
+                    "same_frame_input_surface_evidence": (
+                        same_frame_input_surface_evidence
                     ),
                     "confidence": min(
                         confidence,
@@ -5456,7 +5468,7 @@ def _apply_input_structure_audit(
             )
         ):
             focus_only_input = _focus_only_compact_input_surface(
-                single_step_input_attestation,
+                single_step_input_surface,
                 keyboard_visible=keyboard_visible,
             )
 
@@ -5614,7 +5626,7 @@ def _apply_input_structure_audit(
                     (
                         *rendered_input["field_labels"],
                         *rendered_input["visible_editable_cues"],
-                        *rendered_input.get("single_step_empty_field_evidence", ()),
+                        *rendered_input.get("same_frame_input_surface_evidence", ()),
                     )
                 )
             )
@@ -5686,11 +5698,11 @@ def _apply_input_structure_audit(
                     )
             elif rendered_input["placeholder"]:
                 input_evidence.insert(0, f"应用输入框为空，占位提示：{rendered_input['placeholder']}")
-            elif rendered_input.get("single_step_empty_field_evidence"):
+            elif rendered_input.get("same_frame_input_surface_evidence"):
                 input_evidence.insert(
                     0,
-                    "同一单步响应的场景输入事实与输入结构审计唯一重合；"
-                    "当前输入框为空",
+                    "输入结构审计确认当前输入框为空；同帧场景只证明"
+                    "唯一可见输入表面与其重合",
                 )
             if clearable_ime_preedit:
                 input_evidence.append(

@@ -777,7 +777,10 @@ class TypedInputLineageTests(unittest.TestCase):
         for retired in (
             "def _unique_scene_input_value(",
             "def _unique_payload_input_value(",
+            "def _single_step_preliminary_input_attestation(",
             "preliminary_input_value_hint",
+            "single_step_input_attestation",
+            "single_step_empty_field_evidence",
             "same_frame_visible_cue_text",
             "visible_trailing_newline_projection",
             "coarse_input_value",

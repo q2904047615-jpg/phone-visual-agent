@@ -26,7 +26,10 @@ from agent.domain.visual_evidence import VisualObstruction
 from agent.infrastructure.qwen_runtime_errors import (
     classify_qwen_error,
 )
-from robot_core import WorkflowNotReady, qwerty_keyboard_config_from_anchors
+from agent.infrastructure.robot_controller import (
+    WorkflowNotReady,
+    qwerty_keyboard_config_from_anchors,
+)
 from agent.domain.ui_scene import (
     ALLOWED_ROLES,
     CAMERA_LAYOUT_ORIENTATIONS,

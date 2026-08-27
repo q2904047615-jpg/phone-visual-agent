@@ -855,6 +855,76 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], legacy_imports)
         self.assertEqual([], legacy_patches)
 
+    def test_robot_controller_has_one_infrastructure_entry(self) -> None:
+        import agent.infrastructure.robot_controller as robot_controller
+
+        root = Path(__file__).resolve().parent
+        controller_path = (
+            root / "agent" / "infrastructure" / "robot_controller.py"
+        )
+        self.assertFalse((root / "robot_core.py").exists())
+        self.assertTrue(controller_path.is_file())
+        self.assertEqual(root, robot_controller.POC_ROOT)
+        self.assertEqual(
+            root / "controller_config.json",
+            robot_controller.CONTROL_CONFIG_PATH,
+        )
+        self.assertEqual(root / "output" / "web", robot_controller.WEB_OUTPUT_DIR)
+        self.assertEqual(
+            "agent.infrastructure.robot_controller",
+            robot_controller.RobotController.__module__,
+        )
+        self.assertEqual(
+            "agent.infrastructure.robot_controller",
+            robot_controller.MockRobotController.__module__,
+        )
+        mock = robot_controller.MockRobotController(device_id="architecture-test")
+        self.assertEqual(root / "tap_calibration.json", mock.calibration_path)
+        mock.request_stop()
+        self.assertTrue(mock.stop_event.is_set())
+        mock.begin_new_task()
+        self.assertFalse(mock.stop_event.is_set())
+
+        source = controller_path.read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("class RobotController:"))
+        self.assertEqual(1, source.count("class MockRobotController(RobotController):"))
+        self.assertEqual(1, source.count("def load_controller_config("))
+        self.assertEqual(1, source.count("def qwerty_keyboard_config_from_anchors("))
+        self.assertIn("Path(__file__).resolve().parents[2]", source)
+        for forbidden in (
+            "agent.application",
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "capability_acceptance",
+        ):
+            self.assertNotIn(forbidden, source)
+
+        legacy_imports: list[str] = []
+        legacy_patches: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "robot_core"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "robot_core":
+                            legacy_imports.append(str(path.relative_to(root)))
+                if (
+                    path.name != "test_agent_modular_monolith.py"
+                    and isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and node.value.startswith("robot_core.")
+                ):
+                    legacy_patches.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+        self.assertEqual([], legacy_patches)
+
     def test_web_uses_one_session_repository_instead_of_legacy_storage(self) -> None:
         source = (Path(__file__).resolve().parent / "web_app.py").read_text(
             encoding="utf-8"

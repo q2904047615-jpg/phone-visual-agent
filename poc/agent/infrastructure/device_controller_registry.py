@@ -5,7 +5,7 @@ from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
-from robot_core import MockRobotController, RobotController
+from agent.infrastructure.robot_controller import MockRobotController, RobotController
 
 
 class DeviceControllerRegistryError(RuntimeError):

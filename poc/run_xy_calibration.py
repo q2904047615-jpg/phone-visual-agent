@@ -24,7 +24,7 @@ from agent.infrastructure import (
     InterProcessLease,
     SHARED_DEVICE_LEASE_DIR,
 )
-from robot_core import RobotController, load_controller_config
+from agent.infrastructure.robot_controller import RobotController, load_controller_config
 from agent.infrastructure.tap_calibration import (
     CALIBRATION_PATH,
     Affine2D,

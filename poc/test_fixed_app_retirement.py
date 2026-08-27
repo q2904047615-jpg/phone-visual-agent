@@ -157,7 +157,7 @@ class FixedAppRetirementTests(unittest.TestCase):
         sources = (
             "web_app.py",
             "agent/infrastructure/dashscope_vision_provider.py",
-            "robot_core.py",
+            "agent/infrastructure/robot_controller.py",
             "agent/infrastructure/seller_window_adapter.py",
             "agent/domain/ui_scene.py",
             "agent/domain/vision_model.py",
@@ -196,14 +196,16 @@ class FixedAppRetirementTests(unittest.TestCase):
                 self.assertNotIn(retired, text)
 
     def test_robot_has_no_second_direct_latin_character_veto(self) -> None:
-        text = (ROOT / "robot_core.py").read_text(encoding="utf-8")
+        text = (
+            ROOT / "agent" / "infrastructure" / "robot_controller.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("英文分段包含未认证字符", text)
 
     def test_seller_text_dialog_transport_is_physically_absent(self) -> None:
         text = "\n".join(
             (ROOT / name).read_text(encoding="utf-8")
             for name in (
-                "robot_core.py",
+                "agent/infrastructure/robot_controller.py",
                 "agent/infrastructure/seller_window_adapter.py",
                 "controller_config.json",
             )

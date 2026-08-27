@@ -18,7 +18,10 @@ from agent.application.qwen_visual_decision import (
     _deterministic_exact_selection_payload,
     _selection_choices,
 )
-from robot_core import DEFAULT_CONTROLLER_CONFIG, load_controller_config
+from agent.infrastructure.robot_controller import (
+    DEFAULT_CONTROLLER_CONFIG,
+    load_controller_config,
+)
 from agent.domain.semantic_action import SemanticAction
 from agent.domain.task_semantic_ir import compile_formal_semantic_authority
 from test_task_semantic_ir import required_actions_for_objective

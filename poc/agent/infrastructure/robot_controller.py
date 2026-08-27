@@ -1,3 +1,5 @@
+"""Seller-window backed Robot and Mock controller infrastructure."""
+
 from __future__ import annotations
 
 import json
@@ -21,8 +23,9 @@ from agent.domain.verified_text_transaction import (
 )
 
 
+POC_ROOT = Path(__file__).resolve().parents[2]
 WEB_OUTPUT_DIR = seller_gui.OUTPUT_DIR / "web"
-CONTROL_CONFIG_PATH = Path(__file__).with_name("controller_config.json")
+CONTROL_CONFIG_PATH = POC_ROOT / "controller_config.json"
 
 # A normal seller control window is portrait and tall enough to contain the
 # phone camera view plus its bottom controls.  Startup/error dialogs can share
@@ -284,7 +287,7 @@ class RobotController:
         self.calibration_path = (
             Path(calibration_path)
             if calibration_path is not None
-            else Path(__file__).with_name("tap_calibration.json")
+            else POC_ROOT / "tap_calibration.json"
         )
         self.stop_event = threading.Event()
         self._stop_state_lock = threading.Lock()

@@ -36,7 +36,7 @@ from agent.domain.canonical_action_protocol import GenericStepProposal
 from agent.infrastructure.generic_scene_observer import (
     SINGLE_STEP_SCENE_OBSERVER_VERSION,
 )
-from robot_core import (
+from agent.infrastructure.robot_controller import (
     DEFAULT_CONTROLLER_CONFIG,
     MockRobotController as _MockRobotController,
     RobotController as _RobotController,
@@ -124,12 +124,12 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         frame = Image.new("RGB", (540, 1038), "white")
 
         with (
-            patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
             patch(
-                "robot_core.seller_gui.capture_client_passive",
+                "agent.infrastructure.robot_controller.seller_gui.capture_client_passive",
                 return_value=frame,
             ) as passive,
-            patch("robot_core.seller_gui.capture_client") as active,
+            patch("agent.infrastructure.robot_controller.seller_gui.capture_client") as active,
         ):
             payload = controller.capture_preview()
 
@@ -189,9 +189,9 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             return frame
 
         with (
-            patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
             patch(
-                "robot_core.seller_gui.temporarily_park_cursor_outside_camera",
+                "agent.infrastructure.robot_controller.seller_gui.temporarily_park_cursor_outside_camera",
                 return_value=CursorLease(),
             ) as cursor_lease,
             patch.object(controller, "_capture_phone", side_effect=capture),
@@ -226,17 +226,17 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         frame = Image.new("RGB", (540, 960), "white")
 
         with (
-            patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
             patch.object(controller, "_capture_phone", return_value=frame),
             patch.object(controller, "_checkpoint"),
-            patch("robot_core.seller_gui.configure_single_click_count") as configure,
+            patch("agent.infrastructure.robot_controller.seller_gui.configure_single_click_count") as configure,
             patch(
-                "robot_core.seller_gui.click_client_point",
+                "agent.infrastructure.robot_controller.seller_gui.click_client_point",
                 return_value=self._click_barrier_receipt(),
             ) as click,
-            patch("robot_core.seller_gui.clear_seller_camera_overlay"),
+            patch("agent.infrastructure.robot_controller.seller_gui.clear_seller_camera_overlay"),
             patch(
-                "robot_core.load_controller_config",
+                "agent.infrastructure.robot_controller.load_controller_config",
                 return_value={"tap_hold": 0.35},
             ),
         ):
@@ -268,7 +268,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         frame = Image.new("RGB", (540, 960), "white")
 
         with (
-            patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
             patch.object(controller, "_capture_phone", return_value=frame),
             patch.object(controller, "_consume_physical_execution"),
             patch.object(controller, "_checkpoint"),
@@ -276,17 +276,17 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
                 "agent.infrastructure.tap_calibration.corrected_grid_point",
                 return_value=(500.0, 500.0),
             ),
-            patch("robot_core.seller_gui.configure_click_count") as configure,
+            patch("agent.infrastructure.robot_controller.seller_gui.configure_click_count") as configure,
             patch(
-                "robot_core.seller_gui.configure_single_click_count"
+                "agent.infrastructure.robot_controller.seller_gui.configure_single_click_count"
             ) as restore,
             patch(
-                "robot_core.seller_gui.click_client_point",
+                "agent.infrastructure.robot_controller.seller_gui.click_client_point",
                 return_value=self._click_barrier_receipt(2),
             ) as click,
-            patch("robot_core.seller_gui.clear_seller_camera_overlay") as clear,
+            patch("agent.infrastructure.robot_controller.seller_gui.clear_seller_camera_overlay") as clear,
             patch(
-                "robot_core.load_controller_config",
+                "agent.infrastructure.robot_controller.load_controller_config",
                 return_value={"tap_hold": 0.35},
             ),
         ):
@@ -510,7 +510,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             },
         )
 
-        with patch("robot_core.seller_gui.find_window") as find_window:
+        with patch("agent.infrastructure.robot_controller.seller_gui.find_window") as find_window:
             with self.assertRaisesRegex(Exception, "输入.*真机验收"):
                 controller.vision_type_text_with_layout(
                     "通用Agent验收草稿", TEST_QWERTY_LAYOUT
@@ -528,7 +528,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         frame = Image.new("RGB", (540, 960), "white")
 
         with (
-            patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
             patch.object(controller, "_capture_phone", return_value=frame),
             patch.object(controller, "_consume_physical_execution"),
             patch.object(controller, "_checkpoint"),
@@ -537,7 +537,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
                 return_value=(500.0, 500.0),
             ),
             patch(
-                "robot_core.seller_gui.long_press_client_point",
+                "agent.infrastructure.robot_controller.seller_gui.long_press_client_point",
                 return_value={
                     "version": "2026-08-16-seller-gui-contact-barrier-v3",
                     "channel": "right_button_stationary_touch",
@@ -552,8 +552,8 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
                     "post_barrier_settle_seconds": 0.45,
                 },
             ) as long_press,
-            patch("robot_core.seller_gui.click_client_point") as click,
-            patch("robot_core.seller_gui.clear_seller_camera_overlay"),
+            patch("agent.infrastructure.robot_controller.seller_gui.click_client_point") as click,
+            patch("agent.infrastructure.robot_controller.seller_gui.clear_seller_camera_overlay"),
         ):
             point = controller.vision_long_press_relative(500, 500, 0.8)
 
@@ -614,7 +614,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             verified_actions={"input_verified_text"},
         )
 
-        with patch("robot_core.seller_gui.find_window") as find_window:
+        with patch("agent.infrastructure.robot_controller.seller_gui.find_window") as find_window:
             for text in ("Agent123", "中文", ".com"):
                 with self.subTest(text=text), self.assertRaisesRegex(
                     Exception,
@@ -763,7 +763,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             ("长按", lambda: controller.vision_long_press_relative(500, 500)),
             ("拖动", lambda: controller.vision_drag_relative(100, 100, 900, 900)),
         )
-        with patch("robot_core.seller_gui.find_window") as find_window:
+        with patch("agent.infrastructure.robot_controller.seller_gui.find_window") as find_window:
             for label, operation in operations:
                 with self.subTest(label=label), self.assertRaisesRegex(
                     Exception,
@@ -779,7 +779,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             verified_actions={"dismiss_overlay"},
         )
 
-        with patch("robot_core.seller_gui.find_window") as find_window:
+        with patch("agent.infrastructure.robot_controller.seller_gui.find_window") as find_window:
             with self.assertRaisesRegex(Exception, "点击.*真机验收"):
                 controller.vision_tap_relative(500, 500)
 
@@ -809,15 +809,15 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         frame = Image.new("RGB", (540, 960), "white")
 
         with (
-            patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
             patch.object(controller, "_capture_phone", return_value=frame),
             patch.object(controller, "_checkpoint"),
             patch(
                 "agent.infrastructure.tap_calibration.corrected_grid_point",
                 side_effect=[(100.0, 200.0), (700.0, 800.0)],
             ),
-            patch("robot_core.seller_gui.drag_client_path") as drag,
-            patch("robot_core.seller_gui.clear_seller_camera_overlay") as clear_overlay,
+            patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
+            patch("agent.infrastructure.robot_controller.seller_gui.clear_seller_camera_overlay") as clear_overlay,
         ):
             result = controller.vision_drag_relative(100, 200, 700, 800)
 
@@ -835,8 +835,8 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             verified_actions={"swipe", "drag"},
         )
         with (
-            patch("robot_core.seller_gui.find_window") as find_window,
-            patch("robot_core.seller_gui.drag_client_path") as drag,
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window") as find_window,
+            patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
         ):
             with self.assertRaisesRegex(Exception, "系统边缘唤出导航栏.*真机验收"):
                 controller.vision_reveal_system_navigation()
@@ -858,15 +858,15 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
             "corrected_grid": [[92, 495], [333, 495]],
         }
         with (
-            patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
             patch.object(controller, "_capture_phone", return_value=frame),
             patch.object(controller, "_checkpoint"),
             patch(
                 "agent.infrastructure.tap_calibration.reveal_system_navigation_path",
                 return_value=derived,
             ) as derive,
-            patch("robot_core.seller_gui.drag_client_path") as drag,
-            patch("robot_core.seller_gui.clear_seller_camera_overlay") as clear_overlay,
+            patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
+            patch("agent.infrastructure.robot_controller.seller_gui.clear_seller_camera_overlay") as clear_overlay,
         ):
             result = controller.vision_reveal_system_navigation()
 
@@ -883,7 +883,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         )
         frame = Image.new("RGB", (810, 1440), "white")
         with (
-            patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
             patch.object(controller, "_capture_phone", return_value=frame),
             patch.object(controller, "_checkpoint"),
             patch(
@@ -891,7 +891,7 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
                 return_value={"corrected_grid": [[92, 495], [333, 495]]},
             ),
             patch(
-                "robot_core.seller_gui.drag_client_path",
+                "agent.infrastructure.robot_controller.seller_gui.drag_client_path",
                 side_effect=RuntimeError("drag failed"),
             ) as drag,
         ):
@@ -906,13 +906,13 @@ class PhysicalNavigationSafetyTests(unittest.TestCase):
         )
         frame = Image.new("RGB", (810, 1440), "white")
         with (
-            patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
+            patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
             patch.object(controller, "_capture_phone", return_value=frame),
             patch(
                 "agent.infrastructure.tap_calibration.reveal_system_navigation_path",
                 side_effect=RuntimeError("invalid calibration"),
             ),
-            patch("robot_core.seller_gui.drag_client_path") as drag,
+            patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
         ):
             with self.assertRaisesRegex(RuntimeError, "invalid calibration"):
                 controller.vision_reveal_system_navigation()

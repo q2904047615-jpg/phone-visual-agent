@@ -18,7 +18,7 @@ from agent.infrastructure.orientation_safety import (
     _mint_audited_credential,
     _mint_locally_verified_qwerty_credential,
 )
-from robot_core import RobotController
+from agent.infrastructure.robot_controller import RobotController
 from run_xy_calibration import click_raw_pixel
 
 
@@ -309,14 +309,14 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
             with self.subTest(label=label):
                 controller = self._controller()
                 with (
-                    patch("robot_core.seller_gui.find_window", return_value=(123, "test")),
+                    patch("agent.infrastructure.robot_controller.seller_gui.find_window", return_value=(123, "test")),
                     patch.object(controller, "_capture_phone", return_value=FRAME.copy()),
-                    patch("robot_core.seller_gui.configure_single_click_count") as configure,
-                    patch("robot_core.seller_gui.click_client_point") as click,
-                    patch("robot_core.seller_gui.long_press_client_point") as long_press,
-                    patch("robot_core.seller_gui.drag_client_path") as drag,
-                    patch("robot_core.seller_gui.configure_swipe") as configure_swipe,
-                    patch("robot_core.seller_gui.trigger_selected_action") as trigger,
+                    patch("agent.infrastructure.robot_controller.seller_gui.configure_single_click_count") as configure,
+                    patch("agent.infrastructure.robot_controller.seller_gui.click_client_point") as click,
+                    patch("agent.infrastructure.robot_controller.seller_gui.long_press_client_point") as long_press,
+                    patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
+                    patch("agent.infrastructure.robot_controller.seller_gui.configure_swipe") as configure_swipe,
+                    patch("agent.infrastructure.robot_controller.seller_gui.trigger_selected_action") as trigger,
                 ):
                     with self.assertRaisesRegex(OrientationSafetyError, "一次性方向授权"):
                         invoke(controller)
@@ -356,7 +356,7 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                     )
                 with (
                     patch(
-                        "robot_core.seller_gui.find_window",
+                        "agent.infrastructure.robot_controller.seller_gui.find_window",
                         return_value=(123, "test"),
                     ),
                     patch.object(
@@ -364,11 +364,11 @@ class PublicPhysicalEntryGateTests(unittest.TestCase):
                         "_capture_phone",
                         return_value=FRAME.copy(),
                     ),
-                    patch("robot_core.seller_gui.configure_single_click_count") as configure,
-                    patch("robot_core.seller_gui.click_client_point") as click,
-                    patch("robot_core.seller_gui.drag_client_path") as drag,
-                    patch("robot_core.seller_gui.configure_swipe") as configure_swipe,
-                    patch("robot_core.seller_gui.trigger_selected_action") as trigger,
+                    patch("agent.infrastructure.robot_controller.seller_gui.configure_single_click_count") as configure,
+                    patch("agent.infrastructure.robot_controller.seller_gui.click_client_point") as click,
+                    patch("agent.infrastructure.robot_controller.seller_gui.drag_client_path") as drag,
+                    patch("agent.infrastructure.robot_controller.seller_gui.configure_swipe") as configure_swipe,
+                    patch("agent.infrastructure.robot_controller.seller_gui.trigger_selected_action") as trigger,
                 ):
                     with self.assertRaisesRegex(
                         OrientationSafetyError,

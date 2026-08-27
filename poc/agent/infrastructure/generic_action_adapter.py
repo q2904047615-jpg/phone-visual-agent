@@ -79,7 +79,10 @@ from agent.domain.universal_action_controller import (
     UniversalActionController,
     UniversalActionError,
 )
-from robot_core import WorkflowNotReady, qwerty_keyboard_config_from_anchors
+from agent.infrastructure.robot_controller import (
+    WorkflowNotReady,
+    qwerty_keyboard_config_from_anchors,
+)
 
 
 QWEN_FAILURE_DIAGNOSTIC_VERSION = "2026-08-17-qwen-failure-diagnostic-v1"

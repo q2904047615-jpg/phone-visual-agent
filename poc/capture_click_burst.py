@@ -9,7 +9,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from agent.infrastructure import seller_window_adapter as seller_gui
-from robot_core import RobotController
+from agent.infrastructure.robot_controller import RobotController
 
 
 def capture_click_burst(

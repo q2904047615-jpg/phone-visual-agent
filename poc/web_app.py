@@ -98,7 +98,7 @@ from agent.domain.task_semantic_ir import (
 from agent.domain.canonical_action_protocol import CANONICAL_ACTION_PROTOCOL
 from runtime_doctor import run_runtime_doctor
 
-from robot_core import (
+from agent.infrastructure.robot_controller import (
     MockRobotController,
     RobotController,
     WEB_OUTPUT_DIR,

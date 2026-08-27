@@ -22,11 +22,11 @@ from agent.infrastructure.orientation_safety import (
 from capability_acceptance import (
     CapabilityAcceptanceError,
     CapabilityRegistryPromoter,
-    PROMOTABLE_ACTIONS,
     validate_acceptance_report,
 )
 from capability_acceptance_runtime import CapabilityAcceptanceManager
 from agent.application.action_adapter import GenericActionAdapterError
+from agent.domain.action_capabilities import PROMOTABLE_ACTIONS
 class ProvisionalControllerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()

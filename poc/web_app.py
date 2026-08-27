@@ -47,10 +47,12 @@ from agent.infrastructure import (
 )
 from capability_acceptance import (
     CapabilityAcceptanceError,
-    PROMOTABLE_ACTIONS,
 )
 from capability_acceptance_runtime import CapabilityAcceptanceManager
-from capability_acceptance_planner import CapabilityAcceptanceTaskGraphPlanner
+from agent.application.capability_acceptance_planner import (
+    CapabilityAcceptanceTaskGraphPlanner,
+)
+from agent.domain.action_capabilities import PROMOTABLE_ACTIONS
 from agent.infrastructure.deepseek_intent_provider import (
     DeepSeekIntentProvider,
     IntentProviderError,

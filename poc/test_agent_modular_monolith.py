@@ -1840,9 +1840,106 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_capability_acceptance_planner_has_one_application_entry(self) -> None:
+        import capability_acceptance
+        import capability_acceptance_runtime
+        import agent.application.capability_acceptance_planner as planner
+        from agent.domain.action_capabilities import (
+            CALIBRATION_BOUND_ACTIONS,
+            PROMOTABLE_ACTIONS,
+        )
+
+        root = Path(__file__).resolve().parent
+        application_path = (
+            root / "agent" / "application" / "capability_acceptance_planner.py"
+        )
+        domain_path = root / "agent" / "domain" / "action_capabilities.py"
+        self.assertFalse((root / "capability_acceptance_planner.py").exists())
+        self.assertTrue(application_path.is_file())
+        self.assertIs(PROMOTABLE_ACTIONS, planner.PROMOTABLE_ACTIONS)
+        self.assertIs(PROMOTABLE_ACTIONS, capability_acceptance.PROMOTABLE_ACTIONS)
+        self.assertIs(
+            PROMOTABLE_ACTIONS,
+            capability_acceptance_runtime.PROMOTABLE_ACTIONS,
+        )
+        self.assertIs(
+            CALIBRATION_BOUND_ACTIONS,
+            capability_acceptance.CALIBRATION_BOUND_ACTIONS,
+        )
+        self.assertIs(
+            CALIBRATION_BOUND_ACTIONS,
+            capability_acceptance_runtime.CALIBRATION_BOUND_ACTIONS,
+        )
+        self.assertEqual(
+            {
+                "tap_semantic",
+                "dismiss_overlay",
+                "swipe",
+                "back",
+                "home",
+                "reveal_system_navigation",
+                "input_verified_text",
+                "double_tap",
+                "long_press",
+                "drag",
+            },
+            set(PROMOTABLE_ACTIONS),
+        )
+        self.assertEqual(
+            {"double_tap", "long_press", "drag", "reveal_system_navigation"},
+            set(CALIBRATION_BOUND_ACTIONS),
+        )
+
+        application_source = application_path.read_text(encoding="utf-8")
+        domain_source = domain_path.read_text(encoding="utf-8")
+        self.assertEqual(1, domain_source.count("PROMOTABLE_ACTIONS = frozenset("))
+        self.assertEqual(
+            1,
+            domain_source.count("CALIBRATION_BOUND_ACTIONS = frozenset("),
+        )
+        for forbidden in (
+            "agent.infrastructure",
+            "capability_acceptance import",
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "from pathlib",
+            "Path(",
+        ):
+            self.assertNotIn(forbidden, application_source)
+
+        legacy_imports: list[str] = []
+        legacy_action_authorities: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "capability_acceptance_planner"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "capability_acceptance_planner":
+                            legacy_imports.append(str(path.relative_to(root)))
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "capability_acceptance"
+                    and any(
+                        alias.name
+                        in {"PROMOTABLE_ACTIONS", "CALIBRATION_BOUND_ACTIONS"}
+                        for alias in node.names
+                    )
+                ):
+                    legacy_action_authorities.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+        self.assertEqual([], legacy_action_authorities)
+
     def test_deepseek_task_graph_has_one_application_entry(self) -> None:
         import agent.application.deepseek_task_graph as deepseek_task_graph
-        import capability_acceptance_planner
+        import agent.application.capability_acceptance_planner as capability_acceptance_planner
         import agent.application.universal_agent_orchestrator as universal_agent_orchestrator
         from agent.domain.task_graph import DynamicTaskGraph, ObservedState
 
@@ -1909,7 +2006,7 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], legacy_imports)
 
     def test_task_graph_aggregate_has_one_domain_identity(self) -> None:
-        import capability_acceptance_planner
+        import agent.application.capability_acceptance_planner as capability_acceptance_planner
         import agent.application.universal_agent_orchestrator as universal_agent_orchestrator
         from agent.domain.task_graph import (
             DynamicTaskGraph,

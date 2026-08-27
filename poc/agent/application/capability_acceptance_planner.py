@@ -1,10 +1,12 @@
+"""Deterministic application planner for one capability acceptance action."""
+
 from __future__ import annotations
 
 from dataclasses import replace
 from typing import Final
 import uuid
 
-from capability_acceptance import PROMOTABLE_ACTIONS
+from agent.domain.action_capabilities import PROMOTABLE_ACTIONS
 from agent.domain.task_graph import (
     CompletionCondition,
     DynamicTaskGraph,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import unittest
 
-from capability_acceptance_planner import (
+from agent.application.capability_acceptance_planner import (
     CapabilityAcceptancePlannerError,
     CapabilityAcceptanceTaskGraphPlanner,
 )

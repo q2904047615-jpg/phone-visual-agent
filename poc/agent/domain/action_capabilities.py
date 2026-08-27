@@ -10,6 +10,25 @@ from typing import Any, Iterable, Mapping
 CAPABILITY_PROTOCOL = "2026-08-19-action-capability-v1"
 CAPABILITY_GAP_PROTOCOL = "2026-08-19-capability-gap-v1"
 
+PROMOTABLE_ACTIONS = frozenset(
+    {
+        "tap_semantic",
+        "dismiss_overlay",
+        "swipe",
+        "back",
+        "home",
+        "reveal_system_navigation",
+        "input_verified_text",
+        "double_tap",
+        "long_press",
+        "drag",
+    }
+)
+
+CALIBRATION_BOUND_ACTIONS = frozenset(
+    {"double_tap", "long_press", "drag", "reveal_system_navigation"}
+)
+
 KNOWN_ACTION_CAPABILITIES = frozenset(
     {
         "tap_semantic",

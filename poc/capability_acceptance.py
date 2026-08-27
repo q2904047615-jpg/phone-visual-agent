@@ -26,6 +26,10 @@ from agent.infrastructure.tap_calibration import (
     MIN_COVERAGE_SPAN_Y,
     TapCalibrationError,
 )
+from agent.domain.action_capabilities import (
+    CALIBRATION_BOUND_ACTIONS,
+    PROMOTABLE_ACTIONS,
+)
 from agent.domain.ui_scene import UIScene, UISceneError
 from agent.domain.universal_action_controller import (
     ResolvedSemanticAction,
@@ -35,23 +39,6 @@ from agent.domain.universal_action_controller import (
 from agent.domain.verified_text_transaction import is_direct_latin_segment
 
 
-PROMOTABLE_ACTIONS = frozenset(
-    {
-        "tap_semantic",
-        "dismiss_overlay",
-        "swipe",
-        "back",
-        "home",
-        "reveal_system_navigation",
-        "input_verified_text",
-        "double_tap",
-        "long_press",
-        "drag",
-    }
-)
-CALIBRATION_BOUND_ACTIONS = frozenset(
-    {"double_tap", "long_press", "drag", "reveal_system_navigation"}
-)
 ACCEPTANCE_REPORT_VERSION = 3
 
 

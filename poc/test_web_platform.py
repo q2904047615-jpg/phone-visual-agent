@@ -31,7 +31,7 @@ from agent.infrastructure import (
     FileSystemAgentEvidenceStore,
     InterProcessLease,
 )
-from capability_acceptance import PROMOTABLE_ACTIONS
+from agent.domain.action_capabilities import PROMOTABLE_ACTIONS
 from agent.domain.canonical_action_protocol import GenericStepProposal
 from agent.infrastructure.generic_scene_observer import (
     SINGLE_STEP_SCENE_OBSERVER_VERSION,

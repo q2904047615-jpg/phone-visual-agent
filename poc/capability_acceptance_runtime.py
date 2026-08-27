@@ -13,16 +13,18 @@ import uuid
 
 from capability_acceptance import (
     ACCEPTANCE_REPORT_VERSION,
-    CALIBRATION_BOUND_ACTIONS,
     CapabilityAcceptanceError,
     CapabilityRegistryPromoter,
-    PROMOTABLE_ACTIONS,
     PromotionAuthority,
     PromotionScope,
     action_execution_evidence_error,
     exact_input_evidence_error,
     validated_calibration_evidence,
     validate_acceptance_report,
+)
+from agent.domain.action_capabilities import (
+    CALIBRATION_BOUND_ACTIONS,
+    PROMOTABLE_ACTIONS,
 )
 
 

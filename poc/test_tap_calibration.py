@@ -18,7 +18,6 @@ from agent.infrastructure.tap_calibration import (
     build_calibration,
     corrected_grid_point,
     fit_affine,
-    resolve_target_grid_point_within_calibration,
     reveal_system_navigation_path,
 )
 from run_xy_calibration import (
@@ -120,6 +119,19 @@ class FakeFullscreenRobot:
 
 
 class TapCalibrationMathTests(unittest.TestCase):
+    def test_retired_target_grid_resolver_stays_absent(self):
+        source = (
+            Path(__file__).parent
+            / "agent"
+            / "infrastructure"
+            / "tap_calibration.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn(
+            "def resolve_target_grid_point_within_calibration(",
+            source,
+        )
+
     def test_calibration_page_ready_accepts_only_bounded_modes(self):
         self.assertTrue(
             calibration_page_ready(
@@ -357,294 +369,6 @@ class TapCalibrationMathTests(unittest.TestCase):
             self.assertEqual(
                 (735, 910),
                 corrected_grid_point(735, 910, (540, 960), path),
-            )
-
-    def test_dual_audited_edge_target_resolves_inside_measured_hull(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "tap.json"
-            path.write_text(
-                json.dumps(
-                    {
-                        "version": 2,
-                        "enabled": True,
-                        "validated": True,
-                        "frame_size": [810, 1440],
-                        "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-                        "coverage": {
-                            "sufficient": True,
-                            "normalized_hull": [
-                                [0.11742892459826947, 0.48922863099374564],
-                                [0.12855377008652658, 0.020152883947185545],
-                                [0.5018541409147095, 0.017373175816539264],
-                                [0.8825710754017305, 0.014593467685892982],
-                                [0.8825710754017305, 0.9652536483669215],
-                                [0.5006180469715699, 0.9645587213342599],
-                                [0.1211372064276885, 0.9631688672689368],
-                            ],
-                            "normalized_bounds": [
-                                0.11742892459826947,
-                                0.014593467685892982,
-                                0.8825710754017305,
-                                0.9652536483669215,
-                            ],
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            point = resolve_target_grid_point_within_calibration(
-                895,
-                829,
-                (0.802, 0.797861, 0.988, 0.859861),
-                (810, 1440),
-                path,
-            )
-
-            self.assertEqual((895, 829), point)
-            self.assertEqual(point, corrected_grid_point(*point, (810, 1440), path))
-
-    def test_calibrated_target_center_already_inside_is_unchanged(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "tap.json"
-            path.write_text(
-                json.dumps(
-                    {
-                        "version": 2,
-                        "enabled": True,
-                        "validated": True,
-                        "frame_size": [540, 960],
-                        "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-                        "coverage": {
-                            "sufficient": True,
-                            "normalized_hull": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]],
-                            "normalized_bounds": [0.1, 0.1, 0.9, 0.9],
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            self.assertEqual(
-                (500, 500),
-                resolve_target_grid_point_within_calibration(
-                    500, 500, (0.45, 0.45, 0.55, 0.55), (540, 960), path
-                ),
-            )
-
-    def test_dual_audited_wide_edge_target_uses_absolute_safe_intersection(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "tap.json"
-            hull = [
-                [0.11742892459826947, 0.48922863099374564],
-                [0.12855377008652658, 0.020152883947185545],
-                [0.5018541409147095, 0.017373175816539264],
-                [0.8825710754017305, 0.014593467685892982],
-                [0.8825710754017305, 0.9652536483669215],
-                [0.5006180469715699, 0.9645587213342599],
-                [0.1211372064276885, 0.9631688672689368],
-            ]
-            path.write_text(
-                json.dumps(
-                    {
-                        "version": 2,
-                        "enabled": True,
-                        "validated": True,
-                        "frame_size": [810, 1440],
-                        "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-                        "coverage": {
-                            "sufficient": True,
-                            "normalized_hull": hull,
-                            "normalized_bounds": [
-                                0.11742892459826947,
-                                0.014593467685892982,
-                                0.8825710754017305,
-                                0.9652536483669215,
-                            ],
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            left_point = resolve_target_grid_point_within_calibration(
-                99,
-                941,
-                (0.009, 0.9131388888888889, 0.189, 0.9691388888888889),
-                (810, 1440),
-                path,
-            )
-            right_point = resolve_target_grid_point_within_calibration(
-                901,
-                941,
-                (0.811, 0.9131388888888889, 0.991, 0.9691388888888889),
-                (810, 1440),
-                path,
-            )
-
-            self.assertEqual((99, 941), left_point)
-            self.assertEqual((901, 941), right_point)
-            for point, bounds in (
-                (left_point, (0.009, 0.9131388888888889, 0.189, 0.9691388888888889)),
-                (right_point, (0.811, 0.9131388888888889, 0.991, 0.9691388888888889)),
-            ):
-                self.assertGreater(point[0] / 1000.0, bounds[0] + 0.01)
-                self.assertLess(point[0] / 1000.0, bounds[2] - 0.01)
-                self.assertGreater(point[1] / 1000.0, bounds[1] + 0.01)
-                self.assertLess(point[1] / 1000.0, bounds[3] - 0.01)
-
-    def test_dual_audited_narrow_literal_key_uses_safe_intersection(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "tap.json"
-            hull = [
-                [0.11742892459826947, 0.48922863099374564],
-                [0.12855377008652658, 0.020152883947185545],
-                [0.5018541409147095, 0.017373175816539264],
-                [0.8825710754017305, 0.014593467685892982],
-                [0.8825710754017305, 0.9652536483669215],
-                [0.5006180469715699, 0.9645587213342599],
-                [0.1211372064276885, 0.9631688672689368],
-            ]
-            path.write_text(
-                json.dumps(
-                    {
-                        "version": 2,
-                        "enabled": True,
-                        "validated": True,
-                        "frame_size": [810, 1440],
-                        "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-                        "coverage": {
-                            "sufficient": True,
-                            "normalized_hull": hull,
-                            "normalized_bounds": [
-                                0.11742892459826947,
-                                0.014593467685892982,
-                                0.8825710754017305,
-                                0.9652536483669215,
-                            ],
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            left_bounds = (
-                0.0828,
-                0.6812916666666666,
-                0.1668,
-                0.742111111111111,
-            )
-            right_bounds = (
-                0.8332,
-                0.6812916666666666,
-                0.9172,
-                0.742111111111111,
-            )
-
-            left_point = resolve_target_grid_point_within_calibration(
-                115,
-                712,
-                left_bounds,
-                (810, 1440),
-                path,
-            )
-            right_point = resolve_target_grid_point_within_calibration(
-                885,
-                712,
-                right_bounds,
-                (810, 1440),
-                path,
-            )
-
-            self.assertEqual((115, 712), left_point)
-            self.assertEqual((885, 712), right_point)
-
-            for point, bounds in (
-                (left_point, left_bounds),
-                (right_point, right_bounds),
-            ):
-                self.assertGreater(point[0] / 1000.0, bounds[0] + 0.01)
-                self.assertLess(point[0] / 1000.0, bounds[2] - 0.01)
-                self.assertGreater(point[1] / 1000.0, bounds[1] + 0.01)
-                self.assertLess(point[1] / 1000.0, bounds[3] - 0.01)
-
-    def test_dual_audited_edge_target_keeps_visible_center(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "tap.json"
-            path.write_text(
-                json.dumps(
-                    {
-                        "version": 2,
-                        "enabled": True,
-                        "validated": True,
-                        "frame_size": [540, 960],
-                        "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-                        "coverage": {
-                            "sufficient": True,
-                            "normalized_hull": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]],
-                            "normalized_bounds": [0.1, 0.1, 0.9, 0.9],
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            self.assertEqual(
-                (930, 500),
-                resolve_target_grid_point_within_calibration(
-                    930,
-                    500,
-                    (0.87, 0.30, 0.98, 0.70),
-                    (540, 960),
-                    path,
-                ),
-            )
-
-    def test_calibrated_target_keeps_visible_centers_without_hull_shifting(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "tap.json"
-            path.write_text(
-                json.dumps(
-                    {
-                        "version": 2,
-                        "enabled": True,
-                        "validated": True,
-                        "frame_size": [540, 960],
-                        "target_to_command": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-                        "coverage": {
-                            "sufficient": True,
-                            "normalized_hull": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]],
-                            "normalized_bounds": [0.1, 0.1, 0.9, 0.9],
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            self.assertEqual(
-                (950, 500),
-                resolve_target_grid_point_within_calibration(
-                    950, 500, (0.88, 0.45, 0.99, 0.55), (540, 960), path
-                ),
-            )
-            self.assertEqual(
-                (990, 500),
-                resolve_target_grid_point_within_calibration(
-                    990, 500, (0.70, 0.45, 1.00, 0.55), (540, 960), path
-                ),
-            )
-
-    def test_target_outside_visible_frame_still_fails_closed(self):
-        with self.assertRaisesRegex(TapCalibrationError, "0～1000"):
-            resolve_target_grid_point_within_calibration(
-                1001,
-                500,
-                (0.90, 0.45, 1.00, 0.55),
-                (540, 960),
-            )
-        with self.assertRaisesRegex(TapCalibrationError, "区域边界无效"):
-            resolve_target_grid_point_within_calibration(
-                990,
-                500,
-                (0.90, 0.45, 1.01, 0.55),
-                (540, 960),
             )
 
     def test_legacy_active_calibration_without_coverage_fails_closed(self):

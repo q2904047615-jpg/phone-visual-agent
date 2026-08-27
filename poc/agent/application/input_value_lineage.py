@@ -153,28 +153,6 @@ def lineage_matches_visual(
     )
 
 
-def lineage_matches_persisted_surface(
-    record: TypedInputLineage,
-    *,
-    input_bounds: tuple[float, float, float, float] | None,
-    current_frame: Image.Image | None,
-    **context: Any,
-) -> bool:
-    surface_matches = bool(
-        input_bounds is not None
-        and surface_descriptors_match(
-            record.surface_descriptors,
-            frame=current_frame,
-            bounds=input_bounds,
-        )
-    )
-    return record.matches_persisted_surface(
-        **context,
-        input_bounds=input_bounds,
-        surface_matches=surface_matches,
-    )
-
-
 def lineage_matches_persisted_surface_cue(
     record: TypedInputLineage,
     *,

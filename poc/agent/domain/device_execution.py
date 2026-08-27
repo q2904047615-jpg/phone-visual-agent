@@ -179,7 +179,4 @@ class DeviceExecutionResult:
 
 @runtime_checkable
 class DeviceExecutor(Protocol):
-    @property
-    def action_kinds(self) -> frozenset[str]: ...
-
     def execute(self, request: DeviceActionRequest) -> DeviceExecutionResult: ...

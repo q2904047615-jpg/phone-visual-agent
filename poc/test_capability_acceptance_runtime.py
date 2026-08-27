@@ -15,7 +15,8 @@ from agent.infrastructure import (
 )
 from agent.infrastructure.orientation_safety import (
     PhysicalExecutionGate,
-    _mint_audited_credential,
+    _mint_single_step_scene_credential,
+    camera_layout_orientation,
     frame_fingerprint,
 )
 
@@ -209,10 +210,13 @@ class FakeTrialResult:
         )
         self.evidence = self.before_frame_paths + self.after_frame_paths
         self.orientation_credential = replace(
-            _mint_audited_credential(
+            _mint_single_step_scene_credential(
                 device_id="device-a",
                 scene_fingerprint="fingerprint-execution-before",
                 frame=self.before_frames[0],
+                camera_layout_orientation_value=camera_layout_orientation(
+                    self.before_frames[0].size
+                ),
                 phone_content_rotation="upright",
                 confidence=0.95,
                 evidence=("手机状态文字正向",),

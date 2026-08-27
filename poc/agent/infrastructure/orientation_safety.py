@@ -285,35 +285,6 @@ class OrientationCredential:
 
 
 
-def _mint_audited_credential(
-    *, device_id: str, scene_fingerprint: str, frame: Image.Image,
-    phone_content_rotation: str, confidence: float, evidence: tuple[str, ...],
-) -> OrientationCredential:
-    """Internal mint used only after the observer parsed an actual audit call."""
-
-    seal = object()
-    item = OrientationCredential(
-        version=ORIENTATION_CREDENTIAL_VERSION,
-        credential_id=uuid.uuid4().hex,
-        source=ORIENTATION_AUDIT_SOURCE,
-        device_id=device_id,
-        scene_fingerprint=scene_fingerprint,
-        frame_fingerprint=frame_fingerprint(frame),
-        evidence_frame_fingerprint="",
-        frame_size=tuple(frame.size),
-        camera_layout_orientation=camera_layout_orientation(frame.size),
-        phone_content_rotation=phone_content_rotation,
-        confidence=float(confidence),
-        evidence=evidence,
-        _audit_seal=seal,
-    )
-    item.validate()
-    if float(item.confidence) >= MIN_ORIENTATION_CONFIDENCE:
-        with _AUDIT_SEAL_LOCK:
-            _LIVE_AUDIT_SEALS[seal] = _frame_visual_binding(frame)
-    return item
-
-
 def _mint_locally_verified_qwerty_credential(
     *,
     device_id: str,

@@ -1339,12 +1339,6 @@ class UniversalAgentOrchestrator:
         return decision
 
     @staticmethod
-    def _context_value(source: Any, name: str, default: Any = None) -> Any:
-        if isinstance(source, Mapping):
-            return source.get(name, default)
-        return getattr(source, name, default)
-
-    @staticmethod
     def _is_idempotent_app_foreground_completion(value: Any) -> bool:
         """Recognize one completed App-foreground state, never an action receipt."""
 

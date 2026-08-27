@@ -4,7 +4,6 @@ import time
 from typing import Any, Callable, Iterable, Mapping
 
 from agent.domain import (
-    EXECUTABLE_ACTION_KINDS,
     DeviceActionRequest,
     DeviceExecutionError,
     DeviceExecutionResult,
@@ -42,10 +41,6 @@ class RobotDeviceExecutor:
             "drag": self._drag,
             "wait_for_change": self._wait,
         }
-
-    @property
-    def action_kinds(self) -> frozenset[str]:
-        return frozenset(self._handlers)
 
     def execute(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         request.validate()
@@ -247,10 +242,6 @@ class ReplayDeviceExecutor:
         self._script = [dict(item) for item in script]
         self._index = 0
         self.requests: list[dict[str, Any]] = []
-
-    @property
-    def action_kinds(self) -> frozenset[str]:
-        return EXECUTABLE_ACTION_KINDS
 
     @property
     def complete(self) -> bool:

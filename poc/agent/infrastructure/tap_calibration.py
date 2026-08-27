@@ -180,46 +180,6 @@ def _point_in_convex_hull(
     return True
 
 
-def resolve_target_grid_point_within_calibration(
-    x: int,
-    y: int,
-    target_bounds: Sequence[float],
-    frame_size: tuple[int, int],
-    path: Path = CALIBRATION_PATH,
-) -> tuple[int, int]:
-    """Keep a dual-audited target center anywhere in the visible phone frame."""
-
-    if not (0 <= x <= 1000 and 0 <= y <= 1000):
-        raise TapCalibrationError("目标中心必须位于0～1000视觉坐标内。")
-    if len(target_bounds) != 4:
-        raise TapCalibrationError("目标区域缺少四项归一化边界。")
-    try:
-        left, top, right, bottom = (float(value) for value in target_bounds)
-    except (TypeError, ValueError) as exc:
-        raise TapCalibrationError("目标区域包含非法坐标。") from exc
-    if not (
-        all(math.isfinite(value) for value in (left, top, right, bottom))
-        and 0.0 <= left < right <= 1.0
-        and 0.0 <= top < bottom <= 1.0
-    ):
-        raise TapCalibrationError("目标区域边界无效。")
-
-    calibration = load_active_calibration(frame_size, path)
-    if calibration is None:
-        return x, y
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if int(payload.get("version", 0)) < CALIBRATION_VERSION:
-            raise TapCalibrationError("当前触控标定缺少屏幕覆盖边界，必须重新标定。")
-        _validated_hull(payload.get("coverage"), label="当前触控标定")
-    except TapCalibrationError:
-        raise
-    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-        raise TapCalibrationError("无法验证触控标定覆盖边界，已拒绝点击。") from exc
-
-    return x, y
-
-
 def build_calibration(
     samples: Sequence[dict[str, object]], frame_size: tuple[int, int]
 ) -> dict[str, object]:

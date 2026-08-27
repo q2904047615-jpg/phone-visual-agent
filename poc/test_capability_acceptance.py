@@ -22,7 +22,8 @@ from agent.infrastructure.orientation_safety import (
     ORIENTATION_CREDENTIAL_VERSION,
     OrientationCredential,
     PhysicalExecutionGate,
-    _mint_audited_credential,
+    _mint_single_step_scene_credential,
+    camera_layout_orientation,
     frame_fingerprint,
 )
 
@@ -372,10 +373,13 @@ class CapabilityAcceptanceCoreTests(unittest.TestCase):
             Image.open(path).convert("RGB") for path in report["before_frame_paths"]
         )
         credential = replace(
-            _mint_audited_credential(
+            _mint_single_step_scene_credential(
                 device_id=report["device_id"],
                 scene_fingerprint=report["execution"]["before_scene"]["fingerprint"],
                 frame=before_frames[0],
+                camera_layout_orientation_value=camera_layout_orientation(
+                    before_frames[0].size
+                ),
                 phone_content_rotation="upright",
                 confidence=0.95,
                 evidence=("手机状态文字正向",),

@@ -14,7 +14,6 @@ from agent.infrastructure.generic_scene_observer import (
 )
 from agent.application.input_value_lineage import (
     describe_input_surface,
-    lineage_matches_persisted_surface,
     lineage_matches_trailing_newline_cue,
     lineage_matches_visual,
 )
@@ -885,26 +884,6 @@ class TypedInputLineageTests(unittest.TestCase):
                 )
             )
 
-
-    def test_pending_lineage_cannot_rebind_as_persisted_surface(self) -> None:
-        pending = build_pending_literal_lineage(
-            device_id=DEVICE,
-            resolved_action=resolved(),
-            before_scene=before_scene(),
-            hardware_receipt=receipt(),
-            recorded_at_epoch=1000.0,
-        )
-        self.assertFalse(
-            lineage_matches_persisted_surface(
-                pending,
-                device_id=DEVICE,
-                app_id="sample.app",
-                screen_id="editor",
-                input_bounds=(0.13, 0.54, 0.69, 0.61),
-                current_frame=surface_frame(),
-                now_epoch=1000.0,
-            )
-        )
 
     def test_persisted_surface_exact_adjacent_cue_recovers_value(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

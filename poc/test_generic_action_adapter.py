@@ -129,7 +129,6 @@ class FakeRobot:
     def __init__(self):
         self.actions = []
         self.keyboard_layouts = []
-        self.calibrated_target_requests = []
         self.device_id = "test-device"
         self._armed = None
         self._long_press_receipt = None
@@ -168,14 +167,6 @@ class FakeRobot:
         self.actions.append(("tap", x, y))
         self._record_click_receipt()
         return (x, y)
-
-    def resolve_calibrated_target_grid_point(
-        self, x, y, target_bounds, frame_size
-    ):
-        self.calibrated_target_requests.append(
-            (x, y, tuple(target_bounds), tuple(frame_size))
-        )
-        return x, y
 
     def vision_dismiss_overlay_relative(self, x, y):
         self._consume("dismiss_overlay")
@@ -1330,6 +1321,21 @@ class GenericActionAdapterTests(unittest.TestCase):
             **kwargs,
         )
 
+    def test_retired_confirmation_input_recovery_helpers_stay_absent(self) -> None:
+        source = (
+            Path(__file__).resolve().parent
+            / "agent"
+            / "infrastructure"
+            / "generic_action_adapter.py"
+        ).read_text(encoding="utf-8")
+        for retired_name in (
+            "_local_input_auxiliary_recovery_target",
+            "_confirmation_allows_omitted_local_input_auxiliary",
+            "_recover_omitted_verified_input_scene",
+            "_recover_conflicting_clear_input_scene",
+        ):
+            self.assertNotIn(retired_name, source)
+
     def test_adapter_forwards_only_typed_post_action_visual_context(self) -> None:
         class RecordingObserver(FakeSceneObserver):
             supports_post_action_visual_context = True
@@ -1664,7 +1670,6 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual((), result.verification_errors)
         self.assertEqual("matched", result.action_outcome)
         self.assertEqual([("tap", 220, 735)], robot.actions)
-        self.assertEqual([], robot.calibrated_target_requests)
 
     def test_press_enter_executes_one_verified_tap_and_matches_exact_newline(self):
         gray = Image.new("RGB", (540, 960), "gray")
@@ -2254,162 +2259,6 @@ class GenericActionAdapterTests(unittest.TestCase):
                         ),
                     )
 
-    def test_missing_ordinary_button_cannot_use_input_auxiliary_recovery(self):
-        planned = scene("ordinary-planned")
-        requested = SemanticAction(
-            node_id="ordinary",
-            action="tap_semantic",
-            params={
-                "formal_candidate_id": "candidate-ordinary",
-                "element_id": planned.elements[0].element_id,
-                "target": planned.elements[0].meaning,
-                "role": planned.elements[0].role,
-                "label": planned.elements[0].label,
-                "states": dict(planned.elements[0].states),
-                "expected_effect": {"scene_changed": True},
-            },
-        )
-
-        self.assertIsNone(
-            GenericSingleActionAdapter._local_input_auxiliary_recovery_target(
-                requested,
-                planned,
-                replace(planned, elements=(), fingerprint="fresh-empty"),
-            )
-        )
-        self.assertFalse(
-            GenericSingleActionAdapter._confirmation_allows_omitted_local_input_auxiliary(
-                requested,
-                planned,
-            )
-        )
-
-    def test_typed_field_identity_recovers_placeholder_loss_only_for_exact_prefix(self):
-        def typed_scene(fingerprint, value="first\n"):
-            source = self._literal_input_scene(
-                fingerprint,
-                value=value,
-                include_key=False,
-            )
-            field = source.elements[0]
-            return replace(
-                source,
-                elements=(
-                    replace(
-                        field,
-                        label="first",
-                        states={
-                            **field.states,
-                            "input_field_id": "input_field_1",
-                            "input_multiline": True,
-                            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
-                        },
-                    ),
-                ),
-            )
-
-        planned = typed_scene("planned")
-        field = planned.elements[0]
-        expected_effect = {
-            "element_state": {
-                "meaning": "application_text_input",
-                "states": {"value": "first\nsecond"},
-            }
-        }
-        requested = SemanticAction(
-            node_id="append-second",
-            action="input_verified_text",
-            params={
-                "formal_candidate_id": "candidate-append-second",
-                "element_id": field.element_id,
-                "target": field.meaning,
-                "role": field.role,
-                "label": field.label,
-                "states": dict(field.states),
-                "text": "first\nsecond",
-                "expected_effect": expected_effect,
-            },
-        )
-        empty_fresh = replace(planned, fingerprint="fresh", elements=())
-
-        recovered = GenericSingleActionAdapter._recover_omitted_verified_input_scene(
-            requested,
-            planned,
-            empty_fresh,
-        )
-
-        self.assertIsNotNone(recovered)
-        recovered_field = recovered.get_element("local_audited_input_1")
-        self.assertEqual("input_field_1", recovered_field.states["input_field_id"])
-        self.assertEqual("first\n", recovered_field.states["value"])
-        self.assertIn("授权文字精确前缀", recovered_field.evidence[-1])
-
-        visible_without_typed_id = replace(
-            empty_fresh,
-            elements=(
-                replace(
-                    field,
-                    element_id="fresh-visible-input",
-                    bounds=(0.14, 0.51, 0.72, 0.61),
-                    states={
-                        key: ("first" if key == "value" else value)
-                        for key, value in field.states.items()
-                        if key != "input_field_id"
-                    },
-                    evidence=("应用输入框当前文字：first", "caret"),
-                ),
-                UIElement(
-                    element_id="fresh-enter",
-                    role="button",
-                    meaning="input_exact_enter_key",
-                    label="↵",
-                    bounds=(0.82, 0.89, 0.94, 0.96),
-                    confidence=1.0,
-                    states={
-                        "input_enter_key": True,
-                        "input_field_id": "input_field_1",
-                    },
-                    evidence=("可见换行键",),
-                ),
-            ),
-        )
-        varied = GenericSingleActionAdapter._recover_omitted_verified_input_scene(
-            requested,
-            planned,
-            visible_without_typed_id,
-        )
-        self.assertIsNotNone(varied)
-        varied_field = varied.get_element("local_audited_input_1")
-        self.assertEqual((0.14, 0.51, 0.72, 0.61), varied_field.bounds)
-        self.assertEqual("input_field_1", varied_field.states["input_field_id"])
-
-        wrong_prefix = replace(
-            requested,
-            params={
-                **requested.params,
-                "text": "other\nsecond",
-            },
-        )
-        duplicate = replace(
-            empty_fresh,
-            elements=(field, replace(field, element_id="duplicate-field")),
-        )
-        for unsafe_request, unsafe_fresh in (
-            (wrong_prefix, empty_fresh),
-            (requested, duplicate),
-        ):
-            with self.subTest(
-                text=unsafe_request.params["text"],
-                element_count=len(unsafe_fresh.elements),
-            ):
-                self.assertIsNone(
-                    GenericSingleActionAdapter._recover_omitted_verified_input_scene(
-                        unsafe_request,
-                        planned,
-                        unsafe_fresh,
-                    )
-                )
-
     def test_placeholder_loss_recovery_executes_only_authorized_suffix(self):
         gray = Image.new("RGB", (540, 960), "gray")
 
@@ -2548,7 +2397,6 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
 
         self.assertEqual(1, result.physical_actions)
-        self.assertEqual([], robot.calibrated_target_requests)
         self.assertEqual(1, len(observer.goal_contexts))
         post_focus = observer.goal_contexts[0]["entities"][
             "active_subgoal_visual_context"
@@ -4317,127 +4165,6 @@ class GenericActionAdapterTests(unittest.TestCase):
         self.assertEqual("stable_local_ocr", robot.keyboard_layouts[0]["row_snap_source"])
         self.assertEqual(1, result.physical_actions)
         self.assertEqual("matched", result.action_outcome)
-
-    def test_clear_recovery_keeps_typed_field_across_preedit_read_drift(self):
-        planned_states = {
-            "goal_relevant": True,
-            "fully_visible": True,
-            "focused": True,
-            "value": "longinp",
-            "input_field_id": "input_field_1",
-            "input_multiline": False,
-            "keyboard_layout": "qwerty",
-            "keyboard_input_mode": "chinese_pinyin",
-            "keyboard_case_mode": "lower",
-            "keyboard_geometry": TEST_QWERTY_GEOMETRY,
-        }
-        planned = UIScene(
-            app_id="chat",
-            screen_id="conversation",
-            summary="输入框中显示带下划线的 longinp",
-            elements=(UIElement(
-                element_id="planned-input",
-                role="input",
-                meaning="application_text_input",
-                label="longinp",
-                bounds=(0.13, 0.54, 0.70, 0.59),
-                confidence=1.0,
-                states=planned_states,
-            ),),
-            fingerprint="planned",
-        )
-        fresh_states = {
-            **planned_states,
-            "goal_relevant": False,
-            "value": "",
-            "keyboard_geometry": {
-                **TEST_QWERTY_GEOMETRY,
-                "anchors": {
-                    **TEST_QWERTY_GEOMETRY["anchors"],
-                    "backspace": [879, 853],
-                },
-            },
-        }
-        fresh_input = replace(
-            planned.elements[0],
-            element_id="fresh-input",
-            label="",
-            bounds=(0.13, 0.54, 0.70, 0.60),
-            states=fresh_states,
-        )
-        fresh = replace(
-            planned,
-            elements=(fresh_input,),
-            fingerprint="fresh",
-        )
-        requested = SemanticAction(
-            node_id="clear-conflicting-preedit",
-            action="clear_verified_text",
-            params={
-                "element_id": "planned-input",
-                "target": "application_text_input",
-                "role": "input",
-                "label": "longinp",
-                "states": planned_states,
-                "formal_candidate_id": "candidate-clear-longinp",
-                "expected_effect": {
-                    "element_state": {
-                        "meaning": "application_text_input",
-                        "states": {"value": ""},
-                    }
-                },
-            },
-        )
-
-        recovered = GenericSingleActionAdapter._recover_conflicting_clear_input_scene(
-            requested,
-            planned,
-            fresh,
-        )
-
-        self.assertIsNotNone(recovered)
-        recovered_input = recovered.get_element("planned-input")
-        self.assertEqual("longinp", recovered_input.states["value"])
-        self.assertEqual(
-            [879, 853],
-            recovered_input.states["keyboard_geometry"]["anchors"]["backspace"],
-        )
-        self.assertEqual((0.13, 0.54, 0.70, 0.60), recovered_input.bounds)
-
-        for name, conflicting in (
-            (
-                "different-field",
-                replace(
-                    fresh_input,
-                    states={**fresh_states, "input_field_id": "input_field_2"},
-                ),
-            ),
-            (
-                "different-visible-value",
-                replace(fresh_input, states={**fresh_states, "value": "useful"}),
-            ),
-        ):
-            with self.subTest(name=name):
-                rejected = replace(fresh, elements=(conflicting,))
-                self.assertIsNone(
-                    GenericSingleActionAdapter._recover_conflicting_clear_input_scene(
-                        requested,
-                        planned,
-                        rejected,
-                    )
-                )
-
-        ambiguous = replace(
-            fresh,
-            elements=(fresh_input, replace(fresh_input, element_id="other-input")),
-        )
-        self.assertIsNone(
-            GenericSingleActionAdapter._recover_conflicting_clear_input_scene(
-                requested,
-                planned,
-                ambiguous,
-            )
-        )
 
     def test_matched_direct_input_persists_lineage_and_clear_discards_it(self):
         def input_scene(fingerprint, value, *, goal_relevant=True):

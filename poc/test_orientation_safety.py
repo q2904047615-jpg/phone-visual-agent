@@ -15,8 +15,9 @@ from agent.infrastructure.orientation_safety import (
     OrientationSafetyError,
     PhysicalExecutionGate,
     _CLAIMED_AUDIT_CREDENTIALS,
-    _mint_audited_credential,
     _mint_locally_verified_qwerty_credential,
+    _mint_single_step_scene_credential,
+    camera_layout_orientation,
 )
 from agent.infrastructure.robot_controller import RobotController
 from run_xy_calibration import click_raw_pixel
@@ -41,10 +42,11 @@ def audited_credential(
     frame=FRAME,
     phone_content_rotation="upright",
 ):
-    return _mint_audited_credential(
+    return _mint_single_step_scene_credential(
         device_id=device_id,
         scene_fingerprint=scene,
         frame=frame,
+        camera_layout_orientation_value=camera_layout_orientation(frame.size),
         phone_content_rotation=phone_content_rotation,
         confidence=0.95,
         evidence=("手机状态文字正向",),

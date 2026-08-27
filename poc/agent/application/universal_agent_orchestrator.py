@@ -46,9 +46,6 @@ from agent.application.action_adapter import (
     GenericActionAdapterError,
     GenericSingleActionAdapterPort,
 )
-from agent.domain.post_action_observation import (
-    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
-)
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.domain.canonical_action_protocol import (
     CanonicalActionProtocolError,
@@ -659,31 +656,6 @@ class ObservationBridge:
             "goal_entities": goal_entities,
         }
 
-    @staticmethod
-    def _unique_next_subgoal_after_current(
-        graph: DynamicTaskGraph,
-        active: Any,
-    ) -> Any | None:
-        """Return only one statically knowable successor of the active node."""
-
-        completed = {
-            item.subgoal_id
-            for item in graph.subgoals
-            if item.status == "completed"
-        }
-        candidates = tuple(
-            item
-            for item in graph.subgoals
-            if item.subgoal_id != active.subgoal_id
-            and item.status == "pending"
-            and active.subgoal_id in item.depends_on
-            and all(
-                dependency == active.subgoal_id or dependency in completed
-                for dependency in item.depends_on
-            )
-        )
-        return candidates[0] if len(candidates) == 1 else None
-
     def goal_draft(self, graph: DynamicTaskGraph) -> GenericIntentDraft:
         graph.validate()
         target_surface = str(
@@ -714,17 +686,13 @@ class ObservationBridge:
         if graph.raw_user_goal.strip():
             entities["original_goal_visual_context"] = graph.raw_user_goal.strip()
         if active is not None:
-            # The complete typed graph remains at the root.  The active focus
-            # and at most one statically knowable successor stay shallow and
-            # exclude the full input-field array.
+            # The complete typed graph remains at the root, while the visual
+            # request is conditioned only on the actual active subgoal.  A
+            # successor becomes observable only after DeepSeek activates it
+            # and the orchestrator captures a new scene for that revision.
             entities["active_subgoal_visual_context"] = (
                 self._subgoal_visual_context(graph, active)
             )
-            next_subgoal = self._unique_next_subgoal_after_current(graph, active)
-            if next_subgoal is not None:
-                entities["next_subgoal_visual_context"] = (
-                    self._subgoal_visual_context(graph, next_subgoal)
-                )
         entities["target_apps"] = [
             {"app_id": item.app_id, "app_name": item.app_name}
             for item in graph.goal.target_apps
@@ -4534,32 +4502,6 @@ class UniversalAgentOrchestrator:
             raise UniversalAgentOrchestratorError(
                 "动作后重规划缺少上一子目标、决策或确认权威。"
             )
-        prior_goal_entities = (
-            session.goal_draft.entities
-            if session.goal_draft is not None
-            and isinstance(session.goal_draft.entities, dict)
-            else {}
-        )
-        anticipated_focus = prior_goal_entities.get(
-            "next_subgoal_visual_context"
-        )
-        anticipated_next_subgoal_id = (
-            str(anticipated_focus.get("subgoal_id") or "").strip()
-            if isinstance(anticipated_focus, dict)
-            else ""
-        )
-        post_action_focus_subgoal_id = str(
-            getattr(result, "post_action_focus_subgoal_id", "") or ""
-        ).strip()
-        post_action_observation_phase = str(
-            getattr(result, "post_action_observation_phase", "") or ""
-        ).strip()
-        fused_next_observation = bool(
-            anticipated_next_subgoal_id
-            and post_action_focus_subgoal_id == anticipated_next_subgoal_id
-            and post_action_observation_phase
-            == FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
-        )
         input_transaction_microstep = self._verified_input_transaction_microstep(
             graph=previous_graph,
             previous_decision=previous_decision,
@@ -4681,12 +4623,6 @@ class UniversalAgentOrchestrator:
             "prior_subgoal_signature": previous_signature,
             "prior_action_equivalence_digest": _action_equivalence_digest(
                 previous_decision.proposal.action
-            ),
-            "post_action_focus_subgoal_id": (
-                post_action_focus_subgoal_id or None
-            ),
-            "post_action_observation_phase": (
-                post_action_observation_phase or None
             ),
             "disposition": "replanning",
         }
@@ -4919,6 +4855,9 @@ class UniversalAgentOrchestrator:
             transition_record["disposition"] = "blocked_missing_active_subgoal"
             persist_transition()
             return
+        current_focus_changed = (
+            _subgoal_progress_signature(current) != previous_signature
+        )
         if _requires_effect_confirmation(revised, current):
             session.status = "awaiting_effect_confirmation"
             session.failed_reason = ""
@@ -4926,39 +4865,44 @@ class UniversalAgentOrchestrator:
             self._bind_effect_confirmation(session)
             persist_transition()
             return
-        fused_focus_matches_current = bool(
-            matched
-            and fused_next_observation
-            and current.subgoal_id == anticipated_next_subgoal_id
-        )
-        if (
-            fused_next_observation and not fused_focus_matches_current
-        ) or (
-            current.subgoal_id != previous_current.subgoal_id
-            and not fused_focus_matches_current
-        ):
-            # A sole post-action response can be reused only when its locally
-            # attested focus is exactly the successor selected by the revised
-            # graph.  If DeepSeek keeps the old node or creates a different
-            # plan, the goal-conditioned candidate set is stale and the next
-            # cycle must obtain one fresh observation.
+        if current_focus_changed:
+            # The post-action pixels remain authoritative for verifying the
+            # action that just ran, but their structured scene was conditioned
+            # on the previous active subgoal.  Every newly activated or
+            # rewritten subgoal starts with its own observation/model step.
             session.status = "needs_reobservation"
             session.failed_reason = ""
+            session.qwen_decision = None
             session.controller_decision = None
             session.confirmation_authority = None
             transition_record["disposition"] = (
-                "replanned_outside_fused_post_action_focus"
-                if fused_next_observation
-                else "advanced_to_goal_conditioned_reobservation"
+                "advanced_to_current_subgoal_reobservation"
             )
             transition_record["reobservation_subgoal_id"] = current.subgoal_id
             persist_transition()
             return
-        if fused_focus_matches_current:
-            transition_record["fused_post_action_observation_reused"] = True
-            transition_record["disposition"] = (
-                "reused_fused_post_action_observation_for_next_subgoal"
+        if (
+            not matched
+            and _allows_fresh_observation_corrective_retry(
+                impact=impact,
+                action_kind=previous_decision.proposal.action.action,
             )
+        ):
+            # A navigation mismatch is verified by this action-result scene,
+            # but its corrective candidate must come from one independent
+            # current-subgoal observation.  Do not mint a provisional choice
+            # here only for the autonomous loop to discard it immediately.
+            session.status = "needs_reobservation"
+            session.failed_reason = ""
+            session.qwen_decision = None
+            session.controller_decision = None
+            session.confirmation_authority = None
+            transition_record["disposition"] = (
+                "navigation_mismatch_needs_fresh_observation"
+            )
+            transition_record["reobservation_subgoal_id"] = current.subgoal_id
+            persist_transition()
+            return
         if impact == "read_only":
             try:
                 reviewed = self.deepseek_planner.replan(
@@ -5023,6 +4967,23 @@ class UniversalAgentOrchestrator:
                 )
                 persist_transition()
                 return
+            if (
+                _subgoal_progress_signature(reviewed_current)
+                != _subgoal_progress_signature(current)
+            ):
+                session.status = "needs_reobservation"
+                session.failed_reason = ""
+                session.qwen_decision = None
+                session.controller_decision = None
+                session.confirmation_authority = None
+                transition_record["disposition"] = (
+                    "read_only_advanced_to_current_subgoal_reobservation"
+                )
+                transition_record["reobservation_subgoal_id"] = (
+                    reviewed_current.subgoal_id
+                )
+                persist_transition()
+                return
             if reviewed_impact == "read_only":
                 session.status = "blocked"
                 session.failed_reason = (
@@ -5033,9 +4994,6 @@ class UniversalAgentOrchestrator:
                 transition_record["diagnostic"] = session.failed_reason
                 persist_transition()
                 return
-            # A read-only checkpoint may be completed while the overall task still
-            # has a later navigation-only subgoal. Reuse the same trusted frames;
-            # do not capture again and do not execute anything without a new scope.
             revised = reviewed
             transition_record["revised_revision"] = revised.revision
             transition_record["revised_subgoal_id"] = revised.active_subgoal_id
@@ -5301,6 +5259,7 @@ class UniversalAgentOrchestrator:
                 graph,
             )
         current = graph.active_subgoal()
+        observed_subgoal_signature = _subgoal_progress_signature(current)
         impact = current.external_impact if current is not None else "unknown"
         if pending_effect is None and session.status == "awaiting_effect_confirmation":
             raise UniversalAgentOrchestratorError(
@@ -5593,6 +5552,27 @@ class UniversalAgentOrchestrator:
                     )
                     self._write_terminal_snapshot(session)
                     return risk_decision
+                if (
+                    _subgoal_progress_signature(current)
+                    != observed_subgoal_signature
+                ):
+                    session.status = "needs_reobservation"
+                    session.failed_reason = ""
+                    session.qwen_decision = None
+                    session.controller_decision = None
+                    session.confirmation_authority = None
+                    progressed_decision = SimpleNamespace(
+                        proposal=TaskGraphTransitionReport(
+                            status="progressed",
+                            reason=(
+                                "页面变化已推进活动子目标；必须按新子目标"
+                                "重新截图后再选择动作。"
+                            ),
+                            completion_evidence=(scene.summary,),
+                        )
+                    )
+                    self._write_terminal_snapshot(session)
+                    return progressed_decision
 
             if session.confirmed_effect_ids:
                 context = graph.to_qwen_context(

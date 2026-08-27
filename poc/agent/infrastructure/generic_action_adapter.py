@@ -29,7 +29,6 @@ from agent.infrastructure.generic_scene_observer import (
 )
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.domain.post_action_observation import (
-    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     POST_ACTION_VISUAL_CONTEXT_VERSION,
     POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS,
     POST_NAVIGATION_RESULT_OBJECTIVE,
@@ -159,40 +158,12 @@ def _sanitized_visual_focus(value: Any) -> dict[str, Any] | None:
         return None
     focus = dict(value)
     goal_entities = dict(focus["goal_entities"])
-    # This marker is minted only after a physical action by this module.  A
-    # model, user payload or stale goal draft cannot pre-authorize the fused
-    # post-action observation path.
+    # Observation phases are minted only after a physical action by this
+    # module.  A model, user payload or stale goal draft cannot pre-authorize
+    # an action-result observation mode.
     goal_entities.pop("observation_phase", None)
     focus["goal_entities"] = goal_entities
     return focus
-
-
-def _resolved_completes_active_input_focus(
-    focus: dict[str, Any],
-    resolved: ResolvedSemanticAction,
-) -> bool:
-    """Prove locally that one input microstep reaches its typed final value."""
-
-    goal_entities = focus.get("goal_entities")
-    if not isinstance(goal_entities, dict):
-        return False
-    target_text = goal_entities.get("active_input_transaction_text")
-    if not isinstance(target_text, str) or not target_text:
-        return False
-    expectations = resolved.formal_transition.get("expectations")
-    if isinstance(expectations, list) and any(
-        isinstance(item, dict)
-        and str(item.get("predicate") or "").strip()
-        in {
-            "input_field.focused",
-            "element.state.keyboard_layout",
-            "element.state.keyboard_case_mode",
-            "element.state.keyboard_input_mode",
-        }
-        for item in expectations
-    ):
-        return False
-    return resolved.expected_input_value == target_text
 
 
 def _post_action_observation_context(
@@ -201,14 +172,7 @@ def _post_action_observation_context(
     *,
     physical_action_executed: bool = False,
 ) -> dict[str, Any]:
-    """Fuse previous-step verification and the unique next visual focus.
-
-    The scene itself remains the evidence for the action that just ran.  When
-    the typed graph already exposes exactly one direct successor, the same
-    response may also mark that successor's visible candidate.  DeepSeek still
-    decides whether the graph actually advances; a different revision forces a
-    later fresh observation instead of reusing this focus.
-    """
+    """Build an action-result context for the actual active subgoal only."""
 
     context = goal.to_dict()
     entities = context.get("entities")
@@ -217,58 +181,23 @@ def _post_action_observation_context(
     focus = _sanitized_visual_focus(
         entities.get("active_subgoal_visual_context")
     )
-    next_focus = _sanitized_visual_focus(
-        entities.get("next_subgoal_visual_context")
-    )
-    sanitized_entities = dict(entities)
+    sanitized_entities = {
+        key: value
+        for key, value in entities.items()
+        if not (
+            isinstance(key, str)
+            and key.endswith("_subgoal_visual_context")
+            and key != "active_subgoal_visual_context"
+        )
+    }
     if focus is not None:
         sanitized_entities["active_subgoal_visual_context"] = focus
-    if next_focus is not None:
-        sanitized_entities["next_subgoal_visual_context"] = next_focus
+    else:
+        sanitized_entities.pop("active_subgoal_visual_context", None)
     context = dict(context)
     context["entities"] = sanitized_entities
     entities = sanitized_entities
 
-    active_goal_entities = focus.get("goal_entities") if focus else None
-    active_is_input = bool(
-        isinstance(active_goal_entities, dict)
-        and active_goal_entities.get("active_input_transaction_text")
-    )
-    input_boundary = bool(
-        active_is_input
-        and focus is not None
-        and _resolved_completes_active_input_focus(focus, resolved)
-    )
-    ordinary_physical_boundary = bool(
-        not active_is_input
-        and resolved.kind
-        in {
-            "tap_semantic",
-            "dismiss_overlay",
-            "double_tap",
-            "swipe",
-            "back",
-            "home",
-            "long_press",
-            "drag",
-        }
-    )
-    if (
-        physical_action_executed
-        and focus is not None
-        and next_focus is not None
-        and (input_boundary or ordinary_physical_boundary)
-    ):
-        next_entities = dict(next_focus["goal_entities"])
-        next_entities["observation_phase"] = (
-            FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
-        )
-        fused_focus = dict(next_focus)
-        fused_focus["goal_entities"] = next_entities
-        result_context = dict(context)
-        result_context["entities"] = dict(entities)
-        result_context["entities"]["active_subgoal_visual_context"] = fused_focus
-        return result_context
     expected = resolved.expected_effect
     changed_result = (
         isinstance(expected, dict)
@@ -946,8 +875,6 @@ class GenericActionExecutionResult:
     )
     before_frame_paths: tuple[str, ...] = ()
     orientation_credential: OrientationCredential | None = None
-    post_action_focus_subgoal_id: str = ""
-    post_action_observation_phase: str = ""
 
     def __post_init__(self) -> None:
         # Capture helpers intentionally build mutable lists while sampling.  The
@@ -1000,8 +927,6 @@ class GenericActionExecutionResult:
                 if self.orientation_credential is not None
                 else None
             ),
-            "post_action_focus_subgoal_id": self.post_action_focus_subgoal_id,
-            "post_action_observation_phase": self.post_action_observation_phase,
         }
 
 
@@ -2054,7 +1979,7 @@ class GenericSingleActionAdapter:
         )
         post_action_visual_context = _post_action_visual_context(resolved)
         # This observation is the next closed-loop step: capture locally until
-        # stable, then consume exactly one fused Qwen response.  A mismatch is
+        # stable, then consume exactly one current-scene Qwen response.  A mismatch is
         # evidence for replanning, never permission for another model sample.
         for attempt in range(1, 2):
             attempt_deadline = time.monotonic() + action_timeout
@@ -2858,33 +2783,6 @@ class GenericSingleActionAdapter:
                 # physical action, and it never grants action authority.
                 pass
 
-        post_action_context = _post_action_observation_context(
-            goal,
-            resolved,
-            physical_action_executed=physical_actions > 0,
-        )
-        post_entities = post_action_context.get("entities")
-        post_focus = (
-            post_entities.get("active_subgoal_visual_context")
-            if isinstance(post_entities, dict)
-            else None
-        )
-        post_goal_entities = (
-            post_focus.get("goal_entities")
-            if isinstance(post_focus, dict)
-            else None
-        )
-        post_focus_id = (
-            str(post_focus.get("subgoal_id") or "").strip()
-            if isinstance(post_focus, dict)
-            else ""
-        )
-        post_phase = (
-            str(post_goal_entities.get("observation_phase") or "").strip()
-            if isinstance(post_goal_entities, dict)
-            else ""
-        )
-
         return GenericActionExecutionResult(
             requested_action=requested_action,
             rebound_action=rebound,
@@ -2912,8 +2810,6 @@ class GenericSingleActionAdapter:
             before_frames=before_frames,
             before_frame_paths=before_paths,
             orientation_credential=orientation_credential,
-            post_action_focus_subgoal_id=post_focus_id,
-            post_action_observation_phase=post_phase,
         )
 
     def _rebind_action(

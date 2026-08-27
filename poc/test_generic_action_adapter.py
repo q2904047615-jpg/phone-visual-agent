@@ -27,9 +27,6 @@ from agent.infrastructure.generic_action_adapter import (
     stable_text_ocr_grounding,
 )
 from agent.application.action_adapter import GenericActionAdapterError
-from agent.domain.post_action_observation import (
-    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
-)
 from agent.domain.generic_goal import GenericIntentDraft
 from agent.infrastructure.generic_scene_observer import (
     SINGLE_STEP_OUTPUT_TOKENS,
@@ -2650,7 +2647,7 @@ class GenericActionAdapterTests(unittest.TestCase):
             ],
         )
 
-    def test_post_action_context_reuses_unique_next_focus_in_same_observation(self):
+    def test_post_action_context_discards_non_active_subgoal_focus(self):
         current_goal = navigation_goal()
         current_goal.entities["next_subgoal_visual_context"] = {
             "subgoal_id": "read_title",
@@ -2673,13 +2670,14 @@ class GenericActionAdapterTests(unittest.TestCase):
         )
         focus = result["entities"]["active_subgoal_visual_context"]
 
-        self.assertEqual("read_title", focus["subgoal_id"])
+        self.assertEqual("open_browser", focus["subgoal_id"])
+        self.assertNotIn("next_subgoal_visual_context", result["entities"])
         self.assertEqual(
-            FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
+            "verified_navigation_result_v1",
             focus["goal_entities"]["observation_phase"],
         )
 
-    def test_input_focus_switches_to_next_only_at_typed_terminal_value(self):
+    def test_input_focus_never_switches_to_successor_at_typed_terminal_value(self):
         current_goal = navigation_goal()
         active = current_goal.entities["active_subgoal_visual_context"]
         active["objective"] = "在主题字段输入 first"
@@ -2736,11 +2734,13 @@ class GenericActionAdapterTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            "input_body",
+            "open_browser",
             terminal_context["entities"]["active_subgoal_visual_context"][
                 "subgoal_id"
             ],
         )
+        self.assertNotIn("next_subgoal_visual_context", partial_context["entities"])
+        self.assertNotIn("next_subgoal_visual_context", terminal_context["entities"])
 
     def test_executed_back_and_swipe_use_result_focused_compact_observation(self):
         cases = (

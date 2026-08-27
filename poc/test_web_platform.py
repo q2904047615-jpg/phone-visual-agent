@@ -1617,7 +1617,10 @@ class ApiEndToEndTests(unittest.TestCase):
             SINGLE_STEP_SCENE_OBSERVER_VERSION,
         )
         self.assertEqual(observer["max_online_calls_per_observation"], 1)
-        self.assertEqual(observer["model_role"], "single_step_fused_observation")
+        self.assertEqual(
+            observer["model_role"],
+            "single_step_current_scene_observation",
+        )
         self.assertEqual(observer["supported_app_scope"], "dynamic")
         architecture["universal_agent"] = universal
         self.assertEqual(architecture["active_orchestrator"], "universal_agent")

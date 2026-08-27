@@ -193,7 +193,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 "single_step_observation_protocol": (
                     SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
                 ),
-                "model_role": "single_step_fused_observation",
+                "model_role": "single_step_current_scene_observation",
                 "supported_app_scope": "dynamic",
                 "hardware_actions_enabled": False,
                 "current_stage": current_stage,
@@ -403,8 +403,8 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                     scene_payload,
                     context,
                 )
-            fused_input_attestation = (
-                _fused_preliminary_input_attestation(
+            single_step_input_attestation = (
+                _single_step_preliminary_input_attestation(
                     scene_payload,
                     goal_context=context,
                 )
@@ -494,7 +494,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                         lineage_frame=frame,
                         qwerty_row_snapper=self.qwerty_row_snapper,
                         qwerty_row_frames=frames[stable_tail_start:],
-                        fused_input_attestation=fused_input_attestation,
+                        single_step_input_attestation=single_step_input_attestation,
                     ),
                     obstructions,
                     fingerprint=fingerprint,
@@ -506,7 +506,6 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                     )
                     and not _input_audit_established_local_target(scene)
                     and not _focus_only_input_surface_established(scene)
-                    and not _goal_is_fused_post_action_next_step(context)
                 ):
                     raise VisionAgentError(
                         "单步完整观察没有建立当前输入事务的唯一本地目标。"
@@ -537,7 +536,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             self.last_diagnostics = {
                 "observer_version": SINGLE_STEP_SCENE_OBSERVER_VERSION,
                 "vision_model": public_model_identity(self.provider.status()),
-                "strategy": "single_step_fused_observation",
+                "strategy": "single_step_current_scene_observation",
                 "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                 "model_calls": 1,
                 "online_stages": ["single_step_observation"],
@@ -580,7 +579,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             self.last_diagnostics = {
                 "observer_version": SINGLE_STEP_SCENE_OBSERVER_VERSION,
                 "vision_model": public_model_identity(self.provider.status()),
-                "strategy": "single_step_fused_observation",
+                "strategy": "single_step_current_scene_observation",
                 "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
                 "model_calls": model_calls,
                 "online_stages": (
@@ -1168,7 +1167,7 @@ def _parse_single_step_observation_envelope(
     input_structure_required: bool,
     request_image_size: tuple[int, int],
 ) -> dict[str, Any]:
-    """Parse one fused response without any remote repair or resampling."""
+    """Parse one current-scene response without remote repair or resampling."""
 
     try:
         payload = _extract_json_object(raw, reject_duplicate_keys=True)
@@ -2739,12 +2738,12 @@ def _strip_preliminary_input_geometry_for_dedicated_audit(
     return isolated
 
 
-def _fused_preliminary_input_attestation(
+def _single_step_preliminary_input_attestation(
     payload: dict[str, Any],
     *,
     goal_context: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Keep one non-authoritative empty-field fact from the fused scene.
+    """Keep one non-authoritative empty-field fact from the current scene.
 
     The dedicated input structure remains the sole value and text geometry
     owner. This record proves only that the same envelope described one visible,
@@ -3436,20 +3435,6 @@ def _goal_active_input_transaction_text(context: dict[str, Any]) -> str:
         return ""
     marker = entities.get("active_input_transaction_text")
     return marker if isinstance(marker, str) and marker else ""
-
-
-def _goal_is_fused_post_action_next_step(context: dict[str, Any]) -> bool:
-    """Return whether this response also previews one typed successor."""
-
-    focused = _active_subgoal_visual_context(context)
-    if focused is context:
-        return False
-    entities = focused.get("goal_entities")
-    return bool(
-        isinstance(entities, dict)
-        and entities.get("observation_phase")
-        == post_action_contract.FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
-    )
 
 
 def _goal_active_input_field(context: dict[str, Any]) -> tuple[str, str, bool]:
@@ -4243,7 +4228,7 @@ def _apply_input_structure_audit(
     ]
     | None = None,
     qwerty_row_frames: list[Image.Image] | tuple[Image.Image, ...] | None = None,
-    fused_input_attestation: dict[str, Any] | None = None,
+    single_step_input_attestation: dict[str, Any] | None = None,
 ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
@@ -4697,15 +4682,15 @@ def _apply_input_structure_audit(
             # the value itself must never be trimmed.
             text = raw_text
             placeholder = str(item.get("placeholder") or "").strip()
-            fused_empty_field_evidence: tuple[str, ...] = ()
+            single_step_empty_field_evidence: tuple[str, ...] = ()
             if (
                 len(application_inputs) == 1
                 and text == ""
-                and isinstance(fused_input_attestation, dict)
-                and fused_input_attestation.get("value") == text
+                and isinstance(single_step_input_attestation, dict)
+                and single_step_input_attestation.get("value") == text
             ):
-                attested_bounds = fused_input_attestation.get("bounds")
-                attested_evidence = fused_input_attestation.get("evidence")
+                attested_bounds = single_step_input_attestation.get("bounds")
+                attested_evidence = single_step_input_attestation.get("evidence")
                 if (
                     isinstance(attested_bounds, (list, tuple))
                     and len(attested_bounds) == 4
@@ -4723,7 +4708,7 @@ def _apply_input_structure_audit(
                         _bounds_overlap_ratio(audit_bounds, scene_bounds) >= 0.85
                         and _bounds_overlap_ratio(scene_bounds, audit_bounds) >= 0.85
                     ):
-                        fused_empty_field_evidence = tuple(
+                        single_step_empty_field_evidence = tuple(
                             str(value).strip()[:200]
                             for value in attested_evidence
                             if str(value).strip()
@@ -4739,7 +4724,7 @@ def _apply_input_structure_audit(
                 and not placeholder
                 and not cues
                 and not pending_candidate_shell
-                and not fused_empty_field_evidence
+                and not single_step_empty_field_evidence
             ):
                 continue
             bounds = tuple(float(value) for value in item["bounds"])
@@ -4857,7 +4842,9 @@ def _apply_input_structure_audit(
                     "input_bounds": input_bounds,
                     "right_button": button_match,
                     "pending_ime_candidate_state": pending_ime_candidate_state,
-                    "fused_empty_field_evidence": fused_empty_field_evidence,
+                    "single_step_empty_field_evidence": (
+                        single_step_empty_field_evidence
+                    ),
                     "confidence": min(
                         confidence,
                         float(button_match["confidence"])
@@ -5469,7 +5456,7 @@ def _apply_input_structure_audit(
             )
         ):
             focus_only_input = _focus_only_compact_input_surface(
-                fused_input_attestation,
+                single_step_input_attestation,
                 keyboard_visible=keyboard_visible,
             )
 
@@ -5627,7 +5614,7 @@ def _apply_input_structure_audit(
                     (
                         *rendered_input["field_labels"],
                         *rendered_input["visible_editable_cues"],
-                        *rendered_input.get("fused_empty_field_evidence", ()),
+                        *rendered_input.get("single_step_empty_field_evidence", ()),
                     )
                 )
             )
@@ -5699,7 +5686,7 @@ def _apply_input_structure_audit(
                     )
             elif rendered_input["placeholder"]:
                 input_evidence.insert(0, f"应用输入框为空，占位提示：{rendered_input['placeholder']}")
-            elif rendered_input.get("fused_empty_field_evidence"):
+            elif rendered_input.get("single_step_empty_field_evidence"):
                 input_evidence.insert(
                     0,
                     "同一单步响应的场景输入事实与输入结构审计唯一重合；"

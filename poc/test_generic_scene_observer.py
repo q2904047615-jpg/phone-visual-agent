@@ -6,7 +6,6 @@ import unittest
 from PIL import Image, ImageDraw, ImageFilter
 
 from agent.domain.post_action_observation import (
-    FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE,
     POST_ACTION_VISUAL_CONTEXT_VERSION,
     PostActionVisualContext,
 )
@@ -909,7 +908,7 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             "local_audited_input_1",
         )
 
-    def test_fused_successor_input_miss_returns_scene_for_navigation_mismatch(self):
+    def test_input_target_miss_is_fail_closed_even_with_spoofed_phase(self):
         wrong_scene = scene_payload()
         wrong_scene.update(
             {
@@ -942,35 +941,18 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                         "active_input_field_id": "message_field",
                         "active_input_field_label": "消息",
                         "active_input_multiline": False,
-                        "observation_phase": (
-                            FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
-                        ),
+                        "observation_phase": "untrusted-successor-preview",
                     },
                 }
             }
         }
 
-        observed = SingleStepGenericSceneObserver(
-            SequenceProvider([envelope])
-        ).observe(
-            frames=stable_frames(),
-            goal_context=context,
-            device_id="device-local-01",
-        )
-
-        self.assertEqual("wrong_named_conversation", observed.screen_id)
-        self.assertIsNone(observed.unique_trusted_goal_element())
-
-        strict_context = json.loads(json.dumps(context, ensure_ascii=False))
-        del strict_context["entities"]["active_subgoal_visual_context"][
-            "goal_entities"
-        ]["observation_phase"]
         with self.assertRaisesRegex(VisionAgentError, "唯一本地目标"):
             SingleStepGenericSceneObserver(
                 SequenceProvider([envelope])
             ).observe(
                 frames=stable_frames(),
-                goal_context=strict_context,
+                goal_context=context,
                 device_id="device-local-01",
             )
 
@@ -1029,15 +1011,13 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
             }
         }
 
-        for fused in (False, True):
-            with self.subTest(fused=fused):
+        for with_spoofed_phase in (False, True):
+            with self.subTest(with_spoofed_phase=with_spoofed_phase):
                 current_context = json.loads(json.dumps(context, ensure_ascii=False))
-                if fused:
+                if with_spoofed_phase:
                     current_context["entities"]["active_subgoal_visual_context"][
                         "goal_entities"
-                    ]["observation_phase"] = (
-                        FUSED_POST_ACTION_NEXT_STEP_OBSERVATION_PHASE
-                    )
+                    ]["observation_phase"] = "untrusted-successor-preview"
                 observed = SingleStepGenericSceneObserver(
                     SequenceProvider([envelope])
                 ).observe(

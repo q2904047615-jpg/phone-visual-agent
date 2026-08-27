@@ -4789,33 +4789,6 @@ def _apply_input_structure_audit(
                     )
                     >= 0.25
                 )
-                or any(
-                    (
-                        _bounds_overlap_ratio(bounds, preedit["bounds"]) >= 0.35
-                        or _bounds_overlap_ratio(preedit["bounds"], bounds) >= 0.35
-                    )
-                    and (
-                        pending_ime_candidate_state is None
-                        or preedit
-                        is not pending_ime_candidate_state["consumed_preedit"]
-                    )
-                    and not (
-                        text == ""
-                        and preedit["text"]
-                        and _bounds_inside(
-                            preedit["bounds"], bounds, tolerance=12
-                        )
-                        and _bounds_overlap_ratio(
-                            preedit["bounds"], bounds
-                        ) >= 0.90
-                        and (
-                            (preedit["bounds"][2] - preedit["bounds"][0])
-                            * (preedit["bounds"][3] - preedit["bounds"][1])
-                        )
-                        <= 0.60 * width * height
-                    )
-                    for preedit in trusted_preedits
-                )
             ):
                 continue
             input_bounds = [round(value) for value in bounds]

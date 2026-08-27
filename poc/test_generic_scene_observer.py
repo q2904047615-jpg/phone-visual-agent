@@ -1235,6 +1235,130 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 self.assertEqual("", field.states["value"])
                 self.assertIn("输入结构审计确认当前输入框为空", " ".join(field.evidence))
 
+    def test_single_step_observer_keeps_input_when_optional_preedit_bounds_are_broad(
+        self,
+    ) -> None:
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_message",
+                    "objective": "在输入框中输入指定文字",
+                    "constraints": [],
+                    "completion_conditions": ["输入框显示指定文字"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "aaazjie？你好",
+                        "active_input_field_id": "message_field",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+        for app_id, screen_id in (
+            ("com.example.messaging", "named_conversation"),
+            ("com.example.notes", "edit_note"),
+        ):
+            with self.subTest(app_id=app_id, screen_id=screen_id):
+                input_bounds = [130, 500, 720, 590]
+                scene = scene_payload()
+                scene.update(
+                    {
+                        "foreground_app_id": app_id,
+                        "screen_id": screen_id,
+                        "summary": "当前页面的唯一输入框内有带下划线的拉丁预编辑",
+                        "elements": [
+                            {
+                                "element_id": "e1",
+                                "role": "input",
+                                "meaning": "application_text_input",
+                                "label": "",
+                                "bounds": input_bounds,
+                                "confidence": 1.0,
+                                "states": {
+                                    "goal_relevant": True,
+                                    "fully_visible": True,
+                                },
+                                "evidence": ["唯一完整输入表面内可见下划线 aaazjie"],
+                            }
+                        ],
+                    }
+                )
+                audit = input_audit_payload(
+                    application_inputs=[
+                        audited_application_input(
+                            structure_id="message",
+                            bounds=input_bounds,
+                            text="",
+                            placeholder="",
+                            visible_editable_cues=["aaazjie"],
+                            caret_line_index=0,
+                        )
+                    ],
+                    ime_preedit_regions=[
+                        {
+                            "region_id": "preedit",
+                            # The optional preedit geometry is deliberately as
+                            # broad as the whole input surface.  Its own
+                            # inaccuracy must not erase the independently
+                            # established application input or exact candidate.
+                            "bounds": input_bounds,
+                            "text": "aaazjie",
+                            "confidence": 0.99,
+                            "candidates": [
+                                {
+                                    "text": "aaazjie",
+                                    "bounds": [80, 610, 300, 645],
+                                    "confidence": 0.99,
+                                    "fully_visible": True,
+                                }
+                            ],
+                        }
+                    ],
+                    keyboard={
+                        "visible": True,
+                        "bounds": [0, 650, 1000, 1000],
+                        "layout": "qwerty",
+                        "input_mode": "direct_latin",
+                        "case_mode": "lower",
+                        "mode_switch": None,
+                    },
+                )
+                observed = SingleStepGenericSceneObserver(
+                    SequenceProvider(
+                        [
+                            {
+                                "protocol_version": (
+                                    SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION
+                                ),
+                                "coordinate_space": {
+                                    "kind": "normalized_1000",
+                                    "width": 1000,
+                                    "height": 1000,
+                                },
+                                "scene": scene,
+                                "input_structure": audit,
+                            }
+                        ]
+                    )
+                ).observe(
+                    frames=stable_frames(),
+                    goal_context=context,
+                    device_id="device-local-01",
+                )
+
+                field = observed.get_element("local_audited_input_1")
+                candidates = [
+                    element
+                    for element in observed.elements
+                    if element.meaning == "ime_exact_candidate"
+                ]
+                self.assertIsNotNone(field)
+                self.assertEqual("", field.states["value"])
+                self.assertEqual("aaazjie", field.states["ime_preedit_text"])
+                self.assertEqual(1, len(candidates))
+                self.assertEqual("aaazjie", candidates[0].label)
+                self.assertEqual((0.08, 0.61, 0.3, 0.645), candidates[0].bounds)
+
     def test_single_step_observer_atomically_normalizes_declared_image_grid(
         self,
     ) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
 
@@ -13,6 +14,8 @@ from agent.infrastructure.generic_scene_observer import (
     INPUT_STRUCTURE_AUDIT_VERSION,
     SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
     SingleStepGenericSceneObserver,
+    _has_exact_passive_scene_element_fields,
+    _is_passive_scene_element_wire_object,
 )
 from agent.domain.ui_scene import UI_SCENE_PROTOCOL_VERSION
 from agent.infrastructure.dashscope_vision_provider import _image_data_url
@@ -515,6 +518,47 @@ def multifield_next_audit(
 
 
 class SingleStepGenericSceneObserverTests(unittest.TestCase):
+    def test_passive_scene_element_wire_schema_has_one_authority(self) -> None:
+        element = {
+            "element_id": "e1",
+            "role": "button",
+            "meaning": "open_target",
+            "label": "target",
+            "bounds": [100, 100, 200, 200],
+            "confidence": 0.95,
+            "states": {"goal_relevant": True},
+            "evidence": ["visible target"],
+        }
+
+        self.assertTrue(_has_exact_passive_scene_element_fields(element))
+        self.assertTrue(_is_passive_scene_element_wire_object(element))
+        self.assertFalse(
+            _is_passive_scene_element_wire_object(
+                {
+                    **element,
+                    "states": {
+                        "goal_relevant": True,
+                        "metadata": [{"action": "tap"}],
+                    },
+                }
+            )
+        )
+        self.assertFalse(
+            _has_exact_passive_scene_element_fields(
+                {**element, "unexpected": "field"}
+            )
+        )
+
+        source = (
+            Path(__file__).parent
+            / "agent"
+            / "infrastructure"
+            / "generic_scene_observer.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("exact_fields =", source)
+        self.assertNotIn("action_like =", source)
+        self.assertNotIn("def contains_action_like_key", source)
+
     def test_explicit_system_home_observation_sends_unmasked_phone_frame(
         self,
     ) -> None:

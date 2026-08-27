@@ -75,6 +75,54 @@ OBSERVATION_TIMEOUT_SECONDS = 60.0
 MAX_COMPACT_ELEMENTS = 12
 AUDITED_SOFT_KEYBOARD_HIDDEN_EVIDENCE = "输入结构只读审计确认软键盘不可见"
 
+_PASSIVE_SCENE_ELEMENT_FIELDS = frozenset(
+    {
+        "element_id",
+        "role",
+        "meaning",
+        "label",
+        "bounds",
+        "confidence",
+        "states",
+        "evidence",
+    }
+)
+_ACTION_LIKE_WIRE_KEYS = frozenset(
+    {
+        "action",
+        "actions",
+        "plan",
+        "step",
+        "steps",
+        "tap",
+        "swipe",
+        "command",
+        "coordinates",
+    }
+)
+
+
+def _has_exact_passive_scene_element_fields(value: Any) -> bool:
+    return isinstance(value, dict) and frozenset(value) == _PASSIVE_SCENE_ELEMENT_FIELDS
+
+
+def _contains_action_like_wire_key(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            str(key).strip().casefold() in _ACTION_LIKE_WIRE_KEYS
+            or _contains_action_like_wire_key(part)
+            for key, part in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_action_like_wire_key(part) for part in value)
+    return False
+
+
+def _is_passive_scene_element_wire_object(value: Any) -> bool:
+    return (
+        _has_exact_passive_scene_element_fields(value) and not _contains_action_like_wire_key(value)
+    )
+
 
 STAGE_LABELS = {
     "idle": "空闲",
@@ -2635,45 +2683,8 @@ def _strip_preliminary_elements_for_keyboard_mode_audit(
     elements = payload.get("elements")
     if not isinstance(elements, list):
         return
-    exact_fields = {
-        "element_id",
-        "role",
-        "meaning",
-        "label",
-        "bounds",
-        "confidence",
-        "states",
-        "evidence",
-    }
-    action_like = {
-        "action",
-        "actions",
-        "plan",
-        "step",
-        "steps",
-        "tap",
-        "swipe",
-        "command",
-        "coordinates",
-    }
-
-    def contains_action_like_key(value: Any) -> bool:
-        if isinstance(value, dict):
-            return any(
-                str(key).strip().casefold() in action_like
-                or contains_action_like_key(part)
-                for key, part in value.items()
-            )
-        if isinstance(value, list):
-            return any(contains_action_like_key(part) for part in value)
-        return False
-
     for item in elements:
-        if (
-            not isinstance(item, dict)
-            or set(item) != exact_fields
-            or contains_action_like_key(item)
-        ):
+        if not _is_passive_scene_element_wire_object(item):
             return
     payload["elements"] = []
 
@@ -2698,51 +2709,16 @@ def _strip_preliminary_input_geometry_for_dedicated_audit(
     elements = payload.get("elements")
     if not isinstance(elements, list):
         return False
-    exact_fields = {
-        "element_id",
-        "role",
-        "meaning",
-        "label",
-        "bounds",
-        "confidence",
-        "states",
-        "evidence",
-    }
-    action_like = {
-        "action",
-        "actions",
-        "plan",
-        "step",
-        "steps",
-        "tap",
-        "swipe",
-        "command",
-        "coordinates",
-    }
-
-    def contains_action_like_key(value: Any) -> bool:
-        if isinstance(value, dict):
-            return any(
-                str(key).strip().casefold() in action_like
-                or contains_action_like_key(part)
-                for key, part in value.items()
-            )
-        if isinstance(value, list):
-            return any(contains_action_like_key(part) for part in value)
-        return False
-
     retained: list[Any] = []
     isolated = False
     for item in elements:
         removable_input = (
-            isinstance(item, dict)
-            and set(item) == exact_fields
+            _is_passive_scene_element_wire_object(item)
             and str(item.get("role") or "").strip() == "input"
             and isinstance(item.get("bounds"), list)
             and len(item["bounds"]) == 4
             and isinstance(item.get("states"), dict)
             and isinstance(item.get("evidence"), list)
-            and not contains_action_like_key(item)
         )
         if removable_input:
             isolated = True
@@ -2776,19 +2752,9 @@ def _single_step_input_surface_attestation(
     elements = payload.get("elements")
     if not isinstance(elements, list):
         return None
-    exact_fields = {
-        "element_id",
-        "role",
-        "meaning",
-        "label",
-        "bounds",
-        "confidence",
-        "states",
-        "evidence",
-    }
     candidates: list[dict[str, Any]] = []
     for item in elements:
-        if not isinstance(item, dict) or set(item) != exact_fields:
+        if not _has_exact_passive_scene_element_fields(item):
             continue
         states = item.get("states")
         evidence = item.get("evidence")
@@ -2851,39 +2817,6 @@ def _strip_preliminary_keyboard_containers_for_dedicated_audit(
     elements = payload.get("elements")
     if not isinstance(elements, list):
         return False
-    exact_fields = {
-        "element_id",
-        "role",
-        "meaning",
-        "label",
-        "bounds",
-        "confidence",
-        "states",
-        "evidence",
-    }
-    action_like = {
-        "action",
-        "actions",
-        "plan",
-        "step",
-        "steps",
-        "tap",
-        "swipe",
-        "command",
-        "coordinates",
-    }
-
-    def contains_action_like_key(value: Any) -> bool:
-        if isinstance(value, dict):
-            return any(
-                str(key).strip().casefold() in action_like
-                or contains_action_like_key(part)
-                for key, part in value.items()
-            )
-        if isinstance(value, list):
-            return any(contains_action_like_key(part) for part in value)
-        return False
-
     retained: list[Any] = []
     isolated = False
     dedicated_keyboard_meanings = {
@@ -2907,8 +2840,7 @@ def _strip_preliminary_keyboard_containers_for_dedicated_audit(
         }
         confidence = item.get("confidence") if isinstance(item, dict) else None
         removable_keyboard_container = (
-            isinstance(item, dict)
-            and set(item) == exact_fields
+            _is_passive_scene_element_wire_object(item)
             and isinstance(item.get("element_id"), str)
             and bool(item["element_id"].strip())
             and str(item.get("role") or "").strip() == "container"
@@ -2953,11 +2885,9 @@ def _strip_preliminary_keyboard_containers_for_dedicated_audit(
             )
             and isinstance(item.get("evidence"), list)
             and all(isinstance(part, str) for part in item["evidence"])
-            and not contains_action_like_key(item)
         )
         removable_keyboard_control = (
-            isinstance(item, dict)
-            and set(item) == exact_fields
+            _is_passive_scene_element_wire_object(item)
             and isinstance(item.get("element_id"), str)
             and bool(item["element_id"].strip())
             and str(item.get("role") or "").strip() in {"button", "key"}
@@ -2966,7 +2896,6 @@ def _strip_preliminary_keyboard_containers_for_dedicated_audit(
             and isinstance(states, dict)
             and isinstance(item.get("evidence"), list)
             and all(isinstance(part, str) for part in item["evidence"])
-            and not contains_action_like_key(item)
         )
         if removable_keyboard_container or removable_keyboard_control:
             isolated = True
@@ -3033,45 +2962,10 @@ def _discard_compact_elements_for_targeted_geometry_recovery(
     elements = payload.get("elements")
     if not isinstance(elements, list) or not elements:
         return False
-    exact_fields = {
-        "element_id",
-        "role",
-        "meaning",
-        "label",
-        "bounds",
-        "confidence",
-        "states",
-        "evidence",
-    }
-    action_like = {
-        "action",
-        "actions",
-        "plan",
-        "step",
-        "steps",
-        "tap",
-        "swipe",
-        "command",
-        "coordinates",
-    }
-
-    def contains_action_like_key(value: Any) -> bool:
-        if isinstance(value, dict):
-            return any(
-                str(key).strip().casefold() in action_like
-                or contains_action_like_key(part)
-                for key, part in value.items()
-            )
-        if isinstance(value, list):
-            return any(contains_action_like_key(part) for part in value)
-        return False
-
     target_overflow = False
     for item in elements:
         if (
-            not isinstance(item, dict)
-            or set(item) != exact_fields
-            or contains_action_like_key(item)
+            not _is_passive_scene_element_wire_object(item)
             or not isinstance(item.get("states"), dict)
             or not isinstance(item.get("evidence"), list)
         ):
@@ -6855,39 +6749,6 @@ def _normalize_non_target_keyboard_switch(
     elements = payload.get("elements")
     if not isinstance(elements, list):
         return
-    exact_fields = {
-        "element_id",
-        "role",
-        "meaning",
-        "label",
-        "bounds",
-        "confidence",
-        "states",
-        "evidence",
-    }
-    action_like = {
-        "action",
-        "actions",
-        "plan",
-        "step",
-        "steps",
-        "tap",
-        "swipe",
-        "command",
-        "coordinates",
-    }
-
-    def contains_action_like_key(value: Any) -> bool:
-        if isinstance(value, dict):
-            return any(
-                str(key).strip().casefold() in action_like
-                or contains_action_like_key(part)
-                for key, part in value.items()
-            )
-        if isinstance(value, list):
-            return any(contains_action_like_key(part) for part in value)
-        return False
-
     kept: list[Any] = []
     for item in elements:
         if not isinstance(item, dict):
@@ -6903,8 +6764,7 @@ def _normalize_non_target_keyboard_switch(
         )
         safely_discardable = (
             claimed_switch
-            and set(item) == exact_fields
-            and not contains_action_like_key(item)
+            and _is_passive_scene_element_wire_object(item)
         )
         if not safely_discardable:
             kept.append(item)

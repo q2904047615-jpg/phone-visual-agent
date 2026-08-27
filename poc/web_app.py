@@ -45,7 +45,7 @@ from agent.infrastructure import (
     InterProcessLease,
     SHARED_DEVICE_LEASE_DIR,
 )
-from capability_acceptance import (
+from agent.infrastructure.capability_acceptance import (
     CapabilityAcceptanceError,
 )
 from capability_acceptance_runtime import CapabilityAcceptanceManager

@@ -1,3 +1,5 @@
+"""File-backed capability acceptance validation and promotion infrastructure."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,7 +20,7 @@ from agent.infrastructure.orientation_safety import (
     frame_fingerprint,
 )
 
-from agent.infrastructure import InterProcessLease
+from agent.infrastructure.device_exclusivity import InterProcessLease
 from agent.infrastructure.tap_calibration import (
     Affine2D,
     CALIBRATION_VERSION,

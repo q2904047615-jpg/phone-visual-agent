@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
-from capability_acceptance import _validate_live_promotion_source
+from agent.infrastructure.capability_acceptance import _validate_live_promotion_source
 from agent.domain import (
     DeviceActionRequest,
     DeviceExecutionError,

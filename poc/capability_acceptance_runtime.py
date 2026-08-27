@@ -11,7 +11,7 @@ import threading
 from typing import Any, Callable, Mapping
 import uuid
 
-from capability_acceptance import (
+from agent.infrastructure.capability_acceptance import (
     ACCEPTANCE_REPORT_VERSION,
     CapabilityAcceptanceError,
     CapabilityRegistryPromoter,

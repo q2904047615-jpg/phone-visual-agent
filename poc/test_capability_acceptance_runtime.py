@@ -19,7 +19,7 @@ from agent.infrastructure.orientation_safety import (
     frame_fingerprint,
 )
 
-from capability_acceptance import (
+from agent.infrastructure.capability_acceptance import (
     CapabilityAcceptanceError,
     CapabilityRegistryPromoter,
     validate_acceptance_report,

@@ -10,7 +10,7 @@ import unittest
 
 from PIL import Image
 
-from capability_acceptance import (
+from agent.infrastructure.capability_acceptance import (
     CapabilityAcceptanceError,
     CapabilityRegistryPromoter,
     validated_calibration_evidence,

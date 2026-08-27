@@ -1187,8 +1187,92 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
                             legacy_imports.append(str(path.relative_to(root)))
         self.assertEqual([], legacy_imports)
 
+    def test_runtime_doctor_has_one_infrastructure_entry(self) -> None:
+        import agent.infrastructure.runtime_doctor as runtime_doctor
+        from agent.application.vision_usage import QWEN_PLUS_MODEL
+        from agent.domain.vision_model import DEFAULT_VISION_MODEL
+
+        root = Path(__file__).resolve().parent
+        infrastructure_path = (
+            root / "agent" / "infrastructure" / "runtime_doctor.py"
+        )
+        self.assertFalse((root / "runtime_doctor.py").exists())
+        self.assertTrue(infrastructure_path.is_file())
+        self.assertIs(QWEN_PLUS_MODEL, DEFAULT_VISION_MODEL)
+        self.assertIs(
+            runtime_doctor.DEFAULT_VISION_MODEL,
+            DEFAULT_VISION_MODEL,
+        )
+        self.assertEqual(
+            "agent.infrastructure.runtime_doctor",
+            runtime_doctor.run_runtime_doctor.__module__,
+        )
+
+        source = infrastructure_path.read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("def run_runtime_doctor("))
+        self.assertEqual(1, source.count("def _capture_stable_frames("))
+        for forbidden in (
+            "agent.application",
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "from runtime_doctor",
+        ):
+            self.assertNotIn(forbidden, source)
+
+        legacy_imports: list[str] = []
+        legacy_patches: list[str] = []
+        model_literal_authorities: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "runtime_doctor"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "runtime_doctor":
+                            legacy_imports.append(str(path.relative_to(root)))
+                if (
+                    path.name != "test_agent_modular_monolith.py"
+                    and isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and node.value.startswith("runtime_doctor.")
+                ):
+                    legacy_patches.append(str(path.relative_to(root)))
+                if (
+                    not path.name.startswith("test_")
+                    and isinstance(node, (ast.Assign, ast.AnnAssign))
+                ):
+                    targets = (
+                        node.targets
+                        if isinstance(node, ast.Assign)
+                        else [node.target]
+                    )
+                    value = node.value
+                    if (
+                        any(
+                            isinstance(target, ast.Name)
+                            and target.id
+                            in {"DEFAULT_VISION_MODEL", "QWEN_PLUS_MODEL"}
+                            for target in targets
+                        )
+                        and isinstance(value, ast.Constant)
+                        and value.value == "qwen3.7-plus"
+                    ):
+                        model_literal_authorities.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+        self.assertEqual([], legacy_patches)
+        self.assertEqual(
+            ["agent\\domain\\vision_model.py"],
+            model_literal_authorities,
+        )
+
     def test_action_capabilities_have_one_domain_identity(self) -> None:
-        import runtime_doctor
+        import agent.infrastructure.runtime_doctor as runtime_doctor
         from agent.domain.action_capabilities import (
             KNOWN_ACTION_CAPABILITIES,
             build_device_capability_snapshot,

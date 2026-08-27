@@ -6,7 +6,7 @@ import unittest
 from PIL import Image
 
 from agent.domain.action_capabilities import KNOWN_ACTION_CAPABILITIES
-from runtime_doctor import run_runtime_doctor
+from agent.infrastructure.runtime_doctor import run_runtime_doctor
 
 
 class FakeDoctorController:

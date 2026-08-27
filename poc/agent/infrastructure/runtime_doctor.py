@@ -1,3 +1,5 @@
+"""Read-only runtime diagnostics for the configured phone-agent device."""
+
 from __future__ import annotations
 
 import hashlib
@@ -8,8 +10,8 @@ from typing import Any, Callable, Mapping
 from PIL import Image
 
 from agent.domain.action_capabilities import build_device_capability_snapshot
+from agent.domain.vision_model import DEFAULT_VISION_MODEL
 from agent.infrastructure.observation_images import measure_local_stability
-from agent.application.vision_usage import QWEN_PLUS_MODEL
 
 
 RUNTIME_DOCTOR_VERSION = "2026-08-25-runtime-doctor-v1"
@@ -151,7 +153,10 @@ def run_runtime_doctor(
         blockers.append(deepseek_blocker)
     if qwen_blocker:
         blockers.append(qwen_blocker)
-    if qwen_status.get("configured") and qwen_status.get("model") != QWEN_PLUS_MODEL:
+    if (
+        qwen_status.get("configured")
+        and qwen_status.get("model") != DEFAULT_VISION_MODEL
+    ):
         blockers.append(
             "正式视觉模型不是 qwen3.7-plus："
             + str(qwen_status.get("model") or "unknown")

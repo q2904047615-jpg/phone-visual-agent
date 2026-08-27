@@ -8,9 +8,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from agent.domain.vision_model import DEFAULT_VISION_MODEL
+
 
 VISION_USAGE_LEDGER_VERSION = "2026-08-25-single-step-qwen-usage-v4"
-QWEN_PLUS_MODEL = "qwen3.7-plus"
+QWEN_PLUS_MODEL = DEFAULT_VISION_MODEL
 SINGLE_STEP_ALLOWED_REQUEST_STAGES = frozenset({"single_step_observation"})
 
 # Official Model Studio pricing page, verified 2026-08-24 for China (Beijing),

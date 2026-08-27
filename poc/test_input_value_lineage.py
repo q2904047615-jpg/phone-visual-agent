@@ -761,7 +761,7 @@ class TypedInputLineageTests(unittest.TestCase):
     def make_store(self, root: str, now: float = 1000.0) -> TypedInputLineageStore:
         return TypedInputLineageStore(Path(root), clock=lambda: now)
 
-    def test_pending_lineage_builders_share_one_record_authority(self) -> None:
+    def test_input_lineage_builders_share_one_record_authority(self) -> None:
         source = (
             Path(__file__).resolve().parent
             / "agent"
@@ -774,28 +774,40 @@ class TypedInputLineageTests(unittest.TestCase):
             for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
-        pending_builders = (
+        builder_names = (
             "build_pending_text_lineage",
             "build_pending_chinese_preedit_lineage",
             "build_pending_newline_lineage",
             "build_pending_input_state_lineage",
             "build_pending_ime_candidate_lineage",
             "build_pending_literal_lineage",
+            "build_verified_text_lineage",
+            "build_verified_newline_lineage",
+            "build_verified_literal_lineage",
         )
 
-        self.assertEqual(1, source.count("def _resolve_pending_input_surface("))
-        self.assertEqual(1, source.count("def _build_pending_input_lineage("))
-        for name in pending_builders:
+        self.assertEqual(1, source.count("def _build_input_lineage("))
+        for resolver in (
+            "_resolve_pending_input_surface",
+            "_resolve_verified_input_surface",
+        ):
+            self.assertEqual(1, source.count(f"def {resolver}("))
+        for name in builder_names:
+            resolver = (
+                "_resolve_pending_input_surface"
+                if name.startswith("build_pending_")
+                else "_resolve_verified_input_surface"
+            )
+            direct_calls = [
+                call
+                for call in ast.walk(functions[name])
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            ]
+            call_names = [call.func.id for call in direct_calls]
             with self.subTest(builder=name):
-                calls = {
-                    call.func.id
-                    for call in ast.walk(functions[name])
-                    if isinstance(call, ast.Call)
-                    and isinstance(call.func, ast.Name)
-                }
-                self.assertIn("_resolve_pending_input_surface", calls)
-                self.assertIn("_build_pending_input_lineage", calls)
-                self.assertNotIn("TypedInputLineage", calls)
+                self.assertIn(resolver, call_names)
+                self.assertEqual(1, call_names.count("_build_input_lineage"))
+                self.assertNotIn("TypedInputLineage", call_names)
 
     def test_compact_input_value_shadow_authority_is_physically_absent(self) -> None:
         observer_source = (

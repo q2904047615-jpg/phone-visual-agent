@@ -393,6 +393,47 @@ def audited_application_input(
     return value
 
 
+def audited_text_input_scene(
+    bounds: list[int],
+) -> tuple[dict, dict]:
+    scene = scene_payload()
+    scene.update(
+        {
+            "foreground_app_id": "com.example.messaging",
+            "screen_id": "named_conversation",
+            "summary": "指定会话页底部有一个空输入框",
+            "elements": [
+                {
+                    "element_id": "message-input",
+                    "role": "input",
+                    "meaning": "message_input_field",
+                    "label": "",
+                    "bounds": list(bounds),
+                    "confidence": 1.0,
+                    "states": {
+                        "goal_relevant": True,
+                        "fully_visible": True,
+                        "value": "",
+                    },
+                    "evidence": ["底部唯一完整白色输入区域"],
+                }
+            ],
+        }
+    )
+    audit = input_audit_payload(
+        application_inputs=[
+            audited_application_input(
+                structure_id="message",
+                bounds=list(bounds),
+                text="",
+                placeholder="",
+                visible_editable_cues=["白色矩形背景"],
+            )
+        ]
+    )
+    return scene, audit
+
+
 MULTIFIELD_FIELDS = [
     {"field_id": "subject_field", "field_label": "主题", "text": "first"},
     {"field_id": "body_field", "field_label": "正文", "text": "second"},
@@ -1287,6 +1328,145 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
         )
         self.assertEqual((0.111, 0.911, 0.722, 0.953), canonical_bounds[0])
 
+    def test_single_step_observer_normalizes_request_bound_y_axis_grid(
+        self,
+    ) -> None:
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_message",
+                    "objective": "在输入框中输入消息",
+                    "constraints": [],
+                    "completion_conditions": ["输入框显示指定消息"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "aaazjie？你好",
+                        "active_input_field_id": "message_field",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+        cases = (
+            ((810, 1440), (720, 1280), [120, 1160, 780, 1220]),
+            ((540, 960), (540, 960), [120, 870, 780, 915]),
+        )
+        canonical_bounds = []
+        for frame_size, request_size, raw_bounds in cases:
+            with self.subTest(request_size=request_size):
+                scene, audit = audited_text_input_scene(raw_bounds)
+                provider = SequenceProvider(
+                    [
+                        {
+                            "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                            "coordinate_space": {
+                                "kind": "axis_grid",
+                                "width": 1000,
+                                "height": request_size[1],
+                            },
+                            "scene": scene,
+                            "input_structure": audit,
+                        }
+                    ]
+                )
+                observer = SingleStepGenericSceneObserver(provider)
+
+                observed = observer.observe(
+                    frames=[
+                        Image.new("RGB", frame_size, (30, 40, 50))
+                        for _ in range(4)
+                    ],
+                    goal_context=context,
+                    device_id="device-local-01",
+                )
+
+                field = observed.unique_trusted_goal_element()
+                canonical_bounds.append(
+                    tuple(round(value, 3) for value in field.bounds)
+                )
+                normalization = observer.last_diagnostics[
+                    "coordinate_normalization"
+                ]
+                self.assertEqual("axis_grid", normalization["wire_kind"])
+                self.assertEqual([1000, request_size[1]], normalization["wire_extent"])
+                self.assertEqual(list(request_size), normalization["request_image_size"])
+                self.assertTrue(normalization["applied"])
+                self.assertEqual(1, provider.calls)
+                prompt = provider.messages_seen[0][1]["content"][0]["text"]
+                self.assertIn(
+                    f'"coordinate_space":{{"kind":"axis_grid","width":1000,'
+                    f'"height":{request_size[1]}}}',
+                    prompt,
+                )
+                self.assertNotIn(
+                    '"coordinate_space":{"kind":"normalized_1000",'
+                    '"width":1000,"height":1000}',
+                    prompt,
+                )
+
+        self.assertEqual((0.12, 0.906, 0.78, 0.953), canonical_bounds[0])
+        self.assertEqual(canonical_bounds[0], canonical_bounds[1])
+
+    def test_single_step_observer_repairs_bounded_legacy_y_axis_declaration(
+        self,
+    ) -> None:
+        raw_bounds = [120, 1160, 780, 1220]
+        scene, audit = audited_text_input_scene(raw_bounds)
+        provider = SequenceProvider(
+            [
+                {
+                    "protocol_version": SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION,
+                    "coordinate_space": {
+                        "kind": "normalized_1000",
+                        "width": 1000,
+                        "height": 1000,
+                    },
+                    "scene": scene,
+                    "input_structure": audit,
+                }
+            ]
+        )
+        observer = SingleStepGenericSceneObserver(provider)
+        context = {
+            "entities": {
+                "active_subgoal_visual_context": {
+                    "subgoal_id": "input_message",
+                    "objective": "在输入框中输入消息",
+                    "constraints": [],
+                    "completion_conditions": ["输入框显示指定消息"],
+                    "execution_class": "navigate",
+                    "goal_entities": {
+                        "active_input_transaction_text": "aaazjie？你好",
+                        "active_input_field_id": "message_field",
+                        "active_input_multiline": False,
+                    },
+                }
+            }
+        }
+
+        observed = observer.observe(
+            frames=[
+                Image.new("RGB", (810, 1440), (30, 40, 50))
+                for _ in range(4)
+            ],
+            goal_context=context,
+            device_id="device-local-01",
+        )
+
+        field = observed.unique_trusted_goal_element()
+        self.assertEqual(
+            (0.12, 0.906, 0.78, 0.953),
+            tuple(round(value, 3) for value in field.bounds),
+        )
+        normalization = observer.last_diagnostics["coordinate_normalization"]
+        self.assertEqual(
+            "axis_grid_inferred_from_normalized_1000",
+            normalization["wire_kind"],
+        )
+        self.assertEqual("normalized_1000", normalization["declared_wire_kind"])
+        self.assertEqual([1000, 1280], normalization["wire_extent"])
+        self.assertEqual(1, provider.calls)
+
     def test_single_step_observer_rejects_unprovable_wire_coordinate_spaces(
         self,
     ) -> None:
@@ -1346,6 +1526,16 @@ class SingleStepGenericSceneObserverTests(unittest.TestCase):
                 "mixed_branches",
                 {"kind": "image_grid", "width": 1080, "height": 1920},
                 "没有使用同一个image_grid",
+            ),
+            (
+                "axis_grid_wrong_height",
+                {"kind": "axis_grid", "width": 1000, "height": 1280},
+                "height等于本轮Qwen请求图片高度",
+            ),
+            (
+                "axis_grid_out_of_bounds",
+                {"kind": "axis_grid", "width": 1000, "height": 960},
+                "超出声明的axis_grid",
             ),
         )
         for name, coordinate_space, error in cases:

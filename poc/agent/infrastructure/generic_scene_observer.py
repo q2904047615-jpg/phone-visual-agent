@@ -800,12 +800,14 @@ def _single_step_observation_prompt(
 ) -> str:
     """Build the sole online prompt for one closed-loop observation step."""
 
-    scene_contract = _compact_prompt(context)
+    request_width, request_height = request_image_size
+    scene_contract = _compact_prompt(context, wire_height=request_height)
     if include_input_structure:
         input_contract = _input_structure_audit_prompt(
             context,
             roi_bounds=None,
             current_input_text=current_input_text,
+            wire_height=request_height,
         )
         input_rule = (
             "input_structure必须是完整输入结构对象，使用下面INPUT CONTRACT的"
@@ -820,7 +822,6 @@ def _single_step_observation_prompt(
         if image_count > 1
         else "只有一张当前稳定手机画面。"
     )
-    request_width, request_height = request_image_size
     if post_action_context is None:
         post_action_rule = (
             "本轮不是本地已签发的动作后观察；不得猜测此前执行过任何动作。"
@@ -851,15 +852,12 @@ outcome=pending_visual_verification，绝不等于matched，也不能迫使你�
 
 本轮每张实际发送给你的JPEG均为{request_width}×{request_height}。整份响应的
 scene与input_structure必须共用一个coordinate_space，绝不能各用一把尺子：
-1. 正常且首选输出为
-   {{"kind":"normalized_1000","width":1000,"height":1000}}，此时横纵两轴
-   都把各自图像边缘表示为0和1000，任何坐标不得超过1000。
-2. 如果你的视觉系统已经在一个与{request_width}×{request_height}严格等比例的
-   图像网格中测量了全部坐标，且无法在输出前完成归一化，才可声明
-   {{"kind":"image_grid","width":该网格精确宽度,"height":该网格精确高度}}。
-   scene和input_structure的每个边界与锚点都必须属于这一个声明网格；本地会在
-   解析任何视觉事实前一次性换算为0..1000。禁止猜测1920/2000等常见高度，
-   禁止混用normalized、JPEG像素、手机逻辑像素或裁剪坐标。
+{{"kind":"axis_grid","width":1000,"height":{request_height}}}。
+横坐标使用0..1000，左边缘为0、右边缘为1000；纵坐标使用0..{request_height}，
+上边缘为0、下边缘为{request_height}。scene和input_structure的每个边界与锚点
+都必须属于这一个声明网格；本地会在解析任何视觉事实前一次性换算为统一的
+0..1000坐标。禁止另行声明normalized_1000或image_grid，禁止猜测手机逻辑像素、
+常见屏幕高度、裁剪坐标，也禁止在两个内层对象之间混用坐标尺度。
 
 下面的SCENE CONTRACT和INPUT CONTRACT沿用既有字段语义。它们各自末尾的
 “只返回/Return exactly”示例仅说明对应内层对象，不是本轮顶层输出格式。
@@ -872,7 +870,7 @@ scene与input_structure必须共用一个coordinate_space，绝不能各用一�
 
 最终且唯一有效的顶层格式如下，禁止Markdown、重复键和任何额外字段：
 {{"protocol_version":"{SINGLE_STEP_OBSERVATION_PROTOCOL_VERSION}",
-"coordinate_space":{{"kind":"normalized_1000","width":1000,"height":1000}},
+"coordinate_space":{{"kind":"axis_grid","width":1000,"height":{request_height}}},
 "scene":{{"protocol_version":"{UI_SCENE_PROTOCOL_VERSION}",
 "foreground_app_id":"unknown","screen_id":"unknown","summary":"",
 "system_ui":{{"immersive_or_fullscreen":"unknown","navigation_bar_visible":"unknown"}},
@@ -893,11 +891,11 @@ def _normalize_single_step_wire_coordinates(
 ) -> dict[str, Any]:
     """Atomically normalize one declared wire grid into canonical 0..1000.
 
-    The raw image grid is syntax only.  It never reaches UIScene, canonical
-    candidates, scope, Controller, or the robot.  A non-canonical grid is
-    accepted only when its declared aspect ratio independently agrees with the
-    exact JPEG sent in this request and every coordinate belongs to that one
-    grid.  No conventional phone resolution is guessed.
+    The wire grid is syntax only.  It never reaches UIScene, canonical
+    candidates, scope, Controller, or the robot.  The primary contract keeps X
+    in 0..1000 and binds Y to the exact JPEG height sent in this request.  A
+    legacy full-image grid is accepted only when its aspect ratio independently
+    agrees with that JPEG.  No conventional phone resolution is guessed.
     """
 
     coordinate_space = payload.get("coordinate_space")
@@ -919,10 +917,13 @@ def _normalize_single_step_wire_coordinates(
         or not 64 <= height <= 8192
     ):
         raise UISceneError("coordinate_space宽高必须是64..8192整数。")
-    if kind not in {"normalized_1000", "image_grid"}:
+    if kind not in {"normalized_1000", "axis_grid", "image_grid"}:
         raise UISceneError("coordinate_space.kind无效。")
     if kind == "normalized_1000" and (width, height) != (1000, 1000):
         raise UISceneError("normalized_1000必须声明1000×1000。")
+    request_width, request_height = request_image_size
+    if request_width <= 0 or request_height <= 0:
+        raise UISceneError("本轮Qwen请求图片尺寸无效。")
 
     bounds_refs: list[tuple[dict[str, Any], str]] = []
     point_refs: list[tuple[dict[str, Any], str]] = []
@@ -971,6 +972,8 @@ def _normalize_single_step_wire_coordinates(
     parsed_bounds: list[tuple[dict[str, Any], str, tuple[float, float, float, float]]] = []
     parsed_points: list[tuple[dict[str, Any], str, tuple[float, float]]] = []
     all_coordinates: list[float] = []
+    x_coordinates: list[float] = []
+    y_coordinates: list[float] = []
     for owner, key in bounds_refs:
         value = owner.get(key)
         if (
@@ -985,6 +988,8 @@ def _normalize_single_step_wire_coordinates(
         left, top, right, bottom = (float(part) for part in value)
         parsed_bounds.append((owner, key, (left, top, right, bottom)))
         all_coordinates.extend((left, top, right, bottom))
+        x_coordinates.extend((left, right))
+        y_coordinates.extend((top, bottom))
     for owner, key in point_refs:
         value = owner.get(key)
         if (
@@ -999,56 +1004,106 @@ def _normalize_single_step_wire_coordinates(
         x, y = (float(part) for part in value)
         parsed_points.append((owner, key, (x, y)))
         all_coordinates.extend((x, y))
+        x_coordinates.append(x)
+        y_coordinates.append(y)
 
+    declared_kind = kind
+    wire_kind = kind
+    wire_width = width
+    wire_height = height
+    coordinate_error_label = kind
     if kind == "normalized_1000":
-        # Keep the existing downstream distinction: an input target with
-        # invalid canonical geometry fails closed, while a non-input scene may
-        # discard its entire unusable element batch and retain only the typed
-        # top-level App/screen facts.  This branch never changes coordinates.
-        payload.pop("coordinate_space", None)
-        return {
-            "wire_kind": kind,
-            "wire_extent": [1000, 1000],
-            "canonical_extent": [1000, 1000],
-            "applied": False,
-        }
-
-    request_width, request_height = request_image_size
-    if request_width <= 0 or request_height <= 0:
-        raise UISceneError("本轮Qwen请求图片尺寸无效。")
-    if not math.isclose(
-        width / height,
-        request_width / request_height,
-        rel_tol=0.01,
-        abs_tol=0.0,
-    ):
-        raise UISceneError("image_grid宽高比与本轮Qwen请求图片不一致。")
-    if not all_coordinates or not any(value > 1000 for value in all_coordinates):
-        raise UISceneError("image_grid没有可证明需要归一化的越界坐标。")
+        # Older responses sometimes preserve the former declaration while
+        # using the exact new Y axis.  Correct that one proven contradiction
+        # locally and atomically; every X and Y value must fit the request-
+        # bound axis, so this never guesses a conventional phone resolution.
+        infer_request_bound_y_axis = (
+            request_height > 1000
+            and any(value > 1000 for value in y_coordinates)
+            and all(0 <= value <= 1000 for value in x_coordinates)
+            and all(0 <= value <= request_height for value in y_coordinates)
+        )
+        if infer_request_bound_y_axis:
+            wire_kind = "axis_grid_inferred_from_normalized_1000"
+            wire_width = 1000
+            wire_height = request_height
+            coordinate_error_label = "axis_grid"
+        else:
+            # Keep the existing downstream distinction: an input target with
+            # invalid canonical geometry fails closed, while a non-input scene
+            # may discard an unusable element batch and retain only the typed
+            # top-level App/screen facts.  This branch changes no coordinates.
+            payload.pop("coordinate_space", None)
+            return {
+                "wire_kind": kind,
+                "wire_extent": [1000, 1000],
+                "canonical_extent": [1000, 1000],
+                "applied": False,
+            }
+    elif kind == "axis_grid":
+        if (width, height) != (1000, request_height):
+            raise UISceneError(
+                "axis_grid必须声明width=1000且height等于本轮Qwen请求图片高度。"
+            )
+        if not all_coordinates:
+            payload.pop("coordinate_space", None)
+            return {
+                "wire_kind": kind,
+                "wire_extent": [width, height],
+                "request_image_size": [request_width, request_height],
+                "canonical_extent": [1000, 1000],
+                "applied": False,
+            }
+    else:
+        if not math.isclose(
+            width / height,
+            request_width / request_height,
+            rel_tol=0.01,
+            abs_tol=0.0,
+        ):
+            raise UISceneError("image_grid宽高比与本轮Qwen请求图片不一致。")
+        if not all_coordinates or not any(
+            value > 1000 for value in all_coordinates
+        ):
+            raise UISceneError("image_grid没有可证明需要归一化的越界坐标。")
 
     transformed_bounds: list[tuple[dict[str, Any], str, list[int]]] = []
     transformed_points: list[tuple[dict[str, Any], str, list[int]]] = []
     for owner, key, (left, top, right, bottom) in parsed_bounds:
-        if not (0 <= left < right <= width and 0 <= top < bottom <= height):
-            raise UISceneError("bounds超出声明的image_grid。")
+        if not (
+            0 <= left < right <= wire_width
+            and 0 <= top < bottom <= wire_height
+        ):
+            raise UISceneError(
+                f"bounds超出声明的{coordinate_error_label}。"
+            )
         normalized = [
-            round(left * 1000 / width),
-            round(top * 1000 / height),
-            round(right * 1000 / width),
-            round(bottom * 1000 / height),
+            round(left * 1000 / wire_width),
+            round(top * 1000 / wire_height),
+            round(right * 1000 / wire_width),
+            round(bottom * 1000 / wire_height),
         ]
         if not (
             0 <= normalized[0] < normalized[2] <= 1000
             and 0 <= normalized[1] < normalized[3] <= 1000
         ):
-            raise UISceneError("image_grid换算后bounds退化。")
+            raise UISceneError(
+                f"{coordinate_error_label}换算后bounds退化。"
+            )
         transformed_bounds.append((owner, key, normalized))
     for owner, key, (x, y) in parsed_points:
-        if not (0 <= x <= width and 0 <= y <= height):
-            raise UISceneError("锚点超出声明的image_grid。")
-        normalized = [round(x * 1000 / width), round(y * 1000 / height)]
+        if not (0 <= x <= wire_width and 0 <= y <= wire_height):
+            raise UISceneError(
+                f"锚点超出声明的{coordinate_error_label}。"
+            )
+        normalized = [
+            round(x * 1000 / wire_width),
+            round(y * 1000 / wire_height),
+        ]
         if not (0 <= normalized[0] <= 1000 and 0 <= normalized[1] <= 1000):
-            raise UISceneError("image_grid换算后锚点无效。")
+            raise UISceneError(
+                f"{coordinate_error_label}换算后锚点无效。"
+            )
         transformed_points.append((owner, key, normalized))
 
     for owner, key, value in transformed_bounds:
@@ -1091,16 +1146,20 @@ def _normalize_single_step_wire_coordinates(
             for audit_item in audited_inputs
         ):
             raise UISceneError(
-                "scene与input_structure没有使用同一个image_grid坐标空间。"
+                "scene与input_structure没有使用同一个"
+                f"{coordinate_error_label}坐标空间。"
             )
     payload.pop("coordinate_space", None)
-    return {
-        "wire_kind": kind,
-        "wire_extent": [width, height],
+    diagnostics = {
+        "wire_kind": wire_kind,
+        "wire_extent": [wire_width, wire_height],
         "request_image_size": [request_width, request_height],
         "canonical_extent": [1000, 1000],
         "applied": True,
     }
+    if wire_kind != declared_kind:
+        diagnostics["declared_wire_kind"] = declared_kind
+    return diagnostics
 
 
 def _parse_single_step_observation_envelope(
@@ -1182,7 +1241,11 @@ def _parse_single_step_observation_envelope(
         raise VisionAgentError(f"单步完整观察结果不符合协议：{exc}") from exc
 
 
-def _compact_prompt(context: dict[str, Any]) -> str:
+def _compact_prompt(
+    context: dict[str, Any],
+    *,
+    wire_height: int = 1000,
+) -> str:
     context = _observation_goal_context(context)
     if _goal_requests_keyboard_mode_switch(context):
         keyboard_switch_rule = (
@@ -1210,8 +1273,9 @@ def _compact_prompt(context: dict[str, Any]) -> str:
    写成foreground_app_id；该字段只能来自当前画面的视觉身份。
 2. elements最多{MAX_COMPACT_ELEMENTS}个。必须先报告目标相关控件和当前输入框，
    再报告关闭/返回与必要导航；省略新闻、商品、图片、标签组等无关内容。
-3. bounds使用0..1000的[left,top,right,bottom]，必须只框真实清晰控件。0和1000分别代表
-   原图四边；禁止复制原图像素坐标（例如810x1515画面的y=1130），任何边界超出0..1000就省略该元素。
+3. bounds使用[left,top,right,bottom]：横轴为0..1000，纵轴为0..{wire_height}。
+   左右边缘分别为x=0和x=1000，上下边缘分别为y=0和y={wire_height}。必须只框真实清晰控件；
+   不得另猜手机屏幕高度或混用其他坐标尺度，任何边界超出对应轴范围就省略该元素。
 4. role仅限button/icon/input/text/tab/toggle/image/list_item/dialog/keyboard_key/container/unknown。
    container只表示承载其他内容的分组、布局区或目标区域；四边独立、可单独识别的色块、卡片、图片
    或控件不得写container，应按可见形态写image/list_item/button。可见文字或外观明确证明的移动源
@@ -1268,7 +1332,7 @@ def _compact_prompt(context: dict[str, Any]) -> str:
 "stable":true,"confidence":0.0,"fingerprint":""}}
 每个element只允许：
 {{"element_id":"e1","role":"button","meaning":"open_search","label":"搜索",
-"bounds":[0,0,1000,1000],"confidence":0.0,"states":{{"goal_relevant":true}},"evidence":[]}}
+"bounds":[0,0,1000,{wire_height}],"confidence":0.0,"states":{{"goal_relevant":true}},"evidence":[]}}
 """
 
 
@@ -1326,8 +1390,11 @@ def _input_structure_audit_prompt(
     roi_bounds: tuple[int, int, int, int] | None,
     crop_local: bool = False,
     current_input_text: str | None = None,
+    wire_height: int = 1000,
 ) -> str:
     context = _observation_goal_context(context)
+    coordinate_height = 1000 if crop_local else wire_height
+    keyboard_min_height = max(1, round(180 * coordinate_height / 1000))
     literal_key_targets = _input_audit_literal_key_targets(
         context,
         current_input_text=current_input_text,
@@ -1340,7 +1407,7 @@ def _input_structure_audit_prompt(
                 "value": example_value,
                 "label": "Space" if example_value == " " else example_value,
                 "key_kind": "space" if example_value == " " else "character",
-                "bounds": [0, 0, 1000, 1000],
+                "bounds": [0, 0, 1000, coordinate_height],
                 "confidence": 0.0,
                 "fully_visible": True,
             }
@@ -1398,13 +1465,13 @@ def _input_structure_audit_prompt(
             + _input_audit_detail_note(roi_bounds)
         )
         coordinate_contract = (
-            "All bounds MUST use Image 1 full-frame normalized coordinates "
-            "0..1000. Here 0 and 1000 are the four edges of Image 1. Never copy "
-            "Image 1 source-pixel coordinates, regardless of its width or "
-            "height. A phone aspect ratio never changes this scale: the bottom "
-            "edge is always 1000, never a source-pixel or conventional display "
-            "height. If a structure cannot be bounded in this coordinate "
-            "system, omit it instead of clipping or converting it."
+            "All bounds and qwerty anchor points MUST use the one declared "
+            f"full-frame axis grid: X is 0..1000 and Y is 0..{wire_height}. "
+            "The left/right edges are x=0/x=1000; the top/bottom edges are "
+            f"y=0/y={wire_height}. Never guess a phone logical resolution, "
+            "conventional display height, crop grid, or a second scale. If a "
+            "structure cannot be bounded in this exact coordinate system, "
+            "omit it instead of clipping or converting it."
         )
     return f"""
 You are a read-only, app-independent UI structure auditor. The normal scene observer did not establish an input target.
@@ -1420,7 +1487,7 @@ Distinguish three different visual structures; never merge them:
 2. ime_preedit_regions: the input method's composition and its candidate strip. It is never an application input, even when it contains composed text and a trailing icon. Many real IMEs render an underlined Latin composition inside the otherwise empty App field. In that layout the underlined letters remain IME preedit, application_inputs.text MUST be "", the literal may also appear in visible_editable_cues, and one ime_preedit_regions item MUST tightly bound the underlined composition with text set to that literal. Candidate words use their own complete bounds and may be either immediately adjacent to the composition or in one horizontal candidate row at the top of the visible keyboard, above the QWERTY letter rows. Never call those underlined letters committed application text. Enumerate only complete visible candidate words tied to that composition; candidates are read-only facts and never application inputs. The enum name direct_latin describes the keyboard key mode only: it NEVER proves that Latin letters bypass composition or are already committed.
 3. keyboard.mode_switch: one compact key inside the visible keyboard that explicitly switches between chinese_pinyin and direct_latin. Ordinary letters, backspace, enter, robot/assistant, voice, emoji, and candidate-strip icons are never mode switches.
 4. keyboard.qwerty_anchors: only for a complete visible QWERTY keyboard, locate the centers of q, p, a, l, z, m and backspace. These are read-only current-frame geometry facts, not a tap plan. Use null for every non-QWERTY, incomplete or uncertain keyboard.
-   When keyboard.visible=true, report keyboard.bounds only when it confidently encloses the complete visible keyboard in the same coordinate system, has width at least 300 and height at least 180, and contains every reported keyboard key and anchor. Measure from the four edges of Image 1; do not shift the keyboard toward the bottom or describe only its letter rows. For QWERTY, qwerty_anchors remain mandatory; when the outer bounds cannot be measured confidently, set bounds=null instead of inventing it. Local code may reconstruct an execution envelope only after independent multi-frame row evidence validates all seven anchors. Non-QWERTY actionable geometry still requires complete keyboard.bounds.
+   When keyboard.visible=true, report keyboard.bounds only when it confidently encloses the complete visible keyboard in the same coordinate system, has width at least 300 and height at least {keyboard_min_height}, and contains every reported keyboard key and anchor. Measure from the four edges of Image 1; do not shift the keyboard toward the bottom or describe only its letter rows. For QWERTY, qwerty_anchors remain mandatory; when the outer bounds cannot be measured confidently, set bounds=null instead of inventing it. Local code may reconstruct an execution envelope only after independent multi-frame row evidence validates all seven anchors. Non-QWERTY actionable geometry still requires complete keyboard.bounds.
 5. keyboard.backspace_key: for any complete visible keyboard layout, report the one complete backspace/delete key as label, bounds, confidence and fully_visible. Use null when absent, clipped, ambiguous, or confused with an App delete control. This is read-only geometry and never authorizes clearing by itself.
 6. keyboard.literal_keys: the local, goal-derived whitelist is {json.dumps(literal_key_targets, ensure_ascii=False, separators=(',', ':'))}. Report only complete visible keys whose inserted value occurs in that exact whitelist, at most once per distinct value and at most eight total. Every literal-key object MUST contain exactly these six fields and never omit any of them: value, label, key_kind, bounds, confidence, fully_visible. When the whitelist is empty, literal_keys MUST be []. QWERTY alphabet letters and Chinese characters MUST NEVER be enumerated here, even when they occur in input_text, because qwerty_anchors and the verified pinyin transaction already represent them. Never enumerate a keyboard row. For a whitelisted space use value=" " and key_kind="space". For every other whitelisted key use key_kind="character" and require label to equal value literally. The large central PRIMARY glyph of the whole directly tappable key MUST equal value. A small corner glyph, superscript digit, alternate symbol, swipe hint or long-press hint printed on an alphabet key is NOT a literal key and MUST NEVER be reported here. If the whitelisted value exists only as such a secondary hint, leave literal_keys empty and report a separately visible direction-explicit numeric/symbol layout switch instead. Bounds must enclose the whole direct key, never only the secondary glyph. Never include backspace, enter, send/search, emoji, voice, assistant, shift, or layout switches.
 7. keyboard.enter_key: report at most one complete visible keyboard action key using exactly label, bounds, confidence, fully_visible and key_action. key_action must be one of newline, send, search, done, next, unknown and must describe the key's current visible behavior, never the requested goal. A plain multiline Return/Enter key may be newline. A key visibly labelled or iconographically acting as Send/Search/Done/Next must use that action and can never authorize a newline. The current transaction needs a newline={str(enter_required).lower()} and multiline={str(active_multiline).lower()}, but those facts do not change the visual classification.
@@ -1432,10 +1499,10 @@ When a visible preedit composition itself exactly matches a complete visible can
 keyboard.mode_switch.current_mode MUST equal keyboard.input_mode whenever input_mode is known, and target_mode MUST be the other supported mode. Across real keyboards the visible key label may name either the current mode or the destination mode: for example, 英/EN can be shown while Chinese pinyin is current and pressing it enters direct Latin, or while direct Latin is current and pressing it enters Chinese. Copy the literal label, but never derive current_mode or target_mode from that label. If the direction is not independently clear from the whole keyboard state, set mode_switch to null.
 For a text-entry verification goal, report the proven current keyboard.input_mode; keyboard.mode_switch is optional and should be null unless its direction is independently unambiguous. Never invent a switch direction merely because the goal asks for text entry.
 keyboard.mode_switch MUST be either null or an object with exactly these five fields: label, bounds, confidence, current_mode, target_mode. Never omit confidence or target_mode. Valid non-null shapes in the two directions are:
-{{"label":"英","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"chinese_pinyin","target_mode":"direct_latin"}}
-{{"label":"英","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"direct_latin","target_mode":"chinese_pinyin"}}
+{{"label":"英","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"current_mode":"chinese_pinyin","target_mode":"direct_latin"}}
+{{"label":"英","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"current_mode":"direct_latin","target_mode":"chinese_pinyin"}}
 These are shape examples only. Copy the literal visible label and measured bounds from Image 1, set confidence from the visible evidence, and choose the direction from the independently proven current keyboard state. Never copy either example merely to satisfy the goal.
-keyboard.case_switch uses the same five field names, but current_mode and target_mode are lower or upper. It is valid only for direct_latin QWERTY and a visible shift/case glyph. Example shape: {{"label":"⇧","bounds":[0,0,1000,1000],"confidence":0.0,"current_mode":"lower","target_mode":"upper"}}.
+keyboard.case_switch uses the same five field names, but current_mode and target_mode are lower or upper. It is valid only for direct_latin QWERTY and a visible shift/case glyph. Example shape: {{"label":"⇧","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"current_mode":"lower","target_mode":"upper"}}.
 Do not plan, suggest, authorize, or perform any action.
 {coordinate_contract}
 Use text="" for a visibly empty application field. Copy placeholders and visible_editable_cues literally; do not infer them from the goal. caret_line_index is the zero-based VISUAL row containing the complete visible insertion caret, or null when the caret row is absent, clipped, or ambiguous. It is a read-only geometry fact and by itself never proves a user-entered newline. right_button describes a trailing utility control; it is structural evidence only and is never authorized for activation. Set it to null when no separate trailing control is visible.
@@ -1443,19 +1510,19 @@ An automatic visual line wrap inside a narrow editable field is presentation onl
 Return exactly this JSON schema and no other fields. Emit one compact minified
 JSON object on a single line, without Markdown or explanatory whitespace:
 {{"protocol_version":"{INPUT_STRUCTURE_AUDIT_VERSION}",
-"application_inputs":[{{"structure_id":"app-input-1","bounds":[0,0,1000,1000],
+"application_inputs":[{{"structure_id":"app-input-1","bounds":[0,0,1000,{coordinate_height}],
 "fully_visible":true,"text":"","placeholder":"visible placeholder or empty","field_labels":["literal visible field label"],
 "visible_editable_cues":["literal visible cue"],"caret_line_index":null,"confidence":0.0,
 "right_button":null}}],
-"ime_preedit_regions":[{{"region_id":"ime-preedit-1","bounds":[0,0,1000,1000],
+"ime_preedit_regions":[{{"region_id":"ime-preedit-1","bounds":[0,0,1000,{coordinate_height}],
 "text":"visible composition text or empty","confidence":0.0,
-"candidates":[{{"text":"literal candidate","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true}}]}}],
-"keyboard":{{"visible":true,"bounds":[0,0,1000,1000],"layout":"qwerty",
+"candidates":[{{"text":"literal candidate","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"fully_visible":true}}]}}],
+"keyboard":{{"visible":true,"bounds":[0,0,1000,{coordinate_height}],"layout":"qwerty",
 "input_mode":"unknown","case_mode":"unknown","qwerty_anchors":{{"q":[0,0],"p":[0,0],"a":[0,0],"l":[0,0],"z":[0,0],"m":[0,0],"backspace":[0,0]}},"mode_switch":null,
-"backspace_key":{{"label":"⌫","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true}},
-"enter_key":{{"label":"↵","bounds":[0,0,1000,1000],"confidence":0.0,"fully_visible":true,"key_action":"newline"}},
+"backspace_key":{{"label":"⌫","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"fully_visible":true}},
+"enter_key":{{"label":"↵","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"fully_visible":true,"key_action":"newline"}},
 "case_switch":null,"literal_keys":{literal_keys_example_json},
-"layout_switches":[{{"label":"123","bounds":[0,0,1000,1000],"confidence":0.0,"current_layout":"qwerty","target_layout":"numeric"}},{{"label":"！？#","bounds":[0,0,1000,1000],"confidence":0.0,"current_layout":"qwerty","target_layout":"symbol"}}]}}}}
+"layout_switches":[{{"label":"123","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"current_layout":"qwerty","target_layout":"numeric"}},{{"label":"！？#","bounds":[0,0,1000,{coordinate_height}],"confidence":0.0,"current_layout":"qwerty","target_layout":"symbol"}}]}}}}
 When no keyboard is visible, keyboard must be {{"visible":false,"bounds":null,"layout":"unknown","input_mode":"unknown","case_mode":"unknown","qwerty_anchors":null,"mode_switch":null,"backspace_key":null,"enter_key":null,"case_switch":null,"literal_keys":[],"layout_switches":[]}}.
 Return empty arrays when their geometry is not visible. Never merge a clipped structure with a complete structure, and never copy an IME pre-edit region into application_inputs.
 """

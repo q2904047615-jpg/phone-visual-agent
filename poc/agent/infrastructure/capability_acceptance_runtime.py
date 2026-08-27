@@ -1,3 +1,5 @@
+"""File-backed lifecycle manager for live capability acceptance trials."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

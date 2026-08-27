@@ -1915,9 +1915,70 @@ class AgentDependencyBoundaryTests(unittest.TestCase):
         self.assertEqual([], legacy_imports)
         self.assertEqual([], legacy_patches)
 
+    def test_capability_acceptance_runtime_has_one_infrastructure_entry(self) -> None:
+        import agent.infrastructure.capability_acceptance_runtime as runtime
+
+        root = Path(__file__).resolve().parent
+        infrastructure_path = (
+            root
+            / "agent"
+            / "infrastructure"
+            / "capability_acceptance_runtime.py"
+        )
+        self.assertFalse((root / "capability_acceptance_runtime.py").exists())
+        self.assertTrue(infrastructure_path.is_file())
+        for value in (
+            runtime.CapabilityTrial,
+            runtime.RecoveredCapabilityTrial,
+            runtime.CapabilityAcceptanceManager,
+        ):
+            self.assertEqual(
+                "agent.infrastructure.capability_acceptance_runtime",
+                value.__module__,
+            )
+
+        source = infrastructure_path.read_text(encoding="utf-8")
+        self.assertEqual(1, source.count("class CapabilityTrial:"))
+        self.assertEqual(1, source.count("class RecoveredCapabilityTrial:"))
+        self.assertEqual(1, source.count("class CapabilityAcceptanceManager:"))
+        self.assertEqual(1, source.count("def _atomic_write_json("))
+        for forbidden in (
+            "agent.application",
+            "fastapi",
+            "pydantic",
+            "web_app",
+            "from capability_acceptance_runtime",
+        ):
+            self.assertNotIn(forbidden, source)
+
+        legacy_imports: list[str] = []
+        legacy_patches: list[str] = []
+        for path in root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.level == 0
+                    and node.module == "capability_acceptance_runtime"
+                ):
+                    legacy_imports.append(str(path.relative_to(root)))
+                if isinstance(node, ast.Import):
+                    for item in node.names:
+                        if item.name == "capability_acceptance_runtime":
+                            legacy_imports.append(str(path.relative_to(root)))
+                if (
+                    path.name != "test_agent_modular_monolith.py"
+                    and isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and node.value.startswith("capability_acceptance_runtime.")
+                ):
+                    legacy_patches.append(str(path.relative_to(root)))
+        self.assertEqual([], legacy_imports)
+        self.assertEqual([], legacy_patches)
+
     def test_capability_acceptance_planner_has_one_application_entry(self) -> None:
         import agent.infrastructure.capability_acceptance as capability_acceptance
-        import capability_acceptance_runtime
+        import agent.infrastructure.capability_acceptance_runtime as capability_acceptance_runtime
         import agent.application.capability_acceptance_planner as planner
         from agent.domain.action_capabilities import (
             CALIBRATION_BOUND_ACTIONS,

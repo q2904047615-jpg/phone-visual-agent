@@ -48,7 +48,9 @@ from agent.infrastructure import (
 from agent.infrastructure.capability_acceptance import (
     CapabilityAcceptanceError,
 )
-from capability_acceptance_runtime import CapabilityAcceptanceManager
+from agent.infrastructure.capability_acceptance_runtime import (
+    CapabilityAcceptanceManager,
+)
 from agent.application.capability_acceptance_planner import (
     CapabilityAcceptanceTaskGraphPlanner,
 )

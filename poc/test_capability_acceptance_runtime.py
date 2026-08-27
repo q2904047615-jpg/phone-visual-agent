@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from PIL import Image
-import capability_acceptance_runtime as acceptance_runtime
+import agent.infrastructure.capability_acceptance_runtime as acceptance_runtime
 from agent.infrastructure import (
     DeviceControllerRegistry,
     DeviceTaskRegistry,
@@ -24,7 +24,9 @@ from agent.infrastructure.capability_acceptance import (
     CapabilityRegistryPromoter,
     validate_acceptance_report,
 )
-from capability_acceptance_runtime import CapabilityAcceptanceManager
+from agent.infrastructure.capability_acceptance_runtime import (
+    CapabilityAcceptanceManager,
+)
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.domain.action_capabilities import PROMOTABLE_ACTIONS
 class ProvisionalControllerTests(unittest.TestCase):

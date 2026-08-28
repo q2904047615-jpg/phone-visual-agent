@@ -236,9 +236,7 @@ class GenericStepProposal:
                 raise CanonicalActionProtocolError("系统导航栏唤出动作必须精确声明结构化导航栏可见后置条件。")
 
     def to_dict(self) -> dict[str, Any]:
-        value = asdict(self)
-        value["action"] = self.action.to_dict() if self.action else None
-        return value
+        return _record_wire(self, "proposal")
 
 
 def reject_raw_control_data(value: Any) -> None:
@@ -276,6 +274,13 @@ def _json_value(value: Any, field_name: str) -> Any:
         return json.loads(encoded)
     except (TypeError, ValueError) as exc:
         raise CanonicalActionProtocolError(f"{field_name} 必须是可序列化 JSON 值。") from exc
+
+
+def _record_wire(value: Any, field_name: str, *, omit: Iterable[str] = ()) -> dict[str, Any]:
+    result = _json_value(asdict(value), field_name)
+    for key in omit:
+        result.pop(key, None)
+    return result
 
 
 def _digest(value: Any) -> str:
@@ -375,14 +380,9 @@ class VisualClaim:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return {
-            "claim_id": self.claim_id,
-            "subject_ref": self.subject_ref,
-            "predicate": self.predicate,
-            "value": _json_value(self.value, "claim.value"),
-            "confidence": float(self.confidence),
-            "source_digest": self.source_digest,
-        }
+        result = _record_wire(self, "claim")
+        result["confidence"] = float(self.confidence)
+        return result
 
 
 @dataclass(frozen=True)
@@ -408,13 +408,7 @@ class VisualRelation:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return {
-            "relation_id": self.relation_id,
-            "subject_ref": self.subject_ref,
-            "relation": self.relation,
-            "object_ref": self.object_ref,
-            "support_claim_ids": list(self.support_claim_ids),
-        }
+        return _record_wire(self, "relation")
 
 
 @dataclass(frozen=True)
@@ -438,12 +432,7 @@ class Affordance:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return {
-            "affordance_id": self.affordance_id,
-            "subject_ref": self.subject_ref,
-            "action_kind": self.action_kind,
-            "support_claim_ids": list(self.support_claim_ids),
-        }
+        return _record_wire(self, "affordance")
 
 
 @dataclass(frozen=True)
@@ -473,14 +462,8 @@ class StateExpectation:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        result = {
-            "subject_ref": self.subject_ref,
-            "predicate": self.predicate,
-            "operator": self.operator,
-        }
-        if self.operator in {"equals", "not_equals"}:
-            result["value"] = _json_value(self.value, "expectation.value")
-        return result
+        omit = () if self.operator in {"equals", "not_equals"} else ("value",)
+        return _record_wire(self, "expectation", omit=omit)
 
 
 @dataclass(frozen=True)
@@ -512,12 +495,7 @@ class TypedStateTransition:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return {
-            "transition_id": self.transition_id,
-            "precondition_claim_ids": list(self.precondition_claim_ids),
-            "expectations": [item.to_dict() for item in self.expectations],
-            "exploratory": self.exploratory,
-        }
+        return _record_wire(self, "transition")
 
 
 @dataclass(frozen=True)
@@ -555,16 +533,7 @@ class CanonicalActionCandidate:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return {
-            "candidate_id": self.candidate_id,
-            "action_kind": self.action_kind,
-            "subject_refs": list(self.subject_refs),
-            "affordance_ids": list(self.affordance_ids),
-            "relation_ids": list(self.relation_ids),
-            "parameters": _json_value(self.parameters, "candidate.parameters"),
-            "effect_ref": self.effect_ref,
-            "transition": self.transition.to_dict(),
-        }
+        return _record_wire(self, "candidate")
 
 
 @dataclass(frozen=True)
@@ -670,20 +639,7 @@ class CanonicalActionCatalog:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return {
-            "protocol_version": self.protocol_version,
-            "task_id": self.task_id,
-            "device_id": self.device_id,
-            "revision": self.revision,
-            "scene_digest": self.scene_digest,
-            "semantic_digest": self.semantic_digest,
-            "status": self.status,
-            "warnings": list(self.warnings),
-            "claims": [item.to_dict() for item in self.claims],
-            "relations": [item.to_dict() for item in self.relations],
-            "affordances": [item.to_dict() for item in self.affordances],
-            "candidates": [item.to_dict() for item in self.candidates],
-        }
+        return _record_wire(self, "catalog")
 
     @property
     def report_digest(self) -> str:

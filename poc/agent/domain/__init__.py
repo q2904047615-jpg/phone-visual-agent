@@ -1,6 +1,10 @@
 """Domain contracts shared by the modular monolith."""
 
-from .app_surface_lineage import VerifiedAppSurfaceLineage
+from .app_surface_lineage import (
+    AppSurfaceLineageAuthority,
+    AppSurfaceLineageError,
+    VerifiedAppSurfaceLineage,
+)
 from .canonical_selection import (
     CANONICAL_SELECTION_RECEIPT_VERSION,
     CanonicalSelectionReceipt,
@@ -44,6 +48,8 @@ __all__ = [
     "AgentSessionDeviceMismatchError",
     "AgentSessionNotFoundError",
     "AgentSessionRepository",
+    "AppSurfaceLineageAuthority",
+    "AppSurfaceLineageError",
     "AgentEvidenceStoreFactory",
     "AgentEvidenceStorePort",
     "CanonicalSelectionReceipt",

@@ -3664,12 +3664,10 @@ class GenericActionAdapterTests(unittest.TestCase):
     def test_confirmed_chinese_input_types_pinyin_then_requires_exact_candidate(self):
         class ContinuationObserver(FakeSceneObserver):
             input_lineage_store = object()
-            supports_typed_input_continuation = True
 
             def __init__(self, scenes):
                 super().__init__(scenes)
                 self.lineage_overrides = []
-                self.prior_scenes = []
 
             def observe(
                 self,
@@ -3678,10 +3676,8 @@ class GenericActionAdapterTests(unittest.TestCase):
                 goal_context=None,
                 device_id=None,
                 input_lineage_override=None,
-                prior_scene=None,
             ):
                 self.lineage_overrides.append(input_lineage_override)
-                self.prior_scenes.append(prior_scene)
                 return super().observe(frames=frames, goal_context=goal_context)
 
         def input_scene(fingerprint, *, ime=False):
@@ -3766,11 +3762,6 @@ class GenericActionAdapterTests(unittest.TestCase):
                 getattr(item, "source", None)
                 for item in observer.lineage_overrides
             ],
-        )
-        self.assertEqual("before", observer.prior_scenes[-1].fingerprint)
-        self.assertEqual(
-            "input_field_1",
-            observer.prior_scenes[-1].elements[0].states["input_field_id"],
         )
 
     def test_confirmed_chinese_input_accepts_localized_same_surface_identity(self):

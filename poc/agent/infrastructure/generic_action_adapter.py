@@ -1366,7 +1366,6 @@ class GenericSingleActionAdapter:
         goal_context: dict[str, Any],
         *,
         input_lineage_override: TypedInputLineage | None = None,
-        prior_scene: UIScene | None = None,
         post_action_context: PostActionVisualContext | None = None,
     ) -> UIScene:
         kwargs: dict[str, Any] = {
@@ -1376,16 +1375,6 @@ class GenericSingleActionAdapter:
         if getattr(self.observer, "input_lineage_store", None) is not None:
             kwargs["device_id"] = self.device_id
             kwargs["input_lineage_override"] = input_lineage_override
-        if (
-            prior_scene is not None
-            and getattr(
-                self.observer,
-                "supports_typed_input_continuation",
-                False,
-            )
-            is True
-        ):
-            kwargs["prior_scene"] = prior_scene
         if (
             post_action_context is not None
             and getattr(
@@ -1669,7 +1658,6 @@ class GenericSingleActionAdapter:
                     frames,
                     observation_context,
                     input_lineage_override=input_lineage_override,
-                    prior_scene=before,
                     post_action_context=post_action_visual_context,
                 )
             except RuntimeError as exc:

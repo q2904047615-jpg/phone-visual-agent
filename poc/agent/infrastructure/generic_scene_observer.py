@@ -135,12 +135,6 @@ STAGE_LABELS = {
 }
 
 
-
-
-
-
-
-
 class _SingleStepObserverBase:
     """Shared state and transport for the sole production scene observer."""
 
@@ -163,7 +157,6 @@ class _SingleStepObserverBase:
         self._stage_lock = threading.RLock()
         self._current_stage = "idle"
         self._last_stage = "idle"
-        self.supports_typed_input_continuation = True
         self.supports_post_action_visual_context = True
         self._observation_cache_lock = threading.RLock()
         self._observation_cache: OrderedDict[str, UIScene] = OrderedDict()
@@ -272,13 +265,8 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
         goal_context: dict[str, Any] | None = None,
         device_id: str | None = None,
         input_lineage_override: TypedInputLineage | None = None,
-        prior_scene: UIScene | None = None,
         post_action_context: post_action_contract.PostActionVisualContext | dict[str, Any] | None = None,
     ) -> UIScene:
-        # Never reuse model-authored facts from the prior scene.  The only
-        # cross-step visual context is a locally minted typed action summary;
-        # current pixels remain the sole source of current-screen facts.
-        del prior_scene
         if isinstance(post_action_context, dict):
             post_action_context = post_action_contract.PostActionVisualContext.from_dict(
                 post_action_context
@@ -447,14 +435,7 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                 else None
             )
             if input_structure_required:
-                _strip_preliminary_input_geometry_for_dedicated_audit(
-                    scene_payload,
-                    context,
-                )
-                _strip_preliminary_keyboard_containers_for_dedicated_audit(
-                    scene_payload,
-                    context,
-                )
+                _strip_preliminary_input_elements(scene_payload, context)
             obstructions = consensus_top_edge_obstructions(
                 frames[stable_tail_start:]
             )
@@ -466,7 +447,6 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                         separators=(",", ":"),
                     ),
                     fingerprint=fingerprint,
-                    goal_context=context,
                     camera_layout_orientation=_camera_layout_orientation(frame),
                 ),
                 obstructions,
@@ -522,7 +502,6 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                         ),
                         fingerprint=fingerprint,
                         goal_context=context,
-                        ledger_input_value=ledger_value_hint,
                         verified_input_lineage=verified_lineage,
                         device_id=device_id,
                         lineage_frame=frame,
@@ -790,38 +769,6 @@ CAMERA_ALIGNMENT_OBSERVATION_RULE = (
 )
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _single_step_observation_prompt(
     context: dict[str, Any],
     *,
@@ -842,7 +789,6 @@ def _single_step_observation_prompt(
     if include_input_structure:
         input_contract = _input_structure_audit_prompt(
             context,
-            roi_bounds=None,
             current_input_text=current_input_text,
             wire_height=request_height,
         )
@@ -970,46 +916,6 @@ def _normalize_single_step_wire_coordinates(
 
     normalize(payload.get("scene"))
     normalize(payload.get("input_structure"))
-    scene = payload.get("scene")
-    input_payload = payload.get("input_structure")
-    scene_inputs = [
-        item
-        for item in (scene.get("elements") or [])
-        if isinstance(item, dict)
-        and item.get("role") == "input"
-        and isinstance(item.get("states"), dict)
-        and item["states"].get("goal_relevant") is True
-        and isinstance(item.get("bounds"), list)
-    ] if isinstance(scene, dict) else []
-    audited_inputs = [
-        item
-        for item in (input_payload.get("application_inputs") or [])
-        if isinstance(item, dict) and isinstance(item.get("bounds"), list)
-    ] if isinstance(input_payload, dict) else []
-    if scene_inputs and audited_inputs:
-        def overlap_ratio(first: list[Any], second: list[Any]) -> float:
-            left = max(float(first[0]), float(second[0]))
-            top = max(float(first[1]), float(second[1]))
-            right = min(float(first[2]), float(second[2]))
-            bottom = min(float(first[3]), float(second[3]))
-            intersection = max(0.0, right - left) * max(0.0, bottom - top)
-            first_area = (float(first[2]) - float(first[0])) * (
-                float(first[3]) - float(first[1])
-            )
-            second_area = (float(second[2]) - float(second[0])) * (
-                float(second[3]) - float(second[1])
-            )
-            return intersection / max(1.0, min(first_area, second_area))
-
-        if not any(
-            overlap_ratio(scene_item["bounds"], audit_item["bounds"]) >= 0.5
-            for scene_item in scene_inputs
-            for audit_item in audited_inputs
-        ):
-            raise UISceneError(
-                "scene与input_structure没有使用同一个"
-                "axis_grid坐标空间。"
-            )
     payload.pop("coordinate_space", None)
     return {
         "wire_kind": "axis_grid",
@@ -1173,12 +1079,6 @@ def _compact_prompt(
 """
 
 
-
-
-
-
-
-
 def _input_audit_literal_key_targets(
     context: dict[str, Any],
     *,
@@ -1224,13 +1124,11 @@ def _input_audit_literal_key_targets(
 def _input_structure_audit_prompt(
     context: dict[str, Any],
     *,
-    roi_bounds: tuple[int, int, int, int] | None,
-    crop_local: bool = False,
     current_input_text: str | None = None,
     wire_height: int = 1000,
 ) -> str:
     context = _observation_goal_context(context)
-    coordinate_height = 1000 if crop_local else wire_height
+    coordinate_height = wire_height
     keyboard_min_height = max(1, round(180 * coordinate_height / 1000))
     literal_key_targets = _input_audit_literal_key_targets(
         context,
@@ -1276,40 +1174,14 @@ def _input_structure_audit_prompt(
             and next_input_step.kind == "literal_key"
             and next_input_step.segment == "\n"
         )
-    if crop_local:
-        if roi_bounds is None:
-            raise ValueError("crop-local 输入审计必须绑定 ROI。")
-        image_contract = (
-            "Image 1 is the sole read-only crop of the phone frame at the "
-            f"coarse full-frame ROI {list(roi_bounds)}. Image 1 itself owns a "
-            "crop-local 0..1000 coordinate system. Never return full-frame "
-            "coordinates; local code maps valid crop-local geometry back to "
-            "the full frame."
-        )
-        coordinate_contract = (
-            "All bounds and qwerty anchor points MUST use Image 1 crop-local "
-            "normalized coordinates 0..1000. Here 0 and 1000 are the four "
-            "edges of this crop. Never copy source-pixel or full-frame "
-            "coordinates. Any complete structure next to an internal crop "
-            "edge MUST keep at least 15 units of crop-local margin from that "
-            "edge. If a structure cannot be bounded with that margin in this "
-            "crop-local coordinate system, omit it instead of clipping or "
-            "converting it."
-        )
-    else:
-        image_contract = (
-            "Image 1 is always the complete phone frame. "
-            + _input_audit_detail_note(roi_bounds)
-        )
-        coordinate_contract = (
-            "All bounds and qwerty anchor points MUST use the one declared "
-            f"full-frame axis grid: X is 0..1000 and Y is 0..{wire_height}. "
-            "The left/right edges are x=0/x=1000; the top/bottom edges are "
-            f"y=0/y={wire_height}. Never guess a phone logical resolution, "
-            "conventional display height, crop grid, or a second scale. If a "
-            "structure cannot be bounded in this exact coordinate system, "
-            "omit it instead of clipping or converting it."
-        )
+    image_contract = "Image 1 is the complete phone frame."
+    coordinate_contract = (
+        "All bounds and qwerty anchor points use the one declared full-frame "
+        f"axis grid: X is 0..1000 and Y is 0..{wire_height}. The left/right "
+        "edges are x=0/x=1000; the top/bottom edges are y=0/"
+        f"y={wire_height}. Never guess another resolution or coordinate scale. "
+        "Omit a structure that cannot be bounded in this exact grid."
+    )
     return f"""
 You are a read-only, app-independent UI structure auditor. The normal scene observer did not establish an input target.
 Goal context (evidence selection only): {json.dumps(context, ensure_ascii=False, separators=(',', ':'))}
@@ -1365,47 +1237,10 @@ Return empty arrays when their geometry is not visible. Never merge a clipped st
 """
 
 
-def _input_audit_detail_note(
-    roi_bounds: tuple[int, int, int, int] | None,
-) -> str:
-    if roi_bounds is None:
-        return "No detail crop is provided."
-    return (
-        f"Image 2 is only a magnified read-only crop of Image 1 at {list(roi_bounds)}. "
-        "Use it to read details, but never use Image 2 as a coordinate system."
-    )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _parse_scene(
     raw: str,
     *,
     fingerprint: str,
-    goal_context: dict[str, Any] | None = None,
     camera_layout_orientation: str | None = None,
 ) -> UIScene:
     try:
@@ -1424,10 +1259,6 @@ def _parse_scene(
         ):
             raise UISceneError("模型报告的相机画布方向与本地稳定帧尺寸不一致。")
         _strip_model_authored_local_attestations(payload)
-        _strip_preliminary_elements_for_keyboard_mode_audit(
-            payload,
-            goal_context or {},
-        )
         return UIScene.from_dict(
             payload,
             coordinate_scale=1000.0,
@@ -1493,10 +1324,6 @@ def _drop_forbidden_camera_alignment_evidence(payload: dict[str, Any]) -> None:
     alignment["evidence"] = []
 
 
-
-
-
-
 def _active_subgoal_visual_context(context: dict[str, Any]) -> dict[str, Any]:
     """Return the current graph node's observation focus when it is present."""
 
@@ -1550,36 +1377,6 @@ def _observation_goal_context(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _valid_1000_bounds(value: Any) -> bool:
     if not isinstance(value, (list, tuple)) or len(value) != 4:
         return False
@@ -1592,148 +1389,46 @@ def _valid_1000_bounds(value: Any) -> bool:
     return 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
 
 
-def _typed_prefix_input_survives_invalid_keyboard_geometry(
-    application_inputs: Any,
-    goal_context: dict[str, Any],
-) -> bool:
-    """Keep one typed prefix as verification-only evidence.
-
-    A post-action audit can read the exact application value while returning
-    unusable keyboard geometry. The field value is independent evidence, but
-    it may survive only as a non-actionable typed prefix. No keyboard fact or
-    coordinate from the malformed portion is retained.
-    """
-
-    target_text = _goal_active_input_transaction_text(goal_context)
-    field_id, field_label, _multiline = _goal_active_input_field(goal_context)
-    if (
-        not target_text
-        or not field_id
-        or not isinstance(application_inputs, list)
-        or len(application_inputs) != 1
-    ):
-        return False
-    item = application_inputs[0]
-    required = {
-        "structure_id",
-        "bounds",
-        "fully_visible",
-        "text",
-        "placeholder",
-        "visible_editable_cues",
-        "caret_line_index",
-        "confidence",
-        "right_button",
-    }
-    if (
-        not isinstance(item, dict)
-        or not required.issubset(item)
-        or set(item) - required - {"field_labels"}
-        or item.get("fully_visible") is not True
-        or not _valid_1000_bounds(item.get("bounds"))
-    ):
-        return False
-    confidence = item.get("confidence")
-    if (
-        isinstance(confidence, bool)
-        or not isinstance(confidence, (int, float))
-        or float(confidence) < 0.9
-    ):
-        return False
-    observed = item.get("text")
-    if (
-        not isinstance(observed, str)
-        or not observed
-        or observed == target_text
-        or not target_text.startswith(observed)
-    ):
-        return False
-    cues = item.get("visible_editable_cues")
-    if (
-        not isinstance(cues, list)
-        or not cues
-        or len(cues) > 4
-        or any(not isinstance(value, str) or not value.strip() for value in cues)
-    ):
-        return False
-    labels = item.get("field_labels", [])
-    if (
-        not isinstance(labels, list)
-        or len(labels) > 6
-        or any(not isinstance(value, str) or not value.strip() for value in labels)
-    ):
-        return False
-    if field_label and sum(
-        value.strip().casefold() == field_label.casefold() for value in labels
-    ) != 1:
-        return False
-    return True
-
-
-def _strip_preliminary_elements_for_keyboard_mode_audit(
-    payload: dict[str, Any],
-    goal_context: dict[str, Any],
-) -> None:
-    """Make the strict input audit the sole element authority for mode goals.
-
-    An explicit keyboard-mode goal always runs the independent full-frame input
-    structure audit. Compact elements therefore cannot authorize or block that
-    audit based on any model-authored role, meaning, label, state, or coordinate
-    frame. If every element uses the standard passive scene shape and contains
-    no action-like field, the whole preliminary collection is discarded without
-    reading or reusing any value. Otherwise it remains for strict validation to
-    fail closed. Scene identity, system UI and camera alignment remain intact.
-    """
-
-    if not _goal_requests_keyboard_mode_switch(goal_context):
-        return
-    elements = payload.get("elements")
-    if not isinstance(elements, list):
-        return
-    for item in elements:
-        if not _is_passive_scene_element_wire_object(item):
-            return
-    payload["elements"] = []
-
-
-def _strip_preliminary_input_geometry_for_dedicated_audit(
+def _strip_preliminary_input_elements(
     payload: dict[str, Any],
     goal_context: dict[str, Any],
 ) -> bool:
-    """Remove passive compact input proposals before the strict input audit.
-
-    For an active input subgoal, the later full-frame input-structure audit is
-    the sole geometry authority. Compact input boxes are therefore evidence
-    selection hints only and cannot block that audit merely because the vision
-    model used source-pixel or width-scaled coordinates. Only exact passive
-    scene elements are removable; an input carrying an action-like field,
-    malformed states/evidence, or a nonstandard shape remains for strict parsing
-    to reject. Non-input page identity and navigation facts are preserved.
-    """
-
     if not _goal_requests_input(goal_context):
         return False
     elements = payload.get("elements")
     if not isinstance(elements, list):
         return False
+    mode_only = _goal_requests_keyboard_mode_switch(goal_context)
+    text_input = _goal_has_explicit_input_text(goal_context)
+    keyboard_meanings = {
+        "input_exact_enter_key",
+        "input_exact_literal_key",
+        "switch_keyboard_case",
+        "switch_keyboard_input_mode",
+        "switch_keyboard_layout",
+    }
     retained: list[Any] = []
-    isolated = False
+    removed = False
     for item in elements:
-        removable_input = (
-            _is_passive_scene_element_wire_object(item)
-            and str(item.get("role") or "").strip() == "input"
-            and isinstance(item.get("bounds"), list)
-            and len(item["bounds"]) == 4
-            and isinstance(item.get("states"), dict)
-            and isinstance(item.get("evidence"), list)
+        passive = _is_passive_scene_element_wire_object(item)
+        role = str(item.get("role") or "").strip() if passive else ""
+        meaning = str(item.get("meaning") or "").strip().casefold() if passive else ""
+        dedicated = bool(
+            mode_only
+            or role == "input"
+            or text_input
+            and (
+                role == "container" and "keyboard" in meaning
+                or role in {"button", "key"} and meaning in keyboard_meanings
+            )
         )
-        if removable_input:
-            isolated = True
-            continue
-        retained.append(item)
-    if isolated:
+        if passive and dedicated:
+            removed = True
+        else:
+            retained.append(item)
+    if removed:
         payload["elements"] = retained
-    return isolated
+    return removed
 
 
 def _single_step_input_surface_attestation(
@@ -1801,138 +1496,6 @@ def _single_step_input_surface_attestation(
             }
         )
     return candidates[0] if len(candidates) == 1 else None
-
-
-def _strip_preliminary_keyboard_containers_for_dedicated_audit(
-    payload: dict[str, Any],
-    goal_context: dict[str, Any],
-) -> bool:
-    """Remove compact keyboard geometry before the sole strict input audit.
-
-    During an explicit text-input goal the later independent input-structure
-    audit is the sole authority for keyboard layout, mode and key geometry.
-    Compact observation may still redundantly emit a keyboard container or a
-    keyboard-specific control.  Keeping either copy lets malformed compact
-    geometry veto the dedicated audit before it can run.  Discard only exact
-    scene elements whose typed meaning unambiguously belongs to that dedicated
-    keyboard catalog.  Action-bearing or otherwise ambiguous elements remain
-    so the normal scene parser still fails closed.
-    """
-
-    if not _goal_has_explicit_input_text(goal_context):
-        return False
-    elements = payload.get("elements")
-    if not isinstance(elements, list):
-        return False
-    retained: list[Any] = []
-    isolated = False
-    dedicated_keyboard_meanings = {
-        "input_exact_enter_key",
-        "input_exact_literal_key",
-        "switch_keyboard_case",
-        "switch_keyboard_input_mode",
-        "switch_keyboard_layout",
-    }
-    for item in elements:
-        states = item.get("states") if isinstance(item, dict) else None
-        meaning = (
-            str(item.get("meaning") or "").strip().casefold()
-            if isinstance(item, dict)
-            else ""
-        )
-        meaning_tokens = {
-            token
-            for token in re.split(r"[^a-z0-9]+", meaning)
-            if token
-        }
-        confidence = item.get("confidence") if isinstance(item, dict) else None
-        removable_keyboard_container = (
-            _is_passive_scene_element_wire_object(item)
-            and isinstance(item.get("element_id"), str)
-            and bool(item["element_id"].strip())
-            and str(item.get("role") or "").strip() == "container"
-            and isinstance(item.get("meaning"), str)
-            and "keyboard" in meaning_tokens
-            and isinstance(item.get("label"), str)
-            and _valid_1000_bounds(item.get("bounds"))
-            and not isinstance(confidence, bool)
-            and isinstance(confidence, (int, float))
-            and math.isfinite(float(confidence))
-            and 0.0 <= float(confidence) <= 1.0
-            and isinstance(states, dict)
-            and set(states).issubset(
-                {
-                    "goal_relevant",
-                    "fully_visible",
-                    "keyboard_layout",
-                    "keyboard_input_mode",
-                }
-            )
-            and (
-                "keyboard_layout" in states
-                or "keyboard_input_mode" in states
-            )
-            and (
-                "goal_relevant" not in states
-                or isinstance(states["goal_relevant"], bool)
-            )
-            and (
-                "fully_visible" not in states
-                or isinstance(states["fully_visible"], bool)
-            )
-            and (
-                "keyboard_layout" not in states
-                or states["keyboard_layout"]
-                in {"qwerty", "numeric", "symbol", "unknown"}
-            )
-            and (
-                "keyboard_input_mode" not in states
-                or states["keyboard_input_mode"]
-                in {"direct_latin", "chinese_pinyin", "unknown"}
-            )
-            and isinstance(item.get("evidence"), list)
-            and all(isinstance(part, str) for part in item["evidence"])
-        )
-        removable_keyboard_control = (
-            _is_passive_scene_element_wire_object(item)
-            and isinstance(item.get("element_id"), str)
-            and bool(item["element_id"].strip())
-            and str(item.get("role") or "").strip() in {"button", "key"}
-            and meaning in dedicated_keyboard_meanings
-            and isinstance(item.get("label"), str)
-            and isinstance(states, dict)
-            and isinstance(item.get("evidence"), list)
-            and all(isinstance(part, str) for part in item["evidence"])
-        )
-        if removable_keyboard_container or removable_keyboard_control:
-            isolated = True
-            continue
-        retained.append(item)
-    if isolated:
-        payload["elements"] = retained
-    return isolated
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _goal_requests_input(context: dict[str, Any]) -> bool:
@@ -2010,10 +1573,6 @@ def _goal_requests_input(context: dict[str, Any]) -> bool:
     )
 
 
-
-
-
-
 def _goal_requests_keyboard_mode_switch(context: dict[str, Any]) -> bool:
     focused = _active_subgoal_visual_context(context)
     selectors: list[Any] = [focused]
@@ -2056,8 +1615,6 @@ def _goal_requests_keyboard_mode_switch(context: dict[str, Any]) -> bool:
     )
 
 
-
-
 def _goal_requests_active_verified_text_clear(context: dict[str, Any]) -> bool:
     """Return true only when the current graph node is the clear step."""
 
@@ -2085,8 +1642,6 @@ def _goal_requests_active_verified_text_clear(context: dict[str, Any]) -> bool:
             "delete",
         )
     )
-
-
 
 
 def _input_audit_established_local_target(scene: UIScene) -> bool:
@@ -2345,54 +1900,6 @@ def _goal_has_explicit_input_text(context: dict[str, Any]) -> bool:
     )
 
 
-def _goal_requests_keyboard_dismissal(context: dict[str, Any]) -> bool:
-    visible = json.dumps(
-        _active_subgoal_visual_context(context),
-        ensure_ascii=False,
-    ).casefold()
-    keyboard = re.search(
-        r"(?:软键盘|键盘|输入法|\b(?:soft\s+)?keyboard\b|\bime\b)",
-        visible,
-        re.IGNORECASE,
-    )
-    dismissal = re.search(
-        r"(?:收起|隐藏|关闭|不再显示|不可见|未显示|"
-        r"\b(?:hide|hidden|dismiss|close|closed|not\s+visible|no\s+longer\s+visible)\b)",
-        visible,
-        re.IGNORECASE,
-    )
-    return bool(keyboard and dismissal)
-
-
-
-
-def _scene_reports_keyboard(scene: UIScene) -> bool:
-    visible = " ".join(
-        [
-            scene.summary,
-            *scene.overlays,
-            *(
-                " ".join(
-                    [
-                        element.role,
-                        element.meaning,
-                        element.label,
-                        *element.evidence,
-                    ]
-                )
-                for element in scene.elements
-            ),
-        ]
-    )
-    return bool(
-        re.search(r"(?:软键盘|输入法|键盘|keyboard|ime)", visible, re.IGNORECASE)
-    )
-
-
-
-
-
-
 def _adjacent_exact_preedit_cue(
     trusted_input: dict[str, Any],
     trusted_preedits: list[dict[str, Any]],
@@ -2463,7 +1970,6 @@ def _resolve_pending_ime_candidate_input_state(
         or input_field_id != verified_input_lineage.input_field_id
         or not isinstance(authorized_text, str)
         or not authorized_text.startswith(verified_input_lineage.exact_value)
-        or trusted_input.get("right_button") is not None
         or not isinstance(trusted_input.get("caret_line_index"), int)
         or len(trusted_preedits) != 1
     ):
@@ -3061,13 +2567,185 @@ def _ime_candidate_is_near_preedit(
     )
 
 
+def _audit_strings(
+    value: Any,
+    *,
+    name: str,
+    limit: int,
+    allow_empty: bool,
+) -> tuple[str, ...]:
+    if not isinstance(value, list) or len(value) > limit or any(
+        not isinstance(item, str)
+        or not allow_empty and (
+            not item.strip()
+            or len(item.strip()) > 120
+            or "\n" in item
+            or "\r" in item
+        )
+        for item in value
+    ):
+        raise UISceneError(f"{name} 不符合输入结构协议。")
+    return tuple(dict.fromkeys(item.strip()[:120] for item in value if item.strip()))
+
+
+def _same_frame_input_evidence(
+    input_bounds: tuple[float, float, float, float],
+    *,
+    input_count: int,
+    text: str,
+    surface: dict[str, Any] | None,
+) -> tuple[str, ...]:
+    if input_count != 1 or text or not isinstance(surface, dict):
+        return ()
+    surface_bounds = surface.get("bounds")
+    evidence = surface.get("evidence")
+    if not _valid_1000_bounds(surface_bounds) or not isinstance(evidence, (list, tuple)):
+        return ()
+    other = tuple(float(value) for value in surface_bounds)
+    if (
+        _bounds_overlap_ratio(input_bounds, other) < 0.85
+        or _bounds_overlap_ratio(other, input_bounds) < 0.85
+    ):
+        return ()
+    return tuple(str(value).strip()[:200] for value in evidence if str(value).strip())
+
+
+def _optional_right_button(
+    value: Any,
+    *,
+    input_bounds: tuple[float, float, float, float],
+) -> dict[str, Any] | None:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"label", "bounds", "confidence"}
+        or not _valid_1000_bounds(value.get("bounds"))
+    ):
+        return None
+    try:
+        confidence = _audit_confidence(value.get("confidence"), "right_button")
+    except UISceneError:
+        return None
+    label = str(value.get("label") or "").strip()
+    bounds = tuple(float(part) for part in value["bounds"])
+    width = input_bounds[2] - input_bounds[0]
+    if (
+        confidence < 0.9
+        or not label
+        or not _bounds_inside(bounds, input_bounds, tolerance=20)
+        or bounds[0] <= input_bounds[0] + 0.55 * width
+        or _vertical_overlap_ratio(bounds, input_bounds) < 0.8
+    ):
+        return None
+    return {
+        "label": label,
+        "bounds": [round(part) for part in bounds],
+        "confidence": confidence,
+    }
+
+
+def _reconcile_verified_input_lineage(
+    trusted_input: dict[str, Any],
+    trusted_preedits: list[dict[str, Any]],
+    lineage: TypedInputLineage,
+    *,
+    device_id: str,
+    scene: UIScene,
+    input_field_id: str,
+    active_text: str,
+    multiline: bool,
+    frame: Image.Image | None,
+    keyboard_input_mode: str,
+) -> dict[str, Any]:
+    raw_text = trusted_input["text"]
+    bounds = tuple(float(part) / 1000.0 for part in trusted_input["input_bounds"])
+    cues = tuple(trusted_input["visible_editable_cues"])
+    if (
+        keyboard_input_mode == "direct_latin"
+        and lineage.exact_value not in cues
+        and _adjacent_exact_preedit_cue(
+            trusted_input, trusted_preedits, lineage.exact_value
+        )
+    ):
+        cues = (*cues, lineage.exact_value)
+    identity = {
+        "device_id": device_id,
+        "app_id": scene.app_id,
+        "screen_id": scene.screen_id,
+        "raw_value": raw_text,
+        "input_bounds": bounds,
+    }
+    checks = (
+        (
+            "verified_trailing_newline",
+            lambda: lineage_matches_trailing_newline_cue(
+                lineage,
+                **identity,
+                visible_editable_cues=cues,
+                caret_line_index=trusted_input.get("caret_line_index"),
+                input_field_id=input_field_id,
+                current_frame=frame,
+            ),
+        ),
+        (
+            "lineage_visible_cue_text",
+            lambda: lineage.matches_pending_input_state_cue(
+                **identity,
+                visible_editable_cues=cues,
+                input_field_id=input_field_id,
+            ),
+        ),
+        (
+            "lineage_persisted_visible_cue_text",
+            lambda: lineage_matches_persisted_surface_cue(
+                lineage,
+                **identity,
+                visible_editable_cues=cues,
+                current_frame=frame,
+            ),
+        ),
+        (
+            "lineage_visual_text",
+            lambda: not multiline
+            and lineage_matches_visual(
+                lineage,
+                **identity,
+                current_frame=frame,
+            ),
+        ),
+    )
+    result = trusted_input
+    for key, predicate in checks:
+        if predicate():
+            result = dict(result)
+            result[key] = True if key == "verified_trailing_newline" else (
+                raw_text if key == "lineage_visual_text" else lineage.exact_value
+            )
+            result["text"] = lineage.exact_value
+            break
+    if result["text"] == "":
+        prefix = lineage.pending_text_committed_prefix(
+            device_id=device_id,
+            app_id=scene.app_id,
+            screen_id=scene.screen_id,
+            authorized_text=active_text,
+            raw_value="",
+            preedit_text=_unique_clearable_ime_preedit(result, trusted_preedits),
+            input_bounds=bounds,
+            input_field_id=input_field_id,
+        )
+        if prefix is not None:
+            result = dict(result)
+            result["lineage_pending_text_prefix"] = prefix
+            result["text"] = prefix
+    return result
+
+
 def _apply_input_structure_audit(
     scene: UIScene,
     raw: str,
     *,
     fingerprint: str,
     goal_context: dict[str, Any],
-    ledger_input_value: str | None = None,
     verified_input_lineage: TypedInputLineage | None = None,
     device_id: str | None = None,
     lineage_frame: Image.Image | None = None,
@@ -3151,96 +2829,62 @@ def _apply_input_structure_audit(
                 qwerty_row_frames,
                 keyboard["qwerty_anchors"],
             )
-        keyboard_bounds: tuple[float, float, float, float] | None = None
-        boundsless_keyboard_dismissal = False
-        typed_prefix_verification_only = False
-        if keyboard_visible:
-            locally_rebuilt_keyboard_bounds = (
-                _keyboard_bounds_from_locally_snapped_qwerty_anchors(
-                    locally_snapped_qwerty_anchors
-                )
-                if locally_snapped_qwerty_anchors is not None
-                else None
+        keyboard_bounds = (
+            _keyboard_bounds_from_locally_snapped_qwerty_anchors(
+                locally_snapped_qwerty_anchors
             )
-            valid_keyboard_bounds = locally_rebuilt_keyboard_bounds is not None
-            if valid_keyboard_bounds:
-                keyboard_bounds = locally_rebuilt_keyboard_bounds
-            else:
-                valid_keyboard_bounds = _valid_1000_bounds(keyboard.get("bounds"))
-            if valid_keyboard_bounds:
-                if keyboard_bounds is None:
-                    keyboard_bounds = tuple(float(value) for value in keyboard["bounds"])
-                valid_keyboard_bounds = bool(
-                    keyboard_bounds[2] - keyboard_bounds[0] >= 300
-                    and keyboard_bounds[3] - keyboard_bounds[1] >= 180
+            if locally_snapped_qwerty_anchors is not None
+            else None
+        )
+        if (
+            keyboard_visible
+            and keyboard_bounds is None
+            and _valid_1000_bounds(keyboard.get("bounds"))
+        ):
+            keyboard_bounds = tuple(float(value) for value in keyboard["bounds"])
+        if keyboard_bounds is not None:
+            width = keyboard_bounds[2] - keyboard_bounds[0]
+            if (
+                keyboard_bounds[3] - keyboard_bounds[1] < 180
+                and width >= 300
+                and locally_snapped_qwerty_anchors is not None
+            ):
+                row_y = [
+                    float(point[1])
+                    for point in locally_snapped_qwerty_anchors.values()
+                ]
+                keyboard_bounds = (
+                    keyboard_bounds[0],
+                    min(keyboard_bounds[1], min(row_y)),
+                    keyboard_bounds[2],
+                    max(keyboard_bounds[3], max(row_y)),
                 )
-                if (
-                    not valid_keyboard_bounds
-                    and keyboard_bounds[2] - keyboard_bounds[0] >= 300
-                    and locally_snapped_qwerty_anchors is not None
-                ):
-                    local_row_y = [
-                        float(point[1])
-                        for point in locally_snapped_qwerty_anchors.values()
-                    ]
-                    keyboard_bounds = (
-                        keyboard_bounds[0],
-                        min(keyboard_bounds[1], min(local_row_y)),
-                        keyboard_bounds[2],
-                        max(keyboard_bounds[3], max(local_row_y)),
-                    )
-                    valid_keyboard_bounds = bool(
-                        keyboard_bounds[3] - keyboard_bounds[1] >= 180
-                    )
-            if not valid_keyboard_bounds:
-                if _typed_prefix_input_survives_invalid_keyboard_geometry(
-                    application_inputs,
-                    goal_context,
-                ):
-                    typed_prefix_verification_only = True
-                    keyboard_bounds = None
-                    keyboard_layout = "unknown"
-                    keyboard_input_mode = "unknown"
-                    keyboard_case_mode = "unknown"
-                    keyboard["mode_switch"] = None
-                    keyboard["backspace_key"] = None
-                    keyboard["enter_key"] = None
-                    keyboard["case_switch"] = None
-                    keyboard["literal_keys"] = []
-                    keyboard["layout_switches"] = []
-                    keyboard.pop("qwerty_anchors", None)
-                    ime_preedit_regions = []
-                elif not (
-                    _goal_requests_keyboard_dismissal(goal_context)
-                    and _scene_reports_keyboard(scene)
-                ):
-                    raise UISceneError("可见键盘必须提供有效 bounds。")
-                else:
-                    # A dismissal-only subgoal can safely authorize Android Back
-                    # without touching the keyboard. Keep only dual-source
-                    # presence/focus facts; discard all ungrounded keyboard
-                    # geometry, mode and switch claims so text input remains
-                    # impossible from this observation.
-                    keyboard_bounds = None
-                    boundsless_keyboard_dismissal = True
-                    keyboard_layout = "unknown"
-                    keyboard_input_mode = "unknown"
-                    keyboard_case_mode = "unknown"
-                    keyboard["mode_switch"] = None
-                    keyboard["backspace_key"] = None
-                    keyboard["enter_key"] = None
-                    keyboard["case_switch"] = None
-                    keyboard["literal_keys"] = []
-                    keyboard["layout_switches"] = []
-                    keyboard.pop("qwerty_anchors", None)
-        elif (
-            keyboard.get("bounds") is not None
-            or keyboard.get("mode_switch") is not None
-            or keyboard.get("backspace_key") is not None
-            or keyboard.get("enter_key") is not None
-            or keyboard.get("case_switch") is not None
-            or keyboard.get("literal_keys") not in (None, [])
-            or keyboard.get("layout_switches") not in (None, [])
+            if width < 300 or keyboard_bounds[3] - keyboard_bounds[1] < 180:
+                keyboard_bounds = None
+        keyboard_controls_revoked = keyboard_visible and keyboard_bounds is None
+        if keyboard_controls_revoked:
+            keyboard_layout = keyboard_input_mode = keyboard_case_mode = "unknown"
+            keyboard.update(
+                mode_switch=None,
+                backspace_key=None,
+                enter_key=None,
+                case_switch=None,
+                literal_keys=[],
+                layout_switches=[],
+            )
+            keyboard.pop("qwerty_anchors", None)
+            ime_preedit_regions = []
+        elif not keyboard_visible and any(
+            keyboard.get(key) not in (None, [])
+            for key in (
+                "bounds",
+                "mode_switch",
+                "backspace_key",
+                "enter_key",
+                "case_switch",
+                "literal_keys",
+                "layout_switches",
+            )
         ):
             raise UISceneError("不可见键盘不能包含键位或切换控件。")
         application_keyboard_bounds = keyboard_bounds
@@ -3294,231 +2938,135 @@ def _apply_input_structure_audit(
         tall_typed_active_contract = bool(
             unique_typed_active_field and active_label_occurrences == 1
         )
+        input_fields = {
+            "structure_id",
+            "bounds",
+            "fully_visible",
+            "text",
+            "placeholder",
+            "visible_editable_cues",
+            "caret_line_index",
+            "confidence",
+            "right_button",
+        }
         matches: list[dict[str, Any]] = []
         for item in application_inputs:
-            required_input_fields = {
-                "structure_id",
-                "bounds",
-                "fully_visible",
-                "text",
-                "placeholder",
-                "visible_editable_cues",
-                "caret_line_index",
-                "confidence",
-                "right_button",
-            }
             if (
                 not isinstance(item, dict)
-                or not required_input_fields.issubset(item)
-                or set(item) - required_input_fields - {"field_labels"}
+                or not input_fields.issubset(item)
+                or set(item) - input_fields - {"field_labels"}
+                or not isinstance(item.get("fully_visible"), bool)
+                or not _valid_1000_bounds(item.get("bounds"))
+                or not isinstance(item.get("text"), str)
             ):
                 raise UISceneError("应用输入结构字段不符合协议。")
-            button = item.get("right_button")
-            if _can_discard_separate_right_button(item, button):
-                # A separate adjacent control grants no authority. Discard
-                # only that optional object; never widen or move the input.
-                item["right_button"] = None
-                button = None
-            if button is not None and (
-                not isinstance(button, dict)
-                or set(button) != {"label", "bounds", "confidence"}
-            ):
-                raise UISceneError("输入结构审计 right_button 字段不符合协议。")
-            if not isinstance(item.get("fully_visible"), bool):
-                raise UISceneError("输入结构审计 fully_visible 必须是布尔值。")
-            if not _valid_1000_bounds(item.get("bounds")):
-                raise UISceneError("输入结构审计 bounds 不符合0..1000协议。")
             confidence = _audit_confidence(item.get("confidence"), "应用输入结构")
-            cues = item.get("visible_editable_cues")
-            if (
-                not isinstance(cues, list)
-                or len(cues) > 4
-                or any(not isinstance(value, str) for value in cues)
-            ):
-                raise UISceneError("visible_editable_cues 必须是最多4项的字符串数组。")
-            cues = [value.strip()[:120] for value in cues if value.strip()]
-            caret_line_index = item.get("caret_line_index")
-            if (
-                caret_line_index is not None
-                and (
-                    isinstance(caret_line_index, bool)
-                    or not isinstance(caret_line_index, int)
-                    or not 0 <= caret_line_index <= 30
+            cues = list(
+                _audit_strings(
+                    item.get("visible_editable_cues"),
+                    name="visible_editable_cues",
+                    limit=4,
+                    allow_empty=True,
                 )
-            ):
-                raise UISceneError(
-                    "caret_line_index 必须是0..30整数或 null。"
-                )
-            raw_field_labels = item.get("field_labels", [])
-            if (
-                not isinstance(raw_field_labels, list)
-                or len(raw_field_labels) > 6
-                or any(
-                    not isinstance(value, str)
-                    or not value.strip()
-                    or len(value.strip()) > 120
-                    or "\n" in value
-                    or "\r" in value
-                    for value in raw_field_labels
-                )
-            ):
-                raise UISceneError("field_labels 必须是最多6项的非空可见字符串数组。")
-            field_labels = tuple(
-                dict.fromkeys(value.strip() for value in raw_field_labels)
             )
+            labels = _audit_strings(
+                item.get("field_labels", []),
+                name="field_labels",
+                limit=6,
+                allow_empty=False,
+            )
+            caret = item.get("caret_line_index")
+            if (
+                caret is not None
+                and (
+                    isinstance(caret, bool)
+                    or not isinstance(caret, int)
+                    or not 0 <= caret <= 30
+                )
+            ):
+                raise UISceneError("caret_line_index 必须是0..30整数或 null。")
             if not item["fully_visible"] or confidence < 0.9:
                 continue
-            raw_text = item.get("text")
-            if not isinstance(raw_text, str):
-                raise UISceneError("应用输入结构 text 必须是字符串。")
-            # Exact input values may intentionally begin or end with spaces or
-            # real line feeds.  Placeholder/cue strings are descriptive, but
-            # the value itself must never be trimmed.
-            text = raw_text
+            text = item["text"]
             placeholder = str(item.get("placeholder") or "").strip()
-            same_frame_input_surface_evidence: tuple[str, ...] = ()
-            if (
-                len(application_inputs) == 1
-                and text == ""
-                and isinstance(single_step_input_surface, dict)
-            ):
-                attested_bounds = single_step_input_surface.get("bounds")
-                attested_evidence = single_step_input_surface.get("evidence")
-                if (
-                    isinstance(attested_bounds, (list, tuple))
-                    and len(attested_bounds) == 4
-                    and all(
-                        isinstance(value, (int, float))
-                        and not isinstance(value, bool)
-                        for value in attested_bounds
-                    )
-                    and isinstance(attested_evidence, (list, tuple))
-                    and attested_evidence
-                ):
-                    audit_bounds = tuple(float(value) for value in item["bounds"])
-                    scene_bounds = tuple(float(value) for value in attested_bounds)
-                    if (
-                        _bounds_overlap_ratio(audit_bounds, scene_bounds) >= 0.85
-                        and _bounds_overlap_ratio(scene_bounds, audit_bounds) >= 0.85
-                    ):
-                        same_frame_input_surface_evidence = tuple(
-                            str(value).strip()[:200]
-                            for value in attested_evidence
-                            if str(value).strip()
-                        )
-            pending_candidate_shell = bool(
+            bounds = tuple(float(value) for value in item["bounds"])
+            surface_evidence = _same_frame_input_evidence(
+                bounds,
+                input_count=len(application_inputs),
+                text=text,
+                surface=single_step_input_surface,
+            )
+            pending_shell = bool(
                 verified_input_lineage is not None
                 and verified_input_lineage.source
                 == "pending_verified_ime_candidate_action"
                 and active_field_id not in {"", "unknown"}
             )
-            if (
-                not text
-                and not placeholder
-                and not cues
-                and not pending_candidate_shell
-                and not same_frame_input_surface_evidence
-            ):
+            if not any((text, placeholder, cues, pending_shell, surface_evidence)):
                 continue
-            bounds = tuple(float(value) for value in item["bounds"])
-            width = bounds[2] - bounds[0]
-            height = bounds[3] - bounds[1]
-            pending_ime_candidate_state = _resolve_pending_ime_candidate_input_state(
-                {
-                    "text": text,
-                    "placeholder": placeholder,
-                    "visible_editable_cues": cues,
-                    "caret_line_index": caret_line_index,
-                    "field_labels": field_labels,
-                    "input_bounds": [round(value) for value in bounds],
-                    "right_button": button,
-                },
-                trusted_preedits,
-                application_input_count=len(application_inputs),
-                verified_input_lineage=verified_input_lineage,
-                device_id=str(device_id or ""),
-                app_id=scene.app_id,
-                screen_id=scene.screen_id,
-                input_field_id=active_field_id,
-                authorized_text=active_transaction_text,
-                keyboard_input_mode=keyboard_input_mode,
-            )
-            exact_active_label = bool(
+            exact_label = bool(
                 active_field_label
                 and sum(
                     label.casefold() == active_field_label.casefold()
-                    for label in field_labels
+                    for label in labels
                 )
                 == 1
             )
-            maximum_input_height = (
+            max_height = (
                 600
                 if multiline_input_contract
-                or (tall_typed_active_contract and exact_active_label)
+                or tall_typed_active_contract and exact_label
                 else 180
             )
+            width = bounds[2] - bounds[0]
+            height = bounds[3] - bounds[1]
             if (
                 bounds[1] <= 10
                 or bounds[3] >= 990
                 or width < 240
-                or not 20 <= height <= maximum_input_height
-                or (
-                    application_keyboard_bounds is not None
-                    and _bounds_overlap_ratio(
-                        bounds,
-                        application_keyboard_bounds,
-                    )
-                    >= 0.25
-                )
+                or not 20 <= height <= max_height
+                or application_keyboard_bounds is not None
+                and _bounds_overlap_ratio(bounds, application_keyboard_bounds) >= 0.25
             ):
                 continue
+            button = _optional_right_button(
+                item.get("right_button"),
+                input_bounds=bounds,
+            )
             input_bounds = [round(value) for value in bounds]
-            button_match: dict[str, Any] | None = None
             if button is not None:
-                if not _valid_1000_bounds(button.get("bounds")):
-                    raise UISceneError("输入结构审计 right_button bounds 无效。")
-                button_confidence = _audit_confidence(
-                    button.get("confidence"), "输入结构审计 right_button"
-                )
-                button_label = str(button.get("label") or "").strip()
-                button_bounds = tuple(float(value) for value in button["bounds"])
-                if (
-                    button_confidence < 0.9
-                    or not button_label
-                    or not _bounds_inside(button_bounds, bounds, tolerance=20)
-                    or button_bounds[0] <= bounds[0] + 0.55 * width
-                    or _vertical_overlap_ratio(button_bounds, bounds) < 0.8
-                ):
-                    continue
-                input_bounds[2] = round(button_bounds[0])
-                button_match = {
-                    "label": button_label,
-                    "bounds": [round(value) for value in button_bounds],
-                    "confidence": button_confidence,
-                }
+                input_bounds[2] = button["bounds"][0]
             if input_bounds[2] - input_bounds[0] < 120:
                 continue
-            matches.append(
-                {
-                    "text": text,
-                    "placeholder": placeholder,
-                    "visible_editable_cues": cues,
-                    "caret_line_index": caret_line_index,
-                    "field_labels": field_labels,
-                    "input_bounds": input_bounds,
-                    "right_button": button_match,
-                    "pending_ime_candidate_state": pending_ime_candidate_state,
-                    "same_frame_input_surface_evidence": (
-                        same_frame_input_surface_evidence
-                    ),
-                    "confidence": min(
-                        confidence,
-                        float(button_match["confidence"])
-                        if button_match is not None
-                        else confidence,
-                    ),
-                }
+            match = {
+                "text": text,
+                "placeholder": placeholder,
+                "visible_editable_cues": cues,
+                "caret_line_index": caret,
+                "field_labels": labels,
+                "input_bounds": input_bounds,
+                "right_button": button,
+                "same_frame_input_surface_evidence": surface_evidence,
+                "confidence": min(
+                    confidence,
+                    float(button["confidence"]) if button is not None else confidence,
+                ),
+            }
+            match["pending_ime_candidate_state"] = (
+                _resolve_pending_ime_candidate_input_state(
+                    match,
+                    trusted_preedits,
+                    application_input_count=len(application_inputs),
+                    verified_input_lineage=verified_input_lineage,
+                    device_id=str(device_id or ""),
+                    app_id=scene.app_id,
+                    screen_id=scene.screen_id,
+                    input_field_id=active_field_id,
+                    authorized_text=active_transaction_text,
+                    keyboard_input_mode=keyboard_input_mode,
+                )
             )
+            matches.append(match)
 
         switch_is_goal = _goal_requests_keyboard_mode_switch(goal_context)
         active_clear_goal = _goal_requests_active_verified_text_clear(goal_context)
@@ -3648,106 +3196,18 @@ def _apply_input_structure_audit(
                 )
                 trusted_input["text"] = authorized_prefix_cue
         if trusted_input is not None and verified_input_lineage is not None:
-            raw_lineage_text = trusted_input["text"]
-            lineage_bounds = tuple(
-                float(part) / 1000.0 for part in trusted_input["input_bounds"]
+            trusted_input = _reconcile_verified_input_lineage(
+                trusted_input,
+                trusted_preedits,
+                verified_input_lineage,
+                device_id=str(device_id or ""),
+                scene=scene,
+                input_field_id=active_field_id,
+                active_text=active_transaction_text,
+                multiline=active_multiline,
+                frame=lineage_frame,
+                keyboard_input_mode=keyboard_input_mode,
             )
-            lineage_visible_cues = tuple(trusted_input["visible_editable_cues"])
-            if (
-                keyboard_input_mode == "direct_latin"
-                and verified_input_lineage.exact_value not in lineage_visible_cues
-                and _adjacent_exact_preedit_cue(
-                    trusted_input,
-                    trusted_preedits,
-                    verified_input_lineage.exact_value,
-                )
-            ):
-                lineage_visible_cues = (
-                    *lineage_visible_cues,
-                    verified_input_lineage.exact_value,
-                )
-            if lineage_matches_trailing_newline_cue(
-                verified_input_lineage,
-                device_id=str(device_id or ""),
-                app_id=scene.app_id,
-                screen_id=scene.screen_id,
-                raw_value=raw_lineage_text,
-                visible_editable_cues=lineage_visible_cues,
-                caret_line_index=trusted_input.get("caret_line_index"),
-                input_bounds=lineage_bounds,
-                input_field_id=active_field_id,
-                current_frame=lineage_frame,
-            ):
-                trusted_input = dict(trusted_input)
-                trusted_input["verified_trailing_newline"] = True
-                trusted_input["text"] = verified_input_lineage.exact_value
-            elif verified_input_lineage.matches_pending_input_state_cue(
-                device_id=str(device_id or ""),
-                app_id=scene.app_id,
-                screen_id=scene.screen_id,
-                raw_value=raw_lineage_text,
-                visible_editable_cues=lineage_visible_cues,
-                input_bounds=lineage_bounds,
-                input_field_id=active_field_id,
-            ):
-                trusted_input = dict(trusted_input)
-                trusted_input["lineage_visible_cue_text"] = (
-                    verified_input_lineage.exact_value
-                )
-                trusted_input["text"] = verified_input_lineage.exact_value
-            elif lineage_matches_persisted_surface_cue(
-                verified_input_lineage,
-                device_id=str(device_id or ""),
-                app_id=scene.app_id,
-                screen_id=scene.screen_id,
-                raw_value=raw_lineage_text,
-                visible_editable_cues=lineage_visible_cues,
-                input_bounds=lineage_bounds,
-                current_frame=lineage_frame,
-            ):
-                trusted_input = dict(trusted_input)
-                trusted_input["lineage_persisted_visible_cue_text"] = (
-                    verified_input_lineage.exact_value
-                )
-                trusted_input["text"] = verified_input_lineage.exact_value
-            elif (
-                not _goal_active_input_field(goal_context)[2]
-                and lineage_matches_visual(
-                    verified_input_lineage,
-                    device_id=str(device_id or ""),
-                    app_id=scene.app_id,
-                    screen_id=scene.screen_id,
-                    raw_value=raw_lineage_text,
-                    input_bounds=lineage_bounds,
-                    current_frame=lineage_frame,
-                )
-            ):
-                trusted_input = dict(trusted_input)
-                trusted_input["lineage_visual_text"] = raw_lineage_text
-                trusted_input["text"] = verified_input_lineage.exact_value
-            if trusted_input["text"] == "":
-                pending_preedit_text = _unique_clearable_ime_preedit(
-                    trusted_input,
-                    trusted_preedits,
-                )
-                pending_committed_prefix = (
-                    verified_input_lineage.pending_text_committed_prefix(
-                        device_id=str(device_id or ""),
-                        app_id=scene.app_id,
-                        screen_id=scene.screen_id,
-                        authorized_text=active_transaction_text,
-                        raw_value=trusted_input["text"],
-                        preedit_text=pending_preedit_text,
-                        input_bounds=lineage_bounds,
-                        input_field_id=active_field_id,
-                    )
-                )
-                if pending_committed_prefix is not None:
-                    trusted_input = dict(trusted_input)
-                    trusted_input["lineage_pending_text_prefix"] = (
-                        pending_committed_prefix
-                    )
-                    trusted_input["text"] = pending_committed_prefix
         exact_ime_candidate: dict[str, Any] | None = None
         exact_ime_preedit_text = ""
         input_step = None
@@ -3833,21 +3293,8 @@ def _apply_input_structure_audit(
                 keyboard_bounds=keyboard_bounds,
                 locally_snapped=locally_snapped_qwerty_anchors is not None,
             )
-        raw_backspace_key = keyboard.get("backspace_key")
-        if (
-            trusted_input is not None
-            and isinstance(raw_backspace_key, dict)
-            and set(raw_backspace_key) == {
-                "label", "bounds", "confidence", "fully_visible"
-            }
-            and not str(raw_backspace_key.get("label") or "").strip()
-        ):
-            # An empty literal cannot identify or authorize a delete key. Drop
-            # only this optional non-authoritative substructure so an otherwise
-            # valid application input can still prove its post-action value.
-            raw_backspace_key = None
         generic_backspace_geometry = _validated_keyboard_backspace_key(
-            raw_backspace_key,
+            keyboard.get("backspace_key"),
             keyboard_bounds=keyboard_bounds,
         )
         clearable_ime_preedit = ""
@@ -3909,55 +3356,16 @@ def _apply_input_structure_audit(
             and keyboard_input_mode != required_input_mode
         )
         switch_is_goal = switch_is_goal or input_needs_mode_switch
-        discardable_mode_switch_geometry = bool(
-            isinstance(raw_mode_switch, dict)
-            and set(raw_mode_switch)
-            == {"label", "bounds", "confidence", "current_mode", "target_mode"}
-            and not _valid_1000_bounds(raw_mode_switch.get("bounds"))
+        mode_switch = _validated_keyboard_mode_switch(
+            raw_mode_switch,
+            keyboard_bounds=keyboard_bounds,
         )
-        discardable_mode_switch_semantic_conflict = False
-        if (
-            isinstance(raw_mode_switch, dict)
-            and set(raw_mode_switch)
-            == {"label", "bounds", "confidence", "current_mode", "target_mode"}
-        ):
-            raw_switch_current_mode = raw_mode_switch.get("current_mode")
-            discardable_mode_switch_semantic_conflict = bool(
-                raw_switch_current_mode
-                in {"direct_latin", "chinese_pinyin"}
-                and keyboard_input_mode in {"direct_latin", "chinese_pinyin"}
-                and raw_switch_current_mode != keyboard_input_mode
-            )
-        if (
-            not switch_is_goal
-            and not input_needs_mode_switch
-            and trusted_input is not None
-            and keyboard_visible
-            and keyboard_layout == "qwerty"
-            and keyboard_input_mode in {"direct_latin", "chinese_pinyin"}
-            and (
-                _is_incomplete_optional_keyboard_mode_switch(raw_mode_switch)
-                or discardable_mode_switch_geometry
-                or discardable_mode_switch_semantic_conflict
-            )
-        ):
-            # The current deterministic segment does not consume this optional
-            # control. Revoke a missing-field subset or an exact-shaped claim
-            # whose coordinates or semantics conflict with the independently
-            # audited whole-keyboard mode. When switching is the actual next
-            # action, the same contradictions remain strict.
-            mode_switch = None
-        else:
-            mode_switch = _validated_keyboard_mode_switch(
-                raw_mode_switch,
-                keyboard_bounds=keyboard_bounds,
-            )
         if (
             mode_switch is not None
             and keyboard_input_mode != "unknown"
             and mode_switch["current_mode"] != keyboard_input_mode
         ):
-            raise UISceneError("模式切换键 current_mode 与键盘 input_mode 冲突。")
+            mode_switch = None
         if input_needs_mode_switch and (
             mode_switch is None
             or mode_switch["target_mode"] != required_input_mode
@@ -4007,22 +3415,14 @@ def _apply_input_structure_audit(
             and bool(input_step.required_case_mode)
             and keyboard_case_mode != input_step.required_case_mode
         )
-        raw_case_switch = keyboard.get("case_switch")
-        if (
-            not input_needs_case_switch
-            and isinstance(raw_case_switch, dict)
-            and set(raw_case_switch)
-            == {"label", "bounds", "confidence", "current_mode", "target_mode"}
-            and not _valid_1000_bounds(raw_case_switch.get("bounds"))
-        ):
-            raw_case_switch = None
         case_switch = _validated_keyboard_case_switch(
-            raw_case_switch,
+            keyboard.get("case_switch"),
             keyboard_bounds=keyboard_bounds,
             keyboard_layout=keyboard_layout,
             keyboard_input_mode=keyboard_input_mode,
             case_mode=keyboard_case_mode,
         )
+        exact_literal_key: dict[str, Any] | None = None
         exact_literal_key: dict[str, Any] | None = None
         exact_enter_key: dict[str, Any] | None = None
         exact_layout_switch: dict[str, Any] | None = None
@@ -4101,7 +3501,7 @@ def _apply_input_structure_audit(
             and input_step.kind in {"direct_latin", "chinese_pinyin"}
             and exact_case_switch is None
             and qwerty_geometry is None
-            and not typed_prefix_verification_only
+            and not keyboard_controls_revoked
             and not active_clear_goal
         ):
             raise UISceneError(
@@ -4201,7 +3601,7 @@ def _apply_input_structure_audit(
                     and next_field_key is None
                     and not pending_auxiliary_input_action
                     and not input_requires_auxiliary_action
-                    and not typed_prefix_verification_only
+                    and not keyboard_controls_revoked
                 ),
                 "fully_visible": True,
                 "value": rendered_input["text"],
@@ -4242,7 +3642,7 @@ def _apply_input_structure_audit(
                 states["soft_keyboard_visible"] = False
             if rendered_input["placeholder"]:
                 states["placeholder"] = rendered_input["placeholder"]
-            if keyboard_bounds is not None or boundsless_keyboard_dismissal:
+            if keyboard_visible:
                 states.update(
                     {
                         "focused": True,
@@ -4437,8 +3837,6 @@ def _apply_input_structure_audit(
         raise VisionAgentError(f"输入结构只读审计结果不符合协议：{exc}") from exc
 
 
-
-
 def _audit_confidence(value: Any, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise UISceneError(f"{field_name} confidence 格式无效。")
@@ -4446,6 +3844,38 @@ def _audit_confidence(value: Any, field_name: str) -> float:
     if not 0.0 <= confidence <= 1.0:
         raise UISceneError(f"{field_name} confidence 超出0..1。")
     return confidence
+
+
+def _keyboard_control(
+    value: Any,
+    *,
+    keyboard_bounds: tuple[float, float, float, float] | None,
+    field_name: str,
+    fields: set[str],
+    require_visible: bool = False,
+    tolerance: float = 12,
+) -> tuple[str, tuple[float, float, float, float], float] | None:
+    if (
+        keyboard_bounds is None
+        or not isinstance(value, dict)
+        or set(value) != fields
+        or require_visible and value.get("fully_visible") is not True
+        or not _valid_1000_bounds(value.get("bounds"))
+    ):
+        return None
+    try:
+        confidence = _audit_confidence(value.get("confidence"), field_name)
+    except UISceneError:
+        return None
+    label = str(value.get("label") or "").strip()
+    bounds = tuple(float(part) for part in value["bounds"])
+    if (
+        not label
+        or confidence < 0.9
+        or not _bounds_inside(bounds, keyboard_bounds, tolerance=tolerance)
+    ):
+        return None
+    return label, bounds, confidence
 
 
 def _keyboard_bounds_from_locally_snapped_qwerty_anchors(
@@ -4575,37 +4005,28 @@ def _validated_keyboard_mode_switch(
     *,
     keyboard_bounds: tuple[float, float, float, float] | None,
 ) -> dict[str, Any] | None:
-    if value is None:
+    control = _keyboard_control(
+        value,
+        keyboard_bounds=keyboard_bounds,
+        field_name="mode_switch",
+        fields={"label", "bounds", "confidence", "current_mode", "target_mode"},
+        tolerance=20,
+    )
+    if control is None:
         return None
-    if keyboard_bounds is None:
-        raise UISceneError("模式切换键必须绑定可见键盘区域。")
-    if not isinstance(value, dict) or set(value) != {
-        "label",
-        "bounds",
-        "confidence",
-        "current_mode",
-        "target_mode",
-    }:
-        raise UISceneError("输入结构审计 mode_switch 字段不符合协议。")
-    if not _valid_1000_bounds(value.get("bounds")):
-        raise UISceneError("输入结构审计 mode_switch bounds 无效。")
-    confidence = _audit_confidence(value.get("confidence"), "mode_switch")
-    current_mode = value.get("current_mode")
-    target_mode = value.get("target_mode")
+    label, bounds, confidence = control
+    current_mode = value["current_mode"]
+    target_mode = value["target_mode"]
     modes = {"direct_latin", "chinese_pinyin"}
-    if current_mode not in modes or target_mode not in modes or current_mode == target_mode:
-        raise UISceneError("mode_switch 必须给出方向明确且不同的输入模式。")
-    label = str(value.get("label") or "").strip()
-    bounds = tuple(float(part) for part in value["bounds"])
-    keyboard_width = keyboard_bounds[2] - keyboard_bounds[0]
-    keyboard_height = keyboard_bounds[3] - keyboard_bounds[1]
+    width = keyboard_bounds[2] - keyboard_bounds[0]
+    height = keyboard_bounds[3] - keyboard_bounds[1]
     if (
-        confidence < 0.9
-        or not label
+        current_mode not in modes
+        or target_mode not in modes
+        or current_mode == target_mode
         or not _is_explicit_keyboard_mode_label(label)
-        or not _bounds_inside(bounds, keyboard_bounds, tolerance=20)
-        or bounds[2] - bounds[0] > 0.35 * keyboard_width
-        or bounds[3] - bounds[1] > 0.30 * keyboard_height
+        or bounds[2] - bounds[0] > 0.35 * width
+        or bounds[3] - bounds[1] > 0.30 * height
     ):
         return None
     return {
@@ -4622,39 +4043,17 @@ def _validated_keyboard_backspace_key(
     *,
     keyboard_bounds: tuple[float, float, float, float] | None,
 ) -> dict[str, Any] | None:
-    if value is None:
+    control = _keyboard_control(
+        value,
+        keyboard_bounds=keyboard_bounds,
+        field_name="backspace_key",
+        fields={"label", "bounds", "confidence", "fully_visible"},
+        require_visible=True,
+    )
+    if control is None:
         return None
-    if keyboard_bounds is None:
-        raise UISceneError("退格键必须绑定完整可见键盘区域。")
-    if not isinstance(value, dict) or set(value) != {
-        "label",
-        "bounds",
-        "confidence",
-        "fully_visible",
-    }:
-        raise UISceneError("输入结构审计 backspace_key 字段不符合协议。")
-    label = str(value.get("label") or "").strip()
-    if not label or not re.search(
-        r"(?:⌫|⌦|退格|删除|backspace|delete)",
-        label,
-        re.IGNORECASE,
-    ):
-        # An exact-shaped but semantically unsupported optional claim cannot
-        # authorize deletion. Revoke only this candidate so independent input
-        # facts or a literal key can still be used; a clear operation will
-        # remain blocked because no backspace geometry is minted.
-        return None
-    if value.get("fully_visible") is not True or not _valid_1000_bounds(
-        value.get("bounds")
-    ):
-        return None
-    confidence = _audit_confidence(value.get("confidence"), "backspace_key")
-    bounds = tuple(float(part) for part in value["bounds"])
-    if confidence < 0.9 or not _bounds_inside(
-        bounds,
-        keyboard_bounds,
-        tolerance=12,
-    ):
+    label, bounds, confidence = control
+    if not re.search(r"(?:⌫|⌦|退格|删除|backspace|delete)", label, re.IGNORECASE):
         return None
     return {
         "label": label,
@@ -4671,43 +4070,23 @@ def _validated_keyboard_enter_key(
     *,
     keyboard_bounds: tuple[float, float, float, float] | None,
 ) -> dict[str, Any] | None:
-    """Validate a visible keyboard action key without changing its semantics."""
-
-    if value is None:
-        return None
-    if keyboard_bounds is None:
-        raise UISceneError("回车键必须绑定完整可见键盘区域。")
-    if not isinstance(value, dict) or set(value) != {
-        "label",
-        "bounds",
-        "confidence",
-        "fully_visible",
-        "key_action",
+    control = _keyboard_control(
+        value,
+        keyboard_bounds=keyboard_bounds,
+        field_name="enter_key",
+        fields={"label", "bounds", "confidence", "fully_visible", "key_action"},
+        require_visible=True,
+    )
+    if control is None or value["key_action"] not in {
+        "newline", "send", "search", "done", "next", "unknown",
     }:
-        raise UISceneError("输入结构审计 enter_key 字段不符合协议。")
-    key_action = value.get("key_action")
-    if key_action not in {"newline", "send", "search", "done", "next", "unknown"}:
-        raise UISceneError("输入结构审计 enter_key.key_action 无效。")
-    label = str(value.get("label") or "").strip()
-    if (
-        not label
-        or value.get("fully_visible") is not True
-        or not _valid_1000_bounds(value.get("bounds"))
-    ):
         return None
-    confidence = _audit_confidence(value.get("confidence"), "enter_key")
-    bounds = tuple(float(part) for part in value["bounds"])
-    if confidence < 0.9 or not _bounds_inside(
-        bounds,
-        keyboard_bounds,
-        tolerance=12,
-    ):
-        return None
+    label, bounds, confidence = control
     return {
         "label": label,
         "bounds": [round(part) for part in bounds],
         "confidence": confidence,
-        "key_action": key_action,
+        "key_action": value["key_action"],
     }
 
 
@@ -4717,45 +4096,27 @@ def _locally_snapped_keyboard_enter_key(
     anchors: dict[str, list[int]],
     keyboard_bounds: tuple[float, float, float, float] | None,
 ) -> dict[str, Any] | None:
-    """Bind an audited Enter/Next semantic to stable local QWERTY geometry.
-
-    Qwen remains responsible for identifying the visible key and its current
-    newline semantic.  Its rectangle is not execution authority once local OCR
-    has independently stabilized the whole QWERTY grid; only the horizontal
-    vicinity of the reported key is retained as a cross-check.  An icon-only
-    newline key may omit its text label, but only after that local geometry and
-    Qwen's explicit ``key_action=newline`` agree; conflicting labels and
-    unlabeled Next keys remain rejected.
-    """
-
-    if keyboard_bounds is None or not isinstance(value, dict) or set(value) != {
-        "label",
-        "bounds",
-        "confidence",
-        "fully_visible",
-        "key_action",
-    }:
+    fields = {"label", "bounds", "confidence", "fully_visible", "key_action"}
+    if (
+        keyboard_bounds is None
+        or not isinstance(value, dict)
+        or set(value) != fields
+        or value.get("fully_visible") is not True
+        or value.get("key_action") not in {"newline", "next"}
+    ):
         return None
-    key_action = value.get("key_action")
-    if value.get("fully_visible") is not True or key_action not in {
-        "newline",
-        "next",
-    }:
-        return None
+    action = value["key_action"]
     label = str(value.get("label") or "").strip()
-    normalized_label = re.sub(r"\s+", "", label).casefold()
-    newline_label = bool(
-        any(glyph in label for glyph in ("↵", "⏎", "⤶", "⮐"))
-        or normalized_label in {"enter", "return", "回车", "换行"}
-    )
-    next_label = bool(
-        any(glyph in label for glyph in ("→", "↦", "➡", "⏭"))
-        or normalized_label in {"next", "下一步", "下一个", "下一项"}
-    )
-    unlabeled_newline = key_action == "newline" and not normalized_label
+    normalized = re.sub(r"\s+", "", label).casefold()
+    newline_label = any(glyph in label for glyph in ("↵", "⏎", "⤶", "⮐")) or normalized in {
+        "enter", "return", "回车", "换行",
+    }
+    next_label = any(glyph in label for glyph in ("→", "↦", "➡", "⏭")) or normalized in {
+        "next", "下一步", "下一个", "下一项",
+    }
     if not (
-        (key_action == "newline" and (newline_label or unlabeled_newline))
-        or (key_action == "next" and next_label)
+        action == "newline" and (newline_label or not normalized)
+        or action == "next" and next_label
     ):
         return None
     confidence = _audit_confidence(value.get("confidence"), "enter_key")
@@ -4770,63 +4131,45 @@ def _locally_snapped_keyboard_enter_key(
         )
     ):
         return None
-    raw_left, raw_top, raw_right, raw_bottom = (
-        float(part) for part in raw_bounds
-    )
+    left, top, right, bottom = (float(part) for part in raw_bounds)
     if not (
-        0 <= raw_left < raw_right <= 1000
-        and math.isfinite(raw_top)
-        and math.isfinite(raw_bottom)
-        and raw_top < raw_bottom
+        0 <= left < right <= 1000
+        and math.isfinite(top)
+        and math.isfinite(bottom)
+        and top < bottom
     ):
         return None
     try:
-        q_x = float(anchors["q"][0])
-        p_x = float(anchors["p"][0])
-        backspace_x = float(anchors["backspace"][0])
-        top_y = statistics.mean(
-            (float(anchors["q"][1]), float(anchors["p"][1]))
-        )
-        middle_y = statistics.mean(
-            (float(anchors["a"][1]), float(anchors["l"][1]))
-        )
-        bottom_y = statistics.mean(
-            (
-                float(anchors["z"][1]),
-                float(anchors["m"][1]),
-                float(anchors["backspace"][1]),
-            )
-        )
-    except (KeyError, TypeError, ValueError):
+        profile = qwerty_keyboard_config_from_anchors(anchors)
+        rows = profile["rows"]
+        horizontal_pitch = float(rows[0]["x_step"]) * 1000
+        row_y = [float(row["y"]) * 1000 for row in rows]
+        vertical_pitch = statistics.mean((row_y[1] - row_y[0], row_y[2] - row_y[1]))
+        backspace_x = float(profile["backspace_x_ratio"]) * 1000
+    except (KeyError, TypeError, ValueError, WorkflowNotReady):
         return None
-    horizontal_pitch = (p_x - q_x) / 9.0
-    vertical_pitch = statistics.mean(
-        (middle_y - top_y, bottom_y - middle_y)
-    )
-    if not (45 <= horizontal_pitch <= 130 and 35 <= vertical_pitch <= 140):
-        return None
-    raw_center_x = (raw_left + raw_right) / 2.0
-    if abs(raw_center_x - backspace_x) > max(2.0 * horizontal_pitch, 180.0):
-        return None
-    center_y = bottom_y + vertical_pitch
-    half_width = 0.65 * horizontal_pitch
-    half_height = 0.45 * vertical_pitch
-    snapped_bounds = (
-        max(keyboard_bounds[0], backspace_x - half_width),
-        max(keyboard_bounds[1], center_y - half_height),
-        min(keyboard_bounds[2], backspace_x + half_width),
-        min(keyboard_bounds[3], center_y + half_height),
-    )
     if (
-        not _valid_1000_bounds(snapped_bounds)
-        or not _bounds_inside(snapped_bounds, keyboard_bounds, tolerance=0)
+        not 45 <= horizontal_pitch <= 130
+        or not 35 <= vertical_pitch <= 140
+        or abs((left + right) / 2 - backspace_x) > max(2 * horizontal_pitch, 180)
+    ):
+        return None
+    center_y = row_y[2] + vertical_pitch
+    snapped = (
+        max(keyboard_bounds[0], backspace_x - 0.65 * horizontal_pitch),
+        max(keyboard_bounds[1], center_y - 0.45 * vertical_pitch),
+        min(keyboard_bounds[2], backspace_x + 0.65 * horizontal_pitch),
+        min(keyboard_bounds[3], center_y + 0.45 * vertical_pitch),
+    )
+    if not _valid_1000_bounds(snapped) or not _bounds_inside(
+        snapped, keyboard_bounds, tolerance=0
     ):
         return None
     return {
         "label": label or "↵",
-        "bounds": [round(part) for part in snapped_bounds],
+        "bounds": [round(part) for part in snapped],
         "confidence": confidence,
-        "key_action": key_action,
+        "key_action": action,
     }
 
 
@@ -5103,32 +4446,25 @@ def _validated_keyboard_case_switch(
     keyboard_input_mode: str,
     case_mode: str,
 ) -> dict[str, Any] | None:
-    if value is None:
+    control = _keyboard_control(
+        value,
+        keyboard_bounds=keyboard_bounds,
+        field_name="case_switch",
+        fields={"label", "bounds", "confidence", "current_mode", "target_mode"},
+    )
+    if control is None:
         return None
-    if not isinstance(value, dict) or set(value) != {
-        "label", "bounds", "confidence", "current_mode", "target_mode"
-    }:
-        raise UISceneError("case_switch 字段不符合协议。")
-    current = value.get("current_mode")
-    target = value.get("target_mode")
-    label = str(value.get("label") or "").strip()
+    label, bounds, confidence = control
+    current = value["current_mode"]
+    target = value["target_mode"]
     if (
         keyboard_layout != "qwerty"
         or keyboard_input_mode != "direct_latin"
-        or keyboard_bounds is None
         or current not in {"lower", "upper"}
         or target not in {"lower", "upper"}
         or current == target
         or current != case_mode
-        or not _valid_1000_bounds(value.get("bounds"))
-    ):
-        raise UISceneError("case_switch 只允许绑定英文QWERTY明确大小写方向。")
-    bounds = tuple(float(part) for part in value["bounds"])
-    confidence = _audit_confidence(value.get("confidence"), "case_switch")
-    if (
-        confidence < 0.9
         or not re.search(r"(?:shift|大小写|大写|小写|⇧|↑|⬆)", label, re.IGNORECASE)
-        or not _bounds_inside(bounds, keyboard_bounds, tolerance=12)
     ):
         return None
     return {
@@ -5156,56 +4492,6 @@ def _is_explicit_keyboard_mode_label(label: str) -> bool:
         "latin",
         "pinyin",
     }
-
-
-def _is_incomplete_optional_keyboard_mode_switch(value: Any) -> bool:
-    """Recognize only a missing-field subset of the optional switch schema."""
-
-    required = {
-        "label",
-        "bounds",
-        "confidence",
-        "current_mode",
-        "target_mode",
-    }
-    return isinstance(value, dict) and set(value) < required
-
-
-def _can_discard_separate_right_button(
-    input_item: Any,
-    value: Any,
-) -> bool:
-    """Discard a schema-valid control proven outside the input bounds."""
-
-    # This object is optional, read-only structural context and never grants
-    # action authority.  Providers commonly include the ordinary visibility
-    # fact on an otherwise schema-valid adjacent control.  Once geometry proves
-    # the control is separate from the input, discard the whole object instead
-    # of allowing that harmless optional fact to veto the input observation.
-    allowed = {"label", "bounds", "confidence", "fully_visible"}
-    if (
-        not isinstance(input_item, dict)
-        or not isinstance(value, dict)
-        or not set(value).issubset(allowed)
-        or "bounds" not in value
-        or (
-            "fully_visible" in value
-            and not isinstance(value.get("fully_visible"), bool)
-        )
-        or not _valid_1000_bounds(input_item.get("bounds"))
-        or not _valid_1000_bounds(value.get("bounds"))
-    ):
-        return False
-    input_bounds = tuple(float(part) for part in input_item["bounds"])
-    button_bounds = tuple(float(part) for part in value["bounds"])
-    return bool(
-        button_bounds[0] >= input_bounds[2] - 10
-        and _vertical_overlap_ratio(button_bounds, input_bounds) >= 0.8
-    )
-
-
-
-
 
 
 def _bounds_inside(
@@ -5243,14 +4529,10 @@ def _bounds_overlap_ratio(
     return width * height / first_area if first_area > 0 else 0.0
 
 
-
-
     # Exact text may resolve relevance, but never visibility authority.
     # ``fully_visible`` must be supplied by observation and independently
     # confirmed by the canonical candidate and local controller binding before
     # an element-bound action.
-
-
 
 
 def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:
@@ -5282,17 +4564,6 @@ def _strip_model_authored_local_attestations(payload: dict[str, Any]) -> None:
                 states.pop("keyboard_input_mode_switch", None)
                 states.pop("current_mode", None)
                 states.pop("target_mode", None)
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _observation_cache_key(

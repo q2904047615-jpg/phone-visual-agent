@@ -954,7 +954,6 @@ class TypedInputLineageTests(unittest.TestCase):
                     "objective": f"让输入框逐字显示 {EXPECTED}2",
                     "entities": {"input_text": EXPECTED + "2"},
                 },
-                ledger_input_value=EXPECTED,
                 verified_input_lineage=record,
                 device_id=DEVICE,
                 lineage_frame=surface_frame(variation=1),
@@ -1293,7 +1292,6 @@ class TypedInputLineageTests(unittest.TestCase):
             ime_commit_audit_raw(),
             fingerprint="after-ime-candidate-fp",
             goal_context=context,
-            ledger_input_value="loopok",
             verified_input_lineage=record,
             device_id=DEVICE,
             lineage_frame=surface_frame(),
@@ -1312,7 +1310,6 @@ class TypedInputLineageTests(unittest.TestCase):
             ime_commit_audit_raw(),
             fingerprint="after-ime-candidate-screen-name-drift",
             goal_context=context,
-            ledger_input_value="",
             verified_input_lineage=record,
             device_id=DEVICE,
             lineage_frame=surface_frame(),
@@ -1332,7 +1329,6 @@ class TypedInputLineageTests(unittest.TestCase):
             ime_commit_audit_raw(),
             fingerprint="after-ime-candidate-wrong-field",
             goal_context=wrong_field_context,
-            ledger_input_value="",
             verified_input_lineage=record,
             device_id=DEVICE,
             lineage_frame=surface_frame(),
@@ -1352,7 +1348,6 @@ class TypedInputLineageTests(unittest.TestCase):
                     ime_commit_audit_raw(cue=cue),
                     fingerprint="after-ime-candidate-rejected",
                     goal_context=context,
-                    ledger_input_value="loopok",
                     verified_input_lineage=record,
                     device_id=DEVICE,
                     lineage_frame=surface_frame(),
@@ -1508,7 +1503,6 @@ class TypedInputLineageTests(unittest.TestCase):
                     ),
                     fingerprint="after-ime-prediction-commit",
                     goal_context=context,
-                    ledger_input_value=expected,
                     verified_input_lineage=record,
                     device_id=DEVICE,
                     lineage_frame=surface_frame(),
@@ -1551,7 +1545,6 @@ class TypedInputLineageTests(unittest.TestCase):
                     ),
                     fingerprint="after-ime-ledger-authority",
                     goal_context=context,
-                    ledger_input_value=coarse_value,
                     verified_input_lineage=record,
                     device_id=DEVICE,
                     lineage_frame=surface_frame(),
@@ -1613,7 +1606,6 @@ class TypedInputLineageTests(unittest.TestCase):
                     case["raw"],
                     fingerprint="after-ime-prediction-rejected",
                     goal_context=case["context"],
-                    ledger_input_value=expected,
                     verified_input_lineage=case["lineage"],
                     device_id=DEVICE,
                     lineage_frame=surface_frame(),
@@ -1765,7 +1757,6 @@ class TypedInputLineageTests(unittest.TestCase):
             ),
             fingerprint="symbol-mode-before",
             goal_context=goal,
-            ledger_input_value=current,
         )
         goal_elements = [
             element for element in audited.elements
@@ -1818,7 +1809,6 @@ class TypedInputLineageTests(unittest.TestCase):
                         "objective": f"让输入框逐字显示 {target}",
                         "entities": {"input_text": target},
                     },
-                    ledger_input_value=current,
                 )
                 layout_element = audited.get_element(
                     "local_audited_keyboard_layout_switch_1"
@@ -1853,7 +1843,6 @@ class TypedInputLineageTests(unittest.TestCase):
                 "objective": f"让输入框逐字显示 {target}",
                 "entities": {"input_text": target},
             },
-            ledger_input_value=current,
         )
         self.assertFalse(
             any(
@@ -1879,7 +1868,6 @@ class TypedInputLineageTests(unittest.TestCase):
                 "objective": f"让输入框逐字显示 {target}",
                 "entities": {"input_text": target},
             },
-            ledger_input_value=current,
         )
         literal = audited.get_element("local_audited_literal_key_1")
         self.assertEqual("？", literal.label)
@@ -2212,7 +2200,6 @@ class TypedInputLineageTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="after-fp",
             goal_context=goal(),
-            ledger_input_value=expected,
             verified_input_lineage=pending,
             device_id=DEVICE,
         )
@@ -2248,7 +2235,6 @@ class TypedInputLineageTests(unittest.TestCase):
                     json.dumps(changed_audit, ensure_ascii=False),
                     fingerprint="after-fp",
                     goal_context=goal(),
-                    ledger_input_value=expected,
                     verified_input_lineage=pending,
                     device_id=DEVICE,
                 )
@@ -2264,7 +2250,6 @@ class TypedInputLineageTests(unittest.TestCase):
                     json.dumps(audit, ensure_ascii=False),
                     fingerprint="after-fp",
                     goal_context=changed_goal,
-                    ledger_input_value=changed_coarse,
                     verified_input_lineage=pending,
                     device_id=DEVICE,
                 )
@@ -2284,7 +2269,6 @@ class TypedInputLineageTests(unittest.TestCase):
             json.dumps(audit, ensure_ascii=False),
             fingerprint="after-fp",
             goal_context=goal(),
-            ledger_input_value="first\nother",
             verified_input_lineage=pending,
             device_id=DEVICE,
         )

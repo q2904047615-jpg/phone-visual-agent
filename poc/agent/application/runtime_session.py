@@ -19,12 +19,8 @@ from agent.domain.generic_goal import GenericIntentDraft
 from agent.application.vision_usage import VisionSessionUsageLedger
 
 
-POST_ACTION_TRANSITION_PROTOCOL_VERSION = (
-    "2026-08-16-universal-post-action-transition-v1"
-)
-CORRECTIVE_RETRY_PROTOCOL_VERSION = (
-    "2026-08-24-fresh-observation-corrective-retry-v1"
-)
+POST_ACTION_TRANSITION_PROTOCOL_VERSION = '2026-08-16-universal-post-action-transition-v1'
+CORRECTIVE_RETRY_PROTOCOL_VERSION = '2026-08-24-fresh-observation-corrective-retry-v1'
 
 
 @dataclass
@@ -35,24 +31,15 @@ class UniversalAgentSessionState:
     run_dir: Path
     adapter: Any = field(repr=False)
     evidence_store: AgentEvidenceStorePort = field(repr=False)
-    vision_usage: VisionSessionUsageLedger | None = field(
-        default=None,
-        repr=False,
-    )
+    vision_usage: VisionSessionUsageLedger | None = field(default=None, repr=False)
     task_graph: DynamicTaskGraph | None = None
     goal_draft: GenericIntentDraft | None = None
     trusted_observation: Any = None
     trusted_frames: tuple[Any, ...] = field(default_factory=tuple, repr=False)
     qwen_decision: Any = None
     controller_decision: CanonicalSelectionReceipt | None = None
-    confirmation_authority: ConfirmationAuthority | None = field(
-        default=None,
-        repr=False,
-    )
-    effect_confirmation_authority: EffectConfirmationAuthority | None = field(
-        default=None,
-        repr=False,
-    )
+    confirmation_authority: ConfirmationAuthority | None = field(default=None, repr=False)
+    effect_confirmation_authority: EffectConfirmationAuthority | None = field(default=None, repr=False)
     confirmed_effect_ids: tuple[str, ...] = ()
     status: str = "created"
     step_number: int = 1
@@ -72,11 +59,7 @@ class UniversalAgentSessionState:
     semantic_task_context: Any = field(default=None, repr=False)
     confirm_stage: str = ""
     failed_reason: str = ""
-    created_at: str = field(
-        default_factory=lambda: datetime.now().astimezone().isoformat(
-            timespec="seconds"
-        )
-    )
+    created_at: str = field(default_factory=lambda: datetime.now().astimezone().isoformat(timespec='seconds'))
 
     @staticmethod
     def _serialize(value: Any) -> Any:

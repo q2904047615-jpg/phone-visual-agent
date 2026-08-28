@@ -12,10 +12,7 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 from agent.infrastructure import seller_window_adapter as seller_gui
-from agent.infrastructure.orientation_safety import (
-    OrientationCredential,
-    PhysicalExecutionGate,
-)
+from agent.infrastructure.orientation_safety import OrientationCredential, PhysicalExecutionGate
 from agent.domain.verified_text_transaction import (
     MAX_DIRECT_LATIN_SEGMENT_CHARS,
     VerifiedTextTransactionError,
@@ -44,12 +41,7 @@ def controller_client_has_camera(width: int, height: int) -> bool:
     return seller_gui.seller_layout_has_full_camera(width, height)
 
 
-def oriented_navigation_ratio(
-    x_ratio: float,
-    y_ratio: float,
-    *,
-    landscape: bool,
-) -> tuple[float, float]:
+def oriented_navigation_ratio( x_ratio: float, y_ratio: float, *, landscape: bool, ) -> tuple[float, float]:
     """Map portrait Android navigation coordinates into the observed layout."""
 
     if landscape:
@@ -114,12 +106,7 @@ def load_controller_config() -> dict[str, Any]:
     return _deep_merge(DEFAULT_CONTROLLER_CONFIG, raw)
 
 
-def qwerty_key_point(
-    width: int,
-    height: int,
-    key: str,
-    keyboard_config: dict[str, Any],
-) -> tuple[int, int]:
+def qwerty_key_point( width: int, height: int, key: str, keyboard_config: dict[str, Any], ) -> tuple[int, int]:
     if len(key) != 1 or key not in "abcdefghijklmnopqrstuvwxyz":
         raise ValueError(f"不支持的拼音键：{key!r}")
     rows = keyboard_config.get("rows")
@@ -179,11 +166,7 @@ def qwerty_keyboard_config_from_anchors(
             raise WorkflowNotReady(f"动态拼音键盘锚点 {key!r} 超出安全范围。")
         points[key] = (x, y)
 
-    def row(
-        first: str,
-        last: str,
-        key_count: int,
-    ) -> tuple[float, float, float]:
+    def row( first: str, last: str, key_count: int, ) -> tuple[float, float, float]:
         first_x, first_y = points[first]
         last_x, last_y = points[last]
         if last_x <= first_x:
@@ -215,21 +198,11 @@ def qwerty_keyboard_config_from_anchors(
     # per-letter visual coordinates.
     if not (q_x - top_step * 0.5 <= observed_a_x <= q_x + top_step * 2.0):
         raise WorkflowNotReady("动态拼音键盘第二行缩进异常。")
-    if not (
-        points["p"][0] - top_step * 2.0
-        <= points["l"][0]
-        <= points["p"][0] + top_step * 0.5
-    ):
+    if not ( points["p"][0] - top_step * 2.0 <= points["l"][0] <= points["p"][0] + top_step * 0.5 ):
         raise WorkflowNotReady("动态拼音键盘第二行右端位置异常。")
-    if not (
-        q_x - top_step * 0.5 <= observed_z_x <= q_x + top_step * 3.0
-    ):
+    if not ( q_x - top_step * 0.5 <= observed_z_x <= q_x + top_step * 3.0 ):
         raise WorkflowNotReady("动态拼音键盘第三行缩进异常。")
-    if not (
-        points["p"][0] - top_step * 3.0
-        <= points["m"][0]
-        <= points["p"][0] + top_step * 0.5
-    ):
+    if not ( points["p"][0] - top_step * 3.0 <= points["m"][0] <= points["p"][0] + top_step * 0.5 ):
         raise WorkflowNotReady("动态拼音键盘第三行右端位置异常。")
 
     a_x = q_x + top_step * 0.5
@@ -307,9 +280,7 @@ class RobotController:
             "open_recent_apps",
             "wait_for_change",
         }
-        self.verified_actions = frozenset(
-            default_actions if verified_actions is None else verified_actions
-        )
+        self.verified_actions = frozenset(default_actions if verified_actions is None else verified_actions)
         allowed_actions = default_actions | {
             "input_verified_text",
             "double_tap",
@@ -319,9 +290,7 @@ class RobotController:
         }
         unexpected = self.verified_actions - allowed_actions
         if unexpected:
-            raise ValueError(
-                "设备已验证动作包含未知值：" + ", ".join(sorted(unexpected))
-            )
+            raise ValueError('设备已验证动作包含未知值：' + ', '.join(sorted(unexpected)))
 
     def hardware_capabilities(self) -> dict[str, bool]:
         return {
@@ -409,14 +378,8 @@ class RobotController:
                 "exact_post_action_input_value",
             ],
         }
-        actions["pinch"] = {
-            "enabled": False,
-            "gap_reason": "multi_touch_not_supported_by_single_contact_robot",
-        }
-        actions["hardware_key"] = {
-            "enabled": False,
-            "gap_reason": "hardware_key_transport_not_verified",
-        }
+        actions['pinch'] = {'enabled': False, 'gap_reason': 'multi_touch_not_supported_by_single_contact_robot'}
+        actions['hardware_key'] = {'enabled': False, 'gap_reason': 'hardware_key_transport_not_verified'}
         return {
             "protocol_version": "2026-08-18-device-capability-profile-v1",
             "device_id": self.device_id,
@@ -435,9 +398,7 @@ class RobotController:
 
     def _require_verified_action(self, action: str, label: str) -> None:
         if action not in self.verified_actions:
-            raise WorkflowNotReady(
-                f"当前设备尚未完成{label}真机验收，拒绝执行。"
-            )
+            raise WorkflowNotReady(f'当前设备尚未完成{label}真机验收，拒绝执行。')
 
     def arm_physical_execution(
         self,
@@ -446,22 +407,13 @@ class RobotController:
         action: str,
         scene_fingerprint: str,
     ) -> None:
-        self._physical_execution_gate.arm(
-            credential,
-            action=action,
-            scene_fingerprint=scene_fingerprint,
-        )
+        self._physical_execution_gate.arm(credential, action=action, scene_fingerprint=scene_fingerprint)
 
     def clear_physical_execution_authorization(self) -> None:
         self._physical_execution_gate.clear()
 
-    def _consume_physical_execution(
-        self, action: str, frame: Image.Image
-    ) -> OrientationCredential:
-        return self._physical_execution_gate.consume(
-            action=action,
-            frame=frame,
-        )
+    def _consume_physical_execution( self, action: str, frame: Image.Image ) -> OrientationCredential:
+        return self._physical_execution_gate.consume(action=action, frame=frame)
 
     def request_stop(self) -> None:
         with self._stop_state_lock:
@@ -493,15 +445,7 @@ class RobotController:
             online = width > 0 and height > 0
             camera_online = online and controller_client_has_camera(width, height)
             error = None
-            camera_error = (
-                None
-                if camera_online
-                else (
-                    "控制端当前显示启动/报错对话框，未检测到可用的手机摄像头画面。"
-                    if online
-                    else "控制端窗口不可用。"
-                )
-            )
+            camera_error = None if camera_online else '控制端当前显示启动/报错对话框，未检测到可用的手机摄像头画面。' if online else '控制端窗口不可用。'
         except Exception as exc:  # Device status must stay readable while offline.
             hwnd = 0
             title = ""
@@ -523,15 +467,11 @@ class RobotController:
 
     def _capture_phone(self, hwnd: int) -> Image.Image:
         with self.capture_lock:
-            return seller_gui.camera_crop(
-                seller_gui.capture_client(hwnd), seller_gui.DEFAULT_CAMERA_HEIGHT
-            )
+            return seller_gui.camera_crop(seller_gui.capture_client(hwnd), seller_gui.DEFAULT_CAMERA_HEIGHT)
 
     def _capture_phone_passive(self, hwnd: int) -> Image.Image:
         with self.capture_lock:
-            return seller_gui.camera_crop(
-                seller_gui.capture_client_passive(hwnd), seller_gui.DEFAULT_CAMERA_HEIGHT
-            )
+            return seller_gui.camera_crop(seller_gui.capture_client_passive(hwnd), seller_gui.DEFAULT_CAMERA_HEIGHT)
 
     def capture_preview(self, quality: int = 72) -> bytes:
         hwnd, _title = seller_gui.find_window(self.title)
@@ -581,12 +521,7 @@ class RobotController:
             click_count=2,
         )
 
-    def vision_long_press_relative(
-        self,
-        x: int,
-        y: int,
-        hold_seconds: float = 0.8,
-    ) -> tuple[int, int]:
+    def vision_long_press_relative( self, x: int, y: int, hold_seconds: float = 0.8, ) -> tuple[int, int]:
         """Long-press one calibrated visual target without changing its point."""
 
         self._require_verified_action("long_press", "长按")
@@ -600,12 +535,7 @@ class RobotController:
         self._consume_physical_execution("long_press", frame)
         from agent.infrastructure.tap_calibration import corrected_grid_point
 
-        corrected_x, corrected_y = corrected_grid_point(
-            x,
-            y,
-            (frame.width, frame.height),
-            self.calibration_path,
-        )
+        corrected_x, corrected_y = corrected_grid_point(x, y, (frame.width, frame.height), self.calibration_path)
         point = (
             min(
                 frame.width - 1,
@@ -617,12 +547,7 @@ class RobotController:
             ),
         )
         self._checkpoint()
-        receipt = seller_gui.long_press_client_point(
-            hwnd,
-            point[0],
-            point[1],
-            hold_seconds=float(hold_seconds),
-        )
+        receipt = seller_gui.long_press_client_point(hwnd, point[0], point[1], hold_seconds=float(hold_seconds))
         if not isinstance(receipt, dict):
             raise RuntimeError("控制端没有返回长按事件栅栏凭据。")
         self._last_long_press_receipt = dict(receipt)
@@ -638,14 +563,7 @@ class RobotController:
     ) -> tuple[tuple[int, int], tuple[int, int]]:
         """Drag between two calibrated visual points through the seller UI."""
 
-        return self._vision_path_relative(
-            start_x,
-            start_y,
-            end_x,
-            end_y,
-            action="drag",
-            label="任意两点拖动",
-        )
+        return self._vision_path_relative(start_x, start_y, end_x, end_y, action='drag', label='任意两点拖动')
 
     def vision_swipe_relative(
         self,
@@ -667,14 +585,7 @@ class RobotController:
         }.get(str(direction or "").strip().lower())
         if direction_matches is not True:
             raise ValueError("元素滑动轨迹与请求方向不一致。")
-        return self._vision_path_relative(
-            start_x,
-            start_y,
-            end_x,
-            end_y,
-            action="swipe",
-            label="元素绑定滑动",
-        )
+        return self._vision_path_relative(start_x, start_y, end_x, end_y, action='swipe', label='元素绑定滑动')
 
     def _vision_path_relative(
         self,
@@ -699,18 +610,8 @@ class RobotController:
         self._consume_physical_execution(action, frame)
         from agent.infrastructure.tap_calibration import corrected_grid_point
 
-        corrected_start = corrected_grid_point(
-            start_x,
-            start_y,
-            (frame.width, frame.height),
-            self.calibration_path,
-        )
-        corrected_end = corrected_grid_point(
-            end_x,
-            end_y,
-            (frame.width, frame.height),
-            self.calibration_path,
-        )
+        corrected_start = corrected_grid_point(start_x, start_y, (frame.width, frame.height), self.calibration_path)
+        corrected_end = corrected_grid_point(end_x, end_y, (frame.width, frame.height), self.calibration_path)
 
         def to_pixel(point: tuple[float, float]) -> tuple[int, int]:
             return (
@@ -736,28 +637,17 @@ class RobotController:
     def vision_reveal_system_navigation(self) -> dict[str, Any]:
         """Reveal transient system navigation with one locally derived edge path."""
 
-        self._require_verified_action(
-            "reveal_system_navigation",
-            "系统边缘唤出导航栏",
-        )
+        self._require_verified_action('reveal_system_navigation', '系统边缘唤出导航栏')
         hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
-        self._consume_physical_execution(
-            "reveal_system_navigation", frame
-        )
+        self._consume_physical_execution('reveal_system_navigation', frame)
         from agent.infrastructure.tap_calibration import reveal_system_navigation_path
 
-        evidence = reveal_system_navigation_path(
-            (frame.width, frame.height),
-            self.calibration_path,
-        )
+        evidence = reveal_system_navigation_path((frame.width, frame.height), self.calibration_path)
         corrected = evidence["corrected_grid"]
 
         def to_pixel(point: list[int]) -> tuple[int, int]:
-            return (
-                int(round(point[0] * (frame.width - 1) / 1000)),
-                int(round(point[1] * (frame.height - 1) / 1000)),
-            )
+            return (int(round(point[0] * (frame.width - 1) / 1000)), int(round(point[1] * (frame.height - 1) / 1000)))
 
         start, end = (to_pixel(point) for point in corrected)
         if start == end:
@@ -765,10 +655,7 @@ class RobotController:
         self._checkpoint()
         seller_gui.drag_client_path(hwnd, start, end)
         seller_gui.clear_seller_camera_overlay(hwnd)
-        return {
-            **evidence,
-            "client_path": [list(start), list(end)],
-        }
+        return {**evidence, 'client_path': [list(start), list(end)]}
 
     def _vision_press_relative(
         self,
@@ -790,12 +677,7 @@ class RobotController:
         # ratios and intentionally does not pass through this transform.
         from agent.infrastructure.tap_calibration import corrected_grid_point
 
-        x, y = corrected_grid_point(
-            x,
-            y,
-            (frame.width, frame.height),
-            self.calibration_path,
-        )
+        x, y = corrected_grid_point(x, y, (frame.width, frame.height), self.calibration_path)
         point = (
             min(frame.width - 1, max(0, int(round(x * (frame.width - 1) / 1000)))),
             min(frame.height - 1, max(0, int(round(y * (frame.height - 1) / 1000)))),
@@ -827,18 +709,12 @@ class RobotController:
         self._last_click_receipt = dict(receipt)
         return point
 
-    def _vision_nav_tap(
-        self, x_ratio: float, y_ratio: float, *, action: str
-    ) -> tuple[int, int]:
+    def _vision_nav_tap( self, x_ratio: float, y_ratio: float, *, action: str ) -> tuple[int, int]:
         self._last_click_receipt = None
         hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution(action, frame)
-        x_ratio, y_ratio = oriented_navigation_ratio(
-            x_ratio,
-            y_ratio,
-            landscape=frame.width > frame.height,
-        )
+        x_ratio, y_ratio = oriented_navigation_ratio(x_ratio, y_ratio, landscape=frame.width > frame.height)
         point = (
             min(frame.width - 1, max(0, int(round(frame.width * x_ratio)))),
             min(frame.height - 1, max(0, int(round(frame.height * y_ratio)))),
@@ -887,10 +763,7 @@ class RobotController:
         )
 
     def vision_android_recent_apps(self) -> tuple[int, int]:
-        self._require_verified_action(
-            "open_recent_apps",
-            "Android系统最近任务",
-        )
+        self._require_verified_action('open_recent_apps', 'Android系统最近任务')
         cfg = load_controller_config()
         return self._vision_nav_tap(
             float(cfg["android_recents_x_ratio"]),
@@ -920,11 +793,7 @@ class RobotController:
     def vision_swipe_right(self) -> None:
         self._vision_swipe("right")
 
-    def vision_type_text_with_layout(
-        self,
-        text: str,
-        keyboard_layout: dict[str, Any],
-    ) -> None:
+    def vision_type_text_with_layout( self, text: str, keyboard_layout: dict[str, Any], ) -> None:
         """Universal-agent input path; never falls back to static geometry."""
 
         self._require_verified_action("input_verified_text", "输入文字")
@@ -957,10 +826,7 @@ class RobotController:
         if step is None or text != step.segment or input_method != step.kind:
             raise WorkflowNotReady("设备收到的文字分段与本地精确事务不一致。")
         if step.kind == "direct_latin":
-            if (
-                step.required_case_mode
-                and input_states.get("keyboard_case_mode") != step.required_case_mode
-            ):
+            if ( step.required_case_mode and input_states.get("keyboard_case_mode") != step.required_case_mode ):
                 raise WorkflowNotReady("当前键盘大小写状态与英文分段不一致。")
         elif step.kind == "chinese_pinyin":
             if pinyin != step.pinyin:
@@ -976,12 +842,7 @@ class RobotController:
         if input_states.get("ime_preedit_text"):
             raise WorkflowNotReady("当前仍有未完成的输入法组合。")
 
-    def vision_type_pinyin(
-        self,
-        text: str,
-        pinyin: str,
-        keyboard_layout: dict[str, Any] | None = None,
-    ) -> None:
+    def vision_type_pinyin( self, text: str, pinyin: str, keyboard_layout: dict[str, Any] | None = None, ) -> None:
         self._require_verified_action("input_verified_text", "输入文字")
         del text
         if not re.fullmatch(r"[a-z]{1,30}", pinyin):
@@ -1023,10 +884,7 @@ class RobotController:
             )
             wait_seconds = float(keyboard_cfg["inter_key_wait"])
             if index == 0:
-                wait_seconds = max(
-                    wait_seconds,
-                    float(configured_keyboard.get("first_key_settle", 0.35)),
-                )
+                wait_seconds = max(wait_seconds, float(configured_keyboard.get('first_key_settle', 0.35)))
             self._sleep(wait_seconds)
         seller_gui.clear_seller_camera_overlay(hwnd)
 
@@ -1042,14 +900,8 @@ class RobotController:
         determines the exact number of physical backspace taps.
         """
         self._require_verified_action("input_verified_text", "输入文字")
-        if (
-            isinstance(delete_count, bool)
-            or not isinstance(delete_count, int)
-            or not 1 <= delete_count <= 100
-        ):
-            raise WorkflowNotReady(
-                "退格次数必须是视觉确认后的1～100之间整数，拒绝固定次数清空。"
-            )
+        if ( isinstance(delete_count, bool) or not isinstance(delete_count, int) or not 1 <= delete_count <= 100 ):
+            raise WorkflowNotReady('退格次数必须是视觉确认后的1～100之间整数，拒绝固定次数清空。')
         cfg = load_controller_config()
         backspace_x_ratio = float(cfg["keyboard_backspace_x_ratio"])
         backspace_y_ratio = float(cfg["keyboard_backspace_y_ratio"])
@@ -1072,15 +924,11 @@ class RobotController:
                     )
                     or not all(0 <= float(value) <= 1000 for value in backspace)
                 ):
-                    raise WorkflowNotReady(
-                        "非QWERTY键盘必须提供画面中真实可见的退格键中心。"
-                    )
+                    raise WorkflowNotReady('非QWERTY键盘必须提供画面中真实可见的退格键中心。')
                 backspace_x_ratio = float(backspace[0]) / 1000.0
                 backspace_y_ratio = float(backspace[1]) / 1000.0
             else:
-                raise WorkflowNotReady(
-                    "当前键盘布局不支持安全退格。"
-                )
+                raise WorkflowNotReady('当前键盘布局不支持安全退格。')
         hwnd, _title = seller_gui.find_window(self.title)
         frame = self._capture_phone(hwnd)
         self._consume_physical_execution("input_verified_text", frame)
@@ -1113,13 +961,7 @@ class RobotController:
         seller_gui.configure_single_click_count(hwnd)
         for _index in range(delete_count):
             self._checkpoint()
-            seller_gui.click_client_point(
-                hwnd,
-                point[0],
-                point[1],
-                countdown=0,
-                hold_seconds=0.18,
-            )
+            seller_gui.click_client_point(hwnd, point[0], point[1], countdown=0, hold_seconds=0.18)
             self._sleep(0.08)
         seller_gui.clear_seller_camera_overlay(hwnd)
 
@@ -1213,20 +1055,9 @@ class MockRobotController(RobotController):
         self._record_mock_click_receipt(2)
         return x, y
 
-    def vision_long_press_relative(
-        self,
-        x: int,
-        y: int,
-        hold_seconds: float = 0.8,
-    ) -> tuple[int, int]:
+    def vision_long_press_relative( self, x: int, y: int, hold_seconds: float = 0.8, ) -> tuple[int, int]:
         self._consume_mock_execution("long_press")
-        self.executions.append(
-            {
-                "action": "long_press",
-                "coordinate": [x, y],
-                "hold_seconds": hold_seconds,
-            }
-        )
+        self.executions.append({'action': 'long_press', 'coordinate': [x, y], 'hold_seconds': hold_seconds})
         self._last_long_press_receipt = {
             "version": "2026-08-25-mock-long-press-barrier-v1",
             "hold_started_after_barrier": True,
@@ -1241,13 +1072,7 @@ class MockRobotController(RobotController):
         end_y: int,
     ) -> tuple[tuple[int, int], tuple[int, int]]:
         self._consume_mock_execution("drag")
-        self.executions.append(
-            {
-                "action": "drag",
-                "start": [start_x, start_y],
-                "end": [end_x, end_y],
-            }
-        )
+        self.executions.append({'action': 'drag', 'start': [start_x, start_y], 'end': [end_x, end_y]})
         return (start_x, start_y), (end_x, end_y)
 
     def vision_swipe_relative(
@@ -1270,10 +1095,7 @@ class MockRobotController(RobotController):
         return (start_x, start_y), (end_x, end_y)
 
     def vision_reveal_system_navigation(self) -> dict[str, Any]:
-        self._require_verified_action(
-            "reveal_system_navigation",
-            "系统边缘唤出导航栏",
-        )
+        self._require_verified_action('reveal_system_navigation', '系统边缘唤出导航栏')
         self._consume_mock_execution("reveal_system_navigation")
         evidence = {
             "action": "reveal_system_navigation",
@@ -1322,32 +1144,13 @@ class MockRobotController(RobotController):
         self._consume_mock_execution("swipe")
         self.executions.append({"action": "swipe_right"})
 
-    def vision_type_text_with_layout(
-        self,
-        text: str,
-        keyboard_layout: dict[str, Any],
-    ) -> None:
+    def vision_type_text_with_layout( self, text: str, keyboard_layout: dict[str, Any], ) -> None:
         self._consume_mock_execution("input_verified_text")
-        self.executions.append(
-            {
-                "action": "type_text",
-                "text": text,
-                "keyboard_layout": keyboard_layout,
-            }
-        )
+        self.executions.append({'action': 'type_text', 'text': text, 'keyboard_layout': keyboard_layout})
 
-    def vision_type_pinyin(
-        self,
-        text: str,
-        pinyin: str,
-        keyboard_layout: dict[str, Any] | None = None,
-    ) -> None:
+    def vision_type_pinyin( self, text: str, pinyin: str, keyboard_layout: dict[str, Any] | None = None, ) -> None:
         self._consume_mock_execution("input_verified_text")
-        record: dict[str, Any] = {
-            "action": "type_pinyin",
-            "text": text,
-            "pinyin": pinyin,
-        }
+        record: dict[str, Any] = {'action': 'type_pinyin', 'text': text, 'pinyin': pinyin}
         if keyboard_layout is not None:
             record["keyboard_layout"] = keyboard_layout
         self.executions.append(record)
@@ -1358,10 +1161,7 @@ class MockRobotController(RobotController):
         delete_count: int | None = None,
     ) -> None:
         self._consume_mock_execution("input_verified_text")
-        record: dict[str, Any] = {
-            "action": "clear_text",
-            "delete_count": delete_count,
-        }
+        record: dict[str, Any] = {'action': 'clear_text', 'delete_count': delete_count}
         if keyboard_layout is not None:
             record["keyboard_layout"] = keyboard_layout
         self.executions.append(record)

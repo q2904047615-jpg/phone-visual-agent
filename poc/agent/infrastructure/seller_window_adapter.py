@@ -54,9 +54,7 @@ def _enable_per_monitor_dpi_awareness() -> None:
 
 _enable_per_monitor_dpi_awareness()
 
-EnumWindowsProc = ctypes.WINFUNCTYPE(
-    wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
-)
+EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
@@ -130,45 +128,24 @@ class MOUSEINPUT(ctypes.Structure):
 
 
 class HARDWAREINPUT(ctypes.Structure):
-    _fields_ = [
-        ("uMsg", wintypes.DWORD),
-        ("wParamL", wintypes.WORD),
-        ("wParamH", wintypes.WORD),
-    ]
+    _fields_ = [('uMsg', wintypes.DWORD), ('wParamL', wintypes.WORD), ('wParamH', wintypes.WORD)]
 
 
 class INPUT_UNION(ctypes.Union):
-    _fields_ = [
-        ("mi", MOUSEINPUT),
-        ("ki", KEYBDINPUT),
-        ("hi", HARDWAREINPUT),
-    ]
+    _fields_ = [('mi', MOUSEINPUT), ('ki', KEYBDINPUT), ('hi', HARDWAREINPUT)]
 
 
 class INPUT(ctypes.Structure):
     _anonymous_ = ("data",)
-    _fields_ = [
-        ("type", wintypes.DWORD),
-        ("data", INPUT_UNION),
-    ]
+    _fields_ = [('type', wintypes.DWORD), ('data', INPUT_UNION)]
 
 
 class RECT(ctypes.Structure):
-    _fields_ = [
-        ("left", wintypes.LONG),
-        ("top", wintypes.LONG),
-        ("right", wintypes.LONG),
-        ("bottom", wintypes.LONG),
-    ]
+    _fields_ = [('left', wintypes.LONG), ('top', wintypes.LONG), ('right', wintypes.LONG), ('bottom', wintypes.LONG)]
 
 
 class MONITORINFO(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("rcMonitor", RECT),
-        ("rcWork", RECT),
-        ("dwFlags", wintypes.DWORD),
-    ]
+    _fields_ = [('cbSize', wintypes.DWORD), ('rcMonitor', RECT), ('rcWork', RECT), ('dwFlags', wintypes.DWORD)]
 
 
 def find_window(title_fragment: str) -> tuple[int, str]:
@@ -190,10 +167,7 @@ def find_window(title_fragment: str) -> tuple[int, str]:
 
     user32.EnumWindows(callback, 0)
     if not matches:
-        raise RuntimeError(
-            f"没有找到标题包含“{title_fragment}”的窗口。"
-            "请先打开 main.exe，并保持控制端窗口可见。"
-        )
+        raise RuntimeError(f'没有找到标题包含“{title_fragment}”的窗口。请先打开 main.exe，并保持控制端窗口可见。')
     return matches[0]
 
 
@@ -225,9 +199,7 @@ def ensure_window_fully_visible(hwnd: int) -> None:
     # Only auto-expand layouts that look like a real camera window.  Small
     # startup/error dialogs must continue to fail closed.
     portrait_candidate = client_height > client_width >= MIN_AUTO_LAYOUT_WIDTH
-    desired_client_height = (
-        max(client_height, required_height) if portrait_candidate else client_height
-    )
+    desired_client_height = max(client_height, required_height) if portrait_candidate else client_height
 
     outer_width = window_rect.right - window_rect.left
     outer_height = window_rect.bottom - window_rect.top
@@ -242,23 +214,11 @@ def ensure_window_fully_visible(hwnd: int) -> None:
     work_width = info.rcWork.right - info.rcWork.left
     work_height = info.rcWork.bottom - info.rcWork.top
     if outer_width > work_width or desired_outer_height > work_height:
-        raise RuntimeError(
-            "控制端完整摄像区和操作栏大于当前显示器工作区，已拒绝执行。"
-        )
+        raise RuntimeError('控制端完整摄像区和操作栏大于当前显示器工作区，已拒绝执行。')
 
-    target_left = min(
-        max(window_rect.left, info.rcWork.left),
-        info.rcWork.right - outer_width,
-    )
-    target_top = min(
-        max(window_rect.top, info.rcWork.top),
-        info.rcWork.bottom - desired_outer_height,
-    )
-    if (
-        target_left != window_rect.left
-        or target_top != window_rect.top
-        or desired_outer_height != outer_height
-    ):
+    target_left = min(max(window_rect.left, info.rcWork.left), info.rcWork.right - outer_width)
+    target_top = min(max(window_rect.top, info.rcWork.top), info.rcWork.bottom - desired_outer_height)
+    if ( target_left != window_rect.left or target_top != window_rect.top or desired_outer_height != outer_height ):
         SWP_NOZORDER = 0x0004
         SWP_NOACTIVATE = 0x0010
         if not user32.SetWindowPos(
@@ -299,11 +259,7 @@ def seller_layout_scale(client_width: int, client_height: int) -> float:
     return seller_ui_scale(client_width)
 
 
-def scale_seller_vertical_value(
-    value: int | float,
-    client_width: int,
-    client_height: int,
-) -> int:
+def scale_seller_vertical_value( value: int | float, client_width: int, client_height: int, ) -> int:
     if isinstance(value, bool) or float(value) < 0:
         raise ValueError("控制端基准坐标必须是非负数。")
     scaled = float(value) * seller_layout_scale(client_width, client_height)
@@ -318,19 +274,12 @@ def seller_required_client_height(
     """Return the smallest client height containing camera and both tool rows."""
 
     scale = seller_layout_scale(client_width, client_height)
-    camera_baseline = (
-        BASELINE_CLIENT_WIDTH if int(client_width) > int(client_height)
-        else baseline_height
-    )
+    camera_baseline = BASELINE_CLIENT_WIDTH if int(client_width) > int(client_height) else baseline_height
     required = (camera_baseline + BASELINE_TOOLBAR_HEIGHT) * scale
     return int(math.floor(required + 0.5))
 
 
-def seller_camera_height(
-    client_width: int,
-    client_height: int,
-    baseline_height: int = DEFAULT_CAMERA_HEIGHT,
-) -> int:
+def seller_camera_height( client_width: int, client_height: int, baseline_height: int = DEFAULT_CAMERA_HEIGHT, ) -> int:
     """Map the 540x960 camera viewport to the current physical client size."""
 
     if isinstance(client_height, bool) or int(client_height) <= 0:
@@ -339,14 +288,7 @@ def seller_camera_height(
         scaled = scale_seller_ui_value(baseline_height, client_width)
         return min(int(client_height), max(1, scaled))
 
-    return max(
-        1,
-        scale_seller_vertical_value(
-            BASELINE_CLIENT_WIDTH,
-            client_width,
-            client_height,
-        ),
-    )
+    return max(1, scale_seller_vertical_value(BASELINE_CLIENT_WIDTH, client_width, client_height))
 
 
 def seller_layout_has_full_camera(
@@ -358,11 +300,7 @@ def seller_layout_has_full_camera(
 
     landscape = int(client_width) > int(client_height)
     if not landscape:
-        return int(client_height) >= seller_required_client_height(
-            client_width,
-            client_height,
-            baseline_height,
-        )
+        return int(client_height) >= seller_required_client_height(client_width, client_height, baseline_height)
 
     # A rotated 540x960 phone becomes 960x540.  The vendor window clips its
     # second toolbar row in this orientation; the camera and first-row controls
@@ -388,17 +326,10 @@ def seller_control_point(
     """Map one documented seller-toolbar point to the actual client pixels."""
 
     x = scale_seller_ui_value(baseline_x, client_width)
-    bottom = scale_seller_vertical_value(
-        baseline_y_from_bottom,
-        client_width,
-        client_height,
-    )
+    bottom = scale_seller_vertical_value(baseline_y_from_bottom, client_width, client_height)
     y = int(client_height) - bottom
     if not (0 <= x < int(client_width) and 0 <= y < int(client_height)):
-        raise ValueError(
-            f"缩放后的控制点 ({x}, {y}) 超出窗口客户区 "
-            f"{client_width}×{client_height}。"
-        )
+        raise ValueError(f'缩放后的控制点 ({x}, {y}) 超出窗口客户区 {client_width}×{client_height}。')
     return x, y
 
 
@@ -419,19 +350,12 @@ def _window_is_minimized(hwnd: int) -> bool:
         return False
 
 
-def _validate_camera_region_unoccluded(
-    hwnd: int,
-    *,
-    camera_height: int = DEFAULT_CAMERA_HEIGHT,
-) -> None:
+def _validate_camera_region_unoccluded( hwnd: int, *, camera_height: int = DEFAULT_CAMERA_HEIGHT, ) -> None:
     """Prove the current desktop pixels belong to the seller controller."""
 
     left, top, width, height = client_geometry(hwnd)
     if not seller_layout_has_full_camera(width, height, camera_height):
-        raise RuntimeError(
-            "控制端窗口没有完整显示摄像区和底部操作栏，已拒绝执行；"
-            "请恢复完整窗口或为卖家软件启用独立 DPI 兼容设置。"
-        )
+        raise RuntimeError('控制端窗口没有完整显示摄像区和底部操作栏，已拒绝执行；请恢复完整窗口或为卖家软件启用独立 DPI 兼容设置。')
     visible_height = seller_camera_height(width, height, camera_height)
     if width <= 0 or visible_height <= 0:
         raise RuntimeError("控制端相机区域没有有效大小。")
@@ -454,24 +378,15 @@ def _validate_camera_region_unoccluded(
     expected = int(hwnd)
     for x_ratio, y_ratio in samples:
         screen_x = left + min(width - 1, max(0, int(round((width - 1) * x_ratio))))
-        screen_y = top + min(
-            visible_height - 1,
-            max(0, int(round((visible_height - 1) * y_ratio))),
-        )
+        screen_y = top + min(visible_height - 1, max(0, int(round((visible_height - 1) * y_ratio))))
         owner = _root_window_at(screen_x, screen_y)
         if owner != expected:
             foreign.append((screen_x, screen_y, owner))
     if foreign:
-        raise RuntimeError(
-            "控制端相机区域仍被其他窗口遮挡，已拒绝把电脑桌面当成手机画面。"
-        )
+        raise RuntimeError('控制端相机区域仍被其他窗口遮挡，已拒绝把电脑桌面当成手机画面。')
 
 
-def ensure_camera_region_unoccluded(
-    hwnd: int,
-    *,
-    camera_height: int = DEFAULT_CAMERA_HEIGHT,
-) -> None:
+def ensure_camera_region_unoccluded( hwnd: int, *, camera_height: int = DEFAULT_CAMERA_HEIGHT, ) -> None:
     """Activate the seller controller for one explicitly requested task capture."""
 
     user32.ShowWindow(hwnd, SW_RESTORE)
@@ -487,10 +402,7 @@ def capture_client(hwnd: int) -> Image.Image:
     left, top, width, height = client_geometry(hwnd)
     if width <= 0 or height <= 0:
         raise RuntimeError("控制端窗口当前没有有效大小，可能已最小化。")
-    return ImageGrab.grab(
-        bbox=(left, top, left + width, top + height),
-        all_screens=True,
-    ).convert("RGB")
+    return ImageGrab.grab(bbox=(left, top, left + width, top + height), all_screens=True).convert('RGB')
 
 
 def capture_client_passive(hwnd: int) -> Image.Image:
@@ -502,10 +414,7 @@ def capture_client_passive(hwnd: int) -> Image.Image:
     left, top, width, height = client_geometry(hwnd)
     if width <= 0 or height <= 0:
         raise RuntimeError("控制端窗口当前没有有效大小，被动预览已暂停。")
-    return ImageGrab.grab(
-        bbox=(left, top, left + width, top + height),
-        all_screens=True,
-    ).convert("RGB")
+    return ImageGrab.grab(bbox=(left, top, left + width, top + height), all_screens=True).convert('RGB')
 
 
 def camera_crop(image: Image.Image, camera_height: int) -> Image.Image:
@@ -557,11 +466,7 @@ def click_client_point(
     barrier_seconds = 0.0
     try:
         user32.SetCursorPos(screen_point.x, screen_point.y)
-        target_state = (
-            _stable_seller_position_baseline(hwnd)
-            if require_event_barrier
-            else None
-        )
+        target_state = _stable_seller_position_baseline(hwnd) if require_event_barrier else None
         user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
         pressed = True
         # 实机验证表明 0.08 秒过短：机械臂会下压，但手机可能收不到触摸。
@@ -578,18 +483,10 @@ def click_client_point(
             )
             barrier_started = time.monotonic()
             user32.SetCursorPos(screen_point.x + offset, screen_point.y)
-            changed_pixels, _ = _wait_for_seller_position_state(
-                hwnd,
-                target_state,
-                expect_changed=True,
-            )
+            changed_pixels, _ = _wait_for_seller_position_state(hwnd, target_state, expect_changed=True)
             offset_state = _capture_seller_position_overlay(hwnd)
             user32.SetCursorPos(screen_point.x, screen_point.y)
-            return_changed_pixels, _ = _wait_for_seller_position_state(
-                hwnd,
-                offset_state,
-                expect_changed=True,
-            )
+            return_changed_pixels, _ = _wait_for_seller_position_state(hwnd, offset_state, expect_changed=True)
             barrier_seconds = time.monotonic() - barrier_started
         time.sleep(0.12)
     finally:
@@ -626,17 +523,11 @@ def _capture_seller_position_overlay(hwnd: int) -> np.ndarray:
     owner = _root_window_at(left + crop_width // 2, top + crop_height // 2)
     if owner != int(hwnd):
         raise RuntimeError("控制端坐标状态条被其他窗口遮挡。")
-    image = ImageGrab.grab(
-        bbox=(left, top, left + crop_width, top + crop_height),
-        all_screens=True,
-    ).convert("RGB")
+    image = ImageGrab.grab(bbox=(left, top, left + crop_width, top + crop_height), all_screens=True).convert('RGB')
     return np.asarray(image, dtype=np.int16).copy()
 
 
-def _seller_position_changed_pixels(
-    baseline: np.ndarray,
-    current: np.ndarray,
-) -> int:
+def _seller_position_changed_pixels( baseline: np.ndarray, current: np.ndarray, ) -> int:
     if baseline.shape != current.shape or baseline.ndim != 3:
         raise RuntimeError("控制端坐标状态条尺寸在动作期间发生变化。")
     delta = np.abs(current - baseline).max(axis=2)
@@ -664,9 +555,7 @@ def _wait_for_seller_position_state(
             return last_count, time.monotonic() - started
         time.sleep(0.02)
     state = "变化" if expect_changed else "恢复"
-    raise RuntimeError(
-        f"控制端没有在限定时间内确认坐标状态条{state}，已拒绝无确认长按。"
-    )
+    raise RuntimeError(f'控制端没有在限定时间内确认坐标状态条{state}，已拒绝无确认长按。')
 
 
 def _stable_seller_position_baseline(hwnd: int) -> np.ndarray:
@@ -675,30 +564,19 @@ def _stable_seller_position_baseline(hwnd: int) -> np.ndarray:
     while time.monotonic() < deadline:
         time.sleep(0.03)
         current = _capture_seller_position_overlay(hwnd)
-        if (
-            _seller_position_changed_pixels(previous, current)
-            <= SELLER_POSITION_RETURN_PIXEL_MAX
-        ):
+        if ( _seller_position_changed_pixels(previous, current) <= SELLER_POSITION_RETURN_PIXEL_MAX ):
             return current
         previous = current
     raise RuntimeError("控制端坐标状态条在长按前不稳定。")
 
 
-def long_press_client_point(
-    hwnd: int,
-    x: int,
-    y: int,
-    *,
-    hold_seconds: float,
-) -> dict[str, object]:
+def long_press_client_point( hwnd: int, x: int, y: int, *, hold_seconds: float, ) -> dict[str, object]:
     """Hold contact only after the seller GUI processes a down/move barrier."""
 
     _, _, width, height = client_geometry(hwnd)
     camera_height = seller_camera_height(width, height)
     if not (0 <= x < width and 0 <= y < camera_height):
-        raise ValueError(
-            f"长按位置 ({x}, {y}) 超出摄像头客户区 {width}×{camera_height}。"
-        )
+        raise ValueError(f'长按位置 ({x}, {y}) 超出摄像头客户区 {width}×{camera_height}。')
     if not 0.5 <= float(hold_seconds) <= 2.0:
         raise ValueError("长按时间必须在0.5～2.0秒之间。")
 
@@ -727,18 +605,10 @@ def long_press_client_point(
         pressed = True
         barrier_started = time.monotonic()
         user32.SetCursorPos(point.x + offset, point.y)
-        changed_pixels, _ = _wait_for_seller_position_state(
-            hwnd,
-            baseline,
-            expect_changed=True,
-        )
+        changed_pixels, _ = _wait_for_seller_position_state(hwnd, baseline, expect_changed=True)
         offset_state = _capture_seller_position_overlay(hwnd)
         user32.SetCursorPos(point.x, point.y)
-        return_changed_pixels, _ = _wait_for_seller_position_state(
-            hwnd,
-            offset_state,
-            expect_changed=True,
-        )
+        return_changed_pixels, _ = _wait_for_seller_position_state(hwnd, offset_state, expect_changed=True)
         barrier_seconds = time.monotonic() - barrier_started
         # The seller GUI returning from its synchronous handler proves event
         # ordering, but its native Z command has no documented contact ACK.
@@ -780,10 +650,7 @@ def drag_client_path(
     camera_height = seller_camera_height(width, height)
     for name, (x, y) in (("起点", start), ("终点", end)):
         if not (0 <= x < width and 0 <= y < camera_height):
-            raise ValueError(
-                f"拖动{name} ({x}, {y}) 超出摄像头客户区 "
-                f"{width}×{camera_height}。"
-            )
+            raise ValueError(f'拖动{name} ({x}, {y}) 超出摄像头客户区 {width}×{camera_height}。')
     if start == end:
         raise ValueError("拖动起点和终点不能相同。")
     if not 0.3 <= float(duration_seconds) <= 2.0:
@@ -886,13 +753,7 @@ def type_unicode_text(text: str) -> None:
     for char in text:
         for flags in (KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP):
             events[event_index].type = INPUT_KEYBOARD
-            events[event_index].ki = KEYBDINPUT(
-                wVk=0,
-                wScan=ord(char),
-                dwFlags=flags,
-                time=0,
-                dwExtraInfo=0,
-            )
+            events[event_index].ki = KEYBDINPUT(wVk=0, wScan=ord(char), dwFlags=flags, time=0, dwExtraInfo=0)
             event_index += 1
     sent = user32.SendInput(len(events), events, ctypes.sizeof(INPUT))
     if sent != len(events):
@@ -906,11 +767,7 @@ def configure_click_count(hwnd: int, click_count: int) -> None:
         raise ValueError("控制端连点次数只允许1或2。")
     ensure_window_fully_visible(hwnd)
     _, _, width, height = client_geometry(hwnd)
-    control_x, control_y = seller_control_point(
-        width,
-        height,
-        CLICK_COUNT_INPUT_X,
-    )
+    control_x, control_y = seller_control_point(width, height, CLICK_COUNT_INPUT_X)
     click_client_control(hwnd, control_x, control_y)
     user32.keybd_event(VK_CONTROL, 0, 0, 0)
     press_virtual_key(VK_A)
@@ -950,10 +807,7 @@ def cursor_parking_screen_point(
         (screen_left + 2, screen_bottom - 3),
         (screen_right - 3, screen_bottom - 3),
     )
-    window_center = (
-        (window_left + window_right) / 2,
-        (window_top + window_bottom) / 2,
-    )
+    window_center = ((window_left + window_right) / 2, (window_top + window_bottom) / 2)
     outside = [
         point
         for point in candidates
@@ -964,11 +818,7 @@ def cursor_parking_screen_point(
     ]
     if not outside:
         return None
-    return max(
-        outside,
-        key=lambda point: (point[0] - window_center[0]) ** 2
-        + (point[1] - window_center[1]) ** 2,
-    )
+    return max(outside, key=lambda point: (point[0] - window_center[0]) ** 2 + (point[1] - window_center[1]) ** 2)
 
 
 @contextmanager
@@ -988,10 +838,7 @@ def temporarily_park_cursor_outside_camera(hwnd: int):
         raise ctypes.WinError()
     left, top, width, height = client_geometry(hwnd)
     camera_height = seller_camera_height(width, height, DEFAULT_CAMERA_HEIGHT)
-    if not (
-        left <= original.x < left + width
-        and top <= original.y < top + camera_height
-    ):
+    if not ( left <= original.x < left + width and top <= original.y < top + camera_height ):
         yield False
         return
 
@@ -1039,23 +886,14 @@ def clear_seller_camera_overlay(hwnd: int) -> None:
 
 def configure_swipe(hwnd: int, direction: str) -> None:
     """Select one of the seller software's four documented swipe actions."""
-    action_index = {
-        "up": 0,
-        "down": 1,
-        "left": 2,
-        "right": 3,
-    }
+    action_index = {'up': 0, 'down': 1, 'left': 2, 'right': 3}
     try:
         index = action_index[direction]
     except KeyError as exc:
         raise ValueError(f"Unsupported swipe direction: {direction}") from exc
     ensure_window_fully_visible(hwnd)
     _, _, width, height = client_geometry(hwnd)
-    control_x, control_y = seller_control_point(
-        width,
-        height,
-        ACTION_DROPDOWN_X,
-    )
+    control_x, control_y = seller_control_point(width, height, ACTION_DROPDOWN_X)
     click_client_control(hwnd, control_x, control_y)
     # 下拉选项顺序由卖家文档和实机确认：
     # 上划、下划、左划、右划、下拉、起点。

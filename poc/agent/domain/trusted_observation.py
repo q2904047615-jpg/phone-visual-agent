@@ -46,10 +46,7 @@ class TrustedObservation:
     def target_local_candidate(self) -> UIElement | None:
         """Return the sole conflict-free goal element usable on a dynamic page."""
 
-        return trusted_target_local_candidate(
-            self.scene,
-            self.candidate_conflicts,
-        )
+        return trusted_target_local_candidate(self.scene, self.candidate_conflicts)
 
     def to_dict(self) -> dict[str, Any]:
         scene = self.scene.to_dict()
@@ -82,10 +79,7 @@ def structured_system_ui(scene: UIScene) -> dict[str, Any] | None:
             immersive = facts.get("immersive_or_fullscreen")
         if navigation_visible is None:
             navigation_visible = facts.get("navigation_bar_visible")
-    return {
-        "immersive_or_fullscreen": immersive,
-        "navigation_bar_visible": navigation_visible,
-    }
+    return {'immersive_or_fullscreen': immersive, 'navigation_bar_visible': navigation_visible}
 
 
 def canonicalize_trusted_scene(
@@ -114,10 +108,7 @@ def canonicalize_trusted_scene(
     for left in range(len(elements)):
         for right in range(left + 1, len(elements)):
             overlap = bounds_overlap(elements[left].bounds, elements[right].bounds)
-            compatible = elements_semantically_compatible(
-                elements[left],
-                elements[right],
-            )
+            compatible = elements_semantically_compatible(elements[left], elements[right])
             exact_same_role = bool(
                 elements[left].label.strip()
                 and elements[left].label.strip().casefold()
@@ -182,10 +173,7 @@ def canonicalize_trusted_scene(
     return canonical_scene, tuple(sorted(aliases)), tuple(conflicts)
 
 
-def trusted_target_local_candidate(
-    scene: UIScene,
-    conflicts: tuple[dict[str, Any], ...],
-) -> UIElement | None:
+def trusted_target_local_candidate( scene: UIScene, conflicts: tuple[dict[str, Any], ...], ) -> UIElement | None:
     """Resolve one strong goal element and fail closed on unresolved overlap."""
 
     candidate = scene.unique_trusted_goal_element()
@@ -223,25 +211,12 @@ def canonical_element_rank(element: UIElement) -> tuple[int, int, float, float]:
             or element.states.get("keyboard_input_mode_switch") is True
         )
     )
-    return (
-        locally_audited_input_control,
-        ROLE_PRIORITY.get(element.role, 0),
-        float(element.confidence),
-        -area,
-    )
+    return (locally_audited_input_control, ROLE_PRIORITY.get(element.role, 0), float(element.confidence), -area)
 
 
 def elements_semantically_compatible(left: UIElement, right: UIElement) -> bool:
-    left_texts = {
-        text.strip().casefold()
-        for text in (left.label, *left.evidence)
-        if text.strip()
-    }
-    right_texts = {
-        text.strip().casefold()
-        for text in (right.label, *right.evidence)
-        if text.strip()
-    }
+    left_texts = {text.strip().casefold() for text in (left.label, *left.evidence) if text.strip()}
+    right_texts = {text.strip().casefold() for text in (right.label, *right.evidence) if text.strip()}
     if left_texts and right_texts and left_texts.intersection(right_texts):
         return True
     return left.meaning.strip().casefold() == right.meaning.strip().casefold()

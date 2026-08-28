@@ -20,12 +20,7 @@ class DeviceCameraCoordinator:
     @staticmethod
     def _jpeg(frame: Any, *, quality: int = 72) -> bytes:
         buffer = BytesIO()
-        frame.convert("RGB").save(
-            buffer,
-            format="JPEG",
-            quality=max(1, min(95, int(quality))),
-            optimize=True,
-        )
+        frame.convert('RGB').save(buffer, format='JPEG', quality=max(1, min(95, int(quality))), optimize=True)
         return buffer.getvalue()
 
     @contextmanager
@@ -48,17 +43,13 @@ class DeviceCameraCoordinator:
     ) -> tuple[bytes, bool]:
         if cache_only:
             if self._cached_preview is None:
-                raise CameraPreviewUnavailable(
-                    "任务正在独占相机，尚无可复用的缓存画面。"
-                )
+                raise CameraPreviewUnavailable('任务正在独占相机，尚无可复用的缓存画面。')
             return self._cached_preview, True
 
         acquired = self._serial_lock.acquire(blocking=False)
         if not acquired:
             if self._cached_preview is None:
-                raise CameraPreviewUnavailable(
-                    "任务正在独占相机，尚无可复用的缓存画面。"
-                )
+                raise CameraPreviewUnavailable('任务正在独占相机，尚无可复用的缓存画面。')
             return self._cached_preview, True
         try:
             content = bytes(capture(quality=quality))

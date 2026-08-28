@@ -6,16 +6,10 @@ import json
 from typing import Any
 
 
-FORMAT_ERROR_TYPES = frozenset(
-    {"invalid_json", "truncated_json", "protocol_invalid"}
-)
+FORMAT_ERROR_TYPES = frozenset({'invalid_json', 'truncated_json', 'protocol_invalid'})
 
 
-def classify_qwen_error(
-    error: BaseException | str,
-    *,
-    raw_response: str = "",
-) -> str:
+def classify_qwen_error( error: BaseException | str, *, raw_response: str = "", ) -> str:
     """Classify Qwen failures without weakening any protocol validation."""
 
     text = str(error).strip()
@@ -56,16 +50,7 @@ def classify_qwen_error(
         )
     ):
         return "truncated_json" if looks_like_truncated_json(raw_response) else "invalid_json"
-    if any(
-        marker in text
-        for marker in (
-            "不符合协议",
-            "协议外字段",
-            "缺少字段",
-            "必须是JSON对象",
-            "必须包含4个",
-        )
-    ):
+    if any( marker in text for marker in ( "不符合协议", "协议外字段", "缺少字段", "必须是JSON对象", "必须包含4个", ) ):
         return "protocol_invalid"
     if any(marker in text for marker in ("不稳定", "模糊", "fingerprint", "确认门")):
         return "local_safety_block"

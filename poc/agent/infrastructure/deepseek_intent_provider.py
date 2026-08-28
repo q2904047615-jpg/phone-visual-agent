@@ -28,9 +28,7 @@ def _read_windows_user_environment(name: str) -> str:
 
 
 def _default_deepseek_api_key() -> str:
-    return os.getenv("DEEPSEEK_API_KEY", "").strip() or _read_windows_user_environment(
-        "DEEPSEEK_API_KEY"
-    )
+    return os.getenv('DEEPSEEK_API_KEY', '').strip() or _read_windows_user_environment('DEEPSEEK_API_KEY')
 
 
 class IntentProviderError(RuntimeError):
@@ -53,13 +51,8 @@ class DeepSeekIntentProvider:
         retry_base_delay: float = 0.8,
     ) -> None:
         self.api_key = api_key if api_key is not None else _default_deepseek_api_key()
-        self.model = model or os.getenv(
-            "DEEPSEEK_INTENT_MODEL",
-            DEFAULT_DEEPSEEK_MODEL,
-        )
-        self.base_url = (
-            base_url or os.getenv("DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL)
-        ).rstrip("/")
+        self.model = model or os.getenv('DEEPSEEK_INTENT_MODEL', DEFAULT_DEEPSEEK_MODEL)
+        self.base_url = (base_url or os.getenv('DEEPSEEK_BASE_URL', DEFAULT_DEEPSEEK_BASE_URL)).rstrip('/')
         self.timeout = max(1.0, float(timeout))
         self.max_attempts = max(1, int(max_attempts))
         self.retry_base_delay = max(0.0, float(retry_base_delay))
@@ -87,9 +80,7 @@ class DeepSeekIntentProvider:
 
     def chat_json(self, messages: list[dict[str, Any]], max_tokens: int = 500) -> str:
         if not self.configured:
-            raise IntentProviderError(
-                "DeepSeek 文本理解尚未配置：请先设置 DEEPSEEK_API_KEY。"
-            )
+            raise IntentProviderError('DeepSeek 文本理解尚未配置：请先设置 DEEPSEEK_API_KEY。')
 
         last_error: Exception | None = None
         for attempt in range(1, self.max_attempts + 1):
@@ -122,30 +113,19 @@ class DeepSeekIntentProvider:
             except httpx.HTTPStatusError as exc:
                 last_error = exc
                 status_code = exc.response.status_code
-                if (
-                    status_code not in self.TRANSIENT_HTTP_STATUS_CODES
-                    or attempt >= self.max_attempts
-                ):
+                if ( status_code not in self.TRANSIENT_HTTP_STATUS_CODES or attempt >= self.max_attempts ):
                     detail = exc.response.text[:500]
-                    raise IntentProviderError(
-                        f"DeepSeek 文本理解请求失败（HTTP {status_code}）：{detail}"
-                    ) from exc
+                    raise IntentProviderError(f'DeepSeek 文本理解请求失败（HTTP {status_code}）：{detail}') from exc
             except httpx.TimeoutException as exc:
                 last_error = exc
                 if attempt >= self.max_attempts:
-                    raise IntentProviderError(
-                        f"DeepSeek 文本理解连续{attempt}次超时。"
-                    ) from exc
+                    raise IntentProviderError(f'DeepSeek 文本理解连续{attempt}次超时。') from exc
             except httpx.TransportError as exc:
                 last_error = exc
                 if attempt >= self.max_attempts:
-                    raise IntentProviderError(
-                        f"DeepSeek 文本理解连接连续{attempt}次中断：{exc}"
-                    ) from exc
+                    raise IntentProviderError(f'DeepSeek 文本理解连接连续{attempt}次中断：{exc}') from exc
             except (KeyError, IndexError, TypeError, ValueError) as exc:
-                raise IntentProviderError(
-                    f"DeepSeek 文本理解响应格式无效：{exc}"
-                ) from exc
+                raise IntentProviderError(f'DeepSeek 文本理解响应格式无效：{exc}') from exc
 
             if self.retry_base_delay > 0:
                 time.sleep(self.retry_base_delay * (2 ** (attempt - 1)))

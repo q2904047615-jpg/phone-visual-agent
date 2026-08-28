@@ -4,11 +4,7 @@ import threading
 from contextlib import contextmanager
 from typing import Iterator
 
-from agent.domain import (
-    ACTIVE_SESSION_STATUSES,
-    AgentSession,
-    AgentSessionNotFoundError,
-)
+from agent.domain import ACTIVE_SESSION_STATUSES, AgentSession, AgentSessionNotFoundError
 
 
 class InMemoryAgentSessionRepository:

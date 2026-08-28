@@ -11,14 +11,9 @@ import uuid
 from typing import Any
 
 
-DEEPSEEK_FAILURE_DIAGNOSTIC_VERSION = (
-    "2026-08-17-deepseek-failure-diagnostic-v1"
-)
+DEEPSEEK_FAILURE_DIAGNOSTIC_VERSION = '2026-08-17-deepseek-failure-diagnostic-v1'
 MAX_REDACTED_DEEPSEEK_RESPONSE_CHARS = 16000
-_IMAGE_DATA_URL_RE = re.compile(
-    r"data:image/[^;\s\"']+;base64,[A-Za-z0-9+/=_-]+",
-    re.IGNORECASE,
-)
+_IMAGE_DATA_URL_RE = re.compile('data:image/[^;\\s\\"\']+;base64,[A-Za-z0-9+/=_-]+', re.IGNORECASE)
 _SECRET_FIELD_RE = re.compile(
     r"(?P<prefix>[\"']?(?:authorization|api[_-]?key|access[_-]?token|"
     r"refresh[_-]?token|token|secret|password)[\"']?\s*[:=]\s*)"
@@ -50,15 +45,9 @@ def _redact_deepseek_failure_response(raw: str) -> str:
         ),
         redacted,
     )
-    redacted = _UNQUOTED_SECRET_FIELD_RE.sub(
-        lambda match: f"{match.group('prefix')}[REDACTED_SECRET]",
-        redacted,
-    )
+    redacted = _UNQUOTED_SECRET_FIELD_RE.sub(lambda match: f'{match.group('prefix')}[REDACTED_SECRET]', redacted)
     redacted = _BEARER_RE.sub("Bearer [REDACTED_SECRET]", redacted)
-    redacted = _URL_SECRET_RE.sub(
-        lambda match: f"{match.group('prefix')}[REDACTED_SECRET]",
-        redacted,
-    )
+    redacted = _URL_SECRET_RE.sub(lambda match: f'{match.group('prefix')}[REDACTED_SECRET]', redacted)
     redacted = _URL_USERINFO_RE.sub(r"\1[REDACTED_CREDENTIALS]@", redacted)
     return _OPENAI_STYLE_SECRET_RE.sub("[REDACTED_SECRET]", redacted)
 
@@ -106,9 +95,7 @@ def _structured_candidate_diff(raw: str, previous_graph: Any) -> dict[str, Any] 
                 if isinstance(item, dict)
             ]
         entities = goal.get("entities")
-        input_fields = (
-            entities.get("input_fields") if isinstance(entities, dict) else None
-        )
+        input_fields = entities.get('input_fields') if isinstance(entities, dict) else None
         safe_fields = None
         if isinstance(input_fields, list):
             safe_fields = [
@@ -196,25 +183,13 @@ def persist_deepseek_failure_diagnostic(
     authority = getattr(planner, "last_semantic_authority", None)
     if authority is not None:
         try:
-            authority_json = json.dumps(
-                authority.to_dict(),
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            payload["typed_effect_authority"] = json.loads(
-                _redact_deepseek_failure_response(authority_json)
-            )
+            authority_json = json.dumps(authority.to_dict(), ensure_ascii=False, sort_keys=True)
+            payload['typed_effect_authority'] = json.loads(_redact_deepseek_failure_response(authority_json))
         except (AttributeError, TypeError, ValueError):
-            payload["typed_effect_authority_error"] = (
-                "正式类型化效果报告无法安全序列化。"
-            )
-    authority_error = str(
-        getattr(planner, "last_semantic_authority_error", "") or ""
-    ).strip()
+            payload['typed_effect_authority_error'] = '正式类型化效果报告无法安全序列化。'
+    authority_error = str(getattr(planner, 'last_semantic_authority_error', '') or '').strip()
     if authority_error:
-        payload["typed_effect_authority_error"] = (
-            _redact_deepseek_failure_response(authority_error)[:1000]
-        )
+        payload['typed_effect_authority_error'] = _redact_deepseek_failure_response(authority_error)[:1000]
     encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     temporary = output_dir / f".{target.name}.{uuid.uuid4().hex}.tmp"
     try:

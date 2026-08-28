@@ -23,36 +23,21 @@ class AgentEvidenceStorePort(Protocol):
 
     def write_effect_policy_snapshot(self, graph: Any) -> Path: ...
 
-    def write_trusted_observation(
-        self,
-        step_number: int,
-        observation: Any,
+    def write_trusted_observation( self, step_number: int, observation: Any,
     ) -> Path: ...
 
     def write_qwen_decision(self, step_number: int, decision: Any) -> Path: ...
 
-    def write_controller_decision(
-        self,
-        step_number: int,
-        decision: Any,
+    def write_controller_decision( self, step_number: int, decision: Any,
     ) -> Path: ...
 
-    def write_verification(
-        self,
-        step_number: int,
-        verification: Any,
+    def write_verification( self, step_number: int, verification: Any,
     ) -> Path: ...
 
-    def write_post_action_transition(
-        self,
-        step_number: int,
-        transition: Any,
+    def write_post_action_transition( self, step_number: int, transition: Any,
     ) -> Path: ...
 
-    def write_confirmation_failure(
-        self,
-        step_number: int,
-        transition: Any,
+    def write_confirmation_failure( self, step_number: int, transition: Any,
     ) -> Path: ...
 
     def read_report(self) -> dict[str, Any] | None: ...

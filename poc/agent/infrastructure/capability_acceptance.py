@@ -14,11 +14,7 @@ from typing import Any, Callable, Mapping
 import uuid
 
 from PIL import Image, UnidentifiedImageError
-from agent.infrastructure.orientation_safety import (
-    OrientationCredential,
-    OrientationSafetyError,
-    frame_fingerprint,
-)
+from agent.infrastructure.orientation_safety import OrientationCredential, OrientationSafetyError, frame_fingerprint
 
 from agent.infrastructure.device_exclusivity import InterProcessLease
 from agent.infrastructure.tap_calibration import (
@@ -28,10 +24,7 @@ from agent.infrastructure.tap_calibration import (
     MIN_COVERAGE_SPAN_Y,
     TapCalibrationError,
 )
-from agent.domain.action_capabilities import (
-    CALIBRATION_BOUND_ACTIONS,
-    PROMOTABLE_ACTIONS,
-)
+from agent.domain.action_capabilities import CALIBRATION_BOUND_ACTIONS, PROMOTABLE_ACTIONS
 from agent.domain.ui_scene import UIScene, UISceneError
 from agent.domain.universal_action_controller import (
     ResolvedSemanticAction,
@@ -69,10 +62,7 @@ def _normalized_coverage_bounds(value: Any, *, label: str) -> list[float]:
 def _validated_coverage(value: Any, *, label: str) -> list[float]:
     if not isinstance(value, dict) or value.get("sufficient") is not True:
         raise CapabilityAcceptanceError(f"{label}没有足够的实测屏幕覆盖。")
-    bounds = _normalized_coverage_bounds(
-        value.get("normalized_bounds"),
-        label=label,
-    )
+    bounds = _normalized_coverage_bounds(value.get('normalized_bounds'), label=label)
     hull = value.get("normalized_hull")
     if (
         not isinstance(hull, list)
@@ -142,10 +132,7 @@ def validated_calibration_evidence(path: Path) -> dict[str, Any]:
         or validation.get("coverage_passed") is not True
     ):
         raise CapabilityAcceptanceError("触控标定缺少通过的独立验证记录。")
-    validation_bounds = _validated_coverage(
-        validation.get("coverage"),
-        label="触控标定独立验证覆盖",
-    )
+    validation_bounds = _validated_coverage(validation.get('coverage'), label='触控标定独立验证覆盖')
     return {
         "version": version,
         "sha256": _sha256_bytes(raw),
@@ -171,14 +158,8 @@ def _calibration_evidence(value: Any, *, action: str) -> dict[str, Any] | None:
     version = value.get("version")
     digest = value.get("sha256")
     frame_size = value.get("frame_size")
-    bounds = _normalized_coverage_bounds(
-        value.get("coverage_bounds"),
-        label="手势验收采集覆盖",
-    )
-    validation_bounds = _normalized_coverage_bounds(
-        value.get("validation_coverage_bounds"),
-        label="手势验收独立验证覆盖",
-    )
+    bounds = _normalized_coverage_bounds(value.get('coverage_bounds'), label='手势验收采集覆盖')
+    validation_bounds = _normalized_coverage_bounds(value.get('validation_coverage_bounds'), label='手势验收独立验证覆盖')
     if isinstance(version, bool) or not isinstance(version, int) or version < CALIBRATION_VERSION:
         raise CapabilityAcceptanceError("手势验收触控标定版本无效。")
     if (
@@ -217,11 +198,7 @@ def exact_input_evidence_error(execution: Any) -> str:
         return "输入验收缺少结构化 resolved_action/before_scene/after_scene。"
     expected = resolved.get("text")
     target_id = str(resolved.get("target_element_id") or "").strip()
-    if (
-        not isinstance(expected, str)
-        or not is_direct_latin_segment(expected)
-        or not target_id
-    ):
+    if ( not isinstance(expected, str) or not is_direct_latin_segment(expected) or not target_id ):
         return "输入验收缺少精确文字或目标输入框身份。"
 
     before_elements = before_scene.get("elements")
@@ -356,20 +333,11 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
             raise CapabilityAcceptanceError("验收执行字段 expected_effect 格式无效。")
         hold_seconds = raw_resolved.get("hold_seconds")
         path_distance = raw_resolved.get("path_distance")
-        for field, value in (
-            ("hold_seconds", hold_seconds),
-            ("path_distance", path_distance),
-        ):
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, (int, float))
-            ):
+        for field, value in ( ("hold_seconds", hold_seconds), ("path_distance", path_distance), ):
+            if value is not None and ( isinstance(value, bool) or not isinstance(value, (int, float)) ):
                 raise CapabilityAcceptanceError(f"验收执行字段 {field} 格式无效。")
         resolved_kind = str(raw_resolved.get("kind") or "").strip()
-        resolved_text = (
-            raw_resolved.get("text")
-            if isinstance(raw_resolved.get("text"), str)
-            else None
-        )
+        resolved_text = raw_resolved.get('text') if isinstance(raw_resolved.get('text'), str) else None
         resolved = ResolvedSemanticAction(
             node_id=str(raw_resolved.get("node_id") or "acceptance"),
             kind=resolved_kind,
@@ -524,21 +492,9 @@ def action_execution_evidence_error(action: str, execution: Any) -> str:
         )
         if any(raw_resolved.get(field) is not None for field in geometry_fields):
             return "系统边缘唤栏验收的已解析动作不能携带模型坐标、方向或距离。"
-        client_path = (
-            robot_result.get("client_path")
-            if isinstance(robot_result, dict)
-            else None
-        )
-        requested_grid = (
-            robot_result.get("requested_grid")
-            if isinstance(robot_result, dict)
-            else None
-        )
-        corrected_grid = (
-            robot_result.get("corrected_grid")
-            if isinstance(robot_result, dict)
-            else None
-        )
+        client_path = robot_result.get('client_path') if isinstance(robot_result, dict) else None
+        requested_grid = robot_result.get('requested_grid') if isinstance(robot_result, dict) else None
+        corrected_grid = robot_result.get('corrected_grid') if isinstance(robot_result, dict) else None
         grid_path = lambda value: bool(
             isinstance(value, (list, tuple))
             and len(value) == 2
@@ -616,13 +572,7 @@ def _observation(value: Any, *, field: str) -> dict[str, str]:
     }
 
 
-def _confirmation_scope(
-    value: Any,
-    *,
-    session_id: str,
-    task_id: str,
-    device_id: str,
-) -> dict[str, Any]:
+def _confirmation_scope( value: Any, *, session_id: str, task_id: str, device_id: str, ) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise CapabilityAcceptanceError("验收报告 confirmation_scope 必须是对象。")
     required = {
@@ -638,46 +588,24 @@ def _confirmation_scope(
     if set(value) != required:
         raise CapabilityAcceptanceError("验收报告 confirmation_scope 字段不完整。")
     normalized = dict(value)
-    for field, expected in (
-        ("session_id", session_id),
-        ("task_id", task_id),
-        ("device_id", device_id),
-    ):
+    for field, expected in ( ("session_id", session_id), ("task_id", task_id), ("device_id", device_id), ):
         if normalized.get(field) != expected:
-            raise CapabilityAcceptanceError(
-                f"验收报告 confirmation_scope.{field} 与报告范围不一致。"
-            )
+            raise CapabilityAcceptanceError(f'验收报告 confirmation_scope.{field} 与报告范围不一致。')
     revision = normalized.get("revision")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
         raise CapabilityAcceptanceError("验收报告 confirmation_scope.revision 无效。")
     _required_text(normalized.get("subgoal_id"), field="confirmation_scope.subgoal_id")
-    _required_text(
-        normalized.get("observation_id"),
-        field="confirmation_scope.observation_id",
-    )
-    _required_text(
-        normalized.get("fingerprint"),
-        field="confirmation_scope.fingerprint",
-    )
+    _required_text(normalized.get('observation_id'), field='confirmation_scope.observation_id')
+    _required_text(normalized.get('fingerprint'), field='confirmation_scope.fingerprint')
     effect_ids = normalized.get("effect_ids")
-    if not isinstance(effect_ids, list) or any(
-        not isinstance(item, str) or not item.strip() for item in effect_ids
-    ):
+    if not isinstance(effect_ids, list) or any( not isinstance(item, str) or not item.strip() for item in effect_ids ):
         raise CapabilityAcceptanceError("验收报告 confirmation_scope.effect_ids 无效。")
     if effect_ids != sorted(set(effect_ids)):
-        raise CapabilityAcceptanceError(
-            "验收报告 confirmation_scope.effect_ids 必须去重并排序。"
-        )
+        raise CapabilityAcceptanceError('验收报告 confirmation_scope.effect_ids 必须去重并排序。')
     return normalized
 
 
-def _validate_frame_paths(
-    value: Any,
-    *,
-    field: str,
-    trial_root: Path,
-    expected_sha256: Any,
-) -> tuple[str, ...]:
+def _validate_frame_paths( value: Any, *, field: str, trial_root: Path, expected_sha256: Any, ) -> tuple[str, ...]:
     if not isinstance(value, list) or len(value) != 4:
         raise CapabilityAcceptanceError(f"{field} 必须恰好包含四张 JPEG 证据。")
     if (
@@ -703,15 +631,11 @@ def _validate_frame_paths(
         try:
             resolved = candidate.resolve(strict=True)
         except OSError as exc:
-            raise CapabilityAcceptanceError(
-                f"{field}[{index}] 证据文件不存在。"
-            ) from exc
+            raise CapabilityAcceptanceError(f'{field}[{index}] 证据文件不存在。') from exc
         try:
             resolved.relative_to(resolved_root)
         except ValueError as exc:
-            raise CapabilityAcceptanceError(
-                f"{field}[{index}] 证据必须位于本次 trial 目录。"
-            ) from exc
+            raise CapabilityAcceptanceError(f'{field}[{index}] 证据必须位于本次 trial 目录。') from exc
         if resolved in seen:
             raise CapabilityAcceptanceError(f"{field} 不能重复引用同一张证据。")
         if resolved.suffix.lower() not in {".jpg", ".jpeg"}:
@@ -720,17 +644,11 @@ def _validate_frame_paths(
             with Image.open(resolved) as image:
                 image.verify()
                 if image.format != "JPEG":
-                    raise CapabilityAcceptanceError(
-                        f"{field}[{index}] 证据内容不是 JPEG。"
-                    )
+                    raise CapabilityAcceptanceError(f'{field}[{index}] 证据内容不是 JPEG。')
         except (OSError, UnidentifiedImageError) as exc:
-            raise CapabilityAcceptanceError(
-                f"{field}[{index}] 证据无法读取。"
-            ) from exc
+            raise CapabilityAcceptanceError(f'{field}[{index}] 证据无法读取。') from exc
         if sha256_file(resolved) != expected_sha256[index - 1]:
-            raise CapabilityAcceptanceError(
-                f"{field}[{index}] 证据摘要与文件不一致。"
-            )
+            raise CapabilityAcceptanceError(f'{field}[{index}] 证据摘要与文件不一致。')
         seen.add(resolved)
         result.append(str(resolved))
     return tuple(result)
@@ -761,25 +679,14 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
         raise CapabilityAcceptanceError("验收报告版本无效。")
 
     trial_id = _required_text(report.get("trial_id"), field="trial_id", max_length=128)
-    session_id = _required_text(
-        report.get("session_id"), field="session_id", max_length=128
-    )
+    session_id = _required_text(report.get('session_id'), field='session_id', max_length=128)
     task_id = _required_text(report.get("task_id"), field="task_id", max_length=128)
-    device_id = _required_text(
-        report.get("device_id"), field="device_id", max_length=128
-    )
-    action = _required_text(
-        report.get("candidate_action"), field="candidate_action", max_length=64
-    )
+    device_id = _required_text(report.get('device_id'), field='device_id', max_length=128)
+    action = _required_text(report.get('candidate_action'), field='candidate_action', max_length=64)
     if action not in PROMOTABLE_ACTIONS:
         raise CapabilityAcceptanceError(f"动作类型不能进入真机验收：{action}。")
-    calibration_evidence = _calibration_evidence(
-        report.get("calibration_evidence"),
-        action=action,
-    )
-    code_revision = _required_text(
-        report.get("code_revision"), field="code_revision", max_length=128
-    )
+    calibration_evidence = _calibration_evidence(report.get('calibration_evidence'), action=action)
+    code_revision = _required_text(report.get('code_revision'), field='code_revision', max_length=128)
     if code_revision.endswith("+dirty"):
         raise CapabilityAcceptanceError("验收报告来自未提交代码，不能晋级。")
     if report.get("status") != "passed":
@@ -802,9 +709,7 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
         confirmation_scope["observation_id"] != before["observation_id"]
         or confirmation_scope["fingerprint"] != before["fingerprint"]
     ):
-        raise CapabilityAcceptanceError(
-            "动作前 observation/fingerprint 与确认作用域不一致。"
-        )
+        raise CapabilityAcceptanceError('动作前 observation/fingerprint 与确认作用域不一致。')
     if after["observation_id"] == before["observation_id"]:
         raise CapabilityAcceptanceError("动作后 observation_id 未变化。")
     if after["fingerprint"] == before["fingerprint"]:
@@ -854,20 +759,12 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
     )
     if set(before_paths) & set(after_paths):
         raise CapabilityAcceptanceError("动作前后证据不能引用同一文件。")
-    before_frame_size = _consistent_frame_size(
-        before_paths,
-        field="before_frame_paths",
-    )
-    after_frame_size = _consistent_frame_size(
-        after_paths,
-        field="after_frame_paths",
-    )
+    before_frame_size = _consistent_frame_size(before_paths, field='before_frame_paths')
+    after_frame_size = _consistent_frame_size(after_paths, field='after_frame_paths')
     if before_frame_size != after_frame_size:
         raise CapabilityAcceptanceError("动作前后证据画面尺寸不一致。")
     try:
-        orientation_credential = OrientationCredential.from_dict(
-            execution.get("orientation_credential")
-        )
+        orientation_credential = OrientationCredential.from_dict(execution.get('orientation_credential'))
         orientation_credential.assert_authorizes(
             device_id=device_id,
             scene_fingerprint=execution_before_fingerprint,
@@ -875,9 +772,7 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
             action=action,
         )
     except OrientationSafetyError as exc:
-        raise CapabilityAcceptanceError(
-            f"独立方向凭据不能支持能力晋级：{exc}"
-        ) from exc
+        raise CapabilityAcceptanceError(f'独立方向凭据不能支持能力晋级：{exc}') from exc
     before_fingerprints: set[str] = set()
     for path in before_paths:
         with Image.open(path) as image:
@@ -887,9 +782,7 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
         or orientation_credential.evidence_frame_fingerprint
         not in before_fingerprints
     ):
-        raise CapabilityAcceptanceError(
-            "独立方向凭据未绑定动作前保存的稳定帧。"
-        )
+        raise CapabilityAcceptanceError('独立方向凭据未绑定动作前保存的稳定帧。')
     raw_alignment = before_scene.get("camera_alignment")
     if isinstance(raw_alignment, dict):
         compact_layout = raw_alignment.get("camera_layout_orientation")
@@ -899,9 +792,7 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
         } or compact_rotation not in {
             "unknown", orientation_credential.phone_content_rotation
         }:
-            raise CapabilityAcceptanceError(
-                "主场景方向事实与独立方向凭据冲突，不能晋级。"
-            )
+            raise CapabilityAcceptanceError('主场景方向事实与独立方向凭据冲突，不能晋级。')
     if calibration_evidence is not None:
         width, height = before_frame_size
         robot_result = execution.get("robot_result")
@@ -911,19 +802,10 @@ def validate_acceptance_report(report_path: Path) -> dict[str, Any]:
             points = list(robot_result["client_path"])
         else:
             points = list(robot_result)
-        if any(
-            not 0 <= int(point[0]) < width or not 0 <= int(point[1]) < height
-            for point in points
-        ):
-            raise CapabilityAcceptanceError(
-                "手势验收机械臂实际像素端点超出动作前画面范围。"
-            )
-        if action == "reveal_system_navigation" and robot_result.get(
-            "frame_size"
-        ) != [width, height]:
-            raise CapabilityAcceptanceError(
-                "系统边缘唤栏回执的相机尺寸与动作前证据不一致。"
-            )
+        if any( not 0 <= int(point[0]) < width or not 0 <= int(point[1]) < height for point in points ):
+            raise CapabilityAcceptanceError('手势验收机械臂实际像素端点超出动作前画面范围。')
+        if action == "reveal_system_navigation" and robot_result.get( "frame_size" ) != [width, height]:
+            raise CapabilityAcceptanceError('系统边缘唤栏回执的相机尺寸与动作前证据不一致。')
 
     normalized = dict(report)
     normalized.update(
@@ -979,9 +861,7 @@ def _validate_live_promotion_source(
     execution_result: Any,
 ) -> None:
     if not isinstance(orientation_credential, OrientationCredential):
-        raise CapabilityAcceptanceError(
-            "能力晋级必须接收本进程真实方向凭据对象。"
-        )
+        raise CapabilityAcceptanceError('能力晋级必须接收本进程真实方向凭据对象。')
     if getattr(execution_result, "orientation_credential", None) is not orientation_credential:
         raise CapabilityAcceptanceError("能力晋级方向凭据不是本次动作结果持有的同一对象。")
     physical_actions = getattr(execution_result, "physical_actions", None)
@@ -1020,9 +900,7 @@ def _validate_live_promotion_source(
     if report.get("action_outcome") != getattr(execution_result, "action_outcome", None):
         raise CapabilityAcceptanceError("能力晋级报告与 live 动作结果不一致。")
     before_paths = tuple(str(value) for value in report.get("before_frame_paths", ()))
-    result_paths = tuple(
-        str(value) for value in getattr(execution_result, "before_frame_paths", ())
-    )
+    result_paths = tuple((str(value) for value in getattr(execution_result, 'before_frame_paths', ())))
     if before_paths != result_paths:
         raise CapabilityAcceptanceError("能力晋级报告与 live 动作前证据路径不一致。")
 
@@ -1123,15 +1001,11 @@ class CapabilityRegistryPromoter:
             if lease_path is not None
             else self.registry_path.with_suffix(".promotion.lease")
         )
-        self._replace_file = replace_file or (
-            lambda source, target: os.replace(source, target)
-        )
+        self._replace_file = replace_file or (lambda source, target: os.replace(source, target))
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     @staticmethod
-    def _registry_device(
-        payload: dict[str, Any], device_id: str
-    ) -> dict[str, Any]:
+    def _registry_device( payload: dict[str, Any], device_id: str ) -> dict[str, Any]:
         if payload.get("version") != 1 or not isinstance(payload.get("devices"), list):
             raise CapabilityAcceptanceError("设备注册表版本或 devices 格式无效。")
         matches = [
@@ -1142,14 +1016,10 @@ class CapabilityRegistryPromoter:
             and item.get("device_id") == device_id
         ]
         if len(matches) != 1:
-            raise CapabilityAcceptanceError(
-                f"设备注册表没有唯一的已启用设备：{device_id}。"
-            )
+            raise CapabilityAcceptanceError(f'设备注册表没有唯一的已启用设备：{device_id}。')
         device = matches[0]
         actions = device.get("verified_actions")
-        if not isinstance(actions, list) or any(
-            not isinstance(item, str) or not item.strip() for item in actions
-        ):
+        if not isinstance(actions, list) or any( not isinstance(item, str) or not item.strip() for item in actions ):
             raise CapabilityAcceptanceError("设备 verified_actions 格式无效。")
         normalized = [item.strip() for item in actions]
         if len(normalized) != len(set(normalized)):
@@ -1167,11 +1037,7 @@ class CapabilityRegistryPromoter:
             raise CapabilityAcceptanceError("设备注册表必须是 JSON 对象。")
         return payload, raw
 
-    def _require_matching_calibration(
-        self,
-        report: Mapping[str, Any],
-        device: Mapping[str, Any],
-    ) -> None:
+    def _require_matching_calibration( self, report: Mapping[str, Any], device: Mapping[str, Any], ) -> None:
         action = str(report.get("candidate_action") or "")
         if action not in CALIBRATION_BOUND_ACTIONS:
             return
@@ -1183,9 +1049,7 @@ class CapabilityRegistryPromoter:
             calibration_path = self.registry_path.parent / calibration_path
         current = validated_calibration_evidence(calibration_path)
         if current != report.get("calibration_evidence"):
-            raise CapabilityAcceptanceError(
-                "触控标定与真机验收报告不一致；必须在当前标定上重新验收。"
-            )
+            raise CapabilityAcceptanceError('触控标定与真机验收报告不一致；必须在当前标定上重新验收。')
 
     def preview(
         self,
@@ -1195,9 +1059,7 @@ class CapabilityRegistryPromoter:
         execution_result: Any | None = None,
     ) -> PromotionAuthority:
         if orientation_credential is None or execution_result is None:
-            raise CapabilityAcceptanceError(
-                "能力晋级 preview 必须由 live manager 提供方向凭据和一次动作结果。"
-            )
+            raise CapabilityAcceptanceError('能力晋级 preview 必须由 live manager 提供方向凭据和一次动作结果。')
         report = validate_acceptance_report(report_path)
         _validate_live_promotion_source(
             report=report,
@@ -1220,9 +1082,7 @@ class CapabilityRegistryPromoter:
         try:
             orientation_credential.claim_live_execution_source()
         except OrientationSafetyError as exc:
-            raise CapabilityAcceptanceError(
-                f"能力晋级缺少 live-trial 方向来源：{exc}"
-            ) from exc
+            raise CapabilityAcceptanceError(f'能力晋级缺少 live-trial 方向来源：{exc}') from exc
         return PromotionAuthority(
             scope,
             orientation_credential=orientation_credential,
@@ -1244,9 +1104,7 @@ class CapabilityRegistryPromoter:
             raise CapabilityAcceptanceError(f"晋级证据无法写入：{path.name}：{exc}") from exc
 
     def _replace_registry(self, payload: bytes) -> None:
-        temporary = self.registry_path.parent / (
-            f".{self.registry_path.name}.{uuid.uuid4().hex}.tmp"
-        )
+        temporary = self.registry_path.parent / f'.{self.registry_path.name}.{uuid.uuid4().hex}.tmp'
         try:
             with temporary.open("xb") as handle:
                 handle.write(payload)
@@ -1270,11 +1128,7 @@ class CapabilityRegistryPromoter:
     ) -> dict[str, Any]:
         authority.begin_promotion()
         try:
-            return self._promote_bound(
-                report_path,
-                confirmation=confirmation,
-                authority=authority,
-            )
+            return self._promote_bound(report_path, confirmation=confirmation, authority=authority)
         finally:
             authority.release_source()
             authority.end_promotion()
@@ -1326,12 +1180,8 @@ class CapabilityRegistryPromoter:
             if backup_path.exists() or promotion_path.exists():
                 raise CapabilityAcceptanceError("本次 trial 已存在晋级证据，禁止重复晋级。")
 
-            device["verified_actions"] = sorted(
-                {*device["verified_actions"], scope.action}
-            )
-            encoded_registry = (
-                json.dumps(registry, ensure_ascii=False, indent=2) + "\n"
-            ).encode("utf-8")
+            device['verified_actions'] = sorted({*device['verified_actions'], scope.action})
+            encoded_registry = (json.dumps(registry, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
             after_sha256 = _sha256_bytes(encoded_registry)
             promoted_at = self._now().astimezone(timezone.utc).isoformat()
             result = {
@@ -1345,9 +1195,7 @@ class CapabilityRegistryPromoter:
                 "promoted_at": promoted_at,
                 "requires_restart": True,
             }
-            encoded_promotion = (
-                json.dumps(result, ensure_ascii=False, indent=2) + "\n"
-            ).encode("utf-8")
+            encoded_promotion = (json.dumps(result, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
 
             self._write_new_file(backup_path, registry_raw)
             try:

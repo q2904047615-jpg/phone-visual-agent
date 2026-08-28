@@ -39,35 +39,19 @@ def build_trusted_observation(
         raise VisionAgentError(f"可信观察 device_id 无效：{device_id!r}")
     stability = measure_local_stability(frames, allow_leading_outlier=True)
     if not stability.stable:
-        raise VisionAgentError(
-            f"本地多帧稳定性检查未通过：{stability.reason}；不能建立可信观察。"
-        )
+        raise VisionAgentError(f'本地多帧稳定性检查未通过：{stability.reason}；不能建立可信观察。')
     sharpness = tuple(measure_frame_sharpness(frame) for frame in frames)
     # The observer permits one stale leading camera frame.  Only the converged
     # three-frame tail may provide the trusted fingerprint.
     stable_tail_start = max(0, len(frames) - min(3, len(frames)))
-    selected = max(
-        range(stable_tail_start, len(frames)),
-        key=sharpness.__getitem__,
-    )
-    sharpness_floor = float(
-        os.environ.get(
-            "ROBOT_LOCAL_FRAME_SHARPNESS_MIN",
-            str(MIN_TRUSTED_FRAME_SHARPNESS),
-        )
-    )
+    selected = max(range(stable_tail_start, len(frames)), key=sharpness.__getitem__)
+    sharpness_floor = float(os.environ.get('ROBOT_LOCAL_FRAME_SHARPNESS_MIN', str(MIN_TRUSTED_FRAME_SHARPNESS)))
     if sharpness[selected] < sharpness_floor:
-        raise VisionAgentError(
-            "当前最清晰帧仍然模糊："
-            f"sharpness={sharpness[selected]:.3f} < {sharpness_floor:.3f}。"
-        )
+        raise VisionAgentError(f'当前最清晰帧仍然模糊：sharpness={sharpness[selected]:.3f} < {sharpness_floor:.3f}。')
     fingerprint = local_frame_fingerprint(frames[selected].convert("RGB"))
     scene.validate()
     canonical_scene, aliases, conflicts = canonicalize_trusted_scene(scene)
-    target_local_candidate = trusted_target_local_candidate(
-        canonical_scene,
-        conflicts,
-    )
+    target_local_candidate = trusted_target_local_candidate(canonical_scene, conflicts)
     if not scene.stable or (
         float(scene.confidence) < MIN_TARGET_CONFIDENCE
         and target_local_candidate is None
@@ -75,9 +59,7 @@ def build_trusted_observation(
     ):
         raise VisionAgentError("页面不稳定或整体置信度不足，不能建立可信候选。")
     if scene.fingerprint != fingerprint:
-        raise VisionAgentError(
-            "只读观察 fingerprint 与当前本地帧不一致，拒绝建立可信候选。"
-        )
+        raise VisionAgentError('只读观察 fingerprint 与当前本地帧不一致，拒绝建立可信候选。')
     resolved_id = observation_id or f"obs_{uuid.uuid4().hex}"
     if not OBSERVATION_ID_PATTERN.fullmatch(resolved_id):
         raise VisionAgentError(f"observation_id 格式无效：{resolved_id!r}")
@@ -92,11 +74,7 @@ def build_trusted_observation(
         candidate_aliases=aliases,
         candidate_conflicts=conflicts,
     )
-    validate_trusted_observation_against_frames(
-        result,
-        frames,
-        allow_leading_outlier=True,
-    )
+    validate_trusted_observation_against_frames(result, frames, allow_leading_outlier=True)
     return result
 
 
@@ -108,30 +86,13 @@ def validate_trusted_observation_against_frames(
 ) -> None:
     if len(frames) < 4:
         raise VisionAgentError("新鲜度校验至少需要4帧。")
-    stability = measure_local_stability(
-        frames,
-        allow_leading_outlier=allow_leading_outlier,
-    )
+    stability = measure_local_stability(frames, allow_leading_outlier=allow_leading_outlier)
     if not stability.stable:
-        raise VisionAgentError(
-            f"当前画面已不稳定：{stability.reason}；旧观察失效。"
-        )
+        raise VisionAgentError(f'当前画面已不稳定：{stability.reason}；旧观察失效。')
     sharpness = [measure_frame_sharpness(frame) for frame in frames]
-    eligible_start = (
-        max(0, len(frames) - min(3, len(frames)))
-        if allow_leading_outlier
-        else 0
-    )
-    selected = max(
-        range(eligible_start, len(frames)),
-        key=sharpness.__getitem__,
-    )
-    sharpness_floor = float(
-        os.environ.get(
-            "ROBOT_LOCAL_FRAME_SHARPNESS_MIN",
-            str(MIN_TRUSTED_FRAME_SHARPNESS),
-        )
-    )
+    eligible_start = max(0, len(frames) - min(3, len(frames))) if allow_leading_outlier else 0
+    selected = max(range(eligible_start, len(frames)), key=sharpness.__getitem__)
+    sharpness_floor = float(os.environ.get('ROBOT_LOCAL_FRAME_SHARPNESS_MIN', str(MIN_TRUSTED_FRAME_SHARPNESS)))
     if sharpness[selected] < sharpness_floor:
         raise VisionAgentError("当前新鲜画面仍然模糊，旧动作失效。")
     current_fingerprint = local_frame_fingerprint(frames[selected].convert("RGB"))

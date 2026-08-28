@@ -17,16 +17,10 @@ from typing import Any, Callable
 from PIL import Image, ImageChops, ImageStat
 
 from agent.domain.canonical_action_protocol import CanonicalActionProtocolError
-from agent.domain import (
-    DeviceActionRequest,
-    DeviceExecutionError,
-    DeviceExecutor,
-)
+from agent.domain import DeviceActionRequest, DeviceExecutionError, DeviceExecutor
 from agent.infrastructure import RobotDeviceExecutor
 from agent.domain.generic_goal import GenericIntentDraft
-from agent.infrastructure.generic_scene_observer import (
-    SingleStepGenericSceneObserver,
-)
+from agent.infrastructure.generic_scene_observer import SingleStepGenericSceneObserver
 from agent.application.action_adapter import GenericActionAdapterError
 from agent.domain.post_action_observation import (
     POST_ACTION_VISUAL_CONTEXT_VERSION,
@@ -50,10 +44,7 @@ from agent.domain.input_value_lineage import (
     input_screen_identity_compatible,
 )
 from agent.domain.trusted_observation import bounds_overlap
-from agent.infrastructure.windows_ocr_runtime import (
-    find_text,
-    recognize as recognize_ocr,
-)
+from agent.infrastructure.windows_ocr_runtime import find_text, recognize as recognize_ocr
 from agent.infrastructure.observation_images import (
     measure_frame_sharpness,
     measure_local_stability,
@@ -79,18 +70,12 @@ from agent.domain.universal_action_controller import (
     UniversalActionController,
     UniversalActionError,
 )
-from agent.infrastructure.robot_controller import (
-    WorkflowNotReady,
-    qwerty_keyboard_config_from_anchors,
-)
+from agent.infrastructure.robot_controller import WorkflowNotReady, qwerty_keyboard_config_from_anchors
 
 
 QWEN_FAILURE_DIAGNOSTIC_VERSION = "2026-08-17-qwen-failure-diagnostic-v1"
 MAX_REDACTED_QWEN_RESPONSE_CHARS = 16000
-_IMAGE_DATA_URL_RE = re.compile(
-    r"data:image/[^;\s\"']+;base64,[A-Za-z0-9+/=_-]+",
-    re.IGNORECASE,
-)
+_IMAGE_DATA_URL_RE = re.compile('data:image/[^;\\s\\"\']+;base64,[A-Za-z0-9+/=_-]+', re.IGNORECASE)
 _SECRET_FIELD_RE = re.compile(
     r"(?P<prefix>[\"']?(?:authorization|api[_-]?key|access[_-]?token|"
     r"refresh[_-]?token|token|secret|password)[\"']?\s*[:=]\s*)"
@@ -112,16 +97,7 @@ _URL_SECRET_RE = re.compile(
 _URL_USERINFO_RE = re.compile(r"(https?://)[^/@\s:]+:[^/@\s]+@", re.IGNORECASE)
 _OPENAI_STYLE_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
 
-_POST_NAVIGATION_RESULT_KINDS = frozenset(
-    {
-        "tap_semantic",
-        "double_tap",
-        "swipe",
-        "back",
-        "home",
-        "open_recent_apps",
-    }
-)
+_POST_NAVIGATION_RESULT_KINDS = frozenset({'tap_semantic', 'double_tap', 'swipe', 'back', 'home', 'open_recent_apps'})
 _POST_NAVIGATION_ALLOWED_EFFECT_KEYS = frozenset(
     {
         "scene_changed",
@@ -191,9 +167,7 @@ def _post_action_observation_context(
     entities = context.get("entities")
     if not isinstance(entities, dict):
         return context
-    focus = _sanitized_visual_focus(
-        entities.get("active_subgoal_visual_context")
-    )
+    focus = _sanitized_visual_focus(entities.get('active_subgoal_visual_context'))
     sanitized_entities = {
         key: value
         for key, value in entities.items()
@@ -236,14 +210,10 @@ def _post_action_observation_context(
         return context
     result_entities = dict(goal_entities)
     result_entities.pop("target_ui_label", None)
-    result_entities["observation_phase"] = (
-        POST_NAVIGATION_RESULT_OBSERVATION_PHASE
-    )
+    result_entities['observation_phase'] = POST_NAVIGATION_RESULT_OBSERVATION_PHASE
     result_focus = dict(focus)
     result_focus["objective"] = POST_NAVIGATION_RESULT_OBJECTIVE
-    result_focus["completion_conditions"] = list(
-        POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS
-    )
+    result_focus['completion_conditions'] = list(POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS)
     result_focus["goal_entities"] = result_entities
     result_context = dict(context)
     result_context["entities"] = dict(entities)
@@ -251,9 +221,7 @@ def _post_action_observation_context(
     return result_context
 
 
-def _post_action_visual_context(
-    resolved: ResolvedSemanticAction,
-) -> PostActionVisualContext | None:
+def _post_action_visual_context( resolved: ResolvedSemanticAction, ) -> PostActionVisualContext | None:
     """Project one locally validated canonical transition into Qwen context.
 
     The adapter calls this only after the device executor reports one physical
@@ -278,9 +246,7 @@ def _post_action_visual_context(
     try:
         return PostActionVisualContext.from_dict(payload)
     except (CanonicalActionProtocolError, VisionAgentError, TypeError, ValueError) as exc:
-        raise GenericActionAdapterError(
-            f"canonical动作不能建立typed动作后视觉上下文：{exc}"
-        ) from exc
+        raise GenericActionAdapterError(f'canonical动作不能建立typed动作后视觉上下文：{exc}') from exc
 
 
 def stable_qwerty_ocr_anchors(
@@ -491,12 +457,7 @@ def stable_text_ocr_grounding(
     center.
     """
 
-    if action.action not in {
-        "tap_semantic",
-        "dismiss_overlay",
-        "double_tap",
-        "long_press",
-    }:
+    if action.action not in { "tap_semantic", "dismiss_overlay", "double_tap", "long_press", }:
         return None
     frame_list = list(frames)[-3:]
     if not frame_list or not scene.fingerprint:
@@ -528,11 +489,7 @@ def stable_text_ocr_grounding(
         tuple[float, float, float, float],
         tuple[float, float],
     ] | None:
-        payload = ocr_recognizer(
-            frame.convert("RGB"),
-            "zh-Hans-CN",
-            scale=1.5,
-        )
+        payload = ocr_recognizer(frame.convert('RGB'), 'zh-Hans-CN', scale=1.5)
         matches = find_text(payload, label)
         if len(matches) != 1 or frame.width <= 0 or frame.height <= 0:
             return None
@@ -590,9 +547,7 @@ def stable_text_ocr_grounding(
             (grounded_bounds[0] + grounded_bounds[2]) / 2.0,
             (grounded_bounds[1] + grounded_bounds[3]) / 2.0,
         )
-        if (
-            math.dist(proposed_point, grounded_point) <= 0.025
-        ):
+        if ( math.dist(proposed_point, grounded_point) <= 0.025 ):
             return None
         grounding = LocalPointGrounding(
             source=LOCAL_POINT_GROUNDING_SOURCE,
@@ -621,15 +576,9 @@ def _redact_qwen_failure_response(raw: str) -> str:
         ),
         redacted,
     )
-    redacted = _UNQUOTED_SECRET_FIELD_RE.sub(
-        lambda match: f"{match.group('prefix')}[REDACTED_SECRET]",
-        redacted,
-    )
+    redacted = _UNQUOTED_SECRET_FIELD_RE.sub(lambda match: f'{match.group('prefix')}[REDACTED_SECRET]', redacted)
     redacted = _BEARER_RE.sub("Bearer [REDACTED_SECRET]", redacted)
-    redacted = _URL_SECRET_RE.sub(
-        lambda match: f"{match.group('prefix')}[REDACTED_SECRET]",
-        redacted,
-    )
+    redacted = _URL_SECRET_RE.sub(lambda match: f'{match.group('prefix')}[REDACTED_SECRET]', redacted)
     redacted = _URL_USERINFO_RE.sub(r"\1[REDACTED_CREDENTIALS]@", redacted)
     return _OPENAI_STYLE_SECRET_RE.sub("[REDACTED_SECRET]", redacted)
 
@@ -697,9 +646,7 @@ def persist_observer_failure_diagnostic(
         )
     except Exception as diagnostic_error:
         if isinstance(diagnostics, dict):
-            diagnostics["diagnostic_persistence_error"] = type(
-                diagnostic_error
-            ).__name__
+            diagnostics['diagnostic_persistence_error'] = type(diagnostic_error).__name__
         return ()
     return (str(path),) if path is not None else ()
 
@@ -721,19 +668,11 @@ class GenericActionExecutionResult:
     robot_result: Any = None
     hardware_receipt: dict[str, Any] | None = None
     evidence: tuple[str, ...] = ()
-    after_frames: tuple[Image.Image, ...] = field(
-        default_factory=tuple,
-        repr=False,
-        compare=False,
-    )
+    after_frames: tuple[Image.Image, ...] = field(default_factory=tuple, repr=False, compare=False)
     after_frame_paths: tuple[str, ...] = ()
     observation_errors: tuple[str, ...] = ()
     controller_transition_evidence: tuple[str, ...] = ()
-    before_frames: tuple[Image.Image, ...] = field(
-        default_factory=tuple,
-        repr=False,
-        compare=False,
-    )
+    before_frames: tuple[Image.Image, ...] = field(default_factory=tuple, repr=False, compare=False)
     before_frame_paths: tuple[str, ...] = ()
     orientation_credential: OrientationCredential | None = None
 
@@ -744,11 +683,7 @@ class GenericActionExecutionResult:
         # list-shaped object that the promotion validator must reject.
         object.__setattr__(self, "after_frames", tuple(self.after_frames))
         object.__setattr__(self, "before_frames", tuple(self.before_frames))
-        object.__setattr__(
-            self,
-            "controller_transition_evidence",
-            tuple(self.controller_transition_evidence),
-        )
+        object.__setattr__(self, 'controller_transition_evidence', tuple(self.controller_transition_evidence))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -847,11 +782,7 @@ class GenericSingleActionAdapter:
     )
 
     @classmethod
-    def _primary_input_confirmation_reusable(
-        cls,
-        requested: SemanticAction,
-        scene: UIScene,
-    ) -> bool:
+    def _primary_input_confirmation_reusable( cls, requested: SemanticAction, scene: UIScene, ) -> bool:
         """Return whether one strict input audit may survive local recapture.
 
         The caller has already compared the planned and fresh four-frame sets.
@@ -990,15 +921,9 @@ class GenericSingleActionAdapter:
             declared = {}
 
         def available(action: str, method_name: str) -> bool:
-            return callable(getattr(self.robot, method_name, None)) and bool(
-                declared.get(action, True)
-            )
+            return callable(getattr(self.robot, method_name, None)) and bool(declared.get(action, True))
 
-        supported = (
-            {"wait_for_change"}
-            if bool(declared.get("wait_for_change", True))
-            else set()
-        )
+        supported = {'wait_for_change'} if bool(declared.get('wait_for_change', True)) else set()
         if available("tap_semantic", "vision_tap_relative"):
             supported.add("tap_semantic")
         if available("dismiss_overlay", "vision_dismiss_overlay_relative"):
@@ -1010,10 +935,7 @@ class GenericSingleActionAdapter:
             for direction in ("up", "down", "left", "right")
         ):
             supported.add("swipe")
-        if available(
-            "reveal_system_navigation",
-            "vision_reveal_system_navigation",
-        ):
+        if available( "reveal_system_navigation", "vision_reveal_system_navigation", ):
             supported.add("reveal_system_navigation")
         if available("back", "vision_android_back"):
             supported.add("back")
@@ -1045,16 +967,8 @@ class GenericSingleActionAdapter:
             raw_profile=raw_profile,
         )
 
-    def capability_gap(
-        self,
-        requested_action: str,
-        *,
-        required_parameters: tuple[str, ...] = (),
-    ) -> Any:
-        return self.capability_snapshot().gap(
-            requested_action,
-            required_parameters=required_parameters,
-        )
+    def capability_gap( self, requested_action: str, *, required_parameters: tuple[str, ...] = (), ) -> Any:
+        return self.capability_snapshot().gap(requested_action, required_parameters=required_parameters)
 
     def __init__(
         self,
@@ -1098,10 +1012,7 @@ class GenericSingleActionAdapter:
         self.controller = controller or UniversalActionController()
         self.frame_interval = max(0.0, float(frame_interval))
         self.post_action_settle = max(0.0, float(post_action_settle))
-        self.post_action_timeout = max(
-            0.0,
-            10.0 if post_action_timeout is None else float(post_action_timeout),
-        )
+        self.post_action_timeout = max(0.0, 10.0 if post_action_timeout is None else float(post_action_timeout))
         self.post_action_continuous_timeout = max(
             self.post_action_timeout,
             (
@@ -1113,26 +1024,11 @@ class GenericSingleActionAdapter:
                 else float(post_action_continuous_timeout)
             ),
         )
-        self.post_action_max_observations = min(
-            2,
-            max(1, int(post_action_max_observations)),
-        )
-        self.post_action_min_relative_sharpness = max(
-            0.0,
-            min(1.0, float(post_action_min_relative_sharpness)),
-        )
-        self.post_action_min_reference_sharpness = max(
-            0.0,
-            float(post_action_min_reference_sharpness),
-        )
-        self.post_action_phone_view_delta_max = max(
-            0.0,
-            float(post_action_phone_view_delta_max),
-        )
-        self.confirmation_frame_delta_max = max(
-            0.0,
-            float(confirmation_frame_delta_max),
-        )
+        self.post_action_max_observations = min(2, max(1, int(post_action_max_observations)))
+        self.post_action_min_relative_sharpness = max(0.0, min(1.0, float(post_action_min_relative_sharpness)))
+        self.post_action_min_reference_sharpness = max(0.0, float(post_action_min_reference_sharpness))
+        self.post_action_phone_view_delta_max = max(0.0, float(post_action_phone_view_delta_max))
+        self.confirmation_frame_delta_max = max(0.0, float(confirmation_frame_delta_max))
         self.qwerty_row_snapper = qwerty_row_snapper
         self.text_point_grounder = text_point_grounder
         self.require_local_qwerty_row_snap = bool(require_local_qwerty_row_snap)
@@ -1187,10 +1083,7 @@ class GenericSingleActionAdapter:
         stability = measure_local_stability(frames)
         paths = self._save_frames(frames, evidence_dir, prefix)
         if not stability.stable:
-            raise GenericActionAdapterError(
-                f"确认前本地多帧稳定性检查未通过：{stability.reason}",
-                evidence=paths,
-            )
+            raise GenericActionAdapterError(f'确认前本地多帧稳定性检查未通过：{stability.reason}', evidence=paths)
         return frames, paths
 
     def _capture_scene_once(
@@ -1215,10 +1108,7 @@ class GenericSingleActionAdapter:
                 prefix=prefix,
                 error=exc,
             )
-            raise GenericActionAdapterError(
-                f"通用页面观察失败：{exc}",
-                evidence=paths + diagnostic_paths,
-            ) from exc
+            raise GenericActionAdapterError(f'通用页面观察失败：{exc}', evidence=paths + diagnostic_paths) from exc
         return scene, frames, paths
 
     def _observe_scene(
@@ -1229,10 +1119,7 @@ class GenericSingleActionAdapter:
         input_lineage_override: TypedInputLineage | None = None,
         post_action_context: PostActionVisualContext | None = None,
     ) -> UIScene:
-        kwargs: dict[str, Any] = {
-            "frames": list(frames),
-            "goal_context": goal_context,
-        }
+        kwargs: dict[str, Any] = {'frames': list(frames), 'goal_context': goal_context}
         if getattr(self.observer, "input_lineage_store", None) is not None:
             kwargs["device_id"] = self.device_id
             kwargs["input_lineage_override"] = input_lineage_override
@@ -1259,11 +1146,7 @@ class GenericSingleActionAdapter:
         # frame collection can wait for stability, but an invalid observation
         # is returned immediately instead of resampling the model.
         try:
-            return self._capture_scene_once(
-                goal,
-                evidence_dir=evidence_dir,
-                prefix=f"{prefix}_attempt_1",
-            )
+            return self._capture_scene_once(goal, evidence_dir=evidence_dir, prefix=f'{prefix}_attempt_1')
         except GenericActionAdapterError as exc:
             error = f"第1轮动作前观察失败：{exc}"
             raise GenericActionAdapterError(
@@ -1273,9 +1156,7 @@ class GenericSingleActionAdapter:
             ) from exc
 
     @staticmethod
-    def _requires_post_action_relative_clarity(
-        resolved: ResolvedSemanticAction,
-    ) -> bool:
+    def _requires_post_action_relative_clarity( resolved: ResolvedSemanticAction, ) -> bool:
         """Return whether the action preserves a comparable input surface.
 
         Text mutations keep the keyboard/page structure in place, so their
@@ -1287,28 +1168,13 @@ class GenericSingleActionAdapter:
         content-sensitive *relative* comparison.
         """
 
-        return resolved.kind in {
-            "input_verified_text",
-            "press_enter",
-            "clear_verified_text",
-        }
+        return resolved.kind in {'input_verified_text', 'press_enter', 'clear_verified_text'}
 
     @staticmethod
-    def _requires_post_action_phone_view_identity(
-        resolved: ResolvedSemanticAction,
-    ) -> bool:
-        return resolved.kind in {
-            "clear_verified_text",
-            "double_tap",
-            "drag",
-            "input_verified_text",
-            "long_press",
-        }
+    def _requires_post_action_phone_view_identity( resolved: ResolvedSemanticAction, ) -> bool:
+        return resolved.kind in {'clear_verified_text', 'double_tap', 'drag', 'input_verified_text', 'long_press'}
 
-    def _post_action_timeout_for(
-        self,
-        resolved: ResolvedSemanticAction,
-    ) -> float:
+    def _post_action_timeout_for( self, resolved: ResolvedSemanticAction, ) -> float:
         if self._requires_post_action_phone_view_identity(resolved):
             return self.post_action_continuous_timeout
         return self.post_action_timeout
@@ -1423,9 +1289,7 @@ class GenericSingleActionAdapter:
                 require_phone_view_identity=self._requires_post_action_phone_view_identity(resolved),
             )
         except GenericActionAdapterError as exc:
-            raise GenericActionAdapterError(
-                f"动作后画面采集失败：{exc}", evidence=tuple(exc.evidence)
-            ) from exc
+            raise GenericActionAdapterError(f'动作后画面采集失败：{exc}', evidence=tuple(exc.evidence)) from exc
         all_paths = paths
         try:
             after = self._observe_scene(
@@ -1452,14 +1316,7 @@ class GenericSingleActionAdapter:
             verification_errors: tuple[str, ...] = ()
         except UniversalActionError as exc:
             verification_errors = (f"第1轮动作结果不匹配：{exc}",)
-        return (
-            after,
-            tuple(frames),
-            paths,
-            all_paths,
-            (),
-            verification_errors,
-        )
+        return (after, tuple(frames), paths, all_paths, (), verification_errors)
 
     @staticmethod
     def _reconcile_literal_key_visual_wrap(
@@ -1753,9 +1610,7 @@ class GenericSingleActionAdapter:
             return credential, clear
         except (OrientationSafetyError, RuntimeError, ValueError) as exc:
             clear()
-            raise GenericActionAdapterError(
-                f"动作前单步画面方向凭据校验失败：{exc}", evidence=paths
-            ) from exc
+            raise GenericActionAdapterError(f'动作前单步画面方向凭据校验失败：{exc}', evidence=paths) from exc
 
     @staticmethod
     def _pending_input_lineage(
@@ -1777,9 +1632,7 @@ class GenericSingleActionAdapter:
                 hardware_receipt=hardware_receipt,
             )
         if resolved.kind == "input_verified_text":
-            return _first_valid_lineage(
-                (build_pending_text_lineage, build_pending_chinese_preedit_lineage), **values
-            )
+            return _first_valid_lineage((build_pending_text_lineage, build_pending_chinese_preedit_lineage), **values)
         return None
 
     def _record_verified_input_lineage(
@@ -1887,18 +1740,11 @@ class GenericSingleActionAdapter:
                 evidence=before_paths + tuple(getattr(exc, "evidence", ())),
             ) from exc
         except RuntimeError as exc:
-            raise GenericActionAdapterError(
-                f"确认前独立目标几何审计失败：{exc}",
-                evidence=before_paths,
-            ) from exc
+            raise GenericActionAdapterError(f'确认前独立目标几何审计失败：{exc}', evidence=before_paths) from exc
         local_point_grounding: LocalPointGrounding | None = None
         if callable(self.text_point_grounder):
             try:
-                local_point_grounding = self.text_point_grounder(
-                    before_frames,
-                    before,
-                    rebound,
-                )
+                local_point_grounding = self.text_point_grounder(before_frames, before, rebound)
             except Exception:
                 # OCR is a precision aid, not another product boundary.  If it
                 # is unavailable or inconclusive, retain the canonical target's
@@ -1912,16 +1758,10 @@ class GenericSingleActionAdapter:
                 local_point_grounding=local_point_grounding,
             )
         except UniversalActionError as exc:
-            raise GenericActionAdapterError(
-                f"确认前控制器拒绝动作：{exc}",
-                evidence=before_paths,
-            ) from exc
+            raise GenericActionAdapterError(f'确认前控制器拒绝动作：{exc}', evidence=before_paths) from exc
 
         if resolved.kind not in self.PHYSICAL_KINDS and resolved.kind != "wait_for_change":
-            raise GenericActionAdapterError(
-                f"当前通用硬件适配器尚未开放：{resolved.kind}",
-                evidence=before_paths,
-            )
+            raise GenericActionAdapterError(f'当前通用硬件适配器尚未开放：{resolved.kind}', evidence=before_paths)
 
         prepared_keyboard_geometry = self._prepare_keyboard_geometry(resolved, before, before_frames)
         orientation_credential, clear_authorization = self._arm_physical_execution(
@@ -1932,15 +1772,10 @@ class GenericSingleActionAdapter:
         robot_result: Any = None
         hardware_receipt: dict[str, Any] | None = None
 
-        def executor_point(
-            point: tuple[float, float] | None,
-        ) -> tuple[int, int] | None:
+        def executor_point( point: tuple[float, float] | None, ) -> tuple[int, int] | None:
             if point is None:
                 return None
-            return (
-                max(0, min(1000, round(point[0] * 1000))),
-                max(0, min(1000, round(point[1] * 1000))),
-            )
+            return (max(0, min(1000, round(point[0] * 1000))), max(0, min(1000, round(point[1] * 1000))))
 
         execution_request = DeviceActionRequest(
             kind=resolved.kind,
@@ -1993,9 +1828,7 @@ class GenericSingleActionAdapter:
             if callable(clear_authorization):
                 clear_authorization()
 
-        pending_input_lineage = self._pending_input_lineage(
-            resolved, self.device_id, before, hardware_receipt
-        )
+        pending_input_lineage = self._pending_input_lineage(resolved, self.device_id, before, hardware_receipt)
 
         try:
             (
@@ -2031,9 +1864,7 @@ class GenericSingleActionAdapter:
                     resolved, before, after
                 )
             except UniversalActionError as exc:
-                verification_errors = verification_errors + (
-                    f"控制器转换证据复核失败：{exc}",
-                )
+                verification_errors = verification_errors + (f'控制器转换证据复核失败：{exc}',)
 
         if not verification_errors:
             self._record_verified_input_lineage(resolved, before, after, after_frames, hardware_receipt)
@@ -2141,10 +1972,7 @@ class GenericSingleActionAdapter:
                 if len(aliases) == 1:
                     matches = aliases
             if len(matches) != 1:
-                raise GenericActionAdapterError(
-                    "确认时目标语义不再严格唯一："
-                    f"{original.meaning}，匹配{len(matches)}个"
-                )
+                raise GenericActionAdapterError(f'确认时目标语义不再严格唯一：{original.meaning}，匹配{len(matches)}个')
             current = matches[0]
             original_stable_states = stable_rebind_states(dict(original.states))
             current_stable_states = stable_rebind_states(dict(current.states))
@@ -2162,9 +1990,7 @@ class GenericSingleActionAdapter:
                     if key != "fully_visible"
                 } == original_stable_states
             if current.label != original.label or not states_match:
-                raise GenericActionAdapterError(
-                    "确认时目标标签或状态已经变化，旧确认失效。"
-                )
+                raise GenericActionAdapterError('确认时目标标签或状态已经变化，旧确认失效。')
             overlap = bounds_overlap(original.bounds, current.bounds)
             widths = (original.bounds[2] - original.bounds[0], current.bounds[2] - current.bounds[0])
             heights = (original.bounds[3] - original.bounds[1], current.bounds[3] - current.bounds[1])
@@ -2174,11 +2000,7 @@ class GenericSingleActionAdapter:
                 and center_delta[0] <= max(0.03, 0.25 * max(widths))
                 and center_delta[1] <= max(0.02, 0.50 * max(heights))
             )
-            if (
-                require_geometry_overlap
-                and overlap["iou"] < 0.60
-                and not tight_loose_same_target
-            ):
+            if ( require_geometry_overlap and overlap["iou"] < 0.60 and not tight_loose_same_target ):
                 raise GenericActionAdapterError(
                     "确认时目标区域已明显移动，旧确认失效："
                     f"iou={overlap['iou']:.3f}, smaller_coverage={overlap['intersection_over_smaller']:.3f}, "
@@ -2199,18 +2021,10 @@ class GenericSingleActionAdapter:
                     f"{prefix}states": dict(current.states),
                 }
             )
-        return SemanticAction(
-            node_id=requested.node_id,
-            action=requested.action,
-            params=params,
-        )
+        return SemanticAction(node_id=requested.node_id, action=requested.action, params=params)
 
     @staticmethod
-    def _save_frames(
-        frames: list[Image.Image],
-        evidence_dir: Path | None,
-        prefix: str,
-    ) -> tuple[str, ...]:
+    def _save_frames( frames: list[Image.Image], evidence_dir: Path | None, prefix: str, ) -> tuple[str, ...]:
         if evidence_dir is None:
             return ()
         evidence_dir.mkdir(parents=True, exist_ok=True)

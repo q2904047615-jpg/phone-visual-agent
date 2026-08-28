@@ -25,11 +25,7 @@ def _public_provider_status(provider: Any, *, role: str) -> tuple[dict[str, Any]
     try:
         raw = provider.status()
     except Exception as exc:
-        return {
-            "role": role,
-            "configured": False,
-            "status_error_type": type(exc).__name__,
-        }, f"{role} provider 状态读取失败"
+        return ({'role': role, 'configured': False, 'status_error_type': type(exc).__name__}, f'{role} provider 状态读取失败')
     if not isinstance(raw, Mapping):
         return {
             "role": role,
@@ -141,26 +137,14 @@ def run_runtime_doctor(
     if active_session:
         blockers.append(f"设备已有活动会话：{active_session}")
 
-    deepseek_status, deepseek_blocker = _public_provider_status(
-        deepseek_provider,
-        role="DeepSeek",
-    )
-    qwen_status, qwen_blocker = _public_provider_status(
-        qwen_provider,
-        role="Qwen",
-    )
+    deepseek_status, deepseek_blocker = _public_provider_status(deepseek_provider, role='DeepSeek')
+    qwen_status, qwen_blocker = _public_provider_status(qwen_provider, role='Qwen')
     if deepseek_blocker:
         blockers.append(deepseek_blocker)
     if qwen_blocker:
         blockers.append(qwen_blocker)
-    if (
-        qwen_status.get("configured")
-        and qwen_status.get("model") != DEFAULT_VISION_MODEL
-    ):
-        blockers.append(
-            "正式视觉模型不是 qwen3.7-plus："
-            + str(qwen_status.get("model") or "unknown")
-        )
+    if ( qwen_status.get("configured") and qwen_status.get("model") != DEFAULT_VISION_MODEL ):
+        blockers.append('正式视觉模型不是 qwen3.7-plus：' + str(qwen_status.get('model') or 'unknown'))
 
     capability_profile: Mapping[str, Any] = {}
     profile_provider = getattr(controller, "hardware_capability_profile", None)
@@ -188,14 +172,9 @@ def run_runtime_doctor(
             raw_profile=capability_profile,
         )
         capability_snapshot = typed_capabilities.to_dict()
-        capability_snapshot["supported_actions"] = list(
-            typed_capabilities.supported_actions
-        )
+        capability_snapshot['supported_actions'] = list(typed_capabilities.supported_actions)
     except Exception as exc:
-        capability_snapshot = {
-            "device_id": resolved_device,
-            "error_type": type(exc).__name__,
-        }
+        capability_snapshot = {'device_id': resolved_device, 'error_type': type(exc).__name__}
         blockers.append("设备动作能力合同无效：" + type(exc).__name__)
 
     frames: list[Image.Image] = []
@@ -213,16 +192,11 @@ def run_runtime_doctor(
         if capture_error:
             blockers.append("连续四帧采集失败：" + capture_error)
         if len(frames) != DOCTOR_FRAME_COUNT:
-            blockers.append(
-                f"只取得 {len(frames)} 帧，预期 {DOCTOR_FRAME_COUNT} 帧"
-            )
+            blockers.append(f'只取得 {len(frames)} 帧，预期 {DOCTOR_FRAME_COUNT} 帧')
         elif len({frame.size for frame in frames}) != 1:
             blockers.append("连续四帧尺寸不一致")
         else:
-            measured = measure_local_stability(
-                frames,
-                allow_leading_outlier=True,
-            )
+            measured = measure_local_stability(frames, allow_leading_outlier=True)
             stability = measured.to_dict()
             if not measured.stable:
                 blockers.append("连续四帧不稳定：" + measured.reason)

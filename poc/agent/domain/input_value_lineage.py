@@ -7,10 +7,7 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
-from .verified_text_transaction import (
-    VerifiedTextTransactionError,
-    local_pinyin,
-)
+from .verified_text_transaction import VerifiedTextTransactionError, local_pinyin
 
 
 TYPED_INPUT_LINEAGE_VERSION = "2026-08-24-typed-input-lineage-v6"
@@ -46,12 +43,7 @@ class InputValueLineageError(ValueError):
 
 
 def _canonical_digest(value: Any) -> str:
-    payload = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -67,10 +59,7 @@ def _valid_bounds(value: Any) -> tuple[float, float, float, float] | None:
     return bounds
 
 
-def _bounds_compatible(
-    first: tuple[float, float, float, float],
-    second: tuple[float, float, float, float],
-) -> bool:
+def _bounds_compatible( first: tuple[float, float, float, float], second: tuple[float, float, float, float], ) -> bool:
     left = max(first[0], second[0])
     top = max(first[1], second[1])
     right = min(first[2], second[2])
@@ -117,12 +106,7 @@ def input_app_identity_is_concrete_package(value: str) -> bool:
     """Return whether a visual App identity is a concrete package name."""
 
     normalized = str(value or "").strip().casefold()
-    return bool(
-        re.fullmatch(
-            r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+",
-            normalized,
-        )
-    )
+    return bool(re.fullmatch('[a-z][a-z0-9_]*(?:\\.[a-z0-9_]+)+', normalized))
 
 
 def input_app_identity_compatible(before: str, after: str) -> bool:
@@ -132,12 +116,7 @@ def input_app_identity_compatible(before: str, after: str) -> bool:
     right = str(after or "").strip().casefold()
     if left == right:
         return True
-    placeholders = {
-        "",
-        "unknown",
-        "current_foreground",
-        "foreground_app",
-    }
+    placeholders = {'', 'unknown', 'current_foreground', 'foreground_app'}
     return left in placeholders or right in placeholders
 
 
@@ -155,17 +134,9 @@ def input_screen_identity_family(value: str) -> str:
         ("form", ("form", "表单")),
         ("input", ("input", "输入")),
     )
-    tokens = {
-        token
-        for token in re.split(r"[_\-\s/]+", normalized)
-        if token
-    }
+    tokens = {token for token in re.split('[_\\-\\s/]+', normalized) if token}
     for family, markers in family_markers:
-        if any(
-            marker in tokens
-            or (not marker.isascii() and marker in normalized)
-            for marker in markers
-        ):
+        if any( marker in tokens or (not marker.isascii() and marker in normalized) for marker in markers ):
             return family
     return ""
 
@@ -256,9 +227,7 @@ class TypedInputLineage:
         if "\r" in self.exact_value:
             raise InputValueLineageError("输入值连续性不接受回车字符。")
         if "\n" in self.exact_value and self.source not in NEWLINE_INPUT_LINEAGE_SOURCES:
-            raise InputValueLineageError(
-                "只有经过严格换行动作链验证的连续性才能保存真实换行。"
-            )
+            raise InputValueLineageError('只有经过严格换行动作链验证的连续性才能保存真实换行。')
         if _valid_bounds(self.input_bounds) is None:
             raise InputValueLineageError("输入值连续性 input_bounds 无效。")
         if self.before_fingerprint == self.after_fingerprint:
@@ -271,16 +240,11 @@ class TypedInputLineage:
             not _valid_surface_descriptor(item) for item in self.surface_descriptors
         ):
             raise InputValueLineageError("输入值连续性的局部画面描述无效。")
-        if (
-            self.source not in PENDING_INPUT_LINEAGE_SOURCES
-            and len(self.surface_descriptors) != 4
-        ):
+        if ( self.source not in PENDING_INPUT_LINEAGE_SOURCES and len(self.surface_descriptors) != 4 ):
             raise InputValueLineageError("持久输入值连续性必须绑定动作后四帧。")
         if self.source in PENDING_INPUT_LINEAGE_SOURCES and self.surface_descriptors:
             raise InputValueLineageError("临时输入值连续性不能伪造持久画面描述。")
-        if isinstance(self.recorded_at_epoch, bool) or not isinstance(
-            self.recorded_at_epoch, (int, float)
-        ):
+        if isinstance(self.recorded_at_epoch, bool) or not isinstance( self.recorded_at_epoch, (int, float) ):
             raise InputValueLineageError("输入值连续性时间无效。")
 
     def to_dict(self) -> dict[str, Any]:
@@ -360,9 +324,7 @@ class TypedInputLineage:
             or not _exact_or_soft_wrapped_visual_text(raw_value, self.exact_value)
         ):
             return False
-        if input_bounds is not None and not _bounds_compatible(
-            self.input_bounds, input_bounds
-        ):
+        if input_bounds is not None and not _bounds_compatible( self.input_bounds, input_bounds ):
             return False
         if _surface_identity_compatible(
             recorded_app_id=self.app_id,
@@ -493,14 +455,8 @@ class TypedInputLineage:
         current_screen = str(screen_id or "").strip().casefold()
         recorded_screen = self.screen_id.strip().casefold()
         current_field = str(input_field_id or "").strip()
-        typed_field_matches = bool(
-            self.input_field_id not in {"", "unknown"}
-            and current_field == self.input_field_id
-        )
-        if (
-            self.input_field_id not in {"", "unknown"}
-            and not typed_field_matches
-        ):
+        typed_field_matches = bool(self.input_field_id not in {'', 'unknown'} and current_field == self.input_field_id)
+        if ( self.input_field_id not in {"", "unknown"} and not typed_field_matches ):
             return False
         return bool(
             device_id == self.device_id
@@ -659,15 +615,7 @@ class TypedInputLineage:
         ):
             return False
         prior = self.exact_value[:-1]
-        decorative = {
-            "border",
-            "caret",
-            "cursor",
-            "focus border",
-            "focus ring",
-            "outline",
-            "|",
-        }
+        decorative = {'border', 'caret', 'cursor', 'focus border', 'focus ring', 'outline', '|'}
         literal_cues = tuple(
             cue
             for cue in visible_editable_cues
@@ -675,15 +623,9 @@ class TypedInputLineage:
             and cue.strip()
             and cue.strip().casefold() not in decorative
         )
-        if not (
-            raw_value == prior
-            or (raw_value == "" and literal_cues == (prior,))
-        ):
+        if not ( raw_value == prior or (raw_value == "" and literal_cues == (prior,)) ):
             return False
-        if (
-            self.input_field_id in {"", "unknown"}
-            or input_field_id != self.input_field_id
-        ):
+        if ( self.input_field_id in {"", "unknown"} or input_field_id != self.input_field_id ):
             return False
         if self.source in PENDING_INPUT_LINEAGE_SOURCES:
             return self.matches_pending_input_state_surface(
@@ -804,32 +746,19 @@ def _require_click_receipt(receipt: Any, message: str) -> dict[str, Any]:
 
 def _target_element(scene: Any, element_id: Any, message: str) -> dict[str, Any]:
     elements = scene.get("elements") if isinstance(scene, dict) else None
-    matches = [
-        item
-        for item in elements or ()
-        if isinstance(item, dict) and item.get("element_id") == element_id
-    ]
+    matches = [item for item in elements or () if isinstance(item, dict) and item.get('element_id') == element_id]
     if len(matches) != 1:
         raise InputValueLineageError(message)
     return matches[0]
 
 
-def _expected_input_state(
-    resolved: Any,
-    *,
-    kind: str,
-    message: str,
-) -> tuple[str, str, Any, dict[str, Any]]:
+def _expected_input_state( resolved: Any, *, kind: str, message: str, ) -> tuple[str, str, Any, dict[str, Any]]:
     if not isinstance(resolved, dict) or resolved.get("kind") != kind:
         raise InputValueLineageError(message)
     prior = resolved.get("prior_input_value")
     expected = resolved.get("expected_input_value")
     expected_effect = resolved.get("expected_effect")
-    expected_state = (
-        expected_effect.get("element_state")
-        if isinstance(expected_effect, dict)
-        else None
-    )
+    expected_state = expected_effect.get('element_state') if isinstance(expected_effect, dict) else None
     states = expected_state.get("states") if isinstance(expected_state, dict) else None
     if (
         not isinstance(prior, str)
@@ -879,9 +808,7 @@ def build_pending_text_lineage(
 ) -> TypedInputLineage:
     """Bind one returned text transaction to its immediate visual result."""
 
-    before_input, _prior, expected, _fragment = _validated_text_action_chain(
-        resolved_action, before_scene
-    )
+    before_input, _prior, expected, _fragment = _validated_text_action_chain(resolved_action, before_scene)
     action_digest = _canonical_digest(resolved_action)
     before_fingerprint = str(before_scene.get("fingerprint") or "")
     return _pending_lineage(
@@ -939,10 +866,7 @@ def build_pending_chinese_preedit_lineage(
     )
 
 
-def _validated_newline_action_chain(
-    resolved: Any,
-    before_scene: Any,
-) -> tuple[dict[str, Any], str, str]:
+def _validated_newline_action_chain( resolved: Any, before_scene: Any, ) -> tuple[dict[str, Any], str, str]:
     if not isinstance(before_scene, dict):
         raise InputValueLineageError("换行连续性只接受已解析的 Enter 动作。")
     prior, expected, target_id, expected_states = _expected_input_state(
@@ -986,10 +910,7 @@ def build_pending_newline_lineage(
     """Bind one exact Enter event to its immediate post-action observation."""
 
     _require_click_receipt(hardware_receipt, "临时换行连续性缺少有效事件栅栏。")
-    before_input, _prior, expected = _validated_newline_action_chain(
-        resolved_action,
-        before_scene,
-    )
+    before_input, _prior, expected = _validated_newline_action_chain(resolved_action, before_scene)
     return _pending_lineage(
         device_id=device_id,
         resolved_action=resolved_action,
@@ -1013,10 +934,7 @@ def build_pending_input_state_lineage(
 ) -> TypedInputLineage:
     """Bind a verified keyboard-state switch that must preserve exact text."""
 
-    _require_click_receipt(
-        hardware_receipt,
-        "临时输入状态连续性缺少有效单击事件栅栏。",
-    )
+    _require_click_receipt(hardware_receipt, '临时输入状态连续性缺少有效单击事件栅栏。')
     prior, expected, target_id, expected_states = _expected_input_state(
         resolved_action,
         kind="tap_semantic",
@@ -1030,15 +948,9 @@ def build_pending_input_state_lineage(
         or expected_states.get("value") != prior
         or len(expected_states) != 2
     ):
-        raise InputValueLineageError(
-            "临时输入状态连续性的同值 expected 合同无效。"
-    )
+        raise InputValueLineageError('临时输入状态连续性的同值 expected 合同无效。')
     before_input = _single_input(before_scene, expected_value=prior)
-    target = _target_element(
-        before_scene,
-        target_id,
-        "临时输入状态连续性缺少唯一输入辅助键。",
-    )
+    target = _target_element(before_scene, target_id, '临时输入状态连续性缺少唯一输入辅助键。')
     states = target.get("states")
     meaning = target.get("meaning")
     if (
@@ -1046,23 +958,17 @@ def build_pending_input_state_lineage(
         or states.get("prior_input_value") != prior
         or states.get("input_element_id") != before_input.get("element_id")
     ):
-        raise InputValueLineageError(
-            "临时输入状态连续性没有绑定原输入框和值。"
-        )
+        raise InputValueLineageError('临时输入状态连续性没有绑定原输入框和值。')
     expected_state_key = {
         "switch_keyboard_layout": ("keyboard_layout", "target_layout"),
         "switch_keyboard_case": ("keyboard_case_mode", "target_mode"),
         "switch_keyboard_input_mode": ("keyboard_input_mode", "target_mode"),
     }.get(str(meaning or ""))
     if expected_state_key is None:
-        raise InputValueLineageError(
-            "临时输入状态连续性只接受键盘布局、大小写或输入模式切换。"
-        )
+        raise InputValueLineageError('临时输入状态连续性只接受键盘布局、大小写或输入模式切换。')
     state_key, target_key = expected_state_key
     if expected_states.get(state_key) != states.get(target_key):
-        raise InputValueLineageError(
-            "临时输入状态连续性的切换方向与 expected 不一致。"
-        )
+        raise InputValueLineageError('临时输入状态连续性的切换方向与 expected 不一致。')
     return _pending_lineage(
         device_id=device_id,
         resolved_action=resolved_action,
@@ -1086,10 +992,7 @@ def build_pending_ime_candidate_lineage(
 ) -> TypedInputLineage:
     """Bind one exact IME candidate commit to its typed application field."""
 
-    _require_click_receipt(
-        hardware_receipt,
-        "临时候选提交连续性缺少有效单击事件栅栏。",
-    )
+    _require_click_receipt(hardware_receipt, '临时候选提交连续性缺少有效单击事件栅栏。')
     prior, expected, target_id, expected_states = _expected_input_state(
         resolved_action,
         kind="tap_semantic",
@@ -1106,25 +1009,15 @@ def build_pending_ime_candidate_lineage(
         or expected_states != {"value": expected}
         or not str(resolved_action.get("formal_candidate_id") or "").strip()
     ):
-        raise InputValueLineageError(
-            "临时候选提交连续性的 prior/expected 合同无效。"
-        )
+        raise InputValueLineageError('临时候选提交连续性的 prior/expected 合同无效。')
     segment = expected[len(prior) :]
     if not segment or "\r" in segment or "\n" in segment:
-        raise InputValueLineageError(
-            "临时候选提交连续性只能提交一个不含换行的精确候选片段。"
-        )
+        raise InputValueLineageError('临时候选提交连续性只能提交一个不含换行的精确候选片段。')
     before_input = _single_input(before_scene, expected_value=prior)
     input_states = before_input.get("states")
-    field_id = (
-        str(input_states.get("input_field_id") or "").strip()
-        if isinstance(input_states, dict)
-        else ""
-    )
+    field_id = str(input_states.get('input_field_id') or '').strip() if isinstance(input_states, dict) else ''
     if field_id in {"", "unknown"}:
-        raise InputValueLineageError(
-            "临时候选提交连续性缺少 typed input_field_id。"
-        )
+        raise InputValueLineageError('临时候选提交连续性缺少 typed input_field_id。')
     elements = before_scene.get("elements")
     candidates = [
         item
@@ -1144,19 +1037,11 @@ def build_pending_ime_candidate_lineage(
         and item["states"].get("independent_geometry_verified") is True
     ]
     if len(candidates) != 1 or candidates[0].get("element_id") != target_id:
-        raise InputValueLineageError(
-            "临时候选提交连续性缺少唯一绑定当前输入框的精确候选。"
-        )
+        raise InputValueLineageError('临时候选提交连续性缺少唯一绑定当前输入框的精确候选。')
     preedit = input_states.get("ime_preedit_text")
     candidate_states = candidates[0]["states"]
-    if (
-        not isinstance(preedit, str)
-        or not preedit
-        or candidate_states.get("pinyin") != preedit
-    ):
-        raise InputValueLineageError(
-            "临时候选提交连续性没有绑定同一输入法预编辑串。"
-        )
+    if ( not isinstance(preedit, str) or not preedit or candidate_states.get("pinyin") != preedit ):
+        raise InputValueLineageError('临时候选提交连续性没有绑定同一输入法预编辑串。')
     return _pending_lineage(
         device_id=device_id,
         resolved_action=resolved_action,
@@ -1265,18 +1150,11 @@ def _single_input(scene: dict[str, Any], *, expected_value: str | None = None) -
 
 def _typed_input_field_id(element: dict[str, Any]) -> str:
     states = element.get("states") if isinstance(element, dict) else None
-    field_id = (
-        str(states.get("input_field_id") or "").strip()
-        if isinstance(states, dict)
-        else ""
-    )
+    field_id = str(states.get('input_field_id') or '').strip() if isinstance(states, dict) else ''
     return field_id if field_id and field_id != "unknown" else "unknown"
 
 
-def _validated_text_action_chain(
-    resolved: Any,
-    before_scene: Any,
-) -> tuple[dict[str, Any], str, str, str]:
+def _validated_text_action_chain( resolved: Any, before_scene: Any, ) -> tuple[dict[str, Any], str, str, str]:
     if not isinstance(resolved, dict) or resolved.get("input_method") != "direct_latin" or not isinstance(before_scene, dict):
         raise InputValueLineageError("文字连续性只接受已解析的拉丁按键分段。")
     prior, expected, _target_id, expected_states = _expected_input_state(
@@ -1304,9 +1182,7 @@ def _validated_chinese_preedit_action_chain(
     before_scene: Any,
 ) -> tuple[dict[str, Any], str, str, str, str]:
     if not isinstance(resolved, dict) or resolved.get("input_method") != "chinese_pinyin" or not isinstance(before_scene, dict):
-        raise InputValueLineageError(
-            "中文预编辑连续性只接受已解析的确定性拼音分段。"
-        )
+        raise InputValueLineageError('中文预编辑连续性只接受已解析的确定性拼音分段。')
     prior, expected, target_id, expected_states = _expected_input_state(
         resolved,
         kind="input_verified_text",
@@ -1336,9 +1212,7 @@ def _validated_chinese_preedit_action_chain(
             "ime_exact_candidate_text": fragment,
         }
     ):
-        raise InputValueLineageError(
-            "中文预编辑分段的授权前缀、拼音或 expected 链无效。"
-        )
+        raise InputValueLineageError('中文预编辑分段的授权前缀、拼音或 expected 链无效。')
     try:
         deterministic_pinyin = local_pinyin(fragment)
     except VerifiedTextTransactionError as exc:
@@ -1356,9 +1230,7 @@ def _validated_chinese_preedit_action_chain(
         or not isinstance(input_states.get("keyboard_geometry"), dict)
         or input_states.get("ime_preedit_text") not in (None, "")
     ):
-        raise InputValueLineageError(
-            "中文预编辑分段没有绑定同一 typed 中文 QWERTY 输入框。"
-        )
+        raise InputValueLineageError('中文预编辑分段没有绑定同一 typed 中文 QWERTY 输入框。')
     return before_input, prior, expected, fragment, pinyin
 
 
@@ -1372,19 +1244,10 @@ def _resolve_verified_input_surface(
     missing_screen_message: str,
 ) -> _InputLineageSurface:
     app_id = fallback_surface.app_id if fallback_surface else after_scene.get("app_id")
-    screen_id = (
-        fallback_surface.screen_id if fallback_surface else after_scene.get("screen_id")
-    )
+    screen_id = fallback_surface.screen_id if fallback_surface else after_scene.get('screen_id')
     input_field_id = _typed_input_field_id(after_input)
-    typed_field_stable = bool(
-        input_field_id != "unknown"
-        and _typed_input_field_id(before_input) == input_field_id
-    )
-    if (
-        not isinstance(app_id, str)
-        or not app_id.strip()
-        or (app_id == "unknown" and not typed_field_stable)
-    ):
+    typed_field_stable = bool(input_field_id != 'unknown' and _typed_input_field_id(before_input) == input_field_id)
+    if ( not isinstance(app_id, str) or not app_id.strip() or (app_id == "unknown" and not typed_field_stable) ):
         raise InputValueLineageError(missing_app_message)
     if not isinstance(screen_id, str) or not screen_id.strip() or screen_id == "unknown":
         raise InputValueLineageError(missing_screen_message)
@@ -1500,10 +1363,7 @@ def build_verified_text_lineage(
 ) -> TypedInputLineage:
     if not isinstance(after_scene, dict):
         raise InputValueLineageError("文字连续性缺少动作后场景。")
-    before_input, prior, expected, _fragment = _validated_text_action_chain(
-        resolved,
-        before_scene,
-    )
+    before_input, prior, expected, _fragment = _validated_text_action_chain(resolved, before_scene)
     after_input = _single_input(after_scene)
     raw_after = after_input["states"]["value"]
     if (
@@ -1552,10 +1412,7 @@ def build_verified_newline_lineage(
     if not isinstance(after_scene, dict):
         raise InputValueLineageError("换行连续性缺少动作后场景。")
     _require_click_receipt(hardware_receipt, "换行连续性缺少有效单击事件栅栏。")
-    before_input, prior, expected = _validated_newline_action_chain(
-        resolved,
-        before_scene,
-    )
+    before_input, prior, expected = _validated_newline_action_chain(resolved, before_scene)
     after_input = _single_input(after_scene, expected_value=expected)
     after_states = after_input.get("states")
     after_evidence = after_input.get("evidence")
@@ -1610,11 +1467,7 @@ def build_verified_literal_lineage(
     if not isinstance(before_scene, dict) or not isinstance(after_scene, dict):
         raise InputValueLineageError("输入值连续性缺少前后场景。")
     _require_click_receipt(hardware_receipt, "输入值连续性缺少有效的单击事件栅栏。")
-    before_input, prior, expected = _validated_literal_action_chain(
-        resolved,
-        before_scene,
-        error_prefix="逐字符动作",
-    )
+    before_input, prior, expected = _validated_literal_action_chain(resolved, before_scene, error_prefix='逐字符动作')
     after_input = _single_input(after_scene)
     raw_after = after_input["states"]["value"]
     if (

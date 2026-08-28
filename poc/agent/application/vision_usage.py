@@ -20,9 +20,7 @@ SINGLE_STEP_ALLOWED_REQUEST_STAGES = frozenset({"single_step_observation"})
 # can change, so reports retain both values and label them as estimates rather
 # than claiming to be the Alibaba Cloud invoice.
 QWEN_PLUS_PRICING_VERSION = "cn-beijing-qwen3.7-plus-2026-08-24"
-QWEN_PLUS_PRICING_SOURCE = (
-    "https://help.aliyun.com/zh/model-studio/model-pricing"
-)
+QWEN_PLUS_PRICING_SOURCE = 'https://help.aliyun.com/zh/model-studio/model-pricing'
 QWEN_PLUS_LIST_INPUT_CNY_PER_MILLION = 2.0
 QWEN_PLUS_LIST_OUTPUT_CNY_PER_MILLION = 8.0
 QWEN_PLUS_PROMO_INPUT_CNY_PER_MILLION = 1.6
@@ -41,26 +39,12 @@ class VisionStepContractViolation(VisionUsageError):
     error_code = "vision_step_contract_violation"
 
 
-def _cost_cny(
-    *,
-    prompt_tokens: int,
-    completion_tokens: int,
-    input_rate: float,
-    output_rate: float,
-) -> float:
-    return round(
-        prompt_tokens * input_rate / 1_000_000
-        + completion_tokens * output_rate / 1_000_000,
-        6,
-    )
+def _cost_cny( *, prompt_tokens: int, completion_tokens: int, input_rate: float, output_rate: float, ) -> float:
+    return round(prompt_tokens * input_rate / 1000000 + completion_tokens * output_rate / 1000000, 6)
 
 
 def _non_negative_int(value: Any) -> int:
-    return (
-        value
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
-        else 0
-    )
+    return value if isinstance(value, int) and (not isinstance(value, bool)) and (value >= 0) else 0
 
 
 @dataclass
@@ -69,11 +53,7 @@ class VisionSessionUsageLedger:
 
     session_id: str
     expected_model: str = QWEN_PLUS_MODEL
-    created_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat(
-            timespec="seconds"
-        )
-    )
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec='seconds'))
     _events: list[dict[str, Any]] = field(default_factory=list, repr=False)
     _request_count: int = field(default=0, repr=False)
     _successful_count: int = field(default=0, repr=False)
@@ -87,11 +67,7 @@ class VisionSessionUsageLedger:
     _timed_request_count: int = field(default=0, repr=False)
     _total_elapsed_seconds: float = field(default=0.0, repr=False)
     _max_elapsed_seconds: float = field(default=0.0, repr=False)
-    _lock: threading.RLock = field(
-        default_factory=threading.RLock,
-        repr=False,
-        compare=False,
-    )
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.session_id = str(self.session_id or "").strip()
@@ -111,14 +87,7 @@ class VisionSessionUsageLedger:
         resolved_fingerprint = str(fingerprint or "").strip()[:256]
         return resolved_stage, resolved_fingerprint
 
-    def reserve_request(
-        self,
-        *,
-        model: str,
-        stage: str,
-        fingerprint: str,
-        max_completion_tokens: int,
-    ) -> str:
+    def reserve_request( self, *, model: str, stage: str, fingerprint: str, max_completion_tokens: int, ) -> str:
         stage, fingerprint = self._metadata(stage, fingerprint)
         model = str(model or "").strip()
         with self._lock:
@@ -200,11 +169,7 @@ class VisionSessionUsageLedger:
         completion = _non_negative_int(raw.get("completion_tokens"))
         total = _non_negative_int(raw.get("total_tokens")) or prompt + completion
         prompt_details = raw.get("prompt_tokens_details")
-        cached = (
-            _non_negative_int(prompt_details.get("cached_tokens"))
-            if isinstance(prompt_details, Mapping)
-            else 0
-        )
+        cached = _non_negative_int(prompt_details.get('cached_tokens')) if isinstance(prompt_details, Mapping) else 0
         elapsed = (
             max(0.0, float(elapsed_seconds))
             if isinstance(elapsed_seconds, (int, float))

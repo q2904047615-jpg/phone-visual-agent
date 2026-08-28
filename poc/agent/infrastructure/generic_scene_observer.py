@@ -24,13 +24,8 @@ from agent.infrastructure.observation_images import (
     measure_local_stability,
 )
 from agent.domain.visual_evidence import VisualObstruction
-from agent.infrastructure.qwen_runtime_errors import (
-    classify_qwen_error,
-)
-from agent.infrastructure.robot_controller import (
-    WorkflowNotReady,
-    qwerty_keyboard_config_from_anchors,
-)
+from agent.infrastructure.qwen_runtime_errors import classify_qwen_error
+from agent.infrastructure.robot_controller import WorkflowNotReady, qwerty_keyboard_config_from_anchors
 from agent.domain.ui_scene import (
     ALLOWED_ROLES,
     CAMERA_LAYOUT_ORIENTATIONS,
@@ -42,11 +37,7 @@ from agent.domain.ui_scene import (
     UISceneError,
     camera_alignment_evidence_is_safe,
 )
-from agent.infrastructure.dashscope_vision_provider import (
-    _extract_json_object,
-    _image_data_url,
-    _image_request_size,
-)
+from agent.infrastructure.dashscope_vision_provider import _extract_json_object, _image_data_url, _image_request_size
 from agent.domain.vision_model import VisionAgentError, public_model_identity
 from agent.domain.verified_text_transaction import (
     VerifiedTextTransactionError,
@@ -61,9 +52,7 @@ from agent.application.input_value_lineage import (
     lineage_matches_trailing_newline_cue,
     lineage_matches_visual,
 )
-from agent.domain.input_value_lineage import (
-    TypedInputLineage,
-)
+from agent.domain.input_value_lineage import TypedInputLineage
 import agent.domain.generic_goal as generic_goal_domain
 
 SINGLE_STEP_SCENE_OBSERVER_VERSION = "2026-08-25-single-step-scene-observer-v2"
@@ -302,19 +291,13 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
         try:
             if len(frames) < 4:
                 raise VisionAgentError("通用页面观察至少需要4帧。")
-            stability = measure_local_stability(
-                frames,
-                allow_leading_outlier=True,
-            )
+            stability = measure_local_stability(frames, allow_leading_outlier=True)
             if not stability.stable:
                 raise VisionAgentError(f"本地多帧稳定性检查未通过：{stability.reason}；不调用模型。")
 
             sharpness_scores = [measure_frame_sharpness(item) for item in frames]
             stable_tail_start = max(0, len(frames) - min(3, len(frames)))
-            selected_frame_index = max(
-                range(stable_tail_start, len(frames)),
-                key=sharpness_scores.__getitem__,
-            )
+            selected_frame_index = max(range(stable_tail_start, len(frames)), key=sharpness_scores.__getitem__)
             frame = frames[selected_frame_index].convert("RGB")
             fingerprint = local_frame_fingerprint(frame)
             context = generic_goal_domain.safe_goal_context(goal_context or {})
@@ -332,16 +315,9 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
                     if cached is not None:
                         self._observation_cache.move_to_end(cache_key)
                 if cached is not None:
-                    recorder = getattr(
-                        self.provider,
-                        "record_observation_cache_hit",
-                        None,
-                    )
+                    recorder = getattr(self.provider, 'record_observation_cache_hit', None)
                     if callable(recorder):
-                        recorder(
-                            stage="same_fingerprint_single_step_observation",
-                            fingerprint=fingerprint,
-                        )
+                        recorder(stage='same_fingerprint_single_step_observation', fingerprint=fingerprint)
                     self.last_diagnostics = {
                         "observer_version": SINGLE_STEP_SCENE_OBSERVER_VERSION,
                         "vision_model": model_identity,
@@ -589,27 +565,18 @@ class SingleStepGenericSceneObserver(_SingleStepObserverBase):
             self._set_stage("idle")
 
 
-def _horizontal_overlap_ratio(
-    first: tuple[float, float, float, float],
-    second: tuple[int, int, int, int],
-) -> float:
+def _horizontal_overlap_ratio( first: tuple[float, float, float, float], second: tuple[int, int, int, int], ) -> float:
     overlap = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
     return overlap / max(1.0, first[2] - first[0])
 
 
-def _input_evidence_is_obscured(
-    bounds: tuple[float, float, float, float],
-    obstruction: VisualObstruction,
-) -> bool:
+def _input_evidence_is_obscured( bounds: tuple[float, float, float, float], obstruction: VisualObstruction, ) -> bool:
     if obstruction.kind != "top_edge_opaque_band":
         return False
     horizontal_overlap = _horizontal_overlap_ratio(bounds, obstruction.bounds)
     vertical_gap = bounds[1] - obstruction.bounds[3]
     obstruction_height = obstruction.bounds[3] - obstruction.bounds[1]
-    return horizontal_overlap >= 0.15 and vertical_gap <= max(
-        20.0,
-        obstruction_height * 0.5,
-    )
+    return horizontal_overlap >= 0.15 and vertical_gap <= max(20.0, obstruction_height * 0.5)
 
 
 def _suppress_obscured_input_evidence(
@@ -653,22 +620,11 @@ def _suppress_obscured_input_evidence(
     if note not in overlays:
         overlays.append(note)
     value["overlays"] = overlays
-    return UIScene.from_dict(
-        value,
-        coordinate_scale=1.0,
-        stable_override=True,
-        fingerprint_override=fingerprint,
-    )
+    return UIScene.from_dict(value, coordinate_scale=1.0, stable_override=True, fingerprint_override=fingerprint)
 
 
 def _json_only_system_message() -> dict[str, str]:
-    return {
-        "role": "system",
-        "content": (
-            "你是只读页面观察器。只输出一个语法完整的JSON对象；禁止Markdown、解释、"
-            "思考过程、代码围栏、JSON字符串套壳或对象前后的任何文字。"
-        ),
-    }
+    return {'role': 'system', 'content': '你是只读页面观察器。只输出一个语法完整的JSON对象；禁止Markdown、解释、思考过程、代码围栏、JSON字符串套壳或对象前后的任何文字。'}
 
 
 PREFILLED_INPUT_OBSERVATION_RULE = (
@@ -895,12 +851,7 @@ def _parse_single_step_observation_envelope(
 
     try:
         payload = _extract_json_object(raw, reject_duplicate_keys=True)
-        required = {
-            "protocol_version",
-            "coordinate_space",
-            "scene",
-            "input_structure",
-        }
+        required = {'protocol_version', 'coordinate_space', 'scene', 'input_structure'}
         if set(payload) != required:
             missing = sorted(required - set(payload))
             extra = sorted(set(payload) - required)
@@ -1060,10 +1011,7 @@ def _input_audit_literal_key_targets(
         else:
             if next_step is None:
                 return ()
-            if next_step.kind == "literal_key" and next_step.segment not in {
-                "\r",
-                "\n",
-            }:
+            if next_step.kind == "literal_key" and next_step.segment not in { "\r", "\n", }:
                 return (next_step.segment,)
             return ()
     targets: list[str] = []
@@ -1087,10 +1035,7 @@ def _input_structure_audit_prompt(
     goal = _goal_view(context)
     coordinate_height = wire_height
     keyboard_min_height = max(1, round(180 * coordinate_height / 1000))
-    literal_key_targets = _input_audit_literal_key_targets(
-        context,
-        current_input_text=current_input_text,
-    )
+    literal_key_targets = _input_audit_literal_key_targets(context, current_input_text=current_input_text)
     literal_keys_example = []
     if literal_key_targets:
         example_value = literal_key_targets[0]
@@ -1104,21 +1049,14 @@ def _input_structure_audit_prompt(
                 "fully_visible": True,
             }
         ]
-    literal_keys_example_json = json.dumps(
-        literal_keys_example,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
+    literal_keys_example_json = json.dumps(literal_keys_example, ensure_ascii=False, separators=(',', ':'))
     active_field_id, active_field_label, active_multiline = goal.field
     target_only_clear = goal.target_only
     target_text = goal.transaction_text or goal.explicit_text
     enter_required = False
     if target_text and current_input_text is not None and active_multiline:
         try:
-            next_input_step = plan_next_verified_input(
-                target_text,
-                current_input_text,
-            )
+            next_input_step = plan_next_verified_input(target_text, current_input_text)
         except (ValueError, VerifiedTextTransactionError):
             next_input_step = None
         enter_required = bool(
@@ -1187,12 +1125,7 @@ Return empty arrays when their geometry is not visible. Never merge a clipped st
 """
 
 
-def _parse_scene(
-    raw: str,
-    *,
-    fingerprint: str,
-    camera_layout_orientation: str | None = None,
-) -> UIScene:
+def _parse_scene( raw: str, *, fingerprint: str, camera_layout_orientation: str | None = None, ) -> UIScene:
     try:
         payload = _extract_json_object(raw)
         if "system_ui" not in payload:
@@ -1237,12 +1170,7 @@ def _drop_forbidden_camera_alignment_evidence(payload: dict[str, Any]) -> None:
         return
     if not evidence or retained:
         return
-    required = {
-        "camera_layout_orientation",
-        "phone_content_rotation",
-        "confidence",
-        "evidence",
-    }
+    required = {'camera_layout_orientation', 'phone_content_rotation', 'confidence', 'evidence'}
     confidence = alignment.get("confidence")
     if (
         set(alignment) != required
@@ -1277,10 +1205,7 @@ def _valid_1000_bounds(value: Any) -> bool:
     return 0 <= left < right <= 1000 and 0 <= top < bottom <= 1000
 
 
-def _strip_preliminary_input_elements(
-    payload: dict[str, Any],
-    goal_context: dict[str, Any],
-) -> bool:
+def _strip_preliminary_input_elements( payload: dict[str, Any], goal_context: dict[str, Any], ) -> bool:
     goal = _goal_view(goal_context)
     if not goal.input_requested:
         return False
@@ -1450,14 +1375,7 @@ def _focus_only_compact_input_surface(
 
     if keyboard_visible or not isinstance(attestation, dict):
         return None
-    if set(attestation) != {
-        "element_id",
-        "meaning",
-        "label",
-        "bounds",
-        "confidence",
-        "evidence",
-    }:
+    if set(attestation) != { "element_id", "meaning", "label", "bounds", "confidence", "evidence", }:
         return None
     element_id = str(attestation.get("element_id") or "").strip()
     meaning = str(attestation.get("meaning") or "").strip()
@@ -1515,19 +1433,9 @@ def _adjacent_exact_preedit_cue(
         return False
     input_box = tuple(float(value) for value in trusted_input["input_bounds"])
     preedit_box = tuple(float(value) for value in trusted_preedits[0]["bounds"])
-    horizontal_overlap = max(
-        0.0,
-        min(input_box[2], preedit_box[2]) - max(input_box[0], preedit_box[0]),
-    )
-    smaller_width = min(
-        input_box[2] - input_box[0],
-        preedit_box[2] - preedit_box[0],
-    )
-    vertical_gap = max(
-        0.0,
-        preedit_box[1] - input_box[3],
-        input_box[1] - preedit_box[3],
-    )
+    horizontal_overlap = max(0.0, min(input_box[2], preedit_box[2]) - max(input_box[0], preedit_box[0]))
+    smaller_width = min(input_box[2] - input_box[0], preedit_box[2] - preedit_box[0])
+    vertical_gap = max(0.0, preedit_box[1] - input_box[3], input_box[1] - preedit_box[3])
     return bool(smaller_width > 0 and horizontal_overlap / smaller_width >= 0.60 and vertical_gap <= 100)
 
 
@@ -1598,10 +1506,7 @@ def _resolve_pending_ime_candidate_input_state(
         input_field_id=input_field_id,
     ):
         return None
-    return {
-        "committed_value": exact_value,
-        "consumed_preedit": preedit,
-    }
+    return {'committed_value': exact_value, 'consumed_preedit': preedit}
 
 
 def _authorized_exact_committed_prefix_cue(
@@ -1626,14 +1531,7 @@ def _authorized_exact_committed_prefix_cue(
         or not isinstance(cues, list)
     ):
         return ""
-    non_text_cues = {
-        "border",
-        "caret",
-        "cursor",
-        "focus border",
-        "focus ring",
-        "outline",
-    }
+    non_text_cues = {'border', 'caret', 'cursor', 'focus border', 'focus ring', 'outline'}
     literal_cues = tuple(
         item.strip()
         for item in cues
@@ -1650,11 +1548,7 @@ def _authorized_exact_committed_prefix_cue(
         or "\n" in cue
     ):
         return ""
-    if trusted_preedits and not _adjacent_exact_preedit_cue(
-        trusted_input,
-        trusted_preedits,
-        cue,
-    ):
+    if trusted_preedits and not _adjacent_exact_preedit_cue( trusted_input, trusted_preedits, cue, ):
         return ""
     return cue
 
@@ -1680,15 +1574,7 @@ def _clear_goal_unique_committed_cue(
         or not isinstance(cues, list)
     ):
         return "", 0
-    decorative = {
-        "border",
-        "caret",
-        "cursor",
-        "focus border",
-        "focus ring",
-        "outline",
-        "|",
-    }
+    decorative = {'border', 'caret', 'cursor', 'focus border', 'focus ring', 'outline', '|'}
     literals = tuple(
         item
         for item in cues
@@ -1876,10 +1762,7 @@ def _locally_detect_caret_visual_row(
     return best_row
 
 
-def _unique_clearable_ime_preedit(
-    trusted_input: dict[str, Any],
-    trusted_preedits: list[dict[str, Any]],
-) -> str:
+def _unique_clearable_ime_preedit( trusted_input: dict[str, Any], trusted_preedits: list[dict[str, Any]], ) -> str:
     """Bind one adjacent IME composition to one typed input for clearing."""
 
     if len(trusted_preedits) != 1:
@@ -1903,19 +1786,9 @@ def _unique_clearable_ime_preedit(
             and preedit_area <= 0.60 * input_area
         )
         return preedit_text if nested_empty_preedit else ""
-    horizontal_overlap = max(
-        0.0,
-        min(input_box[2], preedit_box[2]) - max(input_box[0], preedit_box[0]),
-    )
-    smaller_width = min(
-        input_box[2] - input_box[0],
-        preedit_box[2] - preedit_box[0],
-    )
-    vertical_gap = max(
-        0.0,
-        preedit_box[1] - input_box[3],
-        input_box[1] - preedit_box[3],
-    )
+    horizontal_overlap = max(0.0, min(input_box[2], preedit_box[2]) - max(input_box[0], preedit_box[0]))
+    smaller_width = min(input_box[2] - input_box[0], preedit_box[2] - preedit_box[0])
+    vertical_gap = max(0.0, preedit_box[1] - input_box[3], input_box[1] - preedit_box[3])
     if smaller_width <= 0 or horizontal_overlap / smaller_width < 0.60 or vertical_gap > 100:
         return ""
     return preedit_text
@@ -1950,14 +1823,7 @@ def _unique_inline_ime_preedit_cue(
     if not isinstance(cue, str):
         return ""
     cue = cue.strip()
-    non_text_cues = {
-        "border",
-        "caret",
-        "cursor",
-        "focus border",
-        "focus ring",
-        "outline",
-    }
+    non_text_cues = {'border', 'caret', 'cursor', 'focus border', 'focus ring', 'outline'}
     if (
         not cue
         or cue.casefold() in non_text_cues
@@ -2081,13 +1947,7 @@ def _trusted_ime_preedits(
                         qwerty_anchors=qwerty_anchors,
                     )
                 ):
-                    candidates.append(
-                        {
-                            "text": text,
-                            "bounds": candidate_bounds,
-                            "confidence": item_confidence,
-                        }
-                    )
+                    candidates.append({'text': text, 'bounds': candidate_bounds, 'confidence': item_confidence})
         result.append(
             {
                 "text": str(region.get("text") or "").strip(),
@@ -2131,13 +1991,7 @@ def _ime_candidate_is_near_preedit(
     )
 
 
-def _audit_strings(
-    value: Any,
-    *,
-    name: str,
-    limit: int,
-    allow_empty: bool,
-) -> tuple[str, ...]:
+def _audit_strings( value: Any, *, name: str, limit: int, allow_empty: bool, ) -> tuple[str, ...]:
     if (
         not isinstance(value, list)
         or len(value) > limit
@@ -2204,12 +2058,7 @@ def _parse_audited_keyboard(
         width = bounds[2] - bounds[0]
         if bounds[3] - bounds[1] < 180 and width >= 300 and snapped_anchors:
             row_y = [float(point[1]) for point in snapped_anchors.values()]
-            bounds = (
-                bounds[0],
-                min(bounds[1], min(row_y)),
-                bounds[2],
-                max(bounds[3], max(row_y)),
-            )
+            bounds = (bounds[0], min(bounds[1], min(row_y)), bounds[2], max(bounds[3], max(row_y)))
         if width < 300 or bounds[3] - bounds[1] < 180:
             bounds = None
 
@@ -2305,12 +2154,7 @@ def _collect_audited_input_matches(
                 allow_empty=True,
             )
         )
-        labels = _audit_strings(
-            item.get("field_labels", []),
-            name="field_labels",
-            limit=6,
-            allow_empty=False,
-        )
+        labels = _audit_strings(item.get('field_labels', []), name='field_labels', limit=6, allow_empty=False)
         caret = item["caret_line_index"]
         if caret is not None and (isinstance(caret, bool) or not isinstance(caret, int) or not 0 <= caret <= 30):
             raise UISceneError("caret_line_index 必须是0..30整数或 null。")
@@ -2436,11 +2280,7 @@ def _append_audited_input_element(
             states["input_multiline"] = multiline
     if field_label:
         states["input_field_label"] = field_label
-    for key in (
-        "verified_trailing_newline",
-        "local_caret_line_index",
-        "clear_extra_delete_units",
-    ):
+    for key in ( "verified_trailing_newline", "local_caret_line_index", "clear_extra_delete_units", ):
         value = audited_input.get(key)
         if value is True or isinstance(value, int) and not isinstance(value, bool) and value > 0:
             states[key] = value
@@ -2464,10 +2304,7 @@ def _append_audited_input_element(
             "source": "input_structure_audit",
         }
     if controls.candidate is not None and step is not None:
-        states.update(
-            ime_preedit_text=controls.preedit,
-            ime_exact_candidate_text=step.segment,
-        )
+        states.update(ime_preedit_text=controls.preedit, ime_exact_candidate_text=step.segment)
     elif controls.clearable_preedit:
         states["ime_preedit_text"] = controls.clearable_preedit
 
@@ -2500,9 +2337,7 @@ def _append_audited_input_element(
         if audited_input.get("verified_trailing_newline") is True:
             evidence.append("已验证换行动作、同一typed输入框、精确可见前缀与下一行光标一致")
         if isinstance(audited_input.get("local_caret_line_index"), int):
-            evidence.append(
-                "模型确认可见光标后，本地校准像素定位光标视觉行：" f"{audited_input['local_caret_line_index']}"
-            )
+            evidence.append(f'模型确认可见光标后，本地校准像素定位光标视觉行：{audited_input['local_caret_line_index']}')
     elif audited_input["placeholder"]:
         evidence.insert(0, f"应用输入框为空，占位提示：{audited_input['placeholder']}")
     elif audited_input.get("same_frame_input_surface_evidence"):
@@ -2555,10 +2390,7 @@ def _append_audited_input_controls(
             )
         )
     if step is not None:
-        common = {
-            "prior_input_value": step.current_text,
-            "input_element_id": "local_audited_input_1",
-        }
+        common = {'prior_input_value': step.current_text, 'input_element_id': 'local_audited_input_1'}
         specs = (
             (
                 "candidate",
@@ -2672,11 +2504,7 @@ def _same_frame_input_evidence(
     return tuple(str(value).strip()[:200] for value in evidence if str(value).strip())
 
 
-def _optional_right_button(
-    value: Any,
-    *,
-    input_bounds: tuple[float, float, float, float],
-) -> dict[str, Any] | None:
+def _optional_right_button( value: Any, *, input_bounds: tuple[float, float, float, float], ) -> dict[str, Any] | None:
     if (
         not isinstance(value, dict)
         or set(value) != {"label", "bounds", "confidence"}
@@ -2698,11 +2526,7 @@ def _optional_right_button(
         or _vertical_overlap_ratio(bounds, input_bounds) < 0.8
     ):
         return None
-    return {
-        "label": label,
-        "bounds": [round(part) for part in bounds],
-        "confidence": confidence,
-    }
+    return {'label': label, 'bounds': [round(part) for part in bounds], 'confidence': confidence}
 
 
 def _reconcile_verified_input_lineage(
@@ -2861,10 +2685,7 @@ def _plan_audited_input_controls(
             keyboard_bounds=keyboard_bounds,
             locally_snapped=snapped_anchors is not None,
         )
-    backspace = _validated_keyboard_backspace_key(
-        keyboard.get("backspace_key"),
-        keyboard_bounds=keyboard_bounds,
-    )
+    backspace = _validated_keyboard_backspace_key(keyboard.get('backspace_key'), keyboard_bounds=keyboard_bounds)
     clearable_preedit = ""
     if (
         trusted_input is not None
@@ -2912,10 +2733,7 @@ def _plan_audited_input_controls(
         and keyboard_input_mode != required_mode
     )
     switch_is_goal = switch_is_goal or needs_mode_switch
-    mode_switch = _validated_keyboard_mode_switch(
-        keyboard.get("mode_switch"),
-        keyboard_bounds=keyboard_bounds,
-    )
+    mode_switch = _validated_keyboard_mode_switch(keyboard.get('mode_switch'), keyboard_bounds=keyboard_bounds)
     if (
         mode_switch is not None
         and keyboard_input_mode != "unknown"
@@ -2925,10 +2743,7 @@ def _plan_audited_input_controls(
     if needs_mode_switch and (mode_switch is None or mode_switch["target_mode"] != required_mode):
         raise UISceneError("模式切换键未绑定下一确定性文字分段所需方向。")
 
-    literal_keys = _validated_keyboard_literal_keys(
-        keyboard.get("literal_keys", []),
-        keyboard_bounds=keyboard_bounds,
-    )
+    literal_keys = _validated_keyboard_literal_keys(keyboard.get('literal_keys', []), keyboard_bounds=keyboard_bounds)
     targets = set(
         _input_audit_literal_key_targets(
             goal.observation_context,
@@ -3047,12 +2862,7 @@ def _apply_input_structure_audit(
     try:
         goal = _goal_view(goal_context)
         payload = _extract_json_object(raw)
-        if set(payload) != {
-            "protocol_version",
-            "application_inputs",
-            "ime_preedit_regions",
-            "keyboard",
-        }:
+        if set(payload) != { "protocol_version", "application_inputs", "ime_preedit_regions", "keyboard", }:
             raise UISceneError("输入结构审计包含协议外字段。")
         if payload.get("protocol_version") != INPUT_STRUCTURE_AUDIT_VERSION:
             raise UISceneError("输入结构审计协议版本不匹配。")
@@ -3163,10 +2973,7 @@ def _apply_input_structure_audit(
             and trusted_input["text"]
             and isinstance(trusted_input.get("caret_line_index"), int)
         ):
-            extra_clear_units = max(
-                0,
-                trusted_input["caret_line_index"] - trusted_input["text"].count("\n"),
-            )
+            extra_clear_units = max(0, trusted_input['caret_line_index'] - trusted_input['text'].count('\n'))
             if extra_clear_units > 0:
                 trusted_input = dict(trusted_input)
                 trusted_input["clear_extra_delete_units"] = extra_clear_units
@@ -3277,12 +3084,7 @@ def _apply_input_structure_audit(
         )
         value["elements"] = elements
         value["summary"] = "输入状态仅见typed输入账本；compact输入摘要与输入转写不参与判断。"
-        return UIScene.from_dict(
-            value,
-            coordinate_scale=1.0,
-            stable_override=True,
-            fingerprint_override=fingerprint,
-        )
+        return UIScene.from_dict(value, coordinate_scale=1.0, stable_override=True, fingerprint_override=fingerprint)
     except (UISceneError, ValueError, TypeError) as exc:
         raise VisionAgentError(f"输入结构只读审计结果不符合协议：{exc}") from exc
 
@@ -3325,9 +3127,7 @@ def _keyboard_control(
     return label, bounds, confidence
 
 
-def _keyboard_bounds_from_locally_snapped_qwerty_anchors(
-    value: Any,
-) -> tuple[float, float, float, float] | None:
+def _keyboard_bounds_from_locally_snapped_qwerty_anchors( value: Any, ) -> tuple[float, float, float, float] | None:
     """Rebuild one keyboard envelope from independently stabilized QWERTY rows.
 
     The model's outer rectangle is not a second authority once all seven
@@ -3414,11 +3214,7 @@ def _validated_qwerty_keyboard_geometry(
         qwerty_keyboard_config_from_anchors(normalized)
     except WorkflowNotReady as exc:
         raise UISceneError(f"QWERTY anchors 未通过本地布局校验：{exc}") from exc
-    return {
-        "type": "qwerty",
-        "anchors": normalized,
-        "source": "input_structure_audit",
-    }
+    return {'type': 'qwerty', 'anchors': normalized, 'source': 'input_structure_audit'}
 
 
 def _validated_keyboard_mode_switch(
@@ -3498,14 +3294,7 @@ def _validated_keyboard_enter_key(
         fields={"label", "bounds", "confidence", "fully_visible", "key_action"},
         require_visible=True,
     )
-    if control is None or value["key_action"] not in {
-        "newline",
-        "send",
-        "search",
-        "done",
-        "next",
-        "unknown",
-    }:
+    if control is None or value["key_action"] not in { "newline", "send", "search", "done", "next", "unknown", }:
         return None
     label, bounds, confidence = control
     return {
@@ -3540,12 +3329,7 @@ def _locally_snapped_keyboard_enter_key(
         "回车",
         "换行",
     }
-    next_label = any(glyph in label for glyph in ("→", "↦", "➡", "⏭")) or normalized in {
-        "next",
-        "下一步",
-        "下一个",
-        "下一项",
-    }
+    next_label = any((glyph in label for glyph in ('→', '↦', '➡', '⏭'))) or normalized in {'next', '下一步', '下一个', '下一项'}
     if not (action == "newline" and (newline_label or not normalized) or action == "next" and next_label):
         return None
     confidence = _audit_confidence(value.get("confidence"), "enter_key")
@@ -3625,10 +3409,7 @@ def _select_keyboard_layout_switch_for_target(
         return direct[0]
     if direct:
         return None
-    next_layout = next_keyboard_layout_towards(
-        current_layout,
-        target_layout,
-    )
+    next_layout = next_keyboard_layout_towards(current_layout, target_layout)
     next_hop = [
         item
         for item in layout_switches
@@ -3703,11 +3484,7 @@ def _validated_keyboard_literal_keys(
     return result
 
 
-def _literal_key_overlaps_qwerty_letter_cell(
-    item: dict[str, Any],
-    *,
-    qwerty_geometry: dict[str, Any],
-) -> bool:
+def _literal_key_overlaps_qwerty_letter_cell( item: dict[str, Any], *, qwerty_geometry: dict[str, Any], ) -> bool:
     """Reject alternate glyphs painted inside an alphabet key cell.
 
     The visual model supplies only the candidate box and seven row anchors.
@@ -3746,11 +3523,7 @@ def _literal_key_overlaps_qwerty_letter_cell(
     return False
 
 
-def _literal_key_overlaps_qwerty_backspace(
-    item: dict[str, Any],
-    *,
-    qwerty_geometry: dict[str, Any],
-) -> bool:
+def _literal_key_overlaps_qwerty_backspace( item: dict[str, Any], *, qwerty_geometry: dict[str, Any], ) -> bool:
     """Reject a claimed literal key whose box owns the audited backspace.
 
     QWERTY anchors independently identify the current frame's backspace key.
@@ -3886,16 +3659,7 @@ def _is_explicit_keyboard_mode_label(label: str) -> bool:
         return False
     if "中" in visible or "英" in visible:
         return True
-    return visible in {
-        "en",
-        "eng",
-        "english",
-        "中文",
-        "chinese",
-        "abc",
-        "latin",
-        "pinyin",
-    }
+    return visible in {'en', 'eng', 'english', '中文', 'chinese', 'abc', 'latin', 'pinyin'}
 
 
 def _bounds_inside(

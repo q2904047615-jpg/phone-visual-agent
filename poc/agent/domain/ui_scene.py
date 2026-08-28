@@ -12,9 +12,7 @@ MIN_CAMERA_ALIGNMENT_CONFIDENCE = 0.80
 # A low-confidence dynamic background must never authorize a screen-wide action.
 # It may only expose one locally trustworthy, goal-relevant element for the
 # downstream exact-element gates.
-TARGET_LOCAL_ACTION_ROLES = frozenset(
-    {"button", "icon", "input", "text", "tab", "toggle", "image", "list_item"}
-)
+TARGET_LOCAL_ACTION_ROLES = frozenset({'button', 'icon', 'input', 'text', 'tab', 'toggle', 'image', 'list_item'})
 COMPLETION_EVIDENCE_ROLES = frozenset({"container", "dialog"})
 
 ALLOWED_ROLES = {
@@ -39,18 +37,8 @@ class UISceneError(ValueError):
 
 SYSTEM_UI_UNKNOWN = "unknown"
 CAMERA_ALIGNMENT_UNKNOWN = "unknown"
-CAMERA_LAYOUT_ORIENTATIONS = frozenset(
-    {"portrait", "landscape", "square", CAMERA_ALIGNMENT_UNKNOWN}
-)
-PHONE_CONTENT_ROTATIONS = frozenset(
-    {
-        "upright",
-        "rotated_90",
-        "rotated_180",
-        "rotated_270",
-        CAMERA_ALIGNMENT_UNKNOWN,
-    }
-)
+CAMERA_LAYOUT_ORIENTATIONS = frozenset({'portrait', 'landscape', 'square', CAMERA_ALIGNMENT_UNKNOWN})
+PHONE_CONTENT_ROTATIONS = frozenset({'upright', 'rotated_90', 'rotated_180', 'rotated_270', CAMERA_ALIGNMENT_UNKNOWN})
 
 _CAMERA_ALIGNMENT_EVIDENCE_FORBIDDEN = re.compile(
     r"(?:coordinates?|coords?|bounds?|\bx\s*[=:]|\by\s*[=:]|"
@@ -87,9 +75,7 @@ class SystemUIFacts:
         ):
             if isinstance(value, bool) or value == SYSTEM_UI_UNKNOWN:
                 continue
-            raise UISceneError(
-                f"system_ui.{field_name} 必须是布尔值或明确的 unknown。"
-            )
+            raise UISceneError(f'system_ui.{field_name} 必须是布尔值或明确的 unknown。')
 
     def to_dict(self) -> dict[str, bool | str]:
         self.validate()
@@ -106,14 +92,9 @@ class SystemUIFacts:
         missing = required - set(value)
         unexpected = set(value) - required
         if missing:
-            raise UISceneError(
-                "scene.system_ui 缺少字段：" + ", ".join(sorted(missing))
-            )
+            raise UISceneError('scene.system_ui 缺少字段：' + ', '.join(sorted(missing)))
         if unexpected:
-            raise UISceneError(
-                "scene.system_ui 包含协议外字段："
-                + ", ".join(sorted(map(str, unexpected)))
-            )
+            raise UISceneError('scene.system_ui 包含协议外字段：' + ', '.join(sorted(map(str, unexpected))))
         facts = cls(
             immersive_or_fullscreen=value["immersive_or_fullscreen"],
             navigation_bar_visible=value["navigation_bar_visible"],
@@ -136,10 +117,7 @@ class CameraAlignmentFacts:
             not isinstance(self.camera_layout_orientation, str)
             or self.camera_layout_orientation not in CAMERA_LAYOUT_ORIENTATIONS
         ):
-            raise UISceneError(
-                "camera_alignment.camera_layout_orientation 必须是 "
-                "portrait、landscape、square 或 unknown。"
-            )
+            raise UISceneError('camera_alignment.camera_layout_orientation 必须是 portrait、landscape、square 或 unknown。')
         if (
             not isinstance(self.phone_content_rotation, str)
             or self.phone_content_rotation not in PHONE_CONTENT_ROTATIONS
@@ -148,9 +126,7 @@ class CameraAlignmentFacts:
                 "camera_alignment.phone_content_rotation 必须是 upright、"
                 "rotated_90、rotated_180、rotated_270 或 unknown。"
             )
-        if isinstance(self.confidence, bool) or not isinstance(
-            self.confidence, (int, float)
-        ):
+        if isinstance(self.confidence, bool) or not isinstance( self.confidence, (int, float) ):
             raise UISceneError("camera_alignment.confidence 格式无效。")
         if not 0.0 <= float(self.confidence) <= 1.0:
             raise UISceneError("camera_alignment.confidence 必须在0到1之间。")
@@ -158,17 +134,10 @@ class CameraAlignmentFacts:
             raise UISceneError("camera_alignment.evidence 最多包含两个短字符串。")
         for item in self.evidence:
             if not isinstance(item, str) or not item.strip() or len(item) > 160:
-                raise UISceneError(
-                    "camera_alignment.evidence 只允许非空短字符串。"
-                )
+                raise UISceneError('camera_alignment.evidence 只允许非空短字符串。')
             if not camera_alignment_evidence_is_safe(item):
-                raise UISceneError(
-                    "camera_alignment.evidence 包含坐标或控制指令。"
-                )
-        if (
-            self.phone_content_rotation != CAMERA_ALIGNMENT_UNKNOWN
-            and not self.evidence
-        ):
+                raise UISceneError('camera_alignment.evidence 包含坐标或控制指令。')
+        if ( self.phone_content_rotation != CAMERA_ALIGNMENT_UNKNOWN and not self.evidence ):
             raise UISceneError("明确的手机内容方向必须附带只读视觉证据。")
 
     def to_dict(self) -> dict[str, Any]:
@@ -184,23 +153,13 @@ class CameraAlignmentFacts:
     def from_dict(cls, value: Any) -> "CameraAlignmentFacts":
         if not isinstance(value, dict):
             raise UISceneError("scene.camera_alignment 必须是 JSON 对象。")
-        required = {
-            "camera_layout_orientation",
-            "phone_content_rotation",
-            "confidence",
-            "evidence",
-        }
+        required = {'camera_layout_orientation', 'phone_content_rotation', 'confidence', 'evidence'}
         missing = required - set(value)
         unexpected = set(value) - required
         if missing:
-            raise UISceneError(
-                "scene.camera_alignment 缺少字段：" + ", ".join(sorted(missing))
-            )
+            raise UISceneError('scene.camera_alignment 缺少字段：' + ', '.join(sorted(missing)))
         if unexpected:
-            raise UISceneError(
-                "scene.camera_alignment 包含协议外字段："
-                + ", ".join(sorted(map(str, unexpected)))
-            )
+            raise UISceneError('scene.camera_alignment 包含协议外字段：' + ', '.join(sorted(map(str, unexpected))))
         evidence = value["evidence"]
         if not isinstance(evidence, list):
             raise UISceneError("scene.camera_alignment.evidence 必须是数组。")
@@ -235,22 +194,15 @@ class UIElement:
         if not self.meaning.strip():
             raise UISceneError("元素缺少语义 meaning。")
         if _is_system_navigation_bar_fact(self.meaning):
-            raise UISceneError(
-                "系统导航栏只能写入 scene.system_ui，不得进入 elements。"
-            )
+            raise UISceneError('系统导航栏只能写入 scene.system_ui，不得进入 elements。')
         if len(self.bounds) != 4:
             raise UISceneError("元素 bounds 必须包含4个归一化数值。")
         left, top, right, bottom = self.bounds
-        if not all(
-            isinstance(value, (int, float)) and not isinstance(value, bool)
-            for value in self.bounds
-        ):
+        if not all( isinstance(value, (int, float)) and not isinstance(value, bool) for value in self.bounds ):
             raise UISceneError("元素 bounds 格式无效。")
         if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
             raise UISceneError(f"元素 bounds 超出归一化画面：{self.bounds}")
-        if isinstance(self.confidence, bool) or not isinstance(
-            self.confidence, (int, float)
-        ):
+        if isinstance(self.confidence, bool) or not isinstance( self.confidence, (int, float) ):
             raise UISceneError("元素置信度格式无效。")
         if not 0.0 <= float(self.confidence) <= 1.0:
             raise UISceneError("元素置信度必须在0到1之间。")
@@ -274,17 +226,10 @@ class UIElement:
                 or self.states.get("focused") is not True
                 or self.states.get("input_multiline") is not False
             ):
-                raise UISceneError(
-                    "horizontal_suffix 只允许标记聚焦单行输入框的非空可见尾段。"
-                )
+                raise UISceneError('horizontal_suffix 只允许标记聚焦单行输入框的非空可见尾段。')
         if "keyboard_layout" in self.states:
             layout = self.states["keyboard_layout"]
-            if self.role != "input" or layout not in {
-                "qwerty",
-                "numeric",
-                "symbol",
-                "unknown",
-            }:
+            if self.role != "input" or layout not in { "qwerty", "numeric", "symbol", "unknown", }:
                 raise UISceneError(
                     f"元素 {self.element_id}（role={self.role}）的 "
                     "states.keyboard_layout 只允许 input 使用，且值必须是 "
@@ -292,11 +237,7 @@ class UIElement:
                 )
         if "keyboard_input_mode" in self.states:
             input_mode = self.states["keyboard_input_mode"]
-            if self.role != "input" or input_mode not in {
-                "direct_latin",
-                "chinese_pinyin",
-                "unknown",
-            }:
+            if self.role != "input" or input_mode not in { "direct_latin", "chinese_pinyin", "unknown", }:
                 raise UISceneError(
                     f"元素 {self.element_id}（role={self.role}）的 "
                     "states.keyboard_input_mode 只允许 input 使用，且值必须是 "
@@ -313,32 +254,21 @@ class UIElement:
                 or geometry.get("source") != "input_structure_audit"
                 or not isinstance(anchors, dict)
             ):
-                raise UISceneError(
-                    "states.keyboard_geometry 只允许保存输入结构审计绑定的聚焦键盘几何。"
-                )
+                raise UISceneError('states.keyboard_geometry 只允许保存输入结构审计绑定的聚焦键盘几何。')
             geometry_type = geometry.get("type")
             if geometry_type == "qwerty":
                 expected_anchors = {"q", "p", "a", "l", "z", "m", "backspace"}
-                if (
-                    self.states.get("keyboard_layout") != "qwerty"
-                    or set(anchors) != expected_anchors
-                ):
-                    raise UISceneError(
-                        "QWERTY keyboard_geometry 必须绑定完整七点 anchors。"
-                    )
+                if ( self.states.get("keyboard_layout") != "qwerty" or set(anchors) != expected_anchors ):
+                    raise UISceneError('QWERTY keyboard_geometry 必须绑定完整七点 anchors。')
             elif geometry_type == "generic":
                 if (
                     self.states.get("keyboard_layout")
                     not in {"qwerty", "numeric", "symbol"}
                     or set(anchors) != {"backspace"}
                 ):
-                    raise UISceneError(
-                        "generic keyboard_geometry 只允许绑定完整可见的唯一退格键。"
-                    )
+                    raise UISceneError('generic keyboard_geometry 只允许绑定完整可见的唯一退格键。')
             else:
-                raise UISceneError(
-                    "states.keyboard_geometry.type 只允许 qwerty 或 generic。"
-                )
+                raise UISceneError('states.keyboard_geometry.type 只允许 qwerty 或 generic。')
             for key, point in anchors.items():
                 if (
                     not isinstance(point, (list, tuple))
@@ -353,17 +283,11 @@ class UIElement:
                     raise UISceneError(f"keyboard_geometry anchor {key} 无效。")
         if "local_text_clear" in self.states:
             if self.role not in {"button", "icon"} or self.states["local_text_clear"] is not True:
-                raise UISceneError(
-                    "states.local_text_clear=true 只允许标记独立的 button 或 icon。"
-                )
+                raise UISceneError('states.local_text_clear=true 只允许标记独立的 button 或 icon。')
             if self.meaning != "clear_local_text":
-                raise UISceneError(
-                    "states.local_text_clear=true 的 meaning 必须是 clear_local_text。"
-                )
+                raise UISceneError('states.local_text_clear=true 的 meaning 必须是 clear_local_text。')
             if self.label.strip().casefold() not in {"×", "✕", "✖", "x"}:
-                raise UISceneError(
-                    "clear_local_text 必须在 label 逐字保存真实可见的 ×/✕/✖/x 图形。"
-                )
+                raise UISceneError('clear_local_text 必须在 label 逐字保存真实可见的 ×/✕/✖/x 图形。')
         if "keyboard_input_mode_switch" in self.states:
             modes = {"direct_latin", "chinese_pinyin"}
             current_mode = self.states.get("current_mode")
@@ -376,9 +300,7 @@ class UIElement:
                 or target_mode not in modes
                 or current_mode == target_mode
             ):
-                raise UISceneError(
-                    "keyboard_input_mode_switch 必须是方向明确的独立模式切换按钮。"
-                )
+                raise UISceneError('keyboard_input_mode_switch 必须是方向明确的独立模式切换按钮。')
         if "page_index" in self.states or "page_count" in self.states:
             page_index = self.states.get("page_index")
             page_count = self.states.get("page_count")
@@ -396,10 +318,7 @@ class UIElement:
                 or self.states.get("fully_visible") is not True
                 or not self.evidence
             ):
-                raise UISceneError(
-                    "分页视口必须用 paged_viewport container 保存有证据的零基页码、"
-                    "总页数和滚动轴。"
-                )
+                raise UISceneError('分页视口必须用 paged_viewport container 保存有证据的零基页码、总页数和滚动轴。')
         if "focus_only_input_surface" in self.states:
             allowed_focus_only_states = {
                 "enabled",
@@ -417,10 +336,7 @@ class UIElement:
                 or set(self.states) - allowed_focus_only_states
                 or not any(str(item).strip() for item in self.evidence)
             ):
-                raise UISceneError(
-                    "focus_only_input_surface 只能标记唯一完整可见的粗输入面，"
-                    "且不得携带正文、typed字段身份、键盘状态或本地审计权威。"
-                )
+                raise UISceneError('focus_only_input_surface 只能标记唯一完整可见的粗输入面，且不得携带正文、typed字段身份、键盘状态或本地审计权威。')
         _reject_action_data(self.states, "states")
 
     @property
@@ -436,30 +352,14 @@ class UIElement:
         return value
 
     @classmethod
-    def from_dict(
-        cls,
-        value: dict[str, Any],
-        *,
-        coordinate_scale: float = 1.0,
-    ) -> "UIElement":
+    def from_dict( cls, value: dict[str, Any], *, coordinate_scale: float = 1.0, ) -> "UIElement":
         if not isinstance(value, dict):
             raise UISceneError("元素必须是 JSON 对象。")
         _reject_action_data(value, "element")
-        allowed = {
-            "element_id",
-            "role",
-            "meaning",
-            "bounds",
-            "confidence",
-            "label",
-            "states",
-            "evidence",
-        }
+        allowed = {'element_id', 'role', 'meaning', 'bounds', 'confidence', 'label', 'states', 'evidence'}
         unexpected = set(value) - allowed
         if unexpected:
-            raise UISceneError(
-                "元素包含协议外字段：" + ", ".join(sorted(map(str, unexpected)))
-            )
+            raise UISceneError('元素包含协议外字段：' + ', '.join(sorted(map(str, unexpected))))
         raw_bounds = value.get("bounds")
         if not isinstance(raw_bounds, (list, tuple)) or len(raw_bounds) != 4:
             raise UISceneError("元素 bounds 必须包含4个数值。")
@@ -516,16 +416,12 @@ def compact_drag_source_container_error(scene: Any, source: UIElement) -> str:
     for candidate in getattr(scene, "elements", ()):
         if candidate.element_id == source.element_id:
             continue
-        c_left, c_top, c_right, c_bottom = (
-            float(value) for value in candidate.bounds
-        )
+        c_left, c_top, c_right, c_bottom = (float(value) for value in candidate.bounds)
         center_x = (c_left + c_right) / 2.0
         center_y = (c_top + c_bottom) / 2.0
         if not (left <= center_x <= right and top <= center_y <= bottom):
             continue
-        same_literal_text = (
-            candidate.role == "text" and str(candidate.label or "").strip() == label
-        )
+        same_literal_text = candidate.role == 'text' and str(candidate.label or '').strip() == label
         if not same_literal_text:
             return "拖动起点容器包含其他可见元素，不能证明它是单个物体。"
     return ""
@@ -548,9 +444,7 @@ class UIScene:
     fingerprint: str = ""
     protocol_version: str = UI_SCENE_PROTOCOL_VERSION
     system_ui: SystemUIFacts = field(default_factory=SystemUIFacts)
-    camera_alignment: CameraAlignmentFacts = field(
-        default_factory=CameraAlignmentFacts
-    )
+    camera_alignment: CameraAlignmentFacts = field(default_factory=CameraAlignmentFacts)
 
     @property
     def foreground_app_id(self) -> str:
@@ -560,22 +454,16 @@ class UIScene:
 
     def validate(self) -> None:
         if not self.foreground_app_id.strip():
-            raise UISceneError(
-                "场景缺少 foreground_app_id；未知时必须明确写 unknown。"
-            )
+            raise UISceneError('场景缺少 foreground_app_id；未知时必须明确写 unknown。')
         if not self.screen_id.strip():
             raise UISceneError("场景缺少 screen_id。")
         if not isinstance(self.system_ui, SystemUIFacts):
             raise UISceneError("scene.system_ui 必须是 SystemUIFacts。")
         self.system_ui.validate()
         if not isinstance(self.camera_alignment, CameraAlignmentFacts):
-            raise UISceneError(
-                "scene.camera_alignment 必须是 CameraAlignmentFacts。"
-            )
+            raise UISceneError('scene.camera_alignment 必须是 CameraAlignmentFacts。')
         self.camera_alignment.validate()
-        if isinstance(self.confidence, bool) or not isinstance(
-            self.confidence, (int, float)
-        ):
+        if isinstance(self.confidence, bool) or not isinstance( self.confidence, (int, float) ):
             raise UISceneError("场景置信度格式无效。")
         if not 0.0 <= float(self.confidence) <= 1.0:
             raise UISceneError("场景置信度必须在0到1之间。")
@@ -609,22 +497,14 @@ class UIScene:
                 continue
             if expected_label and element.label.casefold() != expected_label:
                 continue
-            if expected_meaning and expected_meaning not in {
-                element.meaning.casefold(),
-                element.label.casefold(),
-            }:
+            if expected_meaning and expected_meaning not in { element.meaning.casefold(), element.label.casefold(), }:
                 continue
             if any(element.states.get(key) != value for key, value in expected_states.items()):
                 continue
             matches.append(element)
         return tuple(matches)
 
-    def get_element(
-        self,
-        element_id: str,
-        *,
-        min_confidence: float = MIN_TARGET_CONFIDENCE,
-    ) -> UIElement:
+    def get_element( self, element_id: str, *, min_confidence: float = MIN_TARGET_CONFIDENCE, ) -> UIElement:
         """Resolve one model element ID inside this exact observation only."""
 
         self.validate()
@@ -639,11 +519,7 @@ class UIScene:
             return element
         raise UISceneError(f"当前场景不存在元素：{expected}")
 
-    def unique_trusted_goal_element(
-        self,
-        *,
-        min_confidence: float = MIN_TARGET_CONFIDENCE,
-    ) -> UIElement | None:
+    def unique_trusted_goal_element( self, *, min_confidence: float = MIN_TARGET_CONFIDENCE, ) -> UIElement | None:
         """Return the sole strong goal element without trusting the whole scene.
 
         This is deliberately narrower than ``resolve_unique``: it only supports
@@ -667,10 +543,7 @@ class UIScene:
         for other in self.elements:
             if other.element_id == candidate.element_id:
                 continue
-            if (
-                other.states.get("goal_relevant") is True
-                and float(other.confidence) >= min_confidence
-            ):
+            if ( other.states.get("goal_relevant") is True and float(other.confidence) >= min_confidence ):
                 return None
             if (
                 other.role in TARGET_LOCAL_ACTION_ROLES
@@ -680,11 +553,7 @@ class UIScene:
                 return None
         return candidate
 
-    def trusted_completion_evidence(
-        self,
-        *,
-        min_confidence: float = MIN_TARGET_CONFIDENCE,
-    ) -> tuple[UIElement, ...]:
+    def trusted_completion_evidence( self, *, min_confidence: float = MIN_TARGET_CONFIDENCE, ) -> tuple[UIElement, ...]:
         """Return strong read-only facts; these never authorize an action."""
 
         self.validate()
@@ -769,25 +638,18 @@ class UIScene:
         }
         unexpected = set(value) - allowed
         if unexpected:
-            raise UISceneError(
-                "视觉场景包含协议外字段：" + ", ".join(sorted(map(str, unexpected)))
-            )
+            raise UISceneError('视觉场景包含协议外字段：' + ', '.join(sorted(map(str, unexpected))))
         raw_elements = value.get("elements") or []
         if not isinstance(raw_elements, list):
             raise UISceneError("场景 elements 必须是数组。")
         if len(raw_elements) > 60:
             raise UISceneError("单个场景元素超过60个，拒绝不受控的视觉输出。")
-        elements = tuple(
-            UIElement.from_dict(item, coordinate_scale=coordinate_scale)
-            for item in raw_elements
-        )
+        elements = tuple((UIElement.from_dict(item, coordinate_scale=coordinate_scale) for item in raw_elements))
         overlays = value.get("overlays") or []
         if not isinstance(overlays, list):
             raise UISceneError("场景 overlays 必须是数组。")
         if any(not isinstance(item, str) for item in overlays):
-            raise UISceneError(
-                "场景 overlays 只允许字符串描述；可交互候选必须放入 elements。"
-            )
+            raise UISceneError('场景 overlays 只允许字符串描述；可交互候选必须放入 elements。')
         screen_id = str(value.get("screen_id") or "unknown").strip().lower()
         if (
             value.get("foreground_app_id")
@@ -795,14 +657,8 @@ class UIScene:
             and str(value.get("foreground_app_id")).strip().lower()
             != str(value.get("app_id")).strip().lower()
         ):
-            raise UISceneError(
-                "foreground_app_id 与兼容字段 app_id 冲突，拒绝含糊场景。"
-            )
-        raw_foreground_app_id = str(
-            value.get("foreground_app_id")
-            or value.get("app_id")
-            or "unknown"
-        ).strip().lower()
+            raise UISceneError('foreground_app_id 与兼容字段 app_id 冲突，拒绝含糊场景。')
+        raw_foreground_app_id = str(value.get('foreground_app_id') or value.get('app_id') or 'unknown').strip().lower()
         scene = cls(
             protocol_version=str(
                 value.get("protocol_version") or UI_SCENE_PROTOCOL_VERSION
@@ -857,21 +713,11 @@ def scene_matches_target_app_surface(scene: UIScene, target_surface: Any) -> boo
             "view", "应用", "程序", "当前", "主页", "主界面", "列表", "页面",
             "界面", "画面", "屏幕",
         }
-        text = " ".join(
-            str(value or "").casefold().replace("_", " ").replace("-", " ")
-            for value in values
-        )
-        terms = {
-            token
-            for token in re.findall(r"[a-z0-9]{3,}", text)
-            if token not in generic
-        }
+        text = ' '.join((str(value or '').casefold().replace('_', ' ').replace('-', ' ') for value in values))
+        terms = {token for token in re.findall('[a-z0-9]{3,}', text) if token not in generic}
         for run in re.findall(r"[\u4e00-\u9fff]{2,}", text):
             for size in range(2, min(6, len(run)) + 1):
-                terms.update(
-                    run[index:index + size]
-                    for index in range(0, len(run) - size + 1)
-                )
+                terms.update((run[index:index + size] for index in range(0, len(run) - size + 1)))
         return frozenset(term for term in terms if term not in generic)
 
     foreground = str(scene.foreground_app_id or "").strip().casefold()
@@ -958,12 +804,7 @@ def _normalize_foreground_app_id(app_id: str, screen_id: str) -> str:
     """Apply deterministic facts that must not depend on model interpretation."""
 
     normalized_screen = screen_id.strip().lower()
-    if normalized_screen in {
-        "android_home",
-        "ios_home",
-        "launcher",
-        "home_screen",
-    }:
+    if normalized_screen in { "android_home", "ios_home", "launcher", "home_screen", }:
         return "launcher"
     normalized_app = app_id.strip().lower()
     return normalized_app or "unknown"
@@ -978,26 +819,14 @@ def _bounds_iou(
     right = min(left_bounds[2], right_bounds[2])
     bottom = min(left_bounds[3], right_bounds[3])
     intersection = max(0.0, right - left) * max(0.0, bottom - top)
-    left_area = (left_bounds[2] - left_bounds[0]) * (
-        left_bounds[3] - left_bounds[1]
-    )
-    right_area = (right_bounds[2] - right_bounds[0]) * (
-        right_bounds[3] - right_bounds[1]
-    )
+    left_area = (left_bounds[2] - left_bounds[0]) * (left_bounds[3] - left_bounds[1])
+    right_area = (right_bounds[2] - right_bounds[0]) * (right_bounds[3] - right_bounds[1])
     union = left_area + right_area - intersection
     return intersection / union if union > 0.0 else 0.0
 
 
 def _reject_action_data(value: Any, path: str) -> None:
-    forbidden = {
-        "action",
-        "tap",
-        "swipe",
-        "command",
-        "shell",
-        "next_action",
-        "execution_plan",
-    }
+    forbidden = {'action', 'tap', 'swipe', 'command', 'shell', 'next_action', 'execution_plan'}
     if isinstance(value, dict):
         for key, item in value.items():
             if str(key).strip().lower() in forbidden:

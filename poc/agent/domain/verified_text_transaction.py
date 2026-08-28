@@ -42,10 +42,7 @@ def preferred_keyboard_layout(character: Any) -> str:
     return "symbol"
 
 
-def next_keyboard_layout_towards(
-    current_layout: Any,
-    desired_layout: Any,
-) -> str | None:
+def next_keyboard_layout_towards( current_layout: Any, desired_layout: Any, ) -> str | None:
     """Return the sole adjacent layout that shortens the canonical path."""
 
     if (
@@ -56,17 +53,10 @@ def next_keyboard_layout_towards(
         return None
     current_index = KEYBOARD_LAYOUT_PATH.index(current_layout)
     desired_index = KEYBOARD_LAYOUT_PATH.index(desired_layout)
-    return KEYBOARD_LAYOUT_PATH[
-        current_index + (1 if desired_index > current_index else -1)
-    ]
+    return KEYBOARD_LAYOUT_PATH[current_index + (1 if desired_index > current_index else -1)]
 
 
-def keyboard_layout_switch_advances(
-    *,
-    current_layout: Any,
-    target_layout: Any,
-    desired_layout: Any,
-) -> bool:
+def keyboard_layout_switch_advances( *, current_layout: Any, target_layout: Any, desired_layout: Any, ) -> bool:
     """Accept a visible direct edge or the sole shortest-path next hop."""
 
     if (
@@ -148,9 +138,7 @@ class VerifiedInputStep:
             raise VerifiedTextTransactionError("逐键分段合同无效。")
 
 
-def required_keyboard_input_mode_for_step(
-    step: VerifiedInputStep,
-) -> str | None:
+def required_keyboard_input_mode_for_step( step: VerifiedInputStep, ) -> str | None:
     """Return the one input mode required before executing ``step``.
 
     Letters use direct Latin, Chinese uses pinyin, and complex symbols first
@@ -169,10 +157,7 @@ def required_keyboard_input_mode_for_step(
     return None
 
 
-def plan_next_verified_input(
-    target_text: Any,
-    current_text: Any,
-) -> VerifiedInputStep | None:
+def plan_next_verified_input( target_text: Any, current_text: Any, ) -> VerifiedInputStep | None:
     target = normalize_user_text(target_text, field_name="输入文字")
     if not isinstance(current_text, str):
         raise VerifiedTextTransactionError("当前输入框缺少精确文字值。")
@@ -202,10 +187,7 @@ def plan_next_verified_input(
     elif first in DIRECT_LATIN_CHARACTERS:
         segment = ""
         for char in remaining:
-            if (
-                char not in DIRECT_LATIN_CHARACTERS
-                or len(segment) >= MAX_DIRECT_LATIN_SEGMENT_CHARS
-            ):
+            if ( char not in DIRECT_LATIN_CHARACTERS or len(segment) >= MAX_DIRECT_LATIN_SEGMENT_CHARS ):
                 break
             segment += char
         step = VerifiedInputStep(
@@ -220,10 +202,7 @@ def plan_next_verified_input(
     elif first in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
         segment = ""
         for char in remaining:
-            if (
-                char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                or len(segment) >= MAX_DIRECT_LATIN_SEGMENT_CHARS
-            ):
+            if ( char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" or len(segment) >= MAX_DIRECT_LATIN_SEGMENT_CHARS ):
                 break
             segment += char
         step = VerifiedInputStep(
@@ -250,10 +229,7 @@ def plan_next_verified_input(
     return step
 
 
-def plan_from_input_states(
-    target_text: Any,
-    states: Mapping[str, Any],
-) -> VerifiedInputStep | None:
+def plan_from_input_states( target_text: Any, states: Mapping[str, Any], ) -> VerifiedInputStep | None:
     if not isinstance(states, Mapping):
         raise VerifiedTextTransactionError("输入框 states 格式无效。")
     return plan_next_verified_input(target_text, states.get("value"))

@@ -4,9 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-CANONICAL_SELECTION_RECEIPT_VERSION = (
-    "2026-08-26-canonical-selection-receipt-v1"
-)
+CANONICAL_SELECTION_RECEIPT_VERSION = '2026-08-26-canonical-selection-receipt-v1'
 
 
 @dataclass(frozen=True)

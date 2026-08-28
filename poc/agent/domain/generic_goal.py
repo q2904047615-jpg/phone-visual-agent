@@ -7,18 +7,9 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .canonical_action_kinds import expected_idempotent_system_surface_kind
-from .task_graph import (
-    DynamicTaskGraph,
-    _named_visual_identity_anchor,
-    named_visual_identity_is_grounded,
-)
+from .task_graph import DynamicTaskGraph, _named_visual_identity_anchor, named_visual_identity_is_grounded
 from .task_semantic_ir import TaskSemanticIRError, compile_formal_semantic_authority
-from .ui_scene import (
-    MIN_TARGET_CONFIDENCE,
-    UISceneError,
-    scene_matches_target_app_surface,
-    scene_surface_kind,
-)
+from .ui_scene import MIN_TARGET_CONFIDENCE, UISceneError, scene_matches_target_app_surface, scene_surface_kind
 from .vision_model import VisionAgentError
 
 

@@ -34,9 +34,7 @@ class VisionModelConfig:
         base_url = self.base_url.strip().rstrip("/")
         if not _MODEL_ID_RE.fullmatch(model):
             raise ValueError("视觉模型 ID 格式无效。")
-        if not base_url.startswith(
-            ("https://", "http://127.0.0.1", "http://localhost")
-        ):
+        if not base_url.startswith( ("https://", "http://127.0.0.1", "http://localhost") ):
             raise ValueError("视觉模型地址必须使用 HTTPS 或本机回环地址。")
         if self.coordinate_scale != VISION_COORDINATE_SCALE:
             raise ValueError("视觉模型坐标必须使用项目统一的 0..1000 归一化尺度。")
@@ -50,12 +48,5 @@ class VisionModelConfig:
 def public_model_identity(status: Mapping[str, object]) -> dict[str, object]:
     """Extract stable, secret-free model provenance for reports."""
 
-    keys = (
-        "model_config_version",
-        "provider",
-        "model",
-        "thinking_enabled",
-        "coordinate_scale",
-        "response_model",
-    )
+    keys = ('model_config_version', 'provider', 'model', 'thinking_enabled', 'coordinate_scale', 'response_model')
     return {key: status[key] for key in keys if key in status}

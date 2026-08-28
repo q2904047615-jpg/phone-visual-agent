@@ -13,18 +13,14 @@ from .device_exclusivity import InterProcessLease
 class DeviceTaskRegistry:
     """Own active-session identity and one re-entrant lock per device."""
 
-    TERMINAL_STATUSES = frozenset(
-        {"succeeded", "blocked", "failed", "paused", "cancelled"}
-    )
+    TERMINAL_STATUSES = frozenset({'succeeded', 'blocked', 'failed', 'paused', 'cancelled'})
 
     def __init__(self, *, lease_directory: Path | None = None) -> None:
         self._guard = threading.RLock()
         self._locks: dict[str, threading.RLock] = {}
         self._active: dict[str, str] = {}
         self._owners: dict[str, tuple[int, int]] = {}
-        self._lease_directory = (
-            Path(lease_directory) if lease_directory is not None else None
-        )
+        self._lease_directory = Path(lease_directory) if lease_directory is not None else None
         self._leases: dict[str, InterProcessLease] = {}
 
     def _lease_path(self, device_id: str) -> Path | None:
@@ -46,9 +42,7 @@ class DeviceTaskRegistry:
         with self._guard:
             active = self._active.get(device)
             if active is not None and active != session:
-                raise DeviceTaskRegistryError(
-                    f"设备 {device} 已有活动任务：{active}。"
-                )
+                raise DeviceTaskRegistryError(f'设备 {device} 已有活动任务：{active}。')
             lease_path = self._lease_path(device)
             if lease_path is not None and device not in self._leases:
                 lease = InterProcessLease(
@@ -59,9 +53,7 @@ class DeviceTaskRegistry:
                 if not lease.acquire():
                     payload = InterProcessLease.active_payload(lease_path) or {}
                     owner = str(payload.get("session_id") or "另一个进程")
-                    raise DeviceTaskRegistryError(
-                        f"设备 {device} 已有活动任务：{owner}。"
-                    )
+                    raise DeviceTaskRegistryError(f'设备 {device} 已有活动任务：{owner}。')
                 self._leases[device] = lease
             self._active[device] = session
             self._locks.setdefault(device, threading.RLock())
@@ -116,6 +108,4 @@ class DeviceTaskRegistry:
         device = self._id(device_id, "device_id")
         with self._guard:
             owner = self._owners.get(device)
-            return bool(
-                owner and owner[0] == threading.get_ident() and owner[1] > 0
-            )
+            return bool(owner and owner[0] == threading.get_ident() and (owner[1] > 0))

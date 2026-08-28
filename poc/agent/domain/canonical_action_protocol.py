@@ -6,19 +6,11 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Mapping
 
-from .task_semantic_ir import (
-    ConstraintIntent,
-    EffectIntent,
-    SemanticEntity,
-    TaskSemanticIR,
-)
+from .task_semantic_ir import ConstraintIntent, EffectIntent, SemanticEntity, TaskSemanticIR
 from .semantic_action import SemanticAction
 from .canonical_action_kinds import CANONICAL_ACTION_KINDS, expected_idempotent_system_surface_kind
 from .ui_scene import UIElement, UIScene, scene_matches_target_app_surface, scene_surface_kind
-from .verified_text_transaction import (
-    VerifiedTextTransactionError,
-    plan_from_input_states,
-)
+from .verified_text_transaction import VerifiedTextTransactionError, plan_from_input_states
 
 
 CANONICAL_ACTION_PROTOCOL = "2026-08-20-canonical-action-v1"
@@ -59,9 +51,7 @@ MIN_ELEMENT_CONFIDENCE = 0.72
 MIN_READY_CANDIDATES = 1
 MAX_READY_CANDIDATES = 24
 
-ELEMENT_ACTION_ROLES = frozenset(
-    {"button", "icon", "input", "tab", "toggle", "list_item"}
-)
+ELEMENT_ACTION_ROLES = frozenset({'button', 'icon', 'input', 'tab', 'toggle', 'list_item'})
 RELATION_KINDS = frozenset(
     {
         "on_surface",
@@ -72,9 +62,7 @@ RELATION_KINDS = frozenset(
         "binds_next_input_field",
     }
 )
-EXPECTATION_OPERATORS = frozenset(
-    {"equals", "not_equals", "present", "absent", "changed"}
-)
+EXPECTATION_OPERATORS = frozenset({'equals', 'not_equals', 'present', 'absent', 'changed'})
 CLAIM_PREDICATES = frozenset(
     {
         "surface.kind",
@@ -145,9 +133,7 @@ class CanonicalActionProtocolError(ValueError):
     pass
 
 
-_FORMAL_AUTHORITY_PARAMS = frozenset(
-    {"formal_candidate_id", "formal_report_digest", "formal_transition"}
-)
+_FORMAL_AUTHORITY_PARAMS = frozenset({'formal_candidate_id', 'formal_report_digest', 'formal_transition'})
 
 
 @dataclass(frozen=True)
@@ -196,10 +182,7 @@ class GenericStepProposal:
             if element.role != "input":
                 raise CanonicalActionProtocolError("输入动作必须绑定 input 元素。")
         elif kind == "clear_verified_text":
-            allowed = {
-                "element_id", "target", "role", "label", "states", "expected_effect",
-                *_FORMAL_AUTHORITY_PARAMS,
-            }
+            allowed = {'element_id', 'target', 'role', 'label', 'states', 'expected_effect', *_FORMAL_AUTHORITY_PARAMS}
             unexpected = set(params) - allowed
             if unexpected:
                 raise CanonicalActionProtocolError("清空动作包含协议外参数：" + ", ".join(sorted(unexpected)))
@@ -227,10 +210,7 @@ class GenericStepProposal:
             if unexpected:
                 raise CanonicalActionProtocolError("系统导航栏唤出动作不能携带坐标、方向、距离或其他参数。")
             system_ui = scene.system_ui
-            if (
-                system_ui.immersive_or_fullscreen is not True
-                or system_ui.navigation_bar_visible is not False
-            ):
+            if ( system_ui.immersive_or_fullscreen is not True or system_ui.navigation_bar_visible is not False ):
                 raise CanonicalActionProtocolError("系统导航栏唤出动作要求当前画面明确处于沉浸态且导航栏隐藏。")
             if params.get("expected_effect") != {"system_ui": {"navigation_bar_visible": True}}:
                 raise CanonicalActionProtocolError("系统导航栏唤出动作必须精确声明结构化导航栏可见后置条件。")
@@ -242,24 +222,11 @@ class GenericStepProposal:
 def reject_raw_control_data(value: Any) -> None:
     """Reject model-authored coordinates or multi-action payloads."""
 
-    forbidden = {
-        "actions",
-        "steps",
-        "plan",
-        "coordinate",
-        "coordinates",
-        "tap_point",
-        "x",
-        "y",
-        "shell",
-        "command",
-    }
+    forbidden = {'actions', 'steps', 'plan', 'coordinate', 'coordinates', 'tap_point', 'x', 'y', 'shell', 'command'}
     if isinstance(value, dict):
         for key, item in value.items():
             if str(key).strip().lower() in forbidden:
-                raise CanonicalActionProtocolError(
-                    f"单步动作包含禁止字段：{key}"
-                )
+                raise CanonicalActionProtocolError(f'单步动作包含禁止字段：{key}')
             reject_raw_control_data(item)
     elif isinstance(value, (list, tuple)):
         for item in value:
@@ -284,12 +251,7 @@ def _record_wire(value: Any, field_name: str, *, omit: Iterable[str] = ()) -> di
 
 
 def _digest(value: Any) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -367,9 +329,7 @@ class VisualClaim:
             self.predicate.startswith("element.state.")
             and self.predicate.removeprefix("element.state.") in _SAFE_STATE_KEYS
         ):
-            raise CanonicalActionProtocolError(
-                f"claim.predicate 无效：{self.predicate}"
-            )
+            raise CanonicalActionProtocolError(f'claim.predicate 无效：{self.predicate}')
         _json_value(self.value, "claim.value")
         if isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)):
             raise CanonicalActionProtocolError("claim.confidence 格式无效。")
@@ -422,9 +382,7 @@ class Affordance:
         _validate_id(self.affordance_id, "affordance.affordance_id")
         _validate_id(self.subject_ref, "affordance.subject_ref")
         if self.action_kind not in CANONICAL_ACTION_KINDS:
-            raise CanonicalActionProtocolError(
-                f"affordance.action_kind 无效：{self.action_kind}"
-            )
+            raise CanonicalActionProtocolError(f'affordance.action_kind 无效：{self.action_kind}')
         if not self.support_claim_ids:
             raise CanonicalActionProtocolError("affordance.support_claim_ids 不能为空。")
         for value in self.support_claim_ids:
@@ -446,19 +404,13 @@ class StateExpectation:
         _validate_id(self.subject_ref, "expectation.subject_ref")
         _required_text(self.predicate, "expectation.predicate", max_length=100)
         if self.predicate not in EXPECTATION_PREDICATES:
-            raise CanonicalActionProtocolError(
-                f"expectation.predicate 无效：{self.predicate}"
-            )
+            raise CanonicalActionProtocolError(f'expectation.predicate 无效：{self.predicate}')
         if self.operator not in EXPECTATION_OPERATORS:
-            raise CanonicalActionProtocolError(
-                f"expectation.operator 无效：{self.operator}"
-            )
+            raise CanonicalActionProtocolError(f'expectation.operator 无效：{self.operator}')
         if self.operator in {"equals", "not_equals"}:
             _json_value(self.value, "expectation.value")
         elif self.value is not None:
-            raise CanonicalActionProtocolError(
-                f"expectation.{self.operator} 不得携带 value。"
-            )
+            raise CanonicalActionProtocolError(f'expectation.{self.operator} 不得携带 value。')
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -483,13 +435,8 @@ class TypedStateTransition:
             raise CanonicalActionProtocolError("transition.expectations 不能为空。")
         for expectation in self.expectations:
             expectation.validate()
-            if (
-                expectation.predicate in {"scene.changed", "observation.changed"}
-                and not self.exploratory
-            ):
-                raise CanonicalActionProtocolError(
-                    "scene/observation changed 只能用于 exploratory transition。"
-                )
+            if ( expectation.predicate in {"scene.changed", "observation.changed"} and not self.exploratory ):
+                raise CanonicalActionProtocolError('scene/observation changed 只能用于 exploratory transition。')
         if not isinstance(self.exploratory, bool):
             raise CanonicalActionProtocolError("transition.exploratory 必须是布尔值。")
 
@@ -558,19 +505,13 @@ class CanonicalActionCatalog:
         _required_text(self.device_id, "report.device_id", max_length=128)
         if isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1:
             raise CanonicalActionProtocolError("report.revision 必须是正整数。")
-        for field_name, value in (
-            ("scene_digest", self.scene_digest),
-            ("semantic_digest", self.semantic_digest),
-        ):
+        for field_name, value in ( ("scene_digest", self.scene_digest), ("semantic_digest", self.semantic_digest), ):
             if not re.fullmatch(r"[0-9a-f]{64}", value):
                 raise CanonicalActionProtocolError(f"report.{field_name} 必须是 SHA-256。")
         if self.status not in {"ready", "blocked"}:
             raise CanonicalActionProtocolError("report.status 无效。")
         if self.status == "ready" and not MIN_READY_CANDIDATES <= len(self.candidates) <= MAX_READY_CANDIDATES:
-            raise CanonicalActionProtocolError(
-                f"ready report 必须包含{MIN_READY_CANDIDATES}至"
-                f"{MAX_READY_CANDIDATES}个候选。"
-            )
+            raise CanonicalActionProtocolError(f'ready report 必须包含{MIN_READY_CANDIDATES}至{MAX_READY_CANDIDATES}个候选。')
         if self.status == "blocked" and len(self.candidates) >= MIN_READY_CANDIDATES:
             raise CanonicalActionProtocolError("候选已足够时不得标记 blocked。")
 
@@ -613,9 +554,7 @@ class CanonicalActionCatalog:
                 raise CanonicalActionProtocolError("candidate 引用未知 relation。")
             if not set(candidate.affordance_ids).issubset(affordance_ids):
                 raise CanonicalActionProtocolError("candidate 引用未知 affordance。")
-            bound_affordances = [
-                affordance_by_id[value] for value in candidate.affordance_ids
-            ]
+            bound_affordances = [affordance_by_id[value] for value in candidate.affordance_ids]
             if any(
                 item.action_kind != candidate.action_kind
                 or item.subject_ref not in candidate.subject_refs
@@ -647,11 +586,7 @@ class CanonicalActionCatalog:
 
 
 def _claim(subject_ref: str, predicate: str, value: Any, confidence: float, source: Any) -> VisualClaim:
-    payload = {
-        "subject_ref": subject_ref,
-        "predicate": predicate,
-        "value": _json_value(value, "claim.value"),
-    }
+    payload = {'subject_ref': subject_ref, 'predicate': predicate, 'value': _json_value(value, 'claim.value')}
     return VisualClaim(
         claim_id=_stable_id("claim", payload),
         subject_ref=subject_ref,
@@ -662,19 +597,9 @@ def _claim(subject_ref: str, predicate: str, value: Any, confidence: float, sour
     )
 
 
-def _relation(
-    subject_ref: str,
-    relation: str,
-    object_ref: str,
-    support_claim_ids: Iterable[str],
-) -> VisualRelation:
+def _relation( subject_ref: str, relation: str, object_ref: str, support_claim_ids: Iterable[str], ) -> VisualRelation:
     support = tuple(sorted(set(support_claim_ids)))
-    payload = {
-        "subject_ref": subject_ref,
-        "relation": relation,
-        "object_ref": object_ref,
-        "support_claim_ids": support,
-    }
+    payload = {'subject_ref': subject_ref, 'relation': relation, 'object_ref': object_ref, 'support_claim_ids': support}
     return VisualRelation(
         relation_id=_stable_id("relation", payload),
         subject_ref=subject_ref,
@@ -686,11 +611,7 @@ def _relation(
 
 def _affordance(subject_ref: str, action_kind: str, support_claim_ids: Iterable[str]) -> Affordance:
     support = tuple(sorted(set(support_claim_ids)))
-    payload = {
-        "subject_ref": subject_ref,
-        "action_kind": action_kind,
-        "support_claim_ids": support,
-    }
+    payload = {'subject_ref': subject_ref, 'action_kind': action_kind, 'support_claim_ids': support}
     return Affordance(
         affordance_id=_stable_id("affordance", payload),
         subject_ref=subject_ref,
@@ -709,10 +630,7 @@ def _element_eligible(element: UIElement) -> bool:
     )
 
 
-def _verified_text_affordance_ready(
-    element: UIElement,
-    target_text: str,
-) -> bool:
+def _verified_text_affordance_ready( element: UIElement, target_text: str, ) -> bool:
     """Expose batch text input only when the next typed segment is executable."""
 
     if element.role != "input" or element.states.get("focused") is not True:
@@ -752,10 +670,7 @@ def _element_proves_scrollable_viewport(element: UIElement) -> bool:
         return True
     # For a scrollable viewport, fully_visible=false is the typed content-crop
     # fact; non-empty element evidence above must independently support it.
-    return bool(
-        element.states.get("fully_visible") is False
-        and element.states.get("goal_relevant") is True
-    )
+    return bool(element.states.get('fully_visible') is False and element.states.get('goal_relevant') is True)
 
 
 def _swipe_directions_for_viewport(element: UIElement) -> tuple[str, ...]:
@@ -810,9 +725,7 @@ _EXPLICIT_SWIPE_DIRECTION_PATTERNS = {
 }
 
 
-def _explicit_required_swipe_direction(
-    constraints: Iterable[ConstraintIntent],
-) -> str | None:
+def _explicit_required_swipe_direction( constraints: Iterable[ConstraintIntent], ) -> str | None:
     """Extract one explicit direction from authoritative swipe wording.
 
     The free-form text may narrow an already typed ``required_action=swipe``;
@@ -962,34 +875,24 @@ def compile_canonical_action_catalog(
 
     scene.validate()
     semantic_ir.validate()
-    active_subgoals = tuple(
-        item for item in semantic_ir.subgoals if item.status == "active"
-    )
+    active_subgoals = tuple((item for item in semantic_ir.subgoals if item.status == 'active'))
     if len(active_subgoals) != 1:
-        raise CanonicalActionProtocolError(
-            "canonical action catalog 要求且只允许一个 active subgoal。"
-        )
+        raise CanonicalActionProtocolError('canonical action catalog 要求且只允许一个 active subgoal。')
     active_subgoal = active_subgoals[0]
-    constraints_by_id = {
-        item.constraint_id: item for item in semantic_ir.constraints
-    }
+    constraints_by_id = {item.constraint_id: item for item in semantic_ir.constraints}
     active_required_action_constraints = tuple(
         constraints_by_id[ref]
         for ref in active_subgoal.constraint_refs
         if ref in constraints_by_id
         and constraints_by_id[ref].kind == "required_action"
     )
-    active_required_actions = frozenset(
-        str(item.value) for item in active_required_action_constraints
-    )
+    active_required_actions = frozenset((str(item.value) for item in active_required_action_constraints))
     active_input_fields = tuple(
         item
         for item in semantic_ir.input_fields
         if active_subgoal.subgoal_id in item.source_subgoal_ids
     )
-    active_input_payload_refs = frozenset(
-        item.payload_ref for item in active_input_fields
-    )
+    active_input_payload_refs = frozenset((item.payload_ref for item in active_input_fields))
     predecessor_input_field_ids = {
         item.field_id
         for item in semantic_ir.input_fields
@@ -1006,17 +909,10 @@ def compile_canonical_action_catalog(
         if set(item.source_subgoal_ids).intersection(direct_successor_ids)
     }
     if predecessor_input_field_ids and successor_input_field_ids:
-        boundary_input_field_ids = (
-            predecessor_input_field_ids & successor_input_field_ids
-        )
+        boundary_input_field_ids = predecessor_input_field_ids & successor_input_field_ids
     else:
-        boundary_input_field_ids = (
-            predecessor_input_field_ids | successor_input_field_ids
-        )
-    enter_input_field_ids = frozenset(
-        {item.field_id for item in active_input_fields}
-        | boundary_input_field_ids
-    )
+        boundary_input_field_ids = predecessor_input_field_ids | successor_input_field_ids
+    enter_input_field_ids = frozenset({item.field_id for item in active_input_fields} | boundary_input_field_ids)
     active_effect_refs = frozenset(active_subgoal.effect_refs)
     effects_by_id = {item.effect_id: item for item in semantic_ir.effects}
     active_entity_refs = set(active_subgoal.entity_refs)
@@ -1026,9 +922,7 @@ def compile_canonical_action_catalog(
             active_entity_refs.update(effect.target_refs)
             active_entity_refs.update(effect.payload_refs)
     active_entity_refs.update(active_input_payload_refs)
-    desired_by_id = {
-        item.state_id: item for item in semantic_ir.desired_states
-    }
+    desired_by_id = {item.state_id: item for item in semantic_ir.desired_states}
     active_desired_states = tuple(
         desired_by_id[ref]
         for ref in active_subgoal.desired_state_refs
@@ -1039,9 +933,7 @@ def compile_canonical_action_catalog(
         for item in active_desired_states
         if item.subject_ref in {entity.entity_id for entity in semantic_ir.entities}
     )
-    active_text = " ".join(
-        str(item.value or "") for item in active_desired_states
-    ).casefold()
+    active_text = ' '.join((str(item.value or '') for item in active_desired_states)).casefold()
     active_targets_input = bool(
         active_input_fields
         or "clear_verified_text" in active_required_actions
@@ -1053,9 +945,7 @@ def compile_canonical_action_catalog(
     available = frozenset(str(value) for value in available_action_kinds)
     unknown = available - CANONICAL_ACTION_KINDS
     if unknown:
-        raise CanonicalActionProtocolError(
-            "available_action_kinds 含未知动作：" + ", ".join(sorted(unknown))
-        )
+        raise CanonicalActionProtocolError('available_action_kinds 含未知动作：' + ', '.join(sorted(unknown)))
 
     surface_ref = "surface_current"
     source = _scene_source(scene)
@@ -1096,9 +986,7 @@ def compile_canonical_action_catalog(
             element_claim_by_predicate[(element.element_id, item.predicate)] = item.claim_id
 
     claims = sorted(claims, key=lambda item: item.claim_id)
-    surface_claim_ids = tuple(
-        item.claim_id for item in claims if item.subject_ref == surface_ref
-    )
+    surface_claim_ids = tuple((item.claim_id for item in claims if item.subject_ref == surface_ref))
     relations: list[VisualRelation] = []
     for element in sorted_elements:
         relations.append(
@@ -1126,17 +1014,12 @@ def compile_canonical_action_catalog(
 
     exact_elements_by_entity: dict[str, tuple[UIElement, ...]] = {}
     relation_ids_by_element: dict[str, list[str]] = {}
-    element_id_by_ref = {
-        _element_ref(element.element_id): element.element_id
-        for element in sorted_elements
-    }
+    element_id_by_ref = {_element_ref(element.element_id): element.element_id for element in sorted_elements}
     for relation in relations:
         if relation.relation == "on_surface":
             element_id = element_id_by_ref.get(relation.subject_ref)
             if element_id:
-                relation_ids_by_element.setdefault(element_id, []).append(
-                    relation.relation_id
-                )
+                relation_ids_by_element.setdefault(element_id, []).append(relation.relation_id)
     relation_effects_by_element: dict[str, list[tuple[str, str, str]]] = {}
 
     def bind_element(
@@ -1147,13 +1030,9 @@ def compile_canonical_action_catalog(
         *,
         entity_id: str = "",
     ) -> VisualRelation:
-        binding = _relation(
-            _element_ref(element.element_id), relation_kind, object_ref, support
-        )
+        binding = _relation(_element_ref(element.element_id), relation_kind, object_ref, support)
         relations.append(binding)
-        relation_ids_by_element.setdefault(element.element_id, []).append(
-            binding.relation_id
-        )
+        relation_ids_by_element.setdefault(element.element_id, []).append(binding.relation_id)
         if entity_id:
             relation_effects_by_element.setdefault(element.element_id, []).append(
                 (object_ref, entity_id, relation_kind)
@@ -1183,20 +1062,11 @@ def compile_canonical_action_catalog(
         for effect, relation_kind in effect_by_entity.get(entity.entity_id, ()):
             if relation_kind != "binds_effect_payload":
                 continue
-            bind_element(
-                element,
-                relation_kind,
-                effect.effect_id,
-                support,
-                entity_id=entity.entity_id,
-            )
+            bind_element(element, relation_kind, effect.effect_id, support, entity_id=entity.entity_id)
     if len(active_input_fields) == 1 and len(predecessor_input_field_ids) == 1:
         active_field = active_input_fields[0]
         predecessor_field_id = next(iter(predecessor_input_field_ids))
-        predecessor_field = next(
-            item for item in semantic_ir.input_fields
-            if item.field_id == predecessor_field_id
-        )
+        predecessor_field = next((item for item in semantic_ir.input_fields if item.field_id == predecessor_field_id))
         predecessor_payload = entity_by_id.get(predecessor_field.payload_ref)
         focused_predecessors = [
             item for item in focused_inputs
@@ -1228,21 +1098,10 @@ def compile_canonical_action_catalog(
     )
     exact_tap_text_element_ids: set[str] = set()
     for entity in semantic_ir.entities:
-        allow_exact_tap_text = bool(
-            exact_tap_authority
-            and entity.role == "target_ui_label"
-        )
-        matches = _unique_exact_matches(
-            sorted_elements,
-            entity,
-            allow_exact_tap_text=allow_exact_tap_text,
-        )
+        allow_exact_tap_text = bool(exact_tap_authority and entity.role == 'target_ui_label')
+        matches = _unique_exact_matches(sorted_elements, entity, allow_exact_tap_text=allow_exact_tap_text)
         exact_elements_by_entity[entity.entity_id] = matches
-        if (
-            allow_exact_tap_text
-            and len(matches) == 1
-            and matches[0].role == "text"
-        ):
+        if ( allow_exact_tap_text and len(matches) == 1 and matches[0].role == "text" ):
             exact_tap_text_element_ids.add(matches[0].element_id)
         if len(matches) != 1:
             continue
@@ -1253,10 +1112,7 @@ def compile_canonical_action_catalog(
         )
         bind_element(element, "exact_literal_match", entity.entity_id, literal_claims)
         for effect, relation_kind in effect_by_entity.get(entity.entity_id, ()):
-            bind_element(
-                element, relation_kind, effect.effect_id, literal_claims,
-                entity_id=entity.entity_id,
-            )
+            bind_element(element, relation_kind, effect.effect_id, literal_claims, entity_id=entity.entity_id)
 
     for surface in semantic_ir.surfaces:
         if surface.kind != "app" or not surface.app_name:
@@ -1282,9 +1138,7 @@ def compile_canonical_action_catalog(
         if _element_proves_scrollable_viewport(element)
     )
     target_swipe_presence: UIElement | None = None
-    explicit_target_swipe_direction = _explicit_required_swipe_direction(
-        active_required_action_constraints
-    )
+    explicit_target_swipe_direction = _explicit_required_swipe_direction(active_required_action_constraints)
     if (
         not scrollable_viewports
         and active_required_actions == {"swipe"}
@@ -1314,10 +1168,7 @@ def compile_canonical_action_catalog(
         )
 
     affordances: list[Affordance] = []
-    system_actions = {
-        "back", "home", "open_recent_apps", "reveal_system_navigation",
-        "swipe", "wait_for_change",
-    }
+    system_actions = {'back', 'home', 'open_recent_apps', 'reveal_system_navigation', 'swipe', 'wait_for_change'}
     for action_kind in sorted(available & system_actions):
         if action_kind == "swipe" and not swipe_directions:
             continue
@@ -1380,9 +1231,7 @@ def compile_canonical_action_catalog(
                     element_claim_ids[element.element_id],
                 )
             )
-    affordance_by_pair = {
-        (item.subject_ref, item.action_kind): item for item in affordances
-    }
+    affordance_by_pair = {(item.subject_ref, item.action_kind): item for item in affordances}
     affordances = sorted(affordances, key=lambda item: item.affordance_id)
 
     candidates: list[CanonicalActionCandidate] = []
@@ -1442,15 +1291,10 @@ def compile_canonical_action_catalog(
     ) -> tuple[tuple[StateExpectation, ...], str, bool] | None:
         element_ref = _element_ref(element.element_id)
         relations_for_element = tuple(relation_by_id[value] for value in relation_ids)
-        surface_binding = next(
-            (item for item in relations_for_element if item.relation == "binds_surface"),
-            None,
-        )
+        surface_binding = next((item for item in relations_for_element if item.relation == 'binds_surface'), None)
         extra: tuple[StateExpectation, ...] = ()
         if surface_binding is not None:
-            expectation = StateExpectation(
-                surface_ref, "surface.active_ref", "equals", surface_binding.object_ref
-            )
+            expectation = StateExpectation(surface_ref, 'surface.active_ref', 'equals', surface_binding.object_ref)
         elif element.meaning == "input_next_field_key":
             field_id = str(element.states.get("target_input_field_id") or "").strip()
             if not any(
@@ -1458,9 +1302,7 @@ def compile_canonical_action_catalog(
                 for item in relations_for_element
             ):
                 return None
-            expectation = StateExpectation(
-                field_id, "input_field.focused", "equals", True
-            )
+            expectation = StateExpectation(field_id, 'input_field.focused', 'equals', True)
         elif element.meaning in {
             "ime_exact_candidate", "input_exact_literal_key", "input_exact_enter_key",
             "switch_keyboard_layout", "switch_keyboard_case",
@@ -1469,9 +1311,7 @@ def compile_canonical_action_catalog(
             direct_value = element.meaning in {
                 "ime_exact_candidate", "input_exact_literal_key", "input_exact_enter_key"
             }
-            value = element.states.get(
-                "expected_input_value" if direct_value else "prior_input_value"
-            )
+            value = element.states.get('expected_input_value' if direct_value else 'prior_input_value')
             if not isinstance(value, str):
                 return None
             subject = _element_ref(
@@ -1479,9 +1319,7 @@ def compile_canonical_action_catalog(
                     str(element.states.get("input_element_id") or "")
                 ).element_id
             ) if str(element.states.get("input_element_id") or "") in element_by_id else element_ref
-            expectation = StateExpectation(
-                subject, "element.state.value", "equals", value
-            )
+            expectation = StateExpectation(subject, 'element.state.value', 'equals', value)
             switch_specs = {
                 "switch_keyboard_layout": ("element.state.keyboard_layout", "target_layout"),
                 "switch_keyboard_case": ("element.state.keyboard_case_mode", "target_mode"),
@@ -1493,9 +1331,7 @@ def compile_canonical_action_catalog(
                 if isinstance(target, str) and target:
                     extra = (StateExpectation(subject, predicate, "equals", target),)
         elif element.role == "input":
-            expectation = StateExpectation(
-                element_ref, "element.state.focused", "equals", True
-            )
+            expectation = StateExpectation(element_ref, 'element.state.focused', 'equals', True)
         else:
             entity_ref = next(iter(sorted(set(bound_entity_ids))), "")
             expectation = (
@@ -1511,9 +1347,7 @@ def compile_canonical_action_catalog(
             "",
         )
         if effect_ref:
-            expectation = StateExpectation(
-                effect_ref, "effect.applied", "equals", True
-            )
+            expectation = StateExpectation(effect_ref, 'effect.applied', 'equals', True)
         exploratory = bool(
             not effect_ref
             and surface_binding is None
@@ -1538,10 +1372,7 @@ def compile_canonical_action_catalog(
         )
 
         tap_affordance = affordance_by_pair.get((element_ref, "tap_semantic"))
-        if (
-            tap_affordance is not None
-            and not (element.role == "input" and element.states.get("focused") is True)
-        ):
+        if ( tap_affordance is not None and not (element.role == "input" and element.states.get("focused") is True) ):
             tap_spec = tap_transition(element, unique_relation_ids, bound_entity_ids)
             if tap_spec is None:
                 continue
@@ -1595,10 +1426,7 @@ def compile_canonical_action_catalog(
             if len(payload_entities) == 1:
                 payload = payload_entities[0]
                 try:
-                    deterministic_input_step = plan_from_input_states(
-                        payload.value,
-                        element.states,
-                    )
+                    deterministic_input_step = plan_from_input_states(payload.value, element.states)
                 except (ValueError, VerifiedTextTransactionError):
                     deterministic_input_step = None
                 if deterministic_input_step is None:
@@ -1633,16 +1461,10 @@ def compile_canonical_action_catalog(
                 )
 
         if affordance_by_pair.get((element_ref, "clear_verified_text")) is not None:
-            clear_expectations = [
-                StateExpectation(element_ref, "element.state.value", "equals", "")
-            ]
+            clear_expectations = [StateExpectation(element_ref, 'element.state.value', 'equals', '')]
             if element.states.get("ime_preedit_text"):
-                clear_expectations.append(
-                    StateExpectation(element_ref, "element.state.ime_preedit_text", "absent")
-                )
-            append_element_candidate(
-                element, unique_relation_ids, "clear_verified_text", clear_expectations
-            )
+                clear_expectations.append(StateExpectation(element_ref, 'element.state.ime_preedit_text', 'absent'))
+            append_element_candidate(element, unique_relation_ids, 'clear_verified_text', clear_expectations)
 
         append_element_candidate(
             element,
@@ -1725,16 +1547,8 @@ def compile_canonical_action_catalog(
                     )
                 )
 
-    surface_affordance = {
-        item.action_kind: item
-        for item in affordances
-        if item.subject_ref == surface_ref
-    }
-    target_swipe_ref = (
-        _element_ref(target_swipe_presence.element_id)
-        if target_swipe_presence is not None
-        else ""
-    )
+    surface_affordance = {item.action_kind: item for item in affordances if item.subject_ref == surface_ref}
+    target_swipe_ref = _element_ref(target_swipe_presence.element_id) if target_swipe_presence is not None else ''
     system_specs = [
         (
             "open_recent_apps",
@@ -1787,18 +1601,10 @@ def compile_canonical_action_catalog(
         affordance = surface_affordance.get(action_kind)
         if affordance is None:
             continue
-        idempotent_surface_kind = expected_idempotent_system_surface_kind(
-            action_kind
-        )
-        if (
-            idempotent_surface_kind is not None
-            and _surface_kind(scene) == idempotent_surface_kind
-        ):
+        idempotent_surface_kind = expected_idempotent_system_surface_kind(action_kind)
+        if ( idempotent_surface_kind is not None and _surface_kind(scene) == idempotent_surface_kind ):
             continue
-        if (
-            action_kind == "reveal_system_navigation"
-            and scene.system_ui.navigation_bar_visible is True
-        ):
+        if ( action_kind == "reveal_system_navigation" and scene.system_ui.navigation_bar_visible is True ):
             continue
         candidates.append(
             _candidate(
@@ -1862,17 +1668,12 @@ def compile_canonical_action_catalog(
         "switch_keyboard_input_mode",
         "input_next_field_key",
     }
-    navigation_actions = {
-        "back", "open_recent_apps", "swipe", "reveal_system_navigation",
-        "wait_for_change",
-    }
+    navigation_actions = {'back', 'open_recent_apps', 'swipe', 'reveal_system_navigation', 'wait_for_change'}
 
     def candidate_element(candidate: CanonicalActionCandidate) -> UIElement | None:
         return element_by_id.get(str(candidate.parameters.get("element_id") or ""))
 
-    def clear_input_disposition(
-        candidate: CanonicalActionCandidate,
-    ) -> tuple[bool, bool]:
+    def clear_input_disposition( candidate: CanonicalActionCandidate, ) -> tuple[bool, bool]:
         """Return (must_clear_nonprefix, preserves_useful_preedit)."""
 
         element = candidate_element(candidate)
@@ -1902,11 +1703,7 @@ def compile_canonical_action_catalog(
         )
         return must_clear, useful_preedit
 
-    def has_relation(
-        candidate: CanonicalActionCandidate,
-        relation_kind: str,
-        object_refs: Iterable[str],
-    ) -> bool:
+    def has_relation( candidate: CanonicalActionCandidate, relation_kind: str, object_refs: Iterable[str], ) -> bool:
         allowed_refs = frozenset(object_refs)
         return any(
             relation_by_id[relation_id].relation == relation_kind
@@ -1938,10 +1735,7 @@ def compile_canonical_action_catalog(
         if action_kind != "tap_semantic":
             return False
         element = candidate_element(candidate)
-        return bool(
-            element is not None
-            and (element.role == "input" or element.meaning in input_auxiliary_meanings)
-        )
+        return bool(element is not None and (element.role == 'input' or element.meaning in input_auxiliary_meanings))
 
     def tap_belongs(candidate: CanonicalActionCandidate) -> bool:
         element = candidate_element(candidate)
@@ -1950,16 +1744,9 @@ def compile_canonical_action_catalog(
         if wrong_app_surface:
             return False
         if element.meaning == "input_next_field_key":
-            return has_relation(
-                candidate,
-                "binds_next_input_field",
-                (item.field_id for item in active_input_fields),
-            )
+            return has_relation(candidate, 'binds_next_input_field', (item.field_id for item in active_input_fields))
         if element.meaning in input_auxiliary_meanings:
-            return bool(
-                element.meaning != "input_exact_enter_key"
-                and active_input_payload_refs
-            )
+            return bool(element.meaning != 'input_exact_enter_key' and active_input_payload_refs)
         if element.role == "input":
             return bool(
                 element.states.get("focused") is not True
@@ -1967,9 +1754,7 @@ def compile_canonical_action_catalog(
             )
         if target_is_app:
             if current_surface_kind == "launcher":
-                return has_relation(
-                    candidate, "binds_surface", (active_subgoal.surface_ref,)
-                )
+                return has_relation(candidate, 'binds_surface', (active_subgoal.surface_ref,))
             if wrong_app_surface:
                 return False
         return bool(
@@ -1985,14 +1770,8 @@ def compile_canonical_action_catalog(
         if candidate.effect_ref:
             return candidate.effect_ref in active_effect_refs
         action_kind = candidate.action_kind
-        if (
-            required_system_action is not None
-            and current_surface_kind != target_surface.kind
-        ):
-            return bool(
-                active_subgoal.external_impact == "navigation_only"
-                and action_kind == required_system_action
-            )
+        if ( required_system_action is not None and current_surface_kind != target_surface.kind ):
+            return bool(active_subgoal.external_impact == 'navigation_only' and action_kind == required_system_action)
         if not matches_required_action(candidate):
             return False
         if action_kind in {"input_verified_text", "press_enter", "clear_verified_text"}:
@@ -2003,9 +1782,7 @@ def compile_canonical_action_catalog(
                 )
             if action_kind == "press_enter":
                 element = candidate_element(candidate)
-                field_id = str(
-                    element.states.get("input_field_id") if element is not None else ""
-                ).strip()
+                field_id = str(element.states.get('input_field_id') if element is not None else '').strip()
                 return bool(
                     active_input_payload_refs
                     or (
@@ -2077,10 +1854,7 @@ def compile_canonical_action_catalog(
     return report
 
 
-def canonical_candidate_expected_result(
-    candidate: CanonicalActionCandidate,
-    scene: UIScene,
-) -> dict[str, Any]:
+def canonical_candidate_expected_result( candidate: CanonicalActionCandidate, scene: UIScene, ) -> dict[str, Any]:
     """Project one canonical transition into the controller's visual result shape."""
 
     candidate.validate()
@@ -2089,15 +1863,9 @@ def canonical_candidate_expected_result(
     if candidate.action_kind == "swipe":
         element_id = str(candidate.parameters.get("element_id") or "").strip()
         if element_id:
-            matches = tuple(
-                element
-                for element in scene.elements
-                if element.element_id == element_id
-            )
+            matches = tuple((element for element in scene.elements if element.element_id == element_id))
             if len(matches) != 1:
-                raise CanonicalActionProtocolError(
-                    "元素绑定 swipe 引用了不存在或不唯一的当前元素。"
-                )
+                raise CanonicalActionProtocolError('元素绑定 swipe 引用了不存在或不唯一的当前元素。')
             element = matches[0]
             return {
                 "content_changed": True,
@@ -2110,9 +1878,7 @@ def canonical_candidate_expected_result(
             }
         return {"content_changed": True}
 
-    element_by_ref = {
-        _element_ref(element.element_id): element for element in scene.elements
-    }
+    element_by_ref = {_element_ref(element.element_id): element for element in scene.elements}
     state_expectations = [
         item
         for item in candidate.transition.expectations
@@ -2123,19 +1889,9 @@ def canonical_candidate_expected_result(
     if state_expectations:
         subjects = {item.subject_ref for item in state_expectations}
         if len(subjects) != 1:
-            raise CanonicalActionProtocolError(
-                "canonical candidate 包含多个元素的状态结果，无法形成唯一验证目标。"
-            )
+            raise CanonicalActionProtocolError('canonical candidate 包含多个元素的状态结果，无法形成唯一验证目标。')
         subject_ref = next(iter(subjects))
         element = element_by_ref[subject_ref]
-        states = {
-            item.predicate.removeprefix("element.state."): item.value
-            for item in state_expectations
-        }
-        return {
-            "element_state": {
-                "meaning": element.meaning,
-                "states": states,
-            }
-        }
+        states = {item.predicate.removeprefix('element.state.'): item.value for item in state_expectations}
+        return {'element_state': {'meaning': element.meaning, 'states': states}}
     return {"scene_changed": True}

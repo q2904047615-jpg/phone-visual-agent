@@ -43,11 +43,7 @@ class FileSystemTypedInputLineageStore:
         record.validate()
         self.directory.mkdir(parents=True, exist_ok=True)
         destination = self._path(record.device_id)
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=f".{destination.stem}.",
-            suffix=".tmp",
-            dir=str(self.directory),
-        )
+        descriptor, temporary = tempfile.mkstemp(prefix=f'.{destination.stem}.', suffix='.tmp', dir=str(self.directory))
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
                 json.dump(record.to_dict(), handle, ensure_ascii=False, indent=2)
@@ -76,9 +72,7 @@ class FileSystemTypedInputLineageStore:
         if not path.is_file():
             return None
         try:
-            record = TypedInputLineage.from_dict(
-                json.loads(path.read_text(encoding="utf-8"))
-            )
+            record = TypedInputLineage.from_dict(json.loads(path.read_text(encoding='utf-8')))
         except (OSError, json.JSONDecodeError, InputValueLineageError):
             return None
         if record.device_id != device_id:
@@ -89,9 +83,7 @@ class FileSystemTypedInputLineageStore:
         return record
 
     @staticmethod
-    def _descriptor_factory(
-        after_frames: tuple[Image.Image, ...],
-    ) -> Any:
+    def _descriptor_factory( after_frames: tuple[Image.Image, ...], ) -> Any:
         return lambda bounds: build_surface_descriptors(after_frames, bounds)
 
     def record_verified_literal_action(

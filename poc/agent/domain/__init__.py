@@ -1,18 +1,8 @@
 """Domain contracts shared by the modular monolith."""
 
-from .app_surface_lineage import (
-    AppSurfaceLineageAuthority,
-    AppSurfaceLineageError,
-    VerifiedAppSurfaceLineage,
-)
-from .canonical_selection import (
-    CANONICAL_SELECTION_RECEIPT_VERSION,
-    CanonicalSelectionReceipt,
-)
-from .confirmation_authority import (
-    ConfirmationAuthority,
-    EffectConfirmationAuthority,
-)
+from .app_surface_lineage import AppSurfaceLineageAuthority, AppSurfaceLineageError, VerifiedAppSurfaceLineage
+from .canonical_selection import CANONICAL_SELECTION_RECEIPT_VERSION, CanonicalSelectionReceipt
+from .confirmation_authority import ConfirmationAuthority, EffectConfirmationAuthority
 from .device_execution import (
     DEVICE_EXECUTOR_PROTOCOL,
     EXECUTABLE_ACTION_KINDS,
@@ -32,11 +22,7 @@ from .session import (
     AgentSessionRepository,
     require_session_device,
 )
-from .session_evidence import (
-    AgentEvidenceStoreFactory,
-    AgentEvidenceStorePort,
-    EvidenceStoreError,
-)
+from .session_evidence import AgentEvidenceStoreFactory, AgentEvidenceStorePort, EvidenceStoreError
 
 __all__ = [
     "ACTIVE_SESSION_STATUSES",

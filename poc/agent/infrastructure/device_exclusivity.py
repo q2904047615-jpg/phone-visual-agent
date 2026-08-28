@@ -84,10 +84,7 @@ class InterProcessLease:
             if _try_lock(descriptor):
                 _unlock(descriptor)
                 return None
-            return cls._read_descriptor(descriptor) or {
-                "session_id": "unknown-process",
-                "unreadable": True,
-            }
+            return cls._read_descriptor(descriptor) or {'session_id': 'unknown-process', 'unreadable': True}
         finally:
             os.close(descriptor)
 
@@ -98,12 +95,7 @@ class InterProcessLease:
         if not _try_lock(descriptor):
             os.close(descriptor)
             return False
-        payload = {
-            "pid": os.getpid(),
-            "owner_id": self.owner_id,
-            "token": self.token,
-            **self.metadata,
-        }
+        payload = {'pid': os.getpid(), 'owner_id': self.owner_id, 'token': self.token, **self.metadata}
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         os.lseek(descriptor, 1, os.SEEK_SET)
         os.write(descriptor, encoded)

@@ -76,18 +76,10 @@ class CapabilityAcceptanceTaskGraphPlanner:
     def __init__(self, candidate_action: str) -> None:
         action = str(candidate_action or "").strip()
         if action not in PROMOTABLE_ACTIONS or action not in _SEMANTIC_CONTRACTS:
-            raise CapabilityAcceptancePlannerError(
-                f"动作 {action or 'missing'} 没有确定性的能力验收合同。"
-            )
+            raise CapabilityAcceptancePlannerError(f'动作 {action or 'missing'} 没有确定性的能力验收合同。')
         self.candidate_action = action
 
-    def plan(
-        self,
-        raw_goal: str,
-        *,
-        device_id: str,
-        task_id: str | None = None,
-    ) -> DynamicTaskGraph:
+    def plan( self, raw_goal: str, *, device_id: str, task_id: str | None = None, ) -> DynamicTaskGraph:
         text = " ".join(str(raw_goal or "").split())
         if not text:
             raise CapabilityAcceptancePlannerError("能力验收目标不能为空。")
@@ -158,9 +150,7 @@ class CapabilityAcceptanceTaskGraphPlanner:
         graph.validate()
         observation.validate()
         if graph.raw_user_goal == "" or graph.active_subgoal_id != "certify_primitive":
-            raise CapabilityAcceptancePlannerError(
-                "能力验收任务图身份或活动节点已变化。"
-            )
+            raise CapabilityAcceptancePlannerError('能力验收任务图身份或活动节点已变化。')
         evidence = tuple(
             dict.fromkeys(
                 (
@@ -181,16 +171,8 @@ class CapabilityAcceptanceTaskGraphPlanner:
             skipped_subgoal_ids=(),
         )
         if observation.last_action_outcome == "matched" and not observation.blocked_reasons:
-            condition = replace(
-                graph.completion_conditions[0],
-                satisfied=True,
-                evidence=evidence,
-            )
-            subgoal = replace(
-                graph.subgoals[0],
-                status="completed",
-                completion_evidence=evidence,
-            )
+            condition = replace(graph.completion_conditions[0], satisfied=True, evidence=evidence)
+            subgoal = replace(graph.subgoals[0], status='completed', completion_evidence=evidence)
             revised = replace(
                 graph,
                 revision=graph.revision + 1,
@@ -201,9 +183,7 @@ class CapabilityAcceptanceTaskGraphPlanner:
                 replan_history=graph.replan_history + (record,),
             )
         else:
-            blocked_evidence = observation.blocked_reasons or (
-                f"动作结果为 {observation.last_action_outcome}",
-            )
+            blocked_evidence = observation.blocked_reasons or (f'动作结果为 {observation.last_action_outcome}',)
             subgoal = replace(graph.subgoals[0], status="blocked")
             revised = replace(
                 graph,

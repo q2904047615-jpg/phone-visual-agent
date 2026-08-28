@@ -34,8 +34,4 @@ class VisualObstruction:
     reason: str
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "kind": self.kind,
-            "bounds": list(self.bounds),
-            "reason": self.reason,
-        }
+        return {'kind': self.kind, 'bounds': list(self.bounds), 'reason': self.reason}

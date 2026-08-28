@@ -33,15 +33,9 @@ class DeviceRuntimeResourceRegistry:
     def coordination_lock(self, device_id: str) -> threading.Lock:
         resolved = self._resolved_device_id(device_id)
         with self._coordination_lock_guard:
-            return self._coordination_locks.setdefault(
-                resolved,
-                threading.Lock(),
-            )
+            return self._coordination_locks.setdefault(resolved, threading.Lock())
 
     def camera_coordinator(self, device_id: str) -> DeviceCameraCoordinator:
         resolved = self._resolved_device_id(device_id)
         with self._camera_coordinator_guard:
-            return self._camera_coordinators.setdefault(
-                resolved,
-                DeviceCameraCoordinator(),
-            )
+            return self._camera_coordinators.setdefault(resolved, DeviceCameraCoordinator())

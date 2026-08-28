@@ -3,23 +3,14 @@ from __future__ import annotations
 import time
 from typing import Any, Callable, Iterable, Mapping
 
-from agent.domain import (
-    DeviceActionRequest,
-    DeviceExecutionError,
-    DeviceExecutionResult,
-)
+from agent.domain import DeviceActionRequest, DeviceExecutionError, DeviceExecutionResult
 from agent.infrastructure.orientation_safety import OrientationSafetyError
 
 
 class RobotDeviceExecutor:
     """The only registry mapping resolved canonical actions to Robot methods."""
 
-    def __init__(
-        self,
-        robot: Any,
-        *,
-        sleep: Callable[[float], None] = time.sleep,
-    ) -> None:
+    def __init__( self, robot: Any, *, sleep: Callable[[float], None] = time.sleep, ) -> None:
         self.robot = robot
         self.sleep = sleep
         self._handlers: dict[
@@ -64,10 +55,7 @@ class RobotDeviceExecutor:
         except OrientationSafetyError:
             raise
         except Exception as exc:
-            raise DeviceExecutionError(
-                f"设备 transport {method_name} 调用失败：{exc}",
-                physical_actions=1,
-            ) from exc
+            raise DeviceExecutionError(f'设备 transport {method_name} 调用失败：{exc}', physical_actions=1) from exc
 
     def _consume_click_receipt(self, *, expected_count: int) -> dict[str, Any]:
         consumer = self._method("consume_last_click_receipt")
@@ -78,16 +66,10 @@ class RobotDeviceExecutor:
             or raw.get("round_trip_position_confirmed") is not True
             or raw.get("mechanical_contact_ack") is not False
         ):
-            raise DeviceExecutionError(
-                "机械控制端没有返回有效的单击事件栅栏凭据。",
-                physical_actions=1,
-            )
+            raise DeviceExecutionError('机械控制端没有返回有效的单击事件栅栏凭据。', physical_actions=1)
         click_count = raw.get("click_count", 1)
         if click_count != expected_count:
-            raise DeviceExecutionError(
-                "点击事件栅栏的 click_count 与请求不一致。",
-                physical_actions=1,
-            )
+            raise DeviceExecutionError('点击事件栅栏的 click_count 与请求不一致。', physical_actions=1)
         return dict(raw)
 
     @staticmethod
@@ -104,9 +86,7 @@ class RobotDeviceExecutor:
         )
 
     def _dismiss_overlay(self, request: DeviceActionRequest) -> DeviceExecutionResult:
-        result = self._hardware_call(
-            "vision_dismiss_overlay_relative", *self._point(request)
-        )
+        result = self._hardware_call('vision_dismiss_overlay_relative', *self._point(request))
         return DeviceExecutionResult(
             physical_actions=1,
             transport_result=result,
@@ -114,18 +94,14 @@ class RobotDeviceExecutor:
         )
 
     def _double_tap(self, request: DeviceActionRequest) -> DeviceExecutionResult:
-        result = self._hardware_call(
-            "vision_double_tap_relative", *self._point(request)
-        )
+        result = self._hardware_call('vision_double_tap_relative', *self._point(request))
         return DeviceExecutionResult(
             physical_actions=1,
             transport_result=result,
             hardware_receipt=self._consume_click_receipt(expected_count=2),
         )
 
-    def _reveal_system_navigation(
-        self, _request: DeviceActionRequest
-    ) -> DeviceExecutionResult:
+    def _reveal_system_navigation( self, _request: DeviceActionRequest ) -> DeviceExecutionResult:
         return DeviceExecutionResult(
             physical_actions=1,
             transport_result=self._hardware_call("vision_reveal_system_navigation"),
@@ -166,9 +142,7 @@ class RobotDeviceExecutor:
             hardware_receipt=self._consume_click_receipt(expected_count=1),
         )
 
-    def _open_recent_apps(
-        self, _request: DeviceActionRequest
-    ) -> DeviceExecutionResult:
+    def _open_recent_apps( self, _request: DeviceActionRequest ) -> DeviceExecutionResult:
         result = self._hardware_call("vision_android_recent_apps")
         return DeviceExecutionResult(
             physical_actions=1,
@@ -179,45 +153,21 @@ class RobotDeviceExecutor:
     def _input_text(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         geometry = dict(request.keyboard_geometry or {})
         if request.input_method == "chinese_pinyin":
-            result = self._hardware_call(
-                "vision_type_pinyin",
-                request.input_fragment,
-                request.input_pinyin,
-                geometry,
-            )
+            result = self._hardware_call('vision_type_pinyin', request.input_fragment, request.input_pinyin, geometry)
         else:
-            result = self._hardware_call(
-                "vision_type_text_with_layout",
-                request.input_fragment,
-                geometry,
-            )
+            result = self._hardware_call('vision_type_text_with_layout', request.input_fragment, geometry)
         return DeviceExecutionResult(physical_actions=1, transport_result=result)
 
     def _clear_text(self, request: DeviceActionRequest) -> DeviceExecutionResult:
-        result = self._hardware_call(
-            "vision_clear_text",
-            dict(request.keyboard_geometry or {}),
-            request.delete_count,
-        )
+        result = self._hardware_call('vision_clear_text', dict(request.keyboard_geometry or {}), request.delete_count)
         return DeviceExecutionResult(physical_actions=1, transport_result=result)
 
     def _long_press(self, request: DeviceActionRequest) -> DeviceExecutionResult:
-        result = self._hardware_call(
-            "vision_long_press_relative",
-            *self._point(request),
-            request.hold_seconds,
-        )
+        result = self._hardware_call('vision_long_press_relative', *self._point(request), request.hold_seconds)
         raw = self._method("consume_last_long_press_receipt")()
         if not isinstance(raw, dict):
-            raise DeviceExecutionError(
-                "机械控制端没有返回长按事件栅栏凭据。",
-                physical_actions=1,
-            )
-        return DeviceExecutionResult(
-            physical_actions=1,
-            transport_result=result,
-            hardware_receipt=dict(raw),
-        )
+            raise DeviceExecutionError('机械控制端没有返回长按事件栅栏凭据。', physical_actions=1)
+        return DeviceExecutionResult(physical_actions=1, transport_result=result, hardware_receipt=dict(raw))
 
     def _drag(self, request: DeviceActionRequest) -> DeviceExecutionResult:
         assert request.end_point is not None
@@ -254,9 +204,7 @@ class ReplayDeviceExecutor:
         expected = self._script[self._index]
         expected_kind = str(expected.get("kind") or "")
         if expected_kind != request.kind:
-            raise DeviceExecutionError(
-                f"离线回放动作不匹配：{request.kind} != {expected_kind}"
-            )
+            raise DeviceExecutionError(f'离线回放动作不匹配：{request.kind} != {expected_kind}')
         expected_request = expected.get("request")
         actual = request.to_dict()
         if isinstance(expected_request, Mapping):

@@ -25,9 +25,7 @@ PROMOTABLE_ACTIONS = frozenset(
     }
 )
 
-CALIBRATION_BOUND_ACTIONS = frozenset(
-    {"double_tap", "long_press", "drag", "reveal_system_navigation"}
-)
+CALIBRATION_BOUND_ACTIONS = frozenset({'double_tap', 'long_press', 'drag', 'reveal_system_navigation'})
 
 KNOWN_ACTION_CAPABILITIES = frozenset(
     {
@@ -144,12 +142,7 @@ class DeviceCapabilitySnapshot:
             value["profile_digest"] = self.profile_digest
         return value
 
-    def gap(
-        self,
-        requested_action: str,
-        *,
-        required_parameters: Iterable[str] = (),
-    ) -> CapabilityGap | None:
+    def gap( self, requested_action: str, *, required_parameters: Iterable[str] = (), ) -> CapabilityGap | None:
         self.validate()
         if requested_action not in KNOWN_ACTION_CAPABILITIES:
             raise ActionCapabilityError(f"未知动作能力：{requested_action}")
@@ -177,14 +170,8 @@ def build_device_capability_snapshot(
     supported = frozenset(str(item) for item in supported_actions)
     unknown = supported - KNOWN_ACTION_CAPABILITIES
     if unknown:
-        raise ActionCapabilityError(
-            "设备声明未知动作能力：" + ", ".join(sorted(unknown))
-        )
-    raw_actions = (
-        raw_profile.get("actions", {})
-        if isinstance(raw_profile, Mapping)
-        else {}
-    )
+        raise ActionCapabilityError('设备声明未知动作能力：' + ', '.join(sorted(unknown)))
+    raw_actions = raw_profile.get('actions', {}) if isinstance(raw_profile, Mapping) else {}
     if not isinstance(raw_actions, Mapping):
         raw_actions = {}
     default_gap = {

@@ -18,9 +18,7 @@ import httpx
 from PIL import Image
 
 from agent.domain.vision_model import VisionAgentError, VisionModelConfig
-from agent.infrastructure.environment_vision_model_config import (
-    load_vision_model_config,
-)
+from agent.infrastructure.environment_vision_model_config import load_vision_model_config
 from agent.application.vision_usage import VisionSessionUsageLedger
 
 
@@ -28,9 +26,7 @@ class _DuplicateJSONKeyError(ValueError):
     pass
 
 
-def _reject_duplicate_json_pairs(
-    pairs: list[tuple[str, Any]],
-) -> dict[str, Any]:
+def _reject_duplicate_json_pairs( pairs: list[tuple[str, Any]], ) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
         if key in value:
@@ -39,20 +35,12 @@ def _reject_duplicate_json_pairs(
     return value
 
 
-def _extract_json_object(
-    raw: str,
-    *,
-    reject_duplicate_keys: bool = False,
-) -> dict[str, Any]:
+def _extract_json_object( raw: str, *, reject_duplicate_keys: bool = False, ) -> dict[str, Any]:
     text = raw.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"\s*```$", "", text)
-    load_options = (
-        {"object_pairs_hook": _reject_duplicate_json_pairs}
-        if reject_duplicate_keys
-        else {}
-    )
+    load_options = {'object_pairs_hook': _reject_duplicate_json_pairs} if reject_duplicate_keys else {}
     try:
         value = json.loads(text, **load_options)
     except _DuplicateJSONKeyError as exc:
@@ -65,9 +53,7 @@ def _extract_json_object(
         try:
             value = json.loads(text[start : end + 1], **load_options)
         except _DuplicateJSONKeyError as exc:
-            raise VisionAgentError(
-                f"模型返回的 JSON 包含重复字段：{exc}"
-            ) from exc
+            raise VisionAgentError(f'模型返回的 JSON 包含重复字段：{exc}') from exc
         except json.JSONDecodeError as exc:
             raise VisionAgentError(f"模型返回的 JSON 无法解析：{exc}") from exc
     if not isinstance(value, dict):
@@ -124,17 +110,11 @@ def _has_only_valid_inline_jpeg_images(messages: list[dict[str, Any]]) -> bool:
     return found
 
 
-def _is_retryable_dashscope_inline_url_rejection(
-    response: httpx.Response,
-    messages: list[dict[str, Any]],
-) -> bool:
+def _is_retryable_dashscope_inline_url_rejection( response: httpx.Response, messages: list[dict[str, Any]], ) -> bool:
     if response.status_code != 400 or not _has_only_valid_inline_jpeg_images(messages):
         return False
     detail = response.text.lower()
-    return (
-        "internalerror.algo.invalidparameter" in detail
-        and "provided url does not appear to be valid" in detail
-    )
+    return 'internalerror.algo.invalidparameter' in detail and 'provided url does not appear to be valid' in detail
 
 
 class DashScopeVisionProvider:
@@ -168,11 +148,7 @@ class DashScopeVisionProvider:
         self.max_attempts = max(1, int(max_attempts))
         self.retry_base_delay = max(0.0, float(retry_base_delay))
         self.last_usage: dict[str, Any] = {}
-        self.usage_totals = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        }
+        self.usage_totals = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}
         self.successful_call_count = 0
         self.last_request_id = ""
         self.last_network_attempts = 0
@@ -216,10 +192,7 @@ class DashScopeVisionProvider:
         }
 
     @contextmanager
-    def session_usage_scope(
-        self,
-        ledger: VisionSessionUsageLedger | None,
-    ) -> Iterator[None]:
+    def session_usage_scope( self, ledger: VisionSessionUsageLedger | None, ) -> Iterator[None]:
         token = self._active_usage_ledger.set(ledger)
         try:
             yield
@@ -227,26 +200,14 @@ class DashScopeVisionProvider:
             self._active_usage_ledger.reset(token)
 
     @contextmanager
-    def call_scope(
-        self,
-        *,
-        stage: str,
-        fingerprint: str = "",
-    ) -> Iterator[None]:
-        token = self._active_call_metadata.set(
-            (str(stage or "unscoped"), str(fingerprint or ""))
-        )
+    def call_scope( self, *, stage: str, fingerprint: str = "", ) -> Iterator[None]:
+        token = self._active_call_metadata.set((str(stage or 'unscoped'), str(fingerprint or '')))
         try:
             yield
         finally:
             self._active_call_metadata.reset(token)
 
-    def record_observation_cache_hit(
-        self,
-        *,
-        stage: str,
-        fingerprint: str,
-    ) -> None:
+    def record_observation_cache_hit( self, *, stage: str, fingerprint: str, ) -> None:
         ledger = self._active_usage_ledger.get()
         if ledger is not None:
             ledger.record_cache_hit(stage=stage, fingerprint=fingerprint)
@@ -390,21 +351,15 @@ class DashScopeVisionProvider:
                     and not retryable_inline_rejection
                 ) or attempt >= effective_attempts:
                     detail = exc.response.text[:500]
-                    raise VisionAgentError(
-                        f"千问视觉请求失败（HTTP {status_code}）：{detail}"
-                    ) from exc
+                    raise VisionAgentError(f'千问视觉请求失败（HTTP {status_code}）：{detail}') from exc
             except httpx.TimeoutException as exc:
                 last_error = exc
                 if attempt >= effective_attempts:
-                    raise VisionAgentError(
-                        f"千问视觉请求连续{attempt}次超时，未执行本轮动作。"
-                    ) from exc
+                    raise VisionAgentError(f'千问视觉请求连续{attempt}次超时，未执行本轮动作。') from exc
             except httpx.TransportError as exc:
                 last_error = exc
                 if attempt >= effective_attempts:
-                    raise VisionAgentError(
-                        f"千问视觉连接连续{attempt}次中断：{exc}"
-                    ) from exc
+                    raise VisionAgentError(f'千问视觉连接连续{attempt}次中断：{exc}') from exc
             except ValueError as exc:
                 raise VisionAgentError(f"千问视觉响应不是有效 JSON：{exc}") from exc
 
@@ -423,9 +378,7 @@ class DashScopeVisionProvider:
         if "total_tokens" not in normalized_usage:
             component_keys = ("prompt_tokens", "completion_tokens")
             if all(key in normalized_usage for key in component_keys):
-                normalized_usage["total_tokens"] = sum(
-                    normalized_usage[key] for key in component_keys
-                )
+                normalized_usage['total_tokens'] = sum((normalized_usage[key] for key in component_keys))
         for key, value in normalized_usage.items():
             self.usage_totals[key] += value
         self.successful_call_count += 1

@@ -15,16 +15,9 @@ from agent.domain import EvidenceStoreError
 class FileSystemAgentEvidenceStore:
     """Persist authoritative session evidence with same-directory replaces."""
 
-    def __init__(
-        self,
-        run_dir: Path,
-        *,
-        replace_file: Callable[[Path, Path], None] | None = None,
-    ) -> None:
+    def __init__( self, run_dir: Path, *, replace_file: Callable[[Path, Path], None] | None = None, ) -> None:
         self.run_dir = Path(run_dir)
-        self._replace_file = replace_file or (
-            lambda source, target: os.replace(source, target)
-        )
+        self._replace_file = replace_file or (lambda source, target: os.replace(source, target))
 
     @staticmethod
     def _payload(value: Any) -> dict[str, Any]:
@@ -40,18 +33,10 @@ class FileSystemAgentEvidenceStore:
 
     def write_json(self, name: str, payload: Any) -> Path:
         clean_name = str(name or "").strip()
-        if (
-            not clean_name
-            or Path(clean_name).name != clean_name
-            or not clean_name.endswith(".json")
-        ):
+        if ( not clean_name or Path(clean_name).name != clean_name or not clean_name.endswith(".json") ):
             raise EvidenceStoreError(f"证据文件名无效：{clean_name!r}")
         try:
-            encoded = json.dumps(
-                self._payload(payload),
-                ensure_ascii=False,
-                indent=2,
-            )
+            encoded = json.dumps(self._payload(payload), ensure_ascii=False, indent=2)
         except (TypeError, ValueError, EvidenceStoreError) as exc:
             raise EvidenceStoreError(f"证据不能序列化：{exc}") from exc
 
@@ -71,19 +56,14 @@ class FileSystemAgentEvidenceStore:
                     temporary.unlink()
             except OSError:
                 pass
-            raise EvidenceStoreError(
-                f"证据原子写入失败：{clean_name}：{exc}"
-            ) from exc
+            raise EvidenceStoreError(f'证据原子写入失败：{clean_name}：{exc}') from exc
         return target
 
     def write_session(self, session: Any) -> Path:
         return self.write_json("session.json", session)
 
     def write_task_graph(self, graph: Any) -> Path:
-        return self.write_json(
-            f"task_graph_revision_{graph.revision}.json",
-            graph,
-        )
+        return self.write_json(f'task_graph_revision_{graph.revision}.json', graph)
 
     def write_effect_policy_snapshot(self, graph: Any) -> Path:
         graph_payload = graph.to_dict()
@@ -98,61 +78,23 @@ class FileSystemAgentEvidenceStore:
             },
         )
 
-    def write_trusted_observation(
-        self,
-        step_number: int,
-        observation: Any,
-    ) -> Path:
-        return self.write_json(
-            f"trusted_observation_step_{int(step_number)}.json",
-            observation,
-        )
+    def write_trusted_observation( self, step_number: int, observation: Any, ) -> Path:
+        return self.write_json(f'trusted_observation_step_{int(step_number)}.json', observation)
 
     def write_qwen_decision(self, step_number: int, decision: Any) -> Path:
-        return self.write_json(
-            f"qwen_decision_step_{int(step_number)}.json",
-            decision,
-        )
+        return self.write_json(f'qwen_decision_step_{int(step_number)}.json', decision)
 
-    def write_controller_decision(
-        self,
-        step_number: int,
-        decision: Any,
-    ) -> Path:
-        return self.write_json(
-            f"controller_decision_step_{int(step_number)}.json",
-            decision,
-        )
+    def write_controller_decision( self, step_number: int, decision: Any, ) -> Path:
+        return self.write_json(f'controller_decision_step_{int(step_number)}.json', decision)
 
-    def write_verification(
-        self,
-        step_number: int,
-        verification: Any,
-    ) -> Path:
-        return self.write_json(
-            f"verification_step_{int(step_number)}.json",
-            verification,
-        )
+    def write_verification( self, step_number: int, verification: Any, ) -> Path:
+        return self.write_json(f'verification_step_{int(step_number)}.json', verification)
 
-    def write_post_action_transition(
-        self,
-        step_number: int,
-        transition: Any,
-    ) -> Path:
-        return self.write_json(
-            f"post_action_transition_step_{int(step_number)}.json",
-            transition,
-        )
+    def write_post_action_transition( self, step_number: int, transition: Any, ) -> Path:
+        return self.write_json(f'post_action_transition_step_{int(step_number)}.json', transition)
 
-    def write_confirmation_failure(
-        self,
-        step_number: int,
-        transition: Any,
-    ) -> Path:
-        return self.write_json(
-            f"confirmation_failure_step_{int(step_number)}.json",
-            transition,
-        )
+    def write_confirmation_failure( self, step_number: int, transition: Any, ) -> Path:
+        return self.write_json(f'confirmation_failure_step_{int(step_number)}.json', transition)
 
     def read_report(self) -> dict[str, Any] | None:
         target = self.run_dir / "report.json"

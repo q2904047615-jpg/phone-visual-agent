@@ -17,19 +17,8 @@ SUPPORTED_TASK_CONTEXT_PROTOCOL = "2026-08-20-deepseek-typed-task-graph-v4"
 SUPPORTED_TASK_CONTEXT_PROTOCOLS = frozenset({SUPPORTED_TASK_CONTEXT_PROTOCOL})
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-ALLOWED_TASK_STATUSES = {
-    "ready",
-    "running",
-    "awaiting_confirmation",
-    "completed",
-    "blocked",
-}
-ALLOWED_EXECUTION_CLASSES = {
-    "observe",
-    "navigate",
-    "effect",
-    "unknown",
-}
+ALLOWED_TASK_STATUSES = {'ready', 'running', 'awaiting_confirmation', 'completed', 'blocked'}
+ALLOWED_EXECUTION_CLASSES = {'observe', 'navigate', 'effect', 'unknown'}
 
 
 @dataclass(frozen=True)
@@ -46,11 +35,7 @@ class QwenTaskContext(Mapping[str, Any]):
     current_execution_class: str
     effect_intents: tuple[dict[str, Any], ...]
     effect_gate: dict[str, Any]
-    semantic_ir: TaskSemanticIR | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
+    semantic_ir: TaskSemanticIR | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "QwenTaskContext":
@@ -73,14 +58,9 @@ class QwenTaskContext(Mapping[str, Any]):
         missing = required - set(value)
         unexpected = set(value) - required
         if missing:
-            raise VisionAgentError(
-                "Qwen任务上下文缺少字段：" + ", ".join(sorted(missing))
-            )
+            raise VisionAgentError('Qwen任务上下文缺少字段：' + ', '.join(sorted(missing)))
         if unexpected:
-            raise VisionAgentError(
-                "Qwen任务上下文包含协议外字段："
-                + ", ".join(sorted(unexpected))
-            )
+            raise VisionAgentError('Qwen任务上下文包含协议外字段：' + ', '.join(sorted(unexpected)))
 
         context = cls(
             protocol_version=str(value["protocol_version"] or "").strip(),
@@ -112,33 +92,21 @@ class QwenTaskContext(Mapping[str, Any]):
 
     def validate(self) -> None:
         if self.protocol_version not in SUPPORTED_TASK_CONTEXT_PROTOCOLS:
-            raise VisionAgentError(
-                f"不支持的DeepSeek任务上下文协议：{self.protocol_version}"
-            )
+            raise VisionAgentError(f'不支持的DeepSeek任务上下文协议：{self.protocol_version}')
         if not TASK_ID_PATTERN.fullmatch(self.task_id):
             raise VisionAgentError(f"task_id 格式无效：{self.task_id!r}")
         if not DEVICE_ID_PATTERN.fullmatch(self.device_id):
             raise VisionAgentError(f"device_id 格式无效：{self.device_id!r}")
-        if (
-            isinstance(self.revision, bool)
-            or not isinstance(self.revision, int)
-            or self.revision < 1
-        ):
+        if ( isinstance(self.revision, bool) or not isinstance(self.revision, int) or self.revision < 1 ):
             raise VisionAgentError("revision 必须是正整数。")
         if self.task_status not in ALLOWED_TASK_STATUSES:
             raise VisionAgentError(f"task_status 无效：{self.task_status}")
         if self.current_execution_class not in ALLOWED_EXECUTION_CLASSES:
-            raise VisionAgentError(
-                f"current_execution_class 无效：{self.current_execution_class}"
-            )
+            raise VisionAgentError(f'current_execution_class 无效：{self.current_execution_class}')
         if self.semantic_ir is not None:
             self.semantic_ir.validate()
             expected_scope = (self.task_id, self.device_id, self.revision)
-            actual_scope = (
-                self.semantic_ir.task_id,
-                self.semantic_ir.device_id,
-                self.semantic_ir.revision,
-            )
+            actual_scope = (self.semantic_ir.task_id, self.semantic_ir.device_id, self.semantic_ir.revision)
             if actual_scope != expected_scope:
                 raise VisionAgentError("TaskSemanticIR 与 Qwen task scope 不一致。")
 
@@ -155,23 +123,15 @@ class QwenTaskContext(Mapping[str, Any]):
         }
         unexpected_subgoal = set(self.current_subgoal) - subgoal_allowed
         if unexpected_subgoal:
-            raise VisionAgentError(
-                "current_subgoal 包含协议外字段："
-                + ", ".join(sorted(unexpected_subgoal))
-            )
+            raise VisionAgentError('current_subgoal 包含协议外字段：' + ', '.join(sorted(unexpected_subgoal)))
         if not str(self.current_subgoal.get("subgoal_id") or "").strip():
             raise VisionAgentError("current_subgoal 缺少 subgoal_id。")
         if not str(self.current_subgoal.get("objective") or "").strip():
             raise VisionAgentError("current_subgoal 缺少 objective。")
         if str(self.current_subgoal.get("status") or "") != "active":
             raise VisionAgentError("Qwen入口只接受 status=active 的 current_subgoal。")
-        if (
-            str(self.current_subgoal.get("execution_class") or "")
-            != self.current_execution_class
-        ):
-            raise VisionAgentError(
-                "current_subgoal.execution_class 与顶层上下文不一致。"
-            )
+        if ( str(self.current_subgoal.get("execution_class") or "") != self.current_execution_class ):
+            raise VisionAgentError('current_subgoal.execution_class 与顶层上下文不一致。')
         generic_goal_domain.safe_goal_context(self.to_dict())
 
         effect_allowed = {
@@ -186,54 +146,28 @@ class QwenTaskContext(Mapping[str, Any]):
         policy_allowed = {"effect_id", "confirmation_required", "policy_level"}
         for index, item in enumerate(self.effect_intents):
             if set(item) != effect_allowed:
-                raise VisionAgentError(
-                    f"effect_intents[{index}] 字段不完整或包含协议外字段。"
-                )
-            for field in (
-                "target_entity_roles",
-                "payload_entity_roles",
-                "source_subgoal_ids",
-                "expected_results",
-            ):
+                raise VisionAgentError(f'effect_intents[{index}] 字段不完整或包含协议外字段。')
+            for field in ( "target_entity_roles", "payload_entity_roles", "source_subgoal_ids", "expected_results", ):
                 _text_tuple(item[field], f"effect_intents[{index}].{field}")
             if not str(item.get("kind") or "").strip():
                 raise VisionAgentError(f"effect_intents[{index}].kind 不能为空。")
-            policy = _require_dict(
-                item.get("local_policy"),
-                f"effect_intents[{index}].local_policy",
-            )
+            policy = _require_dict(item.get('local_policy'), f'effect_intents[{index}].local_policy')
             if set(policy) != policy_allowed:
-                raise VisionAgentError(
-                    f"effect_intents[{index}].local_policy 字段不完整或包含协议外字段。"
-                )
+                raise VisionAgentError(f'effect_intents[{index}].local_policy 字段不完整或包含协议外字段。')
             if policy.get("effect_id") != item.get("effect_id"):
-                raise VisionAgentError(
-                    f"effect_intents[{index}].local_policy.effect_id 不一致。"
-                )
+                raise VisionAgentError(f'effect_intents[{index}].local_policy.effect_id 不一致。')
             if not isinstance(policy.get("confirmation_required"), bool):
-                raise VisionAgentError(
-                    f"effect_intents[{index}].local_policy.confirmation_required 必须是布尔值。"
-                )
+                raise VisionAgentError(f'effect_intents[{index}].local_policy.confirmation_required 必须是布尔值。')
             if not str(policy.get("policy_level") or "").strip():
-                raise VisionAgentError(
-                    f"effect_intents[{index}].local_policy.policy_level 不能为空。"
-                )
+                raise VisionAgentError(f'effect_intents[{index}].local_policy.policy_level 不能为空。')
 
         effect_ids = [str(item.get("effect_id") or "").strip() for item in self.effect_intents]
         if any(not item for item in effect_ids) or len(effect_ids) != len(set(effect_ids)):
             raise VisionAgentError("effect_intents 含空ID或重复ID。")
-        subgoal_effect_ids = _text_tuple(
-            self.current_subgoal.get("effect_ids") or [],
-            "current_subgoal.effect_ids",
-        )
+        subgoal_effect_ids = _text_tuple(self.current_subgoal.get('effect_ids') or [], 'current_subgoal.effect_ids')
         if len(subgoal_effect_ids) != len(set(subgoal_effect_ids)):
             raise VisionAgentError("current_subgoal.effect_ids 含重复效果ID。")
-        gate_allowed = {
-            "required",
-            "state",
-            "effect_ids",
-            "effect_action_allowed",
-        }
+        gate_allowed = {'required', 'state', 'effect_ids', 'effect_action_allowed'}
         if self.protocol_version == SUPPORTED_TASK_CONTEXT_PROTOCOL:
             gate_allowed.add("scope")
         if set(self.effect_gate) != gate_allowed:
@@ -245,10 +179,7 @@ class QwenTaskContext(Mapping[str, Any]):
         state = str(self.effect_gate.get("state") or "").strip()
         if state not in {"not_required", "awaiting_confirmation", "confirmed"}:
             raise VisionAgentError(f"effect_gate.state 无效：{state}")
-        gate_effect_ids = _text_tuple(
-            self.effect_gate.get("effect_ids") or [],
-            "effect_gate.effect_ids",
-        )
+        gate_effect_ids = _text_tuple(self.effect_gate.get('effect_ids') or [], 'effect_gate.effect_ids')
         if len(gate_effect_ids) != len(set(gate_effect_ids)):
             raise VisionAgentError("effect_gate.effect_ids 含重复效果ID。")
         confirmation_effect_ids = {
@@ -257,24 +188,14 @@ class QwenTaskContext(Mapping[str, Any]):
             if isinstance(item.get("local_policy"), dict)
             and item["local_policy"].get("confirmation_required") is True
         }
-        if (
-            set(gate_effect_ids) != confirmation_effect_ids
-            or set(effect_ids) != set(subgoal_effect_ids)
-        ):
-            raise VisionAgentError(
-                "effect_intents、current_subgoal 与 effect_gate 效果ID不一致。"
-            )
+        if ( set(gate_effect_ids) != confirmation_effect_ids or set(effect_ids) != set(subgoal_effect_ids) ):
+            raise VisionAgentError('effect_intents、current_subgoal 与 effect_gate 效果ID不一致。')
 
         if self.protocol_version == SUPPORTED_TASK_CONTEXT_PROTOCOL:
-            scope = _require_dict(
-                self.effect_gate.get("scope"),
-                "effect_gate.scope",
-            )
+            scope = _require_dict(self.effect_gate.get('scope'), 'effect_gate.scope')
             scope_allowed = {"task_id", "device_id", "revision", "subgoal_id"}
             if set(scope) != scope_allowed:
-                raise VisionAgentError(
-                    "effect_gate.scope 字段缺失或包含协议外字段。"
-                )
+                raise VisionAgentError('effect_gate.scope 字段缺失或包含协议外字段。')
             expected_scope = {
                 "task_id": self.task_id,
                 "device_id": self.device_id,
@@ -283,9 +204,7 @@ class QwenTaskContext(Mapping[str, Any]):
             }
             for field, expected in expected_scope.items():
                 if type(scope[field]) is not type(expected) or scope[field] != expected:
-                    raise VisionAgentError(
-                        f"effect_gate.scope.{field} 与当前上下文不一致。"
-                    )
+                    raise VisionAgentError(f'effect_gate.scope.{field} 与当前上下文不一致。')
 
         external = self.current_execution_class in {"effect", "unknown"}
         if self.current_execution_class == "unknown":
@@ -339,10 +258,7 @@ class QwenTaskContext(Mapping[str, Any]):
 
         values: list[str] = []
         for recipient in self.recipient_values:
-            if message_intent_domain.subgoal_targets_recipient_control(
-                recipient,
-                self.current_subgoal,
-            ):
+            if message_intent_domain.subgoal_targets_recipient_control( recipient, self.current_subgoal, ):
                 if recipient not in values:
                     values.append(recipient)
         return tuple(values)
@@ -403,17 +319,11 @@ class QwenTaskContext(Mapping[str, Any]):
         if self.semantic_ir is not None and self.semantic_ir.input_fields:
             active_id = str(self.current_subgoal.get("subgoal_id") or "")
             entities = {item.entity_id: item for item in self.semantic_ir.entities}
-            relevant = [
-                item
-                for item in self.semantic_ir.input_fields
-                if active_id in item.source_subgoal_ids
-            ]
+            relevant = [item for item in self.semantic_ir.input_fields if active_id in item.source_subgoal_ids]
             if not relevant and len(self.semantic_ir.input_fields) == 1:
                 relevant = [self.semantic_ir.input_fields[0]]
             if not relevant and len(self.semantic_ir.input_fields) > 1:
-                raise VisionAgentError(
-                    "当前子目标没有绑定唯一 typed input field，禁止猜测多个字段。"
-                )
+                raise VisionAgentError('当前子目标没有绑定唯一 typed input field，禁止猜测多个字段。')
             if len(relevant) > 1:
                 raise VisionAgentError("当前子目标同时绑定多个输入字段，缺少唯一字段选择。")
             if relevant:

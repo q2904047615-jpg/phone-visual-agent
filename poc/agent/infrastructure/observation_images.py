@@ -55,18 +55,11 @@ def detect_top_edge_opaque_bands(image: Image.Image) -> tuple[VisualObstruction,
 
     row_dark: list[float] = []
     for y in range(probe_bottom):
-        dark = sum(
-            1
-            for x in range(edge_skip, analysis_width - edge_skip)
-            if pixels[x, y] <= dark_limit
-        )
+        dark = sum((1 for x in range(edge_skip, analysis_width - edge_skip) if pixels[x, y] <= dark_limit))
         row_dark.append(dark / usable_width)
 
     attach_limit = max(2, round(analysis_height * 0.02))
-    start = next(
-        (index for index, ratio in enumerate(row_dark[: attach_limit + 1]) if ratio >= 0.22),
-        None,
-    )
+    start = next((index for index, ratio in enumerate(row_dark[:attach_limit + 1]) if ratio >= 0.22), None)
     if start is None:
         return ()
 
@@ -99,11 +92,7 @@ def detect_top_edge_opaque_bands(image: Image.Image) -> tuple[VisualObstruction,
         gap_start = index
         while index < analysis_width and not active[index]:
             index += 1
-        if (
-            gap_start > 0
-            and index < analysis_width
-            and index - gap_start <= bridge
-        ):
+        if ( gap_start > 0 and index < analysis_width and index - gap_start <= bridge ):
             for gap_index in range(gap_start, index):
                 active[gap_index] = True
 
@@ -155,10 +144,7 @@ def detect_top_edge_opaque_bands(image: Image.Image) -> tuple[VisualObstruction,
     return tuple(results)
 
 
-def _bounds_iou(
-    first: tuple[int, int, int, int],
-    second: tuple[int, int, int, int],
-) -> float:
+def _bounds_iou( first: tuple[int, int, int, int], second: tuple[int, int, int, int], ) -> float:
     left = max(first[0], second[0])
     top = max(first[1], second[1])
     right = min(first[2], second[2])
@@ -171,9 +157,7 @@ def _bounds_iou(
     return intersection / max(1, first_area + second_area - intersection)
 
 
-def consensus_top_edge_obstructions(
-    frames: Iterable[Image.Image],
-) -> tuple[VisualObstruction, ...]:
+def consensus_top_edge_obstructions( frames: Iterable[Image.Image], ) -> tuple[VisualObstruction, ...]:
     """Return only top-edge obstructions repeated across the stable frame tail."""
 
     frame_list = list(frames)
@@ -187,26 +171,13 @@ def consensus_top_edge_obstructions(
             continue
         matches: list[VisualObstruction] = []
         for frame_detections in detections:
-            match = max(
-                frame_detections,
-                key=lambda item: _bounds_iou(candidate.bounds, item.bounds),
-                default=None,
-            )
+            match = max(frame_detections, key=lambda item: _bounds_iou(candidate.bounds, item.bounds), default=None)
             if match is not None and _bounds_iou(candidate.bounds, match.bounds) >= 0.60:
                 matches.append(match)
         if len(matches) < required:
             continue
-        coordinates = tuple(
-            sorted(item.bounds[index] for item in matches)[len(matches) // 2]
-            for index in range(4)
-        )
-        accepted.append(
-            VisualObstruction(
-                kind=candidate.kind,
-                bounds=coordinates,
-                reason=candidate.reason,
-            )
-        )
+        coordinates = tuple((sorted((item.bounds[index] for item in matches))[len(matches) // 2] for index in range(4)))
+        accepted.append(VisualObstruction(kind=candidate.kind, bounds=coordinates, reason=candidate.reason))
     return tuple(accepted)
 
 
@@ -246,11 +217,7 @@ def measure_local_stability(
             threshold=float(threshold or 0.0),
             reason="连续画面尺寸发生变化",
         )
-    limit = float(
-        threshold
-        if threshold is not None
-        else os.environ.get("ROBOT_LOCAL_FRAME_DELTA_MAX", "38.0")
-    )
+    limit = float(threshold if threshold is not None else os.environ.get('ROBOT_LOCAL_FRAME_DELTA_MAX', '38.0'))
     sheets = [_static_band_sheet(frame) for frame in frames]
     deltas: list[float] = []
     for first, second in zip(sheets, sheets[1:]):

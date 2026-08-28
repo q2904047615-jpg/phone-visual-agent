@@ -61,10 +61,7 @@ class AgentSessionRepository(Protocol):
     def active_snapshots(self) -> list[dict[str, Any]]: ...
 
 
-def require_session_device(
-    session: AgentSession,
-    requested_device_id: str,
-) -> None:
+def require_session_device( session: AgentSession, requested_device_id: str, ) -> None:
     """Enforce the device identity already fixed by the session aggregate."""
 
     resolved = str(requested_device_id or "")

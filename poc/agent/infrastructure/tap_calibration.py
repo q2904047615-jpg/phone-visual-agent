@@ -35,20 +35,10 @@ class Affine2D:
 
     def apply(self, x: float, y: float) -> tuple[float, float]:
         first, second = self.rows
-        return (
-            first[0] * x + first[1] * y + first[2],
-            second[0] * x + second[1] * y + second[2],
-        )
+        return (first[0] * x + first[1] * y + first[2], second[0] * x + second[1] * y + second[2])
 
     def inverse(self) -> "Affine2D":
-        matrix = np.array(
-            [
-                [*self.rows[0]],
-                [*self.rows[1]],
-                [0.0, 0.0, 1.0],
-            ],
-            dtype=float,
-        )
+        matrix = np.array([[*self.rows[0]], [*self.rows[1]], [0.0, 0.0, 1.0]], dtype=float)
         if abs(float(np.linalg.det(matrix))) < 1e-7:
             raise TapCalibrationError("校准矩阵接近奇异，无法安全求逆。")
         inverse = np.linalg.inv(matrix)
@@ -66,12 +56,7 @@ class Affine2D:
     def from_json(cls, value: Sequence[Sequence[float]]) -> "Affine2D":
         if len(value) != 2 or any(len(row) != 3 for row in value):
             raise TapCalibrationError("二维仿射矩阵必须是2×3。")
-        return cls(
-            (
-                tuple(float(item) for item in value[0]),
-                tuple(float(item) for item in value[1]),
-            )
-        )
+        return cls((tuple((float(item) for item in value[0])), tuple((float(item) for item in value[1]))))
 
 
 def fit_affine(
@@ -87,9 +72,7 @@ def fit_affine(
     if source_array.shape[0] < 3:
         raise TapCalibrationError("至少需要3个不共线校准点。")
     design = np.column_stack((source_array, np.ones(source_array.shape[0])))
-    solution, _residuals, rank, _singular = np.linalg.lstsq(
-        design, destination_array, rcond=None
-    )
+    solution, _residuals, rank, _singular = np.linalg.lstsq(design, destination_array, rcond=None)
     if rank < 3:
         raise TapCalibrationError("校准点共线，无法拟合二维纠偏。")
     transform = Affine2D(
@@ -110,14 +93,8 @@ def _convex_hull(points: Sequence[tuple[float, float]]) -> list[tuple[float, flo
     if len(ordered) < 3:
         raise TapCalibrationError("校准覆盖点不足，无法形成安全区域。")
 
-    def cross(
-        origin: tuple[float, float],
-        first: tuple[float, float],
-        second: tuple[float, float],
-    ) -> float:
-        return (first[0] - origin[0]) * (second[1] - origin[1]) - (
-            first[1] - origin[1]
-        ) * (second[0] - origin[0])
+    def cross( origin: tuple[float, float], first: tuple[float, float], second: tuple[float, float], ) -> float:
+        return (first[0] - origin[0]) * (second[1] - origin[1]) - (first[1] - origin[1]) * (second[0] - origin[0])
 
     lower: list[tuple[float, float]] = []
     for point in ordered:
@@ -135,18 +112,14 @@ def _convex_hull(points: Sequence[tuple[float, float]]) -> list[tuple[float, flo
     return hull
 
 
-def build_coverage(
-    normalized_points: Sequence[tuple[float, float]],
-) -> dict[str, object]:
+def build_coverage( normalized_points: Sequence[tuple[float, float]], ) -> dict[str, object]:
     hull = _convex_hull(normalized_points)
     xs = [point[0] for point in hull]
     ys = [point[1] for point in hull]
     bounds = [min(xs), min(ys), max(xs), max(ys)]
     span_x = bounds[2] - bounds[0]
     span_y = bounds[3] - bounds[1]
-    sufficient = bool(
-        span_x >= MIN_COVERAGE_SPAN_X and span_y >= MIN_COVERAGE_SPAN_Y
-    )
+    sufficient = bool(span_x >= MIN_COVERAGE_SPAN_X and span_y >= MIN_COVERAGE_SPAN_Y)
     return {
         "kind": "convex_hull",
         "normalized_hull": [[float(x), float(y)] for x, y in hull],
@@ -180,9 +153,7 @@ def _point_in_convex_hull(
     return True
 
 
-def build_calibration(
-    samples: Sequence[dict[str, object]], frame_size: tuple[int, int]
-) -> dict[str, object]:
+def build_calibration( samples: Sequence[dict[str, object]], frame_size: tuple[int, int] ) -> dict[str, object]:
     """Build target->command correction from browser touch observations.
 
     Each sample contains the camera-space target/command point and the target
@@ -206,12 +177,8 @@ def build_calibration(
         command = sample.get("command_frame", desired)
         target = sample["target_dom"]
         actual = sample["actual_dom"]
-        desired_frame.append(
-            (float(desired[0]) / (width - 1), float(desired[1]) / (height - 1))
-        )
-        command_frame.append(
-            (float(command[0]) / (width - 1), float(command[1]) / (height - 1))
-        )
+        desired_frame.append((float(desired[0]) / (width - 1), float(desired[1]) / (height - 1)))
+        command_frame.append((float(command[0]) / (width - 1), float(command[1]) / (height - 1)))
         target_dom.append((float(target[0]), float(target[1])))
         actual_dom.append((float(actual[0]), float(actual[1])))
 
@@ -221,9 +188,7 @@ def build_calibration(
     command_to_observed, physical_errors = fit_affine(command_frame, observed_frame)
     target_to_command = command_to_observed.inverse()
 
-    physical_pixel_errors = np.column_stack(
-        (physical_errors[:, 0] * (width - 1), physical_errors[:, 1] * (height - 1))
-    )
+    physical_pixel_errors = np.column_stack((physical_errors[:, 0] * (width - 1), physical_errors[:, 1] * (height - 1)))
     distances = np.linalg.norm(physical_pixel_errors, axis=1)
     projection_scale = np.array([width - 1, height - 1], dtype=float)
     projection_distances = np.linalg.norm(projection_errors * projection_scale, axis=1)
@@ -234,9 +199,7 @@ def build_calibration(
     # A noisy/unstable page must never silently become an active correction.
     # A precise fit over only the middle of the screen is also unsafe because
     # small edge controls would otherwise rely on unmeasured extrapolation.
-    accepted = bool(
-        rms <= 12.0 and maximum <= 25.0 and coverage["sufficient"]
-    )
+    accepted = bool(rms <= 12.0 and maximum <= 25.0 and coverage['sufficient'])
     return {
         "version": CALIBRATION_VERSION,
         "enabled": False,
@@ -263,9 +226,7 @@ def save_calibration(payload: dict[str, object], path: Path = CALIBRATION_PATH) 
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_active_calibration(
-    frame_size: tuple[int, int], path: Path = CALIBRATION_PATH
-) -> Affine2D | None:
+def load_active_calibration( frame_size: tuple[int, int], path: Path = CALIBRATION_PATH ) -> Affine2D | None:
     if not path.exists():
         return None
     try:
@@ -287,10 +248,7 @@ def load_active_calibration(
         # non-uniform resize changes camera geometry and remains fail-closed.
         width_scale = current_width / stored_width
         height_scale = current_height / stored_height
-        scale_delta = abs(width_scale - height_scale) / max(
-            width_scale,
-            height_scale,
-        )
+        scale_delta = abs(width_scale - height_scale) / max(width_scale, height_scale)
         if scale_delta > 0.02:
             return None
         return Affine2D.from_json(payload["target_to_command"])
@@ -319,10 +277,7 @@ def corrected_grid_point(
     corrected_x, corrected_y = calibration.apply(x / 1000.0, y / 1000.0)
     if not (-0.08 <= corrected_x <= 1.08 and -0.08 <= corrected_y <= 1.08):
         raise TapCalibrationError("纠偏结果超出安全边界，已拒绝点击。")
-    return (
-        min(1000, max(0, int(round(corrected_x * 1000)))),
-        min(1000, max(0, int(round(corrected_y * 1000)))),
-    )
+    return (min(1000, max(0, int(round(corrected_x * 1000)))), min(1000, max(0, int(round(corrected_y * 1000)))))
 
 
 def _validated_hull(value: object, *, label: str) -> list[tuple[float, float]]:
@@ -349,9 +304,7 @@ def _validated_hull(value: object, *, label: str) -> list[tuple[float, float]]:
     return hull
 
 
-def _vertical_polygon_slice(
-    polygon: Sequence[tuple[float, float]], x: float
-) -> tuple[float, float]:
+def _vertical_polygon_slice( polygon: Sequence[tuple[float, float]], x: float ) -> tuple[float, float]:
     intersections: list[float] = []
     tolerance = 1e-7
     for index, first in enumerate(polygon):
@@ -371,10 +324,7 @@ def _vertical_polygon_slice(
     return min(intersections), max(intersections)
 
 
-def reveal_system_navigation_path(
-    frame_size: tuple[int, int],
-    path: Path = CALIBRATION_PATH,
-) -> dict[str, object]:
+def reveal_system_navigation_path( frame_size: tuple[int, int], path: Path = CALIBRATION_PATH, ) -> dict[str, object]:
     """Derive one calibrated bottom-edge inward gesture without model coordinates."""
 
     try:
@@ -434,20 +384,12 @@ def reveal_system_navigation_path(
                 raise TypeError
             desired = sample["desired_frame"]
             target = sample["target_dom"]
-            frame_point = (
-                float(desired[0]) / (stored_width - 1),
-                float(desired[1]) / (stored_height - 1),
-            )
+            frame_point = (float(desired[0]) / (stored_width - 1), float(desired[1]) / (stored_height - 1))
             dom_point = (float(target[0]), float(target[1]))
-            if any(
-                not math.isfinite(value)
-                for value in (*frame_point, *dom_point)
-            ):
+            if any( not math.isfinite(value) for value in (*frame_point, *dom_point) ):
                 raise ValueError
             sample_points.append(frame_point)
-            projection_errors.append(
-                math.dist(frame_to_dom.apply(*frame_point), dom_point)
-            )
+            projection_errors.append(math.dist(frame_to_dom.apply(*frame_point), dom_point))
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise TapCalibrationError("frame_to_dom原始样本损坏。") from exc
     if max(projection_errors) > SYSTEM_NAVIGATION_MAX_FRAME_TO_DOM_ERROR:
@@ -465,12 +407,8 @@ def reveal_system_navigation_path(
 
     collection_dom_hull = [frame_to_dom.apply(*point) for point in collection_hull]
     validation_dom_hull = [frame_to_dom.apply(*point) for point in validation_hull]
-    collection_slice = _vertical_polygon_slice(
-        collection_dom_hull, SYSTEM_NAVIGATION_DOM_CENTER_X
-    )
-    validation_slice = _vertical_polygon_slice(
-        validation_dom_hull, SYSTEM_NAVIGATION_DOM_CENTER_X
-    )
+    collection_slice = _vertical_polygon_slice(collection_dom_hull, SYSTEM_NAVIGATION_DOM_CENTER_X)
+    validation_slice = _vertical_polygon_slice(validation_dom_hull, SYSTEM_NAVIGATION_DOM_CENTER_X)
     top = max(collection_slice[0], validation_slice[0])
     bottom = min(collection_slice[1], validation_slice[1])
     if bottom < SYSTEM_NAVIGATION_MIN_BOTTOM_Y:
@@ -483,18 +421,12 @@ def reveal_system_navigation_path(
         end_y = start_y - SYSTEM_NAVIGATION_DOM_INWARD_DISTANCE
         if end_y <= top:
             break
-        candidate_dom = [
-            (SYSTEM_NAVIGATION_DOM_CENTER_X, start_y),
-            (SYSTEM_NAVIGATION_DOM_CENTER_X, end_y),
-        ]
+        candidate_dom = [(SYSTEM_NAVIGATION_DOM_CENTER_X, start_y), (SYSTEM_NAVIGATION_DOM_CENTER_X, end_y)]
         candidate_grid = [
             tuple(int(round(value * 1000)) for value in dom_to_frame.apply(*point))
             for point in candidate_dom
         ]
-        normalized = [
-            (point[0] / 1000.0, point[1] / 1000.0)
-            for point in candidate_grid
-        ]
+        normalized = [(point[0] / 1000.0, point[1] / 1000.0) for point in candidate_grid]
         if all(
             0 <= value <= 1000
             for point in candidate_grid
@@ -521,9 +453,7 @@ def reveal_system_navigation_path(
         corrected = target_to_command.apply(point[0] / 1000.0, point[1] / 1000.0)
         if any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in corrected):
             raise TapCalibrationError("系统边缘轨迹纠偏结果越界，保持0动作。")
-        corrected_grid.append(
-            (int(round(corrected[0] * 1000)), int(round(corrected[1] * 1000)))
-        )
+        corrected_grid.append((int(round(corrected[0] * 1000)), int(round(corrected[1] * 1000))))
 
     return {
         "action": "reveal_system_navigation",

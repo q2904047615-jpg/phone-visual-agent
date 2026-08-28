@@ -32,10 +32,7 @@ SINGLE_ELEMENT_ACTIONS = frozenset({
 })
 
 
-def _targets_single_element(
-    action_or_kind: SemanticAction | str,
-    params: Mapping[str, Any] | None = None,
-) -> bool:
+def _targets_single_element( action_or_kind: SemanticAction | str, params: Mapping[str, Any] | None = None, ) -> bool:
     """Return whether this exact canonical action binds one observed element.
 
     Ordinary viewport swipes remain screen actions.  A swipe becomes an
@@ -49,17 +46,12 @@ def _targets_single_element(
     else:
         kind = str(action_or_kind or "").strip()
         values = params or {}
-    return kind in SINGLE_ELEMENT_ACTIONS or (
-        kind == "swipe"
-        and bool(str(values.get("element_id") or "").strip())
-    )
+    return kind in SINGLE_ELEMENT_ACTIONS or (kind == 'swipe' and bool(str(values.get('element_id') or '').strip()))
 
 
 QWEN_PROTOCOL_ACTIONS = frozenset(CANONICAL_ACTION_KINDS)
 
-ACTIONABLE_EXACT_TEXT_ROLES = frozenset(
-    {"button", "icon", "input", "tab", "toggle", "list_item", "keyboard_key"}
-)
+ACTIONABLE_EXACT_TEXT_ROLES = frozenset({'button', 'icon', 'input', 'tab', 'toggle', 'list_item', 'keyboard_key'})
 @dataclass(frozen=True)
 class VisualTargetRegion:
     kind: str
@@ -119,9 +111,7 @@ class QwenVisualDecision:
             self.trusted_observation.observation_id,
             self.trusted_observation.fingerprint,
         ):
-            raise GenericStepPlanningError(
-                "task/device/revision/observation/fingerprint 已过期或不匹配。"
-            )
+            raise GenericStepPlanningError('task/device/revision/observation/fingerprint 已过期或不匹配。')
         self.proposal.validate(self.trusted_observation.scene)
         if self.protocol_version != QWEN_VISUAL_DECISION_PROTOCOL_VERSION:
             raise GenericStepPlanningError("Qwen视觉决策协议版本无效。")
@@ -168,23 +158,12 @@ class QwenVisualDecision:
 class QwenVisualDecisionObserver:
     """Select one canonical action locally from one trusted observation."""
 
-    def __init__(
-        self,
-        provider: Any,
-        *,
-        trusted_observation_frame_validator: Callable[..., None],
-    ) -> None:
+    def __init__( self, provider: Any, *, trusted_observation_frame_validator: Callable[..., None], ) -> None:
         self.provider = provider
-        self.trusted_observation_frame_validator = (
-            trusted_observation_frame_validator
-        )
+        self.trusted_observation_frame_validator = trusted_observation_frame_validator
         self.last_raw_response = ""
         self.last_diagnostics: dict[str, Any] = {}
-        self._metrics = {
-            "decision_count": 0,
-            "deterministic_action_count": 0,
-            "final_blocked_count": 0,
-        }
+        self._metrics = {'decision_count': 0, 'deterministic_action_count': 0, 'final_blocked_count': 0}
 
     def status(self) -> dict[str, Any]:
         value = dict(self.provider.status())
@@ -225,29 +204,17 @@ class QwenVisualDecisionObserver:
             else qwen_task_context_domain.QwenTaskContext.from_dict(task_context)
         )
         context.validate()
-        available_actions = _normalize_available_action_kinds(
-            available_action_kinds
-        )
+        available_actions = _normalize_available_action_kinds(available_action_kinds)
         # These are the same read-only frames that established the trusted
         # observation, so apply the observer's one-leading-frame tolerance.
         # Confirmation-time recapture and post-action verification use their
         # own stricter full-window stability checks.
-        self.trusted_observation_frame_validator(
-            trusted_observation,
-            frames,
-            allow_leading_outlier=True,
-        )
+        self.trusted_observation_frame_validator(trusted_observation, frames, allow_leading_outlier=True)
         if context.device_id != trusted_observation.device_id:
             raise VisionAgentError("任务 device_id 与可信观察不一致。")
         self._metrics["decision_count"] += 1
-        canonical_choices = _selection_choices(
-            context,
-            trusted_observation,
-            available_actions,
-        )
-        canonical_action_kinds = sorted(
-            {str(item["action"]) for item in canonical_choices}
-        )
+        canonical_choices = _selection_choices(context, trusted_observation, available_actions)
+        canonical_action_kinds = sorted({str(item['action']) for item in canonical_choices})
 
         model_identity = public_model_identity(self.provider.status())
         base_diagnostics = {
@@ -286,11 +253,7 @@ class QwenVisualDecisionObserver:
         )
         if block is not None:
             reason, block_code = block
-            decision = _local_blocked_decision(
-                context,
-                trusted_observation,
-                reason=reason,
-            )
+            decision = _local_blocked_decision(context, trusted_observation, reason=reason)
             self._metrics["final_blocked_count"] += 1
             self.last_diagnostics.update(
                 {
@@ -307,11 +270,7 @@ class QwenVisualDecisionObserver:
             observation=trusted_observation,
         )
         if deterministic_selection is not None:
-            raw = json.dumps(
-                deterministic_selection,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
+            raw = json.dumps(deterministic_selection, ensure_ascii=False, separators=(',', ':'))
             decision = _hydrate_canonical_selection(
                 deterministic_selection,
                 context=context,
@@ -366,15 +325,9 @@ def _selection_choices(
             compile_canonical_action_catalog,
         )
 
-        formal_report = compile_canonical_action_catalog(
-            observation.scene,
-            context.semantic_ir,
-            available_action_kinds,
-        )
+        formal_report = compile_canonical_action_catalog(observation.scene, context.semantic_ir, available_action_kinds)
     except Exception as exc:
-        raise VisionAgentError(
-            f"canonical action catalog 构建失败：{exc}"
-        ) from exc
+        raise VisionAgentError(f'canonical action catalog 构建失败：{exc}') from exc
 
     # Qwen receives a presentation of the canonical catalog, not a separately
     # rebuilt action list.  Every action parameter and postcondition below is a
@@ -438,40 +391,24 @@ def _deterministic_exact_selection_payload(
             else ()
         )
         if active_id == "exact_tap_semantic" and target is not None:
-            matching_choices = tuple(
-                item for item in matching_choices
-                if item.get("element_id") == target.element_id
-            )
+            matching_choices = tuple((item for item in matching_choices if item.get('element_id') == target.element_id))
     if len(matching_choices) == 1:
-        return _selection_payload(
-            matching_choices[0],
-            "结构化直推目录只有一个合法 canonical candidate。",
-        )
+        return _selection_payload(matching_choices[0], '结构化直推目录只有一个合法 canonical candidate。')
 
     if (
         getattr(context, "current_execution_class", "") == "effect"
         and bool(getattr(context, "effect_action_allowed", False))
     ):
-        effect_choices = tuple(
-            item for item in choices if _choice_applies_effect(item)
-        )
+        effect_choices = tuple((item for item in choices if _choice_applies_effect(item)))
         if len(effect_choices) == 1:
-            return _selection_payload(
-                effect_choices[0],
-                "canonical目录只有一个绑定当前EffectIntent的动作。",
-            )
+            return _selection_payload(effect_choices[0], 'canonical目录只有一个绑定当前EffectIntent的动作。')
         if effect_choices:
             return None
 
     if target is not None:
-        same_target = tuple(
-            item for item in choices if item.get("element_id") == target.element_id
-        )
+        same_target = tuple((item for item in choices if item.get('element_id') == target.element_id))
         if len(same_target) == 1:
-            return _selection_payload(
-                same_target[0],
-                "单次Qwen画面的唯一目标与canonical目录唯一候选一致。",
-            )
+            return _selection_payload(same_target[0], '单次Qwen画面的唯一目标与canonical目录唯一候选一致。')
 
     if len(choices) == 1 and str(choices[0].get("action") or "") in {
         "back",
@@ -481,21 +418,13 @@ def _deterministic_exact_selection_payload(
         "swipe",
         "wait_for_change",
     }:
-        return _selection_payload(
-            choices[0],
-            "canonical目录只有一个坐标无关或容器级合法动作。",
-        )
+        return _selection_payload(choices[0], 'canonical目录只有一个坐标无关或容器级合法动作。')
     return None
 
 
-def _selection_payload(
-    choice: Mapping[str, Any], reason: str
-) -> dict[str, Any] | None:
+def _selection_payload( choice: Mapping[str, Any], reason: str ) -> dict[str, Any] | None:
     choice_id = str(choice.get("choice_id") or "").strip()
-    return ({
-        "status": "action", "choice_id": choice_id,
-        "confidence": 1.0, "reason": reason,
-    } if choice_id else None)
+    return {'status': 'action', 'choice_id': choice_id, 'confidence': 1.0, 'reason': reason} if choice_id else None
 
 
 def _choice_applies_effect(choice: Mapping[str, Any]) -> bool:
@@ -527,10 +456,7 @@ def _hydrate_canonical_selection(
         raise VisionAgentError("本地 canonical 选择结构字段无效。")
     if payload.get("status") != "action":
         raise VisionAgentError("本地 canonical 选择结果必须是 action。")
-    matches = [
-        item for item in choices
-        if item.get("choice_id") == payload.get("choice_id")
-    ]
+    matches = [item for item in choices if item.get('choice_id') == payload.get('choice_id')]
     if len(matches) != 1:
         raise VisionAgentError("本地选择引用了不存在或不唯一的 choice_id。")
     choice = matches[0]
@@ -560,15 +486,9 @@ def _hydrate_canonical_selection(
             _bind_element_params(params, element, prefix=prefix)
             bound_ids.append(element.element_id)
     params["expected_effect"] = expected_result
-    action = SemanticAction(
-        node_id=f"qwen_visual_revision_{context.revision}",
-        action=kind,
-        params=params,
-    )
+    action = SemanticAction(node_id=f'qwen_visual_revision_{context.revision}', action=kind, params=params)
     raw_confidence = payload.get("confidence")
-    if isinstance(raw_confidence, bool) or not isinstance(
-        raw_confidence, (int, float)
-    ):
+    if isinstance(raw_confidence, bool) or not isinstance( raw_confidence, (int, float) ):
         raise VisionAgentError("本地 canonical 选择 confidence 无效。")
     confidence = min(
         float(raw_confidence), float(observation.scene.confidence),
@@ -602,9 +522,7 @@ def _canonical_target_region(
     observation: trusted_observation_domain.TrustedObservation,
 ) -> VisualTargetRegion:
     if _targets_single_element(action):
-        element = observation.get_candidate(
-            str(action.params.get("element_id") or "").strip()
-        )
+        element = observation.get_candidate(str(action.params.get('element_id') or '').strip())
         return VisualTargetRegion(
             kind="element",
             element_id=element.element_id,
@@ -612,12 +530,8 @@ def _canonical_target_region(
             description=element.label or element.meaning,
         )
     if action.action == "drag":
-        source = observation.get_candidate(
-            str(action.params.get("source_element_id") or "").strip()
-        )
-        destination = observation.get_candidate(
-            str(action.params.get("destination_element_id") or "").strip()
-        )
+        source = observation.get_candidate(str(action.params.get('source_element_id') or '').strip())
+        destination = observation.get_candidate(str(action.params.get('destination_element_id') or '').strip())
         return VisualTargetRegion(
             kind="element_path",
             element_id=source.element_id,
@@ -646,9 +560,7 @@ def _canonical_target_region(
     )
 
 
-def _normalize_available_action_kinds(
-    value: Iterable[str] | None,
-) -> frozenset[str]:
+def _normalize_available_action_kinds( value: Iterable[str] | None, ) -> frozenset[str]:
     if value is None:
         return QWEN_PROTOCOL_ACTIONS
     try:
@@ -659,9 +571,7 @@ def _normalize_available_action_kinds(
         raise VisionAgentError("设备动作能力不能包含空值。")
     unexpected = normalized - QWEN_PROTOCOL_ACTIONS
     if unexpected:
-        raise VisionAgentError(
-            "设备动作能力包含协议外动作：" + ", ".join(sorted(unexpected))
-        )
+        raise VisionAgentError('设备动作能力包含协议外动作：' + ', '.join(sorted(unexpected)))
     if not normalized:
         raise VisionAgentError("设备没有任何可供本地选择的 canonical 动作。")
     return normalized
@@ -674,15 +584,10 @@ def _typed_required_action_kinds(context: qwen_task_context_domain.QwenTaskConte
     if semantic_ir is None:
         return frozenset()
     active_id = str(context.current_subgoal.get("subgoal_id") or "")
-    subgoal = next(
-        (item for item in semantic_ir.subgoals if item.subgoal_id == active_id),
-        None,
-    )
+    subgoal = next((item for item in semantic_ir.subgoals if item.subgoal_id == active_id), None)
     if subgoal is None:
         return frozenset()
-    constraints = {
-        item.constraint_id: item for item in semantic_ir.constraints
-    }
+    constraints = {item.constraint_id: item for item in semantic_ir.constraints}
     return frozenset(
         str(constraints[constraint_ref].value)
         for constraint_ref in subgoal.constraint_refs
@@ -705,16 +610,9 @@ def _launcher_app_entry_candidate_ids(
     if not any(token in current_identity for token in ("launcher", "home_screen", "desktop")):
         return ()
     active_id = str(context.current_subgoal.get("subgoal_id") or "")
-    typed_subgoal = next(
-        (item for item in semantic_ir.subgoals if item.subgoal_id == active_id),
-        None,
-    )
+    typed_subgoal = next((item for item in semantic_ir.subgoals if item.subgoal_id == active_id), None)
     surfaces = {item.surface_id: item for item in semantic_ir.surfaces}
-    target_surface = (
-        surfaces.get(typed_subgoal.surface_ref)
-        if typed_subgoal is not None
-        else None
-    )
+    target_surface = surfaces.get(typed_subgoal.surface_ref) if typed_subgoal is not None else None
     if target_surface is None or target_surface.kind != "app":
         return ()
     app_name = str(target_surface.app_name or "").strip()
@@ -741,39 +639,18 @@ def _exact_text_candidate_block(
     if _launcher_app_entry_candidate_ids(context, observation):
         return None
     for required_text in context.exact_text_requirements:
-        identity_matches = _identity_scoped_exact_text_matches(
-            context,
-            observation,
-            required_text,
-        )
+        identity_matches = _identity_scoped_exact_text_matches(context, observation, required_text)
         if identity_matches is not None:
             if not identity_matches:
-                return (
-                    f"当前可信页面身份中不存在逐字一致文字：{required_text}",
-                    "exact_text_missing",
-                )
+                return (f'当前可信页面身份中不存在逐字一致文字：{required_text}', 'exact_text_missing')
             if len(identity_matches) != 1:
-                return (
-                    f"逐字一致页面身份不唯一：{required_text}，"
-                    f"共{len(identity_matches)}个",
-                    "exact_text_ambiguous",
-                )
+                return (f'逐字一致页面身份不唯一：{required_text}，共{len(identity_matches)}个', 'exact_text_ambiguous')
             continue
-        matches = _matching_exact_text_candidates(
-            context,
-            observation,
-            required_text,
-        )
+        matches = _matching_exact_text_candidates(context, observation, required_text)
         if not matches:
-            return (
-                f"当前可信候选中不存在逐字一致文字：{required_text}",
-                "exact_text_missing",
-            )
+            return (f'当前可信候选中不存在逐字一致文字：{required_text}', 'exact_text_missing')
         if len(matches) != 1:
-            return (
-                f"逐字一致文字目标不唯一：{required_text}，共{len(matches)}个",
-                "exact_text_ambiguous",
-            )
+            return (f'逐字一致文字目标不唯一：{required_text}，共{len(matches)}个', 'exact_text_ambiguous')
     return None
 
 
@@ -869,10 +746,7 @@ def _identity_candidate_ids(
     ]
 
 
-def _surface_descriptor_identity_candidate_ids(
-    scene: UIScene,
-    required_text: str,
-) -> tuple[str, ...]:
+def _surface_descriptor_identity_candidate_ids( scene: UIScene, required_text: str, ) -> tuple[str, ...]:
     """Bind a generic page descriptor to its visible literal title.
 
     A typed ``target_ui_label`` can name the current page while the physical
@@ -913,17 +787,11 @@ def _identity_scoped_exact_text_matches(
     actions deliberately keep the existing strict target requirement.
     """
 
-    descriptor_matches = _surface_descriptor_identity_candidate_ids(
-        observation.scene,
-        required_text,
-    )
+    descriptor_matches = _surface_descriptor_identity_candidate_ids(observation.scene, required_text)
     if descriptor_matches:
         return list(descriptor_matches)
     required_actions = _typed_required_action_kinds(context)
-    if (
-        len(required_actions) != 1
-        or not required_actions.issubset(_IDENTITY_SCOPED_EXACT_TEXT_ACTIONS)
-    ):
+    if ( len(required_actions) != 1 or not required_actions.issubset(_IDENTITY_SCOPED_EXACT_TEXT_ACTIONS) ):
         return None
     return _matching_surface_identity_candidates(observation, required_text)
 
@@ -933,11 +801,7 @@ def _matching_exact_text_candidates(
     observation: trusted_observation_domain.TrustedObservation,
     required_text: str,
 ) -> list[str]:
-    active_input_matches = _active_input_transaction_exact_candidate_ids(
-        context,
-        observation,
-        required_text,
-    )
+    active_input_matches = _active_input_transaction_exact_candidate_ids(context, observation, required_text)
     if active_input_matches is not None:
         return active_input_matches
     roles = set(context.exact_text_target_roles)
@@ -979,26 +843,15 @@ def _active_input_transaction_exact_candidate_ids(
     if len(fields) != 1:
         return None
     field = fields[0]
-    payload = next(
-        (item for item in semantic_ir.entities if item.entity_id == field.payload_ref),
-        None,
-    )
-    if (
-        payload is None
-        or payload.role != "input_text"
-        or not isinstance(payload.value, str)
-        or not payload.value
-    ):
+    payload = next((item for item in semantic_ir.entities if item.entity_id == field.payload_ref), None)
+    if ( payload is None or payload.role != "input_text" or not isinstance(payload.value, str) or not payload.value ):
         return None
 
     field_elements = [
         item for item in observation.scene.elements
         if item.states.get("input_field_id") == field.field_id
     ]
-    if not any(
-        isinstance(item.states.get("value"), str) and item.states["value"]
-        for item in field_elements
-    ):
+    if not any( isinstance(item.states.get("value"), str) and item.states["value"] for item in field_elements ):
         return None
     return [
         item.element_id for item in field_elements
@@ -1042,9 +895,7 @@ def _local_blocked_decision(
     return decision
 
 
-def _bind_element_params(
-    params: dict[str, Any], element: UIElement, *, prefix: str = ""
-) -> None:
+def _bind_element_params( params: dict[str, Any], element: UIElement, *, prefix: str = "" ) -> None:
     params.update({
         f"{prefix}element_id": element.element_id,
         f"{prefix}target": element.meaning,

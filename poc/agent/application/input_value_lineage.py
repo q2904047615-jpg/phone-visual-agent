@@ -68,10 +68,7 @@ class TypedInputLineageStorePort(Protocol):
     ) -> TypedInputLineage: ...
 
 
-def describe_input_surface(
-    frame: Image.Image,
-    bounds: tuple[float, float, float, float],
-) -> str:
+def describe_input_surface( frame: Image.Image, bounds: tuple[float, float, float, float], ) -> str:
     if not isinstance(frame, Image.Image):
         raise InputValueLineageError("输入表面描述缺少真实图像帧。")
     valid = _valid_bounds(bounds)
@@ -98,10 +95,7 @@ def describe_input_surface(
     return normalized.tobytes().hex()
 
 
-def build_surface_descriptors(
-    frames: Any,
-    bounds: tuple[float, float, float, float],
-) -> tuple[str, ...]:
+def build_surface_descriptors( frames: Any, bounds: tuple[float, float, float, float], ) -> tuple[str, ...]:
     if not isinstance(frames, (list, tuple)) or len(frames) != 4:
         raise InputValueLineageError("输入表面连续性必须绑定动作后四帧。")
     descriptors = tuple(describe_input_surface(frame, bounds) for frame in frames)
@@ -129,9 +123,7 @@ def surface_descriptors_match(
             continue
         if len(prior) != len(current):
             continue
-        mean_distance = sum(
-            abs(first - second) for first, second in zip(prior, current)
-        ) / len(current)
+        mean_distance = sum((abs(first - second) for first, second in zip(prior, current))) / len(current)
         if mean_distance <= SURFACE_DESCRIPTOR_MAX_MEAN_DISTANCE:
             return True
     return False
@@ -168,11 +160,7 @@ def lineage_matches_persisted_surface_cue(
             bounds=input_bounds,
         )
     )
-    return record.matches_persisted_surface_cue(
-        **context,
-        input_bounds=input_bounds,
-        surface_matches=surface_matches,
-    )
+    return record.matches_persisted_surface_cue(**context, input_bounds=input_bounds, surface_matches=surface_matches)
 
 
 def lineage_matches_trailing_newline_cue(
@@ -190,8 +178,4 @@ def lineage_matches_trailing_newline_cue(
             bounds=input_bounds,
         )
     )
-    return record.matches_trailing_newline_cue(
-        **context,
-        input_bounds=input_bounds,
-        surface_matches=surface_matches,
-    )
+    return record.matches_trailing_newline_cue(**context, input_bounds=input_bounds, surface_matches=surface_matches)

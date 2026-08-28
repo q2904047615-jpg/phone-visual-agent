@@ -25,12 +25,7 @@ def _action_digest(action: Any) -> str:
     if action is None:
         raise AppSurfaceLineageError("动作摘要缺少语义动作。")
     payload = action.to_dict() if callable(getattr(action, "to_dict", None)) else action
-    canonical = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -319,9 +314,7 @@ class AppSurfaceLineageAuthority:
                     physical_actions=physical_actions,
                 )
             ):
-                raise AppSurfaceLineageError(
-                    f"Launcher 或其他页面中的 App 入口不能证明目标 App 页面已在前台：subgoal_id={item.subgoal_id}。"
-                )
+                raise AppSurfaceLineageError(f'Launcher 或其他页面中的 App 入口不能证明目标 App 页面已在前台：subgoal_id={item.subgoal_id}。')
 
     @classmethod
     def build(

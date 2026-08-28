@@ -55,14 +55,8 @@ def _compact(text: str) -> str:
 def _match_from_items(text: str, items: list[dict[str, Any]]) -> OcrMatch:
     left = min(float(item.get("left", 0)) for item in items)
     top = min(float(item.get("top", 0)) for item in items)
-    right = max(
-        float(item.get("left", 0)) + float(item.get("width", 1))
-        for item in items
-    )
-    bottom = max(
-        float(item.get("top", 0)) + float(item.get("height", 1))
-        for item in items
-    )
+    right = max((float(item.get('left', 0)) + float(item.get('width', 1)) for item in items))
+    bottom = max((float(item.get('top', 0)) + float(item.get('height', 1)) for item in items))
     return OcrMatch(
         text=text,
         left=int(round(left)),
@@ -117,12 +111,7 @@ def _rescale_box(item: dict[str, Any], scale: float) -> None:
         _rescale_box(word, scale)
 
 
-def recognize(
-    image: Image.Image,
-    language: str = "zh-Hans-CN",
-    *,
-    scale: float = 3.0,
-) -> dict[str, Any]:
+def recognize( image: Image.Image, language: str = "zh-Hans-CN", *, scale: float = 3.0, ) -> dict[str, Any]:
     if not is_available():
         raise OcrUnavailableError("Windows 简体中文 OCR 不可用。")
 
@@ -164,15 +153,11 @@ def recognize(
         stdout = process.stdout.decode("utf-8-sig", errors="replace").strip()
         stderr = process.stderr.decode("utf-8-sig", errors="replace").strip()
         if process.returncode != 0:
-            raise OcrRecognitionError(
-                f"Windows OCR 执行失败（{process.returncode}）：{stderr or stdout}"
-            )
+            raise OcrRecognitionError(f'Windows OCR 执行失败（{process.returncode}）：{stderr or stdout}')
         try:
             payload = json.loads(stdout)
         except json.JSONDecodeError as exc:
-            raise OcrRecognitionError(
-                f"Windows OCR 返回内容无法解析：{stdout[:300]}"
-            ) from exc
+            raise OcrRecognitionError(f'Windows OCR 返回内容无法解析：{stdout[:300]}') from exc
         if not isinstance(payload, dict):
             raise OcrRecognitionError("Windows OCR 返回格式错误。")
         if actual_scale > 1.0:

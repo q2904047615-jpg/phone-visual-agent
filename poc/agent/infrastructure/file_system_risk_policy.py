@@ -5,11 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent.domain.task_semantic_ir import (
-    LocalRiskPolicyConfig,
-    TaskSemanticIRError,
-    local_risk_policy_from_dict,
-)
+from agent.domain.task_semantic_ir import LocalRiskPolicyConfig, TaskSemanticIRError, local_risk_policy_from_dict
 
 
 def load_local_risk_policy(path: str | Path) -> LocalRiskPolicyConfig:

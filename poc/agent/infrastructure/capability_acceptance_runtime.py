@@ -24,10 +24,7 @@ from agent.infrastructure.capability_acceptance import (
     validated_calibration_evidence,
     validate_acceptance_report,
 )
-from agent.domain.action_capabilities import (
-    CALIBRATION_BOUND_ACTIONS,
-    PROMOTABLE_ACTIONS,
-)
+from agent.domain.action_capabilities import CALIBRATION_BOUND_ACTIONS, PROMOTABLE_ACTIONS
 
 
 def _payload(value: Any) -> dict[str, Any]:
@@ -42,9 +39,7 @@ def _payload(value: Any) -> dict[str, Any]:
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> Path:
-    encoded = (
-        json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n"
-    ).encode("utf-8")
+    encoded = (json.dumps(dict(payload), ensure_ascii=False, indent=2) + '\n').encode('utf-8')
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
@@ -100,11 +95,7 @@ class CapabilityTrial:
     promotion_authority: PromotionAuthority | None = field(default=None, repr=False)
     promotion_result: dict[str, Any] | None = None
     confirmation_attempted: bool = False
-    operation_lock: threading.Lock = field(
-        default_factory=threading.Lock,
-        repr=False,
-        compare=False,
-    )
+    operation_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def snapshot(self) -> dict[str, Any]:
         report: dict[str, Any] | None = None
@@ -175,9 +166,7 @@ class RecoveredCapabilityTrial:
         )
         if self.promotion_result is None:
             try:
-                loaded_promotion = json.loads(
-                    (self.run_dir / "promotion.json").read_text(encoding="utf-8")
-                )
+                loaded_promotion = json.loads((self.run_dir / 'promotion.json').read_text(encoding='utf-8'))
                 if isinstance(loaded_promotion, dict):
                     self.promotion_result = loaded_promotion
             except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
@@ -249,9 +238,7 @@ class CapabilityAcceptanceManager:
                 resolved_dir = run_dir.resolve(strict=True)
                 if output_root not in resolved_dir.parents:
                     continue
-                stored = json.loads(
-                    (resolved_dir / "trial.json").read_text(encoding="utf-8")
-                )
+                stored = json.loads((resolved_dir / 'trial.json').read_text(encoding='utf-8'))
                 if not isinstance(stored, dict):
                     continue
                 trial_id = str(stored.get("trial_id") or "").strip()
@@ -284,9 +271,7 @@ class CapabilityAcceptanceManager:
     @staticmethod
     def _require_live_trial(trial: Any) -> CapabilityTrial:
         if isinstance(trial, RecoveredCapabilityTrial):
-            raise CapabilityAcceptanceError(
-                "该验收会话来自服务重启前，仅可查看；确认权限不会跨进程恢复。"
-            )
+            raise CapabilityAcceptanceError('该验收会话来自服务重启前，仅可查看；确认权限不会跨进程恢复。')
         return trial
 
     @staticmethod
@@ -297,9 +282,7 @@ class CapabilityAcceptanceManager:
         if not resolved_device or len(resolved_device) > 128:
             raise CapabilityAcceptanceError("验收 device_id 格式无效。")
         if candidate not in PROMOTABLE_ACTIONS:
-            raise CapabilityAcceptanceError(
-                f"动作 {candidate or 'missing'} 不能进入真机能力验收。"
-            )
+            raise CapabilityAcceptanceError(f'动作 {candidate or 'missing'} 不能进入真机能力验收。')
         if not goal or len(goal) > 500:
             raise CapabilityAcceptanceError("验收目标长度必须在 1～500 个字符之间。")
         return resolved_device, candidate, goal
@@ -320,36 +303,19 @@ class CapabilityAcceptanceManager:
                 )
 
     @staticmethod
-    def _controller_calibration_evidence(
-        controller: Any,
-        action: str,
-    ) -> dict[str, Any] | None:
+    def _controller_calibration_evidence( controller: Any, action: str, ) -> dict[str, Any] | None:
         if action not in CALIBRATION_BOUND_ACTIONS:
             return None
         calibration_path = getattr(controller, "calibration_path", None)
         if calibration_path is None:
-            raise CapabilityAcceptanceError(
-                "正式长按/拖动/系统边缘唤栏验收要求设备控制器提供触控标定路径。"
-            )
+            raise CapabilityAcceptanceError('正式长按/拖动/系统边缘唤栏验收要求设备控制器提供触控标定路径。')
         return validated_calibration_evidence(Path(calibration_path))
 
-    def start(
-        self,
-        *,
-        device_id: str,
-        candidate_action: str,
-        text: str,
-    ) -> CapabilityTrial:
-        resolved_device, action, goal = self._validate_start_values(
-            device_id,
-            candidate_action,
-            text,
-        )
+    def start( self, *, device_id: str, candidate_action: str, text: str, ) -> CapabilityTrial:
+        resolved_device, action, goal = self._validate_start_values(device_id, candidate_action, text)
         active = self.device_registry.active_session(resolved_device)
         if active is not None:
-            raise CapabilityAcceptanceError(
-                f"设备 {resolved_device} 已有活动任务：{active}。"
-            )
+            raise CapabilityAcceptanceError(f'设备 {resolved_device} 已有活动任务：{active}。')
         trial_id = str(self.id_factory() or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", trial_id):
             raise CapabilityAcceptanceError("验收 trial_id 格式无效。")
@@ -364,20 +330,12 @@ class CapabilityAcceptanceManager:
             raise CapabilityAcceptanceError("当前代码存在未提交修改，不能开始真机验收。")
 
         controller = self.provisional_controller_factory(resolved_device, action)
-        calibration_evidence = self._controller_calibration_evidence(
-            controller,
-            action,
-        )
+        calibration_evidence = self._controller_calibration_evidence(controller, action)
         orchestrator = self.orchestrator_factory(controller, action)
         session_id = f"capability-trial-{trial_id}"
         run_dir = self.output_dir / f"capability_acceptance_{trial_id}"
         run_dir.mkdir(parents=True, exist_ok=False)
-        session = orchestrator.start(
-            session_id=session_id,
-            raw_goal=goal,
-            device_id=resolved_device,
-            run_dir=run_dir,
-        )
+        session = orchestrator.start(session_id=session_id, raw_goal=goal, device_id=resolved_device, run_dir=run_dir)
         if int(getattr(session, "physical_actions", 0)) != 0:
             try:
                 orchestrator.cancel(session)
@@ -427,11 +385,7 @@ class CapabilityAcceptanceManager:
                 requested.append(trial.trial_id)
         return requested
 
-    def approve_effects(
-        self,
-        trial_id: str,
-        confirmation: Mapping[str, Any],
-    ) -> Any:
+    def approve_effects( self, trial_id: str, confirmation: Mapping[str, Any], ) -> Any:
         trial = self._require_live_trial(self.get(trial_id))
         result = trial.orchestrator.approve_effects(trial.session, confirmation)
         if int(getattr(trial.session, "physical_actions", 0)) != 0:
@@ -476,23 +430,12 @@ class CapabilityAcceptanceManager:
         before_fingerprint = str(getattr(before_scene, "fingerprint", "") or "")
         after_fingerprint = str(getattr(after_scene, "fingerprint", "") or "")
         after_observation = getattr(trial.session, "trusted_observation", None)
-        after_observation_id = str(
-            getattr(after_observation, "observation_id", "") or ""
-        )
+        after_observation_id = str(getattr(after_observation, 'observation_id', '') or '')
         confirmation_scope = before_snapshot.get("confirmation_scope")
-        confirmation_scope = (
-            dict(confirmation_scope) if isinstance(confirmation_scope, Mapping) else {}
-        )
-        before_observation_id = str(
-            confirmation_scope.get("observation_id") or ""
-        )
-        scoped_before_fingerprint = str(
-            confirmation_scope.get("fingerprint") or ""
-        )
-        action_evidence_error = action_execution_evidence_error(
-            trial.candidate_action,
-            execution,
-        )
+        confirmation_scope = dict(confirmation_scope) if isinstance(confirmation_scope, Mapping) else {}
+        before_observation_id = str(confirmation_scope.get('observation_id') or '')
+        scoped_before_fingerprint = str(confirmation_scope.get('fingerprint') or '')
+        action_evidence_error = action_execution_evidence_error(trial.candidate_action, execution)
         if action_evidence_error:
             verification_errors.append(action_evidence_error)
             action_outcome = "mismatched"
@@ -583,21 +526,11 @@ class CapabilityAcceptanceManager:
             evidence.extend(getattr(result, "before_frame_paths", ()) or ())
             evidence.extend(getattr(result, "after_frame_paths", ()) or ())
         evidence = list(dict.fromkeys(str(path) for path in evidence))
-        observation_errors = [
-            str(value) for value in getattr(exc, "observation_errors", ()) or ()
-        ]
-        verification_errors = [
-            str(value) for value in getattr(exc, "verification_errors", ()) or ()
-        ]
+        observation_errors = [str(value) for value in getattr(exc, 'observation_errors', ()) or ()]
+        verification_errors = [str(value) for value in getattr(exc, 'verification_errors', ()) or ()]
         if result is not None:
-            observation_errors.extend(
-                str(value)
-                for value in getattr(result, "observation_errors", ()) or ()
-            )
-            verification_errors.extend(
-                str(value)
-                for value in getattr(result, "verification_errors", ()) or ()
-            )
+            observation_errors.extend((str(value) for value in getattr(result, 'observation_errors', ()) or ()))
+            verification_errors.extend((str(value) for value in getattr(result, 'verification_errors', ()) or ()))
         failure = {
             "version": ACCEPTANCE_REPORT_VERSION,
             "trial_id": trial.trial_id,
@@ -631,11 +564,7 @@ class CapabilityAcceptanceManager:
         if active_session == getattr(trial.session, "session_id", None):
             trial.orchestrator.pause(trial.session)
 
-    def confirm(
-        self,
-        trial_id: str,
-        confirmation: Mapping[str, Any],
-    ) -> Any:
+    def confirm( self, trial_id: str, confirmation: Mapping[str, Any], ) -> Any:
         trial = self._require_live_trial(self.get(trial_id))
         if not trial.operation_lock.acquire(blocking=False):
             raise CapabilityAcceptanceError("验收确认或晋级正在处理中。")
@@ -650,28 +579,14 @@ class CapabilityAcceptanceManager:
             trial.confirmation_attempted = True
             result = None
             try:
-                current_calibration = self._controller_calibration_evidence(
-                    trial.controller,
-                    trial.candidate_action,
-                )
+                current_calibration = self._controller_calibration_evidence(trial.controller, trial.candidate_action)
                 if current_calibration != trial.calibration_evidence:
-                    raise CapabilityAcceptanceError(
-                        "验收开始后触控标定发生变化；本次会话已失效，必须重新创建。"
-                    )
+                    raise CapabilityAcceptanceError('验收开始后触控标定发生变化；本次会话已失效，必须重新创建。')
                 result = trial.orchestrator.confirm_one(trial.session, confirmation)
-                request_actions = (
-                    int(getattr(trial.session, "physical_actions", 0)) - before_actions
-                )
+                request_actions = int(getattr(trial.session, 'physical_actions', 0)) - before_actions
                 if request_actions != 1 or int(getattr(result, "physical_actions", 0)) != 1:
-                    raise CapabilityAcceptanceError(
-                        "验收确认必须恰好产生一个物理动作，"
-                        f"实际为 {request_actions}。"
-                    )
-                report = self._write_pass_or_fail_report(
-                    trial,
-                    before_snapshot=before_snapshot,
-                    result=result,
-                )
+                    raise CapabilityAcceptanceError(f'验收确认必须恰好产生一个物理动作，实际为 {request_actions}。')
+                report = self._write_pass_or_fail_report(trial, before_snapshot=before_snapshot, result=result)
                 if report["status"] != "passed":
                     raise CapabilityAcceptanceError("真机动作未满足验收通过标准。")
             except Exception as exc:
@@ -712,11 +627,7 @@ class CapabilityAcceptanceManager:
             raise CapabilityAcceptanceError("当前验收没有可用的能力晋级确认。")
         return authority.scope
 
-    def promote(
-        self,
-        trial_id: str,
-        confirmation: Mapping[str, Any],
-    ) -> dict[str, Any]:
+    def promote( self, trial_id: str, confirmation: Mapping[str, Any], ) -> dict[str, Any]:
         trial = self._require_live_trial(self.get(trial_id))
         if not trial.operation_lock.acquire(blocking=False):
             raise CapabilityAcceptanceError("验收确认或晋级正在处理中。")
@@ -726,9 +637,7 @@ class CapabilityAcceptanceManager:
                 raise CapabilityAcceptanceError("当前验收没有可用的能力晋级确认。")
             active_session = self.device_registry.active_session(trial.device_id)
             if active_session is not None:
-                raise CapabilityAcceptanceError(
-                    f"设备 {trial.device_id} 仍有活动任务：{active_session}，不能晋级。"
-                )
+                raise CapabilityAcceptanceError(f'设备 {trial.device_id} 仍有活动任务：{active_session}，不能晋级。')
             try:
                 current_revision = str(self.code_revision_provider() or "").strip()
             except Exception:
@@ -736,9 +645,7 @@ class CapabilityAcceptanceManager:
                 raise
             if current_revision != trial.code_revision:
                 authority.invalidate()
-                raise CapabilityAcceptanceError(
-                    "验收后代码状态发生变化，晋级确认已作废；请重启后重新验收。"
-                )
+                raise CapabilityAcceptanceError('验收后代码状态发生变化，晋级确认已作废；请重启后重新验收。')
             result = self.promoter_factory(self.registry_path).promote(
                 trial.report_path,
                 confirmation=confirmation,

@@ -58,14 +58,7 @@ class DeviceActionRequest:
     def validate(self) -> None:
         if self.kind not in EXECUTABLE_ACTION_KINDS:
             raise DeviceExecutionError(f"设备执行器不支持动作：{self.kind}")
-        point_kinds = {
-            "tap_semantic",
-            "press_enter",
-            "dismiss_overlay",
-            "double_tap",
-            "long_press",
-            "drag",
-        }
+        point_kinds = {'tap_semantic', 'press_enter', 'dismiss_overlay', 'double_tap', 'long_press', 'drag'}
         if self.kind in point_kinds:
             self._validate_point(self.point, "动作落点")
         if self.kind == "drag":
@@ -78,9 +71,7 @@ class DeviceActionRequest:
             has_start = self.point is not None
             has_end = self.end_point is not None
             if has_start != has_end:
-                raise DeviceExecutionError(
-                    "元素绑定滑动必须同时提供起点和终点。"
-                )
+                raise DeviceExecutionError('元素绑定滑动必须同时提供起点和终点。')
             if has_start:
                 self._validate_point(self.point, "元素滑动起点")
                 self._validate_point(self.end_point, "元素滑动终点")
@@ -96,9 +87,7 @@ class DeviceActionRequest:
                     "right": delta_x > 0 and abs(delta_x) > abs(delta_y),
                 }[self.direction]
                 if not direction_matches:
-                    raise DeviceExecutionError(
-                        "元素滑动轨迹与请求方向不一致。"
-                    )
+                    raise DeviceExecutionError('元素滑动轨迹与请求方向不一致。')
         if self.kind == "long_press" and (
             isinstance(self.hold_seconds, bool)
             or not isinstance(self.hold_seconds, (int, float))

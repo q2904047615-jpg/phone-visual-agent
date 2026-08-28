@@ -32,9 +32,4 @@ def editable_character_count(text: str) -> int:
     normalized = unicodedata.normalize("NFC", text)
     if re.fullmatch(r"[A-Za-z\s'’]+", normalized):
         return len(re.sub(r"[\s'’]", "", normalized))
-    return sum(
-        1
-        for char in normalized
-        if not unicodedata.combining(char)
-        and char not in {"\ufe0e", "\ufe0f", "\u200d"}
-    )
+    return sum((1 for char in normalized if not unicodedata.combining(char) and char not in {'︎', '️', '\u200d'}))

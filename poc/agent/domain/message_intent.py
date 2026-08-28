@@ -5,10 +5,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 
-def subgoal_binds_recipient(
-    recipient: str,
-    *values: Any,
-) -> bool:
+def subgoal_binds_recipient( recipient: str, *values: Any, ) -> bool:
     """Return true only when the current subgoal literally carries the recipient.
 
     App-opening and other prerequisite navigation must not be forced to match a
@@ -34,10 +31,7 @@ def subgoal_binds_recipient(
     return any(expected in item for value in values for item in strings(value))
 
 
-def subgoal_targets_recipient_control(
-    recipient: str,
-    *values: Any,
-) -> bool:
+def subgoal_targets_recipient_control( recipient: str, *values: Any, ) -> bool:
     """Distinguish selecting a recipient from using it as page identity."""
 
     if not subgoal_binds_recipient(recipient, *values):
@@ -58,10 +52,7 @@ def subgoal_targets_recipient_control(
         "打开", "进入", "选择", "查找", "搜索", "定位", "匹配",
         "open", "enter", "select", "choose", "find", "search", "locate", "match",
     )
-    non_selector_markers = (
-        "输入", "草稿", "编辑", "发送", "消息正文",
-        "input", "draft", "edit", "type", "send", "message body",
-    )
+    non_selector_markers = ('输入', '草稿', '编辑', '发送', '消息正文', 'input', 'draft', 'edit', 'type', 'send', 'message body')
     return any(marker in visible for marker in selection_markers) and not any(
         marker in visible for marker in non_selector_markers
     )

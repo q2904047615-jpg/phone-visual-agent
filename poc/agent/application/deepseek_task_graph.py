@@ -148,23 +148,9 @@ class DeepSeekTaskGraphPlanner:
         )
         candidate = _normalize_redundant_prohibited_effect_conditions(candidate)
         candidate = _restore_completed_history_evidence(graph, candidate)
-        candidate = _canonicalize_literal_visible_evidence_clauses(
-            graph,
-            candidate,
-            observation,
-        )
-        candidate = _project_terminal_single_navigation_candidate(
-            graph,
-            candidate,
-            observation,
-            trigger=trigger,
-        )
-        candidate = _apply_verified_navigation_completion(
-            graph,
-            candidate,
-            observation,
-            trigger=trigger,
-        )
+        candidate = _canonicalize_literal_visible_evidence_clauses(graph, candidate, observation)
+        candidate = _project_terminal_single_navigation_candidate(graph, candidate, observation, trigger=trigger)
+        candidate = _apply_verified_navigation_completion(graph, candidate, observation, trigger=trigger)
         candidate = _normalize_unique_active_frontier(candidate)
         # Validate the raw typed transport once before local projection.  The
         # revision-specific execution-class and EffectIntent invariants are
@@ -172,19 +158,10 @@ class DeepSeekTaskGraphPlanner:
         # on the same candidate.
         candidate.validate()
         candidate = self._apply_formal_semantic_authority(candidate)
-        self._validate_replan_candidate(
-            graph,
-            candidate,
-            observation,
-            trigger=trigger,
-        )
+        self._validate_replan_candidate(graph, candidate, observation, trigger=trigger)
         previous_ids = {item.subgoal_id for item in graph.subgoals}
-        completed_ids = tuple(
-            item.subgoal_id for item in graph.subgoals if item.status == "completed"
-        )
-        added_ids = tuple(
-            item.subgoal_id for item in candidate.subgoals if item.subgoal_id not in previous_ids
-        )
+        completed_ids = tuple((item.subgoal_id for item in graph.subgoals if item.status == 'completed'))
+        added_ids = tuple((item.subgoal_id for item in candidate.subgoals if item.subgoal_id not in previous_ids))
         skipped_ids = tuple(
             item.subgoal_id
             for item in candidate.subgoals
@@ -218,19 +195,13 @@ class DeepSeekTaskGraphPlanner:
         revised.validate()
         return revised
 
-    def _apply_formal_semantic_authority(
-        self,
-        graph: DynamicTaskGraph,
-    ) -> DynamicTaskGraph:
+    def _apply_formal_semantic_authority( self, graph: DynamicTaskGraph, ) -> DynamicTaskGraph:
         """Apply typed field roles and local confirmation policy fail-closed."""
 
         self.last_semantic_authority = None
         self.last_semantic_authority_error = ""
         try:
-            authority = compile_formal_semantic_authority(
-                graph,
-                risk_policy=self.semantic_risk_policy,
-            )
+            authority = compile_formal_semantic_authority(graph, risk_policy=self.semantic_risk_policy)
             projected = apply_formal_semantic_risk_policy(graph, authority)
         except TaskSemanticIRError as exc:
             self.last_semantic_authority_error = str(exc)[:1000]
@@ -253,16 +224,12 @@ class DeepSeekTaskGraphPlanner:
         """Apply every safety and evidence check to one replan candidate."""
 
         if candidate.revision != graph.revision + 1:
-            raise TaskGraphError(
-                "重规划 revision 必须严格等于上一 revision + 1。"
-            )
+            raise TaskGraphError('重规划 revision 必须严格等于上一 revision + 1。')
         transition = observation.verified_action_transition
         if trigger in {"action_result_matched", "action_result_mismatch"}:
             if transition is None:
                 raise TaskGraphError("动作结果重规划缺少本地 verified action transition。")
-            expected_outcome = (
-                "matched" if trigger == "action_result_matched" else "mismatched"
-            )
+            expected_outcome = 'matched' if trigger == 'action_result_matched' else 'mismatched'
             if transition.outcome != expected_outcome:
                 raise TaskGraphError("重规划触发与本地动作转换回执 outcome 不一致。")
             previous_current = graph.active_subgoal()
@@ -303,9 +270,7 @@ class DeepSeekTaskGraphPlanner:
             )
             == "completed"
         ):
-            raise TaskGraphError(
-                "动作结果不匹配时不能完成回执绑定的上一活动子目标。"
-            )
+            raise TaskGraphError('动作结果不匹配时不能完成回执绑定的上一活动子目标。')
         if (
             trigger == "subgoal_completed"
             and previous_current is not None
@@ -313,10 +278,7 @@ class DeepSeekTaskGraphPlanner:
             and candidate_current is not None
             and candidate_current.external_impact == "read_only"
         ):
-            raise TaskGraphError(
-                "read_only 完成复核不能继续保留 read_only 活动子目标；"
-                "当前证据足够时应完成，证据不足时应阻塞，或推进到后续非只读子目标。"
-            )
+            raise TaskGraphError('read_only 完成复核不能继续保留 read_only 活动子目标；当前证据足够时应完成，证据不足时应阻塞，或推进到后续非只读子目标。')
         task_graph_domain._validate_revision(graph, candidate, observation)
 
     def _request_graph(
@@ -333,10 +295,7 @@ class DeepSeekTaskGraphPlanner:
         ]
         | None = None,
     ) -> DynamicTaskGraph:
-        raw = self.provider.chat_json(
-            [{"role": "user", "content": prompt}],
-            max_tokens=2400,
-        )
+        raw = self.provider.chat_json([{'role': 'user', 'content': prompt}], max_tokens=2400)
         self.last_raw_response = raw
         try:
             payload = _parse_json_object(raw)
@@ -435,13 +394,7 @@ Shell、ADB、keycode、main.exe 指令或其他可直接驱动设备的控制�
 9. 一次给出完整、严格 JSON。不要 Markdown，也不要要求通过第二次远程采样修复格式。
 """
 
-def _replan_prompt(
-    graph: DynamicTaskGraph,
-    observation: ObservedState,
-    *,
-    trigger: str,
-    reason: str,
-) -> str:
+def _replan_prompt( graph: DynamicTaskGraph, observation: ObservedState, *, trigger: str, reason: str, ) -> str:
     return f"""
 你是通用手机视觉操作 Agent 的 DeepSeek 高层任务图重规划器。根据新的只读观察，返回修订后的
 完整高层任务图快照。可以保留用户的自然点击、滑动、输入、长按和拖动意图，但不能输出

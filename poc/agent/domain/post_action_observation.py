@@ -10,9 +10,7 @@ from agent.domain.canonical_action_protocol import StateExpectation
 from agent.domain.vision_model import VisionAgentError
 
 
-POST_ACTION_VISUAL_CONTEXT_VERSION = (
-    "2026-08-25-local-post-action-visual-context-v1"
-)
+POST_ACTION_VISUAL_CONTEXT_VERSION = '2026-08-25-local-post-action-visual-context-v1'
 POST_NAVIGATION_RESULT_OBSERVATION_PHASE = "verified_navigation_result_v1"
 POST_NAVIGATION_RESULT_OBJECTIVE = "观察本次导航后的当前稳定画面"
 POST_NAVIGATION_RESULT_COMPLETION_CONDITIONS = ["当前稳定结果画面已被重新观察"]
